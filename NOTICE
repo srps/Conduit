@@ -1,0 +1,22 @@
+Conduit
+Copyright 2026 Sérgio Pereira da Silva (srps)
+
+This product includes software developed at:
+https://github.com/srps/Conduit
+
+---
+
+This product includes the following third-party dependencies, each under
+their own license (Apache License, Version 2.0):
+
+- SwiftNIO (https://github.com/apple/swift-nio)
+  Copyright 2017-2024 Apple Inc.
+
+- Swift Collections (https://github.com/apple/swift-collections)
+  Copyright 2021-2024 Apple Inc.
+
+- Swift Atomics (https://github.com/apple/swift-atomics)
+  Copyright 2020-2024 Apple Inc.
+
+- Swift System (https://github.com/apple/swift-system)
+  Copyright 2020-2024 Apple Inc.

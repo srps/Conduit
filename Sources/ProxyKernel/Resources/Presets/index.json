@@ -1,0 +1,20 @@
+[
+  {
+    "description": "Empty local profile for configuring your own proxy, DNS, and tunnels.",
+    "displayName": "Generic",
+    "id": "generic",
+    "version": 1
+  },
+  {
+    "description": "Example corporate proxy preset with Kerberos/NTLM negotiation, PAC routing, and regional upstreams on documentation-only hostnames.",
+    "displayName": "Example Corporate",
+    "id": "example-corp",
+    "version": 1
+  },
+  {
+    "description": "Example self-hosted Squid upstream on a documentation-only hostname.",
+    "displayName": "Self-hosted Squid",
+    "id": "squid",
+    "version": 1
+  }
+]

@@ -1,0 +1,128 @@
+{
+  "config": {
+    "dnsEntries": [
+      {
+        "domain": "corp.example",
+        "enabled": true,
+        "id": "6D23B8E7-651A-4E16-9B31-2F088B9CC6D1",
+        "servers": [
+          "192.0.2.53",
+          "192.0.2.54"
+        ]
+      },
+      {
+        "domain": "internal.corp.example",
+        "enabled": true,
+        "id": "65498B89-D94C-48F0-9C42-B3D14B9B102A",
+        "servers": [
+          "192.0.2.53",
+          "192.0.2.54"
+        ]
+      }
+    ],
+    "forceProxyHosts": [
+      "aka.ms"
+    ],
+    "localPACEnabled": true,
+    "pacRoutingEnabled": true,
+    "pacURL": "http://pac.corp.example/proxy.pac",
+    "profileName": "Example Corporate",
+    "strictMode": true,
+    "upstreams": [
+      {
+        "enabled": true,
+        "host": "proxy-de.corp.example",
+        "id": "B05C7A8F-0511-45B4-8712-71AC3792672B",
+        "name": "Germany",
+        "port": 8080,
+        "priority": 0
+      },
+      {
+        "enabled": true,
+        "host": "proxy-na.corp.example",
+        "id": "9844974D-96EC-4CC8-8705-40DDC9FB06F7",
+        "name": "North America",
+        "port": 8080,
+        "priority": 1
+      },
+      {
+        "enabled": true,
+        "host": "proxy-apac.corp.example",
+        "id": "24C012C3-88E5-4D2F-A2CB-FEE8980D70C5",
+        "name": "APAC",
+        "port": 8080,
+        "priority": 2
+      },
+      {
+        "enabled": true,
+        "host": "proxy-in.corp.example",
+        "id": "30C82B79-C976-453D-9B87-B04F31796E88",
+        "name": "India",
+        "port": 8080,
+        "priority": 3
+      },
+      {
+        "enabled": true,
+        "host": "proxy-us.corp.example",
+        "id": "49F91519-8306-44EB-B9C4-FC0D436917C3",
+        "name": "US",
+        "port": 8080,
+        "priority": 4
+      },
+      {
+        "enabled": true,
+        "host": "proxy-szh.corp.example",
+        "id": "011F3478-C712-4584-B7E7-F5D154DE77F4",
+        "name": "Suzhou",
+        "port": 8080,
+        "priority": 5
+      },
+      {
+        "enabled": true,
+        "host": "proxy-ca1.corp.example",
+        "id": "37A22A01-B574-4235-99B2-5E44F375AF48",
+        "name": "Canada",
+        "port": 8080,
+        "priority": 6
+      },
+      {
+        "enabled": true,
+        "host": "proxy-br.corp.example",
+        "id": "02AC3306-18CC-4A6B-B220-E376A2C0CA75",
+        "name": "Brazil",
+        "port": 8080,
+        "priority": 7
+      },
+      {
+        "enabled": true,
+        "host": "proxy-la.corp.example",
+        "id": "E37B0060-5A5C-45F6-A433-D6F462BD85D7",
+        "name": "Latin America",
+        "port": 8080,
+        "priority": 8
+      },
+      {
+        "enabled": true,
+        "host": "proxy-tr.corp.example",
+        "id": "2B98B85C-5F3D-453C-B612-F3A10F0AB828",
+        "name": "Turkey",
+        "port": 8080,
+        "priority": 9
+      }
+    ]
+  },
+  "description": "Example corporate proxy preset with Kerberos/NTLM negotiation, PAC routing, and regional upstreams on documentation-only hostnames.",
+  "displayName": "Example Corporate",
+  "id": "example-corp",
+  "platform": {
+    "manageEnvironmentVariables": true,
+    "manageSystemProxy": true,
+    "systemProxyMode": "pac"
+  },
+  "preferences": {
+    "globalShortcutEnabled": true,
+    "preferredBrowserTestURL": "https://www.example.com/",
+    "showMenuBarIcon": true
+  },
+  "version": 1
+}

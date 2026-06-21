@@ -1,0 +1,30 @@
+{
+  "config": {
+    "forceProxyHosts": [],
+    "localPACEnabled": false,
+    "pacRoutingEnabled": false,
+    "profileName": "Self-hosted Squid",
+    "upstreams": [
+      {
+        "enabled": true,
+        "host": "squid.example.test",
+        "id": "C9C5BEA9-B6B5-41A0-93C5-E117F6677E21",
+        "name": "Squid",
+        "port": 3128,
+        "priority": 0
+      }
+    ]
+  },
+  "description": "Example self-hosted Squid upstream on a documentation-only hostname.",
+  "displayName": "Self-hosted Squid",
+  "id": "squid",
+  "platform": {
+    "manageEnvironmentVariables": true,
+    "manageSystemProxy": true,
+    "systemProxyMode": "manual"
+  },
+  "preferences": {
+    "preferredBrowserTestURL": "https://example.com/"
+  },
+  "version": 1
+}

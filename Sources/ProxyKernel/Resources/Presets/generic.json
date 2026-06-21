@@ -1,0 +1,11 @@
+{
+  "config": {
+    "profileName": "Generic"
+  },
+  "description": "Empty local profile for configuring your own proxy, DNS, and tunnels.",
+  "displayName": "Generic",
+  "id": "generic",
+  "platform": {},
+  "preferences": {},
+  "version": 1
+}
