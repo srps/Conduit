@@ -2180,6 +2180,19 @@ package final class ProxyOrchestrator {
         let ip = config.transparentProxyIP
         let port = config.transparentProxyPort
 
+        // Relay FIRST: the helper's relay start is also what creates the lo0
+        // alias for the intercept IP, and binding the transparent-proxy
+        // listener to that IP fails with EADDRNOTAVAIL until the alias
+        // exists. The historical bind-then-relay order could never start
+        // from a clean system — it only worked when an alias survived from a
+        // previous run. The relay briefly forwards into a not-yet-listening
+        // target port (connections get RST for a few ms); that beats the
+        // permanent failure the other way around. Port 0 means "bind
+        // ephemeral": point the relay at a provisional target so the alias
+        // still gets created, then re-point it once the real port is known.
+        let relayTarget = port != 0 ? port : 10443
+        let relayStarted = startTCPRelay(listenPort: 443, targetPort: relayTarget, host: ip)
+
         do {
             try await transparentProxy.start(host: ip, port: port)
         } catch {
@@ -2188,11 +2201,15 @@ package final class ProxyOrchestrator {
                 "Transparent proxy failed to start on \(ip):\(port): \(error.displayDescription)",
                 category: .proxy
             )
+            if relayStarted {
+                stopTCPRelay()
+            }
             return
         }
 
-        let targetPort = transparentProxy.listeningPort ?? port
-        startTCPRelay(listenPort: 443, targetPort: targetPort, host: ip)
+        if let boundPort = transparentProxy.listeningPort, boundPort != relayTarget {
+            startTCPRelay(listenPort: 443, targetPort: boundPort, host: ip)
+        }
     }
 
     private func stopTransparentProxy() async {
@@ -2200,7 +2217,10 @@ package final class ProxyOrchestrator {
         await transparentProxy.stop()
     }
 
-    private func startTCPRelay(listenPort: Int, targetPort: Int, host: String) {
+    /// Returns true when the helper accepted the relay start (which also
+    /// aliases the intercept IP onto lo0 — see `startTransparentProxy`).
+    @discardableResult
+    private func startTCPRelay(listenPort: Int, targetPort: Int, host: String) -> Bool {
         // The kernel no longer downcasts to the concrete
         // `HelperToolPrivilegeClient` — that class lives in `PlatformMac`
         // and the import fence forbids referencing it here. Instead
@@ -2214,7 +2234,7 @@ package final class ProxyOrchestrator {
                 "TCP relay unavailable: no privileged helper configured.",
                 category: .proxy
             )
-            return
+            return false
         }
         do {
             try privilegeClient.execute(
@@ -2226,12 +2246,14 @@ package final class ProxyOrchestrator {
                 "TCP relay started: \(host):\(listenPort) → :\(targetPort) via helper.",
                 category: .proxy
             )
+            return true
         } catch {
             logStore.log(
                 .info,
                 "TCP relay unavailable on \(host):\(listenPort): \(error.displayDescription)",
                 category: .proxy
             )
+            return false
         }
     }
 

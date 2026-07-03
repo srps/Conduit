@@ -206,9 +206,26 @@ enum HelperDaemon {
     // MARK: - Transparent TCP Relay
 
     nonisolated(unsafe) private static var tcpRelay: TCPRelay?
+    nonisolated(unsafe) private static var currentRelayHost: String?
 
     private static func startTCPRelay(listenPort: Int, targetPort: Int, host: String) -> HelperResponse {
         stopTCPRelay()
+
+        // Non-standard loopback addresses (e.g. 127.44.3.0, the transparent-
+        // proxy intercept IP) are not bindable/reachable until aliased onto
+        // lo0. /32 netmask is the canonical loopback-alias form — a wider
+        // mask would make the .0 address a network address. The alias does
+        // not survive reboot; it is re-added on every relay start.
+        if host != "127.0.0.1" {
+            let status = runIfconfig(["lo0", "alias", host, "netmask", "255.255.255.255"])
+            if status != 0 {
+                // Non-zero also fires when the alias already exists — the
+                // bind below is the authoritative test, so log and continue.
+                fputs("ifconfig lo0 alias \(host) exited \(status); relying on bind to verify\n", stderr)
+            }
+            currentRelayHost = host
+        }
+
         let r = TCPRelay()
         do {
             try r.start(listenPort: listenPort, targetPort: targetPort, host: host)
@@ -216,13 +233,38 @@ enum HelperDaemon {
             fputs("TCP relay started: \(host):\(listenPort) -> \(host):\(targetPort)\n", stderr)
             return .ok()
         } catch {
-            return .error(error.localizedDescription)
+            removeRelayAliasIfNeeded()
+            return .error("TCP relay bind on \(host):\(listenPort) failed: \(error.localizedDescription)")
         }
     }
 
     private static func stopTCPRelay() {
         tcpRelay?.stop()
         tcpRelay = nil
+        removeRelayAliasIfNeeded()
         fputs("TCP relay stopped\n", stderr)
+    }
+
+    private static func removeRelayAliasIfNeeded() {
+        guard let host = currentRelayHost else { return }
+        let status = runIfconfig(["lo0", "-alias", host])
+        if status != 0 {
+            fputs("ifconfig lo0 -alias \(host) exited \(status)\n", stderr)
+        }
+        currentRelayHost = nil
+    }
+
+    private static func runIfconfig(_ arguments: [String]) -> Int32 {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
+        task.arguments = arguments
+        do {
+            try task.run()
+        } catch {
+            fputs("failed to launch ifconfig: \(error.localizedDescription)\n", stderr)
+            return -1
+        }
+        task.waitUntilExit()
+        return task.terminationStatus
     }
 }
