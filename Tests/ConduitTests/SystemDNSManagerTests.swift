@@ -376,7 +376,7 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertTrue(recording.executedCommands.isEmpty, "No saved state means no reconciliation")
     }
 
-    func testReconcileNoOpWhenInterfacesMatch() throws {
+    func testReconcileRepinsDriftedManagedInterfacesWithoutTouchingSavedState() throws {
         let manager = SystemDNSManager(privilegeClient: recording)
 
         let realServices = try manager.connectedNetworkServices()
@@ -390,7 +390,26 @@ final class SystemDNSManagerTests: XCTestCase {
 
         manager.reconcile(logger: nil)
 
-        XCTAssertTrue(recording.executedCommands.isEmpty, "No new/gone interfaces means no commands")
+        // Managed interfaces whose live DNS is not 127.0.0.1 have drifted
+        // (e.g. a VPN client rewrote them after wake) and must be re-pinned;
+        // interfaces already at 127.0.0.1 must be left alone.
+        let driftedCount = realServices.filter { manager.readDNSServers(service: $0) != ["127.0.0.1"] }.count
+        let dnsCommands = recording.commands(matching: .setDNSServers)
+        XCTAssertEqual(dnsCommands.count, driftedCount, "Exactly the drifted managed interfaces are re-pinned")
+        for command in dnsCommands {
+            XCTAssertEqual(Array(command.dropFirst()), ["127.0.0.1"], "Re-pin always restores the loopback override")
+        }
+        XCTAssertTrue(
+            recording.executedCommands.allSatisfy { $0.0 == .setDNSServers },
+            "Reconcile with no new/gone interfaces issues nothing but re-pins"
+        )
+
+        // The saved (pre-override) servers are the restore target for
+        // disable/quit — a re-pin must never overwrite them.
+        let loaded = loadSavedState()
+        for service in realServices {
+            XCTAssertEqual(loaded?.interfaces[service], ["192.168.1.1"], "Saved original DNS survives re-pinning")
+        }
     }
 
     func testReconcileNeverCallsResolverOverrideCommands() throws {

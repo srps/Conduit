@@ -264,6 +264,23 @@ package final class SystemDNSManager: @unchecked Sendable {
         let newInterfaces = currentSet.subtracting(savedSet)
         let goneInterfaces = savedSet.subtracting(currentSet)
 
+        // Re-pin drifted interfaces we already manage. VPN clients (Cisco
+        // Secure Client in particular) rewrite service DNS when the tunnel
+        // re-establishes after sleep or a flap, silently replacing our
+        // 127.0.0.1 override. The saved entry keeps the ORIGINAL pre-override
+        // servers — deliberately not updated here, so disable/quit still
+        // restores what the user had before Conduit touched anything.
+        for iface in savedSet.intersection(currentSet) {
+            let servers = readDNSServers(service: iface)
+            guard servers != ["127.0.0.1"] else { continue }
+            try? privilegeClient.execute(.setDNSServers, values: [iface, "127.0.0.1"])
+            logger?.log(
+                .notice,
+                "DNS reconcile: re-pinned \(iface) to 127.0.0.1 (was rewritten to: \(servers.isEmpty ? "DHCP default" : servers.joined(separator: ", "))).",
+                category: .system
+            )
+        }
+
         if newInterfaces.isEmpty && goneInterfaces.isEmpty { return }
 
         for iface in newInterfaces {

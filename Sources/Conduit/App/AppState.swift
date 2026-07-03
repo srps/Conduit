@@ -996,6 +996,16 @@ final class AppState: ObservableObject {
         Task { @MainActor in
             await orchestrator.handleSystemWake()
         }
+        // Sleep is when the VPN client (Cisco Secure Client) most often
+        // rewrites interface DNS behind our back: on wake it re-establishes
+        // the tunnel and re-asserts its own resolvers, silently undoing the
+        // 127.0.0.1 override while our relay keeps answering port 53 (so the
+        // 30 s liveness probe alone never notices). Reconcile re-pins the
+        // interfaces and re-checks relay liveness immediately instead of
+        // waiting for the next network-change event.
+        if platformConfig.manageSystemDNS, runtime.dnsRunState == .running {
+            scheduleDNSReconcile()
+        }
     }
 
     private func handleNetworkChange(description: String) {
@@ -1031,6 +1041,17 @@ final class AppState: ObservableObject {
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.systemDNSManager.reconcile(logger: self.logStore)
+            // Follow up with an immediate liveness probe (off-main; it can
+            // block up to 2 s) so a relay that died across sleep/VPN churn is
+            // restarted now rather than at the next 30 s health tick.
+            let manager = self.systemDNSManager
+            DispatchQueue.global(qos: .utility).async {
+                let alive = manager.probeLiveness()
+                Task { @MainActor [weak self] in
+                    guard let self, self.runtime.dnsRunState == .running else { return }
+                    self.handleDNSHealthResult(alive: alive)
+                }
+            }
         }
         dnsReconcileWork = work
         // Must run on the main queue: `AppState` and `logStore` are `@MainActor`.
