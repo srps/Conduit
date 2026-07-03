@@ -5,6 +5,13 @@ import ConduitShared
 let rawArgs = Array(CommandLine.arguments.dropFirst())
 
 if rawArgs.first == "--daemon" {
+    // Ignore SIGPIPE process-wide, like every other executable in this
+    // package (app, daemon, pm-proxy, pmctl). The daemon relays raw TCP
+    // (TCPRelay): a client resetting its connection mid-`send()` raises
+    // SIGPIPE, whose default disposition silently terminates the helper —
+    // taking the :443 relay and the lo0 intercept alias with it until the
+    // app restarts them.
+    signal(SIGPIPE, SIG_IGN)
     HelperDaemon.run()
 }
 

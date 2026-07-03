@@ -151,6 +151,15 @@ package final class TCPRelay: @unchecked Sendable {
                 continue
             }
 
+            // TCP_NODELAY on both legs. This relay is one hop of the
+            // transparent-intercept chain (client → :443 relay → transparent
+            // proxy → upstream); with Nagle enabled, the many small TLS
+            // records of interactive HTTP/2 streams get held for the
+            // delayed-ACK timer on every hop and streaming visibly stutters
+            // (Cursor reported "responses are being buffered by a proxy").
+            Self.setNoDelay(clientFD)
+            Self.setNoDelay(targetFD)
+
             sessionFDTracker.insert(clientFD, targetFD)
 
             let sessionFDTracker = sessionFDTracker
@@ -189,19 +198,44 @@ package final class TCPRelay: @unchecked Sendable {
             if fds[0].revents & Int16(POLLIN) != 0 {
                 let n = recv(fd1, &buf1, buf1.count, 0)
                 if n <= 0 { break }
-                let sent = send(fd2, buf1, n, 0)
-                if sent <= 0 { break }
+                guard Self.sendAll(fd2, buf1, n) else { break }
             }
             if fds[0].revents & Int16(POLLHUP | POLLERR) != 0 { break }
 
             if fds[1].revents & Int16(POLLIN) != 0 {
                 let n = recv(fd2, &buf2, buf2.count, 0)
                 if n <= 0 { break }
-                let sent = send(fd1, buf2, n, 0)
-                if sent <= 0 { break }
+                guard Self.sendAll(fd1, buf2, n) else { break }
             }
             if fds[1].revents & Int16(POLLHUP | POLLERR) != 0 { break }
         }
+    }
+
+    /// Writes the full `count` bytes, looping on short writes and EINTR.
+    /// A short `send` silently dropping the tail would corrupt the relayed
+    /// TLS stream (the peer sees a MAC failure and resets).
+    private static func sendAll(_ fd: Int32, _ buffer: [UInt8], _ count: Int) -> Bool {
+        var offset = 0
+        while offset < count {
+            let sent = buffer.withUnsafeBytes { raw in
+                send(fd, raw.baseAddress!.advanced(by: offset), count - offset, 0)
+            }
+            if sent > 0 {
+                offset += sent
+                continue
+            }
+            if sent < 0 && errno == EINTR { continue }
+            return false
+        }
+        return true
+    }
+
+    private static func setNoDelay(_ fd: Int32) {
+        var one: Int32 = 1
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
+        // Defense in depth alongside the daemon-wide SIG_IGN: a peer reset
+        // between poll() and send() must never raise SIGPIPE.
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
     }
 
     private static func isAllowedBindHost(_ host: String) -> Bool {
