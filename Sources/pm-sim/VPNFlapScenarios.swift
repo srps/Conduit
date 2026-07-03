@@ -16,33 +16,21 @@ enum VPNFlapScenarios {
 
     // MARK: - 6.1 vpnFlapShortIdleTunnel
     //
-    // KNOWN LIMITATION: this scenario fails out-of-the-box because
-    // ProxyOrchestrator's health-check loop (started on .connected) invokes
-    // the real authenticator (Kerberos/SPNEGO via GSS) which can't be
-    // satisfied against a fake upstream. The existing upstreamFailover
-    // scenario sidesteps this by constructing LocalProxyServer directly with
-    // MockAuthenticator, but 6.1/6.2 need the orchestrator to drive
-    // handleVPNStateChange.
-    //
-    // The "tunnel survives flap" property this scenario would demonstrate is
-    // already enforced by:
-    //   * AGENTS.md NEVER rule "Never close active upstream channels …
-    //     outside of explicit shutdown."
-    //   * ConnectionPool.CloseScope architecture from Phase 1 + the
-    //     connectionIDsToClose unit tests.
-    //   * VPNTransitionTableTests.testReassertingSetsTransientCauseAndEmitsFlapStart
-    //     which verifies the orchestrator does NOT close pool on .reasserting.
-    //
-    // To make this scenario runnable, the orchestrator would need an
-    // injectable authenticator (or a mock-credentials path on
-    // CredentialManager). Out of scope for Phase 6. Excluded from runAll.
+    // Historical note: 6.1/6.2 were excluded from runAll while the harness
+    // built its orchestrator without an authenticator provider — the
+    // health-check loop then invoked the real GSS/SPNEGO stack, which cannot
+    // be satisfied against a fake upstream. `VPNFlapHarness` now injects
+    // `MockAuthenticator` via the orchestrator's `authenticatorProvider:`
+    // (the same injection AppState and the daemon use), so both run in
+    // runAll. The same "tunnel survives flap" property is independently
+    // enforced at the unit level (ConnectionPool.CloseScope tests,
+    // VPNTransitionTableTests) per the AGENTS.md NEVER rule "Never close
+    // active upstream channels … outside of explicit shutdown."
 
     /// Bring up CONNECT tunnel, simulate utun Link inactive 200 ms, then
     /// active. Tunnel never received `channelInactive`; snapshot's
     /// `directModeCause` came back to `.none`/probe-derived; exactly one
     /// `vpn.flap.recovered` event.
-    ///
-    /// Currently FAILS due to authenticator plumbing — see comment above.
     @MainActor
     static func vpnFlapShortIdleTunnel(verbose: Bool) async throws -> ScenarioResult {
         let name = "vpnFlapShortIdleTunnel"
@@ -111,13 +99,11 @@ enum VPNFlapScenarios {
 
     // MARK: - 6.2 vpnFlapShortActiveStream
     //
-    // KNOWN LIMITATION: see vpnFlapShortIdleTunnel comment. Same authenticator
-    // plumbing issue. Excluded from runAll.
+    // See the 6.1 historical note: runnable since the harness injects
+    // MockAuthenticator.
 
     /// Start streaming HTTP response (slow body), simulate 200 ms flap,
     /// response completes successfully and was not truncated.
-    ///
-    /// Currently FAILS due to authenticator plumbing — see vpnFlapShortIdleTunnel.
     @MainActor
     static func vpnFlapShortActiveStream(verbose: Bool) async throws -> ScenarioResult {
         let name = "vpnFlapShortActiveStream"
@@ -459,9 +445,15 @@ final class VPNFlapHarness {
             UpstreamProxy(name: "FlapHarnessUpstream", host: "127.0.0.1", port: upstream.port, priority: 0)
         ]
 
-        // Use a Mock-Authenticator-friendly auth mode by providing an
-        // authenticator-provider closure that always succeeds.
-        let orchestrator = ProxyOrchestrator(config: config, logger: logger)
+        // Inject MockAuthenticator so the health-check loop and CONNECT path
+        // never touch the real GSS/SPNEGO stack (which cannot be satisfied
+        // against a fake upstream — the reason scenarios 6.1/6.2 historically
+        // failed and were excluded from runAll).
+        let orchestrator = ProxyOrchestrator(
+            config: config,
+            logger: logger,
+            authenticatorProvider: { _ in MockAuthenticator() }
+        )
         try await orchestrator.startProxy()
 
         return VPNFlapHarness(orchestrator: orchestrator, logger: logger, origin: origin, upstream: upstream)

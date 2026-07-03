@@ -38,8 +38,10 @@ enum PMSim {
               vpn-rapid-flap-burst    6 flaps in 1.5s emit one event pair (coalesce)
               network-transition      Wi-Fi → VPN → captive portal → resume; recovery <5s, DoH recycled
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
+              websocket-upgrade       101 upgrade relayed, frames flow both ways
               audit-hop-response      Audit: proxied HTTP response hop-by-hop header leak
               audit-socks5-rsv        Audit: SOCKS5 CONNECT non-zero RSV handling
+              audit-expect-trailers   Audit: Expect: 100-continue answered, trailers passed through
 
             OPTIONS:
               --verbose               Stream per-handler debug logs to stderr
