@@ -618,8 +618,15 @@ package final class ProxyOrchestrator {
     /// Every taken decision branch emits a structured `RuntimeEvent` *before* the human-readable
     /// log line, per the AGENTS.md "events first, logs derived" contract — the event stream is
     /// the contract with the UI, `pmctl`, and `pm-sim`; log lines are for tailing humans.
-    package func applyConfigChange(_ newConfig: ProxyConfig) async {
-        let oldConfig = config
+    ///
+    /// `explicitOld` exists for the GUI app: its `$config` Combine sink mirrors
+    /// every keystroke straight into `self.config`, so by the time the settings
+    /// sheet saves, `config == newConfig` and an internally-derived diff would
+    /// always be empty (the historical "edits only apply after restart" bug).
+    /// The app passes its last-reconciled snapshot instead. Headless callers
+    /// (daemon) omit it and get the previous behavior.
+    package func applyConfigChange(_ newConfig: ProxyConfig, from explicitOld: ProxyConfig? = nil) async {
+        let oldConfig = explicitOld ?? config
         let diff = ConfigDiff(old: oldConfig, new: newConfig)
         guard diff.hasChanges else {
             guard oldConfig != newConfig else { return }

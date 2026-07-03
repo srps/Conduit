@@ -84,6 +84,16 @@ final class AppState: ObservableObject {
     private var dnsReconcileWork: DispatchWorkItem?
     private var dnsHealthTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
+    /// Snapshot of the config the running subsystems were last reconciled
+    /// against. `saveConfig()` diffs the current config against this to drive
+    /// `orchestrator.applyConfigChange(_:from:)` + platform side-effects
+    /// (resolver files, system proxy, env vars) — the `$config` sink can't be
+    /// used for that because it mirrors every keystroke into
+    /// `orchestrator.config`, which would make an internally-derived diff
+    /// permanently empty. Lifecycle toggles that mutate config themselves
+    /// (start/stopDNS) update this snapshot directly so their own save
+    /// doesn't re-trigger the subsystem they just started or stopped.
+    private var lastReconciledConfig: ProxyConfig
 
     init(vpnStatusMonitor: VPNStatusObserving? = nil) {
         let runtimeEnvironment = AppState.runtimeEnvironment()
@@ -107,6 +117,7 @@ final class AppState: ObservableObject {
         self.privilegeClient = privilegeClient
         self.auditedPrivilegeClient = auditedPrivilegeClient
         self.config = initialConfig
+        self.lastReconciledConfig = initialConfig
         self.platformConfig = loadedConfiguration.platformConfig
         self.appPreferences = loadedConfiguration.appPreferences
         // Mirror the two flap-window values into a thread-safe box so the
@@ -215,6 +226,10 @@ final class AppState: ObservableObject {
             Task { @MainActor in
                 guard let self, self.config != updatedConfig else { return }
                 self.config = updatedConfig
+                // Orchestrator-originated changes are already live in the
+                // runtime — record them as reconciled so the next saveConfig
+                // doesn't re-apply them.
+                self.lastReconciledConfig = updatedConfig
             }
         }
         orchestrator.onEvent = { [weak self] event in
@@ -388,6 +403,7 @@ final class AppState: ObservableObject {
             lastErrorMessage = error.localizedDescription
             logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
         }
+        reconcileRuntimeConfig()
         // Surface validation problems at edit time instead of at the next
         // proxy (re)start, where LocalProxyServer would reject the config
         // long after the user closed Settings. The save itself is not
@@ -404,6 +420,60 @@ final class AppState: ObservableObject {
             }
         }
         refreshPreflight()
+    }
+
+    /// Push config edits into the running subsystems. Historically the GUI
+    /// only persisted edits to disk and the runtime kept the old values until
+    /// the next full restart (the daemon path always called
+    /// `applyConfigChange`; the app never did). Runs after every save; no-ops
+    /// when nothing changed since the last reconcile.
+    private func reconcileRuntimeConfig() {
+        let old = lastReconciledConfig
+        let new = config
+        guard old != new else { return }
+        lastReconciledConfig = new
+        let diff = ConfigDiff(old: old, new: new)
+
+        Task { @MainActor in
+            await orchestrator.applyConfigChange(new, from: old)
+
+            let proxyIsUp: Bool
+            switch runtime.runtimeStatus.state {
+            case .running, .degraded, .recovering: proxyIsUp = true
+            default: proxyIsUp = false
+            }
+
+            if diff.dnsChanged, platformConfig.manageDNSResolvers,
+               proxyIsUp || runtime.dnsRunState == .running {
+                do {
+                    try dnsManager.reconcile(old: old, new: new, logger: logStore)
+                } catch {
+                    logStore.log(.warning, "Could not reconcile DNS resolver files after config change: \(error.localizedDescription)", category: .system)
+                }
+            }
+
+            if diff.proxyChanged, proxyIsUp {
+                if platformConfig.manageSystemProxy {
+                    do {
+                        try systemConduit.apply(
+                            config: new,
+                            mode: platformConfig.systemProxyMode,
+                            logger: logStore,
+                            localPACURL: orchestrator.snapshot.bindings.localPACURL
+                        )
+                    } catch {
+                        logStore.log(.warning, "Could not re-apply system proxy after config change: \(error.localizedDescription)", category: .system)
+                    }
+                }
+                if platformConfig.manageEnvironmentVariables {
+                    do {
+                        try environmentManager.apply(config: new, logger: logStore)
+                    } catch {
+                        logStore.log(.warning, "Could not re-apply environment variables after config change: \(error.localizedDescription)", category: .system)
+                    }
+                }
+            }
+        }
     }
 
     func importConfiguration(from url: URL) throws {
@@ -629,6 +699,21 @@ final class AppState: ObservableObject {
                     logStore.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
                 }
             }
+            // Intercept resolver files can only be written now: at proxy
+            // start `dnsForwarderEnabled` was still false, so `apply`
+            // skipped them (the historical "intercepts only work after a
+            // full app restart" gap).
+            if platformConfig.manageDNSResolvers {
+                do {
+                    try dnsManager.applyInterceptFiles(config: config, logger: logStore)
+                } catch {
+                    logStore.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                }
+            }
+            // The flag flip above is our own lifecycle work, not a settings
+            // edit — absorb it so the save below doesn't restart the
+            // forwarder we just started.
+            lastReconciledConfig = config
             saveConfig()
         } else if let err = runtime.dnsError {
             notificationManager.post(title: "DNS Forwarder Failed", body: err)
@@ -650,7 +735,22 @@ final class AppState: ObservableObject {
         }
 
         await orchestrator.stopDNS()
+
+        // Remove intercept resolver files while we still can compute their
+        // set — leaving them behind strands e.g. `*.cursor.sh` pointing at a
+        // forwarder that no longer listens, which surfaces as ENOTFOUND /
+        // dead lookups in every client that resolved through them.
+        if platformConfig.manageDNSResolvers {
+            do {
+                try dnsManager.clearInterceptFiles(config: config, logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not remove intercept resolver files: \(error.localizedDescription)", category: .system)
+            }
+        }
+
         config.dnsForwarderEnabled = false
+        // Lifecycle flip, not a settings edit — see startDNS.
+        lastReconciledConfig = config
         saveConfig()
     }
 
