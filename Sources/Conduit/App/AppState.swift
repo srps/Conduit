@@ -156,13 +156,18 @@ final class AppState: ObservableObject {
             environment: runtimeEnvironment,
             logger: logStore
         )
+        let tunnelResolverManager = TunnelResolverManager(
+            privilegeClient: auditedPrivilegeClient,
+            logger: logStore
+        )
         let orchestrator = ProxyOrchestrator(
             config: initialConfig,
             logger: logStore,
             privilegeClient: auditedPrivilegeClient,
             authenticatorProvider: nil,  // Wired below via setAuthenticatorProvider.
             pacEvaluator: pacEvaluator,
-            auditSink: auditSink
+            auditSink: auditSink,
+            resolverManager: tunnelResolverManager
         )
         self.orchestrator = orchestrator
         let eventLog = orchestrator.eventLog

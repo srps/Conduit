@@ -98,12 +98,17 @@ final class DaemonRuntimeHost {
         )
 
         let pacEvaluator = CFPACEvaluator()
+        let tunnelResolverManager = TunnelResolverManager(
+            privilegeClient: auditedPrivilegeClient,
+            logger: logger
+        )
         let orchestrator = ProxyOrchestrator(
             config: loadedConfiguration.config,
             logger: logger,
             privilegeClient: auditedPrivilegeClient,
             authenticatorProvider: nil,
-            pacEvaluator: pacEvaluator
+            pacEvaluator: pacEvaluator,
+            resolverManager: tunnelResolverManager
         )
         self.orchestrator = orchestrator
 

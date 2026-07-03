@@ -1051,7 +1051,7 @@ package final class ProxyOrchestrator {
         connectCoordinator: tunnelCoordinator,
         connectionPool: tunnelConnectionPool,
         logger: logStore,
-        resolverManager: nil
+        resolverManager: resolverManager
     )
 
     private lazy var transparentProxy = TransparentTCPProxy(
@@ -1062,14 +1062,18 @@ package final class ProxyOrchestrator {
         gatewayModeProvider: { [configBox] in configBox.current.gatewayMode }
     )
 
+    private let resolverManager: (any TunnelResolverApplying)?
+
     package init(
         config: ProxyConfig,
         logger: any LogSink = DiscardingLogSink(),
         privilegeClient: PrivilegeClient? = nil,
         authenticatorProvider: (@Sendable (String) throws -> ProxyAuthenticator)? = nil,
         pacEvaluator: (any PacEvaluator)? = nil,
-        auditSink: any ConnectionAuditSink = DiscardingConnectionAuditSink()
+        auditSink: any ConnectionAuditSink = DiscardingConnectionAuditSink(),
+        resolverManager: (any TunnelResolverApplying)? = nil
     ) {
+        self.resolverManager = resolverManager
         self.auditSink = auditSink
         let configBox = ProxyConfigBox(config)
         self.configBox = configBox
