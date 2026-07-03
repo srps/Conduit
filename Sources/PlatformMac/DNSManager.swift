@@ -80,10 +80,26 @@ package final class DNSManager: @unchecked Sendable {
         }.filter { !$0.isEmpty }
     }
 
+    // MARK: - Entry Processing
+
+    /// Static split-DNS entries (`/etc/resolver/<domain>` → corporate DNS
+    /// servers), gated on the VPN being up. The configured servers live
+    /// inside the tunnel, but the resolver override applies to *everything*
+    /// matching the domain — including the VPN gateway's own public hostname
+    /// (e.g. `vpn-gw.corp.example` matched by a `corp.example` entry). With
+    /// the VPN down the override sends those lookups to unreachable servers,
+    /// so the VPN client cannot resolve its gateway to reconnect: a bootstrap
+    /// deadlock only a file removal breaks. Entry files must therefore exist
+    /// only while the tunnel that makes their servers reachable is up.
+    private func getEntries(from config: ProxyConfig, vpnConnected: Bool) -> [DomainDNSEntry] {
+        guard vpnConnected else { return [] }
+        return config.dnsEntries.filter(\.enabled).filter { !$0.servers.isEmpty }
+    }
+
     // MARK: - State Detection
 
-    package func isApplied(config: ProxyConfig) -> Bool {
-        let enabledEntries = config.dnsEntries.filter(\.enabled).filter { !$0.servers.isEmpty }
+    package func isApplied(config: ProxyConfig, vpnConnected: Bool = true) -> Bool {
+        let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
         let interceptDomains = getInterceptDomains(from: config)
 
         guard !enabledEntries.isEmpty || !interceptDomains.isEmpty else { return true }
@@ -124,9 +140,13 @@ package final class DNSManager: @unchecked Sendable {
 
     // MARK: - Apply / Clear
 
-    package func apply(config: ProxyConfig, logger: (any LogSink)?) throws {
-        let enabledEntries = config.dnsEntries.filter(\.enabled).filter { !$0.servers.isEmpty }
+    package func apply(config: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool = true) throws {
+        let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
         let interceptDomains = getInterceptDomains(from: config)
+
+        if !vpnConnected, !config.dnsEntries.filter(\.enabled).isEmpty {
+            logger?.log(.notice, "Split-DNS entry files deferred until the VPN connects (their servers are tunnel-internal).", category: .system)
+        }
 
         guard !enabledEntries.isEmpty || !interceptDomains.isEmpty else {
             logger?.log(.warning, "DNS resolver management skipped because no internal DNS servers or intercept rules are configured.", category: .system)
@@ -188,13 +208,13 @@ package final class DNSManager: @unchecked Sendable {
     /// are rewritten in place — never removed first — so a running system
     /// keeps resolving them throughout. This is what makes DNS config edits
     /// take effect without a Conduit restart.
-    package func reconcile(old: ProxyConfig, new: ProxyConfig, logger: (any LogSink)?) throws {
+    package func reconcile(old: ProxyConfig, new: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool = true) throws {
         let oldDomains = Set(
             old.dnsEntries.filter(\.enabled).map(\.domain)
                 + getInterceptDomains(from: old, forCleanup: true)
         )
         let newDomains = Set(
-            new.dnsEntries.filter(\.enabled).filter { !$0.servers.isEmpty }.map(\.domain)
+            getEntries(from: new, vpnConnected: vpnConnected).map(\.domain)
                 + getInterceptDomains(from: new)
         )
 
@@ -208,7 +228,44 @@ package final class DNSManager: @unchecked Sendable {
         }
 
         guard !newDomains.isEmpty else { return }
-        try apply(config: new, logger: logger)
+        try apply(config: new, logger: logger, vpnConnected: vpnConnected)
+    }
+
+    // MARK: - VPN-lifecycle entry files
+
+    /// Writes only the static split-DNS entry files. Called when the VPN
+    /// transitions to connected while the proxy is running: `apply` deferred
+    /// them while the tunnel (and thus their servers) was unreachable.
+    package func applyEntryFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
+        let entries = getEntries(from: config, vpnConnected: true)
+        guard !entries.isEmpty else { return }
+        for entry in entries {
+            try Self.validateDomain(entry.domain)
+            for server in entry.servers {
+                try Self.validateServer(server)
+            }
+        }
+        for entry in entries {
+            try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
+        }
+        logger?.log(.notice, "Applied \(entries.count) split-DNS entry file(s) now that the VPN is connected.", category: .system)
+    }
+
+    /// Removes only the static split-DNS entry files. Called when the VPN
+    /// disconnects: their servers are tunnel-internal, and leaving the
+    /// override in place blackholes every lookup under those domains —
+    /// including the VPN gateway's own public hostname when it falls under a
+    /// managed domain, which deadlocks reconnection (see `getEntries`).
+    package func clearEntryFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
+        let entries = config.dnsEntries.filter(\.enabled)
+        guard !entries.isEmpty else { return }
+        for entry in entries {
+            try Self.validateDomain(entry.domain)
+        }
+        for entry in entries {
+            try privilegeClient.execute(.removeDNS, values: [entry.domain])
+        }
+        logger?.log(.notice, "Removed \(entries.count) split-DNS entry file(s) while the VPN is disconnected.", category: .system)
     }
 
     /// Writes only the intercept-rule resolver files. Called from the DNS
