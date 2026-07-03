@@ -67,6 +67,23 @@ final class DaemonRuntimeHost {
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<DaemonVPNFlapWindowConfig>
     private var dnsHealthTimer: DispatchSourceTimer?
+    /// Whether `startRuntime()` ran (and `stopRuntime()` hasn't). Platform
+    /// side-effects (resolver files, system proxy, env vars) only exist in
+    /// that window, so VPN transitions and config reloads must not touch
+    /// them outside it.
+    private var runtimeStarted = false
+    /// Last state emitted by the VPN monitor. Mirrors `AppState`: split-DNS
+    /// entry files point at tunnel-internal servers, so they are applied/
+    /// removed on VPN transitions and every resolver-file apply path
+    /// consults this.
+    private var lastVPNState: VPNObservedState = .unknown
+    /// Entry files are withheld only when the VPN is *definitively* down.
+    /// `.unknown` (monitor hasn't primed yet) and `.reasserting` (flap grace
+    /// window) keep them — see the twin property in `AppState`.
+    private var splitDNSEntriesWanted: Bool {
+        if case .disconnected = lastVPNState { return false }
+        return true
+    }
 
     init(
         environment: RuntimeEnvironment,
@@ -200,7 +217,7 @@ final class DaemonRuntimeHost {
         }
         if platformConfig.manageDNSResolvers {
             do {
-                try dnsManager.apply(config: config, logger: logger)
+                try dnsManager.apply(config: config, logger: logger, vpnConnected: splitDNSEntriesWanted)
             } catch {
                 logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
             }
@@ -234,11 +251,13 @@ final class DaemonRuntimeHost {
 
         networkMonitor.start()
         vpnStatusMonitor.start()
+        runtimeStarted = true
         logger.log(.notice, "Daemon runtime started.", category: .general)
         writeSnapshotFile(snapshot: orchestrator.snapshot)
     }
 
     func stopRuntime(exitAfterStop: Bool = false) async {
+        runtimeStarted = false
         stopDNSHealthTimer()
         vpnStatusMonitor.stop()
         networkMonitor.stop()
@@ -285,6 +304,7 @@ final class DaemonRuntimeHost {
     }
 
     func reloadConfiguration() async {
+        let oldConfig = config
         let loaded = ProxyConfigPersistence.loadAllMigrating(in: environment)
         for warning in loaded.warnings {
             logger.log(.warning, warning, category: .system)
@@ -298,8 +318,50 @@ final class DaemonRuntimeHost {
         }
         configGeneration += 1
         await orchestrator.applyConfigChange(config)
+        reconcilePlatformSideEffects(old: oldConfig, new: config)
         logger.log(.notice, "Daemon configuration reloaded.", category: .general)
         writeSnapshotFile(snapshot: orchestrator.snapshot)
+    }
+
+    /// Push config edits into the applied platform state. The orchestrator
+    /// reconciles its own listeners via `applyConfigChange`, but resolver
+    /// files, system proxy, and env vars are written by this host — without
+    /// this, a daemon config reload leaves them describing the old config
+    /// (e.g. a removed split-DNS entry keeps its /etc/resolver file until
+    /// the next full stop). Twin of `AppState.reconcileRuntimeConfig`.
+    private func reconcilePlatformSideEffects(old: ProxyConfig, new: ProxyConfig) {
+        guard runtimeStarted, old != new else { return }
+        let diff = ConfigDiff(old: old, new: new)
+
+        if diff.dnsChanged, platformConfig.manageDNSResolvers {
+            do {
+                try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSEntriesWanted)
+            } catch {
+                logger.log(.warning, "Could not reconcile DNS resolver files after config reload: \(error.localizedDescription)", category: .system)
+            }
+        }
+
+        if diff.proxyChanged {
+            if platformConfig.manageSystemProxy {
+                do {
+                    try systemConduit.apply(
+                        config: new,
+                        mode: platformConfig.systemProxyMode,
+                        logger: logger,
+                        localPACURL: orchestrator.snapshot.bindings.localPACURL
+                    )
+                } catch {
+                    logger.log(.warning, "Could not re-apply system proxy after config reload: \(error.localizedDescription)", category: .system)
+                }
+            }
+            if platformConfig.manageEnvironmentVariables {
+                do {
+                    try environmentManager.apply(config: new, logger: logger)
+                } catch {
+                    logger.log(.warning, "Could not re-apply environment variables after config reload: \(error.localizedDescription)", category: .system)
+                }
+            }
+        }
     }
 
     func testUpstream(named name: String) async -> ProbeResult? {
@@ -328,9 +390,32 @@ final class DaemonRuntimeHost {
     }
 
     private func handleVPNStateChange(_ state: VPNObservedState) async {
+        let wantedBefore = splitDNSEntriesWanted
+        lastVPNState = state
+        let wantedNow = splitDNSEntriesWanted
+
         await orchestrator.handleVPNStateChange(state)
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             systemDNSManager.reconcile(logger: logger)
+        }
+
+        // Split-DNS entry files live and die with the tunnel — their servers
+        // are tunnel-internal, and the /etc/resolver override otherwise
+        // blackholes the VPN gateway's own hostname while disconnected,
+        // deadlocking reconnection. Twin of `AppState.handleVPNStateChange`.
+        guard platformConfig.manageDNSResolvers, wantedBefore != wantedNow, runtimeStarted else { return }
+        do {
+            if wantedNow {
+                try dnsManager.applyEntryFiles(config: config, logger: logger)
+            } else {
+                try dnsManager.clearEntryFiles(config: config, logger: logger)
+            }
+        } catch {
+            logger.log(
+                .warning,
+                "Could not \(wantedNow ? "apply" : "remove") split-DNS entry files on VPN transition: \(error.localizedDescription)",
+                category: .system
+            )
         }
     }
 
