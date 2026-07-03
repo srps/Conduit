@@ -526,7 +526,7 @@ Implementation notes:
 #### Phase 6 design decisions (resolved, then revised — see below)
 
 - `**vpnFlapGraceSeconds` config field** (pulled forward from Phase 7): added to `HealthSection`, mirrored on `ProxyConfig` flat accessor, surfaced via Codable. `VPNStatusMonitor` reads it from config. pm-sim sets a small value (e.g., 0.2 s) so scenario 6.3 doesn't take 30 s wall time.
-- **All 5 scenarios (6.1–6.5)** in source; 6.1 and 6.2 excluded from `runAll` due to authenticator plumbing (see "What's deferred" below). 6.3, 6.4, 6.5 in `runAll` and PASS.
+- **All 5 scenarios (6.1–6.5)** in source; 6.1 and 6.2 were initially excluded from `runAll` because the harness built its orchestrator without an authenticator provider, so the health-check loop hit the real GSS/SPNEGO stack. Since resolved: `VPNFlapHarness` injects `MockAuthenticator` via the orchestrator's `authenticatorProvider:`, and all five run in `runAll` and PASS.
 
 #### Phase 6 (revised) — coalesce policy switched to min-visible debounce
 

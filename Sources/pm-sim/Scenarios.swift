@@ -492,19 +492,17 @@ extension Scenarios {
         out.append(try await OrchestratorScenarios.upstreamFailover(verbose: verbose))
         out.append(try await floodSlowDrain(verbose: verbose))
         out.append(try await OrchestratorScenarios.directModeSilence(verbose: verbose))
-        // Note: vpnFlapShortIdleTunnel and vpnFlapShortActiveStream (6.1, 6.2)
-        // are excluded from runAll due to a known authenticator-plumbing
-        // limitation in pm-sim's ProxyOrchestrator setup. They're invokable
-        // individually via `pm-sim vpn-flap-idle` / `pm-sim vpn-flap-stream`
-        // but currently FAIL. The "tunnel survives flap" property they
-        // demonstrate is enforced at the unit level via Phase 1's CloseScope
-        // + AGENTS.md NEVER rule. See VPNFlapScenarios source comments.
+        out.append(try await VPNFlapScenarios.vpnFlapShortIdleTunnel(verbose: verbose))
+        out.append(try await VPNFlapScenarios.vpnFlapShortActiveStream(verbose: verbose))
         out.append(try await VPNFlapScenarios.vpnFlapLongOutage(verbose: verbose))
         out.append(try await VPNFlapScenarios.vpnUserDisconnectFastPath(verbose: verbose))
         out.append(try await VPNFlapScenarios.vpnRapidFlapBurst(verbose: verbose))
         out.append(try await NetworkTransitionScenarios.networkTransition(verbose: verbose))
         out.append(try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose))
         out.append(try await UpgradeScenarios.websocketUpgrade(verbose: verbose))
+        out.append(try await AuditScenarios.proxiedResponseHopByHop(verbose: verbose))
+        out.append(try await AuditScenarios.socks5NonZeroRSV(verbose: verbose))
+        out.append(try await AuditScenarios.expectContinueAndTrailers(verbose: verbose))
         return out
     }
 }

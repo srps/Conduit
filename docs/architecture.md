@@ -21,7 +21,7 @@ Conduit/
 │   ├── pm-proxy/              1 file,     0.3k LOC  — headless HTTP/SOCKS5/DNS/tunnel CLI
 │   ├── pm-dns/                1 file,     0.1k LOC  — standalone DoH forwarder
 │   ├── pm-tunnel/             1 file,     0.2k LOC  — standalone TCP tunnel forwarder
-│   ├── pm-sim/                9 files,   2.0k LOC  — fault-injection simulator
+│   ├── pm-sim/                13 files,  3.4k LOC  — fault-injection simulator
 │   ├── pm-vpn-check/          1 file,     0.1k LOC  — VPN status diagnostic
 │   └── pm-auth-check/         1 file,     0.5k LOC  — auth diagnostic
 └── Tests/
