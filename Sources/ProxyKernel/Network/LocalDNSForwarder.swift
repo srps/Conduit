@@ -103,6 +103,12 @@ package final class LocalDNSForwarder: @unchecked Sendable {
 /// can atomically swap it on `resetUpstreamTransports()` without racing with
 /// in-flight DoH requests reading the sessions in `resolveViaDoH`.
 private struct DoHTransports: @unchecked Sendable {
+    // NEVER call `invalidate()` while a DoH fetch may still be using these
+    // sessions: `URLSession.data(for:)` on an invalidated session raises an
+    // Objective-C `NSInvalidArgumentException` from CFNetwork
+    // (`taskForClassInfo:`) that Swift cannot catch — the process aborts
+    // (observed as the 2026-07-01 SIGABRT). All invalidation goes through
+    // `DoHTransportsHandle`, which defers it until in-flight uses drain.
     let direct: URLSession
     let upstream: URLSession?
     let localProxy: URLSession?
@@ -159,6 +165,63 @@ private struct DoHTransports: @unchecked Sendable {
     }
 }
 
+/// Reference-counted lifecycle guard around a `DoHTransports` value.
+///
+/// Invariant: `transports.invalidate()` runs exactly once, and only when the
+/// handle is retired AND no `beginUse()`/`endUse()` window is open. This is
+/// what makes `resetUpstreamTransports()` safe to call concurrently with
+/// in-flight DoH queries — the old sessions stay valid until the last query
+/// that snapshotted them finishes (bounded by the sessions' own 4 s request /
+/// 8 s resource timeouts), then get invalidated by whichever side closes the
+/// window last. Fresh queries never see a retired handle's sessions because
+/// `beginUse()` refuses once retired.
+private final class DoHTransportsHandle: @unchecked Sendable {
+    let transports: DoHTransports
+    private let lock = NSLock()
+    private var activeUses = 0
+    private var retired = false
+
+    init(transports: DoHTransports) {
+        self.transports = transports
+    }
+
+    /// Opens a use window. Returns false when the handle has been retired —
+    /// the caller must re-read the current handle (or give up) instead of
+    /// touching `transports`.
+    func beginUse() -> Bool {
+        lock.withLock {
+            guard !retired else { return false }
+            activeUses += 1
+            return true
+        }
+    }
+
+    /// Closes a use window. Runs the deferred invalidation if this was the
+    /// last open window on a retired handle.
+    func endUse() {
+        let invalidateNow: Bool = lock.withLock {
+            activeUses -= 1
+            return retired && activeUses == 0
+        }
+        if invalidateNow {
+            transports.invalidate()
+        }
+    }
+
+    /// Marks the handle retired. Invalidates immediately when idle; otherwise
+    /// the last `endUse()` performs the invalidation. Idempotent.
+    func retire() {
+        let invalidateNow: Bool = lock.withLock {
+            guard !retired else { return false }
+            retired = true
+            return activeUses == 0
+        }
+        if invalidateNow {
+            transports.invalidate()
+        }
+    }
+}
+
 private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
     typealias OutboundOut = AddressedEnvelope<ByteBuffer>
@@ -173,10 +236,11 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
     private var dohCount = 0
     private var cacheHitCount = 0
     private let concurrencyLimit = DispatchSemaphore(value: 64)
-    /// Swappable on `resetUpstreamTransports`. Reads via `currentTransports()`
-    /// take the lock briefly, copy the struct out, release the lock — keeping
-    /// the rest of the DoH path lock-free.
-    private let transportsBox: NIOLockedValueBox<DoHTransports>
+    /// Swappable on `resetUpstreamTransports`. Reads via `currentHandle()`
+    /// take the lock briefly, copy the reference out, release the lock —
+    /// keeping the rest of the DoH path lock-free. Session invalidation is
+    /// deferred through the handle's use-count (see `DoHTransportsHandle`).
+    private let transportsBox: NIOLockedValueBox<DoHTransportsHandle>
     private let responseCache = DNSResponseCache()
 
     init(
@@ -191,15 +255,21 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
         self.configProvider = configProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.onMetrics = onMetrics
-        self.transportsBox = NIOLockedValueBox(DoHTransports(config: configProvider()))
+        self.transportsBox = NIOLockedValueBox(
+            DoHTransportsHandle(transports: DoHTransports(config: configProvider()))
+        )
     }
 
-    private func currentTransports() -> DoHTransports {
+    private func currentHandle() -> DoHTransportsHandle {
         transportsBox.withLockedValue { $0 }
     }
 
     func invalidateSessions() {
-        transportsBox.withLockedValue { $0.invalidate() }
+        // Retire, don't invalidate directly: a `resolveViaDoH` call that
+        // snapshotted this handle may still have fetches in flight, and
+        // `data(for:)` on an invalidated session aborts the process (see
+        // `DoHTransports`). The handle invalidates once those drain.
+        transportsBox.withLockedValue { $0 }.retire()
     }
 
     /// Tear down the in-flight DoH `URLSession`s, swap in fresh ones built
@@ -212,13 +282,18 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
     /// DoH path on the very next query, so the user sees the recovery
     /// immediately instead of after the cached entry's TTL expires.
     func resetUpstreamTransports() {
-        let fresh = DoHTransports(config: configProvider())
-        let old = transportsBox.withLockedValue { current -> DoHTransports in
+        let fresh = DoHTransportsHandle(transports: DoHTransports(config: configProvider()))
+        let old = transportsBox.withLockedValue { current -> DoHTransportsHandle in
             let captured = current
             current = fresh
             return captured
         }
-        old.invalidate()
+        // Retire (deferred invalidate), never invalidate directly — in-flight
+        // DoH fetches that snapshotted `old` finish against still-valid
+        // sessions (bounded by their 4 s/8 s timeouts) and the last one out
+        // invalidates. Direct invalidation here raced those fetches and
+        // crashed the process with an uncatchable CFNetwork NSException.
+        old.retire()
         responseCache.clear()
     }
 
@@ -401,14 +476,27 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
         let domain = DNSWireFormat.extractDomainName(from: query)
             .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? DNSWireFormat.extractDomainName(from: query)
 
-        // Snapshot the current transport pair under the lock and use that for
-        // the duration of this query. A concurrent `resetUpstreamTransports`
-        // call may invalidate these sessions mid-flight; in-flight tasks then
-        // resume with `cancelled` errors and our `try?` swallows them, so the
-        // task group converges to nil. The next query reads the freshly-swapped
-        // transports out of the box.
-        let sessions = currentTransports().sessions(preferProxyPath: preferProxyPathForDoH())
+        // Snapshot the current transport handle and hold a use window open for
+        // the duration of this query. A concurrent `resetUpstreamTransports`/
+        // `invalidateSessions` retires the handle but must not invalidate the
+        // sessions while our fetches are in flight — `data(for:)` on an
+        // invalidated session aborts the process (uncatchable CFNetwork
+        // NSException). The use window guarantees invalidation is deferred
+        // until the task group below has fully drained. If the handle was
+        // retired before we could open the window, re-read once (a reset just
+        // swapped in a fresh handle); if that one is retired too, the
+        // forwarder is stopping — answer nil.
+        var handle = currentHandle()
+        if !handle.beginUse() {
+            handle = currentHandle()
+            guard handle.beginUse() else { return nil }
+        }
+        defer { handle.endUse() }
+        let sessions = handle.transports.sessions(preferProxyPath: preferProxyPathForDoH())
 
+        // `withTaskGroup` awaits all children before returning (including
+        // after the early-exit `cancelAll`), so no fetch outlives the use
+        // window closed by the `defer` above.
         return await withTaskGroup(of: [UInt8]?.self) { group in
             for provider in providers {
                 let dohURL = "\(provider)?name=\(domain)&type=\(typeName)"

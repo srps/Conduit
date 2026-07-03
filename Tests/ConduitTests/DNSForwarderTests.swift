@@ -573,4 +573,94 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         try await client.close().get()
         await forwarder.stop()
     }
+
+    /// Regression test for the 2026-07-01 SIGABRT: `resetUpstreamTransports`
+    /// used to call `invalidateAndCancel()` on the DoH `URLSession`s while
+    /// `resolveViaDoH` had fetches in flight against them. CFNetwork raises
+    /// an uncatchable Objective-C exception when a task is created on an
+    /// invalidated session, aborting the whole process. The fix defers
+    /// invalidation through a use-counted handle; this test drives real DoH
+    /// fetches (against loopback ports that refuse instantly — no external
+    /// egress) while hammering resets and stop, and simply has to survive.
+    @MainActor
+    func testResetStormDuringInFlightDoHFetchesDoesNotCrash() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+
+        // Local tarpit: accepts TCP connections and never responds, so DoH
+        // fetches against it stay in flight until the sessions' 4 s request
+        // timeout — maximizing the overlap between live fetches and resets
+        // (the production crash needed exactly that overlap). No external
+        // egress.
+        let tarpit = try await ServerBootstrap(group: group)
+            .childChannelInitializer { _ in group.next().makeSucceededVoidFuture() }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let tarpitPort = try XCTUnwrap(tarpit.localAddress?.port)
+
+        var config = ProxyConfig.testFixture()
+        config.upstreams = []
+        // Internal DNS at 127.0.0.1:53 — refused (or answered) immediately;
+        // either way external names fall through to the DoH path.
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.internal.test", servers: ["127.0.0.1"])]
+        // Several distinct provider URLs multiply the task-group fan-out per
+        // query (providers × sessions × {json,wire}), stretching the window
+        // between the transports snapshot and each `data(for:)` call.
+        config.dohProviders = (0..<6).map { "https://127.0.0.1:\(tarpitPort)/dns-query?v=\($0)" }
+        config.localHost = "127.0.0.1"
+        config.localPort = 9
+
+        let logger = RecordingLogSink(minLevel: .debug)
+        let forwarder = LocalDNSForwarder(
+            group: group,
+            logger: logger,
+            configProvider: { [config] in config }
+        )
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        let port = try XCTUnwrap(forwarder.listeningPort)
+
+        let client = try await DatagramBootstrap(group: group)
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let target = try SocketAddress(ipAddress: "127.0.0.1", port: port)
+
+        // Phase 1: send all queries. Their internal-DNS phase (127.0.0.1:53)
+        // resolves fast on refusal or takes up to its 1.5 s timeout — either
+        // way every query then enters `resolveViaDoH` against the tarpit.
+        for i in 0..<96 {
+            // Unique domains defeat the response cache so every query
+            // reaches the DoH task group.
+            let query = DNSWireFormat.buildQuery(domain: "ext-\(i).example.com", txID: UInt16(i))
+            var buf = client.allocator.buffer(capacity: query.count)
+            buf.writeBytes(query)
+            try await client.writeAndFlush(AddressedEnvelope(remoteAddress: target, data: buf)).get()
+        }
+
+        // Wait until the queries demonstrably reach the DoH stage before
+        // starting the storm — otherwise the test silently stops exercising
+        // the crash surface if internal-DNS timing changes.
+        var dohAttempts = 0
+        for _ in 0..<40 {
+            try await Task.sleep(for: .milliseconds(100))
+            dohAttempts = logger.entries().filter { $0.message.contains("trying DoH") }.count
+            if dohAttempts >= 48 { break }
+        }
+        XCTAssertGreaterThan(dohAttempts, 0, "Queries must reach the DoH path for this test to mean anything")
+
+        // Phase 2: reset storm while the DoH task groups are alive in the
+        // tarpit (each fetch pends until the 4 s request timeout).
+        for _ in 0..<300 {
+            forwarder.resetUpstreamTransports(reason: "stress")
+            try await Task.sleep(for: .milliseconds(2))
+        }
+
+        // Stop while fetches are still pending in the tarpit — exercises the
+        // retire path in `invalidateSessions()` too.
+        await forwarder.stop()
+        try await client.close().get()
+        try await tarpit.close().get()
+
+        // Reaching this line is the assertion: the old implementation
+        // died with an uncatchable CFNetwork NSException under this load.
+        XCTAssertNil(forwarder.listeningPort, "Forwarder should be stopped")
+    }
 }
