@@ -322,6 +322,7 @@ package final class TunnelForwarder: @unchecked Sendable {
                 let tracker = self.sessionTracker
                 let bootstrap = ServerBootstrap(group: group)
                     .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+                    .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
                     .childChannelInitializer { channel in
                         guard tracker.tryAcquire(tunnelPort: def.localPort) else {
                             self.logger.log(.warning, "Tunnel \(def.effectiveLabel): session limit reached, rejecting connection.", category: .tunnel)
@@ -728,6 +729,7 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
         let clientChannel = context.channel
         ClientBootstrap(group: group)
             .connectTimeout(.seconds(10))
+            .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             .connect(host: remoteHost, port: remotePort)
             .whenComplete { result in
                 switch result {

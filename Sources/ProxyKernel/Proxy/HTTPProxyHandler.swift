@@ -816,6 +816,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let makeBootstrap: @Sendable () -> ClientBootstrap = {
             let bootstrap = ClientBootstrap(group: eventLoopGroup)
                 .connectTimeout(.seconds(10))
+                .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             if let channelInitializer {
                 return bootstrap.channelInitializer(channelInitializer)
             }

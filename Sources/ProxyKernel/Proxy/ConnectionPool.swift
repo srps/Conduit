@@ -673,6 +673,7 @@ package final class ConnectionPool: @unchecked Sendable {
         let bootstrap = ClientBootstrap(group: group)
             .connectTimeout(.milliseconds(timeoutMS))
             .channelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
+            .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             .channelOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepIdle), value: CInt(keepalive.keepIdleSeconds))
             .channelOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepInterval), value: CInt(keepalive.keepIntervalSeconds))
             .channelOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepCount), value: CInt(keepalive.keepCountProbes))

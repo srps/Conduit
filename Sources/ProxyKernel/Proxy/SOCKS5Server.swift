@@ -55,6 +55,7 @@ final class SOCKS5Server: @unchecked Sendable {
     func start(host: String, port: Int) async throws {
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
             .childChannelInitializer { channel in
                 var future = channel.eventLoop.makeSucceededVoidFuture()
                 if self.gatewayMode {
@@ -374,7 +375,9 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let gatewayMode = self.gatewayMode
 
         let makeBootstrap: @Sendable () -> ClientBootstrap = {
-            ClientBootstrap(group: group).connectTimeout(.seconds(10))
+            ClientBootstrap(group: group)
+                .connectTimeout(.seconds(10))
+                .channelOption(ChannelOptions.tcpNoDelay, value: 1)
         }
 
         makeBootstrap()

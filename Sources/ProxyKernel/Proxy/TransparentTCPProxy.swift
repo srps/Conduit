@@ -34,6 +34,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         let gatewayModeProvider = gatewayModeProvider
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
             .childChannelInitializer { channel in
                 channel.pipeline.addHandler(
                     SNIInterceptHandler(
