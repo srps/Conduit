@@ -103,6 +103,28 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             return
         }
 
+        // The listener can die without a stop() (socket closed externally,
+        // process-level hiccup). Detach any stale refs and tear them down
+        // before building replacements, or the old pool's upstream
+        // connections and a possibly-still-bound SOCKS listener leak beside
+        // the new ones (the SOCKS one would also make the new start fail
+        // with EADDRINUSE). Same detach-then-teardown shape as `stop()`;
+        // `.allButDedicated` because in-flight CONNECT tunnels are
+        // independent of the dead listener and still serving their clients.
+        let stale = refs.withLockedValue { r -> RuntimeRefs in
+            let copy = r
+            r = RuntimeRefs()
+            return copy
+        }
+        if stale.serverChannel != nil || stale.connectionPool != nil || stale.socksServer != nil {
+            logger.log(.warning, "Local proxy listener was gone without a stop; cleaning up stale runtime state before restart.", category: .proxy)
+            await stale.socksServer?.stop()
+            stale.connectionPool?.closeAll(scope: .allButDedicated)
+            if let staleChannel = stale.serverChannel {
+                _ = try? await staleChannel.close().get()
+            }
+        }
+
         let pool = ConnectionPool(
             group: group,
             logger: logger,
