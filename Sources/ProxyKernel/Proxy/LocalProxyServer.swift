@@ -26,25 +26,38 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let inboundConnectionCountBox = NIOLockedValueBox(0)
     private let lastWarnLoggedAt = NIOLockedValueBox<Date>(Date.distantPast)
 
-    private var serverChannel: Channel?
-    private var connectionPool: ConnectionPool?
-    private var connectCoordinator: CONNECTCoordinator?
-    private var socksServer: SOCKS5Server?
+    /// Listener/pool references are read from arbitrary threads (orchestrator
+    /// tasks, the health timer, snapshot accessors on the main thread) while
+    /// start/stop/recycle write them from whatever executor thread their
+    /// suspension points resume on — the scheduled TSan soak flagged exactly
+    /// those pairs as data races. All access goes through this box. Never
+    /// hold the lock across an `await`: copy references out, then suspend.
+    private struct RuntimeRefs {
+        var serverChannel: Channel?
+        var connectionPool: ConnectionPool?
+        var connectCoordinator: CONNECTCoordinator?
+        var socksServer: SOCKS5Server?
+    }
+    private let refs = NIOLockedValueBox(RuntimeRefs())
+
+    private var pool: ConnectionPool? {
+        refs.withLockedValue { $0.connectionPool }
+    }
 
     package var listeningHost: String? {
-        serverChannel?.localAddress?.ipAddress
+        refs.withLockedValue { $0.serverChannel }?.localAddress?.ipAddress
     }
 
     package var listeningPort: Int? {
-        serverChannel?.localAddress?.port
+        refs.withLockedValue { $0.serverChannel }?.localAddress?.port
     }
 
     package var socksListeningHost: String? {
-        socksServer?.listeningHost
+        refs.withLockedValue { $0.socksServer }?.listeningHost
     }
 
     package var socksListeningPort: Int? {
-        socksServer?.listeningPort
+        refs.withLockedValue { $0.socksServer }?.listeningPort
     }
 
     package var inboundConnectionCount: Int {
@@ -86,7 +99,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     }
 
     package func start() async throws {
-        if serverChannel?.isActive == true {
+        if refs.withLockedValue({ $0.serverChannel })?.isActive == true {
             return
         }
 
@@ -124,9 +137,11 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             gatewayMode: config.gatewayMode
         )
 
-        serverChannel = bound
-        connectionPool = pool
-        connectCoordinator = coordinator
+        refs.withLockedValue {
+            $0.serverChannel = bound
+            $0.connectionPool = pool
+            $0.connectCoordinator = coordinator
+        }
         let actualHost = bound.localAddress?.ipAddress ?? listenHost
         let actualPort = bound.localAddress?.port ?? config.localPort
         logger.log(.notice, "Local proxy listening on \(actualHost):\(actualPort).", category: .proxy)
@@ -146,7 +161,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                     onConnectionActivity: self.onConnectionActivity
                 )
                 try await socks.start(host: listenHost, port: config.socksPort)
-                self.socksServer = socks
+                self.refs.withLockedValue { $0.socksServer = socks }
             } catch {
                 logger.log(.warning, "SOCKS5 server failed to start on port \(config.socksPort): \(error.localizedDescription). HTTP proxy is running without SOCKS5.", category: .proxy)
             }
@@ -182,7 +197,10 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// at the BSD-socket level — closing the listener does not propagate to them.
     /// They continue to serve their owners until each side closes its end normally.
     package func recycleListener() async throws {
-        guard let pool = connectionPool, let coordinator = connectCoordinator else {
+        let (existingPool, existingCoordinator) = refs.withLockedValue {
+            ($0.connectionPool, $0.connectCoordinator)
+        }
+        guard let pool = existingPool, let coordinator = existingCoordinator else {
             // No prior listener state — fall through to a normal start so the
             // recovery step still has end-to-end semantics in the cold-start case.
             try await start()
@@ -203,8 +221,11 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             gatewayMode: config.gatewayMode
         )
 
-        let previous = serverChannel
-        serverChannel = newChannel
+        let previous = refs.withLockedValue { r -> Channel? in
+            let old = r.serverChannel
+            r.serverChannel = newChannel
+            return old
+        }
         if let previous {
             _ = try? await previous.close().get()
         }
@@ -330,32 +351,37 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     ///   dedicated tunnels. Reserved for niche cases — `recycleListener()` is
     ///   normally a better fit when "preserve everything active" is the intent.
     package func stop(scope: CloseScope = .all) async {
-        await socksServer?.stop()
-        socksServer = nil
-        connectionPool?.closeAll(scope: scope)
-        connectionPool = nil
-        connectCoordinator = nil
+        // Detach everything under the lock first, then run the async
+        // teardown on the local copies — holding the lock across an await
+        // is not allowed, and clearing eagerly means concurrent readers see
+        // "stopped" for the whole teardown rather than half-closed refs.
+        let detached = refs.withLockedValue { r -> RuntimeRefs in
+            let copy = r
+            r = RuntimeRefs()
+            return copy
+        }
+        await detached.socksServer?.stop()
+        detached.connectionPool?.closeAll(scope: scope)
 
-        if let serverChannel {
+        if let serverChannel = detached.serverChannel {
             _ = try? await serverChannel.close().get()
         }
-        serverChannel = nil
         logger.log(.notice, "Local proxy stopped (scope: \(scope)).", category: .proxy)
     }
 
     package func performHealthCheck() async -> HealthCheckResult {
-        guard let pool = connectionPool else {
+        guard let pool = self.pool else {
             return HealthCheckResult(healthy: false, summary: "Proxy stopped", activeUpstream: nil, responseTimeMS: 0)
         }
         return await pool.healthCheck(urlString: configProvider().healthCheckURL)
     }
 
     package func activeUpstream() -> String? {
-        connectionPool?.activeUpstream()
+        pool?.activeUpstream()
     }
 
     package func upstreamStatuses() -> [UpstreamRuntimeStatus] {
-        connectionPool?.upstreamStatuses() ?? []
+        pool?.upstreamStatuses() ?? []
     }
 
     /// Reset every upstream's circuit breaker to closed without touching its
@@ -365,19 +391,19 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// being rejected by an open circuit that was tripped on the now-stale
     /// flap-network path. See `docs/design-vpn-flap-resilience.md` § "Pool Hardening".
     package func resetCircuitsAfterFlap() {
-        connectionPool?.resetCircuitsAfterFlap()
+        pool?.resetCircuitsAfterFlap()
     }
 
     package func closeStalledConnections() async throws -> Int {
-        connectionPool?.closeStalledConnections(olderThan: configProvider().stalledConnectionTimeoutSeconds) ?? 0
+        pool?.closeStalledConnections(olderThan: configProvider().stalledConnectionTimeoutSeconds) ?? 0
     }
 
     package func reauthenticate() async throws {
-        connectionPool?.resetAuthentication()
+        pool?.resetAuthentication()
     }
 
     package func switchToNextUpstream() async throws -> String? {
-        connectionPool?.switchToNextUpstream()
+        pool?.switchToNextUpstream()
     }
 
 }
