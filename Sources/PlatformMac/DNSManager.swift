@@ -149,7 +149,7 @@ package final class DNSManager: @unchecked Sendable {
         }
 
         guard !enabledEntries.isEmpty || !interceptDomains.isEmpty else {
-            if vpnConnected || config.dnsEntries.filter(\.enabled).isEmpty {
+            if vpnConnected || config.dnsEntries.filter(\.enabled).filter({ !$0.servers.isEmpty }).isEmpty {
                 logger?.log(.warning, "DNS resolver management skipped because no internal DNS servers or intercept rules are configured.", category: .system)
             }
             return
