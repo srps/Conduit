@@ -46,6 +46,11 @@ package struct SplitDNSVPNGate: Sendable {
     /// Acts on a wanted-state flip: writes the entry files when the VPN
     /// came up, removes them when it went down. Failures are logged, not
     /// thrown — a VPN transition handler has no caller to propagate to.
+    ///
+    /// The apply/clear decision reads the gate's *current* state, so call
+    /// this synchronously (same isolation context) right after the
+    /// `update(_:)` that returned `true` — an `update(_:)` interleaved
+    /// between the two changes what this does.
     package func reconcileEntryFiles(config: ProxyConfig, dnsManager: DNSManager, logger: any LogSink) {
         do {
             if entriesWanted {
