@@ -14,6 +14,12 @@ on:
     - cron: "0 3 * * 1"
   workflow_dispatch:
 
+env:
+  # NIO ByteBuffer CoW reports are a known TSan false-positive class —
+  # see .tsan-suppressions for the full rationale. Real races in our own
+  # code carry ProxyKernel frames and are not suppressed.
+  TSAN_OPTIONS: suppressions=${{ github.workspace }}/.tsan-suppressions
+
 jobs:
   asan:
     name: pm-sim under AddressSanitizer
