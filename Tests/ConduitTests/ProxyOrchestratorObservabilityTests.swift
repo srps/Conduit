@@ -66,13 +66,37 @@ final class ProxyOrchestratorObservabilityTests: XCTestCase {
             .connect(host: "127.0.0.1", port: boundPort)
             .get()
 
-        try await Task.sleep(for: .milliseconds(250))
-        XCTAssertEqual(orchestrator.snapshot.tunnelSessionCount, 1)
+        // Session open/close counts update via channel callbacks; poll with a
+        // generous deadline instead of a fixed sleep — the fixed 250 ms
+        // variant flaked under the TSan soak's ~10x scheduling slowdown.
+        try await waitForSessionCount(1, orchestrator: orchestrator)
 
         try await client.close().get()
-        try await Task.sleep(for: .milliseconds(250))
-        XCTAssertEqual(orchestrator.snapshot.tunnelSessionCount, 0)
+        try await waitForSessionCount(0, orchestrator: orchestrator)
 
         await orchestrator.stopTunnels()
+    }
+
+    @MainActor
+    private func waitForSessionCount(
+        _ expected: Int,
+        orchestrator: ProxyOrchestrator,
+        timeout: Duration = .seconds(10),
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            if orchestrator.snapshot.tunnelSessionCount == expected { return }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let finalCount = orchestrator.snapshot.tunnelSessionCount
+        XCTAssertEqual(
+            finalCount,
+            expected,
+            "tunnelSessionCount did not reach \(expected) within \(timeout)",
+            file: file,
+            line: line
+        )
     }
 }
