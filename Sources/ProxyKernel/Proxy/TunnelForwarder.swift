@@ -705,7 +705,12 @@ private final class ProxiedTunnelClientHandler: ChannelInboundHandler, @unchecke
     }
 
     func channelWritabilityChanged(context: ChannelHandlerContext) {
-        if context.channel.isWritable, let upstream {
+        // Only manage upstream reads once the relay is installed: `upstream`
+        // is assigned before the relay (so channelInactive can close it if
+        // the client drops mid-setup), and the relay is the only thing that
+        // pauses upstream reads — resuming them earlier would enable reads
+        // into a pipeline with no handler to forward the data.
+        if context.channel.isWritable, tunnelReady, let upstream {
             upstream.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
         }
         context.fireChannelWritabilityChanged()
@@ -849,7 +854,9 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
     }
 
     func channelWritabilityChanged(context: ChannelHandlerContext) {
-        if context.channel.isWritable, let upstream {
+        // Only manage upstream reads once the relay is installed — see the
+        // twin comment in `ProxiedTunnelClientHandler`.
+        if context.channel.isWritable, connectComplete, let upstream {
             upstream.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
         }
         context.fireChannelWritabilityChanged()
