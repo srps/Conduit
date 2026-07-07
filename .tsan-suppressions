@@ -1,0 +1,16 @@
+# ThreadSanitizer suppressions for the sanitizer-soak workflow.
+#
+# SwiftNIO ByteBuffer copy-on-write: the recv-buffer reuse path checks
+# `isKnownUniquelyReferenced` and reallocates in place when the last other
+# reference was released on a different event loop moments earlier. Swift's
+# retain/release are not TSan-visible synchronization, so TSan pairs the
+# releasing thread's final read with the reallocating thread's write and
+# reports a race that the CoW protocol actually forbids. Every report in
+# this class shows only NIO-internal frames (ByteBuffer._Storage /
+# NIOPooledRecvBufferAllocator / PendingStreamWritesManager) on both sides.
+#
+# Keep entries narrowly scoped to the NIO storage internals so genuine
+# races in ProxyKernel code (which carry our own frames) still fail the job.
+race:ByteBuffer._Storage.reallocStorage
+race:ByteBuffer._Storage.allocateStorage
+race:ByteBuffer._slicedStorageBuffer
