@@ -98,7 +98,7 @@ package final class DNSManager: @unchecked Sendable {
 
     // MARK: - State Detection
 
-    package func isApplied(config: ProxyConfig, vpnConnected: Bool = true) -> Bool {
+    package func isApplied(config: ProxyConfig, vpnConnected: Bool) -> Bool {
         let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
         let interceptDomains = getInterceptDomains(from: config)
 
@@ -140,7 +140,7 @@ package final class DNSManager: @unchecked Sendable {
 
     // MARK: - Apply / Clear
 
-    package func apply(config: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool = true) throws {
+    package func apply(config: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool) throws {
         let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
         let interceptDomains = getInterceptDomains(from: config)
 
@@ -210,7 +210,7 @@ package final class DNSManager: @unchecked Sendable {
     /// are rewritten in place — never removed first — so a running system
     /// keeps resolving them throughout. This is what makes DNS config edits
     /// take effect without a Conduit restart.
-    package func reconcile(old: ProxyConfig, new: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool = true) throws {
+    package func reconcile(old: ProxyConfig, new: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool) throws {
         let oldDomains = Set(
             old.dnsEntries.filter(\.enabled).map(\.domain)
                 + getInterceptDomains(from: old, forCleanup: true)

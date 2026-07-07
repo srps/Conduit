@@ -50,7 +50,8 @@ package struct ActivationPreflightEvaluator {
         isRunning: Bool,
         helperStatus: HelperToolPrivilegeClient.Status,
         systemConduit: SystemProxyManager,
-        dnsManager: DNSManager
+        dnsManager: DNSManager,
+        vpnConnected: Bool
     ) -> ActivationPreflight {
         let helperAvailable = helperStatus == .installed
 
@@ -77,9 +78,12 @@ package struct ActivationPreflightEvaluator {
                 ? !config.dnsEntries.filter(\.enabled).isEmpty
                 : !config.dnsEntries.filter(\.enabled).filter { !$0.servers.isEmpty }.isEmpty
             if hasEntries {
+                // With the VPN down, entry files are intentionally withheld
+                // (see `SplitDNSVPNGate`) — deferred must count as applied,
+                // or the preflight shows a spurious admin-prompt hint.
                 let alreadyApplied = isRunning
                     ? dnsManager.isCleared(config: config)
-                    : dnsManager.isApplied(config: config)
+                    : dnsManager.isApplied(config: config, vpnConnected: vpnConnected)
                 let level: PrivilegeLevel = helperAvailable ? .none : .requiresAdmin
                 splitDNS = IntegrationStatus(enabled: true, alreadyApplied: alreadyApplied, privilegeLevel: level)
             } else {

@@ -94,21 +94,10 @@ final class AppState: ObservableObject {
     /// (start/stopDNS) update this snapshot directly so their own save
     /// doesn't re-trigger the subsystem they just started or stopped.
     private var lastReconciledConfig: ProxyConfig
-    /// Last state emitted by the VPN monitor. Split-DNS entry files point at
-    /// tunnel-internal servers, so they are applied/removed on VPN
-    /// transitions (see `handleVPNStateChange`) and every resolver-file apply
-    /// path consults this to decide whether entry files are currently wanted.
-    private var lastVPNState: VPNObservedState = .unknown
-    /// Entry files are withheld only when the VPN is *definitively* down.
-    /// `.unknown` (monitor hasn't primed yet) and `.reasserting` (flap grace
-    /// window) keep them: wrongly removing files during a flap churns
-    /// resolver state, while wrongly keeping them is self-correcting — the
-    /// fuser settles to `.disconnected` within the grace window and the
-    /// transition handler removes them then.
-    private var splitDNSEntriesWanted: Bool {
-        if case .disconnected = lastVPNState { return false }
-        return true
-    }
+    /// VPN-gating policy for split-DNS entry files (single source of truth
+    /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
+    /// every resolver-file apply path consults `entriesWanted`.
+    private var splitDNSGate = SplitDNSVPNGate()
 
     init(vpnStatusMonitor: VPNStatusObserving? = nil) {
         let runtimeEnvironment = AppState.runtimeEnvironment()
@@ -461,7 +450,7 @@ final class AppState: ObservableObject {
             if diff.dnsChanged, platformConfig.manageDNSResolvers,
                proxyIsUp || runtime.dnsRunState == .running {
                 do {
-                    try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSEntriesWanted)
+                    try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
                 } catch {
                     logStore.log(.warning, "Could not reconcile DNS resolver files after config change: \(error.localizedDescription)", category: .system)
                 }
@@ -615,11 +604,11 @@ final class AppState: ObservableObject {
                 }
             }
             if platformConfig.manageDNSResolvers {
-                if dnsManager.isApplied(config: config, vpnConnected: splitDNSEntriesWanted) {
+                if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
                     logStore.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
                 } else {
                     do {
-                        try dnsManager.apply(config: config, logger: logStore, vpnConnected: splitDNSEntriesWanted)
+                        try dnsManager.apply(config: config, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
                     } catch {
                         logStore.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
                     }
@@ -886,6 +875,7 @@ final class AppState: ObservableObject {
         let privilegeClient = self.privilegeClient
         let systemConduit = self.systemConduit
         let dnsManager = self.dnsManager
+        let vpnConnected = splitDNSGate.entriesWanted
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let helperStatus = privilegeClient.status
@@ -895,7 +885,8 @@ final class AppState: ObservableObject {
                 isRunning: isRunning,
                 helperStatus: helperStatus,
                 systemConduit: systemConduit,
-                dnsManager: dnsManager
+                dnsManager: dnsManager,
+                vpnConnected: vpnConnected
             )
             Task { @MainActor [weak self] in
                 guard let self, self.preflightRefreshID == refreshID else { return }
@@ -1042,9 +1033,7 @@ final class AppState: ObservableObject {
     /// transition table in the orchestrator (direct-mode flips, breaker
     /// reset, flap recovery, slow reprobe cadence, vpn.* events).
     private func handleVPNStateChange(_ state: VPNObservedState) {
-        let wantedBefore = splitDNSEntriesWanted
-        lastVPNState = state
-        let wantedNow = splitDNSEntriesWanted
+        let entriesWantedChanged = splitDNSGate.update(state)
 
         Task { @MainActor in
             await orchestrator.handleVPNStateChange(state)
@@ -1054,13 +1043,12 @@ final class AppState: ObservableObject {
             scheduleDNSReconcile()
         }
 
-        // Split-DNS entry files live and die with the tunnel: their servers
-        // are tunnel-internal, and with the VPN down the /etc/resolver
-        // override blackholes every lookup under the managed domains —
-        // including the VPN gateway's own public hostname when it falls
-        // under one of them (vpn-gw.corp.example under corp.example), which
-        // deadlocks reconnection on a new network until the files go away.
-        guard platformConfig.manageDNSResolvers, wantedBefore != wantedNow else { return }
+        // Entry files live and die with the tunnel (vpn-gw.corp.example
+        // under corp.example deadlocks reconnection otherwise — see
+        // `SplitDNSVPNGate`). Only touch them while the proxy is actually
+        // up: outside that window no platform side-effects exist to
+        // reconcile.
+        guard platformConfig.manageDNSResolvers, entriesWantedChanged else { return }
         let proxyIsUp: Bool
         switch runtime.runtimeStatus.state {
         case .running, .degraded, .recovering: proxyIsUp = true
@@ -1068,19 +1056,7 @@ final class AppState: ObservableObject {
         }
         guard proxyIsUp else { return }
 
-        do {
-            if wantedNow {
-                try dnsManager.applyEntryFiles(config: config, logger: logStore)
-            } else {
-                try dnsManager.clearEntryFiles(config: config, logger: logStore)
-            }
-        } catch {
-            logStore.log(
-                .warning,
-                "Could not \(wantedNow ? "apply" : "remove") split-DNS entry files on VPN transition: \(error.localizedDescription)",
-                category: .system
-            )
-        }
+        splitDNSGate.reconcileEntryFiles(config: config, dnsManager: dnsManager, logger: logStore)
     }
 
     private func scheduleDNSReconcile() {
