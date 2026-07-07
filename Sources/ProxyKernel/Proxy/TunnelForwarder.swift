@@ -732,32 +732,60 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
             .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             .connect(host: remoteHost, port: remotePort)
             .whenComplete { result in
-                switch result {
-                case .success(let ch):
+                // This callback (and the addHandler one below) runs on the
+                // UPSTREAM channel's event loop; all handler state is owned
+                // by the client channel's loop, so hop before touching it —
+                // the TSan soak flagged clientGone/upstream/buffered accesses
+                // here racing channelRead/channelInactive on the client loop.
+                clientChannel.eventLoop.execute {
+                    self.handleConnectResult(result, clientChannel: clientChannel)
+                }
+            }
+    }
+
+    private func handleConnectResult(_ result: Result<Channel, Error>, clientChannel: Channel) {
+        switch result {
+        case .success(let ch):
+            if clientGone {
+                ch.close(mode: .all, promise: nil)
+                buffered.removeAll()
+                bufferedBytes = 0
+                return
+            }
+            upstream = ch
+            let relay = TunnelPeerRelay(peer: clientChannel)
+            ch.pipeline.addHandler(relay).whenComplete { _ in
+                clientChannel.eventLoop.execute {
                     if self.clientGone {
-                        ch.close(mode: .all, promise: nil)
+                        // Client dropped between connect and relay setup;
+                        // channelInactive already closed the upstream.
                         self.buffered.removeAll()
                         self.bufferedBytes = 0
                         return
                     }
-                    self.upstream = ch
-                    self.connectComplete = true
-                    let relay = TunnelPeerRelay(peer: clientChannel)
-                    ch.pipeline.addHandler(relay).whenComplete { _ in
-                        for buf in self.buffered {
-                            ch.write(buf, promise: nil)
-                        }
-                        if !self.buffered.isEmpty {
-                            ch.flush()
-                        }
-                        self.buffered.removeAll()
-                        self.bufferedBytes = 0
+                    // Drain the pre-connect backlog BEFORE flipping
+                    // connectComplete: channelRead writes directly to the
+                    // upstream once the flag is set, so setting it first
+                    // (as the old code did) let fresh reads overtake the
+                    // buffered bytes and corrupt the stream.
+                    for buf in self.buffered {
+                        ch.write(buf, promise: nil)
                     }
-                case .failure(let error):
-                    self.logger.log(.error, "Tunnel to \(self.remoteHost):\(self.remotePort) failed: \(error.localizedDescription)", category: .tunnel)
-                    clientChannel.close(promise: nil)
+                    if !self.buffered.isEmpty {
+                        ch.flush()
+                    }
+                    self.buffered.removeAll()
+                    self.bufferedBytes = 0
+                    self.connectComplete = true
+                    // channelRead pauses reads when the backlog cap is hit;
+                    // this is the only place that can resume them.
+                    clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
                 }
             }
+        case .failure(let error):
+            logger.log(.error, "Tunnel to \(remoteHost):\(remotePort) failed: \(error.localizedDescription)", category: .tunnel)
+            clientChannel.close(promise: nil)
+        }
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
