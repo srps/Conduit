@@ -72,18 +72,10 @@ final class DaemonRuntimeHost {
     /// that window, so VPN transitions and config reloads must not touch
     /// them outside it.
     private var runtimeStarted = false
-    /// Last state emitted by the VPN monitor. Mirrors `AppState`: split-DNS
-    /// entry files point at tunnel-internal servers, so they are applied/
-    /// removed on VPN transitions and every resolver-file apply path
-    /// consults this.
-    private var lastVPNState: VPNObservedState = .unknown
-    /// Entry files are withheld only when the VPN is *definitively* down.
-    /// `.unknown` (monitor hasn't primed yet) and `.reasserting` (flap grace
-    /// window) keep them — see the twin property in `AppState`.
-    private var splitDNSEntriesWanted: Bool {
-        if case .disconnected = lastVPNState { return false }
-        return true
-    }
+    /// VPN-gating policy for split-DNS entry files (single source of truth
+    /// shared with `AppState`). Fed by `handleVPNStateChange`; every
+    /// resolver-file apply path consults `entriesWanted`.
+    private var splitDNSGate = SplitDNSVPNGate()
 
     init(
         environment: RuntimeEnvironment,
@@ -217,7 +209,7 @@ final class DaemonRuntimeHost {
         }
         if platformConfig.manageDNSResolvers {
             do {
-                try dnsManager.apply(config: config, logger: logger, vpnConnected: splitDNSEntriesWanted)
+                try dnsManager.apply(config: config, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
             } catch {
                 logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
             }
@@ -335,7 +327,7 @@ final class DaemonRuntimeHost {
 
         if diff.dnsChanged, platformConfig.manageDNSResolvers {
             do {
-                try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSEntriesWanted)
+                try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
             } catch {
                 logger.log(.warning, "Could not reconcile DNS resolver files after config reload: \(error.localizedDescription)", category: .system)
             }
@@ -390,33 +382,18 @@ final class DaemonRuntimeHost {
     }
 
     private func handleVPNStateChange(_ state: VPNObservedState) async {
-        let wantedBefore = splitDNSEntriesWanted
-        lastVPNState = state
-        let wantedNow = splitDNSEntriesWanted
+        let entriesWantedChanged = splitDNSGate.update(state)
 
         await orchestrator.handleVPNStateChange(state)
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             systemDNSManager.reconcile(logger: logger)
         }
 
-        // Split-DNS entry files live and die with the tunnel — their servers
-        // are tunnel-internal, and the /etc/resolver override otherwise
-        // blackholes the VPN gateway's own hostname while disconnected,
-        // deadlocking reconnection. Twin of `AppState.handleVPNStateChange`.
-        guard platformConfig.manageDNSResolvers, wantedBefore != wantedNow, runtimeStarted else { return }
-        do {
-            if wantedNow {
-                try dnsManager.applyEntryFiles(config: config, logger: logger)
-            } else {
-                try dnsManager.clearEntryFiles(config: config, logger: logger)
-            }
-        } catch {
-            logger.log(
-                .warning,
-                "Could not \(wantedNow ? "apply" : "remove") split-DNS entry files on VPN transition: \(error.localizedDescription)",
-                category: .system
-            )
-        }
+        // Entry files live and die with the tunnel (see `SplitDNSVPNGate`).
+        // Only touch them inside the start/stop window — outside it no
+        // platform side-effects exist to reconcile.
+        guard platformConfig.manageDNSResolvers, entriesWantedChanged, runtimeStarted else { return }
+        splitDNSGate.reconcileEntryFiles(config: config, dnsManager: dnsManager, logger: logger)
     }
 
     private func startDNSHealthTimer(forwarderPort: Int) {
