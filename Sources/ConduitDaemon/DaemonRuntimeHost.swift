@@ -382,18 +382,22 @@ final class DaemonRuntimeHost {
     }
 
     private func handleVPNStateChange(_ state: VPNObservedState) async {
+        // Gate update and reconcile must stay on the same side of any await:
+        // reconcileEntryFiles reads the gate's current state, and a second
+        // VPN transition interleaving at a suspension point would make this
+        // handler act on the newer flip instead of its own (the gate's
+        // documented contract). Entry files live and die with the tunnel —
+        // see `SplitDNSVPNGate`; only touch them inside the start/stop
+        // window, outside it no platform side-effects exist to reconcile.
         let entriesWantedChanged = splitDNSGate.update(state)
+        if platformConfig.manageDNSResolvers, entriesWantedChanged, runtimeStarted {
+            splitDNSGate.reconcileEntryFiles(config: config, dnsManager: dnsManager, logger: logger)
+        }
 
         await orchestrator.handleVPNStateChange(state)
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             systemDNSManager.reconcile(logger: logger)
         }
-
-        // Entry files live and die with the tunnel (see `SplitDNSVPNGate`).
-        // Only touch them inside the start/stop window — outside it no
-        // platform side-effects exist to reconcile.
-        guard platformConfig.manageDNSResolvers, entriesWantedChanged, runtimeStarted else { return }
-        splitDNSGate.reconcileEntryFiles(config: config, dnsManager: dnsManager, logger: logger)
     }
 
     private func startDNSHealthTimer(forwarderPort: Int) {

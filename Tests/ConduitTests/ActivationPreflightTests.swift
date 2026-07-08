@@ -115,4 +115,42 @@ final class ActivationPreflightTests: XCTestCase {
         XCTAssertNotEqual(PrivilegeLevel.none, PrivilegeLevel.requiresAdmin)
         XCTAssertNotEqual(PrivilegeLevel.mayRequireAdmin, PrivilegeLevel.requiresAdmin)
     }
+
+    // MARK: - Evaluator VPN gating
+
+    /// Split-DNS entry files are withheld while the VPN is down (see
+    /// `SplitDNSVPNGate`); the evaluator must count that deferral as
+    /// "already applied" or the UI shows a spurious admin-prompt hint.
+    func testEvaluatorTreatsVPNDeferredEntryFilesAsApplied() {
+        var config = ProxyConfig.testFixture()
+        config.dnsEntries = [
+            DomainDNSEntry(domain: "preflight-gate-test.example", servers: ["10.9.9.9"])
+        ]
+        let platformConfig = PlatformIntegrationConfig(manageDNSResolvers: true)
+        let client = NoopPrivilegeClient()
+
+        func evaluate(vpnConnected: Bool) -> ActivationPreflight {
+            ActivationPreflightEvaluator.evaluate(
+                config: config,
+                platformConfig: platformConfig,
+                isRunning: false,
+                helperStatus: .notInstalled,
+                systemConduit: SystemProxyManager(privilegeClient: client),
+                dnsManager: DNSManager(privilegeClient: client),
+                vpnConnected: vpnConnected
+            )
+        }
+
+        let vpnDown = evaluate(vpnConnected: false)
+        XCTAssertTrue(vpnDown.splitDNS.alreadyApplied, "deferred entry files must count as applied")
+        XCTAssertFalse(vpnDown.requiresAdmin, "no admin hint while the files are intentionally withheld")
+
+        let vpnUp = evaluate(vpnConnected: true)
+        XCTAssertFalse(vpnUp.splitDNS.alreadyApplied, "missing entry files with the VPN up do need applying")
+        XCTAssertTrue(vpnUp.requiresAdmin, "no helper installed, so applying them will prompt")
+    }
+}
+
+private final class NoopPrivilegeClient: PrivilegeClient, @unchecked Sendable {
+    func execute(_ operation: PrivilegedOperation, values: [String]) throws {}
 }
