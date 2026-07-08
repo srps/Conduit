@@ -36,4 +36,57 @@ final class SplitDNSVPNGateTests: XCTestCase {
         XCTAssertTrue(gate.update(.connected), "reconnected: apply files")
         XCTAssertFalse(gate.update(.connected), "duplicate state report: no repeat apply")
     }
+
+    // MARK: - Side effects
+
+    private func makeConfig() -> ProxyConfig {
+        var config = ProxyConfig.testFixture()
+        config.dnsEntries = [
+            DomainDNSEntry(domain: "gate-test.example", servers: ["10.1.1.1"])
+        ]
+        return config
+    }
+
+    func testReconcileAppliesEntryFilesWhenWanted() {
+        var gate = SplitDNSVPNGate()
+        _ = gate.update(.connected)
+        let recording = RecordingPrivilegeClient()
+
+        gate.reconcileEntryFiles(
+            config: makeConfig(),
+            dnsManager: DNSManager(privilegeClient: recording),
+            logger: DiscardingLogSink()
+        )
+
+        XCTAssertEqual(recording.commands(matching: .applyDNS).compactMap(\.first), ["gate-test.example"])
+        XCTAssertTrue(recording.commands(matching: .removeDNS).isEmpty)
+    }
+
+    func testReconcileClearsEntryFilesWhenUnwanted() {
+        var gate = SplitDNSVPNGate()
+        _ = gate.update(.disconnected(reason: .networkLost))
+        let recording = RecordingPrivilegeClient()
+
+        gate.reconcileEntryFiles(
+            config: makeConfig(),
+            dnsManager: DNSManager(privilegeClient: recording),
+            logger: DiscardingLogSink()
+        )
+
+        XCTAssertEqual(recording.commands(matching: .removeDNS).compactMap(\.first), ["gate-test.example"])
+        XCTAssertTrue(recording.commands(matching: .applyDNS).isEmpty)
+    }
+}
+
+private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _commands: [(PrivilegedOperation, [String])] = []
+
+    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
+        lock.withLock { _commands.append((operation, values)) }
+    }
+
+    func commands(matching operation: PrivilegedOperation) -> [[String]] {
+        lock.withLock { _commands }.filter { $0.0 == operation }.map(\.1)
+    }
 }

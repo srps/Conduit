@@ -1049,6 +1049,12 @@ final class AppState: ObservableObject {
         // up: outside that window no platform side-effects exist to
         // reconcile.
         guard platformConfig.manageDNSResolvers, entriesWantedChanged else { return }
+
+        // The activation preflight consults the gate (deferred entry files
+        // count as applied), so a gating flip invalidates it — recompute even
+        // when the proxy is down, which is exactly when the preflight shows.
+        refreshPreflight()
+
         let proxyIsUp: Bool
         switch runtime.runtimeStatus.state {
         case .running, .degraded, .recovering: proxyIsUp = true
