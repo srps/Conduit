@@ -33,10 +33,19 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// those pairs as data races. All access goes through this box. Never
     /// hold the lock across an `await`: copy references out, then suspend.
     private struct RuntimeRefs {
-        var serverChannel: Channel?
-        var connectionPool: ConnectionPool?
-        var connectCoordinator: CONNECTCoordinator?
-        var socksServer: SOCKS5Server?
+        var serverChannel: Channel? = nil
+        var connectionPool: ConnectionPool? = nil
+        var connectCoordinator: CONNECTCoordinator? = nil
+        var socksServer: SOCKS5Server? = nil
+        /// Lifecycle stamp. Every detach (`stop()`, `start()`'s stale
+        /// cleanup) bumps it; `start()`/`recycleListener()` capture it before
+        /// their awaits and refuse to publish results into a lifecycle that
+        /// has moved on. Without it, a start() suspended in bindListener
+        /// resurrects refs a concurrent stop() already detached (listener and
+        /// SOCKS server left running on a "stopped" server), and a recycle
+        /// racing a stop() installs a live listener over a closed pool that
+        /// start() then refuses to repair (its isActive early-return).
+        var epoch = 0
     }
     private let refs = NIOLockedValueBox(RuntimeRefs())
 
@@ -99,30 +108,32 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     }
 
     package func start() async throws {
-        if refs.withLockedValue({ $0.serverChannel })?.isActive == true {
-            return
+        enum StartGate {
+            case alreadyRunning
+            case proceed(stale: RuntimeRefs, epoch: Int)
         }
+        // One atomic decision: bail if a live listener exists, otherwise
+        // detach whatever is there. Check and detach must share one lock
+        // acquisition — split in two, a concurrent start() could publish
+        // between them and have its fresh refs detached as "stale".
+        let gate = refs.withLockedValue { r -> StartGate in
+            if r.serverChannel?.isActive == true { return .alreadyRunning }
+            let stale = r
+            r = RuntimeRefs(epoch: stale.epoch + 1)
+            return .proceed(stale: stale, epoch: stale.epoch + 1)
+        }
+        guard case .proceed(let stale, let epoch) = gate else { return }
 
         // The listener can die without a stop() (socket closed externally,
-        // process-level hiccup). Detach any stale refs and tear them down
-        // before building replacements, or the old pool's upstream
-        // connections and a possibly-still-bound SOCKS listener leak beside
-        // the new ones (the SOCKS one would also make the new start fail
-        // with EADDRINUSE). Same detach-then-teardown shape as `stop()`;
-        // `.allButDedicated` because in-flight CONNECT tunnels are
-        // independent of the dead listener and still serving their clients.
-        let stale = refs.withLockedValue { r -> RuntimeRefs in
-            let copy = r
-            r = RuntimeRefs()
-            return copy
-        }
+        // process-level hiccup). Tear stale refs down before building
+        // replacements, or the old pool's upstream connections and a
+        // possibly-still-bound SOCKS listener leak beside the new ones (the
+        // SOCKS one would also make the new start fail with EADDRINUSE).
+        // `.allButDedicated` matches config-driven restarts: in-flight
+        // CONNECT tunnels are independent of the dead listener.
         if stale.serverChannel != nil || stale.connectionPool != nil || stale.socksServer != nil {
             logger.log(.warning, "Local proxy listener was gone without a stop; cleaning up stale runtime state before restart.", category: .proxy)
-            await stale.socksServer?.stop()
-            stale.connectionPool?.closeAll(scope: .allButDedicated)
-            if let staleChannel = stale.serverChannel {
-                _ = try? await staleChannel.close().get()
-            }
+            await tearDown(stale, scope: .allButDedicated)
         }
 
         let pool = ConnectionPool(
@@ -159,10 +170,21 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             gatewayMode: config.gatewayMode
         )
 
-        refs.withLockedValue {
-            $0.serverChannel = bound
-            $0.connectionPool = pool
-            $0.connectCoordinator = coordinator
+        let published = refs.withLockedValue { r -> Bool in
+            guard r.epoch == epoch else { return false }
+            r.serverChannel = bound
+            r.connectionPool = pool
+            r.connectCoordinator = coordinator
+            return true
+        }
+        guard published else {
+            // A concurrent stop() (or another start()'s stale cleanup) moved
+            // the lifecycle on while we were suspended in bindListener.
+            // Publishing now would resurrect refs that teardown already
+            // detached, so fold the fresh listener back down instead.
+            pool.closeAll(scope: .all)
+            _ = try? await bound.close().get()
+            throw CancellationError()
         }
         let actualHost = bound.localAddress?.ipAddress ?? listenHost
         let actualPort = bound.localAddress?.port ?? config.localPort
@@ -183,7 +205,21 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                     onConnectionActivity: self.onConnectionActivity
                 )
                 try await socks.start(host: listenHost, port: config.socksPort)
-                self.refs.withLockedValue { $0.socksServer = socks }
+                let socksPublished = refs.withLockedValue { r -> Bool in
+                    guard r.epoch == epoch else { return false }
+                    r.socksServer = socks
+                    return true
+                }
+                guard socksPublished else {
+                    // stop() ran during socks.start(): it already tore down
+                    // the HTTP listener and pool we published above, so this
+                    // start() has effectively been stopped — unwind the SOCKS
+                    // listener too rather than leaving it bound.
+                    await socks.stop()
+                    throw CancellationError()
+                }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 logger.log(.warning, "SOCKS5 server failed to start on port \(config.socksPort): \(error.localizedDescription). HTTP proxy is running without SOCKS5.", category: .proxy)
             }
@@ -219,8 +255,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// at the BSD-socket level — closing the listener does not propagate to them.
     /// They continue to serve their owners until each side closes its end normally.
     package func recycleListener() async throws {
-        let (existingPool, existingCoordinator) = refs.withLockedValue {
-            ($0.connectionPool, $0.connectCoordinator)
+        let (existingPool, existingCoordinator, epoch) = refs.withLockedValue {
+            ($0.connectionPool, $0.connectCoordinator, $0.epoch)
         }
         guard let pool = existingPool, let coordinator = existingCoordinator else {
             // No prior listener state — fall through to a normal start so the
@@ -243,13 +279,29 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             gatewayMode: config.gatewayMode
         )
 
-        let previous = refs.withLockedValue { r -> Channel? in
+        enum Install {
+            case previous(Channel?)
+            case preempted
+        }
+        let install = refs.withLockedValue { r -> Install in
+            guard r.epoch == epoch else { return .preempted }
             let old = r.serverChannel
             r.serverChannel = newChannel
-            return old
+            return .previous(old)
         }
-        if let previous {
-            _ = try? await previous.close().get()
+        switch install {
+        case .preempted:
+            // stop()/start() moved the lifecycle on while we were binding —
+            // the pool this listener would serve is already torn down.
+            // Installing it would leave a live listener over a dead pool that
+            // start() then refuses to repair (isActive early-return). Close
+            // the orphan instead.
+            _ = try? await newChannel.close().get()
+            throw CancellationError()
+        case .previous(let previous):
+            if let previous {
+                _ = try? await previous.close().get()
+            }
         }
 
         let actualHost = newChannel.localAddress?.ipAddress ?? listenHost
@@ -377,18 +429,28 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         // teardown on the local copies — holding the lock across an await
         // is not allowed, and clearing eagerly means concurrent readers see
         // "stopped" for the whole teardown rather than half-closed refs.
+        // Bumping the epoch also preempts any in-flight start()/
+        // recycleListener(): their publish step notices and unwinds instead
+        // of resurrecting refs into a stopped server.
         let detached = refs.withLockedValue { r -> RuntimeRefs in
             let copy = r
-            r = RuntimeRefs()
+            r = RuntimeRefs(epoch: copy.epoch + 1)
             return copy
         }
+        await tearDown(detached, scope: scope)
+        logger.log(.notice, "Local proxy stopped (scope: \(scope)).", category: .proxy)
+    }
+
+    /// Order matters: SOCKS listener first (stops intake), then pooled
+    /// upstream connections, then the HTTP accept socket. Shared by `stop()`
+    /// and `start()`'s stale cleanup so the ordering lives in one place.
+    private func tearDown(_ detached: RuntimeRefs, scope: CloseScope) async {
         await detached.socksServer?.stop()
         detached.connectionPool?.closeAll(scope: scope)
 
         if let serverChannel = detached.serverChannel {
             _ = try? await serverChannel.close().get()
         }
-        logger.log(.notice, "Local proxy stopped (scope: \(scope)).", category: .proxy)
     }
 
     package func performHealthCheck() async -> HealthCheckResult {

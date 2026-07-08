@@ -9,8 +9,13 @@
 # this class shows only NIO-internal frames (ByteBuffer._Storage /
 # NIOPooledRecvBufferAllocator / PendingStreamWritesManager) on both sides.
 #
-# Keep entries narrowly scoped to the NIO storage internals so genuine
-# races in ProxyKernel code (which carry our own frames) still fail the job.
+# Caveat: TSan matches `race:` patterns against EVERY frame of both racing
+# stacks, so these entries also mask a genuine cross-loop misuse of a shared
+# ByteBuffer whose racing accesses land inside these storage internals (our
+# frames further down the stack do NOT exempt a report). That blind spot is
+# the accepted cost of keeping the soak green; keep the patterns as narrow
+# as possible and never add entries naming non-storage NIO or ProxyKernel
+# symbols.
 race:ByteBuffer._Storage.reallocStorage
 race:ByteBuffer._Storage.allocateStorage
 race:ByteBuffer._slicedStorageBuffer
