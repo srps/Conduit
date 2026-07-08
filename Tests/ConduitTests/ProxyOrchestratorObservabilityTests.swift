@@ -87,7 +87,21 @@ final class ProxyOrchestratorObservabilityTests: XCTestCase {
     ) async throws {
         let deadline = ContinuousClock.now + timeout
         while ContinuousClock.now < deadline {
-            if orchestrator.snapshot.tunnelSessionCount == expected { return }
+            if orchestrator.snapshot.tunnelSessionCount == expected {
+                // Returning on first match would hide an overshoot (e.g. a
+                // double-decrement driving 1 -> 0 -> -1), which the old
+                // fixed-sleep assertion caught by reading the settled value.
+                // Re-check after a short quiescent window.
+                try await Task.sleep(for: .milliseconds(150))
+                XCTAssertEqual(
+                    orchestrator.snapshot.tunnelSessionCount,
+                    expected,
+                    "tunnelSessionCount reached \(expected) but did not stay there",
+                    file: file,
+                    line: line
+                )
+                return
+            }
             try await Task.sleep(for: .milliseconds(25))
         }
         let finalCount = orchestrator.snapshot.tunnelSessionCount

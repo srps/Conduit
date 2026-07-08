@@ -604,79 +604,85 @@ private final class ProxiedTunnelClientHandler: ChannelInboundHandler, @unchecke
 
         logger.log(.info, "Proxied tunnel \(label): establishing CONNECT to \(target).", category: .tunnel)
 
+        // Hop the CONNECT result to the client channel's event loop — every
+        // piece of handler state is owned by it. Same shape as
+        // DirectTunnelClientHandler so the two flows read identically.
         connectCoordinator.connectUpstreamTunnel(target: target)
             .hop(to: context.eventLoop)
             .whenComplete { [self] result in
-                switch result {
-                case .success(let (upstreamChannel, endpoint, _)):
-                    if self.clientGone {
-                        self.onTunnelClosed(upstreamChannel)
-                        upstreamChannel.close(mode: .all, promise: nil)
-                        self.buffered.removeAll()
-                        self.bufferedBytes = 0
-                        return
-                    }
-                    self.upstream = upstreamChannel
-                    self.logger.log(.notice, "Proxied tunnel \(self.label): established via \(endpoint).", category: .tunnel)
-
-                    let relay = TunnelPeerRelay(peer: clientChannel)
-                    upstreamChannel.pipeline.addHandler(relay).whenComplete { relayResult in
-                        // The addHandler future completes on the UPSTREAM
-                        // channel's event loop; buffered/bufferedBytes/
-                        // tunnelReady are owned by the client loop, so hop
-                        // before touching them (same race the TSan soak
-                        // flagged in DirectTunnelClientHandler).
-                        clientChannel.eventLoop.execute {
-                            if self.clientGone {
-                                // Client dropped between CONNECT and relay
-                                // setup; channelInactive already closed the
-                                // upstream.
-                                self.buffered.removeAll()
-                                self.bufferedBytes = 0
-                                return
-                            }
-                            guard case .success = relayResult else {
-                                // Without the relay, upstream-to-client data
-                                // can never flow — tear both sides down
-                                // instead of leaving a half-broken tunnel.
-                                self.onTunnelClosed(upstreamChannel)
-                                upstreamChannel.close(mode: .all, promise: nil)
-                                self.buffered.removeAll()
-                                self.bufferedBytes = 0
-                                clientChannel.close(promise: nil)
-                                return
-                            }
-                            // Drain the pre-CONNECT backlog BEFORE flipping
-                            // tunnelReady: channelRead writes directly to the
-                            // upstream once the flag is set, so setting it
-                            // first lets fresh reads overtake the buffered
-                            // bytes and corrupt the stream.
-                            for buf in self.buffered {
-                                upstreamChannel.write(buf, promise: nil)
-                            }
-                            if !self.buffered.isEmpty {
-                                upstreamChannel.flush()
-                            }
-                            self.buffered.removeAll()
-                            self.bufferedBytes = 0
-                            self.tunnelReady = true
-                            // channelRead pauses reads when the backlog cap is
-                            // hit; this is the only place that can resume them.
-                            clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
-                        }
-                    }
-
-                case .failure(let error):
-                    self.logger.log(
-                        .error,
-                        "Proxied tunnel \(self.label): CONNECT failed — \(error.localizedDescription)",
-                        category: .tunnel
-                    )
-                    self.buffered.removeAll()
-                    self.bufferedBytes = 0
-                    clientChannel.close(promise: nil)
-                }
+                handleConnectResult(result, clientChannel: clientChannel)
             }
+    }
+
+    /// Runs on the client event loop (the caller hops the future there).
+    private func handleConnectResult(
+        _ result: Result<(channel: Channel, endpoint: String, authMethod: String?), Error>,
+        clientChannel: Channel
+    ) {
+        switch result {
+        case .success(let (upstreamChannel, endpoint, _)):
+            if clientGone {
+                // Client dropped while CONNECT was in flight. `upstream` was
+                // never assigned, so channelInactive could not close it —
+                // do both halves of the upstream teardown here.
+                onTunnelClosed(upstreamChannel)
+                upstreamChannel.close(mode: .all, promise: nil)
+                return
+            }
+            upstream = upstreamChannel
+            logger.log(.notice, "Proxied tunnel \(label): established via \(endpoint).", category: .tunnel)
+
+            let relay = TunnelPeerRelay(peer: clientChannel)
+            // The addHandler future completes on the UPSTREAM channel's
+            // event loop; hop back before touching handler state (the same
+            // race the TSan soak flagged on the direct path).
+            upstreamChannel.pipeline.addHandler(relay)
+                .hop(to: clientChannel.eventLoop)
+                .whenComplete { [self] relayResult in
+                    finishTunnelSetup(relayResult, upstreamChannel: upstreamChannel, clientChannel: clientChannel)
+                }
+
+        case .failure(let error):
+            logger.log(
+                .error,
+                "Proxied tunnel \(label): CONNECT failed — \(error.localizedDescription)",
+                category: .tunnel
+            )
+            // channelInactive clears the backlog when this close lands.
+            clientChannel.close(promise: nil)
+        }
+    }
+
+    /// Runs on the client event loop (the caller hops the future there).
+    private func finishTunnelSetup(_ relayResult: Result<Void, Error>, upstreamChannel: Channel, clientChannel: Channel) {
+        if clientGone {
+            // Client dropped between CONNECT and relay setup; channelInactive
+            // already closed the upstream and cleared the backlog.
+            return
+        }
+        guard case .success = relayResult else {
+            // Without the relay, upstream-to-client data can never flow —
+            // close the client and let channelInactive run the one canonical
+            // teardown (upstream close + onTunnelClosed + backlog clear).
+            clientChannel.close(promise: nil)
+            return
+        }
+        // Drain the pre-CONNECT backlog BEFORE flipping tunnelReady:
+        // channelRead writes directly to the upstream once the flag is set,
+        // so setting it first lets fresh reads overtake the buffered bytes
+        // and corrupt the stream.
+        for buf in buffered {
+            upstreamChannel.write(buf, promise: nil)
+        }
+        if !buffered.isEmpty {
+            upstreamChannel.flush()
+        }
+        buffered.removeAll()
+        bufferedBytes = 0
+        tunnelReady = true
+        // channelRead pauses reads when the backlog cap is hit; this is the
+        // only place that can resume them.
+        clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -766,75 +772,75 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
 
     func channelActive(context: ChannelHandlerContext) {
         let clientChannel = context.channel
+        // The connect future completes on the UPSTREAM channel's event loop;
+        // all handler state is owned by the client channel's loop, so hop the
+        // future there — the TSan soak flagged clientGone/upstream/buffered
+        // accesses in this callback racing channelRead/channelInactive.
         ClientBootstrap(group: group)
             .connectTimeout(.seconds(10))
             .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             .connect(host: remoteHost, port: remotePort)
-            .whenComplete { result in
-                // This callback (and the addHandler one below) runs on the
-                // UPSTREAM channel's event loop; all handler state is owned
-                // by the client channel's loop, so hop before touching it —
-                // the TSan soak flagged clientGone/upstream/buffered accesses
-                // here racing channelRead/channelInactive on the client loop.
-                clientChannel.eventLoop.execute {
-                    self.handleConnectResult(result, clientChannel: clientChannel)
-                }
+            .hop(to: context.eventLoop)
+            .whenComplete { [self] result in
+                handleConnectResult(result, clientChannel: clientChannel)
             }
     }
 
+    /// Runs on the client event loop (the caller hops the future there).
     private func handleConnectResult(_ result: Result<Channel, Error>, clientChannel: Channel) {
         switch result {
         case .success(let ch):
             if clientGone {
+                // Client dropped while the connect was in flight. `upstream`
+                // was never assigned, so channelInactive could not close it.
                 ch.close(mode: .all, promise: nil)
-                buffered.removeAll()
-                bufferedBytes = 0
                 return
             }
             upstream = ch
             let relay = TunnelPeerRelay(peer: clientChannel)
-            ch.pipeline.addHandler(relay).whenComplete { relayResult in
-                clientChannel.eventLoop.execute {
-                    if self.clientGone {
-                        // Client dropped between connect and relay setup;
-                        // channelInactive already closed the upstream.
-                        self.buffered.removeAll()
-                        self.bufferedBytes = 0
-                        return
-                    }
-                    guard case .success = relayResult else {
-                        // Without the relay, upstream-to-client data can
-                        // never flow — tear both sides down instead of
-                        // leaving a half-broken tunnel.
-                        ch.close(mode: .all, promise: nil)
-                        self.buffered.removeAll()
-                        self.bufferedBytes = 0
-                        clientChannel.close(promise: nil)
-                        return
-                    }
-                    // Drain the pre-connect backlog BEFORE flipping
-                    // connectComplete: channelRead writes directly to the
-                    // upstream once the flag is set, so setting it first
-                    // (as the old code did) let fresh reads overtake the
-                    // buffered bytes and corrupt the stream.
-                    for buf in self.buffered {
-                        ch.write(buf, promise: nil)
-                    }
-                    if !self.buffered.isEmpty {
-                        ch.flush()
-                    }
-                    self.buffered.removeAll()
-                    self.bufferedBytes = 0
-                    self.connectComplete = true
-                    // channelRead pauses reads when the backlog cap is hit;
-                    // this is the only place that can resume them.
-                    clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
+            // The addHandler future completes on the UPSTREAM channel's
+            // event loop; hop back before touching handler state.
+            ch.pipeline.addHandler(relay)
+                .hop(to: clientChannel.eventLoop)
+                .whenComplete { [self] relayResult in
+                    finishTunnelSetup(relayResult, upstreamChannel: ch, clientChannel: clientChannel)
                 }
-            }
         case .failure(let error):
             logger.log(.error, "Tunnel to \(remoteHost):\(remotePort) failed: \(error.localizedDescription)", category: .tunnel)
             clientChannel.close(promise: nil)
         }
+    }
+
+    /// Runs on the client event loop (the caller hops the future there).
+    private func finishTunnelSetup(_ relayResult: Result<Void, Error>, upstreamChannel: Channel, clientChannel: Channel) {
+        if clientGone {
+            // Client dropped between connect and relay setup; channelInactive
+            // already closed the upstream and cleared the backlog.
+            return
+        }
+        guard case .success = relayResult else {
+            // Without the relay, upstream-to-client data can never flow —
+            // close the client and let channelInactive run the one canonical
+            // teardown (upstream close + backlog clear).
+            clientChannel.close(promise: nil)
+            return
+        }
+        // Drain the pre-connect backlog BEFORE flipping connectComplete:
+        // channelRead writes directly to the upstream once the flag is set,
+        // so setting it first (as the old code did) let fresh reads overtake
+        // the buffered bytes and corrupt the stream.
+        for buf in buffered {
+            upstreamChannel.write(buf, promise: nil)
+        }
+        if !buffered.isEmpty {
+            upstreamChannel.flush()
+        }
+        buffered.removeAll()
+        bufferedBytes = 0
+        connectComplete = true
+        // channelRead pauses reads when the backlog cap is hit; this is the
+        // only place that can resume them.
+        clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
