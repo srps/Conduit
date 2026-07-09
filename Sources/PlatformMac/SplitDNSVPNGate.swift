@@ -29,6 +29,14 @@ package struct SplitDNSVPNGate: Sendable {
     /// resolver state, while wrongly keeping them is self-correcting — the
     /// fuser settles to `.disconnected` within the grace window and the
     /// transition handler removes them then.
+    ///
+    /// That self-correction depends on the monitor eventually reaching a
+    /// verdict, which it does *only* because `primeInitialState` reports an
+    /// empty utun sweep as `.disconnected` via `markNoTunnelsPresent`. Without
+    /// that, launching with the VPN already down parked the state in
+    /// `.unknown` forever — no utun ever transitioned, so nothing emitted —
+    /// and these files stayed installed against unreachable servers. If you
+    /// weaken the priming path, this `.unknown` default becomes fail-deadly.
     package var entriesWanted: Bool {
         if case .disconnected = lastVPNState { return false }
         return true

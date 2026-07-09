@@ -223,6 +223,30 @@ package struct VPNStateFuser {
         interfaces[interfaceName] != nil
     }
 
+    /// Records the verdict of a *complete* sweep of the utun key space that
+    /// found no tunnel carrying IPv4.
+    ///
+    /// The fuser cannot reach this conclusion on its own: it only ever sees
+    /// interfaces the monitor admits, and the monitor admits none when no
+    /// utun has IPv4 (they're all Apple service tunnels). So `fuseCurrentState`
+    /// returns `.unknown` — "no evidence" — which is indistinguishable from
+    /// "not primed yet". The monitor *does* know the difference at prime time,
+    /// because it enumerated every key rather than reacting to a notification:
+    /// an empty sweep is positive evidence that no VPN is up.
+    ///
+    /// That distinction matters because `SplitDNSVPNGate` reads `.unknown` as
+    /// "assume connected" and installs split-DNS entry files. Launching with
+    /// the VPN already down therefore pointed corporate domains at
+    /// tunnel-internal servers — including the VPN gateway's own hostname,
+    /// the bootstrap deadlock the gate exists to prevent.
+    ///
+    /// No-op once any interface is known: a real observation always outranks
+    /// a sweep, so this is safe to call after `applyObservation`.
+    package mutating func markNoTunnelsPresent() -> Decision {
+        guard interfaces.isEmpty else { return .noChange }
+        return decideEmission(.disconnected(reason: .unknown))
+    }
+
     /// Called by the monitor when the grace-window timer fires. Marks the
     /// internal latch so subsequent observations don't re-emit a stale
     /// `.reasserting` for the same interface bounce.
