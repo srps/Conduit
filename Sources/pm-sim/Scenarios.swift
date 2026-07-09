@@ -497,6 +497,7 @@ extension Scenarios {
         out.append(try await VPNFlapScenarios.vpnFlapLongOutage(verbose: verbose))
         out.append(try await VPNFlapScenarios.vpnUserDisconnectFastPath(verbose: verbose))
         out.append(try await VPNFlapScenarios.vpnRapidFlapBurst(verbose: verbose))
+        out.append(try await TransparentProxyScenarios.transparentDirectRouting(verbose: verbose))
         out.append(try await NetworkTransitionScenarios.networkTransition(verbose: verbose))
         out.append(try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose))
         out.append(try await UpgradeScenarios.websocketUpgrade(verbose: verbose))

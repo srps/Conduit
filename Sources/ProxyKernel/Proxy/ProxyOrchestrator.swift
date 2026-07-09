@@ -1061,11 +1061,21 @@ package final class ProxyOrchestrator {
         resolverManager: resolverManager
     )
 
+    private lazy var originResolver: any OriginResolving = DoHOriginResolver(
+        logger: logStore,
+        dohProviders: { [configBox] in configBox.current.dohProviders }
+    )
+
     private lazy var transparentProxy = TransparentTCPProxy(
         group: MultiThreadedEventLoopGroup.singleton,
         connectCoordinator: tunnelCoordinator,
         connectionPool: tunnelConnectionPool,
         logger: logStore,
+        originResolver: originResolver,
+        directModeProvider: { [directModeBox] in
+            directModeBox.withLockedValue { $0.cause }
+        },
+        strictModeProvider: { [configBox] in configBox.current.strictMode },
         gatewayModeProvider: { [configBox] in configBox.current.gatewayMode }
     )
 
