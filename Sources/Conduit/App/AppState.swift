@@ -451,6 +451,12 @@ final class AppState: ObservableObject {
                proxyIsUp || runtime.dnsRunState == .running {
                 do {
                     try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
+                    // `applyConfigChange` above restarted the forwarder if the
+                    // DNS section changed, possibly onto a different port, and
+                    // `reconcile` does not rewrite intercept files. Re-point
+                    // them at the listeners that came back — or remove them if
+                    // none did.
+                    try refreshInterceptFiles(for: new)
                 } catch {
                     logStore.log(.warning, "Could not reconcile DNS resolver files after config change: \(error.localizedDescription)", category: .system)
                 }
@@ -613,6 +619,19 @@ final class AppState: ObservableObject {
                         logStore.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
                     }
                 }
+                // The DNS forwarder cannot be running yet, so no intercept
+                // resolver file may exist — sweep any that a previous instance
+                // left behind. Termination cleanup removes them on a clean
+                // quit, but a `SIGKILL` (an installer replacing the app, a
+                // crash) never runs it, and the files it strands blackhole
+                // their domains for every process on the machine until
+                // someone deletes them by hand. Only a *start* can be trusted
+                // to repair that, so repair it here.
+                do {
+                    try refreshInterceptFiles(for: config)
+                } catch {
+                    logStore.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                }
             }
             loginItemManager.setEnabled(platformConfig.launchAtLogin, logger: logStore)
 
@@ -682,6 +701,31 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// The single place that decides whether intercept resolver files may
+    /// exist: they do exactly while the DNS forwarder and the transparent
+    /// proxy are both listening. A file that outlives its listeners turns
+    /// every intercepted domain into ENOTFOUND (forwarder down) or a refused
+    /// connection (transparent proxy down) for every process on the machine,
+    /// and `/etc/resolver` survives our exit — so err toward removing them.
+    private func refreshInterceptFiles(for config: ProxyConfig) throws {
+        guard platformConfig.manageDNSResolvers else { return }
+        guard runtime.bindings.dnsInterceptReady else {
+            // Only a surprise when DNS is supposedly up: at proxy start the
+            // forwarder has not been asked to bind yet, so "not ready" is the
+            // expected state and this pass exists purely to sweep strays.
+            if runtime.dnsRunState == .running, !config.enabledInterceptRules.isEmpty {
+                logStore.log(
+                    .warning,
+                    "DNS forwarder is running but the transparent proxy is not listening — intercept resolver files withheld rather than blackhole \(config.enabledInterceptRules.count) domain(s).",
+                    category: .system
+                )
+            }
+            try dnsManager.clearInterceptFiles(config: config, logger: logStore)
+            return
+        }
+        try dnsManager.applyInterceptFiles(config: config, logger: logStore)
+    }
+
     func startDNS() async {
         if platformConfig.manageSystemDNS {
             do {
@@ -703,16 +747,13 @@ final class AppState: ObservableObject {
                     logStore.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
                 }
             }
-            // Intercept resolver files can only be written now: at proxy
-            // start `dnsForwarderEnabled` was still false, so `apply`
-            // skipped them (the historical "intercepts only work after a
-            // full app restart" gap).
-            if platformConfig.manageDNSResolvers {
-                do {
-                    try dnsManager.applyInterceptFiles(config: config, logger: logStore)
-                } catch {
-                    logStore.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
-                }
+            // Intercept resolver files are written only from here — `apply` at
+            // proxy start deliberately skips them, because at that point the
+            // forwarder they name has not bound.
+            do {
+                try refreshInterceptFiles(for: config)
+            } catch {
+                logStore.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
             }
             // The flag flip above is our own lifecycle work, not a settings
             // edit — absorb it so the save below doesn't restart the

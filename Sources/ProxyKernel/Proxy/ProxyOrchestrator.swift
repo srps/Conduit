@@ -12,6 +12,11 @@ package struct ProxyOrchestratorBindings: Sendable, Codable, Equatable {
     package var localPACPort: Int?
     package var dnsHost: String?
     package var dnsPort: Int?
+    /// Non-nil only while the transparent proxy is actually accepting on the
+    /// intercept IP. Intercept resolver files answer with that IP, so their
+    /// installation is gated on this — see `DNSManager.applyInterceptFiles`.
+    package var transparentProxyHost: String?
+    package var transparentProxyPort: Int?
     package var tunnels: [TunnelBindingInfo]
 
     package init(
@@ -23,6 +28,8 @@ package struct ProxyOrchestratorBindings: Sendable, Codable, Equatable {
         localPACPort: Int? = nil,
         dnsHost: String? = nil,
         dnsPort: Int? = nil,
+        transparentProxyHost: String? = nil,
+        transparentProxyPort: Int? = nil,
         tunnels: [TunnelBindingInfo] = []
     ) {
         self.proxyHost = proxyHost
@@ -33,7 +40,19 @@ package struct ProxyOrchestratorBindings: Sendable, Codable, Equatable {
         self.localPACPort = localPACPort
         self.dnsHost = dnsHost
         self.dnsPort = dnsPort
+        self.transparentProxyHost = transparentProxyHost
+        self.transparentProxyPort = transparentProxyPort
         self.tunnels = tunnels
+    }
+
+    /// The DNS forwarder is listening *and* the transparent proxy it points
+    /// clients at is accepting. Both must hold before an intercept resolver
+    /// file may exist: the file promises `<domain> resolves at 127.0.0.1:<dnsPort>`
+    /// and the forwarder promises that answer is a reachable listener. Either
+    /// half missing turns the file into a blackhole for every client that
+    /// honours it — and `/etc/resolver` outlives the process that wrote it.
+    package var dnsInterceptReady: Bool {
+        dnsPort != nil && transparentProxyPort != nil
     }
 
     package var localPACURL: String? {
@@ -50,6 +69,8 @@ package struct ProxyOrchestratorBindings: Sendable, Codable, Equatable {
         case localPACPort
         case dnsHost
         case dnsPort
+        case transparentProxyHost
+        case transparentProxyPort
         case tunnels
     }
 
@@ -63,6 +84,8 @@ package struct ProxyOrchestratorBindings: Sendable, Codable, Equatable {
         self.localPACPort = try c.decodeIfPresent(Int.self, forKey: .localPACPort)
         self.dnsHost = try c.decodeIfPresent(String.self, forKey: .dnsHost)
         self.dnsPort = try c.decodeIfPresent(Int.self, forKey: .dnsPort)
+        self.transparentProxyHost = try c.decodeIfPresent(String.self, forKey: .transparentProxyHost)
+        self.transparentProxyPort = try c.decodeIfPresent(Int.self, forKey: .transparentProxyPort)
         self.tunnels = try c.decodeIfPresent([TunnelBindingInfo].self, forKey: .tunnels) ?? []
     }
 }
@@ -2228,11 +2251,24 @@ package final class ProxyOrchestrator {
         if let boundPort = transparentProxy.listeningPort, boundPort != relayTarget {
             startTCPRelay(listenPort: 443, targetPort: boundPort, host: ip)
         }
+
+        // Publish only after the bind succeeded. Hosts gate the intercept
+        // resolver files on this: those files hand clients the intercept IP,
+        // so writing them while nothing accepts there strands every
+        // intercepted domain behind a refused connection.
+        mutateSnapshot {
+            $0.bindings.transparentProxyHost = ip
+            $0.bindings.transparentProxyPort = self.transparentProxy.listeningPort
+        }
     }
 
     private func stopTransparentProxy() async {
         stopTCPRelay()
         await transparentProxy.stop()
+        mutateSnapshot {
+            $0.bindings.transparentProxyHost = nil
+            $0.bindings.transparentProxyPort = nil
+        }
     }
 
     /// Returns true when the helper accepted the relay start (which also
