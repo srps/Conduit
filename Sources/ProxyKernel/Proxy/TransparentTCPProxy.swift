@@ -12,6 +12,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
     private let directModeProvider: @Sendable () -> DirectModeCause
     private let strictModeProvider: @Sendable () -> Bool
     private let gatewayModeProvider: @Sendable () -> Bool
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private var listener: Channel?
 
     package private(set) var listeningPort: Int?
@@ -29,7 +30,8 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         originResolver: any OriginResolving,
         directModeProvider: @escaping @Sendable () -> DirectModeCause,
         strictModeProvider: @escaping @Sendable () -> Bool,
-        gatewayModeProvider: @escaping @Sendable () -> Bool = { false }
+        gatewayModeProvider: @escaping @Sendable () -> Bool = { false },
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
         self.group = group
         self.connectCoordinator = connectCoordinator
@@ -39,6 +41,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         self.directModeProvider = directModeProvider
         self.strictModeProvider = strictModeProvider
         self.gatewayModeProvider = gatewayModeProvider
+        self.eventSink = eventSink
     }
 
     package func start(host: String, port: Int) async throws {
@@ -49,6 +52,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         let directModeProvider = directModeProvider
         let strictModeProvider = strictModeProvider
         let gatewayModeProvider = gatewayModeProvider
+        let eventSink = eventSink
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
@@ -61,7 +65,8 @@ package final class TransparentTCPProxy: @unchecked Sendable {
                         originResolver: resolver,
                         directModeProvider: directModeProvider,
                         strictModeProvider: strictModeProvider,
-                        gatewayModeProvider: gatewayModeProvider
+                        gatewayModeProvider: gatewayModeProvider,
+                        eventSink: eventSink
                     )
                 )
             }
@@ -101,6 +106,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
     private let directModeProvider: @Sendable () -> DirectModeCause
     private let strictModeProvider: @Sendable () -> Bool
     private let gatewayModeProvider: @Sendable () -> Bool
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private var accumulated = ByteBuffer()
     private var resolved = false
     private var clientGone = false
@@ -112,7 +118,8 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         originResolver: any OriginResolving,
         directModeProvider: @escaping @Sendable () -> DirectModeCause,
         strictModeProvider: @escaping @Sendable () -> Bool,
-        gatewayModeProvider: @escaping @Sendable () -> Bool
+        gatewayModeProvider: @escaping @Sendable () -> Bool,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)?
     ) {
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
@@ -121,6 +128,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         self.directModeProvider = directModeProvider
         self.strictModeProvider = strictModeProvider
         self.gatewayModeProvider = gatewayModeProvider
+        self.eventSink = eventSink
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -202,11 +210,25 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                     )
 
                 case .failure(let error):
+                    // Re-read the cause rather than reuse the one sampled before
+                    // the dial. The dial is asynchronous and the VPN can drop
+                    // while it is in flight — which is exactly when it fails.
+                    // Judging that failure against the stale pre-dial cause
+                    // would close a connection the now-current `.vpnDisconnected`
+                    // state sanctions for direct routing, resurrecting this
+                    // bug inside a narrow window. `HTTPProxyHandler` reads the
+                    // mode at fallback time for the same reason.
+                    let currentCause = self.directModeProvider()
+
                     // Same predicate `HTTPProxyHandler` applies after a failed
                     // proxy exchange, so both listeners honour one strict-mode
                     // contract: a strict profile never silently bypasses the
                     // corporate proxy just because it happens to be down.
-                    guard HTTPProxyHandler.directFallbackAllowed(strictMode: self.strictModeProvider(), cause: cause) else {
+                    guard HTTPProxyHandler.directFallbackAllowed(strictMode: self.strictModeProvider(), cause: currentCause) else {
+                        self.emitEvent(
+                            "transparent_proxy.blocked",
+                            detail: "host=\(sniHost) cause=\(currentCause.rawValue) reason=strict_mode"
+                        )
                         self.logger.log(
                             .error,
                             "Transparent proxy: CONNECT to \(target) failed — \(error.localizedDescription)",
@@ -215,6 +237,10 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                         ctx.close(promise: nil)
                         return
                     }
+                    self.emitEvent(
+                        "transparent_proxy.direct_fallback",
+                        detail: "host=\(sniHost) cause=\(currentCause.rawValue)"
+                    )
                     self.logger.log(
                         .warning,
                         "Transparent proxy: CONNECT to \(target) failed (\(error.localizedDescription)) — falling back to direct.",
@@ -263,6 +289,13 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                     )
 
                 case .failure(let error):
+                    // Covers the `OriginResolverError.selfReferential` trip, so
+                    // a resolver answer that points back at this listener is
+                    // visible to the event stream and not just the log.
+                    self.emitEvent(
+                        "transparent_proxy.direct_failed",
+                        detail: "host=\(host) error=\(error.localizedDescription)"
+                    )
                     self.logger.log(
                         .error,
                         "Transparent proxy: direct relay to \(host) failed — \(error.localizedDescription)",
@@ -271,6 +304,24 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                     ctx.close(promise: nil)
                 }
             }
+    }
+
+    /// Emits a `.routing` event for a transparent-proxy decision that departs
+    /// from configured policy: a strict-mode block, a fallback to direct after
+    /// an upstream failure, or a direct relay that could not be established.
+    ///
+    /// Steady-state decisions are deliberately *not* evented. Both the plain
+    /// upstream tunnel and the direct relay taken under an already-established
+    /// `cause.routesClientTrafficDirectly` happen once per intercepted
+    /// connection, and `RuntimeEventLog` is a fixed 512-entry ring: a browser
+    /// opening a few hundred TLS connections would evict every lifecycle,
+    /// health, and VPN event in the buffer. The transition into direct mode is
+    /// already evented once, at its source, as `direct_mode.entered` with the
+    /// same cause — so per-connection copies add no signal. This mirrors
+    /// `auth.handshake_rejected` and `upstream.circuit_opened`, which event the
+    /// exceptional outcome rather than the successful one.
+    private func emitEvent(_ event: String, detail: String) {
+        eventSink?(RuntimeEvent(kind: .routing, event: event, detail: detail))
     }
 
     func channelInactive(context: ChannelHandlerContext) {
