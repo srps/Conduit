@@ -1076,7 +1076,8 @@ package final class ProxyOrchestrator {
             directModeBox.withLockedValue { $0.cause }
         },
         strictModeProvider: { [configBox] in configBox.current.strictMode },
-        gatewayModeProvider: { [configBox] in configBox.current.gatewayMode }
+        gatewayModeProvider: { [configBox] in configBox.current.gatewayMode },
+        eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
     private let resolverManager: (any TunnelResolverApplying)?

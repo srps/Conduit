@@ -6,15 +6,20 @@ import NIOPosix
 import ProxyKernel
 
 /// `pm-sim transparent-direct`. Covers the routing decision the transparent
-/// SNI listener makes for an intercepted client, across the four states that
+/// SNI listener makes for an intercepted client, across the five states that
 /// matter:
 ///
-/// | # | upstream | cause             | strict | expected            |
-/// |---|----------|-------------------|--------|---------------------|
-/// | A | alive    | `.none`           | yes    | tunnel via upstream |
-/// | B | dead     | `.vpnDisconnected`| yes    | direct relay        |
-/// | C | dead     | `.none`           | yes    | connection closed   |
-/// | D | dead     | `.none`           | no     | direct relay        |
+/// | # | upstream | cause                        | strict | expected            |
+/// |---|----------|------------------------------|--------|---------------------|
+/// | A | alive    | `.none`                      | yes    | tunnel via upstream |
+/// | B | dead     | `.vpnDisconnected`           | yes    | direct relay        |
+/// | C | dead     | `.none`                      | yes    | connection closed   |
+/// | D | dead     | `.none`                      | no     | direct relay        |
+/// | E | dead     | `.none` → `.vpnDisconnected`  | yes    | direct relay        |
+///
+/// E is the mid-dial VPN drop: the cause flips *between* the handler's routing
+/// read and its fallback read. It fails whenever the fallback decision reuses
+/// the pre-dial cause instead of re-reading the current one.
 ///
 /// **B is the regression.** An intercepted client's DNS answer *is* this
 /// listener, so when the VPN drops and the corporate upstreams stop resolving,
@@ -80,7 +85,7 @@ enum TransparentProxyScenarios {
         // ── Case A: upstream healthy, no direct cause → route via upstream ──
         let caseA = try await probe(
             group: group, logger: logger, resolver: resolver,
-            upstreamPort: upstreamPort, cause: .none, strictMode: true, hello: hello
+            upstreamPort: upstreamPort, causeProvider: { .none }, strictMode: true, hello: hello
         )
         let connectsAfterA = upstream.connectCount
         notes.append("A upstream-alive/.none/strict: echoed=\(caseA.echoedHello) closed=\(caseA.closedWithoutData) upstreamCONNECTs=\(connectsAfterA)")
@@ -96,7 +101,7 @@ enum TransparentProxyScenarios {
         // ── Case B: the regression. VPN down → relay direct, never touch upstream ──
         let caseB = try await probe(
             group: group, logger: logger, resolver: resolver,
-            upstreamPort: upstreamPort, cause: .vpnDisconnected, strictMode: true, hello: hello
+            upstreamPort: upstreamPort, causeProvider: { .vpnDisconnected }, strictMode: true, hello: hello
         )
         let connectsAfterB = upstream.connectCount
         notes.append("B upstream-dead/.vpnDisconnected/strict: echoed=\(caseB.echoedHello) closed=\(caseB.closedWithoutData) upstreamCONNECTs=\(connectsAfterB - connectsAfterA)")
@@ -105,32 +110,60 @@ enum TransparentProxyScenarios {
         // ── Case C: strict profile, upstream merely down → must NOT bypass ──
         let caseC = try await probe(
             group: group, logger: logger, resolver: resolver,
-            upstreamPort: upstreamPort, cause: .none, strictMode: true, hello: hello
+            upstreamPort: upstreamPort, causeProvider: { .none }, strictMode: true, hello: hello
         )
-        notes.append("C upstream-dead/.none/strict: echoed=\(caseC.echoedHello) closed=\(caseC.closedWithoutData)")
+        notes.append("C upstream-dead/.none/strict: echoed=\(caseC.echoedHello) closed=\(caseC.closedWithoutData) events=\(caseC.eventNames)")
         let passC = !caseC.echoedHello && caseC.closedWithoutData
+            && caseC.eventNames.contains("transparent_proxy.blocked")
 
         // ── Case D: same, but strictMode off → direct fallback permitted ──
         let caseD = try await probe(
             group: group, logger: logger, resolver: resolver,
-            upstreamPort: upstreamPort, cause: .none, strictMode: false, hello: hello
+            upstreamPort: upstreamPort, causeProvider: { .none }, strictMode: false, hello: hello
         )
-        notes.append("D upstream-dead/.none/non-strict: echoed=\(caseD.echoedHello) closed=\(caseD.closedWithoutData)")
-        let passD = caseD.echoedHello
+        notes.append("D upstream-dead/.none/non-strict: echoed=\(caseD.echoedHello) closed=\(caseD.closedWithoutData) events=\(caseD.eventNames)")
+        let passD = caseD.echoedHello && caseD.eventNames.contains("transparent_proxy.direct_fallback")
 
-        let pass = passA && passB && passC && passD
-        notes.append("A=\(verdict(passA)) B=\(verdict(passB)) C=\(verdict(passC)) D=\(verdict(passD))")
+        // ── Case E: the VPN drops *while the upstream dial is in flight* ──
+        //
+        // The handler reads the cause once to choose a route, then again in the
+        // failure callback to decide whether falling back to direct is
+        // sanctioned. This provider answers `.none` on the first read — so the
+        // connection commits to the upstream — and `.vpnDisconnected` on every
+        // read after, as if the tunnel dropped mid-dial. A handler that reuses
+        // the cause it captured before dialing judges the failure against a
+        // state that no longer exists and closes the client under strict mode,
+        // reviving the very bug this scenario exists to catch, in a window a
+        // fixed-cause test can never enter.
+        let reads = NIOLockedValueBox(0)
+        let caseE = try await probe(
+            group: group, logger: logger, resolver: resolver,
+            upstreamPort: upstreamPort,
+            causeProvider: {
+                let priorReads = reads.withLockedValue { count -> Int in
+                    defer { count += 1 }
+                    return count
+                }
+                return priorReads == 0 ? .none : .vpnDisconnected
+            },
+            strictMode: true, hello: hello
+        )
+        notes.append("E upstream-dead/.none→.vpnDisconnected mid-dial/strict: echoed=\(caseE.echoedHello) closed=\(caseE.closedWithoutData) causeReads=\(reads.withLockedValue { $0 }) events=\(caseE.eventNames)")
+        let passE = caseE.echoedHello && caseE.eventNames.contains("transparent_proxy.direct_fallback")
+
+        let pass = passA && passB && passC && passD && passE
+        notes.append("A=\(verdict(passA)) B=\(verdict(passB)) C=\(verdict(passC)) D=\(verdict(passD)) E=\(verdict(passE))")
         notes.append(pass
-            ? "PASS — intercepted clients relay direct on VPN-down, upstream otherwise, and strict mode still blocks bypass"
+            ? "PASS — intercepted clients relay direct on VPN-down (including a mid-dial drop), upstream otherwise, and strict mode still blocks bypass"
             : "FAIL — see per-case lines above")
 
         return ScenarioResult(
             name: name,
-            clientCount: 4,
-            clientsOpened: 4,
-            clientsWithFirstByte: [passA, passB, passC, passD].filter { $0 }.count,
-            clientsClosedEarly: [passA, passB, passC, passD].filter { !$0 }.count,
-            totalBytes: caseA.bytesRead + caseB.bytesRead + caseC.bytesRead + caseD.bytesRead,
+            clientCount: 5,
+            clientsOpened: 5,
+            clientsWithFirstByte: [passA, passB, passC, passD, passE].filter { $0 }.count,
+            clientsClosedEarly: [passA, passB, passC, passD, passE].filter { !$0 }.count,
+            totalBytes: caseA.bytesRead + caseB.bytesRead + caseC.bytesRead + caseD.bytesRead + caseE.bytesRead,
             durationSeconds: Date().timeIntervalSince(start),
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
@@ -147,17 +180,24 @@ enum TransparentProxyScenarios {
         let echoedHello: Bool
         let closedWithoutData: Bool
         let bytesRead: Int
+        /// `RuntimeEvent.event` names the listener emitted during this probe.
+        /// Routing decisions that depart from configured policy are part of the
+        /// observability contract, not just the log, so they are asserted here.
+        let eventNames: [String]
     }
 
     /// Stands up a `TransparentTCPProxy` wired to the given routing state,
     /// pushes one ClientHello through it, and reports what came back.
+    ///
+    /// `causeProvider` is a closure rather than a value so a scenario can change
+    /// the answer between the handler's two reads — see case E.
     @MainActor
     private static func probe(
         group: EventLoopGroup,
         logger: any LogSink,
         resolver: any OriginResolving,
         upstreamPort: Int,
-        cause: DirectModeCause,
+        causeProvider: @escaping @Sendable () -> DirectModeCause,
         strictMode: Bool,
         hello: [UInt8]
     ) async throws -> ProbeOutcome {
@@ -184,20 +224,22 @@ enum TransparentProxyScenarios {
             logger: logger
         )
 
+        let events = NIOLockedValueBox<[String]>([])
         let proxy = TransparentTCPProxy(
             group: group,
             connectCoordinator: coordinator,
             connectionPool: pool,
             logger: logger,
             originResolver: resolver,
-            directModeProvider: { cause },
-            strictModeProvider: { strictMode }
+            directModeProvider: causeProvider,
+            strictModeProvider: { strictMode },
+            eventSink: { event in events.withLockedValue { $0.append(event.event) } }
         )
         try await proxy.start(host: "127.0.0.1", port: 0)
         defer { Task { @MainActor in await proxy.stop() } }
 
         guard let port = proxy.listeningPort else {
-            return ProbeOutcome(echoedHello: false, closedWithoutData: true, bytesRead: 0)
+            return ProbeOutcome(echoedHello: false, closedWithoutData: true, bytesRead: 0, eventNames: [])
         }
 
         let collector = RawByteCollector(expecting: hello.count)
@@ -220,7 +262,8 @@ enum TransparentProxyScenarios {
         return ProbeOutcome(
             echoedHello: echoed,
             closedWithoutData: collector.sawCloseWithoutData,
-            bytesRead: collector.byteCount
+            bytesRead: collector.byteCount,
+            eventNames: events.withLockedValue { $0 }
         )
     }
 }
