@@ -220,6 +220,30 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
         let ipv6Keys = (SCDynamicStoreCopyKeyList(store, ipv6Pattern) as? [String]) ?? []
         let allKeys = Set(ipv4Keys + ipv6Keys)
         handleStoreChanges(Array(allKeys))
+
+        // `handleStoreChanges` admits a utun only if it currently carries IPv4
+        // (or the fuser already knows it). With the VPN down, every utun is an
+        // Apple service tunnel with an IPv6 link-local and nothing else, so no
+        // observation reaches the fuser and the state stays `.unknown` — which
+        // `SplitDNSVPNGate` treats as "assume connected". Launching off-VPN
+        // then installed split-DNS entry files pointing at unreachable
+        // tunnel-internal servers, and nothing ever emitted the
+        // `.disconnected` that would have removed them: the fuser only reaches
+        // that verdict via a utun it has previously seen with IPv4.
+        //
+        // Unlike a notification, this sweep enumerated the whole key space, so
+        // finding no IPv4-carrying tunnel is evidence, not ignorance. Settle it.
+        guard !anyTunnelHasIPv4(store: store, ipv4Keys: ipv4Keys) else { return }
+        applyFuserDecision(fuser.markNoTunnelsPresent())
+    }
+
+    /// A `utun*/IPv4` key can exist with an empty `Addresses` array, so key
+    /// presence alone doesn't mean the tunnel is up.
+    private func anyTunnelHasIPv4(store: SCDynamicStore, ipv4Keys: [String]) -> Bool {
+        ipv4Keys.contains { key in
+            guard let dict = SCDynamicStoreCopyValue(store, key as CFString) as? [String: Any] else { return false }
+            return !((dict["Addresses"] as? [String])?.isEmpty ?? true)
+        }
     }
 
     private func handleStoreChanges(_ changedKeys: [String]) {

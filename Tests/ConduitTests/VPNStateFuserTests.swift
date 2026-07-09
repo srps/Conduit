@@ -173,6 +173,56 @@ final class VPNStateFuserTests: XCTestCase {
                        "Interface removal (no IPv4 + no IPv6) must be unambiguous: user disconnected, no grace")
     }
 
+    // MARK: - Cold-start priming
+
+    /// Launching with the VPN already down used to park the fuser at
+    /// `.unknown` forever: every utun present is an Apple service tunnel with
+    /// no IPv4, the monitor never admits those, so no observation ever
+    /// arrives and no transition ever fires. `SplitDNSVPNGate` reads
+    /// `.unknown` as "assume connected" and installs split-DNS entry files
+    /// pointing into a tunnel that isn't there — the bootstrap deadlock the
+    /// gate exists to prevent.
+    func testEmptyTunnelSweepSettlesToDisconnected() {
+        var fuser = VPNStateFuser()
+        XCTAssertEqual(
+            fuser.markNoTunnelsPresent(),
+            .emit(.disconnected(reason: .unknown)),
+            "a complete sweep finding no IPv4-carrying utun is evidence of a down VPN, not absence of evidence"
+        )
+    }
+
+    /// A real observation always outranks the sweep. Priming runs after
+    /// `handleStoreChanges` has already fed the fuser, so a connected tunnel
+    /// must not be overwritten by a mis-sequenced sweep verdict.
+    func testEmptyTunnelSweepIsIgnoredOnceAnInterfaceIsKnown() {
+        var fuser = VPNStateFuser()
+        XCTAssertEqual(
+            fuser.applyObservation(interfaceName: "utun0", observation: .connectedFixture()),
+            .emit(.connected)
+        )
+        XCTAssertEqual(fuser.markNoTunnelsPresent(), .noChange)
+    }
+
+    /// Priming happens once per monitor install; a second call must not
+    /// re-emit a state the caller already saw.
+    func testRepeatedEmptySweepDoesNotReEmit() {
+        var fuser = VPNStateFuser()
+        _ = fuser.markNoTunnelsPresent()
+        XCTAssertEqual(fuser.markNoTunnelsPresent(), .noChange)
+    }
+
+    /// The verdict has to be one the gate acts on, or the fix is inert.
+    func testEmptySweepVerdictWithholdsSplitDNSEntryFiles() {
+        var fuser = VPNStateFuser()
+        guard case .emit(let state) = fuser.markNoTunnelsPresent() else {
+            return XCTFail("expected an emission")
+        }
+        var gate = SplitDNSVPNGate()
+        XCTAssertTrue(gate.entriesWanted, "before priming the gate assumes connected")
+        XCTAssertTrue(gate.update(state), "priming must flip the wanted state")
+        XCTAssertFalse(gate.entriesWanted, "entry files must be withheld once the sweep says no tunnel")
+    }
+
     // MARK: - Multi-utun policy
 
     func testAnyConnectedUtunYieldsConnected() {
