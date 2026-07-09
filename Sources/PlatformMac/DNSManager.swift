@@ -56,17 +56,33 @@ package final class DNSManager: @unchecked Sendable {
     // MARK: - Intercept Rule Processing
 
     /// Domains whose `/etc/resolver/<domain>` file points the system resolver
-    /// at the local DNS forwarder. Apply/isApplied gate the set on the
-    /// forwarder + transparent proxy being enabled. Clear/isCleared pass
-    /// `forCleanup: true`: cleanup must derive the set from the rules alone
-    /// (including disabled ones), because by cleanup time the enable flags
-    /// have typically already flipped false (`stopDNS` persists
-    /// `dnsForwarderEnabled = false` before the proxy stops) — gating cleanup
-    /// on them strands stale resolver files that keep routing e.g.
-    /// `*.cursor.sh` at a forwarder that no longer exists.
+    /// at the local DNS forwarder.
+    ///
+    /// These files are written *only* by `applyInterceptFiles`, which its
+    /// callers invoke exclusively once the forwarder and the transparent
+    /// proxy are both listening (`ProxyOrchestratorBindings.dnsInterceptReady`).
+    /// `apply` must never write them, and `isApplied` must never demand them:
+    /// `apply` runs at proxy start, before the forwarder binds — and in the
+    /// GUI host, whether or not it ever will, since nothing there acts on
+    /// `dnsForwarderEnabled` at launch.
+    ///
+    /// That flag used to gate this set, which was wrong twice over: it is a
+    /// record of "DNS was running when we last exited", not a promise that it
+    /// runs now. Quitting with DNS on left it `true` (only `stopDNS` clears
+    /// it), so the next proxy start installed `/etc/resolver/cursor.sh` →
+    /// `127.0.0.1:5053` with nothing bound to 5053, and every `getaddrinfo`
+    /// for an intercepted domain returned ENOTFOUND until the file was
+    /// removed by hand. A resolver file outlives the process that wrote it;
+    /// it may only make promises the running process is already keeping.
+    ///
+    /// Clear/isCleared pass `forCleanup: true`: cleanup must derive the set
+    /// from the rules alone (including disabled ones), because by cleanup
+    /// time the enable flags have typically already flipped false (`stopDNS`
+    /// persists `dnsForwarderEnabled = false` before the proxy stops) —
+    /// gating cleanup on them strands exactly the stale files described above.
     private func getInterceptDomains(from config: ProxyConfig, forCleanup: Bool = false) -> [String] {
         if !forCleanup {
-            guard config.dnsForwarderEnabled, config.transparentProxyEnabled else { return [] }
+            guard config.transparentProxyEnabled else { return [] }
         }
         let rules = forCleanup ? config.dnsInterceptRules : config.enabledInterceptRules
         return rules.map { rule in
@@ -98,29 +114,23 @@ package final class DNSManager: @unchecked Sendable {
 
     // MARK: - State Detection
 
+    /// Whether everything `apply` would write is already on disk. Intercept
+    /// files are deliberately absent from this check — `apply` does not write
+    /// them (see `getInterceptDomains`), so requiring them here would make
+    /// the caller's "already configured, skip" test permanently false
+    /// whenever DNS is stopped.
     package func isApplied(config: ProxyConfig, vpnConnected: Bool) -> Bool {
         let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
-        let interceptDomains = getInterceptDomains(from: config)
 
-        guard !enabledEntries.isEmpty || !interceptDomains.isEmpty else { return true }
+        guard !enabledEntries.isEmpty else { return true }
 
-        let entriesApplied = enabledEntries.allSatisfy { entry in
+        return enabledEntries.allSatisfy { entry in
             let expected = entry.servers.map { "nameserver \($0)" }.joined(separator: "\n")
             let filePath = "/etc/resolver/\(entry.domain)"
             guard let actual = try? String(contentsOfFile: filePath, encoding: .utf8) else { return false }
             return actual.trimmingCharacters(in: .whitespacesAndNewlines)
                 == expected.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-
-        let interceptApplied = interceptDomains.allSatisfy { domain in
-            let expected = "nameserver 127.0.0.1\nport \(config.dnsForwarderPort)"
-            let filePath = "/etc/resolver/\(domain)"
-            guard let actual = try? String(contentsOfFile: filePath, encoding: .utf8) else { return false }
-            return actual.trimmingCharacters(in: .whitespacesAndNewlines)
-                == expected.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return entriesApplied && interceptApplied
     }
 
     package func isCleared(config: ProxyConfig) -> Bool {
@@ -140,17 +150,26 @@ package final class DNSManager: @unchecked Sendable {
 
     // MARK: - Apply / Clear
 
+    /// Writes the static split-DNS entry files at proxy start. Intercept-rule
+    /// files are *not* written here — they belong to the DNS start path, which
+    /// runs once the forwarder they point at is actually listening. See
+    /// `getInterceptDomains`.
     package func apply(config: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool) throws {
         let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
-        let interceptDomains = getInterceptDomains(from: config)
 
         if !vpnConnected, !config.dnsEntries.filter(\.enabled).isEmpty {
             logger?.log(.notice, "Split-DNS entry files deferred until the VPN connects (their servers are tunnel-internal).", category: .system)
         }
 
-        guard !enabledEntries.isEmpty || !interceptDomains.isEmpty else {
+        guard !enabledEntries.isEmpty else {
             if vpnConnected || config.dnsEntries.filter(\.enabled).filter({ !$0.servers.isEmpty }).isEmpty {
-                logger?.log(.warning, "DNS resolver management skipped because no internal DNS servers or intercept rules are configured.", category: .system)
+                if config.enabledInterceptRules.isEmpty {
+                    logger?.log(.warning, "DNS resolver management skipped because no internal DNS servers or intercept rules are configured.", category: .system)
+                } else {
+                    // Not a misconfiguration: intercept-only setups are normal.
+                    // Their resolver files are written by the DNS start path.
+                    logger?.log(.debug, "No split-DNS entry files to write; intercept resolver files are owned by the DNS start path.", category: .system)
+                }
             }
             return
         }
@@ -162,19 +181,11 @@ package final class DNSManager: @unchecked Sendable {
             }
         }
 
-        for domain in interceptDomains {
-            try Self.validateDomain(domain)
-        }
-
         for entry in enabledEntries {
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
         }
 
-        for domain in interceptDomains {
-            try privilegeClient.execute(.applyDNS, values: [domain, "127.0.0.1", String(config.dnsForwarderPort)])
-        }
-
-        logger?.log(.notice, "Applied split-DNS resolver files for \(enabledEntries.count) domain(s) and \(interceptDomains.count) intercept rule(s).", category: .system)
+        logger?.log(.notice, "Applied split-DNS resolver files for \(enabledEntries.count) domain(s).", category: .system)
     }
 
     package func clear(config: ProxyConfig, logger: (any LogSink)?) throws {
@@ -206,10 +217,18 @@ package final class DNSManager: @unchecked Sendable {
 
     /// Applies the delta between two configs: removes resolver files that were
     /// (or may have been) managed under `old` but are no longer wanted under
-    /// `new`, then applies `new`'s full set. Domains present in both configs
+    /// `new`, then applies `new`'s entry files. Domains present in both configs
     /// are rewritten in place — never removed first — so a running system
     /// keeps resolving them throughout. This is what makes DNS config edits
     /// take effect without a Conduit restart.
+    ///
+    /// Intercept files are represented in `newDomains` so a surviving rule is
+    /// not mistaken for stale, but this never *writes* them — `apply` doesn't,
+    /// by design. A DNS-affecting config change (a new `dnsForwarderPort`, in
+    /// particular) therefore leaves their contents untouched here, and the
+    /// caller must refresh them against the restarted listeners: see the
+    /// `dnsInterceptReady` branch in `AppState.applyConfigChange` /
+    /// `DaemonRuntimeHost`.
     package func reconcile(old: ProxyConfig, new: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool) throws {
         let oldDomains = Set(
             old.dnsEntries.filter(\.enabled).map(\.domain)
@@ -270,10 +289,17 @@ package final class DNSManager: @unchecked Sendable {
         logger?.log(.notice, "Removed \(entries.count) split-DNS entry file(s) while the VPN is disconnected.", category: .system)
     }
 
-    /// Writes only the intercept-rule resolver files. Called from the DNS
-    /// start path: at proxy start `dnsForwarderEnabled` may still have been
-    /// false, so `apply` skipped these — they can only be written once the
-    /// forwarder is actually up.
+    /// Writes only the intercept-rule resolver files. The sole writer of
+    /// these files.
+    ///
+    /// Contract for callers: invoke this only when
+    /// `ProxyOrchestratorBindings.dnsInterceptReady` is true — the forwarder
+    /// bound *and* the transparent proxy accepting. The file tells the system
+    /// resolver that `<domain>` is answered at `127.0.0.1:<port>`, and the
+    /// forwarder answers with the intercept IP; a file written while either
+    /// listener is down blackholes the domain for every client on the machine
+    /// and survives the process that wrote it. `stopDNS` pairs this with
+    /// `clearInterceptFiles`.
     package func applyInterceptFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
         let interceptDomains = getInterceptDomains(from: config)
         guard !interceptDomains.isEmpty else { return }
@@ -291,6 +317,10 @@ package final class DNSManager: @unchecked Sendable {
     /// never keep pointing at a forwarder that is no longer listening, while
     /// the static split-DNS entry files (which do not depend on the
     /// forwarder) stay in place for the still-running proxy.
+    ///
+    /// Also runs at proxy start, to sweep files a killed instance stranded.
+    /// Removal is idempotent (the helper unlinks with `try?`), so this makes
+    /// no claim that a file was there — hence "cleared", not "removed".
     package func clearInterceptFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
         let interceptDomains = getInterceptDomains(from: config, forCleanup: true)
         guard !interceptDomains.isEmpty else { return }
@@ -300,6 +330,6 @@ package final class DNSManager: @unchecked Sendable {
         for domain in interceptDomains {
             try privilegeClient.execute(.removeDNS, values: [domain])
         }
-        logger?.log(.notice, "Removed \(interceptDomains.count) intercept resolver file(s).", category: .system)
+        logger?.log(.notice, "Cleared intercept resolver files for \(interceptDomains.count) rule(s).", category: .system)
     }
 }

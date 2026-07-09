@@ -213,6 +213,14 @@ final class DaemonRuntimeHost {
             } catch {
                 logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
             }
+            // The forwarder cannot be running yet, so no intercept resolver
+            // file may exist — sweep any a killed instance stranded. Only a
+            // start can repair that; a SIGKILL never runs cleanup.
+            do {
+                try refreshInterceptFiles(for: config)
+            } catch {
+                logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+            }
         }
 
         if config.dnsForwarderEnabled {
@@ -234,6 +242,14 @@ final class DaemonRuntimeHost {
                 } catch {
                     logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
                 }
+            }
+            // `apply` above wrote the split-DNS entry files only; the intercept
+            // files are written here, once the forwarder and the transparent
+            // proxy they point clients at are both listening.
+            do {
+                try refreshInterceptFiles(for: config)
+            } catch {
+                logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
             }
         }
 
@@ -315,6 +331,28 @@ final class DaemonRuntimeHost {
         writeSnapshotFile(snapshot: orchestrator.snapshot)
     }
 
+    /// The single place that decides whether intercept resolver files may
+    /// exist: they do exactly while the DNS forwarder and the transparent
+    /// proxy are both listening. Twin of `AppState.refreshInterceptFiles` —
+    /// a resolver file outlives this process, so a listener that is down must
+    /// mean no file rather than a blackholed domain.
+    private func refreshInterceptFiles(for config: ProxyConfig) throws {
+        guard platformConfig.manageDNSResolvers else { return }
+        guard orchestrator.snapshot.bindings.dnsInterceptReady else {
+            // Only a surprise when DNS is supposedly up — see the twin.
+            if orchestrator.snapshot.dnsRunState == .running, !config.enabledInterceptRules.isEmpty {
+                logger.log(
+                    .warning,
+                    "DNS forwarder is running but the transparent proxy is not listening — intercept resolver files withheld rather than blackhole \(config.enabledInterceptRules.count) domain(s).",
+                    category: .system
+                )
+            }
+            try dnsManager.clearInterceptFiles(config: config, logger: logger)
+            return
+        }
+        try dnsManager.applyInterceptFiles(config: config, logger: logger)
+    }
+
     /// Push config edits into the applied platform state. The orchestrator
     /// reconciles its own listeners via `applyConfigChange`, but resolver
     /// files, system proxy, and env vars are written by this host — without
@@ -328,6 +366,11 @@ final class DaemonRuntimeHost {
         if diff.dnsChanged, platformConfig.manageDNSResolvers {
             do {
                 try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
+                // `applyConfigChange` restarted the forwarder if the DNS
+                // section changed, possibly onto a different port, and
+                // `reconcile` does not rewrite intercept files. Re-point them
+                // at the listeners that came back — or remove them if none did.
+                try refreshInterceptFiles(for: new)
             } catch {
                 logger.log(.warning, "Could not reconcile DNS resolver files after config reload: \(error.localizedDescription)", category: .system)
             }
