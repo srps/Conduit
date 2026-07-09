@@ -121,6 +121,46 @@ package enum DNSWireFormat {
         return minimum
     }
 
+    /// First `A` record in the answer section, with its TTL.
+    ///
+    /// CNAMEs share the answer section with the addresses they resolve to and
+    /// come first in practice, so "first answer" is not "first address" — their
+    /// RDATA is a name, not four octets. Filter on TYPE, not position.
+    package static func firstIPv4Answer(in response: [UInt8]) -> (ip: String, ttl: UInt32)? {
+        guard response.count >= 12 else { return nil }
+
+        var offset = 4
+        guard let questionCount = readUInt16(from: response, at: &offset),
+              let answerCount = readUInt16(from: response, at: &offset) else {
+            return nil
+        }
+
+        offset = 12
+        for _ in 0..<questionCount {
+            guard skipName(in: response, offset: &offset), offset + 4 <= response.count else { return nil }
+            offset += 4
+        }
+
+        for _ in 0..<answerCount {
+            guard skipName(in: response, offset: &offset), offset + 10 <= response.count else { return nil }
+            guard let type = readUInt16(from: response, at: &offset),
+                  readUInt16(from: response, at: &offset) != nil, // CLASS
+                  let ttl = readUInt32(from: response, at: &offset),
+                  let rdLength = readUInt16(from: response, at: &offset),
+                  offset + Int(rdLength) <= response.count else {
+                return nil
+            }
+
+            if type == 1, rdLength == 4 {
+                let octets = response[offset..<offset + 4].map(String.init).joined(separator: ".")
+                return (octets, ttl)
+            }
+            offset += Int(rdLength)
+        }
+
+        return nil
+    }
+
     package static func isInternalDomain(_ domain: String, config: ProxyConfig) -> Bool {
         let lower = domain.lowercased()
         let internalPatterns = config.dnsEntries.filter(\.enabled).map { $0.domain.lowercased() }

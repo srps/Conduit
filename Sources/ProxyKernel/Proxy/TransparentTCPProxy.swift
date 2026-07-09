@@ -8,22 +8,36 @@ package final class TransparentTCPProxy: @unchecked Sendable {
     private let connectCoordinator: CONNECTCoordinator
     private let connectionPool: ConnectionPool
     private let logger: any LogSink
+    private let originResolver: any OriginResolving
+    private let directModeProvider: @Sendable () -> DirectModeCause
+    private let strictModeProvider: @Sendable () -> Bool
     private let gatewayModeProvider: @Sendable () -> Bool
     private var listener: Channel?
 
     package private(set) var listeningPort: Int?
 
+    /// `directModeProvider` and `strictModeProvider` have no defaults on
+    /// purpose. This listener is the *only* path its clients have to the
+    /// origin — DNS handed them a loopback address — so a call site that
+    /// forgets to wire routing state silently black-holes every intercepted
+    /// connection the moment the upstream pool becomes unreachable.
     package init(
         group: EventLoopGroup,
         connectCoordinator: CONNECTCoordinator,
         connectionPool: ConnectionPool,
         logger: any LogSink,
+        originResolver: any OriginResolving,
+        directModeProvider: @escaping @Sendable () -> DirectModeCause,
+        strictModeProvider: @escaping @Sendable () -> Bool,
         gatewayModeProvider: @escaping @Sendable () -> Bool = { false }
     ) {
         self.group = group
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
         self.logger = logger
+        self.originResolver = originResolver
+        self.directModeProvider = directModeProvider
+        self.strictModeProvider = strictModeProvider
         self.gatewayModeProvider = gatewayModeProvider
     }
 
@@ -31,6 +45,9 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         let coordinator = connectCoordinator
         let pool = connectionPool
         let log = logger
+        let resolver = originResolver
+        let directModeProvider = directModeProvider
+        let strictModeProvider = strictModeProvider
         let gatewayModeProvider = gatewayModeProvider
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -41,6 +58,9 @@ package final class TransparentTCPProxy: @unchecked Sendable {
                         connectCoordinator: coordinator,
                         connectionPool: pool,
                         logger: log,
+                        originResolver: resolver,
+                        directModeProvider: directModeProvider,
+                        strictModeProvider: strictModeProvider,
                         gatewayModeProvider: gatewayModeProvider
                     )
                 )
@@ -77,6 +97,9 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
     private let connectCoordinator: CONNECTCoordinator
     private let connectionPool: ConnectionPool
     private let logger: any LogSink
+    private let originResolver: any OriginResolving
+    private let directModeProvider: @Sendable () -> DirectModeCause
+    private let strictModeProvider: @Sendable () -> Bool
     private let gatewayModeProvider: @Sendable () -> Bool
     private var accumulated = ByteBuffer()
     private var resolved = false
@@ -86,11 +109,17 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         connectCoordinator: CONNECTCoordinator,
         connectionPool: ConnectionPool,
         logger: any LogSink,
+        originResolver: any OriginResolving,
+        directModeProvider: @escaping @Sendable () -> DirectModeCause,
+        strictModeProvider: @escaping @Sendable () -> Bool,
         gatewayModeProvider: @escaping @Sendable () -> Bool
     ) {
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
         self.logger = logger
+        self.originResolver = originResolver
+        self.directModeProvider = directModeProvider
+        self.strictModeProvider = strictModeProvider
         self.gatewayModeProvider = gatewayModeProvider
     }
 
@@ -132,10 +161,28 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         let bufferedData = accumulated
         accumulated = ByteBuffer()
         let target = "\(sniHost):443"
+        let cause = directModeProvider()
+
+        nonisolated(unsafe) let ctx = context
+
+        // An intercepted client cannot route around us: its DNS answer is our
+        // own listener. So when the orchestrator has declared direct routing —
+        // VPN down, no upstreams configured — the upstream pool is not merely
+        // slower, it is unreachable, and dialing it strands the connection.
+        // Skip straight to the origin, exactly as `LocalProxyServer` does for
+        // proxy-aware clients on the same cause.
+        guard !cause.routesClientTrafficDirectly else {
+            logger.log(
+                .info,
+                "Transparent proxy: SNI=\(sniHost), relaying directly to \(target) (direct mode: \(cause.rawValue)).",
+                category: .proxy
+            )
+            relayDirect(context: ctx, host: sniHost, initialData: bufferedData)
+            return
+        }
 
         logger.log(.info, "Transparent proxy: SNI=\(sniHost), tunneling to \(target).", category: .proxy)
 
-        nonisolated(unsafe) let ctx = context
         connectCoordinator.connectUpstreamTunnel(target: target)
             .hop(to: ctx.eventLoop)
             .whenComplete { [self] result in
@@ -150,13 +197,75 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                     self.attachRelay(
                         context: ctx,
                         upstreamChannel: upstreamChannel,
-                        initialData: bufferedData
+                        initialData: bufferedData,
+                        pooledTunnel: true
+                    )
+
+                case .failure(let error):
+                    // Same predicate `HTTPProxyHandler` applies after a failed
+                    // proxy exchange, so both listeners honour one strict-mode
+                    // contract: a strict profile never silently bypasses the
+                    // corporate proxy just because it happens to be down.
+                    guard HTTPProxyHandler.directFallbackAllowed(strictMode: self.strictModeProvider(), cause: cause) else {
+                        self.logger.log(
+                            .error,
+                            "Transparent proxy: CONNECT to \(target) failed — \(error.localizedDescription)",
+                            category: .proxy
+                        )
+                        ctx.close(promise: nil)
+                        return
+                    }
+                    self.logger.log(
+                        .warning,
+                        "Transparent proxy: CONNECT to \(target) failed (\(error.localizedDescription)) — falling back to direct.",
+                        category: .proxy
+                    )
+                    self.relayDirect(context: ctx, host: sniHost, initialData: bufferedData)
+                }
+            }
+    }
+
+    /// Dial the origin ourselves and splice the client onto it.
+    ///
+    /// Resolution goes through `originResolver`, never the system resolver: the
+    /// hostname we just read out of the ClientHello is one we taught macOS to
+    /// resolve to this very listener, so `getaddrinfo` would loop us back onto
+    /// ourselves. See `OriginResolving`.
+    ///
+    /// The client's TLS session terminates at the origin — we only move bytes,
+    /// so its certificate validation is unaffected by the detour.
+    private func relayDirect(context ctx: ChannelHandlerContext, host: String, initialData: ByteBuffer) {
+        let eventLoop = ctx.eventLoop
+        originResolver.resolveOrigin(host: host, port: 443, on: eventLoop)
+            .flatMap { address in
+                ClientBootstrap(group: eventLoop)
+                    .channelOption(ChannelOptions.tcpNoDelay, value: 1)
+                    .connect(to: address)
+            }
+            .hop(to: eventLoop)
+            .whenComplete { [self] result in
+                switch result {
+                case .success(let originChannel):
+                    if self.clientGone {
+                        originChannel.close(mode: .all, promise: nil)
+                        return
+                    }
+                    self.logger.log(
+                        .notice,
+                        "Transparent proxy: direct relay established for \(host).",
+                        category: .proxy
+                    )
+                    self.attachRelay(
+                        context: ctx,
+                        upstreamChannel: originChannel,
+                        initialData: initialData,
+                        pooledTunnel: false
                     )
 
                 case .failure(let error):
                     self.logger.log(
                         .error,
-                        "Transparent proxy: CONNECT to \(target) failed — \(error.localizedDescription)",
+                        "Transparent proxy: direct relay to \(host) failed — \(error.localizedDescription)",
                         category: .proxy
                     )
                     ctx.close(promise: nil)
@@ -175,19 +284,27 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         context.close(promise: nil)
     }
 
+    /// `pooledTunnel` distinguishes a channel the `CONNECTCoordinator` registered
+    /// in the connection pool from one we dialed ourselves on the direct path.
+    /// Only the former has a dedicated-tunnel entry to retire on close.
     private func attachRelay(
         context: ChannelHandlerContext,
         upstreamChannel: Channel,
-        initialData: ByteBuffer
+        initialData: ByteBuffer,
+        pooledTunnel: Bool
     ) {
         let clientChannel = context.channel
 
+        var onUpstreamClose: (@Sendable () -> Void)?
+        if pooledTunnel {
+            let pool = connectionPool
+            onUpstreamClose = { pool.removeDedicatedTunnelByChannel(upstreamChannel) }
+        }
+
         let upstreamRelay = TransparentPeerRelay(
             peer: clientChannel,
-            connectionPool: connectionPool,
-            onClose: { [connectionPool] in
-                connectionPool.removeDedicatedTunnelByChannel(upstreamChannel)
-            }
+            connectionPool: pooledTunnel ? connectionPool : nil,
+            onClose: onUpstreamClose
         )
         let clientRelay = TransparentPeerRelay(peer: upstreamChannel, connectionPool: nil, onClose: nil)
 

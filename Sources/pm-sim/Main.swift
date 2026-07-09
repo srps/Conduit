@@ -36,6 +36,7 @@ enum PMSim {
               vpn-flap-long-outage    long outage transitions to .vpnDisconnected, recovers on reconnect
               vpn-user-disconnect     user-initiated disconnect is fast-path (no probe cycle)
               vpn-rapid-flap-burst    6 flaps in 1.5s emit one event pair (coalesce)
+              transparent-direct      intercepted SNI client relays direct on VPN-down, upstream otherwise
               network-transition      Wi-Fi → VPN → captive portal → resume; recovery <5s, DoH recycled
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
               websocket-upgrade       101 upgrade relayed, frames flow both ways
@@ -113,6 +114,8 @@ enum PMSim {
             return [try await VPNFlapScenarios.vpnUserDisconnectFastPath(verbose: verbose)]
         case "vpn-rapid-flap-burst":
             return [try await VPNFlapScenarios.vpnRapidFlapBurst(verbose: verbose)]
+        case "transparent-direct":
+            return [try await TransparentProxyScenarios.transparentDirectRouting(verbose: verbose)]
         case "network-transition":
             return [try await NetworkTransitionScenarios.networkTransition(verbose: verbose)]
         case "upstream-flap":

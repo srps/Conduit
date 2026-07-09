@@ -26,6 +26,13 @@ final class FakeUpstreamProxy: @unchecked Sendable {
     private let childrenLock = NIOLock()
     private var children: [ObjectIdentifier: Channel] = [:]
 
+    /// Number of CONNECT requests this upstream has accepted. Scenarios that
+    /// must distinguish "routed through the proxy" from "relayed directly"
+    /// assert on this — both paths reach the same origin, so the byte stream
+    /// alone cannot tell them apart.
+    private let connectCountBox = NIOLockedValueBox(0)
+    var connectCount: Int { connectCountBox.withLockedValue { $0 } }
+
     init(
         group: EventLoopGroup,
         originHost: String,
@@ -58,12 +65,14 @@ final class FakeUpstreamProxy: @unchecked Sendable {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { [weak self] channel in
                 self?.trackChild(channel)
+                let connectCountBox = self?.connectCountBox
                 return channel.pipeline.addHandler(
                     FakeUpstreamSession(
                         originHost: originHost,
                         originPort: originPort,
                         requireAuth: requireAuth,
-                        plainHTTPResponse: plainHTTPResponse
+                        plainHTTPResponse: plainHTTPResponse,
+                        onConnect: { connectCountBox?.withLockedValue { $0 += 1 } }
                     )
                 )
             }
@@ -105,15 +114,23 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
     private let originPort: Int
     private let requireAuth: Bool
     private let plainHTTPResponse: String?
+    private let onConnect: @Sendable () -> Void
     private var phase: Phase
     private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
     private var originChannel: Channel?
 
-    init(originHost: String, originPort: Int, requireAuth: Bool, plainHTTPResponse: String?) {
+    init(
+        originHost: String,
+        originPort: Int,
+        requireAuth: Bool,
+        plainHTTPResponse: String?,
+        onConnect: @escaping @Sendable () -> Void = {}
+    ) {
         self.originHost = originHost
         self.originPort = originPort
         self.requireAuth = requireAuth
         self.plainHTTPResponse = plainHTTPResponse
+        self.onConnect = onConnect
         self.phase = requireAuth ? .awaitingFirstConnect : .awaitingAuthedConnect
     }
 
@@ -149,6 +166,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
 
         case .awaitingAuthedConnect:
             if method.uppercased() == "CONNECT" {
+                onConnect()
                 openOriginAndPromote(context: context)
             } else {
                 // Plain HTTP request (e.g., HEAD health check). Answer 200 OK with empty body.
