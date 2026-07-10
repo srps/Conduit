@@ -639,6 +639,22 @@ final class AppState: ObservableObject {
                     logStore.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
                 }
             }
+
+            // Bring the DNS forwarder up with the proxy when the user last
+            // left it on. `dnsForwarderEnabled` is that persisted intent —
+            // `startDNS`/`stopDNS` are its only writers — and this is the GUI
+            // analog of `DaemonRuntimeHost`'s boot sequence, which starts DNS
+            // right after the proxy on the same flag. Without it the flag was
+            // GUI-write-only: every launch came up with DNS off regardless of
+            // how it was left, so intercepted clients whose transport ignores
+            // the proxy stayed broken until a manual toggle. Guarded so a
+            // proxy restart with DNS already up is a no-op.
+            if config.dnsForwarderEnabled,
+               orchestrator.snapshot.dnsRunState != .running,
+               orchestrator.snapshot.dnsRunState != .starting {
+                await startDNS()
+            }
+
             loginItemManager.setEnabled(platformConfig.launchAtLogin, logger: logStore)
 
             saveConfig()
