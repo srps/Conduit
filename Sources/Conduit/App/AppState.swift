@@ -693,10 +693,12 @@ final class AppState: ObservableObject {
 
     func toggleDNS() {
         Task {
-            if runtime.dnsRunState == .running {
-                await stopDNS()
-            } else if runtime.dnsRunState != .starting {
-                await startDNS()
+            // `runtime` is a presentation mirror fed through an async hop, so
+            // it lags the orchestrator — never gate a side effect on it.
+            switch orchestrator.snapshot.dnsRunState {
+            case .running: await stopDNS()
+            case .starting: break
+            default: await startDNS()
             }
         }
     }
@@ -707,13 +709,21 @@ final class AppState: ObservableObject {
     /// every intercepted domain into ENOTFOUND (forwarder down) or a refused
     /// connection (transparent proxy down) for every process on the machine,
     /// and `/etc/resolver` survives our exit — so err toward removing them.
+    ///
+    /// Reads `orchestrator.snapshot`, never `runtime`. The latter is a
+    /// presentation mirror fed by `onSnapshotChange` through a
+    /// `Task { @MainActor }` hop, so at the instant `startDNS()` returns it
+    /// still holds the snapshot taken *before* the transparent proxy bound:
+    /// `transparentProxyPort` is nil, `dnsInterceptReady` is false, and the
+    /// files get withheld from a fully healthy stack.
     private func refreshInterceptFiles(for config: ProxyConfig) throws {
         guard platformConfig.manageDNSResolvers else { return }
-        guard runtime.bindings.dnsInterceptReady else {
+        let snapshot = orchestrator.snapshot
+        guard snapshot.bindings.dnsInterceptReady else {
             // Only a surprise when DNS is supposedly up: at proxy start the
             // forwarder has not been asked to bind yet, so "not ready" is the
             // expected state and this pass exists purely to sweep strays.
-            if runtime.dnsRunState == .running, !config.enabledInterceptRules.isEmpty {
+            if snapshot.dnsRunState == .running, !config.enabledInterceptRules.isEmpty {
                 logStore.log(
                     .warning,
                     "DNS forwarder is running but the transparent proxy is not listening — intercept resolver files withheld rather than blackhole \(config.enabledInterceptRules.count) domain(s).",
@@ -737,7 +747,10 @@ final class AppState: ObservableObject {
 
         await orchestrator.startDNS()
 
-        if runtime.dnsRunState == .running {
+        // Read the orchestrator, not `runtime`: the mirror is one async hop
+        // behind and still reports `.starting` here when no `await` inside
+        // `startDNS()` happened to let its Task run.
+        if orchestrator.snapshot.dnsRunState == .running {
             config.dnsForwarderEnabled = true
             if platformConfig.manageSystemDNS {
                 do {
@@ -760,7 +773,7 @@ final class AppState: ObservableObject {
             // forwarder we just started.
             lastReconciledConfig = config
             saveConfig()
-        } else if let err = runtime.dnsError {
+        } else if let err = orchestrator.snapshot.dnsError {
             notificationManager.post(title: "DNS Forwarder Failed", body: err)
             if platformConfig.manageSystemDNS {
                 try? systemDNSManager.clear(logger: logStore)
@@ -887,7 +900,7 @@ final class AppState: ObservableObject {
     }
 
     private var effectiveDNSForwarderPort: Int {
-        runtime.bindings.dnsPort ?? config.dnsForwarderPort
+        orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
     }
 
     private func handle(orchestratorEvent event: ProxyOrchestratorEvent) {

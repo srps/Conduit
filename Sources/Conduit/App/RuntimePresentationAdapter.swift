@@ -3,6 +3,20 @@ import Combine
 import Foundation
 import ProxyKernel
 
+/// SwiftUI's view of the orchestrator snapshot.
+///
+/// This is a *mirror for rendering*, never a source of truth for decisions.
+/// `AppState` feeds it from `onSnapshotChange` through a `Task { @MainActor }`
+/// hop, and the counter tier is coalesced on top of that, so it always lags
+/// `ProxyOrchestrator.snapshot` by at least one main-actor turn. Code that
+/// takes an irreversible action — writing `/etc/resolver` files, applying
+/// system DNS, starting or stopping a module — must read
+/// `orchestrator.snapshot` directly.
+///
+/// Getting this wrong is quiet: `startDNS()` returns with the forwarder and
+/// transparent proxy both bound, this mirror still reports the pre-bind
+/// snapshot, and the intercept resolver files are withheld from a healthy
+/// stack with only a warning in the log.
 @MainActor
 final class RuntimePresentationAdapter: ObservableObject {
 
