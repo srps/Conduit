@@ -660,10 +660,15 @@ private final class ProxiedTunnelClientHandler: ChannelInboundHandler, @unchecke
             // already closed the upstream and cleared the backlog.
             return
         }
-        guard case .success = relayResult else {
+        if case .failure(let error) = relayResult {
             // Without the relay, upstream-to-client data can never flow —
             // close the client and let channelInactive run the one canonical
             // teardown (upstream close + onTunnelClosed + backlog clear).
+            logger.log(
+                .error,
+                "Proxied tunnel \(label): relay setup failed — \(error.localizedDescription)",
+                category: .tunnel
+            )
             clientChannel.close(promise: nil)
             return
         }
@@ -680,9 +685,13 @@ private final class ProxiedTunnelClientHandler: ChannelInboundHandler, @unchecke
         buffered.removeAll()
         bufferedBytes = 0
         tunnelReady = true
-        // channelRead pauses reads when the backlog cap is hit; this is the
-        // only place that can resume them.
-        clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
+        // Resume client reads only if the drain left the upstream writable.
+        // If the backlog pushed it past the high-water mark, holding reads
+        // paused keeps the pending-buffer cap honored; the relay's
+        // channelWritabilityChanged resumes the client once the upstream drains.
+        if upstreamChannel.isWritable {
+            clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
+        }
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -818,10 +827,15 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
             // already closed the upstream and cleared the backlog.
             return
         }
-        guard case .success = relayResult else {
+        if case .failure(let error) = relayResult {
             // Without the relay, upstream-to-client data can never flow —
             // close the client and let channelInactive run the one canonical
             // teardown (upstream close + backlog clear).
+            logger.log(
+                .error,
+                "Tunnel to \(remoteHost):\(remotePort) relay setup failed: \(error.localizedDescription)",
+                category: .tunnel
+            )
             clientChannel.close(promise: nil)
             return
         }
@@ -838,9 +852,13 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
         buffered.removeAll()
         bufferedBytes = 0
         connectComplete = true
-        // channelRead pauses reads when the backlog cap is hit; this is the
-        // only place that can resume them.
-        clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
+        // Resume client reads only if the drain left the upstream writable.
+        // If the backlog pushed it past the high-water mark, holding reads
+        // paused keeps the pending-buffer cap honored; the relay's
+        // channelWritabilityChanged resumes the client once the upstream drains.
+        if upstreamChannel.isWritable {
+            clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
+        }
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
