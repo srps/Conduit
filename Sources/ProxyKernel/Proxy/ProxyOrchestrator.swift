@@ -51,6 +51,14 @@ package struct ProxyOrchestratorBindings: Sendable, Codable, Equatable {
     /// and the forwarder promises that answer is a reachable listener. Either
     /// half missing turns the file into a blackhole for every client that
     /// honours it — and `/etc/resolver` outlives the process that wrote it.
+    ///
+    /// Read this from `ProxyOrchestrator.snapshot`, which `mutateSnapshot`
+    /// updates synchronously. Do **not** read it from a UI mirror fed by
+    /// `onSnapshotChange`: hosts deliver that through an async hop, so right
+    /// after `startDNS()` returns the mirror still carries the snapshot taken
+    /// before the transparent proxy bound — `transparentProxyPort` nil, this
+    /// predicate false, and the resolver files silently withheld from a
+    /// perfectly healthy stack.
     package var dnsInterceptReady: Bool {
         dnsPort != nil && transparentProxyPort != nil
     }
