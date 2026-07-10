@@ -441,14 +441,18 @@ final class AppState: ObservableObject {
         Task { @MainActor in
             await orchestrator.applyConfigChange(new, from: old)
 
+            // Read the snapshot, not `runtime`: `applyConfigChange` just
+            // mutated it, and the mirror that gates these resolver-file
+            // side effects is still an async hop behind.
+            let snapshot = orchestrator.snapshot
             let proxyIsUp: Bool
-            switch runtime.runtimeStatus.state {
+            switch snapshot.runtimeStatus.state {
             case .running, .degraded, .recovering: proxyIsUp = true
             default: proxyIsUp = false
             }
 
             if diff.dnsChanged, platformConfig.manageDNSResolvers,
-               proxyIsUp || runtime.dnsRunState == .running {
+               proxyIsUp || snapshot.dnsRunState == .running {
                 do {
                     try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
                     // `applyConfigChange` above restarted the forwarder if the
@@ -538,19 +542,21 @@ final class AppState: ObservableObject {
     // MARK: - Proxy Lifecycle
 
     func toggleProxy() {
-        guard runtime.runtimeStatus.state != .starting else { return }
+        // Gate on the orchestrator snapshot, not the lagging `runtime` mirror,
+        // so a fast double-tap can't start an already-running proxy or skip a
+        // stop. `runtime` is for rendering only.
+        guard orchestrator.snapshot.runtimeStatus.state != .starting else { return }
         Task {
-            if runtime.runtimeStatus.state == .running || runtime.runtimeStatus.state == .degraded || runtime.runtimeStatus.state == .recovering {
-                await stopProxy()
-            } else {
-                try? await startProxy()
+            switch orchestrator.snapshot.runtimeStatus.state {
+            case .running, .degraded, .recovering: await stopProxy()
+            default: try? await startProxy()
             }
             refreshPreflight()
         }
     }
 
     func restartProxy() {
-        guard runtime.runtimeStatus.state != .starting else { return }
+        guard orchestrator.snapshot.runtimeStatus.state != .starting else { return }
         Task {
             await restartProxyLifecycle()
             refreshPreflight()
@@ -559,7 +565,7 @@ final class AppState: ObservableObject {
 
     private func restartProxyLifecycle() async {
         lastErrorMessage = nil
-        let shouldStopFirst = MenuBarPresentation.shouldStopBeforeRestart(for: runtime.runtimeStatus.state)
+        let shouldStopFirst = MenuBarPresentation.shouldStopBeforeRestart(for: orchestrator.snapshot.runtimeStatus.state)
 
         if shouldStopFirst {
             logStore.log(.notice, "Restarting proxy runtime from menu bar.", category: .proxy)
@@ -580,7 +586,7 @@ final class AppState: ObservableObject {
     }
 
     private func startProxy(postNotification: Bool) async throws {
-        guard runtime.runtimeStatus.state != .starting && runtime.runtimeStatus.state != .running else { return }
+        guard orchestrator.snapshot.runtimeStatus.state != .starting && orchestrator.snapshot.runtimeStatus.state != .running else { return }
 
         do {
             try await orchestrator.startProxy()
@@ -816,10 +822,13 @@ final class AppState: ObservableObject {
 
     func toggleTunnels() {
         Task {
-            if runtime.tunnelsRunState == .running {
-                await stopTunnels()
-            } else if runtime.tunnelsRunState != .starting {
-                await startTunnels()
+            // Gate on the orchestrator, not `runtime`: the mirror lags by an
+            // async hop, so a rapid toggle could double-start or skip a stop.
+            // Same rule as `toggleDNS`/`toggleProxy`.
+            switch orchestrator.snapshot.tunnelsRunState {
+            case .running: await stopTunnels()
+            case .starting: break
+            default: await startTunnels()
             }
         }
     }
@@ -827,9 +836,13 @@ final class AppState: ObservableObject {
     func startTunnels() async {
         await orchestrator.startTunnels()
 
-        if runtime.tunnelsRunState == .failed {
-            notificationManager.post(title: "Tunnels Failed", body: runtime.tunnelsError ?? "All tunnel listeners failed to bind.")
-        } else if runtime.tunnelsRunState == .running, let err = runtime.tunnelsError {
+        // `startTunnels` updated the snapshot synchronously; `runtime` has not
+        // caught up yet, so read the snapshot or the failure notification is
+        // silently missed when the mirror still shows `.starting`.
+        let snapshot = orchestrator.snapshot
+        if snapshot.tunnelsRunState == .failed {
+            notificationManager.post(title: "Tunnels Failed", body: snapshot.tunnelsError ?? "All tunnel listeners failed to bind.")
+        } else if snapshot.tunnelsRunState == .running, let err = snapshot.tunnelsError {
             notificationManager.post(title: "Tunnels Partially Started", body: err)
         }
         saveConfig()
@@ -919,9 +932,13 @@ final class AppState: ObservableObject {
     // MARK: - Preflight
 
     func refreshPreflight() {
-        let isRunning = runtime.runtimeStatus.state == .running
-            || runtime.runtimeStatus.state == .degraded
-            || runtime.runtimeStatus.state == .recovering
+        // `refreshPreflight` runs right after `startProxy`/`stopProxy` awaits,
+        // when `runtime` still lags; read the authoritative snapshot so the
+        // preflight doesn't check the wrong applied/cleared branch.
+        let runtimeState = orchestrator.snapshot.runtimeStatus.state
+        let isRunning = runtimeState == .running
+            || runtimeState == .degraded
+            || runtimeState == .recovering
         let configSnapshot = config
         let platformConfigSnapshot = platformConfig
         let refreshID = UUID()
@@ -1063,7 +1080,7 @@ final class AppState: ObservableObject {
         // 30 s liveness probe alone never notices). Reconcile re-pins the
         // interfaces and re-checks relay liveness immediately instead of
         // waiting for the next network-change event.
-        if platformConfig.manageSystemDNS, runtime.dnsRunState == .running {
+        if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             scheduleDNSReconcile()
         }
     }
@@ -1073,7 +1090,7 @@ final class AppState: ObservableObject {
             await orchestrator.handleNetworkChange(description: description)
         }
 
-        if platformConfig.manageSystemDNS, runtime.dnsRunState == .running {
+        if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             scheduleDNSReconcile()
         }
         // Note: `autoEnableOnVPN` / `autoDisableOffVPN` retired in Phase 3 of
@@ -1093,7 +1110,7 @@ final class AppState: ObservableObject {
             await orchestrator.handleVPNStateChange(state)
         }
 
-        if platformConfig.manageSystemDNS, runtime.dnsRunState == .running {
+        if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             scheduleDNSReconcile()
         }
 
@@ -1110,7 +1127,7 @@ final class AppState: ObservableObject {
         refreshPreflight()
 
         let proxyIsUp: Bool
-        switch runtime.runtimeStatus.state {
+        switch orchestrator.snapshot.runtimeStatus.state {
         case .running, .degraded, .recovering: proxyIsUp = true
         default: proxyIsUp = false
         }
@@ -1131,7 +1148,10 @@ final class AppState: ObservableObject {
             DispatchQueue.global(qos: .utility).async {
                 let alive = manager.probeLiveness()
                 Task { @MainActor [weak self] in
-                    guard let self, self.runtime.dnsRunState == .running else { return }
+                    // Authoritative "is the forwarder up?"; the mirror's
+                    // dnsRunState may be a UI-only `.failed` health override,
+                    // which `handleDNSHealthResult` itself inspects.
+                    guard let self, self.orchestrator.snapshot.dnsRunState == .running else { return }
                     self.handleDNSHealthResult(alive: alive)
                 }
             }
