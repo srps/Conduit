@@ -190,47 +190,62 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         let actualPort = bound.localAddress?.port ?? config.localPort
         logger.log(.notice, "Local proxy listening on \(actualHost):\(actualPort).", category: .proxy)
 
-        if config.socksEnabled {
-            do {
-                let socks = SOCKS5Server(
-                    group: self.group,
-                    connectCoordinator: coordinator,
-                    logger: self.logger,
-                    directModeProvider: self.directModeProvider,
-                    pacRoutingEngine: self.pacRoutingEngine,
-                    configProvider: self.configProvider,
-                    gatewayMode: config.gatewayMode,
-                    onConnectionOpened: self.onConnectionOpened,
-                    onConnectionClosed: self.onConnectionClosed,
-                    onConnectionActivity: self.onConnectionActivity
-                )
-                try await socks.start(host: listenHost, port: config.socksPort)
-                let socksPublished = refs.withLockedValue { r -> Bool in
-                    guard r.epoch == epoch else { return false }
-                    r.socksServer = socks
-                    return true
-                }
-                guard socksPublished else {
-                    // stop() ran during socks.start(): it already tore down
-                    // the HTTP listener and pool we published above, so this
-                    // start() has effectively been stopped — unwind the SOCKS
-                    // listener too rather than leaving it bound.
-                    await socks.stop()
-                    throw CancellationError()
-                }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                logger.log(.warning, "SOCKS5 server failed to start on port \(config.socksPort): \(error.localizedDescription). HTTP proxy is running without SOCKS5.", category: .proxy)
-            }
-        }
+        try await startSOCKSIfEnabled(config: config, coordinator: coordinator, listenHost: listenHost, epoch: epoch)
+        schedulePrewarm(pool: pool)
+    }
 
+    /// Start the SOCKS5 listener when enabled, publishing it under the same
+    /// epoch guard as the HTTP listener. A SOCKS bind failure is non-fatal —
+    /// the HTTP proxy keeps running — but a lost epoch race means stop() tore
+    /// down everything this start() published, so unwind via CancellationError.
+    private func startSOCKSIfEnabled(
+        config: ProxyConfig,
+        coordinator: CONNECTCoordinator,
+        listenHost: String,
+        epoch: Int
+    ) async throws {
+        guard config.socksEnabled else { return }
+        do {
+            let socks = SOCKS5Server(
+                group: self.group,
+                connectCoordinator: coordinator,
+                logger: self.logger,
+                directModeProvider: self.directModeProvider,
+                pacRoutingEngine: self.pacRoutingEngine,
+                configProvider: self.configProvider,
+                gatewayMode: config.gatewayMode,
+                onConnectionOpened: self.onConnectionOpened,
+                onConnectionClosed: self.onConnectionClosed,
+                onConnectionActivity: self.onConnectionActivity
+            )
+            try await socks.start(host: listenHost, port: config.socksPort)
+            let socksPublished = refs.withLockedValue { r -> Bool in
+                guard r.epoch == epoch else { return false }
+                r.socksServer = socks
+                return true
+            }
+            guard socksPublished else {
+                // stop() ran during socks.start(): it already tore down
+                // the HTTP listener and pool we published above, so this
+                // start() has effectively been stopped — unwind the SOCKS
+                // listener too rather than leaving it bound.
+                await socks.stop()
+                throw CancellationError()
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            logger.log(.warning, "SOCKS5 server failed to start on port \(config.socksPort): \(error.localizedDescription). HTTP proxy is running without SOCKS5.", category: .proxy)
+        }
+    }
+
+    /// Prewarm the upstream connection pool off the start path, unless upstream
+    /// health is intentionally quiet (explicit direct routing or transient VPN
+    /// reassertion). VPN-connected upstream failures still route through
+    /// PAC/upstreams, so prewarm remains useful there.
+    private func schedulePrewarm(pool: ConnectionPool) {
         Task { [weak self] in
             guard let self else { return }
-            // Skip prewarm when upstream health is intentionally quiet (explicit
-            // direct routing or transient VPN reassertion). VPN-connected
-            // upstream failures still route through PAC/upstreams, so prewarm
-            // remains useful there.
             let (_, cause) = self.directModeProvider()
             guard cause.runsUpstreamHealthLoop else {
                 self.logger.log(.debug,
