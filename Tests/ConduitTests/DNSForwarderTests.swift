@@ -32,6 +32,48 @@ final class DNSWireFormatTests: XCTestCase {
         XCTAssertEqual(DNSWireFormat.extractQueryType(from: packet), 1)
     }
 
+    // MARK: - emptyServerFailureResponse
+
+    /// SERVFAIL is the forwarder's answer of last resort. Every failure path
+    /// uses it instead of dropping the query, so that a client learns
+    /// immediately rather than waiting out its own resolver timeout and then
+    /// reporting "no servers could be reached" — which reads as "the forwarder
+    /// is down" rather than "this lookup failed".
+    func testEmptyServerFailureResponseSetsRcode2() throws {
+        let query = DNSWireFormat.buildQuery(domain: "example.com", txID: 0xBEEF, qtype: 1)
+        let response = try XCTUnwrap(DNSWireFormat.emptyServerFailureResponse(originalQuery: query))
+
+        XCTAssertEqual(response[3] & 0x0F, 2, "rcode must be SERVFAIL")
+        XCTAssertEqual(response[0], 0xBE)
+        XCTAssertEqual(response[1], 0xEF)
+        XCTAssertEqual(response[2] & 0x80, 0x80, "QR bit must mark this a response")
+    }
+
+    /// A SERVFAIL that does not echo the question is not a usable answer —
+    /// clients match responses to queries by question, so this must satisfy the
+    /// same check the forwarder applies to upstream responses.
+    func testEmptyServerFailureResponseEchoesTheQuestion() throws {
+        let query = DNSWireFormat.buildQuery(domain: "a.b.example.com", txID: 0x1234, qtype: 28)
+        let response = try XCTUnwrap(DNSWireFormat.emptyServerFailureResponse(originalQuery: query))
+
+        XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: response))
+        XCTAssertEqual(DNSWireFormat.extractDomainName(from: response), "a.b.example.com")
+    }
+
+    func testEmptyServerFailureResponseCarriesNoAnswers() throws {
+        let query = DNSWireFormat.buildQuery(domain: "example.com")
+        let response = try XCTUnwrap(DNSWireFormat.emptyServerFailureResponse(originalQuery: query))
+
+        XCTAssertEqual(Int(response[6]) << 8 | Int(response[7]), 0, "answer count must be 0")
+        XCTAssertNil(DNSWireFormat.firstIPv4Answer(in: response))
+    }
+
+    /// The one case where answering is impossible: a query too malformed to
+    /// echo. Callers drop these rather than inventing a question.
+    func testEmptyServerFailureResponseIsNilForTruncatedQuery() {
+        XCTAssertNil(DNSWireFormat.emptyServerFailureResponse(originalQuery: [0x12, 0x34]))
+    }
+
     // MARK: - extractDomainName
 
     func testExtractDomainNameFromStandardQuery() {
@@ -545,33 +587,151 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertTrue(warnings.isEmpty, "Rapid resets must not produce warnings. Got: \(warnings.map(\.message))")
     }
 
+    /// A datagram too short to hold a DNS header is dropped without a reply —
+    /// there is no transaction ID to answer it with — and the forwarder keeps
+    /// serving afterwards.
+    ///
+    /// The guard lives in `DNSUDPHandler.channelRead`, ahead of the admission
+    /// gate, so garbage costs neither an in-flight slot nor a spawned task.
+    /// That accounting is not directly observable from a client socket (a
+    /// no-op task returns its slot too fast to catch), so what this test pins
+    /// is the contract either placement must keep: silence for the garbage,
+    /// service for the query behind it.
     @MainActor
     func testForwarderRejectsPacketTooShort() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
-        let config = ProxyConfig.testFixture()
+        var config = ProxyConfig.testFixture()
+        config.dnsInterceptRules = [
+            DNSInterceptRule(pattern: "*.intercept.test", interceptIP: "127.44.3.9", enabled: true)
+        ]
+        let frozen = config
         let group = MultiThreadedEventLoopGroup.singleton
         let forwarder = LocalDNSForwarder(
             group: group,
             logger: logger,
-            configProvider: { config }
+            configProvider: { frozen }
         )
 
-        let port = 16_000 + Int.random(in: 0..<1000)
-        try await forwarder.start(host: "127.0.0.1", port: port)
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        let port = try XCTUnwrap(forwarder.listeningPort)
+
+        let garbage = try await Self.exchangeOverUDP(
+            payload: [0, 1, 2, 3], port: port, group: group, timeoutMilliseconds: 400
+        )
+        XCTAssertNil(garbage, "A sub-header datagram must be dropped, not answered")
+
+        // The forwarder is still serving: an intercept answer is synthesized
+        // locally, so this needs no reachable upstream.
+        let query = DNSWireFormat.buildQuery(domain: "after.intercept.test", txID: 0x7788, qtype: 1)
+        let answer = try await Self.exchangeOverUDP(
+            payload: query, port: port, group: group, timeoutMilliseconds: 2000
+        )
+        let response = try XCTUnwrap(answer, "A well-formed query after garbage must still be answered")
+        XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: response))
+        XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: response)?.ip, "127.44.3.9")
+
+        await forwarder.stop()
+    }
+
+    /// A DoH outage is one condition, but it is discovered once per query, and
+    /// a single page load asks for dozens of public names. Unthrottled, the
+    /// "all providers failed" warning turned one root cause into dozens of
+    /// near-identical lines — on exactly the degraded network where the log is
+    /// the only diagnostic anyone has. The warning is rate-limited and carries
+    /// the count it suppressed.
+    @MainActor
+    func testTotalDoHFailureWarningIsRateLimited() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+
+        // A port nothing listens on: DoH fetches are refused immediately, so
+        // every public name fails the whole provider set fast and with the
+        // same signature (no HTTP status observed at all). No external egress.
+        let placeholder = try await ServerBootstrap(group: group)
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let deadPort = try XCTUnwrap(placeholder.localAddress?.port)
+        try await placeholder.close().get()
+
+        var config = ProxyConfig.testFixture()
+        config.upstreams = []
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.internal.test", servers: ["127.0.0.1"])]
+        config.dohProviders = ["https://127.0.0.1:\(deadPort)/dns-query"]
+        config.localHost = "127.0.0.1"
+        config.localPort = 9
+        let frozen = config
+
+        let logger = RecordingLogSink(minLevel: .debug)
+        let forwarder = LocalDNSForwarder(
+            group: group,
+            logger: logger,
+            configProvider: { frozen }
+        )
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        let port = try XCTUnwrap(forwarder.listeningPort)
 
         let client = try await DatagramBootstrap(group: group)
             .bind(host: "127.0.0.1", port: 0)
             .get()
-
-        var buf = client.allocator.buffer(capacity: 4)
-        buf.writeBytes([0, 1, 2, 3])
         let target = try SocketAddress(ipAddress: "127.0.0.1", port: port)
-        let envelope = AddressedEnvelope(remoteAddress: target, data: buf)
-        try await client.writeAndFlush(envelope).get()
 
-        try await Task.sleep(for: .milliseconds(200))
-        try await client.close().get()
+        // Unique names defeat the response cache, so every one of them reaches
+        // the DoH path and would have logged its own warning.
+        let queryCount = 12
+        for i in 0..<queryCount {
+            let query = DNSWireFormat.buildQuery(domain: "flood-\(i).example.com", txID: UInt16(i))
+            var buf = client.allocator.buffer(capacity: query.count)
+            buf.writeBytes(query)
+            try await client.writeAndFlush(AddressedEnvelope(remoteAddress: target, data: buf)).get()
+        }
+
+        var attempts = 0
+        for _ in 0..<60 {
+            try await Task.sleep(for: .milliseconds(100))
+            attempts = logger.entries().filter { $0.message.contains("trying DoH") }.count
+            if attempts >= queryCount { break }
+        }
+        XCTAssertEqual(attempts, queryCount, "Every query must reach the DoH path for this test to mean anything")
+
+        // Let the last failures land before counting.
+        try await Task.sleep(for: .milliseconds(300))
+        let warnings = logger.entries().filter { $0.message.contains("DoH provider(s) failed") }
+
+        XCTAssertGreaterThanOrEqual(warnings.count, 1, "The outage must still be reported at least once")
+        XCTAssertLessThan(
+            warnings.count, queryCount,
+            "\(queryCount) failing queries produced \(warnings.count) warnings — the throttle is not holding"
+        )
+
         await forwarder.stop()
+        try await client.close().get()
+    }
+
+    /// Sends one datagram and waits for a single reply, or nil if none arrives
+    /// within `timeout`.
+    private static func exchangeOverUDP(
+        payload: [UInt8],
+        port: Int,
+        group: EventLoopGroup,
+        timeoutMilliseconds: Int
+    ) async throws -> [UInt8]? {
+        let client = try await DatagramBootstrap(group: group)
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        defer { client.close(promise: nil) }
+
+        let collector = UDPReplyCollector()
+        try await client.pipeline.addHandler(collector).get()
+
+        var buf = client.allocator.buffer(capacity: payload.count)
+        buf.writeBytes(payload)
+        let target = try SocketAddress(ipAddress: "127.0.0.1", port: port)
+        try await client.writeAndFlush(AddressedEnvelope(remoteAddress: target, data: buf)).get()
+
+        for _ in 0..<(timeoutMilliseconds / 25) {
+            if let reply = collector.reply() { return reply }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        return collector.reply()
     }
 
     /// Regression test for the 2026-07-01 SIGABRT: `resetUpstreamTransports`
@@ -662,5 +822,24 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         // Reaching this line is the assertion: the old implementation
         // died with an uncatchable CFNetwork NSException under this load.
         XCTAssertNil(forwarder.listeningPort, "Forwarder should be stopped")
+    }
+}
+
+/// Captures the first datagram a test client receives, so a test can assert on
+/// a reply *or* on the absence of one.
+private final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = AddressedEnvelope<ByteBuffer>
+
+    private let lock = NSLock()
+    private var received: [UInt8]?
+
+    func reply() -> [UInt8]? {
+        lock.withLock { received }
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data).data
+        let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
+        lock.withLock { if received == nil { received = bytes } }
     }
 }

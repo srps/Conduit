@@ -114,6 +114,43 @@ package struct RoutingSection: Codable, Equatable, Sendable {
 // MARK: - DNS Section
 
 package struct DNSSection: Codable, Equatable, Sendable {
+    /// DoH endpoints addressed by **IP literal**, never by hostname.
+    ///
+    /// A forwarder whose fallback resolver is named by hostname needs working
+    /// DNS in order to obtain working DNS. That circularity is not theoretical:
+    /// the forwarder's DoH path exists precisely for the case where the
+    /// configured nameservers answer NXDOMAIN for public names — and on such a
+    /// network `cloudflare-dns.com` is one of the names that will not resolve,
+    /// so the fallback cannot even open a connection. IP literals have no
+    /// bootstrap dependency.
+    ///
+    /// They also survive hostname-based filtering. Corporate web filters
+    /// routinely block DoH by URL category to keep DNS visible; a filtered
+    /// network returns a block page (a 404 or 200 that is not a DNS answer) for
+    /// the provider *hostnames* while passing the same providers' IPs. Both
+    /// failure modes are silent at the DNS layer, which is why
+    /// `DNSForwardingHandler.resolveViaDoH` logs the HTTP statuses it saw when
+    /// every provider fails.
+    ///
+    /// All three certificates carry IP SANs, so TLS validation is unaffected.
+    /// Quad9 serves RFC 8484 wire format on this path but answers `400` to
+    /// dns-json GETs; the forwarder tries both encodings against every
+    /// provider, so that costs nothing.
+    package static let defaultDoHProviders = [
+        "https://1.1.1.1/dns-query",   // Cloudflare
+        "https://9.9.9.9/dns-query",   // Quad9 (wire format only)
+        "https://8.8.8.8/dns-query",   // Google
+    ]
+
+    /// The hostname-addressed providers shipped before schema 2. Retained only
+    /// so `ProxyConfigPersistence` can recognise an untouched old default and
+    /// migrate it; a user who curated their own list keeps it.
+    package static let legacyHostnameDoHProviders = [
+        "https://cloudflare-dns.com/dns-query",
+        "https://dns.quad9.net/dns-query",
+        "https://dns.google/dns-query",
+    ]
+
     package var forwarderEnabled: Bool
     package var forwarderPort: Int
     package var dohProviders: [String]
@@ -126,11 +163,7 @@ package struct DNSSection: Codable, Equatable, Sendable {
     package init(
         forwarderEnabled: Bool = false,
         forwarderPort: Int = 5053,
-        dohProviders: [String] = [
-            "https://cloudflare-dns.com/dns-query",
-            "https://dns.quad9.net/dns-query",
-            "https://dns.google/dns-query",
-        ],
+        dohProviders: [String] = DNSSection.defaultDoHProviders,
         entries: [DomainDNSEntry] = [],
         interceptRules: [DNSInterceptRule] = [],
         transparentProxyEnabled: Bool = false,

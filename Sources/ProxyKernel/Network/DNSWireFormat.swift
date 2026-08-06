@@ -264,6 +264,19 @@ package enum DNSWireFormat {
         emptyDNSResponse(originalQuery: originalQuery, rcode: 5)
     }
 
+    /// SERVFAIL (rcode 2) echoing the original question.
+    ///
+    /// The forwarder's answer of last resort. Every path that cannot produce a
+    /// real answer must still write *something*: a resolver client that gets no
+    /// datagram back waits out its own timeout (5 s for `dig`'s default) and
+    /// then reports a misleading "no servers could be reached", which reads as
+    /// "the forwarder is down" rather than "this one lookup failed". SERVFAIL
+    /// is the honest, immediate answer, and it is the one clients retry
+    /// sensibly against their next configured resolver.
+    package static func emptyServerFailureResponse(originalQuery: [UInt8]) -> [UInt8]? {
+        emptyDNSResponse(originalQuery: originalQuery, rcode: 2)
+    }
+
     static func emptyDNSResponse(originalQuery: [UInt8], rcode: UInt8) -> [UInt8]? {
         guard originalQuery.count >= 12, hasExactlyOneQuestion(originalQuery) else { return nil }
 

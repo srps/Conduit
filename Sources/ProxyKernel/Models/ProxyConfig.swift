@@ -2,7 +2,13 @@
 import Foundation
 
 package struct ProxyConfig: Codable, Equatable {
-    package static let currentSchemaVersion = 1
+    /// Bump this whenever a persisted config needs rewriting on load, and add
+    /// the matching transform to `ProxyConfigPersistence.migrate(_:from:)`.
+    ///
+    /// - 1: initial versioned schema.
+    /// - 2: DoH providers moved from hostnames to IP literals
+    ///      (`DNSSection.defaultDoHProviders`).
+    package static let currentSchemaVersion = 2
 
     // MARK: - Section Storage
 
