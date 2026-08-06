@@ -591,12 +591,10 @@ final class DNSForwarderIntegrationTests: XCTestCase {
     /// there is no transaction ID to answer it with — and the forwarder keeps
     /// serving afterwards.
     ///
-    /// The guard lives in `DNSUDPHandler.channelRead`, ahead of the admission
-    /// gate, so garbage costs neither an in-flight slot nor a spawned task.
-    /// That accounting is not directly observable from a client socket (a
-    /// no-op task returns its slot too fast to catch), so what this test pins
-    /// is the contract either placement must keep: silence for the garbage,
-    /// service for the query behind it.
+    /// This is the end-to-end half of the rule, over a real socket: what a
+    /// client sees. The other half — that the runt never reaches the admission
+    /// gate at all — is not visible from out here and is pinned separately in
+    /// `DNSAdmissionGateTests`.
     @MainActor
     func testForwarderRejectsPacketTooShort() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
