@@ -52,6 +52,35 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.tcpMaximumConnections = tcpMaximumConnections
     }
 
+    /// A UDP handler wired to a fresh resolution core, plus readers for that
+    /// core's admission counters.
+    ///
+    /// Exposed only so a test can pin the rule that a datagram too short to be
+    /// a query costs no admission slot. That rule is about work *not* done, and
+    /// is invisible from outside: the handler drops the runt silently either
+    /// way, and the in-flight gauge cannot show it, because a resolution
+    /// admitted for a runt does nothing and returns its slot before any
+    /// assertion can run. `admissionDecisionCount` is monotonic and so records
+    /// the admission that a correct implementation never attempts.
+    package static func makeUDPHandlerForTesting(
+        group: EventLoopGroup,
+        logger: any LogSink,
+        configProvider: @escaping () -> ProxyConfig
+    ) -> (
+        handler: any ChannelHandler & Sendable,
+        inFlightQueryCount: @Sendable () -> Int,
+        admissionDecisionCount: @Sendable () -> Int
+    ) {
+        let core = DNSResolutionCore(
+            group: group,
+            logger: logger,
+            configProvider: configProvider,
+            preferProxyPathForDoH: { false },
+            onMetrics: nil
+        )
+        return (DNSUDPHandler(core: core), { core.inFlightQueryCount }, { core.admissionDecisionCount })
+    }
+
     /// Binds UDP and TCP on the same port.
     ///
     /// Order matters: UDP binds first and TCP follows on whatever port UDP
@@ -307,7 +336,17 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// is unavailable from async contexts under Swift 6 — blocking a
     /// cooperative-pool thread is exactly what it would do.
     private static let maximumInFlightQueries = 64
-    private let inFlightQueries = NIOLockedValueBox(0)
+    private let admission = NIOLockedValueBox(AdmissionState())
+
+    private struct AdmissionState {
+        /// Admitted resolutions that have not yet released their slot.
+        var inFlight = 0
+        /// Every admission decision ever taken, granted or refused. Monotonic,
+        /// and that is the point: `inFlight` is a gauge, so a resolution that
+        /// finishes returns it to zero and nothing downstream can tell "never
+        /// admitted" from "admitted and already done". This distinguishes them.
+        var decisions = 0
+    }
     /// A DoH outage is not per-query, but the warning that reports it is: one
     /// browser page load asks for dozens of public names, and every one of them
     /// would emit its own near-identical "all providers failed" line for a
@@ -396,15 +435,27 @@ private final class DNSResolutionCore: @unchecked Sendable {
     /// already committed to. Gating first is what the `DispatchSemaphore` this
     /// replaced did from `channelRead`.
     func admitQuery() -> Bool {
-        inFlightQueries.withLockedValue { count in
-            guard count < Self.maximumInFlightQueries else { return false }
-            count += 1
+        admission.withLockedValue { state in
+            state.decisions += 1
+            guard state.inFlight < Self.maximumInFlightQueries else { return false }
+            state.inFlight += 1
             return true
         }
     }
 
     func releaseQuery() {
-        inFlightQueries.withLockedValue { $0 -= 1 }
+        admission.withLockedValue { $0.inFlight -= 1 }
+    }
+
+    /// Admitted resolutions that have not yet released their slot.
+    var inFlightQueryCount: Int {
+        admission.withLockedValue { $0.inFlight }
+    }
+
+    /// Admission decisions taken since this core was built — see
+    /// `AdmissionState.decisions`.
+    var admissionDecisionCount: Int {
+        admission.withLockedValue { $0.decisions }
     }
 
     /// The answer for a query turned away by `admitQuery()`. Logs once and
