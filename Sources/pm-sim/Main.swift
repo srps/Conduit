@@ -43,6 +43,7 @@ enum PMSim {
               audit-hop-response      Audit: proxied HTTP response hop-by-hop header leak
               audit-socks5-rsv        Audit: SOCKS5 CONNECT non-zero RSV handling
               audit-expect-trailers   Audit: Expect: 100-continue answered, trailers passed through
+              dns-doh-blocked         DNS: internal server dead + DoH answering 404 still answers the client
 
             OPTIONS:
               --verbose               Stream per-handler debug logs to stderr
@@ -128,6 +129,8 @@ enum PMSim {
             return [try await AuditScenarios.socks5NonZeroRSV(verbose: verbose)]
         case "audit-expect-trailers":
             return [try await AuditScenarios.expectContinueAndTrailers(verbose: verbose)]
+        case "dns-doh-blocked":
+            return [try await DNSResolverScenarios.dohBlockedStillAnswers(verbose: verbose)]
         default:
             FileHandle.standardError.write(Data("unknown scenario: \(name)\n".utf8))
             exit(2)

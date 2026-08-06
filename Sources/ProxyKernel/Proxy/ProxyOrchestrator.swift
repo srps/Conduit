@@ -1094,7 +1094,7 @@ package final class ProxyOrchestrator {
 
     private lazy var originResolver: any OriginResolving = DoHOriginResolver(
         logger: logStore,
-        dohProviders: { [configBox] in configBox.current.dohProviders }
+        configProvider: { [configBox] in configBox.current }
     )
 
     private lazy var transparentProxy = TransparentTCPProxy(

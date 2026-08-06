@@ -572,9 +572,33 @@ final class SystemDNSManagerTests: XCTestCase {
     func testDohProvidersDefaultHasThreeEntries() {
         let config = ProxyConfig.testFixture()
         XCTAssertEqual(config.dohProviders.count, 3)
-        XCTAssertTrue(config.dohProviders[0].contains("cloudflare"))
-        XCTAssertTrue(config.dohProviders[1].contains("quad9"))
-        XCTAssertTrue(config.dohProviders[2].contains("google"))
+    }
+
+    /// The default providers must be addressable without DNS.
+    ///
+    /// This is the invariant, not which vendors are listed: the DoH path exists
+    /// for networks whose nameservers cannot resolve public names, and on such a
+    /// network a provider named by hostname cannot be reached at all. Asserting
+    /// on the host being an IP literal keeps a future edit from quietly
+    /// reintroducing the bootstrap dependency.
+    func testDohProviderDefaultsAreAddressableWithoutDNS() throws {
+        for provider in DNSSection.defaultDoHProviders {
+            let host = try XCTUnwrap(URL(string: provider)?.host, "\(provider) has no host")
+            var parsed = in_addr()
+            XCTAssertEqual(
+                host.withCString { inet_pton(AF_INET, $0, &parsed) }, 1,
+                "\(provider) is addressed by hostname; DoH must not need DNS to bootstrap DNS"
+            )
+        }
+    }
+
+    /// Guards the migration's recognition test in `ProxyConfigPersistence`:
+    /// if these two lists ever overlap, a migrated config would be rewritten
+    /// back to a blocked default.
+    func testLegacyAndCurrentDoHDefaultsAreDisjoint() {
+        let legacy = Set(DNSSection.legacyHostnameDoHProviders)
+        let current = Set(DNSSection.defaultDoHProviders)
+        XCTAssertTrue(legacy.isDisjoint(with: current))
     }
 
     func testDohProvidersRoundTrip() throws {

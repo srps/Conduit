@@ -39,8 +39,19 @@ package struct RuntimeConfigurationLoadResult {
 // MARK: - Runtime Config Persistence
 
 package enum ProxyConfigPersistence {
+    /// Loads a config and brings it up to the current schema **in memory**,
+    /// without rewriting the file.
+    ///
+    /// Migration is not optional for a reader. A transform exists because the
+    /// old persisted value no longer means what the current code needs it to
+    /// mean, so a caller that skips it runs against a config the code has
+    /// already disowned — the v2 DoH rewrite, for instance, would leave the
+    /// headless CLIs holding provider hostnames that cannot be reached on the
+    /// networks the transform exists for. The only thing that distinguishes
+    /// this from `loadMigrating` is whether the result is written back, which
+    /// is what keeps `pm-proxy` side-effect-free.
     package static func load(from url: URL) -> ProxyConfig {
-        loadJSON(ProxyConfig.self, from: url) ?? GenericDefaults.shared.makeConfig()
+        loadMigrating(from: url, saveMigrated: false).config
     }
 
     package static func load(in environment: RuntimeEnvironment) -> ProxyConfig {
@@ -77,7 +88,7 @@ package enum ProxyConfigPersistence {
             return ProxyConfigMigrationResult(config: decoded, migrated: false, warnings: [])
         }
 
-        var migrated = decoded
+        var migrated = migrate(decoded, from: previousVersion)
         migrated.schemaVersion = ProxyConfig.currentSchemaVersion
         guard saveMigrated else {
             return ProxyConfigMigrationResult(config: migrated, migrated: true, warnings: [])
@@ -92,6 +103,27 @@ package enum ProxyConfigPersistence {
                 warnings: ["Config schema migrated in memory but could not be written to \(url.path): \(error.localizedDescription)"]
             )
         }
+    }
+
+    /// Applies every schema transform between `previousVersion` and
+    /// `ProxyConfig.currentSchemaVersion`. Each step is guarded by the version
+    /// that introduced it, so a config two versions behind picks up both.
+    ///
+    /// Transforms rewrite *stale defaults*, never user choices — the test for
+    /// "did the user touch this?" is whether the persisted value still equals
+    /// the default it shipped with.
+    package static func migrate(_ config: ProxyConfig, from previousVersion: Int) -> ProxyConfig {
+        var migrated = config
+
+        // v2: DoH providers moved from hostnames to IP literals. A forwarder
+        // cannot resolve `cloudflare-dns.com` on exactly the networks where it
+        // needs DoH, and filtered networks block the provider hostnames while
+        // passing their IPs. See `DNSSection.defaultDoHProviders`.
+        if previousVersion < 2, migrated.dohProviders == DNSSection.legacyHostnameDoHProviders {
+            migrated.dohProviders = DNSSection.defaultDoHProviders
+        }
+
+        return migrated
     }
 
     package static func save(_ config: ProxyConfig, to url: URL) throws {

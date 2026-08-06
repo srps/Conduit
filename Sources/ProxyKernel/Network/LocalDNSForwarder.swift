@@ -10,8 +10,12 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let onMetrics: (@Sendable (Int, Int, Int) -> Void)?
+    private let tcpIdleTimeoutSeconds: Int64
+    private let tcpMaximumConnections: Int
     private var channel: Channel?
-    private var handler: DNSForwardingHandler?
+    private var tcpChannel: Channel?
+    private var tcpConnections: DNSTCPConnectionRegistry?
+    private var core: DNSResolutionCore?
 
     package var listeningHost: String? {
         channel?.localAddress?.ipAddress
@@ -21,47 +25,117 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         channel?.localAddress?.port
     }
 
+    /// The TCP listener's port, or nil when only UDP is bound. Always equal to
+    /// `listeningPort` when present — see `start(host:port:)`.
+    package var tcpListeningPort: Int? {
+        tcpChannel?.localAddress?.port
+    }
+
     package init(
         group: EventLoopGroup,
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
-        onMetrics: (@Sendable (Int, Int, Int) -> Void)? = nil
+        onMetrics: (@Sendable (Int, Int, Int) -> Void)? = nil,
+        // Exposed only so tests can drive the "client waiting on a slow lookup
+        // must not be cut off" rule without a ten-second wait.
+        tcpIdleTimeoutSeconds: Int64 = DNSTCPHandler.defaultIdleTimeoutSeconds,
+        // Exposed only so tests can reach the cap without opening 64 sockets.
+        tcpMaximumConnections: Int = DNSTCPConnectionRegistry.defaultMaximumConnections
     ) {
         self.group = group
         self.logger = logger
         self.configProvider = configProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.onMetrics = onMetrics
+        self.tcpIdleTimeoutSeconds = tcpIdleTimeoutSeconds
+        self.tcpMaximumConnections = tcpMaximumConnections
     }
 
+    /// Binds UDP and TCP on the same port.
+    ///
+    /// Order matters: UDP binds first and TCP follows on whatever port UDP
+    /// actually got. With `port: 0` — used by `pm-proxy --dns-port 0` and by
+    /// the tests — binding both to 0 would land the two listeners on different
+    /// ephemeral ports, and a resolver client that retried over TCP would find
+    /// nothing there.
+    ///
+    /// A TCP bind failure is not fatal. UDP-only is what this forwarder shipped
+    /// as, and a resolver serving UDP is far more useful than one that refused
+    /// to start; the failure is logged rather than thrown.
     package func start(host: String, port: Int) async throws {
-        let h = DNSForwardingHandler(
+        let core = DNSResolutionCore(
             group: group,
             logger: logger,
             configProvider: configProvider,
             preferProxyPathForDoH: preferProxyPathForDoH,
             onMetrics: onMetrics
         )
-        self.handler = h
+        self.core = core
+
         let bootstrap = DatagramBootstrap(group: group)
             .channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .channelInitializer { channel in
-                channel.pipeline.addHandler(h)
+                channel.pipeline.addHandler(DNSUDPHandler(core: core))
             }
         channel = try await bootstrap.bind(host: host, port: port).get()
         let actualHost = channel?.localAddress?.ipAddress ?? host
         let actualPort = channel?.localAddress?.port ?? port
-        logger.log(.notice, "DNS forwarder listening on \(actualHost):\(actualPort).", category: .network)
+
+        let log = logger
+        let idleTimeout = tcpIdleTimeoutSeconds
+        let connections = DNSTCPConnectionRegistry(
+            maximumConnections: tcpMaximumConnections,
+            logger: logger
+        )
+        tcpConnections = connections
+        let tcpBootstrap = ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
+            .childChannelInitializer { channel in
+                guard connections.admit(channel) else {
+                    channel.close(promise: nil)
+                    return channel.eventLoop.makeSucceededVoidFuture()
+                }
+                channel.closeFuture.whenComplete { _ in connections.release(channel) }
+                return channel.pipeline.addHandler(
+                    DNSTCPHandler(core: core, logger: log, idleTimeoutSeconds: idleTimeout)
+                )
+            }
+        do {
+            tcpChannel = try await tcpBootstrap.bind(host: host, port: actualPort).get()
+            logger.log(.notice, "DNS forwarder listening on \(actualHost):\(actualPort) (UDP and TCP).", category: .network)
+        } catch {
+            logger.log(
+                .warning,
+                "DNS forwarder listening on \(actualHost):\(actualPort) (UDP only) — TCP bind failed: \(error.displayDescription). Clients that retry over TCP after a truncated answer will not reach it.",
+                category: .network
+            )
+            tcpConnections = nil
+        }
     }
 
     package func stop() async {
         if let channel {
             _ = try? await channel.close().get()
         }
+        if let tcpChannel {
+            _ = try? await tcpChannel.close().get()
+        }
         channel = nil
-        handler?.invalidateSessions()
-        handler = nil
+        tcpChannel = nil
+        // Closing a `ServerBootstrap` channel only stops accepting; the child
+        // channels it already accepted survive it, and each one holds the core
+        // — so a stopped forwarder would keep answering those clients from the
+        // cache, from internal DNS and from intercept rules until their idle
+        // window elapsed, and a restart would briefly run two resolvers with
+        // separate caches and metrics.
+        if let tcpConnections {
+            await tcpConnections.closeAll()
+        }
+        tcpConnections = nil
+        core?.invalidateSessions()
+        core = nil
         logger.log(.notice, "DNS forwarder stopped.", category: .network)
     }
 
@@ -82,11 +156,11 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     /// No-op when the forwarder is stopped (handler is nil). Safe to call
     /// from any actor context.
     package func resetUpstreamTransports(reason: String) {
-        guard let handler else {
+        guard let core else {
             logger.log(.debug, "DNS forwarder transports reset skipped (forwarder not running). reason=\(reason)", category: .network)
             return
         }
-        handler.resetUpstreamTransports()
+        core.resetUpstreamTransports()
         logger.log(.notice, "DNS forwarder transports reset (reason=\(reason)).", category: .network)
     }
 
@@ -95,7 +169,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     /// evict opportunistically). Used to verify `resetUpstreamTransports`
     /// flushes the cache.
     package var cachedResponseCount: Int {
-        handler?.cachedResponseCount ?? 0
+        core?.cachedResponseCount ?? 0
     }
 }
 
@@ -114,38 +188,19 @@ private struct DoHTransports: @unchecked Sendable {
     let localProxy: URLSession?
 
     init(config: ProxyConfig) {
-        let directConfig = URLSessionConfiguration.ephemeral
-        directConfig.timeoutIntervalForRequest = 4
-        directConfig.timeoutIntervalForResource = 8
-        directConfig.connectionProxyDictionary = [:]
-        self.direct = URLSession(configuration: directConfig)
+        self.direct = DoHSessionFactory.session(for: DoHSessionFactory.Route(proxy: nil))
 
         if let upstream = config.enabledUpstreams.first {
-            let proxyConfig = URLSessionConfiguration.ephemeral
-            proxyConfig.timeoutIntervalForRequest = 4
-            proxyConfig.timeoutIntervalForResource = 8
-            proxyConfig.connectionProxyDictionary = Self.proxyDictionary(host: upstream.host, port: upstream.port)
-            self.upstream = URLSession(configuration: proxyConfig)
+            self.upstream = DoHSessionFactory.session(
+                for: DoHSessionFactory.Route(proxy: (upstream.host, upstream.port))
+            )
         } else {
             self.upstream = nil
         }
 
-        let localConfig = URLSessionConfiguration.ephemeral
-        localConfig.timeoutIntervalForRequest = 4
-        localConfig.timeoutIntervalForResource = 8
-        localConfig.connectionProxyDictionary = Self.proxyDictionary(host: config.localHost, port: config.localPort)
-        self.localProxy = URLSession(configuration: localConfig)
-    }
-
-    private static func proxyDictionary(host: String, port: Int) -> [String: Any] {
-        [
-            kCFNetworkProxiesHTTPEnable as String: true,
-            kCFNetworkProxiesHTTPProxy as String: host,
-            kCFNetworkProxiesHTTPPort as String: port,
-            kCFProxyTypeHTTPS as String: true,
-            "HTTPSProxy" as String: host,
-            "HTTPSPort" as String: port,
-        ]
+        self.localProxy = DoHSessionFactory.session(
+            for: DoHSessionFactory.Route(proxy: (config.localHost, config.localPort))
+        )
     }
 
     func invalidate() {
@@ -222,10 +277,19 @@ private final class DoHTransportsHandle: @unchecked Sendable {
     }
 }
 
-private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = AddressedEnvelope<ByteBuffer>
-    typealias OutboundOut = AddressedEnvelope<ByteBuffer>
-
+/// The query→response engine, independent of how the query arrived.
+///
+/// UDP and TCP are two framings of the same protocol, and everything that makes
+/// an answer — intercept rules, the response cache, the internal-then-DoH
+/// ladder, the DoH transports and their reset contract, the metrics counters —
+/// must be *one* instance shared by both. Splitting that state per transport
+/// would give a TCP retry a cold cache and its own `URLSession` pool, and would
+/// make `resetUpstreamTransports` reset only half the forwarder.
+///
+/// `resolve(query:)` always answers when it possibly can: it returns SERVFAIL
+/// rather than nil for lookups that failed, and returns nil only for a query so
+/// malformed that no well-formed response can echo its question.
+private final class DNSResolutionCore: @unchecked Sendable {
     private let group: EventLoopGroup
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
@@ -235,7 +299,26 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
     private var queryCount = 0
     private var dohCount = 0
     private var cacheHitCount = 0
-    private let concurrencyLimit = DispatchSemaphore(value: 64)
+    /// Caps concurrent in-flight resolutions.
+    ///
+    /// A plain counter behind a lock, not a `DispatchSemaphore`: acquisition is
+    /// a non-blocking try (an over-limit query is answered SERVFAIL, never
+    /// queued), so the semaphore bought nothing, and `DispatchSemaphore.wait`
+    /// is unavailable from async contexts under Swift 6 — blocking a
+    /// cooperative-pool thread is exactly what it would do.
+    private static let maximumInFlightQueries = 64
+    private let inFlightQueries = NIOLockedValueBox(0)
+    /// A DoH outage is not per-query, but the warning that reports it is: one
+    /// browser page load asks for dozens of public names, and every one of them
+    /// would emit its own near-identical "all providers failed" line for a
+    /// single root cause. Report at most once per this interval, carrying the
+    /// count suppressed since the last report — the same shape as
+    /// `DNSTCPConnectionRegistry.refusalCountToReport()`.
+    private static let dohFailureReportInterval: TimeInterval = 5
+    private let dohFailureLock = NSLock()
+    private var dohFailuresSinceLastReport = 0
+    private var lastDoHFailureReport: Date?
+    private var lastDoHFailureSignature: [Int]?
     /// Swappable on `resetUpstreamTransports`. Reads via `currentHandle()`
     /// take the lock briefly, copy the reference out, release the lock —
     /// keeping the rest of the DoH path lock-free. Session invalidation is
@@ -301,6 +384,64 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
         responseCache.entryCount
     }
 
+    /// Non-blocking admission check. **Call this on the event loop, before
+    /// spawning a resolution task**, and pair every `true` with exactly one
+    /// `releaseQuery()`.
+    ///
+    /// The gate has to sit in front of task creation, not inside `resolve`.
+    /// Under a flood, checking inside means every datagram still allocates a
+    /// `Task` and captures its query buffer before being turned away, so the
+    /// queue of pending rejections grows without any configured bound — the
+    /// cap stops bounding the work and only bounds the concurrency of work
+    /// already committed to. Gating first is what the `DispatchSemaphore` this
+    /// replaced did from `channelRead`.
+    func admitQuery() -> Bool {
+        inFlightQueries.withLockedValue { count in
+            guard count < Self.maximumInFlightQueries else { return false }
+            count += 1
+            return true
+        }
+    }
+
+    func releaseQuery() {
+        inFlightQueries.withLockedValue { $0 -= 1 }
+    }
+
+    /// The answer for a query turned away by `admitQuery()`. Logs once and
+    /// hands back SERVFAIL so an overloaded forwarder still answers rather
+    /// than going silent — the failure mode this PR exists to remove.
+    func overLimitResponse(for query: [UInt8]) -> [UInt8]? {
+        let domain = DNSWireFormat.extractDomainName(from: query)
+        logger.log(.warning, "DNS: query limit reached, replying SERVFAIL for \(domain).", category: .network)
+        recordQuery(doh: false, cacheHit: false)
+        return DNSWireFormat.emptyServerFailureResponse(originalQuery: query)
+    }
+
+    /// Total-DoH-failure count since the last report (including this one), or
+    /// nil while the warning is still throttled.
+    ///
+    /// The observed-status set is part of the throttle key, not just the
+    /// message: "nothing was reachable" and "everything answered HTTP 403" are
+    /// different diagnoses, and a transition between them is exactly the moment
+    /// the log has to speak. A changed signature reports immediately; an
+    /// unchanged one waits out the interval.
+    private func doHFailureCountToReport(signature: [Int]) -> Int? {
+        dohFailureLock.withLock {
+            dohFailuresSinceLastReport += 1
+            let now = Date.now
+            if signature == lastDoHFailureSignature,
+               let lastDoHFailureReport,
+               now.timeIntervalSince(lastDoHFailureReport) < Self.dohFailureReportInterval {
+                return nil
+            }
+            lastDoHFailureReport = now
+            lastDoHFailureSignature = signature
+            let failures = dohFailuresSinceLastReport
+            dohFailuresSinceLastReport = 0
+            return failures
+        }
+    }
+
     private func recordQuery(doh: Bool, cacheHit: Bool) {
         let (q, d, c) = lock.withLock {
             queryCount += 1
@@ -311,12 +452,13 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
         onMetrics?(q, d, c)
     }
 
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let envelope = unwrapInboundIn(data)
-        let clientAddress = envelope.remoteAddress
-        var queryBuffer = envelope.data
-        let queryBytes = queryBuffer.readBytes(length: queryBuffer.readableBytes) ?? []
-        guard queryBytes.count >= 12 else { return }
+    /// Resolves one query. Never throws, and answers whenever a well-formed
+    /// answer is possible — see the type doc for why nil is so narrow.
+    ///
+    /// - Precondition: the caller holds a slot from `admitQuery()` and releases
+    ///   it with `releaseQuery()` once this returns.
+    func resolve(query queryBytes: [UInt8]) async -> [UInt8]? {
+        guard queryBytes.count >= 12 else { return nil }
 
         let domain = DNSWireFormat.extractDomainName(from: queryBytes)
         let config = configProvider()
@@ -325,105 +467,90 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
         let isInternal = DNSWireFormat.isInternalDomain(domain, config: config)
         let queryType = DNSWireFormat.extractQueryType(from: queryBytes)
         let cacheKey = DNSCacheKey(domain: domain.lowercased(), queryType: queryType)
-        let eventLoop = context.eventLoop
-        let channel = context.channel
 
         if let interceptIP = matchingInterceptIP(for: domain, config: config) {
+            recordQuery(doh: false, cacheHit: false)
             if let synth = DNSWireFormat.synthesizeDirectResponse(originalQuery: queryBytes, ip: interceptIP) {
-                recordQuery(doh: false, cacheHit: false)
                 logger.log(.debug, "DNS intercept: \(domain) → \(interceptIP)", category: .network)
-                eventLoop.execute {
-                    var buf = channel.allocator.buffer(capacity: synth.count)
-                    buf.writeBytes(synth)
-                    let reply = AddressedEnvelope(remoteAddress: clientAddress, data: buf)
-                    channel.writeAndFlush(reply, promise: nil)
-                }
+                return synth
             }
-            return
+            // Synthesis rejects queries it cannot echo faithfully (multi-question
+            // packets, malformed questions). Answering SERVFAIL beats the silent
+            // drop this used to be: the client learns immediately instead of
+            // waiting out its resolver timeout on a domain we deliberately own.
+            logger.log(
+                .warning,
+                "DNS: could not synthesize an intercept answer for \(domain); replying SERVFAIL.",
+                category: .network
+            )
+            return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
         }
 
         if !isInternal, let cachedResponse = responseCache.lookup(for: cacheKey, query: queryBytes) {
             recordQuery(doh: false, cacheHit: true)
-            eventLoop.execute {
-                var buf = channel.allocator.buffer(capacity: cachedResponse.count)
-                buf.writeBytes(cachedResponse)
-                let reply = AddressedEnvelope(remoteAddress: clientAddress, data: buf)
-                channel.writeAndFlush(reply, promise: nil)
-            }
-            return
+            return cachedResponse
         }
 
-        let forwarder = self
-        guard concurrencyLimit.wait(timeout: .now()) == .success else {
-            logger.log(.warning, "DNS: query limit reached, dropping query for \(domain).", category: .network)
-            return
-        }
-        Task { @Sendable in
-            defer { forwarder.concurrencyLimit.signal() }
-            var response: [UInt8]?
-            var usedDoH = false
+        var response: [UInt8]?
+        var usedDoH = false
 
-            if isInternal {
-                response = await forwarder.forwardUDP(query: queryBytes, server: primaryDNS, port: 53, timeoutMS: 2000)
-            } else {
-                let internalResponse = await forwarder.forwardUDP(
-                    query: queryBytes, server: primaryDNS, port: 53, timeoutMS: 1500
-                )
-                if DNSWireFormat.shouldFallbackToPublicDoH(internalResponse: internalResponse) {
-                    forwarder.logger.log(.debug, "DNS: \(domain) not resolved internally, trying DoH.", category: .network)
-                    let dohResponse = await forwarder.resolveViaDoH(query: queryBytes, config: config)
-                    if let dohResponse {
-                        // DoH found an answer. Prefer it: the corporate
-                        // server's NXDOMAIN was just "I don't know about
-                        // this name", not authoritative.
-                        response = dohResponse
-                        usedDoH = true
-                    } else {
-                        // DoH failed (no providers reachable, all timed
-                        // out, or the upstream proxy is down). Fall back
-                        // to whatever the corporate DNS gave us — even an
-                        // NXDOMAIN is a definitive answer the client can
-                        // act on. Without this, the client gets no reply
-                        // at all and the browser surfaces a misleading
-                        // ERR_NAME_NOT_RESOLVED / DNS-timeout. The wake/
-                        // VPN-recovery `resetUpstreamTransports` path
-                        // exists precisely so the *next* DoH lookup
-                        // succeeds; this fallback keeps the current one
-                        // useful in the meantime.
-                        response = internalResponse
-                    }
+        if isInternal {
+            response = await forwardUDP(query: queryBytes, server: primaryDNS, port: 53, timeoutMS: 2000)
+        } else {
+            let internalResponse = await forwardUDP(
+                query: queryBytes, server: primaryDNS, port: 53, timeoutMS: 1500
+            )
+            if DNSWireFormat.shouldFallbackToPublicDoH(internalResponse: internalResponse) {
+                logger.log(.debug, "DNS: \(domain) not resolved internally, trying DoH.", category: .network)
+                let dohResponse = await resolveViaDoH(query: queryBytes, config: config)
+                if let dohResponse {
+                    // DoH found an answer. Prefer it: the corporate
+                    // server's NXDOMAIN was just "I don't know about
+                    // this name", not authoritative.
+                    response = dohResponse
+                    usedDoH = true
                 } else {
+                    // DoH failed (no providers reachable, all timed
+                    // out, blocked by a filtering proxy, or the upstream
+                    // proxy is down). Fall back to whatever the corporate
+                    // DNS gave us — even an NXDOMAIN is a definitive
+                    // answer the client can act on. Without this, the
+                    // client gets no reply at all and the browser
+                    // surfaces a misleading ERR_NAME_NOT_RESOLVED /
+                    // DNS-timeout. The wake/VPN-recovery
+                    // `resetUpstreamTransports` path exists precisely so
+                    // the *next* DoH lookup succeeds; this fallback keeps
+                    // the current one useful in the meantime.
                     response = internalResponse
                 }
-            }
-
-            forwarder.recordQuery(doh: usedDoH, cacheHit: false)
-
-            guard let responseBytes = response, !responseBytes.isEmpty else {
-                forwarder.logger.log(.warning, "DNS: failed to resolve \(domain).", category: .network)
-                return
-            }
-
-            guard DNSWireFormat.responseQuestionMatches(query: queryBytes, response: responseBytes) else {
-                forwarder.logger.log(
-                    .warning,
-                    "DNS: discarded mismatched response for \(domain).",
-                    category: .network
-                )
-                return
-            }
-
-            if !isInternal {
-                forwarder.cacheResponse(responseBytes, for: cacheKey, matching: queryBytes)
-            }
-
-            eventLoop.execute {
-                var buf = channel.allocator.buffer(capacity: responseBytes.count)
-                buf.writeBytes(responseBytes)
-                let reply = AddressedEnvelope(remoteAddress: clientAddress, data: buf)
-                channel.writeAndFlush(reply, promise: nil)
+            } else {
+                response = internalResponse
             }
         }
+
+        recordQuery(doh: usedDoH, cacheHit: false)
+
+        guard let responseBytes = response, !responseBytes.isEmpty else {
+            logger.log(.warning, "DNS: failed to resolve \(domain); replying SERVFAIL.", category: .network)
+            return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
+        }
+
+        guard DNSWireFormat.responseQuestionMatches(query: queryBytes, response: responseBytes) else {
+            // Keep this visible: a response whose question does not match the
+            // query is a possible spoof, not just a failure.
+            logger.log(
+                .warning,
+                "DNS: discarded mismatched response for \(domain); replying SERVFAIL.",
+                category: .network
+            )
+            return DNSWireFormat.emptyServerFailureResponse(originalQuery: queryBytes)
+        }
+
+        if !isInternal {
+            cacheResponse(responseBytes, for: cacheKey, matching: queryBytes)
+        }
+
+        return responseBytes
     }
 
     private func forwardUDP(query: [UInt8], server: String, port: Int, timeoutMS: Int) async -> [UInt8]? {
@@ -469,12 +596,24 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
             return DNSWireFormat.emptyRefusedResponse(originalQuery: query)
         }
 
+        // The empty-list fallback must be the shipped default, not a literal:
+        // a hardcoded hostname here is unreachable on exactly the networks
+        // this fallback exists for. See `DNSSection.defaultDoHProviders`.
         let providers = config.dohProviders.isEmpty
-            ? ["https://cloudflare-dns.com/dns-query"]
+            ? DNSSection.defaultDoHProviders
             : config.dohProviders
 
         let domain = DNSWireFormat.extractDomainName(from: query)
-            .addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? DNSWireFormat.extractDomainName(from: query)
+        let encodedDomain = domain.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? domain
+
+        // Every DoH attempt that reaches a server records its HTTP status here.
+        // When they all fail this is the only evidence of *why* — and the
+        // distinction matters enormously: an empty set means nothing was
+        // reachable, while a uniform 404/403/200-not-a-DNS-answer across every
+        // provider means something answered on their behalf, i.e. a filtering
+        // proxy is intercepting DoH. Without this the failure is 18 silent nils
+        // and an NXDOMAIN the user cannot account for.
+        let observedStatuses = NIOLockedValueBox<Set<Int>>([])
 
         // Snapshot the current transport handle and hold a use window open for
         // the duration of this query. A concurrent `resetUpstreamTransports`/
@@ -497,15 +636,21 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
         // `withTaskGroup` awaits all children before returning (including
         // after the early-exit `cancelAll`), so no fetch outlives the use
         // window closed by the `defer` above.
-        return await withTaskGroup(of: [UInt8]?.self) { group in
+        let answer: [UInt8]? = await withTaskGroup(of: [UInt8]?.self) { group -> [UInt8]? in
             for provider in providers {
-                let dohURL = "\(provider)?name=\(domain)&type=\(typeName)"
+                let dohURL = "\(provider)?name=\(encodedDomain)&type=\(typeName)"
                 for session in sessions {
                     group.addTask {
-                        await Self.tryDoHJSONFetch(dohURL: dohURL, session: session, query: query, queryType: qtype)
+                        await Self.tryDoHJSONFetch(
+                            dohURL: dohURL, session: session, query: query,
+                            queryType: qtype, statuses: observedStatuses
+                        )
                     }
                     group.addTask {
-                        await Self.tryDoHWireFetch(provider: provider, session: session, query: query)
+                        await Self.tryDoHWireFetch(
+                            provider: provider, session: session, query: query,
+                            statuses: observedStatuses
+                        )
                     }
                 }
             }
@@ -517,17 +662,45 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
             }
             return nil
         }
+
+        if answer == nil {
+            let statuses = observedStatuses.withLockedValue { $0 }.sorted()
+            if let failures = doHFailureCountToReport(signature: statuses) {
+                let detail = statuses.isEmpty
+                    ? "no HTTP response at all — the providers were unreachable, timed out, or their hostnames did not resolve"
+                    : "every attempt answered HTTP \(statuses.map(String.init).joined(separator: "/")) instead of a DNS payload, which is what a DoH-blocking proxy looks like"
+                let alsoFailed = failures > 1
+                    ? " (and \(failures - 1) other name(s) since the last such warning)"
+                    : ""
+                logger.log(
+                    .warning,
+                    "DNS: all \(providers.count) DoH provider(s) failed for \(domain)\(alsoFailed) — \(detail). Public names cannot be resolved until a reachable provider is configured (IP-literal endpoints avoid both failure modes).",
+                    category: .network
+                )
+            }
+        }
+
+        return answer
     }
 
-    private static func tryDoHJSONFetch(dohURL: String, session: URLSession, query: [UInt8], queryType: UInt16) async -> [UInt8]? {
+    private static func tryDoHJSONFetch(
+        dohURL: String,
+        session: URLSession,
+        query: [UInt8],
+        queryType: UInt16,
+        statuses: NIOLockedValueBox<Set<Int>>
+    ) async -> [UInt8]? {
         guard let url = URL(string: dohURL) else { return nil }
         var request = URLRequest(url: url)
         request.setValue("application/dns-json", forHTTPHeaderField: "Accept")
 
         guard let (data, response) = try? await session.data(for: request),
-              let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200,
-              !data.isEmpty else {
+              let httpResponse = response as? HTTPURLResponse else {
+            return nil
+        }
+        statuses.withLockedValue { _ = $0.insert(httpResponse.statusCode) }
+
+        guard httpResponse.statusCode == 200, !data.isEmpty else {
             return nil
         }
 
@@ -538,7 +711,12 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
     /// RFC 8484 wire-format DoH (POST `application/dns-message`). Some VPN /
     /// proxy paths block dns-json GET but still tunnel binary DoH through the
     /// corporate HTTP proxy.
-    private static func tryDoHWireFetch(provider: String, session: URLSession, query: [UInt8]) async -> [UInt8]? {
+    private static func tryDoHWireFetch(
+        provider: String,
+        session: URLSession,
+        query: [UInt8],
+        statuses: NIOLockedValueBox<Set<Int>>
+    ) async -> [UInt8]? {
         guard let url = URL(string: provider) else { return nil }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -547,9 +725,12 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
         request.httpBody = Data(query)
 
         guard let (data, response) = try? await session.data(for: request),
-              let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200,
-              data.count >= 12 else {
+              let httpResponse = response as? HTTPURLResponse else {
+            return nil
+        }
+        statuses.withLockedValue { _ = $0.insert(httpResponse.statusCode) }
+
+        guard httpResponse.statusCode == 200, data.count >= 12 else {
             return nil
         }
 
@@ -583,6 +764,323 @@ private final class DNSForwardingHandler: ChannelInboundHandler, @unchecked Send
 
         guard let ttl else { return }
         responseCache.store(response, for: key, ttl: ttl)
+    }
+}
+
+/// UDP framing: one datagram in, one datagram out.
+private final class DNSUDPHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = AddressedEnvelope<ByteBuffer>
+    typealias OutboundOut = AddressedEnvelope<ByteBuffer>
+
+    private let core: DNSResolutionCore
+
+    init(core: DNSResolutionCore) {
+        self.core = core
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let envelope = unwrapInboundIn(data)
+        let clientAddress = envelope.remoteAddress
+        var queryBuffer = envelope.data
+        let queryBytes = queryBuffer.readBytes(length: queryBuffer.readableBytes) ?? []
+        let eventLoop = context.eventLoop
+        let channel = context.channel
+        let core = self.core
+
+        // Too short to carry a DNS header, so there is nothing to answer and no
+        // ID to answer it with. Reject before admission, not inside `resolve`:
+        // a garbage datagram must not cost an admission slot and a task spawn,
+        // or a flood of them fills all 64 slots with no-op tasks and real
+        // queries start getting SERVFAIL'd. TCP needs no equivalent — its
+        // length-prefix framing rejects malformed input earlier still.
+        guard queryBytes.count >= 12 else { return }
+
+        // Admission first, on the event loop: a flood must be turned away
+        // before it can allocate a task each. See `admitQuery()`.
+        guard core.admitQuery() else {
+            if let servfail = core.overLimitResponse(for: queryBytes) {
+                write(servfail, to: clientAddress, on: channel)
+            }
+            return
+        }
+
+        Task { @Sendable in
+            let response = await core.resolve(query: queryBytes)
+            core.releaseQuery()
+            guard let response else { return }
+            eventLoop.execute {
+                Self.write(response, to: clientAddress, on: channel)
+            }
+        }
+    }
+
+    private func write(_ response: [UInt8], to address: SocketAddress, on channel: Channel) {
+        Self.write(response, to: address, on: channel)
+    }
+
+    private static func write(_ response: [UInt8], to address: SocketAddress, on channel: Channel) {
+        var buf = channel.allocator.buffer(capacity: response.count)
+        buf.writeBytes(response)
+        channel.writeAndFlush(AddressedEnvelope(remoteAddress: address, data: buf), promise: nil)
+    }
+}
+
+/// The set of accepted DNS-over-TCP connections, bounded and closable.
+///
+/// It exists for two reasons a `ServerBootstrap` channel alone cannot cover:
+///
+/// - **A cap.** Every accepted connection costs an accumulation buffer (up to
+///   `DNSTCPHandler.maximumMessageBytes`), a scheduled timer and a descriptor,
+///   held for the whole idle window even if the client never sends a byte. UDP
+///   has no equivalent exposure because a datagram leaves no per-peer state.
+///   The in-flight resolution cap bounds concurrent *lookups*, not sockets.
+/// - **Shutdown reach.** Closing the listener stops accepts; it does not close
+///   the children, and each child keeps the resolution core alive.
+private final class DNSTCPConnectionRegistry: @unchecked Sendable {
+    /// A resolver client opens a connection, asks, and goes away, so the steady
+    /// state is a handful. This is generous for legitimate use and still bounds
+    /// what an abusive local client can pin.
+    static let defaultMaximumConnections = 64
+
+    /// A connection flood must not become a log flood: refusals are reported at
+    /// most this often, and the message carries the count since the last one.
+    private static let rejectionReportInterval: TimeInterval = 5
+
+    private let maximumConnections: Int
+    private let logger: any LogSink
+    private let lock = NSLock()
+    private var openChannels: [ObjectIdentifier: Channel] = [:]
+    private var shuttingDown = false
+    private var refusedSinceLastReport = 0
+    private var lastRejectionReport: Date?
+
+    init(maximumConnections: Int, logger: any LogSink) {
+        self.maximumConnections = maximumConnections
+        self.logger = logger
+    }
+
+    /// Records an accepted connection. Returns false when the cap is reached or
+    /// the forwarder is shutting down — the caller must close the channel.
+    func admit(_ channel: Channel) -> Bool {
+        let decision: (admitted: Bool, refused: Int?, shuttingDown: Bool) = lock.withLock {
+            guard !shuttingDown, openChannels.count < maximumConnections else {
+                refusedSinceLastReport += 1
+                return (false, refusalCountToReport(), shuttingDown)
+            }
+            openChannels[ObjectIdentifier(channel)] = channel
+            return (true, nil, false)
+        }
+
+        if decision.admitted { return true }
+        if let refused = decision.refused {
+            if decision.shuttingDown {
+                logger.log(
+                    .debug,
+                    "DNS TCP: refused \(refused) connection(s) — the forwarder is shutting down.",
+                    category: .network
+                )
+            } else {
+                logger.log(
+                    .warning,
+                    "DNS TCP: refused \(refused) connection(s); the \(maximumConnections)-connection cap is already reached. A client holding sockets open without querying can cause this.",
+                    category: .network
+                )
+            }
+        }
+        return false
+    }
+
+    /// Refusals accumulated since the last report, or nil while still inside the
+    /// reporting interval. Caller holds the lock.
+    private func refusalCountToReport() -> Int? {
+        let now = Date.now
+        if let lastRejectionReport, now.timeIntervalSince(lastRejectionReport) < Self.rejectionReportInterval {
+            return nil
+        }
+        lastRejectionReport = now
+        let refused = refusedSinceLastReport
+        refusedSinceLastReport = 0
+        return refused
+    }
+
+    func release(_ channel: Channel) {
+        lock.withLock { _ = openChannels.removeValue(forKey: ObjectIdentifier(channel)) }
+    }
+
+    /// Closes every accepted connection and refuses later ones. Called from
+    /// `LocalDNSForwarder.stop()` after the listener is down.
+    func closeAll() async {
+        let open: [Channel] = lock.withLock {
+            shuttingDown = true
+            let values = Array(openChannels.values)
+            openChannels.removeAll()
+            return values
+        }
+        for channel in open {
+            _ = try? await channel.close().get()
+        }
+    }
+}
+
+/// TCP framing per RFC 1035 §4.2.2: every message, in both directions, is
+/// preceded by its length as a 2-byte big-endian integer. One connection may
+/// carry several queries back to back, so reads are accumulated and drained
+/// message by message rather than assumed to arrive one per `channelRead`.
+private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias OutboundOut = ByteBuffer
+
+    /// The length prefix permits 64 KiB, but a query is one question plus a few
+    /// EDNS options and never approaches that. The cap is what stops a client
+    /// from making us buffer 64 KiB per connection by announcing a length it
+    /// then dribbles out or never sends.
+    static let maximumMessageBytes = 4096
+
+    /// A resolver client sends its query immediately on connect. A connection
+    /// still silent after this — with nothing outstanding — has gone away or is
+    /// holding a socket for no reason.
+    ///
+    /// Enforced by our own timer rather than `IdleStateHandler` for two
+    /// reasons: that type's `Sendable` conformance is unavailable, so adding it
+    /// to a pipeline from a `@Sendable` initializer warns; and it measures only
+    /// inbound silence, which for DNS-over-TCP is indistinguishable between "the
+    /// client is gone" and "the client asked a question and is waiting". Only
+    /// the handler knows which, so the handler owns the timer.
+    static let defaultIdleTimeoutSeconds: Int64 = 10
+
+    private let core: DNSResolutionCore
+    private let logger: any LogSink
+    private let idleTimeoutSeconds: Int64
+    private var pending: ByteBuffer?
+
+    /// Lookups spawned from this connection that have not written yet.
+    /// Event-loop confined: incremented in `respond` (reached from
+    /// `channelRead`) and decremented in the write hop, both on the loop.
+    private var outstandingQueries = 0
+    private var idleTask: Scheduled<Void>?
+
+    init(core: DNSResolutionCore, logger: any LogSink, idleTimeoutSeconds: Int64) {
+        self.core = core
+        self.logger = logger
+        self.idleTimeoutSeconds = idleTimeoutSeconds
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        armIdleTimer(on: context.eventLoop, channel: context.channel)
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        idleTask?.cancel()
+        idleTask = nil
+    }
+
+    /// (Re)starts the silence countdown. Rearmed on every read and every
+    /// answer written, so the window measures time since the last thing that
+    /// happened on this connection.
+    private func armIdleTimer(on loop: EventLoop, channel: Channel) {
+        idleTask?.cancel()
+        idleTask = loop.scheduleTask(in: .seconds(idleTimeoutSeconds)) { [weak self] in
+            guard let self else { return }
+            // A client waiting on an answer is legitimately silent. A worst-case
+            // resolution (1.5 s internal attempt, then a DoH race bounded by the
+            // 4 s / 8 s session timeouts) runs right up against this window, so
+            // closing here would discard the answer mid-flight and hand the
+            // client the exact silence this forwarder exists to avoid.
+            guard self.outstandingQueries == 0 else {
+                self.armIdleTimer(on: loop, channel: channel)
+                return
+            }
+            channel.close(promise: nil)
+        }
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        armIdleTimer(on: context.eventLoop, channel: context.channel)
+        var incoming = unwrapInboundIn(data)
+        if pending == nil {
+            pending = incoming
+        } else {
+            pending?.writeBuffer(&incoming)
+        }
+        drain(context: context)
+    }
+
+    /// Peels off every complete message currently buffered. Returns as soon as
+    /// the buffer holds only a partial one — the next read resumes here.
+    private func drain(context: ChannelHandlerContext) {
+        while var buffer = pending {
+            guard let length = buffer.getInteger(at: buffer.readerIndex, as: UInt16.self) else { return }
+
+            guard Int(length) <= Self.maximumMessageBytes else {
+                logger.log(
+                    .warning,
+                    "DNS TCP: announced message length \(length) exceeds the \(Self.maximumMessageBytes)-byte cap; closing the connection.",
+                    category: .network
+                )
+                pending = nil
+                context.close(promise: nil)
+                return
+            }
+
+            guard buffer.readableBytes >= 2 + Int(length) else { return }
+            buffer.moveReaderIndex(forwardBy: 2)
+            let queryBytes = buffer.readBytes(length: Int(length)) ?? []
+            pending = buffer.readableBytes > 0 ? buffer : nil
+            respond(to: queryBytes, context: context)
+        }
+    }
+
+    private func respond(to queryBytes: [UInt8], context: ChannelHandlerContext) {
+        let eventLoop = context.eventLoop
+        let channel = context.channel
+        let core = self.core
+        let logger = self.logger
+
+        // Admission first, on the event loop. See `DNSResolutionCore.admitQuery()`.
+        guard core.admitQuery() else {
+            if let servfail = core.overLimitResponse(for: queryBytes) {
+                Self.write(servfail, on: channel, logger: logger)
+            }
+            return
+        }
+
+        outstandingQueries += 1
+        Task { @Sendable in
+            let response = await core.resolve(query: queryBytes)
+            core.releaseQuery()
+            eventLoop.execute { [weak self] in
+                self?.outstandingQueries -= 1
+                self?.armIdleTimer(on: eventLoop, channel: channel)
+                guard let response else { return }
+                Self.write(response, on: channel, logger: logger)
+            }
+        }
+    }
+
+    private static func write(_ response: [UInt8], on channel: Channel, logger: any LogSink) {
+        guard response.count <= Int(UInt16.max) else {
+            logger.log(
+                .warning,
+                "DNS TCP: response of \(response.count) bytes exceeds the wire framing limit; dropping it.",
+                category: .network
+            )
+            return
+        }
+        var out = channel.allocator.buffer(capacity: response.count + 2)
+        out.writeInteger(UInt16(response.count))
+        out.writeBytes(response)
+        channel.writeAndFlush(out, promise: nil)
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        // Never close silently: this is the only trace an operator gets when a
+        // DNS-over-TCP connection fails (AGENTS.md, "never swallow an error").
+        logger.log(
+            .warning,
+            "DNS TCP: connection error, closing: \(error.displayDescription)",
+            category: .network
+        )
+        context.close(promise: nil)
     }
 }
 

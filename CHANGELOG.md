@@ -1,8 +1,39 @@
 # Changelog
 
-All notable changes to Conduit. This is the pre-release development history that
-precedes the first public `0.1`; entries are grouped by theme, newest first. Forward-looking
-plans live in [`ROADMAP.md`](./ROADMAP.md).
+All notable changes to Conduit. Released versions come first; below them is the
+pre-release development history that precedes the first public `0.1`, grouped by theme.
+Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
+
+## 0.1.1
+
+Makes the DNS forwarder usable as a resolver on a split-DNS corporate network, where
+internal DNS answers NXDOMAIN for public names and the DoH fallback meant to cover that
+was itself unreachable.
+
+- Addressed the default DoH providers by IP literal (`1.1.1.1`, `9.9.9.9`, `8.8.8.8`) instead
+  of hostname, with a schema-2 migration for configs still carrying the untouched hostname
+  list. A fallback resolver named by hostname needs working DNS to obtain working DNS, and on
+  a split-DNS network those hostnames are exactly the names that will not resolve. IP literals
+  also sidestep URL-category filtering: all three shipped providers were observed serving a
+  proxy's 404 block page while their IPs answered DNS normally.
+- Made the forwarder log a total DoH failure instead of swallowing it, once, with the distinct
+  HTTP statuses observed. A uniform status across every provider is a filtering proxy
+  answering on their behalf; no status at all means nothing was reachable.
+- Extended the origin resolver behind the transparent proxy's direct relay path to try the
+  proxied routes as well as a direct dial. It was direct-only, and a direct dial to a public
+  resolver is dropped under a full-tunnel VPN, the one condition in which that path runs.
+- Answered SERVFAIL on the four DNS failure paths that previously returned nothing at all
+  (intercept synthesis failure, unresolvable name, question mismatch, query-limit rejection).
+  A client that gets no datagram waits out its own timeout and reports a dead forwarder rather
+  than a failed lookup.
+- Served DNS over TCP alongside UDP on the same port, with RFC 1035 §4.2.2 length-prefix
+  framing, a 4 KiB message cap and an idle timeout. Clients may open with TCP and must retry
+  over it after a truncated answer; `dig +tcp` was previously met with `connection refused`.
+  Accepted connections are bounded (64) and closed when the forwarder stops, since closing a
+  listener socket does not close its children.
+- Internally, resolution moved into a transport-independent `DNSResolutionCore` so UDP and TCP
+  share one cache, one URLSession pool and one metrics counter, and `DoHSessionFactory` absorbs
+  the session construction both DoH clients duplicated.
 
 ## Unreleased (pre-0.1)
 

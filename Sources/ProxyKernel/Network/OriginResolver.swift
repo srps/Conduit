@@ -56,15 +56,16 @@ package final class DoHOriginResolver: OriginResolving {
     private static let maximumEntries = 256
     private static let maximumTTL: TimeInterval = 300
     private static let fallbackTTL: TimeInterval = 60
-    private static let requestTimeout: TimeInterval = 4
 
     private let logger: any LogSink
-    private let dohProviders: @Sendable () -> [String]
+    private let configProvider: @Sendable () -> ProxyConfig
     private let cache = NIOLockedValueBox<[String: CacheEntry]>([:])
 
-    package init(logger: any LogSink, dohProviders: @escaping @Sendable () -> [String]) {
+    /// Takes the whole config, not just the provider list: reaching a DoH
+    /// provider needs the proxy routes too (see `DoHSessionFactory.routes`).
+    package init(logger: any LogSink, configProvider: @escaping @Sendable () -> ProxyConfig) {
         self.logger = logger
-        self.dohProviders = dohProviders
+        self.configProvider = configProvider
     }
 
     package func resolveOrigin(host: String, port: Int, on eventLoop: EventLoop) -> EventLoopFuture<SocketAddress> {
@@ -74,10 +75,10 @@ package final class DoHOriginResolver: OriginResolving {
             return eventLoop.makeCompletedFuture { try Self.address(ip: ip, port: port, host: host) }
         }
 
-        let providers = dohProviders()
+        let config = configProvider()
         let promise = eventLoop.makePromise(of: SocketAddress.self)
         Task { [self] in
-            guard let answer = await lookupA(host: key, providers: providers) else {
+            guard let answer = await lookupA(host: key, config: config) else {
                 promise.fail(OriginResolverError.unresolved(host: host))
                 return
             }
@@ -140,23 +141,36 @@ package final class DoHOriginResolver: OriginResolving {
     /// A records only. The transparent proxy binds an IPv4 loopback listener and
     /// its clients reached it over IPv4, so an IPv6 origin buys nothing here.
     ///
-    /// Every provider is tried in both encodings, first usable answer wins.
-    /// Neither encoding is universal: of the three providers shipped in the
-    /// default config, only Cloudflare answers `dns-json` on `/dns-query`
-    /// (quad9 and dns.google reply `400`), while all three accept RFC 8484
-    /// wire format. A JSON-only resolver would work today purely because
-    /// Cloudflare is listed first, and would fail closed — i.e. black-hole the
-    /// intercepted connection — the moment someone reordered the list. Same
-    /// reasoning as `DNSForwardingHandler.resolveViaDoH`.
-    private func lookupA(host: String, providers: [String]) async -> (ip: String, ttl: TimeInterval)? {
-        let providers = providers.isEmpty ? ["https://cloudflare-dns.com/dns-query"] : providers
+    /// Every provider is tried in both encodings over every route, first usable
+    /// answer wins.
+    ///
+    /// Neither encoding is universal: Quad9 and dns.google reply `400` to
+    /// `dns-json` GETs while accepting RFC 8484 wire format. A JSON-only
+    /// resolver would work purely because Cloudflare happens to be listed
+    /// first, and would fail closed — black-holing the intercepted connection —
+    /// the moment someone reordered the list.
+    ///
+    /// Neither is the *route* universal, which is why this fans out over
+    /// `DoHSessionFactory.routes` rather than dialling directly. This resolver
+    /// runs on exactly the networks where a direct dial to a public resolver is
+    /// dropped: under a full-tunnel VPN, direct 443 to a DoH endpoint times out
+    /// while the same request through the corporate proxy succeeds. Direct-only
+    /// meant the transparent proxy's direct path silently black-holed there.
+    /// Same reasoning as `DNSResolutionCore.resolveViaDoH`.
+    private func lookupA(host: String, config: ProxyConfig) async -> (ip: String, ttl: TimeInterval)? {
+        let providers = config.dohProviders.isEmpty
+            ? DNSSection.defaultDoHProviders
+            : config.dohProviders
+        let routes = DoHSessionFactory.routes(for: config)
         let encoded = host.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? host
         let query = DNSWireFormat.buildQuery(domain: host, qtype: 1)
 
         return await withTaskGroup(of: (ip: String, ttl: TimeInterval)?.self) { group in
             for provider in providers {
-                group.addTask { await Self.fetchJSON(url: "\(provider)?name=\(encoded)&type=A") }
-                group.addTask { await Self.fetchWire(provider: provider, query: query) }
+                for route in routes {
+                    group.addTask { await Self.fetchJSON(url: "\(provider)?name=\(encoded)&type=A", route: route) }
+                    group.addTask { await Self.fetchWire(provider: provider, query: query, route: route) }
+                }
             }
             for await result in group {
                 if let result {
@@ -168,22 +182,11 @@ package final class DoHOriginResolver: OriginResolving {
         }
     }
 
-    /// A short-lived session per request. See the type doc: nothing to reset on
-    /// wake, and no invalidate-while-in-flight hazard.
-    private static func session() -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = requestTimeout
-        configuration.timeoutIntervalForResource = requestTimeout * 2
-        // Empty, not nil: nil inherits the system proxy settings, which point at
-        // Conduit's own listener. The DoH lookup would then be proxied through
-        // the process trying to perform it.
-        configuration.connectionProxyDictionary = [:]
-        return URLSession(configuration: configuration)
-    }
-
-    private static func fetchJSON(url: String) async -> (ip: String, ttl: TimeInterval)? {
+    private static func fetchJSON(url: String, route: DoHSessionFactory.Route) async -> (ip: String, ttl: TimeInterval)? {
         guard let url = URL(string: url) else { return nil }
-        let session = session()
+        // A short-lived session per request. See the type doc: nothing to reset
+        // on wake, and no invalidate-while-in-flight hazard.
+        let session = DoHSessionFactory.session(for: route)
         defer { session.finishTasksAndInvalidate() }
 
         var request = URLRequest(url: url)
@@ -210,9 +213,9 @@ package final class DoHOriginResolver: OriginResolving {
     }
 
     /// RFC 8484 wire format (`POST application/dns-message`).
-    private static func fetchWire(provider: String, query: [UInt8]) async -> (ip: String, ttl: TimeInterval)? {
+    private static func fetchWire(provider: String, query: [UInt8], route: DoHSessionFactory.Route) async -> (ip: String, ttl: TimeInterval)? {
         guard let url = URL(string: provider) else { return nil }
-        let session = session()
+        let session = DoHSessionFactory.session(for: route)
         defer { session.finishTasksAndInvalidate() }
 
         var request = URLRequest(url: url)
