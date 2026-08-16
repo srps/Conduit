@@ -30,6 +30,36 @@ package final class AuditingPrivilegeClient: PrivilegeClient, @unchecked Sendabl
         }
     }
 
+    /// Batches are audited step by step but executed as one unit, so the audit
+    /// trail is identical to the looping default while the elevation is not.
+    /// Without this override the batch path would inherit the protocol default,
+    /// which calls `execute(_:values:)` on `self` — auditing correctly, but
+    /// losing the single-prompt property the batch exists for.
+    package func execute(batch: [PrivilegedBatchStep]) throws {
+        guard !batch.isEmpty else { return }
+        for step in batch {
+            emit(operation: step.operation, outcome: "requested", valueCount: step.values.count)
+        }
+        do {
+            try base.execute(batch: batch)
+            for step in batch {
+                emit(operation: step.operation, outcome: "succeeded", valueCount: step.values.count)
+            }
+        } catch {
+            // Which step failed is not observable through a batched elevation,
+            // so every step is reported failed rather than guessing.
+            for step in batch {
+                emit(
+                    operation: step.operation,
+                    outcome: "failed",
+                    valueCount: step.values.count,
+                    error: error.displayDescription
+                )
+            }
+            throw error
+        }
+    }
+
     private func emit(
         operation: PrivilegedOperation,
         outcome: String,

@@ -106,7 +106,9 @@ final class DaemonRuntimeHost {
             )
         )
         self.vpnFlapWindowBox = flapBox
-        self.privilegeClient = privilegeClient ?? HelperToolPrivilegeClient()
+        self.privilegeClient = privilegeClient ?? HelperToolPrivilegeClient(
+            eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) }
+        )
         self.auditedPrivilegeClient = AuditingPrivilegeClient(
             base: self.privilegeClient,
             eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) }

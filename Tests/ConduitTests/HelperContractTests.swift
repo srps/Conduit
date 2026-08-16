@@ -240,6 +240,102 @@ final class HelperContractTests: XCTestCase {
         XCTAssertFalse(client.ping())
     }
 
+    // MARK: - Restore operations
+
+    func testRestoreCommandsExist() {
+        XCTAssertNotNil(HelperCommand(rawValue: "set-web-proxy-endpoint"))
+        XCTAssertNotNil(HelperCommand(rawValue: "set-autoproxy"))
+    }
+
+    /// Bypass entries were the one helper argument that reached `networksetup`
+    /// unvalidated, because they are not domains — `*.local` and `169.254/16`
+    /// are both real and neither passes `validateDomain`. That called for its
+    /// own rule, not an exemption from the trust boundary.
+    func testValidateProxyBypassEntryAcceptsRealWorldEntries() {
+        XCTAssertTrue(HelperInputValidator.validateProxyBypassEntry("*.local"))
+        XCTAssertTrue(HelperInputValidator.validateProxyBypassEntry("169.254/16"))
+        XCTAssertTrue(HelperInputValidator.validateProxyBypassEntry("*.corp.example"))
+        XCTAssertTrue(HelperInputValidator.validateProxyBypassEntry(".example.com"))
+        XCTAssertTrue(HelperInputValidator.validateProxyBypassEntry("10.0.0.1"))
+    }
+
+    func testValidateProxyBypassEntryRejectsArgumentInjection() {
+        // These reach networksetup as argv, so a leading dash is the one shape
+        // that changes what the command does.
+        XCTAssertFalse(HelperInputValidator.validateProxyBypassEntry("-setwebproxystate"))
+        XCTAssertFalse(HelperInputValidator.validateProxyBypassEntry(""))
+        XCTAssertFalse(HelperInputValidator.validateProxyBypassEntry("has space"))
+        XCTAssertFalse(HelperInputValidator.validateProxyBypassEntry("a;rm -rf /"))
+        XCTAssertFalse(HelperInputValidator.validateProxyBypassEntry("$(whoami)"))
+        XCTAssertFalse(HelperInputValidator.validateProxyBypassEntry("a\nb"))
+    }
+
+    /// Host and port travel together: `-setwebproxy` takes both or neither, and
+    /// a port of `0` — what `-getwebproxy` reports for a service that never had
+    /// a proxy — must not round-trip into a live but unusable endpoint.
+    func testValidateOptionalEndpointRequiresHostAndPortTogether() {
+        XCTAssertTrue(HelperInputValidator.validateOptionalEndpoint(host: "", port: ""))
+        XCTAssertTrue(HelperInputValidator.validateOptionalEndpoint(host: "proxy.example", port: "8080"))
+        // The clear instruction, distinct from "leave the address alone".
+        XCTAssertTrue(HelperInputValidator.validateOptionalEndpoint(host: "Empty", port: ""))
+        XCTAssertFalse(HelperInputValidator.validateOptionalEndpoint(host: "Empty", port: "8080"))
+        XCTAssertFalse(HelperInputValidator.validateOptionalEndpoint(host: "proxy.example", port: ""))
+        XCTAssertFalse(HelperInputValidator.validateOptionalEndpoint(host: "", port: "8080"))
+        XCTAssertFalse(HelperInputValidator.validateOptionalEndpoint(host: "proxy.example", port: "0"))
+        XCTAssertFalse(HelperInputValidator.validateOptionalEndpoint(host: "bad host!", port: "8080"))
+    }
+
+    func testHelperClientRejectsInvalidRestoreArgumentsBeforeIPC() {
+        let client = HelperToolPrivilegeClient()
+
+        XCTAssertThrowsError(try client.execute(.setWebProxyEndpoint, values: ["Wi-Fi", "sideways", "", "", "off"]))
+        XCTAssertThrowsError(try client.execute(.setWebProxyEndpoint, values: ["Wi-Fi", "web", "", "", "maybe"]))
+        XCTAssertThrowsError(try client.execute(.setAutoproxy, values: ["Wi-Fi", "file:///etc/passwd", "on"]))
+        XCTAssertThrowsError(try client.execute(.setProxyBypass, values: ["Wi-Fi", "-setwebproxystate"]))
+        XCTAssertThrowsError(try client.execute(.setProxyBypass, values: ["Wi-Fi"]),
+                             "clearing the list has a spelling; a lost argument list must not look like one")
+        XCTAssertThrowsError(try client.execute(.setProxyBypass, values: ["Wi-Fi", "Empty", "*.local"]))
+    }
+
+    /// The empty-URL and empty-endpoint forms are what make a restore
+    /// expressible at all: `networksetup` keeps host, port and URL on a
+    /// *disabled* proxy, so putting a user's setting back without switching it
+    /// on is the common case, not an edge one.
+    func testAppleScriptRendererWritesStateLastAndSkipsAbsentValues() throws {
+        let client = AppleScriptPrivilegeClient()
+
+        let disabledURL = try XCTUnwrap(
+            client.shellScript(for: .setAutoproxy, values: ["Wi-Fi", "http://mdm.corp.example/a.pac", "off"])
+        )
+        let urlIndex = try XCTUnwrap(disabledURL.range(of: "-setautoproxyurl"))
+        let stateIndex = try XCTUnwrap(disabledURL.range(of: "-setautoproxystate 'Wi-Fi' off"))
+        XCTAssertLessThan(
+            urlIndex.lowerBound, stateIndex.lowerBound,
+            "-setautoproxyurl enables autoproxy as a side effect, so the state must be written last"
+        )
+
+        let stateOnly = try XCTUnwrap(client.shellScript(for: .setAutoproxy, values: ["Wi-Fi", "", "off"]))
+        XCTAssertFalse(stateOnly.contains("-setautoproxyurl"), "no URL recorded means none to write back")
+
+        let endpointOnly = try XCTUnwrap(
+            client.shellScript(for: .setWebProxyEndpoint, values: ["Wi-Fi", "secure", "old.example", "9999", "off"])
+        )
+        XCTAssertTrue(endpointOnly.contains("-setsecurewebproxy 'Wi-Fi' 'old.example' '9999'"))
+        XCTAssertTrue(endpointOnly.contains("-setsecurewebproxystate 'Wi-Fi' off"))
+    }
+
+    /// Restoring one service takes four operations, and the AppleScript
+    /// fallback raises an admin prompt per invocation.
+    func testAppleScriptBatchRendersAsASingleScript() throws {
+        let client = AppleScriptPrivilegeClient()
+        let script = try client.batchScript(for: [
+            PrivilegedBatchStep(.setAutoproxy, ["Wi-Fi", "", "off"]),
+            PrivilegedBatchStep(.setWebProxyEndpoint, ["Wi-Fi", "web", "", "", "off"]),
+        ])
+        XCTAssertTrue(script.contains("-setautoproxystate 'Wi-Fi' off"))
+        XCTAssertTrue(script.contains("-setwebproxystate 'Wi-Fi' off"))
+    }
+
     // MARK: - HelperBinaryLocator
 
     func testLocatorReturnsNilWhenNotBundled() {
