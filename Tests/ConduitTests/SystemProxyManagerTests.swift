@@ -868,6 +868,159 @@ extension SystemProxyManagerTests {
         )
     }
 
+    // MARK: - Not capturing our own residue as the user's setting
+
+    /// Observed on a real machine. A teardown that only switched autoproxy
+    /// *off* left our local PAC URL in the field; the next cold start read it
+    /// back and recorded it as "what the user had", and the corporate PAC URL
+    /// it had replaced was gone for good. First-write-wins guards a single
+    /// session; across sessions the machine is the input, and it can already be
+    /// carrying our leftovers.
+    func testCaptureDiscardsOurOwnLocalPACURLLeftByAnEarlierSession() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = false                                  // partial teardown
+        runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"         // ours, left behind
+
+        var config = ProxyConfig.testFixture()
+        config.localPACEnabled = true
+        config.localPACPort = 63145
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: config, mode: .pac, logger: nil, localPACURL: "http://127.0.0.1:63145/proxy.pac")
+
+        guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
+            return XCTFail("expected a recorded prior")
+        }
+        XCTAssertEqual(prior["autoURL"], "", "our own dead local PAC URL is residue, not the user's setting")
+        XCTAssertEqual(prior["autoEnabled"], "false")
+    }
+
+    /// The trap in the obvious version of that rule. "Discard anything equal to
+    /// what we are about to write" looks equivalent and is not: with
+    /// `localPACEnabled` off, `apply` writes the user's *own* configured PAC
+    /// URL to the system, so that test would throw away the very setting
+    /// teardown exists to restore. Ownership is about the address, not the
+    /// write.
+    func testCaptureKeepsTheUsersPACURLEvenWhenWeAreAboutToApplyItOurselves() throws {
+        let corporate = "http://rbins.example.com/lis.pac"
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = corporate
+
+        var config = ProxyConfig.testFixture()
+        config.localPACEnabled = false
+        config.pacURL = corporate                                        // we apply the user's own URL
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: config, mode: .pac, logger: nil)
+
+        guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
+            return XCTFail("expected a recorded prior")
+        }
+        XCTAssertEqual(prior["autoURL"], corporate, "a remote PAC URL is the user's, whoever wrote it last")
+        XCTAssertEqual(prior["autoEnabled"], "true")
+    }
+
+    /// Someone running their own proxy on loopback is entitled to have it
+    /// restored, so the rule cannot be "is this loopback".
+    func testCaptureKeepsALoopbackProxyThatIsNotOurs() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.webProxyEnabled = true
+        runner.proxyHost = "127.0.0.1"
+        runner.proxyPort = "8888"                                        // not our port
+
+        var config = ProxyConfig.testFixture()
+        config.localHost = "127.0.0.1"
+        config.localPort = 3128
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: config, mode: .manual, logger: nil)
+
+        guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
+            return XCTFail("expected a recorded prior")
+        }
+        XCTAssertEqual(prior["webHost"], "127.0.0.1")
+        XCTAssertEqual(prior["webPort"], "8888")
+        XCTAssertEqual(prior["webEnabled"], "true")
+    }
+
+    /// A stale URL on a local PAC port we no longer use is still ours — the
+    /// port is ephemeral across sessions, the path is not.
+    func testCaptureDiscardsOurLocalPACURLOnAStalePort() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://127.0.0.1:51999/proxy.pac"         // last session's port
+
+        var config = ProxyConfig.testFixture()
+        config.localPACEnabled = true
+        config.localPACPort = 63145
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: config, mode: .pac, logger: nil, localPACURL: "http://127.0.0.1:63145/proxy.pac")
+
+        guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
+            return XCTFail("expected a recorded prior")
+        }
+        XCTAssertEqual(prior["autoURL"], "")
+    }
+
+    /// And our own manual endpoint, from a session that ran in manual mode.
+    func testCaptureDiscardsOurOwnManualEndpoint() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.webProxyEnabled = false
+        runner.proxyHost = "127.0.0.1"
+        runner.proxyPort = "3128"
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"      // so a prior exists
+
+        var config = ProxyConfig.testFixture()
+        config.localHost = "127.0.0.1"
+        config.localPort = 3128
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: config, mode: .manual, logger: nil)
+
+        guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
+            return XCTFail("expected a recorded prior")
+        }
+        XCTAssertEqual(prior["webHost"], "", "our own address must not become the user's prior")
+        XCTAssertEqual(prior["webPort"], "")
+        XCTAssertEqual(
+            prior["autoURL"], "http://mdm.corp.example/managed.pac",
+            "and the rest of the prior is untouched"
+        )
+    }
+
     // MARK: - Crash recovery
 
     /// A run that was `SIGKILL`ed never tore down, so the machine keeps

@@ -94,11 +94,21 @@ package final class SystemProxyManager: @unchecked Sendable {
         // Capture before overwriting. `recordPrior` is first-write-wins, so
         // the repeat applies a session performs (config reload, restart, VPN
         // transition) cannot replace the user's original setting with ours.
+        //
+        // That guard only covers a single session. Across sessions the machine
+        // itself is the input, and it can already be carrying our leftovers: a
+        // teardown that only switched autoproxy *off* leaves our URL in the
+        // field, and the next cold start reads it as the user's own setting.
+        // Observed in the wild — a journal recording
+        // `http://127.0.0.1:<localPACPort>/proxy.pac` as the value to restore,
+        // with the corporate PAC URL it had replaced gone for good. So
+        // anything pointing at our own local listener is discarded at capture.
+        let ours = LocalListenerFingerprint(config: config)
         for service in services {
             journal.recordPrior(
                 surface: .systemProxy,
                 scope: service,
-                value: capturePriorState(service: service)
+                value: capturePriorState(service: service, ours: ours)
             )
         }
         journal.markApplied(surface: .systemProxy)
@@ -587,10 +597,23 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// the bypass-domain list. Recording only the enabled endpoints would leave
     /// Conduit's host, port and bypass list sitting in the user's disabled
     /// fields for good, which restore is supposed to undo.
-    private func capturePriorState(service: String) -> [String: String] {
-        let web = readProxyState(service: service, type: "webproxy")
-        let secure = readProxyState(service: service, type: "securewebproxy")
-        let auto = readAutoproxy(service: service)
+    private func capturePriorState(service: String, ours: LocalListenerFingerprint) -> [String: String] {
+        var web = readProxyState(service: service, type: "webproxy")
+        var secure = readProxyState(service: service, type: "securewebproxy")
+        var auto = readAutoproxy(service: service)
+
+        // A setting that points at our own listener is residue, not a prior.
+        // Recording it would make teardown "restore" a dead local port and
+        // would overwrite the last copy of what the user actually had.
+        if ours.matchesEndpoint(host: web.host, port: web.port) {
+            web = ProxyState()
+        }
+        if ours.matchesEndpoint(host: secure.host, port: secure.port) {
+            secure = ProxyState()
+        }
+        if ours.matchesPACURL(auto.url) {
+            auto = (enabled: false, url: "")
+        }
 
         return ProxyServiceState(
             webHost: web.host,
@@ -603,6 +626,42 @@ package final class SystemProxyManager: @unchecked Sendable {
             autoEnabled: auto.enabled,
             bypassDomains: readBypassDomains(service: service)
         ).journalValues
+    }
+
+    /// Identifies settings that point at Conduit's own local listeners.
+    ///
+    /// Deliberately *not* "does this equal the value we are about to write".
+    /// That test looks equivalent and is not: with `localPACEnabled` off,
+    /// `apply` writes the user's own configured PAC URL to the system, so
+    /// matching on it would discard the very setting teardown exists to
+    /// restore. Ownership is about the address, not about the write.
+    ///
+    /// Equally not "is this loopback" — someone running their own local proxy
+    /// is entitled to have it restored.
+    struct LocalListenerFingerprint {
+        let host: String
+        let port: String
+        let pacPort: String
+
+        init(config: ProxyConfig) {
+            host = config.localHost
+            port = String(config.localPort)
+            pacPort = String(config.localPACPort)
+        }
+
+        func matchesEndpoint(host candidateHost: String, port candidatePort: String) -> Bool {
+            candidateHost == host && candidatePort == port
+        }
+
+        /// Matched on the port *or* the path, because the local PAC port can
+        /// change between sessions while the path cannot — and a stale URL on
+        /// a port we no longer use is exactly the residue worth discarding.
+        func matchesPACURL(_ url: String) -> Bool {
+            guard !url.isEmpty, let parsed = URL(string: url) else { return false }
+            guard SystemProxyManager.isLoopbackHost(parsed.host ?? "") else { return false }
+            if let parsedPort = parsed.port, String(parsedPort) == pacPort { return true }
+            return parsed.path == LocalPACServer.pacPath
+        }
     }
 
     /// Whether any service is still actively routed at this machine — the
