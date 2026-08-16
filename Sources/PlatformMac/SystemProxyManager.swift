@@ -19,14 +19,22 @@ enum SystemProxyManagerError: Error, LocalizedError {
 package final class SystemProxyManager: @unchecked Sendable {
     private let privilegeClient: PrivilegeClient
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+    /// Records what each service's proxy configuration was before we changed
+    /// it, so `clear` restores rather than blanket-disabling. Optional: without
+    /// one, teardown keeps its previous unconditional behaviour rather than
+    /// refusing to clean up — see `PlatformStateJournal` on why "unknown"
+    /// must never mean "leave it".
+    private let journal: PlatformStateJournal?
 
     package init(
         privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
+        journal: PlatformStateJournal? = nil,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         }
     ) {
         self.privilegeClient = privilegeClient
+        self.journal = journal
         self.commandRunner = commandRunner
     }
 
@@ -77,6 +85,19 @@ package final class SystemProxyManager: @unchecked Sendable {
             throw SystemProxyManagerError.noNetworkServices
         }
 
+        // Capture before overwriting. `recordPrior` is first-write-wins, so
+        // the repeat applies a session performs (config reload, restart, VPN
+        // transition) cannot replace the user's original setting with ours.
+        if let journal {
+            for service in services {
+                journal.recordPrior(
+                    surface: .systemProxy,
+                    scope: service,
+                    value: capturePriorState(service: service)
+                )
+            }
+        }
+
         let pacURL = Self.effectivePACURL(config: config, localPACURL: localPACURL)
         var script = ""
         for service in services {
@@ -119,30 +140,79 @@ package final class SystemProxyManager: @unchecked Sendable {
         logger?.log(.notice, "Applied macOS proxy settings to \(services.count) service(s).", category: .system)
     }
 
+    /// Puts each service back the way it was before `apply`, falling back to
+    /// disabling every proxy on services the journal has no record for.
+    ///
+    /// The fallback is the important half. A machine can reach teardown with no
+    /// record at all — the journal was never wired in, it was wiped, or the
+    /// process that wrote it was `SIGKILL`ed — and refusing to act then would
+    /// leave the system pointing at a proxy port nothing serves, which breaks
+    /// networking for every client on the machine. Over-clearing costs the user
+    /// a visible setting they can restore; stranding does not announce itself.
     package func clear(logger: (any LogSink)?) throws {
         let services = (try? connectedNetworkServices(logger: nil)) ?? allNetworkServices()
 
         var script = ""
+        var restored: [String] = []
+        var reset: [String] = []
+
         for service in services {
-            let s = service.shellQuoted
-            script += "/usr/sbin/networksetup -setwebproxystate \(s) off 2>/dev/null || true\n"
-            script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) off 2>/dev/null || true\n"
-            script += "/usr/sbin/networksetup -setautoproxystate \(s) off 2>/dev/null || true\n"
+            switch journal?.prior(surface: .systemProxy, scope: service) ?? .notRecorded {
+            case .wasPresent(let prior):
+                script += Self.restoreScript(service: service, prior: prior)
+                restored.append(service)
+            case .wasAbsent, .notRecorded:
+                let s = service.shellQuoted
+                script += "/usr/sbin/networksetup -setwebproxystate \(s) off 2>/dev/null || true\n"
+                script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) off 2>/dev/null || true\n"
+                script += "/usr/sbin/networksetup -setautoproxystate \(s) off 2>/dev/null || true\n"
+                reset.append(service)
+            }
         }
 
         guard !script.isEmpty else { return }
 
         let result = try runUnprivileged(script)
+        var restoreSucceeded = result.exitCode == 0
         if result.exitCode != 0 {
             let output = [result.standardError, result.standardOutput].filter { !$0.isEmpty }.joined(separator: " | ")
             if output.contains("requires admin") || result.exitCode == 14 {
+                // The helper contract has no "restore arbitrary proxy state"
+                // operation and adding one is a versioned-surface change
+                // (AGENTS.md). Degrade to the clear it does have rather than
+                // leaving the settings in place.
+                if !restored.isEmpty {
+                    logger?.log(
+                        .warning,
+                        "Could not restore the previous proxy settings without admin rights; disabling proxies on \(restored.count) service(s) instead.",
+                        category: .system
+                    )
+                }
                 for service in services {
                     try? privilegeClient.execute(.clearSystemProxy, values: [service])
                 }
+                restoreSucceeded = false
             }
         }
 
-        logger?.log(.notice, "Cleared macOS proxy settings.", category: .system)
+        // Only forget once the prior value is actually back on the machine. A
+        // record dropped after a failed restore is a setting we changed with
+        // nothing left saying so.
+        if restoreSucceeded, let journal {
+            for service in restored + reset {
+                journal.forget(surface: .systemProxy, scope: service)
+            }
+        }
+
+        if restored.isEmpty {
+            logger?.log(.notice, "Cleared macOS proxy settings.", category: .system)
+        } else {
+            logger?.log(
+                .notice,
+                "Restored the previous macOS proxy settings on \(restored.count) service(s); cleared \(reset.count) with no recorded prior state.",
+                category: .system
+            )
+        }
     }
 
     private func applyViaPrivilegeClient(config: ProxyConfig, mode: SystemProxyMode, services: [String], pacURL: String, logger: (any LogSink)?) throws {
@@ -261,33 +331,85 @@ package final class SystemProxyManager: @unchecked Sendable {
         return state.enabled && state.host == host && state.port == String(port)
     }
 
-    private func readAutoproxyEnabled(service: String) -> Bool {
+    /// Single reader for `-getautoproxyurl`. It used to be parsed twice, by
+    /// `readAutoproxyEnabled` and `autoproxyMatches`, each shelling out
+    /// separately and pulling one field out of the same output.
+    private func readAutoproxy(service: String) -> (enabled: Bool, url: String) {
         guard let result = try? commandRunner("/usr/sbin/networksetup", ["-getautoproxyurl", service]),
-              result.exitCode == 0 else { return false }
-        for line in result.standardOutput.split(separator: "\n") {
-            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed.hasPrefix("Enabled:") {
-                return trimmed.dropFirst("Enabled:".count)
-                    .trimmingCharacters(in: .whitespacesAndNewlines) == "Yes"
-            }
-        }
-        return false
-    }
+              result.exitCode == 0 else { return (false, "") }
 
-    private func autoproxyMatches(service: String, url: String) -> Bool {
-        guard let result = try? commandRunner("/usr/sbin/networksetup", ["-getautoproxyurl", service]),
-              result.exitCode == 0 else { return false }
-
-        var currentURL = ""
+        var url = ""
         var enabled = false
         for line in result.standardOutput.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.hasPrefix("URL:") {
-                currentURL = String(trimmed.dropFirst("URL:".count).trimmingCharacters(in: .whitespacesAndNewlines))
+                url = String(trimmed.dropFirst("URL:".count).trimmingCharacters(in: .whitespacesAndNewlines))
             } else if trimmed.hasPrefix("Enabled:") {
                 enabled = trimmed.dropFirst("Enabled:".count).trimmingCharacters(in: .whitespacesAndNewlines) == "Yes"
             }
         }
-        return enabled && currentURL == url
+        return (enabled, url)
+    }
+
+    private func readAutoproxyEnabled(service: String) -> Bool {
+        readAutoproxy(service: service).enabled
+    }
+
+    private func autoproxyMatches(service: String, url: String) -> Bool {
+        let current = readAutoproxy(service: service)
+        return current.enabled && current.url == url
+    }
+
+    // MARK: - Prior-state capture and restore
+
+    /// Everything about a service's proxy configuration that `apply` overwrites,
+    /// or `nil` when nothing was enabled — in which case teardown has nothing to
+    /// put back and turning everything off restores the machine exactly.
+    private func capturePriorState(service: String) -> [String: String]? {
+        let web = readProxyState(service: service, type: "webproxy")
+        let secure = readProxyState(service: service, type: "securewebproxy")
+        let auto = readAutoproxy(service: service)
+
+        guard web.enabled || secure.enabled || auto.enabled else { return nil }
+
+        return [
+            "webEnabled": String(web.enabled),
+            "webHost": web.host,
+            "webPort": web.port,
+            "secureEnabled": String(secure.enabled),
+            "secureHost": secure.host,
+            "securePort": secure.port,
+            "autoEnabled": String(auto.enabled),
+            "autoURL": auto.url,
+        ]
+    }
+
+    /// Rebuilds the `networksetup` calls that put `prior` back on `service`.
+    private static func restoreScript(service: String, prior: [String: String]) -> String {
+        let s = service.shellQuoted
+        var script = ""
+
+        if prior["autoEnabled"] == "true", let url = prior["autoURL"], !url.isEmpty {
+            script += "/usr/sbin/networksetup -setautoproxyurl \(s) \(url.shellQuoted)\n"
+            script += "/usr/sbin/networksetup -setautoproxystate \(s) on\n"
+        } else {
+            script += "/usr/sbin/networksetup -setautoproxystate \(s) off 2>/dev/null || true\n"
+        }
+
+        for (key, setter, stateSetter) in [
+            ("web", "-setwebproxy", "-setwebproxystate"),
+            ("secure", "-setsecurewebproxy", "-setsecurewebproxystate"),
+        ] {
+            let enabled = prior["\(key)Enabled"] == "true"
+            let host = prior["\(key)Host"] ?? ""
+            let port = prior["\(key)Port"] ?? ""
+            if enabled, !host.isEmpty, !port.isEmpty {
+                script += "/usr/sbin/networksetup \(setter) \(s) \(host.shellQuoted) \(port.shellQuoted)\n"
+                script += "/usr/sbin/networksetup \(stateSetter) \(s) on\n"
+            } else {
+                script += "/usr/sbin/networksetup \(stateSetter) \(s) off 2>/dev/null || true\n"
+            }
+        }
+        return script
     }
 }
