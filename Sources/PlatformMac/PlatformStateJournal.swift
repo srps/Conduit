@@ -11,7 +11,10 @@ import ProxyKernel
 /// per-surface divergence this file exists to remove.
 package enum PlatformSurface: String, Codable, Sendable, CaseIterable {
     /// Scope: network service name. Keys: `webEnabled`, `webHost`, `webPort`,
-    /// `secureEnabled`, `secureHost`, `securePort`, `autoEnabled`, `autoURL`.
+    /// `secureEnabled`, `secureHost`, `securePort`, `autoEnabled`, `autoURL`,
+    /// `bypassDomains` (comma-separated; an empty string means the service had
+    /// no bypass entries). `ProxyServiceState` is the typed reader and writer
+    /// for this shape — decode through it rather than indexing the dictionary.
     case systemProxy
 
     /// Scope: network service name. Keys: `servers` (comma-separated; an empty
@@ -144,10 +147,23 @@ package final class PlatformStateJournal: @unchecked Sendable {
         saveLocked(records)
     }
 
-    /// Reserved scope for the "this surface is applied" marker. Prefixed with a
+    /// Reserved scope for the surface-ownership marker. Prefixed with a
     /// control character so it can never collide with a real scope — network
     /// service names, variable names and resolver domains are all printable.
     private static let appliedMarkerScope = "\u{0}applied"
+    private static let ownershipKey = "ownership"
+    private static let releasedOwnership = "released"
+
+    /// What the journal believes about who owns a surface right now.
+    package enum SurfaceOwnership: Equatable, Sendable {
+        /// No marker. Either we never applied, or the record was lost.
+        case unknown
+        /// We applied and have not torn down.
+        case applied
+        /// We applied and put everything back. Whatever the surface holds now
+        /// is the user's, not ours.
+        case released
+    }
 
     /// Records that a surface was applied even if it captured no per-scope
     /// prior values.
@@ -159,13 +175,65 @@ package final class PlatformStateJournal: @unchecked Sendable {
     /// would clear settings the user made *after* we applied, which is the
     /// erasing behaviour this journal exists to stop.
     package func markApplied(surface: PlatformSurface, now: Date = .now) {
-        recordPrior(surface: surface, scope: Self.appliedMarkerScope, value: nil, now: now)
+        setOwnership(surface: surface, ownership: nil, now: now)
+    }
+
+    /// Records that teardown ran and put the prior values back.
+    ///
+    /// Unlike the prior values, which are dropped once restored, this outlives
+    /// the teardown — because "the journal holds nothing for this surface" is
+    /// otherwise two situations with opposite right answers. It is "we never
+    /// applied, or we lost the record", where a caller must fall back to
+    /// probing the machine for its own residue; and it is "we just restored",
+    /// where probing is actively wrong. A user whose *own* proxy is a loopback
+    /// address gets it flagged as our residue by any such probe, and the
+    /// second teardown of a session then disables the settings the first one
+    /// restored. Remembering that we let go is what tells the two apart.
+    package func markReleased(surface: PlatformSurface, now: Date = .now) {
+        setOwnership(surface: surface, ownership: Self.releasedOwnership, now: now)
+    }
+
+    /// Last write wins, deliberately, and unlike `recordPrior`. Prior values
+    /// describe what was there before us and must never be overwritten by our
+    /// own; ownership describes the present and has to be able to change.
+    private func setOwnership(surface: PlatformSurface, ownership: String?, now: Date) {
+        lock.lock()
+        defer { lock.unlock() }
+        var records = loadLocked()
+        let value = ownership.map { [Self.ownershipKey: $0] }
+        if let index = records.firstIndex(where: {
+            $0.surface == surface && $0.scope == Self.appliedMarkerScope
+        }) {
+            records[index].priorValue = value
+            records[index].recordedAt = now
+        } else {
+            records.append(
+                PlatformStateRecord(
+                    surface: surface,
+                    scope: Self.appliedMarkerScope,
+                    priorValue: value,
+                    recordedAt: now
+                )
+            )
+        }
+        saveLocked(records)
+    }
+
+    package func ownership(of surface: PlatformSurface) -> SurfaceOwnership {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let marker = loadLocked().first(where: {
+            $0.surface == surface && $0.scope == Self.appliedMarkerScope
+        }) else {
+            return .unknown
+        }
+        // A marker written before this key existed carries no payload and meant
+        // exactly "applied", so that is what it keeps meaning.
+        return marker.priorValue?[Self.ownershipKey] == Self.releasedOwnership ? .released : .applied
     }
 
     package func isMarkedApplied(surface: PlatformSurface) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return loadLocked().contains { $0.surface == surface && $0.scope == Self.appliedMarkerScope }
+        ownership(of: surface) == .applied
     }
 
     /// Refreshes a surface's timestamps without touching the recorded values.
@@ -207,10 +275,16 @@ package final class PlatformStateJournal: @unchecked Sendable {
         return loadLocked().filter { $0.surface == surface && $0.scope != Self.appliedMarkerScope }
     }
 
+    /// Real scopes only, matching `records(for:)`. The two disagreed before:
+    /// this counted the ownership marker as a record, which was harmless while
+    /// the marker's only states were "present" and "absent" — every caller
+    /// pairs it with `isMarkedApplied`, so the marker was covered twice. It
+    /// stops being harmless once the marker can say *released*, because then a
+    /// surface with nothing outstanding would still report records.
     package func hasRecords(for surface: PlatformSurface) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return loadLocked().contains { $0.surface == surface }
+        return loadLocked().contains { $0.surface == surface && $0.scope != Self.appliedMarkerScope }
     }
 
     package var isEmpty: Bool {

@@ -148,9 +148,23 @@ final class SystemProxyManagerTests: XCTestCase {
 
 private final class RecordingProxyPrivilegeClient: PrivilegeClient, @unchecked Sendable {
     private(set) var commands: [(command: PrivilegedOperation, values: [String])] = []
+    /// One entry per elevation, so tests can pin how many times a user would be
+    /// prompted rather than only what was run.
+    private(set) var batches: [[PrivilegedBatchStep]] = []
+    private let error: Error?
+
+    init(error: Error? = nil) {
+        self.error = error
+    }
 
     func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        commands.append((operation, values))
+        try execute(batch: [PrivilegedBatchStep(operation, values)])
+    }
+
+    func execute(batch: [PrivilegedBatchStep]) throws {
+        batches.append(batch)
+        commands.append(contentsOf: batch.map { ($0.operation, $0.values) })
+        if let error { throw error }
     }
 }
 
@@ -554,7 +568,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingProxyPrivilegeClient(error: PrivilegeClientError.helperNotInstalled),
             journal: journal,
             commandRunner: runner.run
         )
@@ -571,6 +585,373 @@ extension SystemProxyManagerTests {
     }
 }
 
+// MARK: - Restoring where writes need admin rights
+
+extension SystemProxyManagerTests {
+
+    /// The gap this whole change exists to close.
+    ///
+    /// On a machine where the user cannot write proxy settings without admin
+    /// rights — verified to be this project's own primary target — every
+    /// teardown degraded to `clearSystemProxy` per service: the recorded prior
+    /// state was kept and never applied, so the feature bought "nothing is lost
+    /// permanently" rather than "your settings come back".
+    func testPrivilegedTeardownRestoresThePriorStateInsteadOfBlanketClearing() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+        runner.bypassDomains = ["*.corp.example"]
+        runner.proxyHost = "oldproxy.example"
+        runner.proxyPort = "9999"
+        runner.webProxyEnabled = true
+
+        let privilegeClient = RecordingProxyPrivilegeClient()
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: privilegeClient,
+            journal: journal,
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+
+        runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
+        try manager.clear(logger: nil)
+
+        XCTAssertFalse(
+            privilegeClient.commands.contains { $0.command == .clearSystemProxy },
+            "teardown must no longer degrade to a blanket clear: \(privilegeClient.commands)"
+        )
+        XCTAssertEqual(
+            privilegeClient.commands.map(\.command),
+            [.setAutoproxy, .setWebProxyEndpoint, .setWebProxyEndpoint, .setProxyBypass]
+        )
+        XCTAssertEqual(
+            privilegeClient.commands[0].values,
+            ["Wi-Fi", "http://mdm.corp.example/managed.pac", "on"],
+            "the user's PAC URL goes back, enabled as it was"
+        )
+        XCTAssertEqual(
+            privilegeClient.commands[1].values,
+            ["Wi-Fi", "web", "oldproxy.example", "9999", "on"]
+        )
+        XCTAssertEqual(
+            privilegeClient.commands[2].values,
+            ["Wi-Fi", "secure", "oldproxy.example", "9999", "off"],
+            "an endpoint that was configured but off must go back configured and off"
+        )
+        XCTAssertEqual(privilegeClient.commands[3].values, ["Wi-Fi", "*.corp.example"])
+        XCTAssertTrue(
+            journal.scopes(for: .systemProxy).isEmpty,
+            "a restore that landed may drop its records"
+        )
+    }
+
+    /// Restoring one service takes four operations, and the AppleScript
+    /// fallback prompts for a password per invocation. Looping would ask a user
+    /// with two services for eight passwords.
+    func testPrivilegedTeardownElevatesOncePerService() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let privilegeClient = RecordingProxyPrivilegeClient()
+        let manager = SystemProxyManager(
+            privilegeClient: privilegeClient,
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(privilegeClient.batches.count, 1, "one elevation, not one per write")
+        XCTAssertEqual(privilegeClient.batches[0].count, 4)
+    }
+
+    /// `sh -c` reports only the *last* command's exit status, so a restore
+    /// whose endpoint write failed but whose trailing bypass write succeeded
+    /// used to report success — after which the records, the only copy of the
+    /// user's real settings, were dropped.
+    func testRestoreScriptAbortsOnTheFirstFailedCommand() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(
+            script.hasPrefix("set -e\n"),
+            "without `set -e` only the last command's status survives: \(script)"
+        )
+    }
+
+    /// Each service is its own unit of work. A failure on one must not decide
+    /// the outcome for the others, and must not drop their records.
+    func testOneServiceFailingDoesNotDropAnotherServicesRecord() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.services = ["Wi-Fi", "Ethernet"]
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+        runner.failingServices = ["Ethernet"]
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(error: PrivilegeClientError.helperNotInstalled),
+            journal: journal,
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.clear(logger: nil)
+
+        XCTAssertNotEqual(
+            journal.prior(surface: .systemProxy, scope: "Wi-Fi"), .notRecorded,
+            "one service failing must keep every record, so a later teardown can retry the lot"
+        )
+        XCTAssertNotEqual(journal.prior(surface: .systemProxy, scope: "Ethernet"), .notRecorded)
+    }
+
+    /// A user whose *own* proxy is a loopback address — a local mitmproxy, or a
+    /// second tool — gets it read as our residue by the residue probe. Before
+    /// the journal remembered that a teardown had completed, the second
+    /// teardown of a session then disabled the settings the first one had just
+    /// restored: the double-teardown erase, through the residue door.
+    func testSecondTeardownDoesNotDisableARestoredLoopbackProxy() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://127.0.0.1:8888/user-own.pac"   // the user's, not ours
+
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.clear(logger: nil)
+        let scriptsAfterFirstClear = runner.shellScripts.count
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(
+            runner.shellScripts.count, scriptsAfterFirstClear,
+            "the restored setting is the user's own loopback proxy, not our residue"
+        )
+    }
+
+    /// A service that had no manual proxy before us must not be left holding
+    /// ours.
+    ///
+    /// `networksetup` keeps host and port on a *disabled* proxy, so switching
+    /// the state off is not enough: our `127.0.0.1:<port>` stays in the
+    /// `Server` field and is handed to the user the moment they re-enable the
+    /// proxy by hand — the exact harm restoring disabled endpoints exists to
+    /// prevent. Found by driving the real helper: the recorded prior said "no
+    /// endpoint", and an empty host meant "write only the state".
+    func testTeardownClearsOurAddressWhenTheServiceHadNoneBefore() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.proxyHost = ""            // nothing configured before us
+        runner.proxyPort = "0"           // what -getwebproxy reports for "none"
+        runner.webProxyEnabled = false
+        runner.autoProxyEnabled = true   // so a prior is captured at all
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let privilegeClient = RecordingProxyPrivilegeClient()
+        let manager = SystemProxyManager(
+            privilegeClient: privilegeClient,
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(
+            script.contains("-setwebproxy 'Wi-Fi' '' 0"),
+            "our address must be blanked, not just switched off: \(script)"
+        )
+        XCTAssertTrue(script.contains("-setsecurewebproxy 'Wi-Fi' '' 0"))
+
+        _ = privilegeClient
+    }
+
+    /// The privileged renderer must say the same thing as the shell one — that
+    /// is the whole point of driving both from one description.
+    func testPrivilegedTeardownClearsOurAddressWhenTheServiceHadNoneBefore() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.proxyHost = ""
+        runner.proxyPort = "0"
+        runner.webProxyEnabled = false
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let privilegeClient = RecordingProxyPrivilegeClient()
+        let manager = SystemProxyManager(
+            privilegeClient: privilegeClient,
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+
+        runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
+        try manager.clear(logger: nil)
+
+        XCTAssertTrue(
+            privilegeClient.commands.contains {
+                $0.command == .setWebProxyEndpoint && $0.values == ["Wi-Fi", "web", "Empty", "", "off"]
+            },
+            "the privileged path must clear it too: \(privilegeClient.commands)"
+        )
+        XCTAssertTrue(
+            privilegeClient.commands.contains {
+                $0.command == .setWebProxyEndpoint && $0.values == ["Wi-Fi", "secure", "Empty", "", "off"]
+            }
+        )
+    }
+
+    /// The other side of that rule. A blanket clear runs when there is *no*
+    /// record, and an endpoint we never recorded is not ours to erase —
+    /// switching the proxy off is enough to stop it routing.
+    func testBlanketClearSwitchesOffWithoutErasingAnUnrecordedAddress() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"   // residue, no record
+
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(script.contains("-setwebproxystate 'Wi-Fi' off"), "precondition: blanket-clear branch")
+        XCTAssertFalse(
+            script.contains("-setwebproxy 'Wi-Fi'"),
+            "an address we have no record of is not ours to erase: \(script)"
+        )
+    }
+
+    /// `-setwebproxy` switches the proxy *on* as a side effect, exactly like
+    /// `-setautoproxyurl` — verified on macOS 26, documented nowhere. So the
+    /// state line has to come last on the manual endpoints too, or restoring a
+    /// configured-but-disabled proxy would switch it on behind the user's back.
+    func testEndpointStateIsAlwaysWrittenAfterTheAddress() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.proxyHost = "oldproxy.example"
+        runner.proxyPort = "9999"
+        runner.webProxyEnabled = false
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        let address = try XCTUnwrap(script.range(of: "-setwebproxy 'Wi-Fi' 'oldproxy.example' '9999'"))
+        let state = try XCTUnwrap(script.range(of: "-setwebproxystate 'Wi-Fi' off"))
+        XCTAssertLessThan(
+            address.lowerBound, state.lowerBound,
+            "-setwebproxy enables the proxy, so the state must be written after it: \(script)"
+        )
+    }
+
+    // MARK: - Crash recovery
+
+    /// A run that was `SIGKILL`ed never tore down, so the machine keeps
+    /// pointing at a proxy port nothing serves. Launch is when the recorded
+    /// prior state is most likely still the truth.
+    func testRestoreIfNeededRestoresOrphanedSettingsWhenNothingIsListening() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run,
+            portProbe: { _ in false }
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        // The crash: our own PAC is on the machine, the records survive, and
+        // nothing is serving the port.
+        runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
+        let freshManager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run,
+            portProbe: { _ in false }
+        )
+        runner.invocations.removeAll()
+
+        freshManager.restoreIfNeeded(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last, "orphaned settings must be restored at launch")
+        XCTAssertTrue(script.contains("-setautoproxyurl 'Wi-Fi' 'http://mdm.corp.example/managed.pac'"))
+    }
+
+    /// The safety valve: a live listener on the port the machine points at
+    /// means another instance is serving it, and taking its settings away would
+    /// break every client on the machine.
+    func testRestoreIfNeededLeavesAServedProxyAlone() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run,
+            portProbe: { _ in true }
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
+        runner.invocations.removeAll()
+
+        manager.restoreIfNeeded(logger: nil)
+
+        XCTAssertTrue(
+            runner.shellScripts.isEmpty,
+            "a proxy that is still being served is not orphaned"
+        )
+    }
+
+    /// Nothing recorded means nothing of ours is outstanding, whatever the
+    /// machine currently holds.
+    func testRestoreIfNeededDoesNothingWithoutRecords() {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run,
+            portProbe: { _ in false }
+        )
+
+        manager.restoreIfNeeded(logger: nil)
+
+        XCTAssertTrue(runner.shellScripts.isEmpty)
+    }
+}
+
 private final class FakeNetworksetupRunner: @unchecked Sendable {
     var shellResult = CommandResult(exitCode: 0, standardOutput: "", standardError: "")
     var autoProxyEnabled = false
@@ -580,7 +961,11 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
     var proxyHost = "127.0.0.1"
     var proxyPort = "3128"
     var bypassDomains: [String] = []
-    private(set) var invocations: [(launchPath: String, arguments: [String])] = []
+    var services = ["Wi-Fi"]
+    /// Services whose write scripts fail as if `networksetup` rejected them —
+    /// a non-admin failure, so no privileged fallback is attempted.
+    var failingServices: [String] = []
+    var invocations: [(launchPath: String, arguments: [String])] = []
 
     var shellScripts: [String] {
         invocations.compactMap { invocation in
@@ -592,6 +977,10 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
     func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
         invocations.append((launchPath, arguments))
         if launchPath == "/bin/sh" {
+            let script = arguments.count == 2 ? arguments[1] : ""
+            if failingServices.contains(where: { script.contains("'\($0)'") }) {
+                return CommandResult(exitCode: 1, standardOutput: "", standardError: "networksetup: unsupported")
+            }
             return shellResult
         }
         guard launchPath == "/usr/sbin/networksetup", let command = arguments.first else {
@@ -601,7 +990,8 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
         case "-listallnetworkservices":
             return CommandResult(
                 exitCode: 0,
-                standardOutput: "An asterisk (*) denotes that a network service is disabled.\nWi-Fi",
+                standardOutput: (["An asterisk (*) denotes that a network service is disabled."] + services)
+                    .joined(separator: "\n"),
                 standardError: ""
             )
         case "-getinfo":

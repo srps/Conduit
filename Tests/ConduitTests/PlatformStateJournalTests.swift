@@ -120,4 +120,70 @@ final class PlatformStateJournalTests: XCTestCase {
         XCTAssertEqual(journal.oldestRecordDate(for: .systemDNS), old)
         XCTAssertNil(journal.oldestRecordDate(for: .systemProxy))
     }
+
+    // MARK: - Ownership
+
+    /// "The journal holds nothing for this surface" is two situations with
+    /// opposite right answers: we never applied (or lost the record), where a
+    /// caller must probe the machine for its own residue; and we just restored,
+    /// where probing is wrong — a user's own loopback proxy reads as our
+    /// residue and the next teardown disables it.
+    func testReleasedSurfaceIsIdleButDistinguishableFromNeverApplied() throws {
+        let (journal, _) = try makeJournal()
+        XCTAssertEqual(journal.ownership(of: .systemProxy), .unknown)
+        XCTAssertTrue(journal.knowsSurfaceIsIdle(.systemProxy))
+
+        journal.markApplied(surface: .systemProxy)
+        XCTAssertEqual(journal.ownership(of: .systemProxy), .applied)
+        XCTAssertFalse(journal.knowsSurfaceIsIdle(.systemProxy))
+
+        journal.forgetAll(surface: .systemProxy)
+        journal.markReleased(surface: .systemProxy)
+        XCTAssertEqual(journal.ownership(of: .systemProxy), .released)
+        XCTAssertTrue(journal.knowsSurfaceIsIdle(.systemProxy), "a released surface has nothing outstanding")
+        XCTAssertFalse(journal.isMarkedApplied(surface: .systemProxy))
+    }
+
+    /// Unlike the prior values, ownership describes the present and has to be
+    /// able to change — a new apply after a teardown reclaims the surface.
+    func testApplyAfterReleaseReclaimsTheSurface() throws {
+        let (journal, _) = try makeJournal()
+        journal.markReleased(surface: .systemProxy)
+        journal.markApplied(surface: .systemProxy)
+
+        XCTAssertEqual(journal.ownership(of: .systemProxy), .applied)
+        XCTAssertFalse(journal.knowsSurfaceIsIdle(.systemProxy))
+    }
+
+    /// A marker written before ownership existed carries no payload and meant
+    /// exactly "applied", so that is what it has to keep meaning — otherwise
+    /// upgrading the app would forget that a running session owns the surface.
+    func testLegacyMarkerWithoutOwnershipStillReadsAsApplied() throws {
+        let (_, url) = try makeJournal()
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
+        let legacy = #"""
+        [{"surface":"systemProxy","scope":"\u0000applied","recordedAt":"2026-08-16T00:00:00Z"}]
+        """#
+        try Data(legacy.utf8).write(to: url)
+
+        let reloaded = PlatformStateJournal(fileURL: url)
+        XCTAssertEqual(reloaded.ownership(of: .systemProxy), .applied)
+        XCTAssertTrue(reloaded.isMarkedApplied(surface: .systemProxy))
+    }
+
+    /// `records(for:)` always excluded the ownership marker; `hasRecords(for:)`
+    /// counted it. Harmless while the marker was only present-or-absent, and
+    /// not once it can say *released*.
+    func testHasRecordsIgnoresTheOwnershipMarker() throws {
+        let (journal, _) = try makeJournal()
+        journal.markApplied(surface: .systemProxy)
+
+        XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+        XCTAssertTrue(journal.records(for: .systemProxy).isEmpty)
+
+        journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["autoURL": "a"])
+        XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+    }
 }

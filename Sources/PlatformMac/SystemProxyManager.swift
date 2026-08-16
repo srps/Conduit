@@ -20,22 +20,28 @@ package final class SystemProxyManager: @unchecked Sendable {
     private let privilegeClient: PrivilegeClient
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
     /// Records what each service's proxy configuration was before we changed
-    /// it, so `clear` restores rather than blanket-disabling. Optional: without
-    /// one, teardown keeps its previous unconditional behaviour rather than
-    /// refusing to clean up — see `PlatformStateJournal` on why "unknown"
-    /// must never mean "leave it".
+    /// it, so `clear` restores rather than blanket-disabling. Required, not
+    /// optional: an absent journal used to silently restore the old erasing
+    /// teardown. See `PlatformStateJournal` on why "unknown" must never mean
+    /// "leave it".
     private let journal: PlatformStateJournal
+
+    /// Whether a loopback port is being served. Injectable so `restoreIfNeeded`
+    /// is testable without a real listener.
+    private let portProbe: @Sendable (Int) -> Bool
 
     package init(
         privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
         journal: PlatformStateJournal,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
-        }
+        },
+        portProbe: @escaping @Sendable (Int) -> Bool = { LoopbackPortProbe.isServed(port: $0) }
     ) {
         self.privilegeClient = privilegeClient
         self.journal = journal
         self.commandRunner = commandRunner
+        self.portProbe = portProbe
     }
 
     // MARK: - State Detection
@@ -115,8 +121,14 @@ package final class SystemProxyManager: @unchecked Sendable {
                 script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) on\n"
             case .pac:
                 if !pacURL.isEmpty {
-                    script += "/usr/sbin/networksetup -setwebproxystate \(s) off 2>/dev/null || true\n"
-                    script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) off 2>/dev/null || true\n"
+                    // No `2>/dev/null || true`: the suffix forces the script's
+                    // exit code to 0 and discards the "requires admin" text,
+                    // and the privileged fallback keys on both. It was removed
+                    // from teardown for exactly that reason; leaving it on the
+                    // apply path made a failure to switch manual proxies off
+                    // before enabling the PAC silently survivable.
+                    script += "/usr/sbin/networksetup -setwebproxystate \(s) off\n"
+                    script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) off\n"
                     script += "/usr/sbin/networksetup -setautoproxyurl \(s) \(pacURL.shellQuoted)\n"
                     script += "/usr/sbin/networksetup -setautoproxystate \(s) on\n"
                 }
@@ -164,96 +176,62 @@ package final class SystemProxyManager: @unchecked Sendable {
         // directory. Only the machine can tell them apart, so ask it: if any
         // service is still actively routed at this host, the setting is ours
         // and stranded, whatever the journal says.
-        if journal.knowsSurfaceIsIdle(.systemProxy), !loopbackResidueExists() {
-            logger?.log(
-                .debug,
-                "System proxy teardown skipped: nothing recorded as applied and no local-proxy settings on any service.",
-                category: .system
-            )
-            return
+        if journal.knowsSurfaceIsIdle(.systemProxy) {
+            // ...and "we hold nothing" is itself two situations. A teardown
+            // that already completed put the user's own settings back, and
+            // those may legitimately be a loopback proxy — someone running
+            // their own local proxy, or a second tool. Probing for residue then
+            // reads the user's restored setting as ours and the next teardown
+            // disables it, which is the double-teardown erase in a different
+            // costume. Only a surface we never released gets probed.
+            if journal.ownership(of: .systemProxy) == .released {
+                logger?.log(
+                    .debug,
+                    "System proxy teardown skipped: a previous teardown already restored this surface.",
+                    category: .system
+                )
+                return
+            }
+            if !loopbackResidueExists() {
+                logger?.log(
+                    .debug,
+                    "System proxy teardown skipped: nothing recorded as applied and no local-proxy settings on any service.",
+                    category: .system
+                )
+                return
+            }
         }
 
         let services = (try? connectedNetworkServices(logger: nil)) ?? allNetworkServices()
+        guard !services.isEmpty else { return }
 
-        var script = ""
         var restored: [String] = []
         var reset: [String] = []
+        var failed: [String] = []
 
+        // One unit of work per service, not one script for all of them.
+        // Concatenating every service's commands into a single `/bin/sh -c`
+        // made the whole teardown's success ride on the *last* command's exit
+        // code — `sh` reports only that one — so a service that failed
+        // partway through was invisible as long as the final command
+        // succeeded, and `forgetAll` then destroyed the records for every
+        // service including the one that had not been restored.
         for service in services {
+            let steps: [ProxyWriteStep]
+            let isRestore: Bool
             switch journal.prior(surface: .systemProxy, scope: service) {
             case .wasPresent(let prior):
-                script += Self.restoreScript(service: service, prior: prior)
-                restored.append(service)
+                steps = ProxyServiceState(journalValues: prior).writeSteps
+                isRestore = true
             case .wasAbsent, .notRecorded:
-                // No `2>/dev/null || true` here either. It was justified as
-                // best-effort — "a service that cannot take the setting was not
-                // on anyway" — but that reasoning only covers an *unsupported*
-                // service, and the failure that actually happens is a
-                // permissions one. Suppressing it forced the script's exit code
-                // to 0 and threw away the "requires admin" text, so the
-                // privileged fallback never ran, nothing was cleared, the
-                // records were dropped as if it had worked, and the run logged
-                // success. On a machine where the user cannot write proxy
-                // settings unprivileged — verified to be this project's own
-                // primary target — that was every teardown with no recorded
-                // prior.
-                let s = service.shellQuoted
-                script += "/usr/sbin/networksetup -setwebproxystate \(s) off\n"
-                script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) off\n"
-                script += "/usr/sbin/networksetup -setautoproxystate \(s) off\n"
-                reset.append(service)
+                steps = ProxyServiceState.disabledEverything()
+                isRestore = false
             }
-        }
 
-        guard !script.isEmpty else { return }
-
-        let result = try runUnprivileged(script)
-        var restoreSucceeded = result.exitCode == 0
-        if result.exitCode != 0 {
-            let output = [result.standardError, result.standardOutput].filter { !$0.isEmpty }.joined(separator: " | ")
-            if !(output.contains("requires admin") || result.exitCode == 14) {
-                // Every other failure used to fall through here reporting
-                // nothing, after which the closing notice still announced a
-                // successful restore. `apply` throws on this same branch; the
-                // asymmetry made a user's "it said it restored my proxy"
-                // impossible to falsify.
-                logger?.log(
-                    .warning,
-                    "networksetup failed during teardown (exit \(result.exitCode)): \(output.isEmpty ? "no output" : output). Recorded settings are kept for the next attempt.",
-                    category: .system
-                )
-            }
-            if output.contains("requires admin") || result.exitCode == 14 {
-                // The helper contract has no "restore arbitrary proxy state"
-                // operation and adding one is a versioned-surface change
-                // (AGENTS.md). Degrade to the clear it does have rather than
-                // leaving the settings in place.
-                if !restored.isEmpty {
-                    logger?.log(
-                        .warning,
-                        "Could not restore the previous proxy settings without admin rights; disabling proxies on \(restored.count) service(s) instead.",
-                        category: .system
-                    )
-                }
-                var helperFailures = 0
-                for service in services {
-                    do {
-                        try privilegeClient.execute(.clearSystemProxy, values: [service])
-                    } catch {
-                        helperFailures += 1
-                    }
-                }
-                if helperFailures > 0 {
-                    // Swallowing these left the worst case silent: with no
-                    // helper installed nothing is cleared at all, and the run
-                    // still announced a restore.
-                    logger?.log(
-                        .error,
-                        "Could not clear the system proxy on \(helperFailures) of \(services.count) service(s) via the privileged helper; the system may still point at a proxy that is not running.",
-                        category: .system
-                    )
-                }
-                restoreSucceeded = false
+            if write(steps: steps, service: service, logger: logger) {
+                if isRestore { restored.append(service) } else { reset.append(service) }
+            } else {
+                failed.append(service)
             }
         }
 
@@ -268,18 +246,17 @@ package final class SystemProxyManager: @unchecked Sendable {
         // later session, first-write-wins would keep that stale record in
         // preference to capturing the state the service actually has now.
         // Teardown means done: nothing about this surface is ours any more.
-        if restoreSucceeded {
-            journal.forgetAll(surface: .systemProxy)
-        }
-
-        guard restoreSucceeded else {
+        guard failed.isEmpty else {
             logger?.log(
                 .warning,
-                "Could not fully apply the macOS proxy teardown; the recorded previous settings are kept so a later teardown can retry.",
+                "Could not fully apply the macOS proxy teardown on \(failed.count) of \(services.count) service(s); the recorded previous settings are kept so a later teardown can retry.",
                 category: .system
             )
             return
         }
+
+        journal.forgetAll(surface: .systemProxy)
+        journal.markReleased(surface: .systemProxy)
 
         if restored.isEmpty {
             logger?.log(.notice, "Cleared macOS proxy settings.", category: .system)
@@ -290,6 +267,170 @@ package final class SystemProxyManager: @unchecked Sendable {
                 category: .system
             )
         }
+    }
+
+    /// Puts one service into the state `steps` describe, unprivileged if it
+    /// can and via the privileged helper if it must. Returns whether the whole
+    /// sequence landed.
+    ///
+    /// The privileged half is no longer a degradation. It used to be
+    /// `clearSystemProxy` per service — the only proxy-writing operation the
+    /// helper contract had that teardown could use — which meant that on any
+    /// machine where the user cannot write proxy settings without admin rights
+    /// the recorded prior state was kept and never applied: the feature bought
+    /// "nothing is lost permanently" rather than "your settings come back".
+    /// The same steps now render to typed privileged operations, so both paths
+    /// reach the same end state.
+    private func write(steps: [ProxyWriteStep], service: String, logger: (any LogSink)?) -> Bool {
+        // `set -e`, because `sh -c` otherwise reports only the *last* command's
+        // status. Without it a restore whose endpoint write failed but whose
+        // trailing bypass write succeeded reported success, and the records —
+        // the only copy of the user's real settings — were then dropped. Every
+        // write here is an absolute set, so aborting early and re-running the
+        // whole sequence through the privileged path is safe.
+        let script = "set -e\n" + steps.shellScript(service: service)
+        let result: CommandResult
+        do {
+            result = try runUnprivileged(script)
+        } catch {
+            logger?.log(
+                .warning,
+                "Could not run the proxy teardown for \(service): \(error.displayDescription)",
+                category: .system
+            )
+            return false
+        }
+
+        if result.exitCode == 0 { return true }
+
+        let output = [result.standardError, result.standardOutput]
+            .filter { !$0.isEmpty }
+            .joined(separator: " | ")
+        guard Self.requiresAdmin(exitCode: result.exitCode, output: output) else {
+            // Every other failure used to fall through reporting nothing, after
+            // which the closing notice still announced a successful restore.
+            // `apply` throws on this same branch; the asymmetry made a user's
+            // "it said it restored my proxy" impossible to falsify.
+            logger?.log(
+                .warning,
+                "networksetup failed during teardown of \(service) (exit \(result.exitCode)): \(output.isEmpty ? "no output" : output). Recorded settings are kept for the next attempt.",
+                category: .system
+            )
+            return false
+        }
+
+        do {
+            // One batch, so a machine with no helper installed pays a single
+            // admin prompt per service rather than one per write.
+            try privilegeClient.execute(batch: steps.privilegedBatch(service: service))
+            logger?.log(
+                .debug,
+                "Applied the proxy teardown for \(service) through the privileged helper.",
+                category: .system
+            )
+            return true
+        } catch {
+            logger?.log(
+                .error,
+                "Could not restore the proxy settings on \(service) with admin rights (\(error.displayDescription)); the system may still point at a proxy that is not running.",
+                category: .system
+            )
+            return false
+        }
+    }
+
+    /// `networksetup` refuses unprivileged writes with exit 14 and a
+    /// `requires admin` message. Both are checked because neither is a
+    /// documented contract.
+    private static func requiresAdmin(exitCode: Int32, output: String) -> Bool {
+        output.contains("requires admin") || exitCode == 14
+    }
+
+    // MARK: - Crash recovery
+
+    /// Restores the recorded prior proxy settings at launch when the run that
+    /// recorded them never got to tear down.
+    ///
+    /// Teardown is not enough on its own. A `SIGKILL`, a panic, or a forced
+    /// logout leaves the machine pointing at a proxy port nothing serves and
+    /// the journal holding the only copy of what was there before — and launch
+    /// is the moment that copy is most likely still the truth. This mirrors
+    /// `SystemDNSManager.restoreIfNeeded`, which has covered the DNS surface
+    /// the same way for the same reason.
+    package func restoreIfNeeded(logger: (any LogSink)?) {
+        guard journal.isMarkedApplied(surface: .systemProxy)
+                || journal.hasRecords(for: .systemProxy),
+              let appliedAt = journal.oldestRecordDate(for: .systemProxy) else { return }
+
+        let stalenessThreshold: TimeInterval = 7 * 24 * 3600
+        if Date().timeIntervalSince(appliedAt) > stalenessThreshold {
+            logger?.log(
+                .warning,
+                "Recorded system proxy state is older than 7 days. Restoring the previous settings.",
+                category: .system
+            )
+            performRestore(logger: logger)
+            return
+        }
+
+        // A live listener on the port the machine is pointed at means another
+        // instance is serving it, and taking its settings away would break
+        // every client on the machine. Absent one, the settings are orphaned.
+        if localProxyListenerExists() {
+            logger?.log(
+                .debug,
+                "Recorded system proxy state exists and a local proxy is still listening; leaving it alone.",
+                category: .system
+            )
+            return
+        }
+
+        logger?.log(
+            .warning,
+            "Found system proxy settings recorded by a run that never tore down (likely a crash). Restoring the previous settings...",
+            category: .system
+        )
+        performRestore(logger: logger)
+    }
+
+    private func performRestore(logger: (any LogSink)?) {
+        do {
+            try clear(logger: logger)
+        } catch {
+            logger?.log(
+                .error,
+                "Failed to restore the system proxy after a crash: \(error.displayDescription)",
+                category: .system
+            )
+        }
+    }
+
+    /// Whether something is listening on the loopback port the machine's proxy
+    /// settings currently point at.
+    private func localProxyListenerExists() -> Bool {
+        let services = (try? connectedNetworkServices(logger: nil)) ?? allNetworkServices()
+        var ports = Set<String>()
+        for service in services {
+            for type in ["webproxy", "securewebproxy"] {
+                let state = readProxyState(service: service, type: type)
+                if state.enabled, Self.isLoopbackHost(state.host), !state.port.isEmpty {
+                    ports.insert(state.port)
+                }
+            }
+            let auto = readAutoproxy(service: service)
+            if auto.enabled,
+               let url = URL(string: auto.url),
+               Self.isLoopbackHost(url.host ?? ""),
+               let port = url.port {
+                ports.insert(String(port))
+            }
+        }
+        return ports.contains { isListening(onPort: $0) }
+    }
+
+    private func isListening(onPort port: String) -> Bool {
+        guard let port = Int(port) else { return false }
+        return portProbe(port)
     }
 
     private func applyViaPrivilegeClient(config: ProxyConfig, mode: SystemProxyMode, services: [String], pacURL: String, logger: (any LogSink)?) throws {
@@ -451,17 +592,17 @@ package final class SystemProxyManager: @unchecked Sendable {
         let secure = readProxyState(service: service, type: "securewebproxy")
         let auto = readAutoproxy(service: service)
 
-        return [
-            "webEnabled": String(web.enabled),
-            "webHost": web.host,
-            "webPort": web.port,
-            "secureEnabled": String(secure.enabled),
-            "secureHost": secure.host,
-            "securePort": secure.port,
-            "autoEnabled": String(auto.enabled),
-            "autoURL": auto.url,
-            "bypassDomains": readBypassDomains(service: service).joined(separator: ","),
-        ]
+        return ProxyServiceState(
+            webHost: web.host,
+            webPort: web.port,
+            webEnabled: web.enabled,
+            secureHost: secure.host,
+            securePort: secure.port,
+            secureEnabled: secure.enabled,
+            autoURL: auto.url,
+            autoEnabled: auto.enabled,
+            bypassDomains: readBypassDomains(service: service)
+        ).journalValues
     }
 
     /// Whether any service is still actively routed at this machine — the
@@ -505,57 +646,4 @@ package final class SystemProxyManager: @unchecked Sendable {
             .filter { !$0.isEmpty && !$0.contains("There aren't any") }
     }
 
-    /// Rebuilds the `networksetup` calls that put `prior` back on `service`.
-    ///
-    /// Deliberately without the `2>/dev/null || true` the blanket-clear path
-    /// uses. There, best-effort is right — we are switching things off and a
-    /// service that cannot do it was not on anyway. Here the exit code is the
-    /// only evidence the restore landed, and swallowing failures would let a
-    /// partial restore look complete, after which the record is dropped and the
-    /// user's remaining settings can never be recovered.
-    private static func restoreScript(service: String, prior: [String: String]) -> String {
-        let s = service.shellQuoted
-        var script = ""
-
-        // The URL goes back whether or not it was enabled, for the same reason
-        // the endpoint loop below restores a disabled host and port:
-        // networksetup keeps the address on a switched-off autoproxy, so
-        // leaving ours there hands the user a dead local PAC server the moment
-        // they switch automatic configuration back on.
-        //
-        // The state line comes last, and it is load-bearing:
-        // `-setautoproxyurl` enables autoproxy as a side effect. Verified on
-        // macOS 26 — writing a URL to a service whose autoproxy is off leaves
-        // it reporting `Enabled: Yes`. Neither `man networksetup` nor the
-        // usage string documents this. Without the trailing `off`, restoring a
-        // URL the user had configured-but-disabled would switch their
-        // automatic proxy configuration on behind their back.
-        if let url = prior["autoURL"], !url.isEmpty {
-            script += "/usr/sbin/networksetup -setautoproxyurl \(s) \(url.shellQuoted)\n"
-        }
-        script += "/usr/sbin/networksetup -setautoproxystate \(s) \(prior["autoEnabled"] == "true" ? "on" : "off")\n"
-
-        for (key, setter, stateSetter) in [
-            ("web", "-setwebproxy", "-setwebproxystate"),
-            ("secure", "-setsecurewebproxy", "-setsecurewebproxystate"),
-        ] {
-            let enabled = prior["\(key)Enabled"] == "true"
-            let host = prior["\(key)Host"] ?? ""
-            let port = prior["\(key)Port"] ?? ""
-            // Put the endpoint back even when it was disabled: networksetup
-            // retains host/port on a disabled proxy, and leaving ours there
-            // would quietly hand the user our address if they re-enable it.
-            if !host.isEmpty, !port.isEmpty {
-                script += "/usr/sbin/networksetup \(setter) \(s) \(host.shellQuoted) \(port.shellQuoted)\n"
-            }
-            script += "/usr/sbin/networksetup \(stateSetter) \(s) \(enabled ? "on" : "off")\n"
-        }
-
-        // "Empty" is networksetup's own spelling for clearing the list.
-        let bypass = (prior["bypassDomains"] ?? "").split(separator: ",").map(String.init)
-        let bypassArgument = bypass.isEmpty ? "Empty" : bypass.map(\.shellQuoted).joined(separator: " ")
-        script += "/usr/sbin/networksetup -setproxybypassdomains \(s) \(bypassArgument)\n"
-
-        return script
-    }
 }

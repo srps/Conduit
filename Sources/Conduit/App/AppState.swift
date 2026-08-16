@@ -116,8 +116,13 @@ final class AppState: ObservableObject {
             logStore.log(.notice, "Configuration files migrated to the current schema.", category: .system)
         }
         let initialConfig = loadedConfiguration.config
-        let privilegeClient = HelperToolPrivilegeClient()
         let privilegeAuditEventSink = PrivilegeAuditEventSink()
+        // The sink also carries the "helper unreachable, falling back to an
+        // admin prompt" event, which is a recovery the user needs to see: it
+        // means the installed helper is missing or predates a protocol bump.
+        let privilegeClient = HelperToolPrivilegeClient(
+            eventSink: { event in privilegeAuditEventSink.emit(event) }
+        )
         let auditedPrivilegeClient = AuditingPrivilegeClient(
             base: privilegeClient,
             eventSink: { event in privilegeAuditEventSink.emit(event) }
@@ -297,6 +302,11 @@ final class AppState: ObservableObject {
             Task { @MainActor in self?.handleSystemWake() }
         }
         systemDNSManager.restoreIfNeeded(logger: logStore)
+        // Same reason as the line above: a run that was `SIGKILL`ed never got
+        // to tear down, and launch is when the recorded prior state is most
+        // likely still the truth. Without this the machine keeps pointing at a
+        // dead proxy port until the user next stops the proxy by hand.
+        systemConduit.restoreIfNeeded(logger: logStore)
         isShowingOnboarding = config.authMode == .ntlmv2 && !credentialManager.hasSavedCredentials(for: config)
         refreshPreflight()
     }
