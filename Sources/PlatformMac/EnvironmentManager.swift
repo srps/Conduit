@@ -3,12 +3,40 @@ import Foundation
 import ProxyKernel
 
 package final class EnvironmentManager {
-    package init() {}
+    /// Prior values of the launchd variables we publish, so teardown restores
+    /// rather than unsetting whatever was there.
+    ///
+    /// The shell-profile half of this class needs no journal: its marker block
+    /// already delimits our region inside a file we do not own, which answers
+    /// a different question — *which part of this is ours* — and does it
+    /// without copying a user's `.zshrc` into our state directory.
+    private let journal: PlatformStateJournal?
+    /// Home directory whose shell profiles we edit, and the launchctl runner.
+    ///
+    /// Both are injectable because this class edits a user's dotfiles and their
+    /// launchd domain — real, visible, outside-the-sandbox side effects. Without
+    /// a seam the only honest amount of test coverage was none, which is what it
+    /// had. Mirrors `SystemProxyManager`'s injected `commandRunner`.
+    private let homeDirectory: URL
+    private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+
+    package init(
+        journal: PlatformStateJournal? = nil,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
+        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
+            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
+        }
+    ) {
+        self.journal = journal
+        self.homeDirectory = homeDirectory
+        self.commandRunner = commandRunner
+    }
+
     private let blockStart = "# >>> Conduit >>>"
     private let blockEnd = "# <<< Conduit <<<"
 
-    private var targetFiles: [URL] {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+    package var targetFiles: [URL] {
+        let home = homeDirectory
         return [
             home.appendingPathComponent(".zshrc"),
             home.appendingPathComponent(".zprofile"),
@@ -62,10 +90,24 @@ package final class EnvironmentManager {
             "HTTPS_PROXY": proxyURL, "https_proxy": proxyURL,
             "NO_PROXY": noProxy, "no_proxy": noProxy,
         ]
+        // Capture before overwriting. A developer with HTTP_PROXY already
+        // exported into their launchd domain would otherwise have it silently
+        // unset by our teardown, with nothing recording that it existed.
+        if let journal {
+            for name in launchdVariableNames {
+                journal.recordPrior(
+                    surface: .launchdEnvironment,
+                    scope: name,
+                    value: readLaunchdValue(name).map { ["value": $0] }
+                )
+            }
+            journal.markApplied(surface: .launchdEnvironment)
+        }
+
         var failures = 0
         for name in launchdVariableNames {
             guard let value = values[name] else { continue }
-            let result = try? CommandRunner.run(launchPath: "/bin/launchctl", arguments: ["setenv", name, value])
+            let result = try? commandRunner("/bin/launchctl", ["setenv", name, value])
             if result?.exitCode != 0 { failures += 1 }
         }
         if failures > 0 {
@@ -76,10 +118,36 @@ package final class EnvironmentManager {
     }
 
     private func clearLaunchdEnvironment(logger: (any LogSink)?) {
+        var restored = 0
         for name in launchdVariableNames {
-            _ = try? CommandRunner.run(launchPath: "/bin/launchctl", arguments: ["unsetenv", name])
+            switch journal?.prior(surface: .launchdEnvironment, scope: name) ?? .notRecorded {
+            case .wasPresent(let prior):
+                let value = prior["value"] ?? ""
+                _ = try? commandRunner("/bin/launchctl", ["setenv", name, value])
+                restored += 1
+            case .wasAbsent, .notRecorded:
+                // Unknown falls back to unsetting: leaving our proxy URL in the
+                // launchd domain would point every GUI app launched afterwards
+                // at a proxy that is no longer running.
+                _ = try? commandRunner("/bin/launchctl", ["unsetenv", name])
+            }
         }
-        logger?.log(.notice, "Cleared proxy variables from the user launchd domain.", category: .system)
+        journal?.forgetAll(surface: .launchdEnvironment)
+
+        if restored > 0 {
+            logger?.log(.notice, "Restored \(restored) pre-existing launchd proxy variable(s), cleared the rest.", category: .system)
+        } else {
+            logger?.log(.notice, "Cleared proxy variables from the user launchd domain.", category: .system)
+        }
+    }
+
+    /// Current value of a launchd variable, or nil when it is not set.
+    private func readLaunchdValue(_ name: String) -> String? {
+        guard let result = try? commandRunner("/bin/launchctl", ["getenv", name]),
+              result.exitCode == 0
+        else { return nil }
+        let value = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     private func renderBlock(config: ProxyConfig) -> String {
