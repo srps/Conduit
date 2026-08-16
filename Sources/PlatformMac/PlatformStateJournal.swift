@@ -109,6 +109,46 @@ package final class PlatformStateJournal: @unchecked Sendable {
         saveLocked(records)
     }
 
+    /// Reserved scope for the "this surface is applied" marker. Prefixed with a
+    /// control character so it can never collide with a real scope — network
+    /// service names, variable names and resolver domains are all printable.
+    private static let appliedMarkerScope = "\u{0}applied"
+
+    /// Records that a surface was applied even if it captured no per-scope
+    /// prior values.
+    ///
+    /// "We applied and there was nothing to capture" and "we have no record"
+    /// want opposite fallbacks. The first means teardown has nothing to undo
+    /// and must do nothing. The second means we cannot say what we changed, so
+    /// teardown has to reset the surface — and doing that in the first case
+    /// would clear settings the user made *after* we applied, which is the
+    /// erasing behaviour this journal exists to stop.
+    package func markApplied(surface: PlatformSurface, now: Date = .now) {
+        recordPrior(surface: surface, scope: Self.appliedMarkerScope, value: nil, now: now)
+    }
+
+    package func isMarkedApplied(surface: PlatformSurface) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return loadLocked().contains { $0.surface == surface && $0.scope == Self.appliedMarkerScope }
+    }
+
+    /// Refreshes a surface's timestamps without touching the recorded values.
+    ///
+    /// `recordedAt` doubles as a liveness signal — a record far in the past is
+    /// read as the residue of a crashed run rather than a live session — so a
+    /// long-lived session has to be able to say "still mine" without
+    /// overwriting the prior values it is holding.
+    package func touch(surface: PlatformSurface, now: Date = .now) {
+        lock.lock()
+        defer { lock.unlock() }
+        var records = loadLocked()
+        for index in records.indices where records[index].surface == surface {
+            records[index].recordedAt = now
+        }
+        saveLocked(records)
+    }
+
     // MARK: - Reading
 
     package func prior(surface: PlatformSurface, scope: String) -> RecordedPrior {
@@ -122,15 +162,14 @@ package final class PlatformStateJournal: @unchecked Sendable {
     }
 
     package func scopes(for surface: PlatformSurface) -> [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return loadLocked().filter { $0.surface == surface }.map(\.scope)
+        records(for: surface).map(\.scope)
     }
 
+    /// Real scopes only — the applied marker is bookkeeping, not a setting.
     package func records(for surface: PlatformSurface) -> [PlatformStateRecord] {
         lock.lock()
         defer { lock.unlock() }
-        return loadLocked().filter { $0.surface == surface }
+        return loadLocked().filter { $0.surface == surface && $0.scope != Self.appliedMarkerScope }
     }
 
     package func hasRecords(for surface: PlatformSurface) -> Bool {
