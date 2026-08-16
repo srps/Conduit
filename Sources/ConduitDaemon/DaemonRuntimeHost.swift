@@ -71,7 +71,8 @@ final class DaemonRuntimeHost {
     private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient)
     private lazy var systemDNSManager = SystemDNSManager(
         savedDNSFile: environment.savedDNSFile,
-        privilegeClient: auditedPrivilegeClient
+        privilegeClient: auditedPrivilegeClient,
+        journal: platformStateJournal
     )
     private let networkMonitor = NetworkMonitor()
     private let vpnStatusMonitor: VPNStatusObserving

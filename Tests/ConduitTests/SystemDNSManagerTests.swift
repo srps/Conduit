@@ -36,17 +36,42 @@ private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
 final class SystemDNSManagerTests: XCTestCase {
 
     private var recording: RecordingPrivilegeClient!
+    /// Per-test state directory.
+    ///
+    /// These tests used to write saved DNS state into the *live*
+    /// `~/Library/Application Support/Conduit` directory, so a run that
+    /// crashed between `setUp` and `tearDown` left a snapshot the installed app
+    /// would find and act on. Harmless while the snapshot was DNS-only and
+    /// `manageSystemDNS` was off, but the journal is shared across every
+    /// platform surface now — a stray record there would have the running app
+    /// restore proxy settings it never captured.
+    private var stateDirectory: URL!
+    private var journal: PlatformStateJournal!
 
     override func setUp() {
         super.setUp()
         recording = RecordingPrivilegeClient()
-        cleanupSavedState()
+        stateDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("systemdns-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        journal = PlatformStateJournal(fileURL: stateDirectory.appendingPathComponent("platform-state.json"))
     }
 
     override func tearDown() {
-        cleanupSavedState()
+        try? FileManager.default.removeItem(at: stateDirectory)
+        stateDirectory = nil
+        journal = nil
         recording = nil
         super.tearDown()
+    }
+
+    /// Manager under test, wired to this test's isolated state.
+    private func makeManager() -> SystemDNSManager {
+        SystemDNSManager(
+            savedDNSFile: stateDirectory.appendingPathComponent("saved-dns.json"),
+            privilegeClient: recording,
+            journal: journal
+        )
     }
 
     // MARK: - SavedDNSState serialization
@@ -158,18 +183,18 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - State Detection
 
     func testHasSavedStateReturnsFalseWhenNoFile() {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         XCTAssertFalse(manager.hasSavedState())
     }
 
     func testHasSavedStateReturnsTrueWhenFileExists() {
         writeSavedState(SavedDNSState(interfaces: ["Wi-Fi": ["8.8.8.8"]]))
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         XCTAssertTrue(manager.hasSavedState())
     }
 
     func testReadDNSServersForNonexistentService() {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         let servers = manager.readDNSServers(service: "NonexistentService12345")
         XCTAssertTrue(servers.isEmpty)
     }
@@ -213,7 +238,7 @@ final class SystemDNSManagerTests: XCTestCase {
         ])
         writeSavedState(state)
 
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         try manager.clear(logger: nil)
 
         let dnsCommands = recording.commands(matching: .setDNSServers)
@@ -224,7 +249,7 @@ final class SystemDNSManagerTests: XCTestCase {
     func testClearWithEmptySavedInterfacesJustDeletesFile() throws {
         writeSavedState(SavedDNSState(interfaces: [:]))
 
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         try manager.clear(logger: nil)
 
         XCTAssertTrue(recording.executedCommands.isEmpty)
@@ -232,7 +257,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testClearRestoresRealInterfacesAndSkipsFake() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
 
         let realServices = try manager.connectedNetworkServices()
         guard let firstService = realServices.first else {
@@ -255,7 +280,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testClearRestoresEmptyDNSAsEmpty() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
 
         let realServices = try manager.connectedNetworkServices()
         guard let firstService = realServices.first else {
@@ -273,7 +298,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testClearContinuesAfterPartialFailure() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
 
         let realServices = try manager.connectedNetworkServices()
         guard realServices.count >= 2 else {
@@ -295,7 +320,7 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - apply() with RecordingPrivilegeClient
 
     func testApplyNeverCallsResolverOverrideCommands() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
 
         // apply() will fail at startRelay since recording isn't HelperToolPrivilegeClient,
         // but it still proceeds to setDNSServers
@@ -309,7 +334,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testApplySetsAllInterfacesToLocalhost() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
 
         try manager.apply(forwarderPort: 5053, logger: nil)
 
@@ -324,7 +349,7 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - clear() never calls resolver override commands (regression)
 
     func testClearNeverCallsResolverOverrideCommands() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         let realServices = try manager.connectedNetworkServices()
         guard let service = realServices.first else {
             throw XCTSkip("No connected network services")
@@ -344,7 +369,7 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - reconcile() with RecordingPrivilegeClient
 
     func testReconcileRedirectsNewInterfaces() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
 
         let realServices = try manager.connectedNetworkServices()
         guard let firstService = realServices.first else {
@@ -371,13 +396,13 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testReconcileDoesNothingWithoutSavedState() {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         manager.reconcile(logger: nil)
         XCTAssertTrue(recording.executedCommands.isEmpty, "No saved state means no reconciliation")
     }
 
     func testReconcileRepinsDriftedManagedInterfacesWithoutTouchingSavedState() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
 
         let realServices = try manager.connectedNetworkServices()
         guard !realServices.isEmpty else {
@@ -413,7 +438,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testReconcileNeverCallsResolverOverrideCommands() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
 
         writeSavedState(SavedDNSState(interfaces: ["FakeOldInterface": ["10.0.0.1"]]))
         manager.reconcile(logger: nil)
@@ -428,7 +453,7 @@ final class SystemDNSManagerTests: XCTestCase {
         let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
         writeSavedState(SavedDNSState(savedAt: oldDate, interfaces: ["FakeOldInterface": ["10.0.0.1"]]))
 
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         manager.reconcile(logger: nil)
 
         let loaded = loadSavedState()
@@ -477,16 +502,67 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertEqual(goneInterfaces, ["utun3"])
     }
 
+    // MARK: - Legacy snapshot migration
+
+    /// An install can be upgraded while the DNS relay is active, with its
+    /// pre-journal `saved-dns.json` on disk holding the only record of the
+    /// user's real resolvers. Dropping that file instead of importing it would
+    /// leave their DNS pinned at 127.0.0.1 with nothing left saying what to
+    /// restore — the exact stranding this whole change exists to prevent.
+    func testLegacySavedStateIsImportedAndTheOldFileRemoved() throws {
+        let legacyFile = stateDirectory.appendingPathComponent("saved-dns.json")
+        let savedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let legacy = SavedDNSState(savedAt: savedAt, interfaces: ["Wi-Fi": ["192.168.1.1", "1.1.1.1"]])
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .deferredToDate
+        try encoder.encode(legacy).write(to: legacyFile)
+
+        let manager = makeManager()
+        XCTAssertTrue(manager.hasSavedState(), "a legacy snapshot still counts as saved state")
+
+        XCTAssertEqual(
+            journal.prior(surface: .systemDNS, scope: "Wi-Fi"),
+            .wasPresent(["servers": "192.168.1.1,1.1.1.1"]),
+            "the user's real resolvers must survive the format change"
+        )
+        XCTAssertEqual(
+            journal.oldestRecordDate(for: .systemDNS),
+            savedAt,
+            "the original save time carries over, so staleness is judged from when it was really taken"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: legacyFile.path),
+            "the legacy file is consumed, not left to be re-imported"
+        )
+    }
+
+    /// Import must not clobber a journal that already holds the truth.
+    func testLegacyImportDoesNotOverwriteExistingJournalRecords() throws {
+        journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "10.0.0.1"])
+
+        let legacyFile = stateDirectory.appendingPathComponent("saved-dns.json")
+        let legacy = SavedDNSState(interfaces: ["Wi-Fi": ["8.8.8.8"]])
+        try JSONEncoder().encode(legacy).write(to: legacyFile)
+
+        _ = makeManager().hasSavedState()
+
+        XCTAssertEqual(
+            journal.prior(surface: .systemDNS, scope: "Wi-Fi"),
+            .wasPresent(["servers": "10.0.0.1"]),
+            "first-write-wins protects the newer record"
+        )
+    }
+
     // MARK: - restoreIfNeeded()
 
     func testRestoreIfNeededNoOpsWithoutFile() {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         manager.restoreIfNeeded(logger: nil)
         XCTAssertTrue(recording.executedCommands.isEmpty)
     }
 
     func testRestoreIfNeededRestoresWhenPort53FreeAndFileExists() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         let realServices = try manager.connectedNetworkServices()
         guard let service = realServices.first else {
             throw XCTSkip("No connected network services")
@@ -510,7 +586,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testRestoreIfNeededForcesRestoreForStaleState() throws {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         let realServices = try manager.connectedNetworkServices()
         guard let service = realServices.first else {
             throw XCTSkip("No connected network services")
@@ -527,7 +603,7 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - Liveness probe
 
     func testProbeLivenessReturnsFalseWhenNoListener() {
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         let port = Int.random(in: 17000..<18000)
         XCTAssertFalse(manager.probeLiveness(port: port), "Should fail with nothing on the port")
     }
@@ -559,7 +635,7 @@ final class SystemDNSManagerTests: XCTestCase {
         }
         echoThread.start()
 
-        let manager = SystemDNSManager(privilegeClient: recording)
+        let manager = makeManager()
         let alive = manager.probeLiveness(port: port)
 
         close(echoFD)
@@ -641,25 +717,32 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     private func writeSavedState(_ state: SavedDNSState) {
-        let savedDNSFile = RuntimeEnvironment.userDefault().savedDNSFile
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try! encoder.encode(state)
-        try! FileManager.default.createDirectory(
-            at: savedDNSFile.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try! data.write(to: savedDNSFile, options: .atomic)
+        journal.forgetAll(surface: .systemDNS)
+        // Stands in for the legacy file's mere existence: a snapshot with zero
+        // interfaces still meant "we applied and captured nothing", which is
+        // not the same as having no saved state at all.
+        journal.markApplied(surface: .systemDNS, now: state.savedAt)
+        for (service, servers) in state.interfaces {
+            journal.recordPrior(
+                surface: .systemDNS,
+                scope: service,
+                value: ["servers": servers.joined(separator: ",")],
+                now: state.savedAt
+            )
+        }
     }
 
     private func loadSavedState() -> SavedDNSState? {
-        let savedDNSFile = RuntimeEnvironment.userDefault().savedDNSFile
-        guard let data = try? Data(contentsOf: savedDNSFile) else { return nil }
-        return try? JSONDecoder().decode(SavedDNSState.self, from: data)
-    }
-
-    private func cleanupSavedState() {
-        try? FileManager.default.removeItem(at: RuntimeEnvironment.userDefault().savedDNSFile)
+        guard journal.hasRecords(for: .systemDNS) else { return nil }
+        var interfaces: [String: [String]] = [:]
+        for record in journal.records(for: .systemDNS) {
+            let servers = record.priorValue?["servers"] ?? ""
+            interfaces[record.scope] = servers.isEmpty ? [] : servers.split(separator: ",").map(String.init)
+        }
+        return SavedDNSState(
+            savedAt: journal.oldestRecordDate(for: .systemDNS) ?? .now,
+            interfaces: interfaces
+        )
     }
 
     private func createUDPSocket(port: Int) -> Int32 {

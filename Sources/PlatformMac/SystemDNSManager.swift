@@ -2,6 +2,11 @@
 import Foundation
 import ProxyKernel
 
+/// Legacy on-disk format for saved DNS state, superseded by
+/// `PlatformStateJournal`. Retained only so existing installs' `saved-dns.json`
+/// can be imported once and deleted — dropping it outright would orphan the
+/// saved DNS of anyone who upgrades while the relay is active, leaving their
+/// resolvers pointed at 127.0.0.1 with nothing left recording what to restore.
 package struct SavedDNSState: Codable {
     package var savedAt: Date
     package var interfaces: [String: [String]]
@@ -14,14 +19,60 @@ package struct SavedDNSState: Codable {
 
 package final class SystemDNSManager: @unchecked Sendable {
     private let privilegeClient: PrivilegeClient
+    /// Prior per-service DNS servers. Shared with every other platform surface
+    /// so there is one answer to "what was here before us" rather than the
+    /// bespoke snapshot this manager used to keep for itself.
+    private let journal: PlatformStateJournal
+    /// Legacy snapshot path, read once for migration and then deleted.
     package let savedDNSFile: URL
 
     package init(
         savedDNSFile: URL = RuntimeEnvironment.userDefault().savedDNSFile,
-        privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient()
+        privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
+        journal: PlatformStateJournal = PlatformStateJournal(
+            fileURL: RuntimeEnvironment.userDefault().platformStateFile
+        )
     ) {
         self.savedDNSFile = savedDNSFile
         self.privilegeClient = privilegeClient
+        self.journal = journal
+    }
+
+    // MARK: - Journal-backed saved state
+
+    /// Folds a pre-journal `saved-dns.json` into the journal, once.
+    ///
+    /// Runs before every read of saved state rather than at startup: an install
+    /// can be upgraded while the relay is running, and the first thing the new
+    /// build does with DNS may well be the teardown that needs this.
+    private func importLegacySavedStateIfNeeded() {
+        guard FileManager.default.fileExists(atPath: savedDNSFile.path) else { return }
+        defer { try? FileManager.default.removeItem(at: savedDNSFile) }
+
+        guard let data = try? Data(contentsOf: savedDNSFile),
+              let legacy = try? JSONDecoder().decode(SavedDNSState.self, from: data)
+        else { return }
+
+        for (service, servers) in legacy.interfaces {
+            journal.recordPrior(
+                surface: .systemDNS,
+                scope: service,
+                value: ["servers": servers.joined(separator: ",")],
+                now: legacy.savedAt
+            )
+        }
+    }
+
+    private func savedInterfaces() -> [String: [String]] {
+        importLegacySavedStateIfNeeded()
+        var interfaces: [String: [String]] = [:]
+        for record in journal.records(for: .systemDNS) {
+            let servers = record.priorValue?["servers"] ?? ""
+            interfaces[record.scope] = servers.isEmpty
+                ? []
+                : servers.split(separator: ",").map(String.init)
+        }
+        return interfaces
     }
 
     // MARK: - Apply / Clear
@@ -96,12 +147,19 @@ package final class SystemDNSManager: @unchecked Sendable {
             state.interfaces[service] = servers
         }
 
-        let data = try JSONEncoder.prettyEncoder.encode(state)
-        try FileManager.default.createDirectory(
-            at: savedDNSFile.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try data.write(to: savedDNSFile, options: .atomic)
+        for (service, servers) in state.interfaces {
+            // First-write-wins in the journal: a second `saveCurrentDNS` in the
+            // same session reads 127.0.0.1 (our own relay) as the current
+            // value, and recording that would make restore a no-op.
+            journal.recordPrior(
+                surface: .systemDNS,
+                scope: service,
+                value: ["servers": servers.joined(separator: ",")]
+            )
+        }
+        // Mark even when there were no services: teardown must be able to tell
+        // "nothing to restore" from "we do not know what we changed".
+        journal.markApplied(surface: .systemDNS)
         logger?.log(.debug, "Saved current DNS state for \(services.count) interface(s).", category: .system)
     }
 
@@ -152,17 +210,25 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func hasSavedState() -> Bool {
-        FileManager.default.fileExists(atPath: savedDNSFile.path)
+        importLegacySavedStateIfNeeded()
+        return journal.isMarkedApplied(surface: .systemDNS) || journal.hasRecords(for: .systemDNS)
     }
 
     // MARK: - Private
 
     private func loadSavedState() -> SavedDNSState? {
-        guard let data = try? Data(contentsOf: savedDNSFile) else { return nil }
-        return try? JSONDecoder().decode(SavedDNSState.self, from: data)
+        importLegacySavedStateIfNeeded()
+        guard journal.isMarkedApplied(surface: .systemDNS) || journal.hasRecords(for: .systemDNS) else {
+            return nil
+        }
+        return SavedDNSState(
+            savedAt: journal.oldestRecordDate(for: .systemDNS) ?? .now,
+            interfaces: savedInterfaces()
+        )
     }
 
     private func deleteSavedState() {
+        journal.forgetAll(surface: .systemDNS)
         try? FileManager.default.removeItem(at: savedDNSFile)
     }
 
@@ -296,10 +362,23 @@ package final class SystemDNSManager: @unchecked Sendable {
             logger?.log(.debug, "DNS reconcile: removed vanished interface \(iface) from saved state.", category: .system)
         }
 
-        saved.savedAt = .now
-        if let data = try? JSONEncoder.prettyEncoder.encode(saved) {
-            try? data.write(to: savedDNSFile, options: .atomic)
+        // Write the delta through the journal. Interfaces we already manage are
+        // untouched on purpose (see the re-pin loop above): their record holds
+        // the ORIGINAL pre-override servers, and refreshing it would replace the
+        // user's DNS with our own 127.0.0.1 override as the thing we restore.
+        for iface in newInterfaces where saved.interfaces[iface] != nil {
+            journal.recordPrior(
+                surface: .systemDNS,
+                scope: iface,
+                value: ["servers": (saved.interfaces[iface] ?? []).joined(separator: ",")]
+            )
         }
+        for iface in goneInterfaces {
+            journal.forget(surface: .systemDNS, scope: iface)
+        }
+        // Refresh liveness only: a session that keeps reconciling is not the
+        // orphaned residue `restoreIfNeeded` looks for.
+        journal.touch(surface: .systemDNS)
     }
 
     // MARK: - Liveness probe
