@@ -515,6 +515,35 @@ extension SystemProxyManagerTests {
         )
     }
 
+    /// The blanket-clear branch must not suppress its failures either.
+    ///
+    /// Every command used to end in `2>/dev/null || true`, which forces the
+    /// script's exit code to 0 and discards the "requires admin" text — so on a
+    /// machine that cannot write proxy settings unprivileged, the privileged
+    /// fallback never ran, nothing was cleared, the records were dropped as if
+    /// it had worked, and the run reported success.
+    func testBlanketClearScriptDoesNotSuppressFailures() throws {
+        let runner = FakeNetworksetupRunner()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+
+        // Residue with no recorded prior: takes the blanket-clear branch.
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(script.contains("-setautoproxystate 'Wi-Fi' off"), "precondition: blanket-clear branch")
+        XCTAssertFalse(
+            script.contains("|| true"),
+            "a teardown that cannot report failure cannot fall back to the helper: \(script)"
+        )
+        XCTAssertFalse(script.contains("2>/dev/null"), "and the 'requires admin' text must survive: \(script)")
+    }
+
     /// A record is only safe to drop once the prior value is actually back. If
     /// restore fails and we forget anyway, the setting we changed is left with
     /// nothing recording that we changed it.
