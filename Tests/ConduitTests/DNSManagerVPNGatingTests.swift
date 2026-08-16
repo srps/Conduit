@@ -201,4 +201,83 @@ final class DNSManagerVPNGatingTests: XCTestCase {
             "Full teardown (proxy stop/quit) is not VPN-gated"
         )
     }
+
+    // MARK: - Stranded entry files
+
+    /// A start with the VPN down must *repair* stranded entry files, not just
+    /// defer writing new ones.
+    ///
+    /// Entry files outlive the process that wrote them — a `SIGKILL`, an
+    /// installer swapping the app, or a run that ended without a clean stop all
+    /// leave them on disk with no in-memory record. Nothing else sweeps them:
+    /// the VPN transition handler only fires on a state *flip*, so files
+    /// stranded while the VPN is already down stay stranded, sending their
+    /// whole domain to servers only the tunnel can reach and blackholing those
+    /// lookups for every process on the machine.
+    func testApplyWithVPNDisconnectedSweepsStrandedEntryFiles() throws {
+        let resolverDir = try makeTemporaryResolverDirectory()
+        let manager = DNSManager(privilegeClient: recording, resolverDirectory: resolverDir.path)
+
+        // A previous run left one entry file behind.
+        try "nameserver 10.1.1.1".write(
+            to: resolverDir.appendingPathComponent("corp.example"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        try manager.apply(config: makeConfig(), logger: nil, vpnConnected: false)
+
+        XCTAssertEqual(
+            removedDomains(),
+            ["corp.example", "internal.example"],
+            "a start with the VPN down must sweep entry files rather than strand them"
+        )
+        XCTAssertTrue(appliedDomains().isEmpty, "nothing may be written while the tunnel is down")
+    }
+
+    /// The clean case must stay quiet: no stranded files means no privileged
+    /// helper round-trips on every start.
+    func testApplyWithVPNDisconnectedSweepsNothingWhenDiskIsClean() throws {
+        let resolverDir = try makeTemporaryResolverDirectory()
+        let manager = DNSManager(privilegeClient: recording, resolverDirectory: resolverDir.path)
+
+        try manager.apply(config: makeConfig(), logger: nil, vpnConnected: false)
+
+        XCTAssertTrue(removedDomains().isEmpty, "no files on disk, nothing to sweep")
+        XCTAssertTrue(appliedDomains().isEmpty)
+    }
+
+    /// `isApplied` is the gate the GUI host puts in front of `apply`, so it has
+    /// to answer for everything `apply` does. It reported "already applied"
+    /// whenever the VPN was down — there is nothing to *write* then — which
+    /// skipped the stranded-file sweep in the one host and the one state the
+    /// sweep exists for. Caught in review on #54.
+    func testIsAppliedReportsWorkPendingWhenEntryFilesAreStranded() throws {
+        let resolverDir = try makeTemporaryResolverDirectory()
+        let manager = DNSManager(privilegeClient: recording, resolverDirectory: resolverDir.path)
+
+        XCTAssertTrue(
+            manager.isApplied(config: makeConfig(), vpnConnected: false),
+            "VPN down with a clean disk: nothing to write and nothing to sweep"
+        )
+
+        try "nameserver 10.1.1.1".write(
+            to: resolverDir.appendingPathComponent("corp.example"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertFalse(
+            manager.isApplied(config: makeConfig(), vpnConnected: false),
+            "a stranded entry file is pending work, so the caller must not skip apply"
+        )
+    }
+
+    private func makeTemporaryResolverDirectory() throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("resolver-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir
+    }
 }

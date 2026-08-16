@@ -55,7 +55,8 @@ final class SplitDNSVPNGateTests: XCTestCase {
         gate.reconcileEntryFiles(
             config: makeConfig(),
             dnsManager: DNSManager(privilegeClient: recording),
-            logger: DiscardingLogSink()
+            logger: DiscardingLogSink(),
+            runtimeStarted: true
         )
 
         XCTAssertEqual(recording.commands(matching: .applyDNS).compactMap(\.first), ["gate-test.example"])
@@ -70,11 +71,72 @@ final class SplitDNSVPNGateTests: XCTestCase {
         gate.reconcileEntryFiles(
             config: makeConfig(),
             dnsManager: DNSManager(privilegeClient: recording),
-            logger: DiscardingLogSink()
+            logger: DiscardingLogSink(),
+            runtimeStarted: true
         )
 
         XCTAssertEqual(recording.commands(matching: .removeDNS).compactMap(\.first), ["gate-test.example"])
         XCTAssertTrue(recording.commands(matching: .applyDNS).isEmpty)
+    }
+
+    // MARK: - Run-state asymmetry
+
+    /// The deadlock case, and the reason removal is not gated on the runtime.
+    ///
+    /// Both hosts used to skip entry-file reconciliation entirely unless the
+    /// proxy was up ("outside that window no platform side-effects exist to
+    /// reconcile"). When the proxy dies or fails to start with its files
+    /// applied, the side effects *do* still exist — and the guard then left
+    /// `/etc/resolver/<domain>` pointing into a tunnel that is gone, which
+    /// blackholes those lookups machine-wide and can strand the VPN client's
+    /// own gateway hostname.
+    func testEntryFilesAreRemovedEvenWithTheRuntimeDown() {
+        var gate = SplitDNSVPNGate()
+        _ = gate.update(.disconnected(reason: .networkLost))
+        let recording = RecordingPrivilegeClient()
+
+        gate.reconcileEntryFiles(
+            config: makeConfig(),
+            dnsManager: DNSManager(privilegeClient: recording),
+            logger: DiscardingLogSink(),
+            runtimeStarted: false
+        )
+
+        XCTAssertEqual(
+            recording.commands(matching: .removeDNS).compactMap(\.first),
+            ["gate-test.example"],
+            "a stopped proxy must not strand entry files against unreachable servers"
+        )
+    }
+
+    /// The other half of the asymmetry: writing files is a side effect of
+    /// running the proxy, so a stopped runtime must not create them.
+    func testEntryFilesAreNotAppliedWithTheRuntimeDown() {
+        var gate = SplitDNSVPNGate()
+        _ = gate.update(.connected)
+        let recording = RecordingPrivilegeClient()
+
+        gate.reconcileEntryFiles(
+            config: makeConfig(),
+            dnsManager: DNSManager(privilegeClient: recording),
+            logger: DiscardingLogSink(),
+            runtimeStarted: false
+        )
+
+        XCTAssertTrue(recording.commands(matching: .applyDNS).isEmpty)
+        XCTAssertTrue(recording.commands(matching: .removeDNS).isEmpty)
+    }
+
+    func testActionPolicy() {
+        var gate = SplitDNSVPNGate()
+
+        _ = gate.update(.connected)
+        XCTAssertEqual(gate.action(runtimeStarted: true), .apply)
+        XCTAssertEqual(gate.action(runtimeStarted: false), .nothing)
+
+        _ = gate.update(.disconnected(reason: .userInitiated))
+        XCTAssertEqual(gate.action(runtimeStarted: true), .remove)
+        XCTAssertEqual(gate.action(runtimeStarted: false), .remove, "removal never depends on run state")
     }
 }
 

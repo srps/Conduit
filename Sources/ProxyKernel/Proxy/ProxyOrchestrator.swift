@@ -1049,12 +1049,19 @@ package final class ProxyOrchestrator {
                 }
             }
         },
-        eventSink: { [eventLog] event in eventLog.append(event) }
+        eventSink: { [eventLog] event in eventLog.append(event) },
+        portHolderProbe: portHolderProbe
     )
 
     private lazy var localPACServer = LocalPACServer(logger: logStore)
 
     private lazy var autoRecovery = AutoRecovery(service: localProxyServer, logger: logStore)
+
+    /// Platform probe that names the process holding a contended listen
+    /// address. Nil in portable/headless builds; the bind error then names the
+    /// address alone. Stored rather than passed through so the lazily-built
+    /// `localProxyServer` can read it.
+    private let portHolderProbe: (any ListenerPortHolderProbing)?
 
     private let tunnelAuthHandshakeLimiter = AuthHandshakeLimiter()
 
@@ -1120,8 +1127,10 @@ package final class ProxyOrchestrator {
         authenticatorProvider: (@Sendable (String) throws -> ProxyAuthenticator)? = nil,
         pacEvaluator: (any PacEvaluator)? = nil,
         auditSink: any ConnectionAuditSink = DiscardingConnectionAuditSink(),
-        resolverManager: (any TunnelResolverApplying)? = nil
+        resolverManager: (any TunnelResolverApplying)? = nil,
+        portHolderProbe: (any ListenerPortHolderProbing)? = nil
     ) {
+        self.portHolderProbe = portHolderProbe
         self.resolverManager = resolverManager
         self.auditSink = auditSink
         let configBox = ProxyConfigBox(config)

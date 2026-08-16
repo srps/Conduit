@@ -25,6 +25,21 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let group = MultiThreadedEventLoopGroup.singleton
     private let inboundConnectionCountBox = NIOLockedValueBox(0)
     private let lastWarnLoggedAt = NIOLockedValueBox<Date>(Date.distantPast)
+    /// Count of accept sockets this server has successfully bound. Lets callers
+    /// (and tests) distinguish "the listener was preserved" from "the listener
+    /// was re-created on the same port" — the two are indistinguishable from
+    /// `listeningPort` alone, and the difference is the whole point of
+    /// `recycleListener`'s healthy-case no-op.
+    private let listenerGenerationBox = NIOLockedValueBox(0)
+    /// How many times a retriable bind failure is re-attempted, one second
+    /// apart. Injectable so tests can exercise the conflict path without
+    /// paying the production handoff budget.
+    private let bindRetryLimit: Int
+    /// Names the process holding a contended address so an `EADDRINUSE` can
+    /// say *who* rather than just *that*. Optional: hosts that link a platform
+    /// layer supply one, headless/portable builds leave it nil and the error
+    /// falls back to naming the address.
+    private let portHolderProbe: (any ListenerPortHolderProbing)?
 
     /// Listener/pool references are read from arbitrary threads (orchestrator
     /// tasks, the health timer, snapshot accessors on the main thread) while
@@ -32,8 +47,25 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// suspension points resume on — the scheduled TSan soak flagged exactly
     /// those pairs as data races. All access goes through this box. Never
     /// hold the lock across an `await`: copy references out, then suspend.
+    /// The `(host, port)` a listener was *asked* for, kept beside the channel.
+    ///
+    /// Recycling needs to know "is this socket still where the config wants
+    /// it", and the bound address cannot answer that. `localPort = 0` means
+    /// "any port", but the channel reports the concrete one it got; a host of
+    /// `localhost` is accepted by config validation, but the channel reports
+    /// `127.0.0.1`. Comparing the live address against raw config values makes
+    /// both configurations compare unequal forever, so the healthy-listener
+    /// no-op becomes unreachable and every recovery cycle drops a working
+    /// socket — with port 0, onto a different port than clients were told.
+    /// Comparing request against request is exact in every case.
+    struct RequestedAddress: Equatable {
+        var host: String
+        var port: Int
+    }
+
     private struct RuntimeRefs {
         var serverChannel: Channel? = nil
+        var serverAddress: RequestedAddress? = nil
         var connectionPool: ConnectionPool? = nil
         var connectCoordinator: CONNECTCoordinator? = nil
         var socksServer: SOCKS5Server? = nil
@@ -59,6 +91,12 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
 
     package var listeningPort: Int? {
         refs.withLockedValue { $0.serverChannel }?.localAddress?.port
+    }
+
+    /// How many accept sockets this server has bound since it was created.
+    /// Unchanged across a recycle that correctly left a healthy listener alone.
+    package var listenerGeneration: Int {
+        listenerGenerationBox.withLockedValue { $0 }
     }
 
     package var socksListeningHost: String? {
@@ -92,8 +130,12 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in },
         onRequestCompleted: @Sendable @escaping (Bool, String?) -> Void,
-        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        bindRetryLimit: Int = 10,
+        portHolderProbe: (any ListenerPortHolderProbing)? = nil
     ) {
+        self.bindRetryLimit = max(1, bindRetryLimit)
+        self.portHolderProbe = portHolderProbe
         self.logger = logger
         self.configProvider = configProvider
         self.directModeProvider = directModeProvider
@@ -173,6 +215,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         let published = refs.withLockedValue { r -> Bool in
             guard r.epoch == epoch else { return false }
             r.serverChannel = bound
+            r.serverAddress = RequestedAddress(host: listenHost, port: config.localPort)
             r.connectionPool = pool
             r.connectCoordinator = coordinator
             return true
@@ -270,8 +313,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// at the BSD-socket level — closing the listener does not propagate to them.
     /// They continue to serve their owners until each side closes its end normally.
     package func recycleListener() async throws {
-        let (existingPool, existingCoordinator, epoch) = refs.withLockedValue {
-            ($0.connectionPool, $0.connectCoordinator, $0.epoch)
+        let (existingPool, existingCoordinator, existingChannel, existingAddress, epoch) = refs.withLockedValue {
+            ($0.connectionPool, $0.connectCoordinator, $0.serverChannel, $0.serverAddress, $0.epoch)
         }
         guard let pool = existingPool, let coordinator = existingCoordinator else {
             // No prior listener state — fall through to a normal start so the
@@ -283,29 +326,94 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         let config = configProvider()
         let listenHost = config.effectiveListenHost
 
-        // Bind a fresh listener BEFORE closing the old one to minimize the
-        // accept-gap window. SO_REUSEADDR makes simultaneous bind to the same
-        // port valid across the close.
-        let newChannel = try await bindListener(
-            pool: pool,
-            coordinator: coordinator,
-            listenHost: listenHost,
-            port: config.localPort,
-            gatewayMode: config.gatewayMode
-        )
+        // A listener only needs replacing when it is dead, or when it was
+        // asked for an address the current config no longer wants (a host/port
+        // edit, or `effectiveListenHost` flipping with gateway mode).
+        let wanted = RequestedAddress(host: listenHost, port: config.localPort)
+        let isHealthy = existingChannel?.isActive == true
+        let isCorrectlyAddressed = existingAddress == wanted
 
-        enum Install {
-            case previous(Channel?)
-            case preempted
+        if isHealthy && isCorrectlyAddressed {
+            // Deliberate no-op. Two independent reasons:
+            //
+            // 1. It cannot be done. On Darwin `SO_REUSEADDR` does not permit a
+            //    second bind over a socket that is already `LISTEN`ing — the
+            //    bind returns `EADDRINUSE` against our *own* accept socket.
+            //    Only `SO_REUSEPORT` allows it and we will not set that (see
+            //    `ListenerBindError.addressInUse`). The previous
+            //    bind-new-before-close-old ordering was therefore unreachable
+            //    code that always burned the full retry budget and then threw.
+            //
+            // 2. It should not be done. Recycling is `AutoRecovery`'s last
+            //    step, reached because *health checks* are failing — which is
+            //    an upstream-side condition that a fresh accept socket cannot
+            //    affect. Closing a working listener to re-create an identical
+            //    one only opens a window for another process to take the port.
+            //    That is not hypothetical: a co-resident corporate proxy agent
+            //    claimed 3128 during exactly such a gap, after which no restart
+            //    could ever bind again.
+            // Events are the contract with the UI, pmctl and pm-sim, and a
+            // recovery step that decides to do nothing still owes them the
+            // reason — otherwise the step is indistinguishable from one that
+            // ran and silently failed. See AGENTS.md "Always emit a
+            // RuntimeEvent first".
+            eventSink?(RuntimeEvent(
+                kind: .health,
+                event: "proxy.listener_recycle_skipped",
+                detail: "listener=\(wanted.host):\(wanted.port) healthy"
+            ))
+            logger.log(
+                .debug,
+                "Listener recycle skipped: accept socket on \(wanted.host):\(wanted.port) is healthy.",
+                category: .proxy
+            )
+            return
         }
-        let install = refs.withLockedValue { r -> Install in
-            guard r.epoch == epoch else { return .preempted }
+
+        // The accept socket must be released before its replacement can take
+        // the address. Detach it first so a failed rebind cannot leave a closed
+        // channel installed — `start()` gates on `serverChannel?.isActive`, and
+        // a stale reference there turns a repairable state into a confusing one.
+        let detached = refs.withLockedValue { r -> Channel? in
+            guard r.epoch == epoch else { return nil }
             let old = r.serverChannel
-            r.serverChannel = newChannel
-            return .previous(old)
+            r.serverChannel = nil
+            r.serverAddress = nil
+            return old
         }
-        switch install {
-        case .preempted:
+        if let detached {
+            _ = try? await detached.close().get()
+        }
+
+        let newChannel: Channel
+        do {
+            newChannel = try await bindListener(
+                pool: pool,
+                coordinator: coordinator,
+                listenHost: listenHost,
+                port: config.localPort,
+                gatewayMode: config.gatewayMode
+            )
+        } catch {
+            // Refs already show "no listener", which is the truth. The pool and
+            // its in-flight tunnels stay up: they are independent of the accept
+            // socket, and dropping them would turn a listener outage into a
+            // stream outage. `start()` repairs from here.
+            logger.log(
+                .error,
+                "Local proxy listener could not be rebound: \(error.displayDescription)",
+                category: .proxy
+            )
+            throw error
+        }
+
+        let published = refs.withLockedValue { r -> Bool in
+            guard r.epoch == epoch else { return false }
+            r.serverChannel = newChannel
+            r.serverAddress = wanted
+            return true
+        }
+        guard published else {
             // stop()/start() moved the lifecycle on while we were binding —
             // the pool this listener would serve is already torn down.
             // Installing it would leave a live listener over a dead pool that
@@ -313,15 +421,27 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             // the orphan instead.
             _ = try? await newChannel.close().get()
             throw CancellationError()
-        case .previous(let previous):
-            if let previous {
-                _ = try? await previous.close().get()
-            }
         }
 
         let actualHost = newChannel.localAddress?.ipAddress ?? listenHost
         let actualPort = newChannel.localAddress?.port ?? config.localPort
         logger.log(.notice, "Local proxy listener recycled on \(actualHost):\(actualPort) — pool and active connections preserved.", category: .proxy)
+    }
+
+    /// Closes the accept socket without touching the pool, coordinator or
+    /// SOCKS listener — reproducing "the listener died without a `stop()`",
+    /// the state `recycleListener` exists to repair. Test-only seam: nothing
+    /// in production drops the accept socket on its own.
+    package func simulateListenerLossForTesting() async {
+        let detached = refs.withLockedValue { r -> Channel? in
+            let old = r.serverChannel
+            r.serverChannel = nil
+            r.serverAddress = nil
+            return old
+        }
+        if let detached {
+            _ = try? await detached.close().get()
+        }
     }
 
     /// Build a fresh listener channel with the canonical handler pipeline.
@@ -406,21 +526,48 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                 }
             }
 
-        let maxRetries = 10
-        var lastError: Error?
+        // The retry budget exists for one benign case: a handoff, where an
+        // outgoing instance (an upgrade replacing a running copy) still holds
+        // the port for the moment it takes to exit. Only failures a wait can
+        // plausibly resolve are retried — retrying `EACCES` on a privileged
+        // port ten times just stalls the start for ten seconds before
+        // reporting the same thing.
+        let maxRetries = bindRetryLimit
+        var lastError: ListenerBindError?
         for attempt in 1...maxRetries {
             do {
-                return try await bootstrap.bind(host: listenHost, port: port).get()
+                let channel = try await bootstrap.bind(host: listenHost, port: port).get()
+                listenerGenerationBox.withLockedValue { $0 += 1 }
+                return channel
             } catch {
-                lastError = error
-                if attempt < maxRetries {
-                    logger.log(.warning, "Port \(port) busy, retrying in 1s (attempt \(attempt)/\(maxRetries))...", category: .proxy)
-                    try await Task.sleep(for: .seconds(1))
-                }
+                let classified = ListenerBindError.classify(
+                    error,
+                    listener: Self.listenerName,
+                    host: listenHost,
+                    port: port,
+                    holderProbe: portHolderProbe
+                )
+                lastError = classified
+                guard classified.isRetriable, attempt < maxRetries else { break }
+                logger.log(
+                    .warning,
+                    "\(Self.listenerName) bind on \(listenHost):\(port) failed (attempt \(attempt)/\(maxRetries)), retrying in 1s: \(classified.localizedDescription)",
+                    category: .proxy
+                )
+                try await Task.sleep(for: .seconds(1))
             }
         }
-        throw lastError ?? ConnectionPoolError.invalidResponse
+        throw lastError ?? .bindFailed(
+            listener: Self.listenerName,
+            host: listenHost,
+            port: port,
+            reason: "bind returned no channel and no error"
+        )
     }
+
+    /// Name used in bind diagnostics. Matches the label users see for this
+    /// listener in the UI, so an error message and the settings field agree.
+    private static let listenerName = "Local proxy"
 
     /// Stop the proxy listener and tear down pooled connections according to `scope`.
     ///
