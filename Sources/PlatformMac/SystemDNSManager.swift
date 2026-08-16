@@ -55,13 +55,37 @@ package final class SystemDNSManager: @unchecked Sendable {
 
     package func clear(logger: (any LogSink)?) throws {
         guard hasSavedInterfaces() else {
-            resetToDefaults(logger: logger)
+            // An empty journal used to mean "reset every connected service to
+            // DHCP", which erases resolvers the app may never have touched —
+            // the mirror image of the system-proxy surface, where the same
+            // state meant "do nothing". Ask the machine instead: reset only
+            // what still points at our own forwarder.
+            if loopbackResidueExists() {
+                logger?.log(
+                    .notice,
+                    "No saved DNS state, but some interfaces still point at 127.0.0.1 — resetting those to DHCP defaults.",
+                    category: .system
+                )
+                resetToDefaults(logger: logger)
+            } else {
+                // Still stop the relay: it is ours whether or not any interface
+                // is pointed at it.
+                stopRelay(logger: logger)
+                logger?.log(
+                    .debug,
+                    "System DNS teardown skipped: nothing recorded and no interface points at the local forwarder.",
+                    category: .system
+                )
+            }
             return
         }
 
         let savedInterfaces = savedInterfaces()
         guard !savedInterfaces.isEmpty else {
-            // Applied, but there was nothing to capture: nothing to undo.
+            // Applied, but there was nothing to capture: no DNS servers to put
+            // back. The relay still has to go — this was the one teardown path
+            // that left it running.
+            stopRelay(logger: logger)
             deleteSavedState()
             return
         }
@@ -92,7 +116,19 @@ package final class SystemDNSManager: @unchecked Sendable {
             }
         }
 
-        deleteSavedState()
+        // Only drop the records once every interface we could reach is back.
+        // Forgetting after a partial failure destroys the only copy of the
+        // remaining interfaces' real servers while leaving them pinned at
+        // 127.0.0.1 — the rule the proxy and launchd surfaces already follow.
+        if lastError == nil {
+            deleteSavedState()
+        } else {
+            logger?.log(
+                .warning,
+                "Restored system DNS for \(restored) interface(s) but some failed; keeping the recorded servers so a later teardown can retry.",
+                category: .system
+            )
+        }
         logger?.log(.notice, "Restored system DNS for \(restored) interface(s)\(skipped > 0 ? ", skipped \(skipped) vanished" : "").", category: .system)
 
         if let lastError, restored == 0 {
@@ -165,6 +201,16 @@ package final class SystemDNSManager: @unchecked Sendable {
             let servers = readDNSServers(service: service)
             return servers == ["127.0.0.1"]
         }
+    }
+
+    /// Whether any connected service still points at our local forwarder.
+    ///
+    /// Deliberately *any*, not `isApplied()`'s *all*: a single interface left
+    /// on 127.0.0.1 after a crash is exactly the residue worth cleaning, and
+    /// requiring every service to match would step straight past it.
+    private func loopbackResidueExists() -> Bool {
+        guard let services = try? connectedNetworkServices(logger: nil) else { return false }
+        return services.contains { readDNSServers(service: $0) == ["127.0.0.1"] }
     }
 
     package func hasSavedState() -> Bool {
@@ -363,10 +409,3 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 }
 
-private extension JSONEncoder {
-    static let prettyEncoder: JSONEncoder = {
-        let e = JSONEncoder()
-        e.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return e
-    }()
-}

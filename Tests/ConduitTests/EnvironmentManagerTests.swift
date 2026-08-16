@@ -135,6 +135,33 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080")
     }
 
+    /// The launchd twin of the system-proxy residue case. A stale proxy URL
+    /// here is harder to find than one in Network Settings — it surfaces only
+    /// as GUI apps mysteriously failing to reach anything — so an absent
+    /// journal must not be taken as licence to leave it.
+    func testTeardownUnsetsStaleVariablesWhenTheRecordIsLost() throws {
+        // The domain still carries our address; the journal does not know it.
+        launchctl.environment["HTTP_PROXY"] = "http://127.0.0.1:3128"
+        launchctl.environment["HTTPS_PROXY"] = "http://127.0.0.1:3128"
+
+        try makeManager().clear(logger: nil)
+
+        XCTAssertNil(launchctl.environment["HTTP_PROXY"], "a stranded variable must still be cleaned up")
+        XCTAssertNil(launchctl.environment["HTTPS_PROXY"])
+    }
+
+    /// And the converse: variables that are not ours are left alone.
+    func testTeardownLeavesForeignVariablesAloneWhenNothingWasApplied() throws {
+        launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
+
+        try makeManager().clear(logger: nil)
+
+        XCTAssertEqual(
+            launchctl.environment["HTTP_PROXY"], "http://corp.example:8080",
+            "never having applied is not a licence to unset the user's own variable"
+        )
+    }
+
     // MARK: - Shell profile block
 
     /// The marker block is the other ownership mechanism, and the reason it is
