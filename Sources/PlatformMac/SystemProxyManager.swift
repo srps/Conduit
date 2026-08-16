@@ -185,10 +185,22 @@ package final class SystemProxyManager: @unchecked Sendable {
                 script += Self.restoreScript(service: service, prior: prior)
                 restored.append(service)
             case .wasAbsent, .notRecorded:
+                // No `2>/dev/null || true` here either. It was justified as
+                // best-effort — "a service that cannot take the setting was not
+                // on anyway" — but that reasoning only covers an *unsupported*
+                // service, and the failure that actually happens is a
+                // permissions one. Suppressing it forced the script's exit code
+                // to 0 and threw away the "requires admin" text, so the
+                // privileged fallback never ran, nothing was cleared, the
+                // records were dropped as if it had worked, and the run logged
+                // success. On a machine where the user cannot write proxy
+                // settings unprivileged — verified to be this project's own
+                // primary target — that was every teardown with no recorded
+                // prior.
                 let s = service.shellQuoted
-                script += "/usr/sbin/networksetup -setwebproxystate \(s) off 2>/dev/null || true\n"
-                script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) off 2>/dev/null || true\n"
-                script += "/usr/sbin/networksetup -setautoproxystate \(s) off 2>/dev/null || true\n"
+                script += "/usr/sbin/networksetup -setwebproxystate \(s) off\n"
+                script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) off\n"
+                script += "/usr/sbin/networksetup -setautoproxystate \(s) off\n"
                 reset.append(service)
             }
         }
