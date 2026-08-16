@@ -1,22 +1,28 @@
-# Design handoff: restoring the user's own proxy settings on a machine that needs admin
+# Design: restoring the user's own proxy settings on a machine that needs admin
 
-> **Status: not started.** This is a handoff brief for a design conversation, written
-> 2026-08-16 while finishing PR #56. Everything below is verified against the tree at
-> `9b9253f` on `fix/unify-platform-side-effect-ownership` unless marked otherwise.
+> **Status: implemented.** Designed and built 2026-08-16 on
+> `fix/unify-platform-side-effect-ownership`, on top of PR #56. The brief that
+> opened this design conversation is preserved below under
+> [The problem](#the-problem); everything from [Decisions](#decisions) onward
+> records what was chosen and why.
+>
+> **Operational note: `sudo ./install-helper.sh` is required after this lands.**
+> The helper protocol went 3 → 4. An un-reinstalled helper is reported
+> `.outdated` in Settings and every privileged operation degrades to an admin
+> prompt — which now works, and did not before (see [B2](#b2)).
 
-## The problem in one paragraph
+## The problem
 
-PR #56 teaches Conduit to record what the machine's proxy settings were before it
-changed them, so teardown can put them back instead of blanket-disabling. The recording
-works. The putting-back does not — on any machine where the user cannot write proxy
-settings without admin rights, which includes the project's own primary target. There,
-every teardown degrades to a blanket clear and the recorded values are kept but never
-applied. The feature currently buys "nothing is lost permanently" rather than "your
-settings come back".
+PR #56 teaches Conduit to record what the machine's proxy settings were
+before it changed them, so teardown can put them back instead of blanket-
+disabling. The recording worked. The putting-back did not — on any machine where
+the user cannot write proxy settings without admin rights, which includes the
+project's own primary target. There, every teardown degraded to a blanket clear
+and the recorded values were kept but never applied. The feature bought
+"nothing is lost permanently" rather than "your settings come back".
 
-## Evidence
-
-Verified on the development machine (macOS 26, non-admin-for-networksetup user):
+Verified on the development machine (macOS 26, non-admin-for-`networksetup`
+user):
 
 ```
 $ networksetup -setautoproxyurl "Thunderbolt Bridge" http://example.test/a.pac
@@ -27,156 +33,333 @@ URL: http://127.0.0.1:63145/proxy.pac
 Enabled: Yes
 ```
 
-Unprivileged writes are refused, yet Wi-Fi carries Conduit's PAC URL — so `apply`
-only ever reached the machine through `SystemProxyManager.applyViaPrivilegeClient`, the
-privileged-helper fallback. **The requires-admin path is the default here, not an edge
-case.** Any reasoning that treats it as rare is wrong for this deployment.
-
-Follow it through `clear()`: the restore script is unprivileged, it fails with
-`requires admin`, and the code degrades to `PrivilegedOperation.clearSystemProxy` per
-service, sets `restoreSucceeded = false`, and keeps the records. Nothing is restored,
-ever.
-
-### A related bug this uncovered, already fixed in #56
-
-On `main`, every command in the teardown script ends in `2>/dev/null || true`. That forces
-the script's exit code to 0 and discards the `requires admin` text — and the fallback
-detection keys on both. So on this machine `clear()` silently cleared *nothing* while
-logging "Cleared macOS proxy settings." That is the stale-PAC symptom that started this
-whole line of work: proxy stopped, system PAC still enabled and pointing at a dead port.
-Fixed in `9b9253f` by removing the suffixes; the fallback now fires. Mentioned here
-because it means **teardown-via-helper is newly load-bearing** and any design here inherits
-that path.
-
-## The key discovery: most of a restore is already expressible
-
-The helper contract (`Sources/ConduitShared/HelperContract.swift`) already has four
-proxy-writing operations, implemented in `Sources/ConduitHelper/HelperTool.swift`:
-
-| Operation | What the helper actually runs |
-|---|---|
-| `applySystemProxy(service, host, port)` | `-setwebproxy` + `-setsecurewebproxy` (same host/port), then `-setwebproxystate on` + `-setsecurewebproxystate on` |
-| `clearSystemProxy(service)` | `-setwebproxystate off`, `-setsecurewebproxystate off`, `-setautoproxystate off` |
-| `setAutoproxyURL(service, url)` | `-setautoproxyurl`, then `-setautoproxystate on` |
-| `disableAutoproxy(service)` | `-setautoproxystate off` |
-| `setProxyBypass(service, domains...)` | `-setproxybypassdomains` |
-
-The prior state #56 records per service is
-`{webEnabled, webHost, webPort, secureEnabled, secureHost, securePort, autoEnabled, autoURL, bypassDomains}`
-(see `SystemProxyManager.capturePriorState`). Mapping it onto the above:
-
-**Expressible today:**
-- bypass domains → `setProxyBypass` (exact)
-- autoproxy enabled, URL present → `setAutoproxyURL` (exact)
-- autoproxy disabled, URL present → `setAutoproxyURL` then `disableAutoproxy`
-- autoproxy disabled, no URL → `disableAutoproxy`
-- web **and** secure both enabled on the **same** host/port → `applySystemProxy`
-
-**Not expressible:**
-1. Web and secure with *different* endpoints, or only one of the two enabled —
-   `applySystemProxy` writes both to one host/port and turns both on.
-2. Writing an endpoint *without* enabling it — needed because `networksetup` retains
-   host/port on a disabled proxy, and leaving Conduit's address there hands it to the
-   user the moment they re-enable. (#56 already restores this correctly on the
-   unprivileged path; the privileged path cannot.)
-3. Partial clears — `clearSystemProxy` is all-or-nothing and also kills autoproxy, so it
-   cannot serve as a building block.
-
-So the design question is **not** "how do we add a restore operation" but "how much of the
-gap is worth closing, and at what cost to a versioned IPC surface".
+Unprivileged writes are refused, yet Wi-Fi carries Conduit's PAC URL — so
+`apply` only ever reached the machine through the privileged-helper fallback.
+**The requires-admin path is the default here, not an edge case.**
 
 ### Verified `networksetup` behaviour worth knowing
 
-`-setautoproxyurl` **enables autoproxy as a side effect** — writing a URL to a service
-whose autoproxy is off leaves it reporting `Enabled: Yes`. Confirmed empirically
-2026-08-16; documented in neither `man networksetup` nor the usage string. This is why
-`setAutoproxyURL` must be followed by `disableAutoproxy` when restoring a
-configured-but-disabled URL, and why the unprivileged restore script writes its state line
-last. Any new operation must preserve that ordering.
+**Writing an address enables the proxy, on every setter.** `-setautoproxyurl`
+leaves a service reporting `Enabled: Yes` whatever it was before — and so does
+`-setwebproxy`, including when clearing:
 
-## Options to weigh
+```
+# web proxy was Enabled: No, Server: 10.1.2.3, Port: 1111
+$ sudo networksetup -setwebproxy "Thunderbolt Bridge" "" 0
+exit=0
+$ networksetup -getwebproxy "Thunderbolt Bridge"
+Enabled: Yes        # <- switched on by a command that only cleared an address
+Server:
+Port: 0
+```
 
-**A. Compose from existing operations, accept the gaps.** No contract change, ships
-immediately, covers the common case (web and secure pointing at the same proxy, which is
-what almost every corporate config and every GUI-configured proxy looks like). Falls back
-to `clearSystemProxy` plus a loud log for asymmetric configs. Cost: silently lossy for a
-minority, and case 2 above means a disabled endpoint keeps our address.
+Confirmed empirically 2026-08-16 on macOS 26; documented in neither
+`man networksetup` nor the usage string. Every path that writes an address must
+therefore write the on/off state *after* it. This is enforced inside the
+`setAutoproxy` and `setWebProxyEndpoint` operations rather than left to callers
+to remember — the rule is the kind that gets forgotten once per call site, so
+there is only one call site.
 
-**B. One new operation that takes the whole prior state.** e.g.
-`restoreSystemProxy(service, webEnabled, webHost, webPort, secureEnabled, secureHost,
-securePort, autoEnabled, autoURL, bypass...)`. Exact, single round-trip, one new case to
-validate. Cost: a wide argument list over a security boundary, and a versioned-contract
-change — `AGENTS.md` says to ask first, and the field-compat argument is weak but the
-review burden is real.
+**An empty host with port `0` clears an address.** That is the form used to
+blank a manual endpoint; see [B10](#b10) for why it is needed.
 
-**C. Two narrow primitives.** `setWebProxy(service, kind, host, port, enabled)` and
-`setAutoproxy(service, url, enabled)`, composing to cover everything. More round-trips,
-smaller and more reviewable each, and they subsume the existing `applySystemProxy` /
-`setAutoproxyURL` / `disableAutoproxy` — which raises whether to deprecate those.
+`sh -c` reports only the **last** command's exit status, which is what made the
+old single-script teardown unable to detect a partial failure:
 
-My prior, weakly held: **C**, with A as the interim if the contract change needs to wait.
-But this is exactly what the design conversation is for.
+```
+$ /bin/sh -c "networksetup -setwebproxystate 'Thunderbolt Bridge' off   # requires admin
+              /usr/bin/true"
+** Error: Command requires admin privileges.
+script exit=0
+```
 
-## Constraints and things not to break
+`lsof` lives at `/usr/sbin/lsof` on macOS 26, not `/usr/bin/lsof`.
 
-- **`AGENTS.md`: "Ask before changing the helper XPC/IPC surface" in `ConduitShared`** —
-  it is a versioned contract. Note the mitigating fact: the project is pre-0.1 with no tags
-  and no releases, and `docs/RELEASE-PREP.md` ships 0.1 as a fresh repo, so there are no
-  installed daemons in the field except the developer's own.
-- **Validation is mandatory and already exists.** `HelperTool` calls `validateService`,
-  `validateServiceHostPort`, `validateAutoproxyURL` before every `run`. Any new operation
-  must validate every argument the same way; the threat model treats helper input as
-  untrusted. See `docs/threat-model.md` and `Tests/ConduitTests/HelperContractTests.swift`.
-- **The helper is versioned and rejects unversioned frames** (`HelperDaemon.swift`). Adding
-  a case means deciding whether old helpers must be re-installed, and what a new client
-  does when it meets an old helper — probably: detect the unknown-command error and fall
-  back to option A's composition.
-- **`SystemProxyManager.restoreScript` already builds the correct unprivileged sequence.**
-  Whatever the privileged path does should produce the same end state; consider driving
-  both from one description of the target state rather than writing the logic twice. The
-  duplicate-implementation problem is what #56 was about in the first place.
+## Decisions
+
+The options weighed were **A** (compose from the existing operations, accept the
+gaps), **B** (one wide `restoreSystemProxy` taking the whole prior state), and
+**C** (two narrow primitives). **C was chosen**, with four decisions around it.
+
+### 1. Contract shape: two new operations
+
+| Operation | Values | Helper runs |
+|---|---|---|
+| `setWebProxyEndpoint` | `service, kind (web\|secure), host, port, state` | `-set{web,securewebproxy}` if host non-empty, **then** `-set…state` |
+| `setAutoproxy` | `service, url, state` | `-setautoproxyurl` if url non-empty, **then** `-setautoproxystate` |
+
+Empty host/port and empty URL are legal and write only the state. That is the
+case `applySystemProxy` could not express and restore needs most: `networksetup`
+keeps host, port and URL on a *disabled* proxy, so putting a user's setting back
+without switching it on is the common case, not an edge one. Asymmetric
+configurations (web and secure at different addresses, or only one enabled) fall
+out for free.
+
+Ordering lives inside each operation, not in the caller. That is deliberate: the
+`-setautoproxyurl` side effect above is the kind of rule that is got wrong once
+per call site, so there is only one call site.
+
+`applySystemProxy` / `setAutoproxyURL` / `disableAutoproxy` are **kept, not
+deprecated** — an older helper's vocabulary should not shrink — but the restore
+path no longer uses them.
+
+### 2. Versioning: bump to 4, and make the fallback real
+
+`HelperProtocolVersion.current` is now 4. The question the brief asked ("what
+should a new client do when it meets an old helper?") turned out to have an
+answer already baked in, and a bad one: see [B2](#b2). With that fixed, an old
+or missing helper degrades to an AppleScript admin prompt and emits an
+`auth.privilege_helper_degraded` event, instead of failing every privileged
+operation outright.
+
+Because the AppleScript fallback prompts **per invocation**, and a full restore
+is four operations per service, `PrivilegeClient` gained
+`execute(batch:)` — one elevation for a whole service. `AppleScriptPrivilegeClient`
+renders the batch as a single script; the helper client loops over the socket
+(where round-trips are free) and hands the *remainder* of the batch to the
+fallback if the helper drops out mid-sequence. The protocol default
+implementation loops, so existing conformers are unchanged.
+
+### 3. Restore also runs at launch
+
+`SystemProxyManager.restoreIfNeeded` mirrors `SystemDNSManager.restoreIfNeeded`,
+called from `AppState` at startup: a run that was `SIGKILL`ed never tore down,
+and launch is when the recorded prior is most likely still the truth. Same
+7-day staleness rule. The "is this actually orphaned?" test is whether anything
+is *serving* the loopback port the machine points at — see
+[the port probe](#the-port-probe).
+
+### 4. One description, two renderers
+
+`ProxyServiceState` decodes the journal record; `writeSteps` turns it into an
+ordered `[ProxyWriteStep]`; each step renders either to a shell command or to a
+typed privileged operation. The two restore paths can no longer disagree,
+because there is only one of them. This was the actual structural problem — two
+implementations of one platform side effect is what the prior-state journal was
+introduced to remove in the first place.
+
+## Bugs found and fixed along the way
+
+Ranked by what they cost the user.
+
+**B1 — teardown trusted an exit code that could not report failure.** `clear()`
+concatenated every service's commands into one `/bin/sh -c` and read
+`result.exitCode` as "did the restore land"; `sh` reports only the last
+command's status. A restore whose endpoint write failed but whose trailing
+bypass write succeeded reported success, and `forgetAll` then destroyed the
+records — the only copy of the user's real settings — for every service. Fixed
+by making each service its own unit of work and prefixing the script with
+`set -e`. Every write is an absolute set, so aborting early and re-running the
+sequence through the privileged path is safe.
+
+<a id="b2"></a>**B2 — `HelperToolPrivilegeClient` could not reach its own
+documented fallback.** The class comment promised "falls back to AppleScript
+when the helper is not installed or unreachable", but `sendRequest` throws
+`helperNotInstalled` / `communicationFailed`, and `execute` had
+`catch let error as PrivilegeClientError { throw error }` *ahead* of the
+fallback. Only JSON coding errors ever reached it. So a machine with no helper
+failed every privileged operation outright — meaning teardown cleared nothing at
+all, silently, on exactly the machines this design targets. Now
+`PrivilegeClientError.isHelperUnreachable` separates "could not reach or
+understand the helper" (retry by another route) from "the helper ran it and it
+failed" (a real error), and only the former degrades.
+
+**B3 — bypass domains were the one unvalidated helper argument.** Both the
+client and `HelperTool` validated the service name and passed the rest to
+`networksetup` untouched, while every other operation validated everything. The
+reason is visible in real data — `*.local` and `169.254/16` are both live on the
+development machine and neither passes `validateDomain` — but the answer to
+that is a bypass-specific rule, not an exemption from the trust boundary. Added
+`validateProxyBypassEntry`, which also rejects a leading `-`: these reach
+`networksetup` as argv, so an entry shaped like a flag is the one input that
+changes what the command does.
+
+This also settles the brief's open question 5. Zero domains is no longer
+accepted; clearing takes the explicit `Empty` sentinel, mirroring how
+`setDNSServers` already spells `empty`. A caller that lost its argument list is
+now distinguishable from one that means "clear".
+
+**B4 — `apply`'s PAC path still carried `2>/dev/null || true`.** The same
+suppression `9b9253f` removed from teardown, under the same reasoning that was
+found to be wrong. Removed.
+
+**B5 — port `0` round-tripped into an invalid write.** `-getwebproxy` reports
+`Port: 0` for a service that never had a manual proxy; carried through
+literally that becomes `-setwebproxy host 0`, which the privileged path rejects
+outright and the unprivileged one writes as an unusable endpoint.
+`ProxyServiceState` normalises 0 to "no port", and `validateOptionalEndpoint`
+requires host and port to travel together.
+
+**B6 — the residue probe mis-fired on a user's own loopback proxy.** After a
+successful restore the journal was forgotten, so `knowsSurfaceIsIdle` was true —
+but `loopbackResidueExists()` still read a user's *own* loopback proxy (a local
+mitmproxy, a second tool) as our residue, so the second teardown of a session
+disabled what the first had just restored. That is the double-teardown erase
+`4af8269` fixed, re-entering through the residue door.
+
+The fix is the journal remembering that it let go. The applied marker now
+carries an ownership payload — absent (legacy) or `applied` reads as applied,
+`released` means teardown completed — written last-write-wins, unlike prior
+values, because ownership describes the present and has to be able to change. A
+released surface skips the residue probe entirely.
+
+> An earlier sketch stored the *applied fingerprint* (our host/port/PAC URL) on
+> the marker so residue could mean "matches what we wrote". That turns out not
+> to be the lever: whenever a fingerprint exists the surface is marked applied,
+> `knowsSurfaceIsIdle` is already false, and the residue probe is never
+> consulted. The probe only runs when ownership is *unknown* — where by
+> definition there is no fingerprint to compare against. Remembering the
+> release is the whole fix.
+
+**B7 — `PlatformSurface.systemProxy` did not document `bypassDomains`,** though
+the enum's own docs promise each case lists its keys. Fixed, and pointed at
+`ProxyServiceState` as the typed reader.
+
+**B8 — `apply` records prior state and marks applied before attempting the
+write,** so a fully failed apply leaves the surface permanently non-idle. Left
+as-is: the consequence is a later teardown restoring values identical to what is
+already there. Noted rather than fixed.
+
+<a id="b10"></a>**B10 — teardown left Conduit's address in a service that
+had none before it.** Found by driving the rebuilt helper against
+`Thunderbolt Bridge`, not by reading the code. A service with no manual proxy
+reports `Server: (empty), Port: 0`; apply overwrites that with
+`127.0.0.1:<port>`; the recorded prior therefore says "no endpoint"; and both
+renderers read an empty host as *write only the state*. So teardown switched the
+proxy off and left our address in the `Server` field — to be handed to the user
+the moment they re-enabled the proxy by hand. That is precisely the harm
+restoring disabled endpoints exists to prevent, and it was inherited from #56's
+`restoreScript`, which had the same skip.
+
+The fix is that "the service had no address" and "do not touch the address" are
+now different instructions. `ProxyEndpoint` has three cases — `.unchanged`,
+`.cleared`, `.address` — and on the wire the host argument carries the
+instruction, on the pattern `setProxyBypass` and `setDNSServers` already use:
+empty leaves it alone, the `Empty` sentinel clears it. The blanket-clear path
+still uses `.unchanged`, because an endpoint we never recorded is not ours to
+erase.
+
+**B9 — `SystemDNSManager.isPort53InUse()` had never returned `true` on macOS
+26.** It shells out to `/usr/bin/lsof`, which does not exist on this OS version
+(`lsof` moved to `/usr/sbin`), so the probe threw and answered "port free"
+always — which made `restoreIfNeeded` treat a *running* relay's saved state as
+orphaned and force a restore at launch. The path is now resolved from a list of
+known absolute paths at first use. Absolute, not a `PATH` lookup: resolving tool
+locations from the inherited environment is how a process that may elevate ends
+up running someone else's binary.
+
+<a id="the-port-probe"></a>
+## The port probe
+
+The proxy surface's "is this still being served?" test does **not** shell out.
+`LoopbackPortProbe.isServed(port:)` does a non-blocking `connect` to
+`127.0.0.1:port` and reads `SO_ERROR`. Three reasons:
+
+1. It answers the question actually being asked. `lsof` reports which process
+   holds a socket; a teardown decision needs to know whether the address the
+   machine points at is being *served*.
+2. No subprocess means no path to get wrong — which is exactly how B9 happened.
+3. It is bounded: a loopback connect completes or is refused immediately, and
+   the 250 ms timeout only covers a listener whose accept backlog is full.
+
+A `bind` probe would avoid opening a connection, but it cannot serve the DNS
+case (binding port 53 unprivileged fails with `EACCES` whether or not anything
+holds it) and it misreports listeners using `SO_REUSEPORT`. So the DNS surface
+keeps `lsof`, with its path resolved rather than assumed.
+
+## Deferred: unify `apply`'s privileged path (separate issue)
+
+In scope for this change was restore plus the structural fixes it depends on.
+Deliberately **not** done, and worth its own issue:
+
+- **`applyViaPrivilegeClient` still uses the old operations.** In `.pac` mode it
+  runs `setAutoproxyURL → clearSystemProxy → setAutoproxyURL`, a three-operation
+  re-arm dance with a window where the PAC is off, because `clearSystemProxy`
+  also kills autoproxy. Expressed as `setWebProxyEndpoint(web, …, off)`,
+  `setWebProxyEndpoint(secure, …, off)`, `setAutoproxy(url, on)` it becomes
+  three independent writes with no window and no dance.
+- **Privileged PAC apply has never set bypass domains.** The unprivileged PAC
+  path does not either, so this is a pre-existing gap on both sides rather than
+  a divergence — but the manual path does, and the asymmetry is not explained
+  anywhere.
+- **`apply` is still one concatenated script for all services,** so it carries
+  B1's exit-code blindness. It is less dangerous there (apply throws on failure
+  rather than dropping records) but it is the same bug.
+- **Once `apply` moves over,** `applySystemProxy` / `setAutoproxyURL` /
+  `disableAutoproxy` have no remaining callers and the deprecation question
+  from the original brief becomes live.
+
+## Constraints honoured
+
+- **`AGENTS.md`: "Ask before changing the helper XPC/IPC surface".** Asked and
+  agreed before implementing. Mitigating fact: the project is pre-0.1 with no
+  tags and no releases, so the only installed daemon in the field is the
+  developer's own.
+- **Validation is mandatory.** Every new argument is validated on both sides of
+  the boundary — `HelperToolPrivilegeClient.validate` before IPC and
+  `HelperTool` before execution — and the whole batch is validated before any of
+  it runs, so a step rejected halfway cannot leave a surface in a state no
+  caller asked for.
+- **No silent recovery.** The degrade to AppleScript emits
+  `auth.privilege_helper_degraded`; `AuditingPrivilegeClient` audits every step
+  of a batch.
 
 ## Where the code is
 
 | Concern | File |
 |---|---|
-| Prior-state capture / restore / teardown | `Sources/PlatformMac/SystemProxyManager.swift` (`capturePriorState`, `restoreScript`, `clear`, `applyViaPrivilegeClient`) |
-| Prior-state storage | `Sources/PlatformMac/PlatformStateJournal.swift` |
-| Contract enum | `Sources/ConduitShared/HelperContract.swift` |
+| Target state, write steps, both renderers | `Sources/PlatformMac/ProxyServiceState.swift` |
+| Capture / restore / teardown / launch recovery | `Sources/PlatformMac/SystemProxyManager.swift` |
+| Prior-state storage and surface ownership | `Sources/PlatformMac/PlatformStateJournal.swift` |
+| Port probe | `Sources/PlatformMac/LoopbackPortProbe.swift` |
+| Contract enum and validators | `Sources/ConduitShared/HelperContract.swift` |
+| Operation enum, batch step, error classification | `Sources/ProxyKernel/Abstractions/PrivilegeClient.swift` |
+| Client implementations and the fallback | `Sources/PlatformMac/HelperPrivilegeClient.swift` |
 | Privileged implementation | `Sources/ConduitHelper/HelperTool.swift` |
-| Frame handling / versioning | `Sources/ConduitHelper/HelperDaemon.swift` |
-| Tests | `Tests/ConduitTests/SystemProxyManagerTests.swift`, `HelperContractTests.swift`, `PrivilegeAuditTests.swift` |
+| Tests | `SystemProxyManagerTests`, `HelperContractTests`, `PlatformStateJournalTests`, `LoopbackPortProbeTests`, `PrivilegeAuditTests` |
 
-## How to verify any of this for real
+## How to verify by hand
 
-The unprivileged path can be driven entirely from tests — `SystemProxyManager` takes an
-injectable `commandRunner`, and `FakeNetworksetupRunner` in the test file models
-`networksetup` well enough to assert on generated scripts. The privileged path cannot: it
-needs the installed helper.
+The unprivileged path is fully driven from tests — `SystemProxyManager` takes an
+injectable `commandRunner` and `portProbe`, and `FakeNetworksetupRunner` models
+`networksetup` well enough to assert on generated scripts and privileged
+batches. The privileged path needs the installed helper, rebuilt at protocol 4.
 
-For manual verification, `Thunderbolt Bridge` on the development machine is a safe target —
-it has no IP address, so `connectedNetworkServices` excludes it and Conduit never
-manages it, but `networksetup` will still read and write its proxy settings. Save and
-restore its state around any experiment:
+`Thunderbolt Bridge` on the development machine is a safe target — it has no IP
+address, so `connectedNetworkServices` excludes it and Conduit never
+manages it, but `networksetup` will still read and write its proxy settings.
+Save and restore its state around any experiment:
 
 ```
-networksetup -getautoproxyurl "Thunderbolt Bridge"   # save
+networksetup -getautoproxyurl "Thunderbolt Bridge"       # save
+networksetup -getproxybypassdomains "Thunderbolt Bridge"
 ... experiment ...
 sudo networksetup -setautoproxystate "Thunderbolt Bridge" off   # restore
 ```
 
 Do **not** experiment on Wi-Fi; it carries the live proxy configuration.
 
-## Open questions for the design conversation
+### What was verified against the live helper
 
-1. Which option — and if C, do `applySystemProxy` / `setAutoproxyURL` / `disableAutoproxy`
-   get deprecated, or kept for compatibility with a helper that predates the change?
-2. What should a new client do when it meets an old helper? Silent composition fallback, or
-   a visible "re-install the helper to restore proxy settings" prompt?
-3. Should restore be attempted at *launch* as well as teardown? See #57 — there is no
-   crash-recovery pass for this surface, and launch is the moment when the recorded prior
-   is most likely still the truth.
-4. Is a lossy restore worse than no restore? An asymmetric web/secure config restored as
-   symmetric is arguably worse than leaving it cleared, because it looks correct.
-5. Does `setProxyBypass` with zero domains actually clear the list, or does it need the
-   literal `Empty` that the unprivileged path uses? Unverified.
+Driven over the helper socket on 2026-08-16, against `Thunderbolt Bridge`, with
+the machine's state saved and restored around it:
+
+- **`Empty` clears the bypass list.** Read back as
+  `There aren't any bypass domains set on Thunderbolt Bridge.`, which is the
+  string `readBypassDomains` filters on. The brief's open question 5 is closed.
+- **An asymmetric configuration round-trips exactly**: web enabled at one
+  address, secure *disabled* at a different one, and a PAC URL written while
+  staying `Enabled: No`. None of the three was expressible before.
+- **Helper-side validation holds with the client's validation bypassed** — the
+  threat model's actual case, since the helper must not trust its input. Ten
+  malformed frames sent straight to the socket (bad kind, port `0`,
+  half-specified endpoint, bad state, `file://` PAC URL, credentials in the PAC
+  URL, `-setwebproxystate` as a bypass entry, zero-argument bypass,
+  `Empty` alongside a domain, and `Wi-Fi; rm -rf /` as a service name) were all
+  rejected, and the machine was unchanged afterwards.
+- **The version gate holds both ways**: a protocol-3 frame to the protocol-4
+  helper is refused, and the refusal carries `protocolVersion: 4` so a client
+  can tell *outdated* from *broken*.
+- **B10 was found this way**, which is the argument for doing this at all: it is
+  invisible in the code and obvious the moment a real service with no manual
+  proxy goes through a full apply-and-restore.
