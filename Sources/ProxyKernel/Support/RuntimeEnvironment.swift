@@ -5,6 +5,9 @@ package struct RuntimeEnvironment: Sendable, Equatable {
     package var configDirectory: URL
     package var configFile: URL
     package var savedDNSFile: URL
+    /// Prior values of platform settings Conduit changed, so teardown can
+    /// restore them instead of blanket-clearing. See `PlatformStateJournal`.
+    package var platformStateFile: URL
     package var exportDefaultFile: URL
     package var platformConfigFile: URL
     package var preferencesFile: URL
@@ -15,6 +18,7 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         configDirectory: URL,
         configFile: URL? = nil,
         savedDNSFile: URL? = nil,
+        platformStateFile: URL? = nil,
         exportDefaultFile: URL? = nil,
         platformConfigFile: URL? = nil,
         preferencesFile: URL? = nil,
@@ -24,6 +28,8 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         self.configDirectory = configDirectory
         self.configFile = configFile ?? configDirectory.appendingPathComponent("config.json")
         self.savedDNSFile = savedDNSFile ?? configDirectory.appendingPathComponent("saved-dns.json")
+        self.platformStateFile = platformStateFile
+            ?? configDirectory.appendingPathComponent("platform-state.json")
         self.exportDefaultFile = exportDefaultFile
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Conduit-config.json")
         self.platformConfigFile = platformConfigFile ?? configDirectory.appendingPathComponent("platform.json")

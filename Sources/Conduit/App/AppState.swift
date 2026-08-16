@@ -57,7 +57,13 @@ final class AppState: ObservableObject {
     private let runtimeEnvironment: RuntimeEnvironment
     private let orchestrator: ProxyOrchestrator
 
-    private lazy var systemConduit = SystemProxyManager(privilegeClient: auditedPrivilegeClient)
+    /// Prior values of the platform settings we change, so teardown restores
+    /// rather than blanket-clearing. Shared by every side-effect manager.
+    private lazy var platformStateJournal = PlatformStateJournal(fileURL: runtimeEnvironment.platformStateFile)
+    private lazy var systemConduit = SystemProxyManager(
+        privilegeClient: auditedPrivilegeClient,
+        journal: platformStateJournal
+    )
     private lazy var environmentManager = EnvironmentManager()
     private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient)
     private lazy var systemDNSManager = SystemDNSManager(

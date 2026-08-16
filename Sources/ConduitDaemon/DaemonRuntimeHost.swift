@@ -60,7 +60,13 @@ final class DaemonRuntimeHost {
     // Platform side-effect coordinators. Default daemon
     // startup does not apply side effects until `startRuntime()` is called
     // (future control socket command).
-    private lazy var systemConduit = SystemProxyManager(privilegeClient: auditedPrivilegeClient)
+    /// Prior values of the platform settings we change, so teardown restores
+    /// rather than blanket-clearing. Shared by every side-effect manager.
+    private lazy var platformStateJournal = PlatformStateJournal(fileURL: environment.platformStateFile)
+    private lazy var systemConduit = SystemProxyManager(
+        privilegeClient: auditedPrivilegeClient,
+        journal: platformStateJournal
+    )
     private lazy var environmentManager = EnvironmentManager()
     private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient)
     private lazy var systemDNSManager = SystemDNSManager(
