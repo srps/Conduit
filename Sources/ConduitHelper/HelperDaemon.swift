@@ -110,7 +110,8 @@ enum HelperDaemon {
             stopTCPRelay()
             return .ok()
         case .applyDNS, .removeDNS, .applySystemProxy, .clearSystemProxy,
-             .setProxyBypass, .setAutoproxyURL, .disableAutoproxy, .setDNSServers:
+             .setProxyBypass, .setAutoproxyURL, .disableAutoproxy,
+             .setWebProxyEndpoint, .setAutoproxy, .setDNSServers:
             let args = HelperArguments(command: request.command, values: request.values)
             do {
                 try HelperTool.run(arguments: args)

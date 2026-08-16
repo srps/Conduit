@@ -18,11 +18,28 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
         try CommandRunner.runPrivilegedShellScript(script)
     }
 
+    /// One prompt for the whole batch. Every step is still rendered through
+    /// `shellScript(for:values:)`, so the same argument validation applies —
+    /// this only changes how many times the user is asked.
+    package func execute(batch: [PrivilegedBatchStep]) throws {
+        guard !batch.isEmpty else { return }
+        try CommandRunner.runPrivilegedShellScript(batchScript(for: batch))
+    }
+
     func runPrivilegedScript(_ script: String) throws {
         try CommandRunner.runPrivilegedShellScript(script)
     }
 
-    private func shellScript(for operation: PrivilegedOperation, values: [String]) throws -> String {
+    /// Internal rather than private so tests can assert on what these render
+    /// to. The ordering inside them is the contract, and it cannot otherwise be
+    /// observed without prompting a human for a password.
+    func batchScript(for batch: [PrivilegedBatchStep]) throws -> String {
+        try batch
+            .map { try shellScript(for: $0.operation, values: $0.values) }
+            .joined(separator: "\n")
+    }
+
+    func shellScript(for operation: PrivilegedOperation, values: [String]) throws -> String {
         switch operation {
         case .applyDNS:
             guard values.count >= 2 else { throw PrivilegeClientError.executionFailed("applyDNS requires domain and servers") }
@@ -56,10 +73,37 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
             /usr/sbin/networksetup -setautoproxystate \(s) off
             """
         case .setProxyBypass:
-            guard !values.isEmpty else { throw PrivilegeClientError.executionFailed("setProxyBypass requires service") }
+            guard values.count >= 2 else { throw PrivilegeClientError.executionFailed("setProxyBypass requires service and at least one domain or 'Empty'") }
             let s = values[0].shellQuoted
             let domains = values.dropFirst().map { $0.shellQuoted }.joined(separator: " ")
             return "/usr/sbin/networksetup -setproxybypassdomains \(s) \(domains)"
+        case .setWebProxyEndpoint:
+            guard values.count >= 5 else { throw PrivilegeClientError.executionFailed("setWebProxyEndpoint requires service, kind, host, port, state") }
+            let s = values[0].shellQuoted
+            let kind = values[1]
+            let host = values[2], port = values[3], state = values[4]
+            let setter = kind == "web" ? "-setwebproxy" : "-setsecurewebproxy"
+            let stateSetter = kind == "web" ? "-setwebproxystate" : "-setsecurewebproxystate"
+            var script = ""
+            if HelperInputValidator.isEmptyListSentinel(host) {
+                script += "/usr/sbin/networksetup \(setter) \(s) '' 0\n"
+            } else if !host.isEmpty {
+                script += "/usr/sbin/networksetup \(setter) \(s) \(host.shellQuoted) \(port.shellQuoted)\n"
+            }
+            // State last — `-setwebproxy` enables the proxy as a side effect.
+            script += "/usr/sbin/networksetup \(stateSetter) \(s) \(state)"
+            return script
+        case .setAutoproxy:
+            guard values.count >= 3 else { throw PrivilegeClientError.executionFailed("setAutoproxy requires service, url, state") }
+            let s = values[0].shellQuoted
+            let url = values[1], state = values[2]
+            var script = ""
+            if !url.isEmpty {
+                script += "/usr/sbin/networksetup -setautoproxyurl \(s) \(url.shellQuoted)\n"
+            }
+            // State last — `-setautoproxyurl` enables autoproxy as a side effect.
+            script += "/usr/sbin/networksetup -setautoproxystate \(s) \(state)"
+            return script
         case .setAutoproxyURL:
             guard values.count >= 2 else { throw PrivilegeClientError.executionFailed("setAutoproxyURL requires service and URL") }
             let s = values[0].shellQuoted, url = values[1].shellQuoted
@@ -86,8 +130,18 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
 /// Communicates with the installed LaunchDaemon helper via Unix domain socket.
 /// Falls back to AppleScript when the helper is not installed or unreachable.
 package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    package init() {}
     private let fallback = AppleScriptPrivilegeClient()
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+
+    /// - Parameter eventSink: notified when the helper cannot be reached and
+    ///   the AppleScript fallback takes over. Optional only so the many
+    ///   `HelperToolPrivilegeClient()` call sites in tests stay unchanged;
+    ///   production hosts should pass one, because a silent degrade to an
+    ///   admin prompt is exactly the kind of recovery `AGENTS.md` requires an
+    ///   event for.
+    package init(eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil) {
+        self.eventSink = eventSink
+    }
 
     package enum Status: Sendable, Equatable {
         case installed
@@ -110,20 +164,61 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     }
 
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        let command = HelperCommand(operation)
-        try validate(command: command, values: values)
-        do {
-            let response = try sendRequest(HelperRequest(command: command, values: values))
-            guard response.protocolVersion == HelperProtocolVersion.current else {
-                throw PrivilegeClientError.communicationFailed("Helper protocol mismatch.")
+        try execute(batch: [PrivilegedBatchStep(operation, values)])
+    }
+
+    package func execute(batch: [PrivilegedBatchStep]) throws {
+        guard !batch.isEmpty else { return }
+        // Validate the whole batch before running any of it: a step rejected
+        // halfway through would leave the surface in a state no caller asked
+        // for, and the fallback would then re-run the steps that already
+        // landed.
+        let commands = batch.map { (HelperCommand($0.operation), $0.values) }
+        for (command, values) in commands {
+            try validate(command: command, values: values)
+        }
+
+        for (index, (command, values)) in commands.enumerated() {
+            do {
+                let response = try sendRequest(HelperRequest(command: command, values: values))
+                guard response.protocolVersion == HelperProtocolVersion.current else {
+                    throw PrivilegeClientError.communicationFailed(
+                        "Helper speaks protocol \(response.protocolVersion), this build speaks \(HelperProtocolVersion.current)."
+                    )
+                }
+                guard response.success else {
+                    // The helper ran the command and it failed. Re-running the
+                    // same command through osascript would raise an admin
+                    // prompt only to fail identically, so this is a real
+                    // error, not a reachability problem.
+                    throw PrivilegeClientError.executionFailed(response.errorMessage ?? "Command failed")
+                }
+            } catch let error as PrivilegeClientError {
+                guard error.isHelperUnreachable else { throw error }
+                // The documented fallback, which until now was unreachable:
+                // `sendRequest` throws `helperNotInstalled` on a failed connect
+                // and `communicationFailed` on a version mismatch, and both
+                // were rethrown by a `catch let error as PrivilegeClientError`
+                // placed ahead of the fallback. So a machine with no helper —
+                // or one running a helper from before a protocol bump — failed
+                // every privileged operation outright instead of asking for an
+                // admin password. On a machine that cannot write proxy
+                // settings unprivileged that meant teardown cleared nothing.
+                eventSink?(
+                    RuntimeEvent(
+                        kind: .auth,
+                        event: "auth.privilege_helper_degraded",
+                        detail: "command=\(command.rawValue) reason=\(error.displayDescription) fallback=applescript"
+                    )
+                )
+                // Everything from here on goes through one prompt, including
+                // the step that just failed.
+                try fallback.execute(batch: Array(batch[index...]))
+                return
+            } catch {
+                try fallback.execute(batch: Array(batch[index...]))
+                return
             }
-            guard response.success else {
-                throw PrivilegeClientError.executionFailed(response.errorMessage ?? "Command failed")
-            }
-        } catch let error as PrivilegeClientError {
-            throw error
-        } catch {
-            try fallback.execute(operation, values: values)
         }
     }
 
@@ -188,8 +283,31 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
                 throw PrivilegeClientError.executionFailed("invalid network service name")
             }
         case .setProxyBypass:
-            guard let service = values.first, HelperInputValidator.validateServiceName(service) else {
-                throw PrivilegeClientError.executionFailed("invalid network service name")
+            guard values.count >= 2, HelperInputValidator.validateServiceName(values[0]) else {
+                throw PrivilegeClientError.executionFailed("invalid bypass service or empty domain list")
+            }
+            let domains = Array(values.dropFirst())
+            if domains.contains(where: HelperInputValidator.isEmptyListSentinel) {
+                guard domains.count == 1 else {
+                    throw PrivilegeClientError.executionFailed("'Empty' must be the only bypass domain value")
+                }
+            } else if !domains.allSatisfy(HelperInputValidator.validateProxyBypassEntry) {
+                throw PrivilegeClientError.executionFailed("invalid bypass domain")
+            }
+        case .setWebProxyEndpoint:
+            guard values.count >= 5,
+                  HelperInputValidator.validateServiceName(values[0]),
+                  HelperInputValidator.validateWebProxyKind(values[1]),
+                  HelperInputValidator.validateOptionalEndpoint(host: values[2], port: values[3]),
+                  HelperInputValidator.validateProxyState(values[4]) else {
+                throw PrivilegeClientError.executionFailed("invalid web proxy service, kind, endpoint, or state")
+            }
+        case .setAutoproxy:
+            guard values.count >= 3,
+                  HelperInputValidator.validateServiceName(values[0]),
+                  values[1].isEmpty || HelperInputValidator.validateAutoproxyURL(values[1]),
+                  HelperInputValidator.validateProxyState(values[2]) else {
+                throw PrivilegeClientError.executionFailed("invalid autoproxy service, URL, or state")
             }
         case .setAutoproxyURL:
             guard values.count >= 2,
@@ -341,6 +459,10 @@ extension HelperCommand {
             self = .setAutoproxyURL
         case .disableAutoproxy:
             self = .disableAutoproxy
+        case .setWebProxyEndpoint:
+            self = .setWebProxyEndpoint
+        case .setAutoproxy:
+            self = .setAutoproxy
         case .setDNSServers:
             self = .setDNSServers
         case .startDNSRelay:

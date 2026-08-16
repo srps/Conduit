@@ -2,7 +2,7 @@
 import Foundation
 
 public enum HelperProtocolVersion {
-    public static let current = 3
+    public static let current = 4
 }
 
 public enum HelperCommand: String, Codable, Sendable, CaseIterable {
@@ -13,6 +13,33 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
     case setProxyBypass = "set-proxy-bypass"
     case setAutoproxyURL = "set-autoproxy-url"
     case disableAutoproxy = "disable-autoproxy"
+    /// Writes one manual-proxy endpoint and its on/off state, in that order.
+    /// Values: `service, kind ("web" | "secure"), host, port, state ("on" | "off")`.
+    ///
+    /// The host argument carries three instructions, on the pattern
+    /// `setProxyBypass` and `setDNSServers` already use: empty (with an empty
+    /// port) writes only the state, the `Empty` sentinel clears the address,
+    /// and a host/port pair writes that address.
+    ///
+    /// All three are needed, and none is expressible through
+    /// `applySystemProxy`. `networksetup` keeps host and port on a *disabled*
+    /// proxy, so putting a user's endpoint back without switching it on is a
+    /// real requirement; so is putting back an asymmetric pair (web and secure
+    /// at different addresses, or only one of them enabled); and so is blanking
+    /// the address on a service that had none before us, which otherwise keeps
+    /// Conduit's own address in a field the user can re-enable by hand.
+    case setWebProxyEndpoint = "set-web-proxy-endpoint"
+    /// Writes the autoproxy URL and its on/off state, in that order.
+    /// Values: `service, url, state ("on" | "off")`. An empty URL writes only
+    /// the state.
+    ///
+    /// The ordering is load-bearing, which is why it lives inside one command
+    /// rather than being left to the caller: `-setautoproxyurl` **enables**
+    /// autoproxy as a side effect (verified on macOS 26; documented in neither
+    /// `man networksetup` nor the usage string), so the state must be written
+    /// last or restoring a configured-but-disabled URL silently switches the
+    /// user's automatic proxy configuration on.
+    case setAutoproxy = "set-autoproxy"
     case setDNSServers = "set-dns-servers"
     case startDNSRelay = "start-dns-relay"
     case stopDNSRelay = "stop-dns-relay"
@@ -30,6 +57,19 @@ public enum HelperInputValidator {
     )
     private static let serviceNameRegex = try! NSRegularExpression(
         pattern: #"^[a-zA-Z0-9 \-_\(\)\./]+$"#
+    )
+    /// Bypass entries are not domains. Real lists carry `*.local`,
+    /// `169.254/16`, `.example.com` and bare addresses, none of which pass
+    /// `validateDomain` — which is why this argument went unvalidated until
+    /// now, the only helper input that did. The set below is what
+    /// `networksetup` actually accepts, minus everything that could be read as
+    /// something other than a host pattern.
+    ///
+    /// A leading `-` is rejected separately: these reach `networksetup` as
+    /// argv, so an entry that looks like a flag is the one shape that changes
+    /// what the command does.
+    private static let proxyBypassEntryRegex = try! NSRegularExpression(
+        pattern: #"^[a-zA-Z0-9*._:/\-]+$"#
     )
 
     public static func validateDomain(_ domain: String) -> Bool {
@@ -67,6 +107,49 @@ public enum HelperInputValidator {
 
     public static func validatePort(_ port: Int) -> Bool {
         port >= 1 && port <= 65535
+    }
+
+    /// The sentinel that clears a list-valued setting. `networksetup` spells it
+    /// `Empty` for bypass domains and `empty` for DNS servers; both are matched
+    /// case-insensitively so callers need not care which surface they are on.
+    public static let emptyListSentinel = "Empty"
+
+    public static func isEmptyListSentinel(_ value: String) -> Bool {
+        value.lowercased() == "empty"
+    }
+
+    public static func validateProxyBypassEntry(_ entry: String) -> Bool {
+        guard !entry.isEmpty, entry.count <= 253, !entry.hasPrefix("-") else { return false }
+        let range = NSRange(entry.startIndex..<entry.endIndex, in: entry)
+        return proxyBypassEntryRegex.firstMatch(in: entry, range: range) != nil
+    }
+
+    /// Which of the two manual-proxy endpoints a `setWebProxyEndpoint` targets.
+    public static func validateWebProxyKind(_ kind: String) -> Bool {
+        kind == "web" || kind == "secure"
+    }
+
+    public static func validateProxyState(_ state: String) -> Bool {
+        state == "on" || state == "off"
+    }
+
+    /// An endpoint argument pair, which encodes three instructions:
+    ///
+    /// - both empty — leave the address alone, write only the state
+    /// - host == `Empty`, port empty — clear the address
+    /// - host and port both set — write that address
+    ///
+    /// Host and port otherwise travel together: `networksetup -setwebproxy`
+    /// takes both or neither, and a half-specified pair would either be
+    /// rejected by the tool or — worse, with a port of `0`, which is what
+    /// `-getwebproxy` reports for a service that never had one — written as a
+    /// live but unusable endpoint.
+    public static func validateOptionalEndpoint(host: String, port: String) -> Bool {
+        if host.isEmpty && port.isEmpty { return true }
+        if isEmptyListSentinel(host) { return port.isEmpty }
+        guard !host.isEmpty, !port.isEmpty else { return false }
+        guard validateIPAddress(host) || validateDomain(host) else { return false }
+        return validatePort(port)
     }
 
     public static func validateRelayBindHost(_ host: String) -> Bool {

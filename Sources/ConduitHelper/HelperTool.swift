@@ -67,13 +67,95 @@ enum HelperTool {
             _ = try run("/usr/sbin/networksetup", ["-setautoproxystate", service, "off"])
 
         case .setProxyBypass:
-            guard arguments.values.count >= 1 else {
-                throw HelperToolError.invalidInput("setProxyBypass requires service name")
+            guard arguments.values.count >= 2 else {
+                // Zero domains used to be accepted and forwarded as a bare
+                // `-setproxybypassdomains <service>`, whose behaviour is
+                // undocumented. Clearing the list has a spelling —  `Empty` —
+                // and requiring it makes "clear" indistinguishable from a
+                // caller that lost its arguments.
+                throw HelperToolError.invalidInput(
+                    "setProxyBypass requires a service and at least one domain or '\(HelperInputValidator.emptyListSentinel)'"
+                )
             }
             let service = arguments.values[0]
             try validateService(service)
             let domains = Array(arguments.values.dropFirst())
+            if domains.contains(where: HelperInputValidator.isEmptyListSentinel) {
+                guard domains.count == 1 else {
+                    throw HelperToolError.invalidInput(
+                        "'\(HelperInputValidator.emptyListSentinel)' must be the only value when clearing bypass domains"
+                    )
+                }
+            } else {
+                // The one helper argument that used to reach `networksetup`
+                // unvalidated. Bypass entries are not domains — `*.local` and
+                // `169.254/16` are both real — so they need their own rule
+                // rather than an exemption from the trust boundary.
+                for domain in domains {
+                    guard HelperInputValidator.validateProxyBypassEntry(domain) else {
+                        throw HelperToolError.invalidInput("invalid bypass domain: \(domain)")
+                    }
+                }
+            }
             _ = try run("/usr/sbin/networksetup", ["-setproxybypassdomains", service] + domains)
+
+        case .setWebProxyEndpoint:
+            guard arguments.values.count >= 5 else {
+                throw HelperToolError.invalidInput("setWebProxyEndpoint requires service, kind, host, port, state")
+            }
+            let service = arguments.values[0]
+            let kind = arguments.values[1]
+            let host = arguments.values[2]
+            let port = arguments.values[3]
+            let state = arguments.values[4]
+            try validateService(service)
+            guard HelperInputValidator.validateWebProxyKind(kind) else {
+                throw HelperToolError.invalidInput("invalid web proxy kind: \(kind)")
+            }
+            guard HelperInputValidator.validateOptionalEndpoint(host: host, port: port) else {
+                throw HelperToolError.invalidInput("invalid web proxy endpoint: \(host):\(port)")
+            }
+            guard HelperInputValidator.validateProxyState(state) else {
+                throw HelperToolError.invalidInput("invalid proxy state: \(state)")
+            }
+            let setter = kind == "web" ? "-setwebproxy" : "-setsecurewebproxy"
+            let stateSetter = kind == "web" ? "-setwebproxystate" : "-setsecurewebproxystate"
+            if HelperInputValidator.isEmptyListSentinel(host) {
+                // An empty host with port 0 is how `networksetup` blanks an
+                // address. Needed because a service that had no manual proxy
+                // before us must not be left holding ours in its disabled
+                // `Server` field, where re-enabling by hand would hand the user
+                // a dead local address.
+                _ = try run("/usr/sbin/networksetup", [setter, service, "", "0"])
+            } else if !host.isEmpty {
+                _ = try run("/usr/sbin/networksetup", [setter, service, host, port])
+            }
+            // State last: see `HelperCommand.setWebProxyEndpoint`. `-setwebproxy`
+            // switches the proxy on as a side effect just as `-setautoproxyurl`
+            // does — including when clearing — so writing the state first would
+            // leave a restored-but-disabled endpoint switched on.
+            _ = try run("/usr/sbin/networksetup", [stateSetter, service, state])
+
+        case .setAutoproxy:
+            guard arguments.values.count >= 3 else {
+                throw HelperToolError.invalidInput("setAutoproxy requires service, url, state")
+            }
+            let service = arguments.values[0]
+            let url = arguments.values[1]
+            let state = arguments.values[2]
+            try validateService(service)
+            if !url.isEmpty {
+                try validateAutoproxyURL(url)
+            }
+            guard HelperInputValidator.validateProxyState(state) else {
+                throw HelperToolError.invalidInput("invalid proxy state: \(state)")
+            }
+            if !url.isEmpty {
+                _ = try run("/usr/sbin/networksetup", ["-setautoproxyurl", service, url])
+            }
+            // State last, and this one is not stylistic: `-setautoproxyurl`
+            // leaves autoproxy reporting `Enabled: Yes` whatever it was before.
+            _ = try run("/usr/sbin/networksetup", ["-setautoproxystate", service, state])
 
         case .setAutoproxyURL:
             guard arguments.values.count >= 2 else {
