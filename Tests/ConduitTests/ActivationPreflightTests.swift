@@ -6,6 +6,16 @@ import XCTest
 
 final class ActivationPreflightTests: XCTestCase {
 
+    /// The preflight only reads configuration state, so its manager needs a
+    /// journal purely to satisfy the initializer.
+    private func makeThrowawayJournal() -> PlatformStateJournal {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("preflight-\(UUID().uuidString)")
+            .appendingPathComponent("platform-state.json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        return PlatformStateJournal(fileURL: url)
+    }
+
     // MARK: - IntegrationStatus
 
     func testDisabledIntegrationNeverNeedsChange() {
@@ -135,7 +145,7 @@ final class ActivationPreflightTests: XCTestCase {
                 platformConfig: platformConfig,
                 isRunning: false,
                 helperStatus: .notInstalled,
-                systemConduit: SystemProxyManager(privilegeClient: client),
+                systemConduit: SystemProxyManager(privilegeClient: client, journal: makeThrowawayJournal()),
                 dnsManager: DNSManager(privilegeClient: client),
                 vpnConnected: vpnConnected
             )

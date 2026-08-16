@@ -6,6 +6,17 @@ import XCTest
 
 final class SystemProxyManagerTests: XCTestCase {
 
+    /// Every manager needs a journal now — the optional one silently restored
+    /// the old erasing teardown, which is not a mode worth being able to reach
+    /// by omission.
+    fileprivate func makeJournal() -> PlatformStateJournal {
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("sysproxy-journal-\(UUID().uuidString)")
+            .appendingPathComponent("platform-state.json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        return PlatformStateJournal(fileURL: url)
+    }
+
     func testEffectivePACURLUsesRemoteURLWhenLocalPACDisabled() {
         var config = ProxyConfig.testFixture()
         config.pacURL = "https://proxy.example.com/proxy.pac"
@@ -47,6 +58,7 @@ final class SystemProxyManagerTests: XCTestCase {
         let runner = FakeNetworksetupRunner()
         let manager = SystemProxyManager(
             privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
             commandRunner: runner.run
         )
 
@@ -69,7 +81,7 @@ final class SystemProxyManagerTests: XCTestCase {
         let runner = FakeNetworksetupRunner()
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
         let privilegeClient = RecordingProxyPrivilegeClient()
-        let manager = SystemProxyManager(privilegeClient: privilegeClient, commandRunner: runner.run)
+        let manager = SystemProxyManager(privilegeClient: privilegeClient, journal: makeJournal(), commandRunner: runner.run)
 
         try manager.apply(config: config, mode: .pac, logger: nil)
 
@@ -89,7 +101,7 @@ final class SystemProxyManagerTests: XCTestCase {
         runner.autoProxyURL = "https://proxy.example.com/proxy.pac"
         runner.webProxyEnabled = false
         runner.secureWebProxyEnabled = false
-        let manager = SystemProxyManager(commandRunner: runner.run)
+        let manager = SystemProxyManager(journal: makeJournal(), commandRunner: runner.run)
 
         XCTAssertTrue(manager.isApplied(config: config, mode: .pac))
 
@@ -106,7 +118,7 @@ final class SystemProxyManagerTests: XCTestCase {
         runner.webProxyEnabled = false
         runner.secureWebProxyEnabled = false
         runner.autoProxyEnabled = true
-        let manager = SystemProxyManager(commandRunner: runner.run)
+        let manager = SystemProxyManager(journal: makeJournal(), commandRunner: runner.run)
 
         XCTAssertFalse(manager.isCleared())
     }
@@ -116,7 +128,7 @@ final class SystemProxyManagerTests: XCTestCase {
         runner.webProxyEnabled = false
         runner.secureWebProxyEnabled = false
         runner.autoProxyEnabled = false
-        let manager = SystemProxyManager(commandRunner: runner.run)
+        let manager = SystemProxyManager(journal: makeJournal(), commandRunner: runner.run)
 
         XCTAssertTrue(manager.isCleared())
     }
@@ -128,7 +140,7 @@ final class SystemProxyManagerTests: XCTestCase {
 
         let runner = FakeNetworksetupRunner()
         runner.autoProxyEnabled = true
-        let manager = SystemProxyManager(commandRunner: runner.run)
+        let manager = SystemProxyManager(journal: makeJournal(), commandRunner: runner.run)
 
         XCTAssertFalse(manager.isApplied(config: config, mode: .pac))
     }
@@ -145,14 +157,6 @@ private final class RecordingProxyPrivilegeClient: PrivilegeClient, @unchecked S
 // MARK: - Prior-state ownership
 
 extension SystemProxyManagerTests {
-
-    private func makeJournal() -> PlatformStateJournal {
-        let url = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("sysproxy-journal-\(UUID().uuidString)")
-            .appendingPathComponent("platform-state.json")
-        addTeardownBlock { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-        return PlatformStateJournal(fileURL: url)
-    }
 
     /// The harm this exists to stop. A managed Mac can arrive with an MDM- or
     /// user-configured PAC URL already set; teardown used to blanket-disable
@@ -203,28 +207,30 @@ extension SystemProxyManagerTests {
         XCTAssertFalse(script.contains("-setautoproxyurl"), "nothing to put back")
     }
 
-    /// The safety rule: no record means *unknown*, never *leave it alone*.
-    /// A journal that was wiped, never wired in, or lost with the process that
-    /// wrote it must still leave the machine usable — a system proxy pointing
-    /// at a port nothing serves breaks every client on the machine, while
-    /// over-clearing costs a visible setting the user can restore.
-    func testClearStillDisablesProxiesWhenNothingWasRecorded() throws {
+    /// A journal that never recorded anything means we never applied anything,
+    /// so teardown must leave the machine alone.
+    ///
+    /// This used to be impossible to express: with an optional journal, "we
+    /// never applied" and "we cannot say what we applied" were the same state,
+    /// and teardown blanket-disabled for both — so quitting an app that had
+    /// never started the proxy would wipe a user's MDM proxy settings.
+    func testClearLeavesTheMachineAloneWhenNothingWasEverApplied() throws {
         let runner = FakeNetworksetupRunner()
         runner.autoProxyEnabled = true
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
 
-        // Note: no journal at all — the pre-existing configuration.
         let manager = SystemProxyManager(
             privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
             commandRunner: runner.run
         )
 
         try manager.clear(logger: nil)
 
-        let script = try XCTUnwrap(runner.shellScripts.last)
-        XCTAssertTrue(script.contains("-setwebproxystate 'Wi-Fi' off"))
-        XCTAssertTrue(script.contains("-setsecurewebproxystate 'Wi-Fi' off"))
-        XCTAssertTrue(script.contains("-setautoproxystate 'Wi-Fi' off"))
+        XCTAssertTrue(
+            runner.shellScripts.isEmpty,
+            "never having applied is not a licence to disable the user's own proxy"
+        )
     }
 
     /// End-to-end first-write-wins. Apply runs repeatedly within a session, and

@@ -12,7 +12,7 @@ final class AgentIsolationTests: XCTestCase {
 
         XCTAssertEqual(environment.configDirectory.path, stateDirectory.path)
         XCTAssertEqual(environment.configFile.path, stateDirectory.appendingPathComponent("config.json").path)
-        XCTAssertEqual(environment.savedDNSFile.path, stateDirectory.appendingPathComponent("saved-dns.json").path)
+        XCTAssertEqual(environment.platformStateFile.path, stateDirectory.appendingPathComponent("platform-state.json").path)
     }
 
     @MainActor

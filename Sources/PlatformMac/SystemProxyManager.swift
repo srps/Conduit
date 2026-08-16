@@ -24,11 +24,11 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// one, teardown keeps its previous unconditional behaviour rather than
     /// refusing to clean up — see `PlatformStateJournal` on why "unknown"
     /// must never mean "leave it".
-    private let journal: PlatformStateJournal?
+    private let journal: PlatformStateJournal
 
     package init(
         privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
-        journal: PlatformStateJournal? = nil,
+        journal: PlatformStateJournal,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         }
@@ -88,16 +88,14 @@ package final class SystemProxyManager: @unchecked Sendable {
         // Capture before overwriting. `recordPrior` is first-write-wins, so
         // the repeat applies a session performs (config reload, restart, VPN
         // transition) cannot replace the user's original setting with ours.
-        if let journal {
-            for service in services {
-                journal.recordPrior(
-                    surface: .systemProxy,
-                    scope: service,
-                    value: capturePriorState(service: service)
-                )
-            }
-            journal.markApplied(surface: .systemProxy)
+        for service in services {
+            journal.recordPrior(
+                surface: .systemProxy,
+                scope: service,
+                value: capturePriorState(service: service)
+            )
         }
+        journal.markApplied(surface: .systemProxy)
 
         let pacURL = Self.effectivePACURL(config: config, localPACURL: localPACURL)
         var script = ""
@@ -160,7 +158,7 @@ package final class SystemProxyManager: @unchecked Sendable {
         // Only a journal that positively knows the surface is idle may skip;
         // an unreadable one answers `false` and we clear as before, because a
         // stranded proxy setting is worse than an unnecessary one.
-        if let journal, journal.knowsSurfaceIsIdle(.systemProxy) {
+        if journal.knowsSurfaceIsIdle(.systemProxy) {
             logger?.log(
                 .debug,
                 "System proxy teardown skipped: nothing recorded as applied.",
@@ -176,7 +174,7 @@ package final class SystemProxyManager: @unchecked Sendable {
         var reset: [String] = []
 
         for service in services {
-            switch journal?.prior(surface: .systemProxy, scope: service) ?? .notRecorded {
+            switch journal.prior(surface: .systemProxy, scope: service) {
             case .wasPresent(let prior):
                 script += Self.restoreScript(service: service, prior: prior)
                 restored.append(service)
@@ -226,7 +224,7 @@ package final class SystemProxyManager: @unchecked Sendable {
         // preference to capturing the state the service actually has now.
         // Teardown means done: nothing about this surface is ours any more.
         if restoreSucceeded {
-            journal?.forgetAll(surface: .systemProxy)
+            journal.forgetAll(surface: .systemProxy)
         }
 
         if restored.isEmpty {

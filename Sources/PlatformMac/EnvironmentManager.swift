@@ -10,7 +10,7 @@ package final class EnvironmentManager {
     /// already delimits our region inside a file we do not own, which answers
     /// a different question — *which part of this is ours* — and does it
     /// without copying a user's `.zshrc` into our state directory.
-    private let journal: PlatformStateJournal?
+    private let journal: PlatformStateJournal
     /// Home directory whose shell profiles we edit, and the launchctl runner.
     ///
     /// Both are injectable because this class edits a user's dotfiles and their
@@ -21,7 +21,7 @@ package final class EnvironmentManager {
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
 
     package init(
-        journal: PlatformStateJournal? = nil,
+        journal: PlatformStateJournal,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
@@ -93,16 +93,14 @@ package final class EnvironmentManager {
         // Capture before overwriting. A developer with HTTP_PROXY already
         // exported into their launchd domain would otherwise have it silently
         // unset by our teardown, with nothing recording that it existed.
-        if let journal {
-            for name in launchdVariableNames {
-                journal.recordPrior(
-                    surface: .launchdEnvironment,
-                    scope: name,
-                    value: readLaunchdValue(name).map { ["value": $0] }
-                )
-            }
-            journal.markApplied(surface: .launchdEnvironment)
+        for name in launchdVariableNames {
+            journal.recordPrior(
+                surface: .launchdEnvironment,
+                scope: name,
+                value: readLaunchdValue(name).map { ["value": $0] }
+            )
         }
+        journal.markApplied(surface: .launchdEnvironment)
 
         var failures = 0
         for name in launchdVariableNames {
@@ -121,7 +119,7 @@ package final class EnvironmentManager {
         // Same reason as `SystemProxyManager.clear`: a second teardown finding
         // no records would `unsetenv` the pre-existing values the first one
         // restored. Both hosts clear on stop and again on quit.
-        if let journal, journal.knowsSurfaceIsIdle(.launchdEnvironment) {
+        if journal.knowsSurfaceIsIdle(.launchdEnvironment) {
             logger?.log(.debug, "launchd environment teardown skipped: nothing recorded as applied.", category: .system)
             return
         }
@@ -130,7 +128,7 @@ package final class EnvironmentManager {
         var failed: [String] = []
         for name in launchdVariableNames {
             let result: CommandResult?
-            switch journal?.prior(surface: .launchdEnvironment, scope: name) ?? .notRecorded {
+            switch journal.prior(surface: .launchdEnvironment, scope: name) {
             case .wasPresent(let prior):
                 result = try? commandRunner("/bin/launchctl", ["setenv", name, prior["value"] ?? ""])
                 if result?.exitCode == 0 { restored += 1 }
@@ -148,7 +146,7 @@ package final class EnvironmentManager {
         // some of ours in place, and a later teardown could otherwise never
         // retry.
         if failed.isEmpty {
-            journal?.forgetAll(surface: .launchdEnvironment)
+            journal.forgetAll(surface: .launchdEnvironment)
         } else {
             logger?.log(
                 .warning,

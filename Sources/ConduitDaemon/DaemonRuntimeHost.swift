@@ -70,7 +70,6 @@ final class DaemonRuntimeHost {
     private lazy var environmentManager = EnvironmentManager(journal: platformStateJournal)
     private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient)
     private lazy var systemDNSManager = SystemDNSManager(
-        savedDNSFile: environment.savedDNSFile,
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal
     )

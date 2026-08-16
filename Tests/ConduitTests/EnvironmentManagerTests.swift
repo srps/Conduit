@@ -77,18 +77,6 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertNil(launchctl.environment["NO_PROXY"])
     }
 
-    /// Without a journal the class must behave exactly as it used to rather
-    /// than refuse to clean up: an unknown prior is still cleared.
-    func testTeardownWithoutAJournalStillUnsets() throws {
-        launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
-        let manager = EnvironmentManager(homeDirectory: home, commandRunner: launchctl.run)
-
-        try manager.apply(config: makeConfig(), logger: nil)
-        try manager.clear(logger: nil)
-
-        XCTAssertNil(launchctl.environment["HTTP_PROXY"], "unknown prior falls back to clearing, never to leaving ours")
-    }
-
     /// Apply runs repeatedly per session; after the first, launchctl reports our
     /// own proxy URL. Recording that would make teardown "restore" our value.
     func testRepeatedApplyKeepsTheOriginalLaunchdPrior() throws {
