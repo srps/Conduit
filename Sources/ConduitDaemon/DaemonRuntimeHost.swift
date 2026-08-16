@@ -49,7 +49,11 @@ final class DaemonRuntimeHost {
 
     let orchestrator: ProxyOrchestrator
     private let credentialManager: CredentialManager
-    private let privilegeClient: HelperToolPrivilegeClient
+    /// Base client every privileged side effect goes through, wrapped by
+    /// `auditedPrivilegeClient`. Injectable so tests can drive the platform
+    /// side-effect paths (apply on start, revert on a failed start) without
+    /// touching the real system configuration.
+    private let privilegeClient: any PrivilegeClient
     private let auditedPrivilegeClient: any PrivilegeClient
     private let privilegeAuditSink = DaemonPrivilegeAuditEventSink()
 
@@ -81,7 +85,8 @@ final class DaemonRuntimeHost {
         environment: RuntimeEnvironment,
         logger: any LogSink,
         loadedConfiguration: RuntimeConfigurationLoadResult,
-        vpnStatusMonitor: VPNStatusObserving? = nil
+        vpnStatusMonitor: VPNStatusObserving? = nil,
+        privilegeClient: (any PrivilegeClient)? = nil
     ) {
         self.environment = environment
         self.logger = logger
@@ -95,9 +100,9 @@ final class DaemonRuntimeHost {
             )
         )
         self.vpnFlapWindowBox = flapBox
-        self.privilegeClient = HelperToolPrivilegeClient()
+        self.privilegeClient = privilegeClient ?? HelperToolPrivilegeClient()
         self.auditedPrivilegeClient = AuditingPrivilegeClient(
-            base: privilegeClient,
+            base: self.privilegeClient,
             eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) }
         )
         self.eventWriter = RuntimeEventFileWriter(fileURL: environment.eventsFile, logger: logger)
@@ -117,7 +122,8 @@ final class DaemonRuntimeHost {
             privilegeClient: auditedPrivilegeClient,
             authenticatorProvider: nil,
             pacEvaluator: pacEvaluator,
-            resolverManager: tunnelResolverManager
+            resolverManager: tunnelResolverManager,
+            portHolderProbe: PortHolderProbe()
         )
         self.orchestrator = orchestrator
 
@@ -186,7 +192,25 @@ final class DaemonRuntimeHost {
     }
 
     func startRuntime() async throws {
-        try await orchestrator.startProxy()
+        do {
+            try await orchestrator.startProxy()
+        } catch {
+            // A failed start must not leave the machine pointing at listeners
+            // that are not there. These side effects outlive the process and
+            // are not self-healing — a system PAC setting naming a dead PAC
+            // port, or `/etc/resolver` files naming a dead forwarder, break
+            // networking for *every* client on the machine, and the only other
+            // path that clears them is an explicit stop that nobody is going to
+            // issue for a daemon that never came up. `stopRuntime` is
+            // idempotent, so this is safe wherever in the sequence we failed.
+            logger.log(
+                .warning,
+                "Runtime start failed (\(error.displayDescription)) — reverting system proxy, environment and DNS resolver settings so they cannot point at listeners that are not running.",
+                category: .system
+            )
+            await stopRuntime()
+            throw error
+        }
 
         if platformConfig.manageSystemProxy {
             do {
@@ -430,11 +454,18 @@ final class DaemonRuntimeHost {
         // VPN transition interleaving at a suspension point would make this
         // handler act on the newer flip instead of its own (the gate's
         // documented contract). Entry files live and die with the tunnel —
-        // see `SplitDNSVPNGate`; only touch them inside the start/stop
-        // window, outside it no platform side-effects exist to reconcile.
+        // see `SplitDNSVPNGate`. `runtimeStarted` is passed rather than used
+        // as a guard: it gates *applying* files, never removing them, because
+        // a runtime that died with its files applied is exactly the case that
+        // strands them against unreachable servers.
         let entriesWantedChanged = splitDNSGate.update(state)
-        if platformConfig.manageDNSResolvers, entriesWantedChanged, runtimeStarted {
-            splitDNSGate.reconcileEntryFiles(config: config, dnsManager: dnsManager, logger: logger)
+        if platformConfig.manageDNSResolvers, entriesWantedChanged {
+            splitDNSGate.reconcileEntryFiles(
+                config: config,
+                dnsManager: dnsManager,
+                logger: logger,
+                runtimeStarted: runtimeStarted
+            )
         }
 
         await orchestrator.handleVPNStateChange(state)

@@ -182,7 +182,8 @@ final class AppState: ObservableObject {
             authenticatorProvider: nil,  // Wired below via setAuthenticatorProvider.
             pacEvaluator: pacEvaluator,
             auditSink: auditSink,
-            resolverManager: tunnelResolverManager
+            resolverManager: tunnelResolverManager,
+            portHolderProbe: PortHolderProbe()
         )
         self.orchestrator = orchestrator
         let eventLog = orchestrator.eventLog
@@ -662,8 +663,28 @@ final class AppState: ObservableObject {
                 notificationManager.post(title: "Proxy Enabled", body: runtime.runtimeStatus.activeUpstream ?? "Local proxy is running.")
             }
         } catch {
+            // A failed start must not leave the machine pointing at listeners
+            // that are not there. The side effects outlive us and are not
+            // self-healing: the system PAC setting keeps naming a PAC server on
+            // a port nothing serves, and `/etc/resolver` files keep sending
+            // whole domains to a dead forwarder — so every client on the
+            // machine loses networking, not just this app. Nothing else clears
+            // them either, because the only other cleanup path is a *user*
+            // stop, and a user staring at a failed start has no reason to press
+            // stop.
+            //
+            // The teardown is the same one a stop runs, and it is idempotent
+            // (each step tests `isCleared` first), so this is safe whether the
+            // failure happened before or after any of it was applied.
+            logStore.log(
+                .warning,
+                "Proxy start failed (\(error.displayDescription)) — reverting system proxy, environment and DNS resolver settings so they cannot point at listeners that are not running.",
+                category: .system
+            )
+            await stopProxy(postNotification: false)
+
             if postNotification {
-                notificationManager.post(title: "Proxy Start Failed", body: error.localizedDescription)
+                notificationManager.post(title: "Proxy Start Failed", body: error.displayDescription)
             }
             throw error
         }
@@ -1132,9 +1153,7 @@ final class AppState: ObservableObject {
 
         // Entry files live and die with the tunnel (vpn-gw.corp.example
         // under corp.example deadlocks reconnection otherwise — see
-        // `SplitDNSVPNGate`). Only touch them while the proxy is actually
-        // up: outside that window no platform side-effects exist to
-        // reconcile.
+        // `SplitDNSVPNGate`).
         guard platformConfig.manageDNSResolvers, entriesWantedChanged else { return }
 
         // The activation preflight consults the gate (deferred entry files
@@ -1142,14 +1161,23 @@ final class AppState: ObservableObject {
         // when the proxy is down, which is exactly when the preflight shows.
         refreshPreflight()
 
+        // Note the run state is *passed*, not used as a guard: the gate applies
+        // files only while the proxy is up, but removes them whenever the VPN
+        // is down and they are still on disk. A proxy that died or failed to
+        // start with its entry files applied is precisely the case where a
+        // run-state guard would strand them — see `SplitDNSVPNGate.action`.
         let proxyIsUp: Bool
         switch orchestrator.snapshot.runtimeStatus.state {
         case .running, .degraded, .recovering: proxyIsUp = true
         default: proxyIsUp = false
         }
-        guard proxyIsUp else { return }
 
-        splitDNSGate.reconcileEntryFiles(config: config, dnsManager: dnsManager, logger: logStore)
+        splitDNSGate.reconcileEntryFiles(
+            config: config,
+            dnsManager: dnsManager,
+            logger: logStore,
+            runtimeStarted: proxyIsUp
+        )
     }
 
     private func scheduleDNSReconcile() {

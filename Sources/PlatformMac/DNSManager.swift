@@ -28,9 +28,22 @@ package final class DNSManager: @unchecked Sendable {
     )
 
     private let privilegeClient: PrivilegeClient
+    /// Where resolver files live. Injectable so tests can exercise the
+    /// disk-state paths (`isApplied`, `isCleared`, `entryFilesPresent`, and the
+    /// stale-file repair in `apply`) against a temporary directory instead of
+    /// needing to write to the real `/etc/resolver`.
+    private let resolverDirectory: String
 
-    package init(privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient()) {
+    package init(
+        privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
+        resolverDirectory: String = "/etc/resolver"
+    ) {
         self.privilegeClient = privilegeClient
+        self.resolverDirectory = resolverDirectory
+    }
+
+    private func resolverFilePath(for domain: String) -> String {
+        "\(resolverDirectory)/\(domain)"
     }
 
     // MARK: - Validation
@@ -114,19 +127,31 @@ package final class DNSManager: @unchecked Sendable {
 
     // MARK: - State Detection
 
-    /// Whether everything `apply` would write is already on disk. Intercept
-    /// files are deliberately absent from this check — `apply` does not write
-    /// them (see `getInterceptDomains`), so requiring them here would make
-    /// the caller's "already configured, skip" test permanently false
+    /// Whether `apply` has nothing left to do. Callers use it to skip the
+    /// apply step, so it has to account for everything `apply` does — which
+    /// since the stranded-file sweep includes *removing* files, not only
+    /// writing them.
+    ///
+    /// Intercept files are deliberately absent from this check — `apply` does
+    /// not write them (see `getInterceptDomains`), so requiring them here would
+    /// make the caller's "already configured, skip" test permanently false
     /// whenever DNS is stopped.
     package func isApplied(config: ProxyConfig, vpnConnected: Bool) -> Bool {
         let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
 
-        guard !enabledEntries.isEmpty else { return true }
+        guard !enabledEntries.isEmpty else {
+            // Nothing to write. That is not the same as nothing to do: with the
+            // VPN down `apply` sweeps entry files a previous run stranded, and
+            // reporting "already applied" here skips exactly that repair. The
+            // GUI host guards its `apply` call with this method, so answering
+            // `true` unconditionally made the sweep unreachable in the one host
+            // and the one state it exists for.
+            return !entryFilesPresent(config: config)
+        }
 
         return enabledEntries.allSatisfy { entry in
             let expected = entry.servers.map { "nameserver \($0)" }.joined(separator: "\n")
-            let filePath = "/etc/resolver/\(entry.domain)"
+            let filePath = resolverFilePath(for: entry.domain)
             guard let actual = try? String(contentsOfFile: filePath, encoding: .utf8) else { return false }
             return actual.trimmingCharacters(in: .whitespacesAndNewlines)
                 == expected.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -138,11 +163,11 @@ package final class DNSManager: @unchecked Sendable {
         let interceptDomains = getInterceptDomains(from: config, forCleanup: true)
 
         let entriesCleared = enabledEntries.allSatisfy { entry in
-            !FileManager.default.fileExists(atPath: "/etc/resolver/\(entry.domain)")
+            !FileManager.default.fileExists(atPath: resolverFilePath(for: entry.domain))
         }
 
         let interceptCleared = interceptDomains.allSatisfy { domain in
-            !FileManager.default.fileExists(atPath: "/etc/resolver/\(domain)")
+            !FileManager.default.fileExists(atPath: resolverFilePath(for: domain))
         }
 
         return entriesCleared && interceptCleared
@@ -158,6 +183,20 @@ package final class DNSManager: @unchecked Sendable {
         let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
 
         if !vpnConnected, !config.dnsEntries.filter(\.enabled).isEmpty {
+            // Repair, not just defer. Entry files outlive the process that
+            // wrote them: a `SIGKILL`, an installer swapping the app, or a run
+            // that ended without a clean stop all strand them on disk with no
+            // in-memory record. Left there with the VPN down, each one sends
+            // its whole domain to servers only the tunnel can reach —
+            // blackholing those lookups for every process on the machine, the
+            // VPN gateway's own hostname included when it falls under a
+            // managed domain. Nothing else sweeps them: the VPN transition
+            // handler only fires on a state *flip*, so files stranded while
+            // the VPN is already down stay stranded. A start is the one moment
+            // that can be relied on to fix it.
+            if entryFilesPresent(config: config) {
+                try clearEntryFiles(config: config, logger: logger)
+            }
             logger?.log(.notice, "Split-DNS entry files deferred until the VPN connects (their servers are tunnel-internal).", category: .system)
         }
 
@@ -253,6 +292,20 @@ package final class DNSManager: @unchecked Sendable {
     }
 
     // MARK: - VPN-lifecycle entry files
+
+    /// Whether any static split-DNS entry file is on disk right now.
+    ///
+    /// Disk truth, not bookkeeping: these files outlive the process that wrote
+    /// them. A `SIGKILL`, an installer swapping the app, or a start that failed
+    /// after they were applied all leave them behind with no in-memory record,
+    /// and each one blackholes its domain for every process on the machine
+    /// until someone removes it. Callers deciding whether there is anything to
+    /// clean up have to ask the filesystem.
+    package func entryFilesPresent(config: ProxyConfig) -> Bool {
+        config.dnsEntries
+            .filter(\.enabled)
+            .contains { FileManager.default.fileExists(atPath: resolverFilePath(for: $0.domain)) }
+    }
 
     /// Writes only the static split-DNS entry files. Called when the VPN
     /// transitions to connected while the proxy is running: `apply` deferred

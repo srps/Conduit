@@ -51,25 +51,70 @@ package struct SplitDNSVPNGate: Sendable {
         return wantedBefore != entriesWanted
     }
 
-    /// Acts on a wanted-state flip: writes the entry files when the VPN
-    /// came up, removes them when it went down. Failures are logged, not
-    /// thrown — a VPN transition handler has no caller to propagate to.
+    /// What a host should do to the entry files right now.
+    package enum EntryFileAction: Equatable, Sendable {
+        case apply
+        case remove
+        case nothing
+    }
+
+    /// The gating policy, as a pure function of what the VPN state wants and
+    /// whether the proxy runtime is up.
     ///
-    /// The apply/clear decision reads the gate's *current* state, so call
-    /// this synchronously (same isolation context) right after the
-    /// `update(_:)` that returned `true` — an `update(_:)` interleaved
-    /// between the two changes what this does.
-    package func reconcileEntryFiles(config: ProxyConfig, dnsManager: DNSManager, logger: any LogSink) {
+    /// The asymmetry is the point. *Writing* entry files is gated on a running
+    /// runtime — files pointing into a tunnel are a side effect of running the
+    /// proxy, and creating them while it is down strands overrides nobody
+    /// owns. *Removing* them is gated on nothing at all.
+    ///
+    /// Both hosts used to gate removal on the runtime too, reasoning that
+    /// "outside the start/stop window no platform side-effects exist to
+    /// reconcile". That is false in exactly the case that matters: when the
+    /// proxy dies or fails to start *while the files are applied*, the side
+    /// effects very much still exist, and a VPN drop then leaves
+    /// `/etc/resolver/<domain>` pointing at servers only the tunnel could
+    /// reach. Every lookup under those domains blackholes machine-wide —
+    /// including the VPN gateway's own hostname when it falls under a managed
+    /// domain, which is the bootstrap deadlock this gate exists to prevent.
+    /// Removal must never be conditional on the health of the thing whose
+    /// failure creates the need for it.
+    ///
+    /// Removal is also unconditional rather than presence-checked: deleting a
+    /// file that is not there is free, and the check would be one more way to
+    /// wrongly decide there is nothing to clean up.
+    package func action(runtimeStarted: Bool) -> EntryFileAction {
+        guard entriesWanted else { return .remove }
+        return runtimeStarted ? .apply : .nothing
+    }
+
+    /// Acts on the current policy decision: writes the entry files when the VPN
+    /// came up under a running proxy, removes them whenever the VPN is down and
+    /// they are still on disk. Failures are logged, not thrown — a VPN
+    /// transition handler has no caller to propagate to.
+    ///
+    /// The decision reads the gate's *current* state, so call this
+    /// synchronously (same isolation context) right after the `update(_:)`
+    /// whose result you are acting on — an `update(_:)` interleaved between the
+    /// two changes what this does.
+    package func reconcileEntryFiles(
+        config: ProxyConfig,
+        dnsManager: DNSManager,
+        logger: any LogSink,
+        runtimeStarted: Bool
+    ) {
+        let decision = action(runtimeStarted: runtimeStarted)
         do {
-            if entriesWanted {
+            switch decision {
+            case .apply:
                 try dnsManager.applyEntryFiles(config: config, logger: logger)
-            } else {
+            case .remove:
                 try dnsManager.clearEntryFiles(config: config, logger: logger)
+            case .nothing:
+                break
             }
         } catch {
             logger.log(
                 .warning,
-                "Could not \(entriesWanted ? "apply" : "remove") split-DNS entry files on VPN transition: \(error.localizedDescription)",
+                "Could not \(decision == .apply ? "apply" : "remove") split-DNS entry files on VPN transition: \(error.localizedDescription)",
                 category: .system
             )
         }

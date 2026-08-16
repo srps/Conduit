@@ -140,6 +140,12 @@ final class DNSTCPListenerTests: XCTestCase {
     /// nameserver, whose 1.5-second timeout alone outlasts it.
     @MainActor
     func testSlowLookupIsNotCutOffByTheIdleTimer() async throws {
+        try XCTSkipIf(
+            Self.networkAnswersForUnroutableDNS(),
+            "This network transparently redirects outbound UDP/53, so the unreachable "
+                + "nameserver this test depends on answers instantly and the lookup never "
+                + "outlasts the idle window"
+        )
         let logger = RecordingLogSink(minLevel: .debug)
         var config = ProxyConfig.testFixture()
         // TEST-NET-1: routes nowhere, so the internal attempt burns its full
@@ -398,5 +404,45 @@ final class DNSTCPListenerTests: XCTestCase {
         // A clean close surfaces as recv() returning 0 (EOF).
         var scratch = [UInt8](repeating: 0, count: 64)
         return recv(fd, &scratch, scratch.count, 0) == 0
+    }
+
+    /// Whether this network answers DNS sent to an address that routes nowhere.
+    ///
+    /// Home routers, hotel networks and ISPs commonly force DNS by redirecting
+    /// *all* outbound UDP/53 to their own resolver regardless of destination
+    /// address. On such a network, a query aimed at a documentation-range
+    /// address comes back instantly — observed as an authoritative NXDOMAIN
+    /// from a `192.0.2.x` "server", with the same address on port 5353 timing
+    /// out normally, which is what identifies the redirect as port-based.
+    ///
+    /// Tests that need a genuinely unreachable nameserver have no way to get
+    /// one there: the forwarder always queries port 53, so every candidate
+    /// address is intercepted.
+    private static func networkAnswersForUnroutableDNS() -> Bool {
+        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+
+        var timeout = timeval(tv_sec: 1, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(53).bigEndian
+        // TEST-NET-1 (RFC 5737): reserved for documentation, routed nowhere.
+        addr.sin_addr.s_addr = inet_addr("192.0.2.53")
+
+        let connected = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connected == 0 else { return false }
+
+        let probe = DNSWireFormat.buildQuery(domain: "probe.invalid.test", txID: 0x5151, qtype: 1)
+        _ = probe.withUnsafeBytes { send(fd, $0.baseAddress, probe.count, 0) }
+
+        var scratch = [UInt8](repeating: 0, count: 512)
+        return recv(fd, &scratch, scratch.count, 0) > 0
     }
 }
