@@ -424,6 +424,13 @@ package final class SystemProxyManager: @unchecked Sendable {
     }
 
     /// Rebuilds the `networksetup` calls that put `prior` back on `service`.
+    ///
+    /// Deliberately without the `2>/dev/null || true` the blanket-clear path
+    /// uses. There, best-effort is right — we are switching things off and a
+    /// service that cannot do it was not on anyway. Here the exit code is the
+    /// only evidence the restore landed, and swallowing failures would let a
+    /// partial restore look complete, after which the record is dropped and the
+    /// user's remaining settings can never be recovered.
     private static func restoreScript(service: String, prior: [String: String]) -> String {
         let s = service.shellQuoted
         var script = ""
@@ -432,7 +439,7 @@ package final class SystemProxyManager: @unchecked Sendable {
             script += "/usr/sbin/networksetup -setautoproxyurl \(s) \(url.shellQuoted)\n"
             script += "/usr/sbin/networksetup -setautoproxystate \(s) on\n"
         } else {
-            script += "/usr/sbin/networksetup -setautoproxystate \(s) off 2>/dev/null || true\n"
+            script += "/usr/sbin/networksetup -setautoproxystate \(s) off\n"
         }
 
         for (key, setter, stateSetter) in [
@@ -448,7 +455,7 @@ package final class SystemProxyManager: @unchecked Sendable {
             if !host.isEmpty, !port.isEmpty {
                 script += "/usr/sbin/networksetup \(setter) \(s) \(host.shellQuoted) \(port.shellQuoted)\n"
             }
-            script += "/usr/sbin/networksetup \(stateSetter) \(s) \(enabled ? "on" : "off") 2>/dev/null || true\n"
+            script += "/usr/sbin/networksetup \(stateSetter) \(s) \(enabled ? "on" : "off")\n"
         }
 
         // "Empty" is networksetup's own spelling for clearing the list.

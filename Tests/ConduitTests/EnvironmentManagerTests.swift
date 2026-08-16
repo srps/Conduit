@@ -123,6 +123,30 @@ final class EnvironmentManagerTests: XCTestCase {
         )
     }
 
+    /// A transient `launchctl` failure must not cost the user their record.
+    /// Forgetting on a partial restore destroys the only copy of their original
+    /// values while leaving some of ours in place, with no way to retry.
+    func testRecordsSurviveAFailedLaunchctlRestore() throws {
+        launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
+
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+
+        launchctl.failSetenv = true
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(
+            journal.prior(surface: .launchdEnvironment, scope: "HTTP_PROXY"),
+            .wasPresent(["value": "http://corp.example:8080"]),
+            "a failed restore keeps the record so the next teardown can retry"
+        )
+
+        // And the retry works once launchctl recovers.
+        launchctl.failSetenv = false
+        try manager.clear(logger: nil)
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080")
+    }
+
     // MARK: - Shell profile block
 
     /// The marker block is the other ownership mechanism, and the reason it is
@@ -166,6 +190,8 @@ final class EnvironmentManagerTests: XCTestCase {
 /// are observable and `getenv` reflects them.
 private final class FakeLaunchctl: @unchecked Sendable {
     var environment: [String: String] = [:]
+    /// Simulates a transient launchctl failure on writes.
+    var failSetenv = false
     private let lock = NSLock()
 
     func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
@@ -177,6 +203,9 @@ private final class FakeLaunchctl: @unchecked Sendable {
 
         switch verb {
         case "setenv" where arguments.count >= 3:
+            if failSetenv {
+                return CommandResult(exitCode: 1, standardOutput: "", standardError: "simulated failure")
+            }
             environment[arguments[1]] = arguments[2]
             return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
         case "unsetenv" where arguments.count >= 2:

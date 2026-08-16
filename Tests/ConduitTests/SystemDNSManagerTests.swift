@@ -536,6 +536,25 @@ final class SystemDNSManagerTests: XCTestCase {
         )
     }
 
+    /// A legacy snapshot listing no interfaces still meant "we applied and
+    /// captured this much". Importing only its rows would turn it into no saved
+    /// state at all, and `clear` would then take the unknown-state fallback and
+    /// reset every connected service to DHCP — where the old implementation
+    /// correctly did nothing.
+    func testEmptyLegacySnapshotStillCountsAsAppliedState() throws {
+        let legacyFile = stateDirectory.appendingPathComponent("saved-dns.json")
+        try JSONEncoder().encode(SavedDNSState(interfaces: [:])).write(to: legacyFile)
+
+        let manager = makeManager()
+        XCTAssertTrue(manager.hasSavedState(), "an empty snapshot is still saved state")
+
+        try manager.clear(logger: nil)
+        XCTAssertTrue(
+            recording.executedCommands.isEmpty,
+            "nothing was captured, so teardown has nothing to undo — it must not reset DNS"
+        )
+    }
+
     /// Import must not clobber a journal that already holds the truth.
     func testLegacyImportDoesNotOverwriteExistingJournalRecords() throws {
         journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "10.0.0.1"])
