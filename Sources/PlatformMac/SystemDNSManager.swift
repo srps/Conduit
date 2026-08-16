@@ -400,9 +400,30 @@ package final class SystemDNSManager: @unchecked Sendable {
 
     // MARK: - Internal helpers
 
+    /// First existing absolute path for `lsof`, or `nil` if the tool is gone —
+    /// in which case the caller treats the port as free, which is the same
+    /// answer the broken hardcoded path gave, but now a deliberate one.
+    private static let lsofPath: String? = ["/usr/sbin/lsof", "/usr/bin/lsof"]
+        .first { FileManager.default.isExecutableFile(atPath: $0) }
+
     private func isPort53InUse() -> Bool {
+        // The path is resolved, not hardcoded: `lsof` moved to `/usr/sbin` on
+        // macOS 26 and this probe named `/usr/bin/lsof`, so it threw and
+        // answered "port free" on every modern machine — which made
+        // `restoreIfNeeded` treat a *running* relay's saved state as orphaned
+        // and force a restore at launch.
+        //
+        // Candidates are absolute and known-good rather than a `PATH` lookup:
+        // resolving a tool from the inherited environment is how a process that
+        // may elevate ends up running someone else's binary.
+        //
+        // Unlike the proxy surface, this one cannot be done with a socket. The
+        // relay listens on port 53 as root; an unprivileged `bind` there fails
+        // with `EACCES` whether or not anything holds it, and UDP has no
+        // connect handshake to test instead.
+        guard let lsof = Self.lsofPath else { return false }
         let result = try? CommandRunner.run(
-            launchPath: "/usr/bin/lsof",
+            launchPath: lsof,
             arguments: ["-i", "UDP:53", "-P", "-n"]
         )
         return result?.exitCode == 0 && !(result?.standardOutput.isEmpty ?? true)
