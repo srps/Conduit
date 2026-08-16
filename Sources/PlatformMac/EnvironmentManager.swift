@@ -127,24 +127,39 @@ package final class EnvironmentManager {
         }
 
         var restored = 0
+        var failed: [String] = []
         for name in launchdVariableNames {
+            let result: CommandResult?
             switch journal?.prior(surface: .launchdEnvironment, scope: name) ?? .notRecorded {
             case .wasPresent(let prior):
-                let value = prior["value"] ?? ""
-                _ = try? commandRunner("/bin/launchctl", ["setenv", name, value])
-                restored += 1
+                result = try? commandRunner("/bin/launchctl", ["setenv", name, prior["value"] ?? ""])
+                if result?.exitCode == 0 { restored += 1 }
             case .wasAbsent, .notRecorded:
                 // Unknown falls back to unsetting: leaving our proxy URL in the
                 // launchd domain would point every GUI app launched afterwards
                 // at a proxy that is no longer running.
-                _ = try? commandRunner("/bin/launchctl", ["unsetenv", name])
+                result = try? commandRunner("/bin/launchctl", ["unsetenv", name])
             }
+            if result?.exitCode != 0 { failed.append(name) }
         }
-        journal?.forgetAll(surface: .launchdEnvironment)
+
+        // Keep the records if anything failed. Forgetting on a partial restore
+        // destroys the only copy of the user's original values while leaving
+        // some of ours in place, and a later teardown could otherwise never
+        // retry.
+        if failed.isEmpty {
+            journal?.forgetAll(surface: .launchdEnvironment)
+        } else {
+            logger?.log(
+                .warning,
+                "launchctl failed for \(failed.joined(separator: ", ")); keeping the recorded values so the next teardown can retry.",
+                category: .system
+            )
+        }
 
         if restored > 0 {
             logger?.log(.notice, "Restored \(restored) pre-existing launchd proxy variable(s), cleared the rest.", category: .system)
-        } else {
+        } else if failed.isEmpty {
             logger?.log(.notice, "Cleared proxy variables from the user launchd domain.", category: .system)
         }
     }

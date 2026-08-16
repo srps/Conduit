@@ -373,6 +373,32 @@ extension SystemProxyManagerTests {
         )
     }
 
+    /// The restore path's exit code is the only evidence it landed, so unlike
+    /// the blanket-clear path it must not suppress failures. With `|| true` a
+    /// half-failed restore reports success, the record is dropped, and the
+    /// user's remaining settings can never be recovered.
+    func testRestoreScriptDoesNotSuppressFailures() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(script.contains("-setautoproxyurl"), "precondition: this is the restore path")
+        XCTAssertFalse(
+            script.contains("|| true"),
+            "a restore that cannot report failure cannot be retried: \(script)"
+        )
+    }
+
     /// A record is only safe to drop once the prior value is actually back. If
     /// restore fails and we forget anyway, the setting we changed is left with
     /// nothing recording that we changed it.

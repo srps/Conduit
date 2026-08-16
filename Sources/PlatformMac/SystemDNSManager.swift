@@ -53,6 +53,13 @@ package final class SystemDNSManager: @unchecked Sendable {
               let legacy = try? JSONDecoder().decode(SavedDNSState.self, from: data)
         else { return }
 
+        // Unconditionally, including for a snapshot with no interfaces: the
+        // legacy file's mere existence meant "we applied and captured this
+        // much". Importing only the rows would turn an empty snapshot into no
+        // saved state at all, and `clear` would then take the unknown-state
+        // fallback and reset every connected service to DHCP — where the old
+        // implementation correctly did nothing.
+        journal.markApplied(surface: .systemDNS, now: legacy.savedAt)
         for (service, servers) in legacy.interfaces {
             journal.recordPrior(
                 surface: .systemDNS,
