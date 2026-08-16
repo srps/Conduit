@@ -523,11 +523,13 @@ package final class SystemProxyManager: @unchecked Sendable {
         // leaving ours there hands the user a dead local PAC server the moment
         // they switch automatic configuration back on.
         //
-        // The state line comes last deliberately. `-setautoproxyurl` is widely
-        // held to enable autoproxy as a side effect, though neither the man
-        // page nor the usage string documents it; ordering it this way is
-        // correct either way — if it does enable, the trailing `off` corrects
-        // it, and if it does not, the `off` is a no-op.
+        // The state line comes last, and it is load-bearing:
+        // `-setautoproxyurl` enables autoproxy as a side effect. Verified on
+        // macOS 26 — writing a URL to a service whose autoproxy is off leaves
+        // it reporting `Enabled: Yes`. Neither `man networksetup` nor the
+        // usage string documents this. Without the trailing `off`, restoring a
+        // URL the user had configured-but-disabled would switch their
+        // automatic proxy configuration on behind their back.
         if let url = prior["autoURL"], !url.isEmpty {
             script += "/usr/sbin/networksetup -setautoproxyurl \(s) \(url.shellQuoted)\n"
         }
