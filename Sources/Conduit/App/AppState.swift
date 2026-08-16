@@ -67,7 +67,6 @@ final class AppState: ObservableObject {
     private lazy var environmentManager = EnvironmentManager(journal: platformStateJournal)
     private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient)
     private lazy var systemDNSManager = SystemDNSManager(
-        savedDNSFile: runtimeEnvironment.savedDNSFile,
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal
     )

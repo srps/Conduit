@@ -33,6 +33,13 @@ private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
 
 // MARK: - Tests
 
+/// Convenience shape for seeding the journal with per-interface prior DNS
+/// servers. Not an on-disk format — the journal is the only storage now.
+private struct SavedDNS {
+    var savedAt: Date = .now
+    var interfaces: [String: [String]] = [:]
+}
+
 final class SystemDNSManagerTests: XCTestCase {
 
     private var recording: RecordingPrivilegeClient!
@@ -67,90 +74,20 @@ final class SystemDNSManagerTests: XCTestCase {
 
     /// Manager under test, wired to this test's isolated state.
     private func makeManager() -> SystemDNSManager {
-        SystemDNSManager(
-            savedDNSFile: stateDirectory.appendingPathComponent("saved-dns.json"),
-            privilegeClient: recording,
-            journal: journal
-        )
+        SystemDNSManager(privilegeClient: recording, journal: journal)
     }
 
-    // MARK: - SavedDNSState serialization
 
-    func testSavedDNSStateEncodesAndDecodes() throws {
-        let state = SavedDNSState(
-            savedAt: Date(timeIntervalSince1970: 1_700_000_000),
-            interfaces: [
-                "Wi-Fi": ["192.168.2.1", "1.1.1.1"],
-                "Ethernet": []
-            ]
-        )
 
-        let data = try JSONEncoder().encode(state)
-        let decoded = try JSONDecoder().decode(SavedDNSState.self, from: data)
 
-        XCTAssertEqual(decoded.interfaces["Wi-Fi"], ["192.168.2.1", "1.1.1.1"])
-        XCTAssertEqual(decoded.interfaces["Ethernet"], [])
-        XCTAssertEqual(decoded.interfaces.count, 2)
-    }
 
-    func testSavedDNSStateDefaultsToEmptyInterfaces() {
-        let state = SavedDNSState()
-        XCTAssertTrue(state.interfaces.isEmpty)
-    }
 
-    func testSavedDNSStateDateRoundTripsAccurately() throws {
-        let specificDate = Date(timeIntervalSince1970: 1_700_000_000)
-        let state = SavedDNSState(savedAt: specificDate, interfaces: ["Wi-Fi": ["8.8.8.8"]])
-
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        let data = try encoder.encode(state)
-        let decoded = try JSONDecoder().decode(SavedDNSState.self, from: data)
-
-        XCTAssertEqual(
-            decoded.savedAt.timeIntervalSince1970,
-            specificDate.timeIntervalSince1970,
-            accuracy: 0.001,
-            "Date should round-trip with sub-second accuracy"
-        )
-    }
-
-    func testSavedDNSStateDateRoundTripsViaProductionEncoderAndDecoder() throws {
-        let specificDate = Date(timeIntervalSince1970: 1_700_000_000)
-        let state = SavedDNSState(savedAt: specificDate, interfaces: ["Wi-Fi": ["8.8.8.8"]])
-
-        writeSavedState(state)
-        let loaded = loadSavedState()
-
-        XCTAssertNotNil(loaded, "Production encoder output must be decodable by production decoder")
-        XCTAssertEqual(
-            loaded!.savedAt.timeIntervalSince1970,
-            specificDate.timeIntervalSince1970,
-            accuracy: 0.001,
-            "Date must survive production file round-trip"
-        )
-        XCTAssertEqual(loaded!.interfaces["Wi-Fi"], ["8.8.8.8"])
-    }
-
-    func testSavedDNSStatePersistsAndLoads() throws {
-        let tmpFile = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("json")
-        defer { try? FileManager.default.removeItem(at: tmpFile) }
-
-        let state = SavedDNSState(interfaces: ["Wi-Fi": ["8.8.8.8", "8.8.4.4"]])
-        let data = try JSONEncoder().encode(state)
-        try data.write(to: tmpFile, options: .atomic)
-
-        let loaded = try JSONDecoder().decode(SavedDNSState.self, from: Data(contentsOf: tmpFile))
-        XCTAssertEqual(loaded.interfaces["Wi-Fi"], ["8.8.8.8", "8.8.4.4"])
-    }
 
     // MARK: - Staleness detection
 
     func testStalenessThresholdDetectsOldState() {
         let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
-        let state = SavedDNSState(savedAt: eightDaysAgo, interfaces: ["Wi-Fi": ["8.8.8.8"]])
+        let state = SavedDNS(savedAt: eightDaysAgo, interfaces: ["Wi-Fi": ["8.8.8.8"]])
 
         let threshold: TimeInterval = 7 * 24 * 3600
         XCTAssertTrue(
@@ -160,7 +97,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testStalenessThresholdAllowsFreshState() {
-        let state = SavedDNSState(savedAt: .now, interfaces: ["Wi-Fi": ["8.8.8.8"]])
+        let state = SavedDNS(savedAt: .now, interfaces: ["Wi-Fi": ["8.8.8.8"]])
 
         let threshold: TimeInterval = 7 * 24 * 3600
         XCTAssertFalse(
@@ -171,7 +108,7 @@ final class SystemDNSManagerTests: XCTestCase {
 
     func testStalenessThresholdBoundaryJustUnder() {
         let justUnder = Date().addingTimeInterval(-7 * 24 * 3600 + 60)
-        let state = SavedDNSState(savedAt: justUnder, interfaces: ["Wi-Fi": ["8.8.8.8"]])
+        let state = SavedDNS(savedAt: justUnder, interfaces: ["Wi-Fi": ["8.8.8.8"]])
 
         let threshold: TimeInterval = 7 * 24 * 3600
         XCTAssertFalse(
@@ -188,7 +125,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testHasSavedStateReturnsTrueWhenFileExists() {
-        writeSavedState(SavedDNSState(interfaces: ["Wi-Fi": ["8.8.8.8"]]))
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["8.8.8.8"]]))
         let manager = makeManager()
         XCTAssertTrue(manager.hasSavedState())
     }
@@ -223,16 +160,11 @@ final class SystemDNSManagerTests: XCTestCase {
 
     // MARK: - Saved DNS file path
 
-    func testSavedDNSFileIsInConfigDirectory() {
-        let path = RuntimeEnvironment.userDefault().savedDNSFile.path
-        XCTAssertTrue(path.contains("Conduit"))
-        XCTAssertTrue(path.hasSuffix("saved-dns.json"))
-    }
 
     // MARK: - clear() with RecordingPrivilegeClient
 
     func testClearWithAllVanishedInterfacesSkipsAllAndDeletesFile() throws {
-        let state = SavedDNSState(interfaces: [
+        let state = SavedDNS(interfaces: [
             "FakeVPN_utun99": ["10.0.0.1"],
             "FakeThunderbolt": ["169.254.1.1"]
         ])
@@ -247,7 +179,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testClearWithEmptySavedInterfacesJustDeletesFile() throws {
-        writeSavedState(SavedDNSState(interfaces: [:]))
+        writeSavedState(SavedDNS(interfaces: [:]))
 
         let manager = makeManager()
         try manager.clear(logger: nil)
@@ -264,7 +196,7 @@ final class SystemDNSManagerTests: XCTestCase {
             throw XCTSkip("No connected network services on this machine")
         }
 
-        let state = SavedDNSState(interfaces: [
+        let state = SavedDNS(interfaces: [
             firstService: ["192.168.1.1"],
             "FakeVPN_utun99": ["10.0.0.1"]
         ])
@@ -287,7 +219,7 @@ final class SystemDNSManagerTests: XCTestCase {
             throw XCTSkip("No connected network services on this machine")
         }
 
-        writeSavedState(SavedDNSState(interfaces: [firstService: []]))
+        writeSavedState(SavedDNS(interfaces: [firstService: []]))
 
         try manager.clear(logger: nil)
 
@@ -306,7 +238,7 @@ final class SystemDNSManagerTests: XCTestCase {
         }
 
         recording.throwingCommands = [.setDNSServers]
-        writeSavedState(SavedDNSState(interfaces: Dictionary(
+        writeSavedState(SavedDNS(interfaces: Dictionary(
             uniqueKeysWithValues: realServices.map { ($0, ["1.1.1.1"]) }
         )))
 
@@ -355,7 +287,7 @@ final class SystemDNSManagerTests: XCTestCase {
             throw XCTSkip("No connected network services")
         }
 
-        writeSavedState(SavedDNSState(interfaces: [service: ["1.1.1.1"]]))
+        writeSavedState(SavedDNS(interfaces: [service: ["1.1.1.1"]]))
 
         try manager.clear(logger: nil)
 
@@ -376,7 +308,7 @@ final class SystemDNSManagerTests: XCTestCase {
             throw XCTSkip("No connected network services")
         }
 
-        writeSavedState(SavedDNSState(interfaces: [
+        writeSavedState(SavedDNS(interfaces: [
             "FakeOldInterface": ["10.0.0.1"]
         ]))
 
@@ -409,7 +341,7 @@ final class SystemDNSManagerTests: XCTestCase {
             throw XCTSkip("No connected network services")
         }
 
-        writeSavedState(SavedDNSState(interfaces: Dictionary(
+        writeSavedState(SavedDNS(interfaces: Dictionary(
             uniqueKeysWithValues: realServices.map { ($0, ["192.168.1.1"]) }
         )))
 
@@ -440,7 +372,7 @@ final class SystemDNSManagerTests: XCTestCase {
     func testReconcileNeverCallsResolverOverrideCommands() throws {
         let manager = makeManager()
 
-        writeSavedState(SavedDNSState(interfaces: ["FakeOldInterface": ["10.0.0.1"]]))
+        writeSavedState(SavedDNS(interfaces: ["FakeOldInterface": ["10.0.0.1"]]))
         manager.reconcile(logger: nil)
 
         let applyDNS = recording.commands(matching: .applyDNS)
@@ -451,7 +383,7 @@ final class SystemDNSManagerTests: XCTestCase {
 
     func testReconcileUpdatesTimestamp() throws {
         let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
-        writeSavedState(SavedDNSState(savedAt: oldDate, interfaces: ["FakeOldInterface": ["10.0.0.1"]]))
+        writeSavedState(SavedDNS(savedAt: oldDate, interfaces: ["FakeOldInterface": ["10.0.0.1"]]))
 
         let manager = makeManager()
         manager.reconcile(logger: nil)
@@ -464,7 +396,7 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - Reconcile set algebra (pure logic)
 
     func testReconcileDetectsNewInterfaces() {
-        let saved = SavedDNSState(interfaces: ["Wi-Fi": ["192.168.1.1"]])
+        let saved = SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]])
         let currentServices = ["Wi-Fi", "utun3"]
 
         let newInterfaces = Set(currentServices).subtracting(saved.interfaces.keys)
@@ -475,7 +407,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testReconcileDetectsGoneInterfaces() {
-        let saved = SavedDNSState(interfaces: [
+        let saved = SavedDNS(interfaces: [
             "Wi-Fi": ["192.168.1.1"],
             "utun3": ["10.0.0.1"]
         ])
@@ -489,7 +421,7 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testReconcileDetectsSimultaneousChanges() {
-        let saved = SavedDNSState(interfaces: [
+        let saved = SavedDNS(interfaces: [
             "Wi-Fi": ["192.168.1.1"],
             "utun3": ["10.0.0.1"]
         ])
@@ -503,74 +435,6 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     // MARK: - Legacy snapshot migration
-
-    /// An install can be upgraded while the DNS relay is active, with its
-    /// pre-journal `saved-dns.json` on disk holding the only record of the
-    /// user's real resolvers. Dropping that file instead of importing it would
-    /// leave their DNS pinned at 127.0.0.1 with nothing left saying what to
-    /// restore — the exact stranding this whole change exists to prevent.
-    func testLegacySavedStateIsImportedAndTheOldFileRemoved() throws {
-        let legacyFile = stateDirectory.appendingPathComponent("saved-dns.json")
-        let savedAt = Date(timeIntervalSince1970: 1_700_000_000)
-        let legacy = SavedDNSState(savedAt: savedAt, interfaces: ["Wi-Fi": ["192.168.1.1", "1.1.1.1"]])
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .deferredToDate
-        try encoder.encode(legacy).write(to: legacyFile)
-
-        let manager = makeManager()
-        XCTAssertTrue(manager.hasSavedState(), "a legacy snapshot still counts as saved state")
-
-        XCTAssertEqual(
-            journal.prior(surface: .systemDNS, scope: "Wi-Fi"),
-            .wasPresent(["servers": "192.168.1.1,1.1.1.1"]),
-            "the user's real resolvers must survive the format change"
-        )
-        XCTAssertEqual(
-            journal.oldestRecordDate(for: .systemDNS),
-            savedAt,
-            "the original save time carries over, so staleness is judged from when it was really taken"
-        )
-        XCTAssertFalse(
-            FileManager.default.fileExists(atPath: legacyFile.path),
-            "the legacy file is consumed, not left to be re-imported"
-        )
-    }
-
-    /// A legacy snapshot listing no interfaces still meant "we applied and
-    /// captured this much". Importing only its rows would turn it into no saved
-    /// state at all, and `clear` would then take the unknown-state fallback and
-    /// reset every connected service to DHCP — where the old implementation
-    /// correctly did nothing.
-    func testEmptyLegacySnapshotStillCountsAsAppliedState() throws {
-        let legacyFile = stateDirectory.appendingPathComponent("saved-dns.json")
-        try JSONEncoder().encode(SavedDNSState(interfaces: [:])).write(to: legacyFile)
-
-        let manager = makeManager()
-        XCTAssertTrue(manager.hasSavedState(), "an empty snapshot is still saved state")
-
-        try manager.clear(logger: nil)
-        XCTAssertTrue(
-            recording.executedCommands.isEmpty,
-            "nothing was captured, so teardown has nothing to undo — it must not reset DNS"
-        )
-    }
-
-    /// Import must not clobber a journal that already holds the truth.
-    func testLegacyImportDoesNotOverwriteExistingJournalRecords() throws {
-        journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "10.0.0.1"])
-
-        let legacyFile = stateDirectory.appendingPathComponent("saved-dns.json")
-        let legacy = SavedDNSState(interfaces: ["Wi-Fi": ["8.8.8.8"]])
-        try JSONEncoder().encode(legacy).write(to: legacyFile)
-
-        _ = makeManager().hasSavedState()
-
-        XCTAssertEqual(
-            journal.prior(surface: .systemDNS, scope: "Wi-Fi"),
-            .wasPresent(["servers": "10.0.0.1"]),
-            "first-write-wins protects the newer record"
-        )
-    }
 
     // MARK: - restoreIfNeeded()
 
@@ -587,7 +451,7 @@ final class SystemDNSManagerTests: XCTestCase {
             throw XCTSkip("No connected network services")
         }
 
-        writeSavedState(SavedDNSState(interfaces: [service: ["8.8.8.8"]]))
+        writeSavedState(SavedDNS(interfaces: [service: ["8.8.8.8"]]))
 
         manager.restoreIfNeeded(logger: nil)
 
@@ -612,7 +476,7 @@ final class SystemDNSManagerTests: XCTestCase {
         }
 
         let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
-        writeSavedState(SavedDNSState(savedAt: eightDaysAgo, interfaces: [service: ["8.8.8.8"]]))
+        writeSavedState(SavedDNS(savedAt: eightDaysAgo, interfaces: [service: ["8.8.8.8"]]))
 
         manager.restoreIfNeeded(logger: nil)
 
@@ -735,11 +599,11 @@ final class SystemDNSManagerTests: XCTestCase {
         platform.manageSystemDNS ? 53 : config.dnsForwarderPort
     }
 
-    private func writeSavedState(_ state: SavedDNSState) {
+    private func writeSavedState(_ state: SavedDNS) {
         journal.forgetAll(surface: .systemDNS)
-        // Stands in for the legacy file's mere existence: a snapshot with zero
-        // interfaces still meant "we applied and captured nothing", which is
-        // not the same as having no saved state at all.
+        // Mark applied even with zero interfaces: "we ran and captured
+        // nothing" is not the same as having no saved state at all, and
+        // teardown treats them differently.
         journal.markApplied(surface: .systemDNS, now: state.savedAt)
         for (service, servers) in state.interfaces {
             journal.recordPrior(
@@ -751,14 +615,14 @@ final class SystemDNSManagerTests: XCTestCase {
         }
     }
 
-    private func loadSavedState() -> SavedDNSState? {
+    private func loadSavedState() -> SavedDNS? {
         guard journal.hasRecords(for: .systemDNS) else { return nil }
         var interfaces: [String: [String]] = [:]
         for record in journal.records(for: .systemDNS) {
             let servers = record.priorValue?["servers"] ?? ""
             interfaces[record.scope] = servers.isEmpty ? [] : servers.split(separator: ",").map(String.init)
         }
-        return SavedDNSState(
+        return SavedDNS(
             savedAt: journal.oldestRecordDate(for: .systemDNS) ?? .now,
             interfaces: interfaces
         )
