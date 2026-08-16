@@ -96,6 +96,7 @@ package final class SystemProxyManager: @unchecked Sendable {
                     value: capturePriorState(service: service)
                 )
             }
+            journal.markApplied(surface: .systemProxy)
         }
 
         let pacURL = Self.effectivePACURL(config: config, localPACURL: localPACURL)
@@ -150,6 +151,24 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// networking for every client on the machine. Over-clearing costs the user
     /// a visible setting they can restore; stranding does not announce itself.
     package func clear(logger: (any LogSink)?) throws {
+        // A teardown that already ran must not run its fallback again. `clear`
+        // restores the recorded prior state and then forgets it, so a second
+        // call finds `.notRecorded` — and the unconditional fallback would
+        // blanket-disable the very settings the first call just restored. Both
+        // hosts do call it twice: once on stop, once on quit.
+        //
+        // Only a journal that positively knows the surface is idle may skip;
+        // an unreadable one answers `false` and we clear as before, because a
+        // stranded proxy setting is worse than an unnecessary one.
+        if let journal, journal.knowsSurfaceIsIdle(.systemProxy) {
+            logger?.log(
+                .debug,
+                "System proxy teardown skipped: nothing recorded as applied.",
+                category: .system
+            )
+            return
+        }
+
         let services = (try? connectedNetworkServices(logger: nil)) ?? allNetworkServices()
 
         var script = ""
@@ -198,10 +217,16 @@ package final class SystemProxyManager: @unchecked Sendable {
         // Only forget once the prior value is actually back on the machine. A
         // record dropped after a failed restore is a setting we changed with
         // nothing left saying so.
-        if restoreSucceeded, let journal {
-            for service in restored + reset {
-                journal.forget(surface: .systemProxy, scope: service)
-            }
+        //
+        // The whole surface goes, not just the services we just handled. A
+        // service can vanish between apply and clear — a VPN interface, an
+        // unplugged adapter — and forgetting only what is currently present
+        // would leave its record behind for good. Worse, if it came back in a
+        // later session, first-write-wins would keep that stale record in
+        // preference to capturing the state the service actually has now.
+        // Teardown means done: nothing about this surface is ours any more.
+        if restoreSucceeded {
+            journal?.forgetAll(surface: .systemProxy)
         }
 
         if restored.isEmpty {
@@ -362,15 +387,17 @@ package final class SystemProxyManager: @unchecked Sendable {
 
     // MARK: - Prior-state capture and restore
 
-    /// Everything about a service's proxy configuration that `apply` overwrites,
-    /// or `nil` when nothing was enabled — in which case teardown has nothing to
-    /// put back and turning everything off restores the machine exactly.
-    private func capturePriorState(service: String) -> [String: String]? {
+    /// Everything about a service's proxy configuration that `apply` overwrites.
+    ///
+    /// Captured whether or not anything is currently *enabled*: `networksetup`
+    /// keeps a host and port on a disabled proxy, and manual mode also replaces
+    /// the bypass-domain list. Recording only the enabled endpoints would leave
+    /// Conduit's host, port and bypass list sitting in the user's disabled
+    /// fields for good, which restore is supposed to undo.
+    private func capturePriorState(service: String) -> [String: String] {
         let web = readProxyState(service: service, type: "webproxy")
         let secure = readProxyState(service: service, type: "securewebproxy")
         let auto = readAutoproxy(service: service)
-
-        guard web.enabled || secure.enabled || auto.enabled else { return nil }
 
         return [
             "webEnabled": String(web.enabled),
@@ -381,7 +408,19 @@ package final class SystemProxyManager: @unchecked Sendable {
             "securePort": secure.port,
             "autoEnabled": String(auto.enabled),
             "autoURL": auto.url,
+            "bypassDomains": readBypassDomains(service: service).joined(separator: ","),
         ]
+    }
+
+    /// Bypass domains currently configured for a service. `apply` overwrites
+    /// these in manual mode via `-setproxybypassdomains`.
+    private func readBypassDomains(service: String) -> [String] {
+        guard let result = try? commandRunner("/usr/sbin/networksetup", ["-getproxybypassdomains", service]),
+              result.exitCode == 0 else { return [] }
+        return result.standardOutput
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !$0.contains("There aren't any") }
     }
 
     /// Rebuilds the `networksetup` calls that put `prior` back on `service`.
@@ -403,13 +442,20 @@ package final class SystemProxyManager: @unchecked Sendable {
             let enabled = prior["\(key)Enabled"] == "true"
             let host = prior["\(key)Host"] ?? ""
             let port = prior["\(key)Port"] ?? ""
-            if enabled, !host.isEmpty, !port.isEmpty {
+            // Put the endpoint back even when it was disabled: networksetup
+            // retains host/port on a disabled proxy, and leaving ours there
+            // would quietly hand the user our address if they re-enable it.
+            if !host.isEmpty, !port.isEmpty {
                 script += "/usr/sbin/networksetup \(setter) \(s) \(host.shellQuoted) \(port.shellQuoted)\n"
-                script += "/usr/sbin/networksetup \(stateSetter) \(s) on\n"
-            } else {
-                script += "/usr/sbin/networksetup \(stateSetter) \(s) off 2>/dev/null || true\n"
             }
+            script += "/usr/sbin/networksetup \(stateSetter) \(s) \(enabled ? "on" : "off") 2>/dev/null || true\n"
         }
+
+        // "Empty" is networksetup's own spelling for clearing the list.
+        let bypass = (prior["bypassDomains"] ?? "").split(separator: ",").map(String.init)
+        let bypassArgument = bypass.isEmpty ? "Empty" : bypass.map(\.shellQuoted).joined(separator: " ")
+        script += "/usr/sbin/networksetup -setproxybypassdomains \(s) \(bypassArgument)\n"
+
         return script
     }
 }

@@ -118,6 +118,14 @@ package final class EnvironmentManager {
     }
 
     private func clearLaunchdEnvironment(logger: (any LogSink)?) {
+        // Same reason as `SystemProxyManager.clear`: a second teardown finding
+        // no records would `unsetenv` the pre-existing values the first one
+        // restored. Both hosts clear on stop and again on quit.
+        if let journal, journal.knowsSurfaceIsIdle(.launchdEnvironment) {
+            logger?.log(.debug, "launchd environment teardown skipped: nothing recorded as applied.", category: .system)
+            return
+        }
+
         var restored = 0
         for name in launchdVariableNames {
             switch journal?.prior(surface: .launchdEnvironment, scope: name) ?? .notRecorded {
