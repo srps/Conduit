@@ -62,7 +62,7 @@ final class DaemonRuntimeHost {
     // (future control socket command).
     /// Prior values of the platform settings we change, so teardown restores
     /// rather than blanket-clearing. Shared by every side-effect manager.
-    private lazy var platformStateJournal = PlatformStateJournal(fileURL: environment.platformStateFile)
+    private lazy var platformStateJournal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
     private lazy var systemConduit = SystemProxyManager(
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal

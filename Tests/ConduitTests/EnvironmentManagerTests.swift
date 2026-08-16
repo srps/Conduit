@@ -102,6 +102,27 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080")
     }
 
+    /// The same double-teardown trap as the system proxy. `clear` restores the
+    /// pre-existing value and forgets the record; a second `clear` finding no
+    /// record would `unsetenv` the value it just gave back. Both hosts clear on
+    /// stop and again on quit.
+    func testSecondTeardownDoesNotUnsetWhatTheFirstOneRestored() throws {
+        launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
+
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.clear(logger: nil)
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080")
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(
+            launchctl.environment["HTTP_PROXY"],
+            "http://corp.example:8080",
+            "quitting after a stop must not undo the restore the stop performed"
+        )
+    }
+
     // MARK: - Shell profile block
 
     /// The marker block is the other ownership mechanism, and the reason it is

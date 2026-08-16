@@ -76,12 +76,47 @@ package struct PlatformStateRecord: Codable, Equatable, Sendable {
 /// user a setting they can see and restore. Over-clearing is recoverable;
 /// stranding is not. When in doubt, clean up.
 package final class PlatformStateJournal: @unchecked Sendable {
+    /// How much the journal file can be trusted to describe what we hold.
+    package enum FileState: Equatable, Sendable {
+        /// No file. Nothing was ever recorded, so there is nothing outstanding.
+        case absent
+        /// A file exists but could not be read or decoded. It may have
+        /// described settings we changed, so callers must assume the worst and
+        /// fall back to an unconditional teardown.
+        case unreadable
+        /// Read successfully; its contents are the whole truth.
+        case loaded
+    }
+
     private let fileURL: URL
+    private let logger: (any LogSink)?
     private let lock = NSLock()
     private var loaded: [PlatformStateRecord]?
+    private var fileStateBox: FileState = .absent
 
-    package init(fileURL: URL) {
+    package init(fileURL: URL, logger: (any LogSink)? = nil) {
         self.fileURL = fileURL
+        self.logger = logger
+    }
+
+    /// Whether the on-disk journal could be read. Callers use this to tell
+    /// "we hold nothing on this surface" from "we cannot say what we hold".
+    package var fileState: FileState {
+        lock.lock()
+        defer { lock.unlock() }
+        _ = loadLocked()
+        return fileStateBox
+    }
+
+    /// Whether the journal positively knows it holds nothing for `surface` —
+    /// no prior values and no applied marker, read from a file it could parse.
+    ///
+    /// This is the one question whose answer may *stop* a teardown, so it is
+    /// deliberately narrow: an unreadable journal returns `false`, and the
+    /// caller clears unconditionally rather than risk stranding.
+    package func knowsSurfaceIsIdle(_ surface: PlatformSurface) -> Bool {
+        guard fileState != .unreadable else { return false }
+        return !isMarkedApplied(surface: surface) && !hasRecords(for: surface)
     }
 
     // MARK: - Recording
@@ -223,29 +258,58 @@ package final class PlatformStateJournal: @unchecked Sendable {
 
     private func loadLocked() -> [PlatformStateRecord] {
         if let loaded { return loaded }
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder.iso8601Decoder.decode([PlatformStateRecord].self, from: data)
-        else {
-            // An unreadable or corrupt journal is indistinguishable from no
-            // journal, and both mean the same thing to every caller: we cannot
-            // say what was here, so fall back to an unconditional teardown.
+
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            // No file at all: nothing was ever recorded here.
+            fileStateBox = .absent
             loaded = []
             return []
         }
-        loaded = decoded
-        return decoded
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let decoded = try JSONDecoder.iso8601Decoder.decode([PlatformStateRecord].self, from: data)
+            fileStateBox = .loaded
+            loaded = decoded
+            return decoded
+        } catch {
+            // Recovered, not swallowed: callers read `.unreadable` as "we
+            // cannot say what we changed" and fall back to an unconditional
+            // teardown, which is the safe direction. Say so out loud, because
+            // it also means a crash from here on cannot restore anything.
+            logger?.log(
+                .warning,
+                "Could not read the platform-state journal at \(fileURL.path) (\(error.displayDescription)); teardown will clear settings unconditionally instead of restoring them.",
+                category: .system
+            )
+            fileStateBox = .unreadable
+            loaded = []
+            return []
+        }
     }
 
     private func saveLocked(_ records: [PlatformStateRecord]) {
         loaded = records
-        guard let data = try? JSONEncoder.prettyISO8601Encoder.encode(records) else { return }
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        // Atomic: a half-written journal read back after a crash would claim
-        // prior values that were never true.
-        try? data.write(to: fileURL, options: .atomic)
+        do {
+            let data = try JSONEncoder.prettyISO8601Encoder.encode(records)
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            // Atomic: a half-written journal read back after a crash would
+            // claim prior values that were never true.
+            try data.write(to: fileURL, options: .atomic)
+            fileStateBox = .loaded
+        } catch {
+            // The in-memory copy still serves this process, so a failed write
+            // is survivable *now* — but it means a crash from here on leaves
+            // the user's original settings unrecoverable, which nobody would
+            // otherwise learn.
+            logger?.log(
+                .error,
+                "Could not write the platform-state journal at \(fileURL.path) (\(error.displayDescription)); if this process dies, the previous system settings cannot be restored.",
+                category: .system
+            )
+        }
     }
 }
 

@@ -196,7 +196,6 @@ extension SystemProxyManagerTests {
         )
 
         try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
-        XCTAssertEqual(journal.prior(surface: .systemProxy, scope: "Wi-Fi"), .wasAbsent)
 
         try manager.clear(logger: nil)
         let script = try XCTUnwrap(runner.shellScripts.last)
@@ -261,6 +260,119 @@ extension SystemProxyManagerTests {
         )
     }
 
+    /// Teardown clears the whole surface, not just the services present at the
+    /// time. A service can vanish between apply and clear — a VPN interface, an
+    /// unplugged adapter — and forgetting only what is currently connected
+    /// leaves its record behind for good; if it ever reappears,
+    /// first-write-wins would then keep that stale record in preference to the
+    /// state the service actually has.
+    func testClearForgetsRecordsForServicesThatVanished() throws {
+        let runner = FakeNetworksetupRunner()
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        // Stands in for a service that was present at apply and is gone by clear.
+        journal.recordPrior(surface: .systemProxy, scope: "FakeVPN_utun99", value: ["autoURL": "http://old"])
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(
+            journal.prior(surface: .systemProxy, scope: "FakeVPN_utun99"),
+            .notRecorded,
+            "a vanished service must not keep a record across sessions"
+        )
+        XCTAssertTrue(journal.scopes(for: .systemProxy).isEmpty)
+    }
+
+    /// The regression this nearly shipped with. `clear` restores the recorded
+    /// prior state and then forgets it, so a second `clear` finds no record —
+    /// and the unconditional fallback would blanket-disable the settings the
+    /// first call just put back. Both hosts really do call it twice: once on
+    /// stop, once on quit.
+    func testSecondTeardownDoesNotWipeWhatTheFirstOneRestored() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.clear(logger: nil)
+        let scriptsAfterFirstClear = runner.shellScripts.count
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(
+            runner.shellScripts.count,
+            scriptsAfterFirstClear,
+            "the second teardown must issue nothing, not blanket-disable the restored settings"
+        )
+    }
+
+    /// The safety valve on that short-circuit: a journal that cannot be read
+    /// must not be taken as "nothing to do", or a crash that corrupts it would
+    /// strand the machine pointing at a proxy port nothing serves.
+    func testUnreadableJournalStillFallsBackToClearing() throws {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("sysproxy-corrupt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("platform-state.json")
+        try Data("{ truncated".utf8).write(to: file)
+
+        let runner = FakeNetworksetupRunner()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: PlatformStateJournal(fileURL: file),
+            commandRunner: runner.run
+        )
+
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(script.contains("-setautoproxystate 'Wi-Fi' off"))
+    }
+
+    /// Manual mode also overwrites the bypass-domain list, and networksetup
+    /// keeps host/port on a *disabled* proxy — so capturing only the enabled
+    /// endpoints would leave Conduit's values in the user's fields.
+    func testTeardownRestoresBypassDomainsAndDisabledEndpoints() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.bypassDomains = ["*.corp.example", "internal.test"]
+        runner.proxyHost = "oldproxy.example"
+        runner.proxyPort = "9999"
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(
+            script.contains("-setproxybypassdomains 'Wi-Fi' '*.corp.example' 'internal.test'"),
+            "the user's bypass list must come back: \(script)"
+        )
+        XCTAssertTrue(
+            script.contains("-setwebproxy 'Wi-Fi' 'oldproxy.example' '9999'"),
+            "a disabled proxy's endpoint is still the user's, not ours: \(script)"
+        )
+    }
+
     /// A record is only safe to drop once the prior value is actually back. If
     /// restore fails and we forget anyway, the setting we changed is left with
     /// nothing recording that we changed it.
@@ -280,15 +392,11 @@ extension SystemProxyManagerTests {
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
         try manager.clear(logger: nil)
 
-        XCTAssertEqual(
-            journal.prior(surface: .systemProxy, scope: "Wi-Fi"),
-            .wasPresent([
-                "webEnabled": "false", "webHost": "127.0.0.1", "webPort": "3128",
-                "secureEnabled": "false", "secureHost": "127.0.0.1", "securePort": "3128",
-                "autoEnabled": "true", "autoURL": "http://mdm.corp.example/managed.pac",
-            ]),
-            "a failed restore must keep the record so a later teardown can retry"
-        )
+        guard case .wasPresent(let prior) = journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
+            return XCTFail("a failed restore must keep the record so a later teardown can retry")
+        }
+        XCTAssertEqual(prior["autoURL"], "http://mdm.corp.example/managed.pac")
+        XCTAssertEqual(prior["autoEnabled"], "true")
     }
 }
 
@@ -300,6 +408,7 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
     var secureWebProxyEnabled = false
     var proxyHost = "127.0.0.1"
     var proxyPort = "3128"
+    var bypassDomains: [String] = []
     private(set) var invocations: [(launchPath: String, arguments: [String])] = []
 
     var shellScripts: [String] {
@@ -330,6 +439,14 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
             return proxyState(enabled: webProxyEnabled)
         case "-getsecurewebproxy":
             return proxyState(enabled: secureWebProxyEnabled)
+        case "-getproxybypassdomains":
+            return CommandResult(
+                exitCode: 0,
+                standardOutput: bypassDomains.isEmpty
+                    ? "There aren't any bypass domains set on this network service."
+                    : bypassDomains.joined(separator: "\n"),
+                standardError: ""
+            )
         case "-getautoproxyurl":
             return CommandResult(
                 exitCode: 0,
