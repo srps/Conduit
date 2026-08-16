@@ -405,6 +405,116 @@ extension SystemProxyManagerTests {
         )
     }
 
+    /// The other half of the absent-journal question. "Nothing recorded" is
+    /// "we never applied" on a clean install, but it is also "we applied and
+    /// lost the record" after a failed journal write or a deleted state
+    /// directory. Skipping on the second leaves every app on the machine
+    /// pointed at a proxy that is not running, permanently.
+    func testClearStillCleansUpWhenTheMachineStillPointsAtUs() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"   // our own residue
+
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),            // empty: the record is gone
+            commandRunner: runner.run
+        )
+
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(
+            runner.shellScripts.last,
+            "a stranded local-proxy setting must be cleaned up even with no record of it"
+        )
+        XCTAssertTrue(script.contains("-setautoproxystate 'Wi-Fi' off"))
+    }
+
+    /// The residue probe must not fire on a *disabled* local proxy: it routes
+    /// nothing, and blanket-disabling on its account is pure over-reach.
+    func testResidueProbeIgnoresDisabledLocalProxySettings() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.proxyHost = "127.0.0.1"
+        runner.webProxyEnabled = false
+        runner.secureWebProxyEnabled = false
+
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+
+        try manager.clear(logger: nil)
+
+        XCTAssertTrue(runner.shellScripts.isEmpty, "a disabled entry is not active residue")
+    }
+
+    /// networksetup keeps the autoproxy URL on a switched-off autoproxy, so
+    /// leaving ours there hands the user a dead local PAC server the moment
+    /// they switch automatic configuration back on. The sibling endpoint loop
+    /// already restored disabled host/port; this branch had been missed.
+    func testTeardownRestoresADisabledAutoproxyURL() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = false                                  // configured but off
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+        runner.webProxyEnabled = true                                    // so prior state is captured
+
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        try manager.clear(logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(
+            script.contains("-setautoproxyurl 'Wi-Fi' 'http://mdm.corp.example/managed.pac'"),
+            "the user's URL must go back even though it was switched off: \(script)"
+        )
+        let urlIndex = try XCTUnwrap(script.range(of: "-setautoproxyurl"))
+        let stateIndex = try XCTUnwrap(script.range(of: "-setautoproxystate 'Wi-Fi' off"))
+        XCTAssertLessThan(
+            urlIndex.lowerBound, stateIndex.lowerBound,
+            "state must be set last, so the URL write cannot leave autoproxy enabled"
+        )
+    }
+
+    /// A teardown that failed for a non-admin reason used to report nothing and
+    /// then announce a successful restore anyway.
+    func testFailedTeardownIsReportedAndNotClaimedAsSuccess() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let journal = makeJournal()
+        let logger = RecordingLogSink(minLevel: .debug)
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        runner.shellResult = CommandResult(exitCode: 3, standardOutput: "", standardError: "boom")
+        try manager.clear(logger: logger)
+
+        XCTAssertTrue(
+            logger.containsMessage("networksetup failed during teardown", at: .warning),
+            "the failure must be reported: \(logger.entries().map(\.message))"
+        )
+        XCTAssertFalse(
+            logger.containsMessage("Restored the previous macOS proxy settings"),
+            "a failed teardown must not announce a restore"
+        )
+        XCTAssertNotEqual(
+            journal.prior(surface: .systemProxy, scope: "Wi-Fi"), .notRecorded,
+            "and the records stay for a retry"
+        )
+    }
+
     /// A record is only safe to drop once the prior value is actually back. If
     /// restore fails and we forget anyway, the setting we changed is left with
     /// nothing recording that we changed it.

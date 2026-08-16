@@ -184,8 +184,28 @@ final class SystemDNSManagerTests: XCTestCase {
         let manager = makeManager()
         try manager.clear(logger: nil)
 
-        XCTAssertTrue(recording.executedCommands.isEmpty)
+        XCTAssertTrue(
+            recording.commands(matching: .setDNSServers).isEmpty,
+            "nothing was captured, so no interface's servers may be rewritten"
+        )
+        XCTAssertFalse(recording.commands(matching: .stopDNSRelay).isEmpty,
+                       "the relay is ours regardless — this branch used to leave it running")
         XCTAssertFalse(manager.hasSavedState())
+    }
+
+    /// An empty journal used to mean "reset every connected service to DHCP",
+    /// erasing resolvers the app may never have touched — the mirror image of
+    /// the system-proxy surface, where the same state meant "do nothing".
+    /// Neither guess is acceptable; the machine decides.
+    func testClearWithNoSavedStateLeavesForeignResolversAlone() throws {
+        let manager = makeManager()   // journal empty, and nothing points at 127.0.0.1
+
+        try manager.clear(logger: nil)
+
+        XCTAssertTrue(
+            recording.commands(matching: .setDNSServers).isEmpty,
+            "DNS the app never redirected must not be reset to DHCP"
+        )
     }
 
     func testClearRestoresRealInterfacesAndSkipsFake() throws {
@@ -246,7 +266,15 @@ final class SystemDNSManagerTests: XCTestCase {
             try manager.clear(logger: nil)
         } catch {}
 
-        XCTAssertFalse(manager.hasSavedState(), "File should be deleted even after partial failures")
+        XCTAssertTrue(
+            manager.hasSavedState(),
+            """
+            Records must SURVIVE a partial failure. Dropping them destroys the only copy of \
+            the still-unrestored interfaces' real servers while leaving those interfaces pinned \
+            at 127.0.0.1 — the rule the proxy and launchd surfaces already follow. This assertion \
+            was inverted deliberately; it previously pinned the losing behaviour.
+            """
+        )
     }
 
     // MARK: - apply() with RecordingPrivilegeClient

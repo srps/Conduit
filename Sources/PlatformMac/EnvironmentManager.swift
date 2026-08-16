@@ -119,8 +119,18 @@ package final class EnvironmentManager {
         // Same reason as `SystemProxyManager.clear`: a second teardown finding
         // no records would `unsetenv` the pre-existing values the first one
         // restored. Both hosts clear on stop and again on quit.
-        if journal.knowsSurfaceIsIdle(.launchdEnvironment) {
-            logger?.log(.debug, "launchd environment teardown skipped: nothing recorded as applied.", category: .system)
+        // Same ambiguity as the system proxy: an empty journal is "we never
+        // applied" on a clean install and "we applied and lost the record"
+        // after a failed write or a wiped state directory. Ask the domain
+        // itself — a stale proxy URL here is harder for a user to find than
+        // one in Network Settings, since it only shows up as GUI apps
+        // mysteriously failing to reach anything.
+        if journal.knowsSurfaceIsIdle(.launchdEnvironment), !loopbackResidueExists() {
+            logger?.log(
+                .debug,
+                "launchd environment teardown skipped: nothing recorded as applied and no local-proxy variables set.",
+                category: .system
+            )
             return
         }
 
@@ -159,6 +169,19 @@ package final class EnvironmentManager {
             logger?.log(.notice, "Restored \(restored) pre-existing launchd proxy variable(s), cleared the rest.", category: .system)
         } else if failed.isEmpty {
             logger?.log(.notice, "Cleared proxy variables from the user launchd domain.", category: .system)
+        }
+    }
+
+    /// Whether any managed variable currently points at this machine — the
+    /// residue Conduit leaves in the per-user launchd domain.
+    ///
+    /// The shell-profile half of teardown needs no equivalent: its marker block
+    /// identifies our region of the file directly. The launchd domain has no
+    /// such marker, so this probe stands in for one.
+    private func loopbackResidueExists() -> Bool {
+        launchdVariableNames.contains { name in
+            guard let value = readLaunchdValue(name), let host = URL(string: value)?.host else { return false }
+            return host == "localhost" || host == "::1" || host.hasPrefix("127.")
         }
     }
 
