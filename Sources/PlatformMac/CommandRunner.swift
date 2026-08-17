@@ -39,7 +39,7 @@ package enum CommandRunner {
     ///
     /// It is deliberately a *default* and not the only value. A caller reading a
     /// whole document has a different question to answer, and the honest place to
-    /// answer it is that call site: see `AppState.curlPACFetcher`. An earlier
+    /// answer it is that call site: see `AppState.pacMaxOutputBytes`. An earlier
     /// version of this comment justified the number by matching the helper
     /// socket's frame cap, which explained nothing — a protocol frame and a
     /// document are not the same kind of thing.
