@@ -16,6 +16,35 @@ package enum DNSValidationError: Error, LocalizedError {
     }
 }
 
+/// Raised when resolver-file removals failed. Every removal in the batch was
+/// still attempted — see `DNSManager.removeAll` for why stopping at the first
+/// failure is the wrong shape here.
+package struct DNSRemovalError: Error, LocalizedError {
+    package struct Failure: Sendable, Equatable {
+        package let domain: String
+        package let message: String
+
+        package init(domain: String, message: String) {
+            self.domain = domain
+            self.message = message
+        }
+    }
+
+    package let failures: [Failure]
+
+    package init(failures: [Failure]) {
+        self.failures = failures
+    }
+
+    package var domains: [String] { failures.map(\.domain) }
+
+    package var errorDescription: String? {
+        let listed = failures.map { "\($0.domain) (\($0.message))" }.joined(separator: ", ")
+        return "Failed to remove \(failures.count) resolver file(s): \(listed). "
+             + "Those domains stay overridden until the removal succeeds."
+    }
+}
+
 package final class DNSManager: @unchecked Sendable {
     private static let domainRegex = try! NSRegularExpression(
         pattern: #"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"#
@@ -241,13 +270,7 @@ package final class DNSManager: @unchecked Sendable {
             try Self.validateDomain(domain)
         }
 
-        for entry in enabledEntries {
-            try privilegeClient.execute(.removeDNS, values: [entry.domain])
-        }
-
-        for domain in interceptDomains {
-            try privilegeClient.execute(.removeDNS, values: [domain])
-        }
+        try removeAll(enabledEntries.map(\.domain) + interceptDomains, logger: logger)
 
         logger?.log(.notice, "Removed managed split-DNS resolver files and intercept rules.", category: .system)
     }
@@ -278,11 +301,11 @@ package final class DNSManager: @unchecked Sendable {
                 + getInterceptDomains(from: new)
         )
 
-        let stale = oldDomains.subtracting(newDomains)
+        let stale = oldDomains.subtracting(newDomains).sorted()
         for domain in stale {
             try Self.validateDomain(domain)
-            try privilegeClient.execute(.removeDNS, values: [domain])
         }
+        try removeAll(stale, logger: logger)
         if !stale.isEmpty {
             logger?.log(.notice, "Removed \(stale.count) stale resolver file(s) after config change.", category: .system)
         }
@@ -336,9 +359,7 @@ package final class DNSManager: @unchecked Sendable {
         for entry in entries {
             try Self.validateDomain(entry.domain)
         }
-        for entry in entries {
-            try privilegeClient.execute(.removeDNS, values: [entry.domain])
-        }
+        try removeAll(entries.map(\.domain), logger: logger)
         logger?.log(.notice, "Removed \(entries.count) split-DNS entry file(s) while the VPN is disconnected.", category: .system)
     }
 
@@ -380,9 +401,46 @@ package final class DNSManager: @unchecked Sendable {
         for domain in interceptDomains {
             try Self.validateDomain(domain)
         }
-        for domain in interceptDomains {
-            try privilegeClient.execute(.removeDNS, values: [domain])
-        }
+        try removeAll(interceptDomains, logger: logger)
         logger?.log(.notice, "Cleared intercept resolver files for \(interceptDomains.count) rule(s).", category: .system)
+    }
+
+    // MARK: - Removal
+
+    /// Removes every domain in the list, then reports what failed.
+    ///
+    /// Fail-fast is wrong for removals specifically. Each `rm -f` is
+    /// independent and idempotent, so there is no ordering reason for one
+    /// failure to cancel the rest — and a `/etc/resolver/<domain>` left behind
+    /// is not inert. It points the system resolver at a forwarder that is no
+    /// longer listening, which blackholes that domain for every process on the
+    /// machine (see `getEntries`). `clearEntryFiles` is the sharp case: it runs
+    /// on VPN-down, nothing re-runs it, and one early failure would strand
+    /// every domain after it — including, when the gateway's own hostname falls
+    /// under a managed domain, the name the VPN needs in order to reconnect.
+    ///
+    /// The *apply* loops keep their fail-fast behaviour deliberately:
+    /// `isApplied` reports a partial apply as not-applied and the start path
+    /// guards on it, so those repair themselves at the next start. Removals
+    /// have no equivalent retry.
+    ///
+    /// This is also what `TunnelResolverManager.removeAll` and
+    /// `SystemDNSManager.clear` already do; `DNSManager` was the outlier.
+    private func removeAll(_ domains: [String], logger: (any LogSink)?) throws {
+        var failures: [DNSRemovalError.Failure] = []
+        for domain in domains {
+            do {
+                try privilegeClient.execute(.removeDNS, values: [domain])
+            } catch {
+                failures.append(.init(domain: domain, message: error.localizedDescription))
+                logger?.log(
+                    .warning,
+                    "Failed to remove \(resolverFilePath(for: domain)): \(error.localizedDescription). "
+                        + "Lookups under \(domain) stay overridden for every process on this machine until it is removed.",
+                    category: .system
+                )
+            }
+        }
+        guard failures.isEmpty else { throw DNSRemovalError(failures: failures) }
     }
 }
