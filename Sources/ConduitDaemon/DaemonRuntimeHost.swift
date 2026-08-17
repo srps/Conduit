@@ -396,16 +396,22 @@ final class DaemonRuntimeHost {
         let diff = ConfigDiff(old: old, new: new)
 
         if diff.dnsChanged, platformConfig.manageDNSResolvers {
-            do {
-                try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
+            DNSResolverReconciliation.run(
+                after: "config reload",
+                logger: logger,
+                reconcile: {
+                    try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
+                },
                 // `applyConfigChange` restarted the forwarder if the DNS
                 // section changed, possibly onto a different port, and
                 // `reconcile` does not rewrite intercept files. Re-point them
                 // at the listeners that came back — or remove them if none did.
-                try refreshInterceptFiles(for: new)
-            } catch {
-                logger.log(.warning, "Could not reconcile DNS resolver files after config reload: \(error.localizedDescription)", category: .system)
-            }
+                // Runs whatever the reconcile did: see
+                // `DNSResolverReconciliation`.
+                refreshInterceptFiles: {
+                    try refreshInterceptFiles(for: new)
+                }
+            )
         }
 
         if diff.proxyChanged {
