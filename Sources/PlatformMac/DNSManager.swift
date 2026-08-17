@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import ProxyKernel
+import ConduitShared
 
 package enum DNSValidationError: Error, LocalizedError {
-    case invalidDomain(String)
+    /// Carries the specific reason as well as the name. The old single-payload
+    /// case produced "Invalid DNS domain name: foo_bar.example" in a log an
+    /// operator then had to guess at; the reason is what tells them which
+    /// character to change.
+    case invalidDomain(String, reason: DomainNameError)
     case invalidServer(String)
 
     package var errorDescription: String? {
         switch self {
-        case .invalidDomain(let d):
-            return "Invalid DNS domain name: \(d)"
+        case .invalidDomain(let d, let reason):
+            return "Invalid DNS domain name '\(d)': \(reason.localizedDescription)"
         case .invalidServer(let s):
             return "Invalid DNS server address: \(s)"
         }
@@ -46,9 +51,6 @@ package struct DNSRemovalError: Error, LocalizedError {
 }
 
 package final class DNSManager: @unchecked Sendable {
-    private static let domainRegex = try! NSRegularExpression(
-        pattern: #"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"#
-    )
     private static let ipv4Regex = try! NSRegularExpression(
         pattern: #"^(\d{1,3}\.){3}\d{1,3}$"#
     )
@@ -77,12 +79,15 @@ package final class DNSManager: @unchecked Sendable {
 
     // MARK: - Validation
 
+    /// Delegates to `DomainNameSyntax`, the package's one domain grammar. This
+    /// file used to hold a regex byte-identical to `HelperInputValidator`'s,
+    /// which meant the writer and the privileged executor of the same
+    /// `/etc/resolver/<domain>` file each carried their own copy of the rule.
     package static func validateDomain(_ domain: String) throws {
-        let range = NSRange(domain.startIndex..<domain.endIndex, in: domain)
-        guard !domain.isEmpty,
-              domain.count <= 253,
-              domainRegex.firstMatch(in: domain, range: range) != nil else {
-            throw DNSValidationError.invalidDomain(domain)
+        do {
+            try DomainNameSyntax.validate(domain)
+        } catch {
+            throw DNSValidationError.invalidDomain(domain, reason: error)
         }
     }
 
@@ -451,12 +456,13 @@ package final class DNSManager: @unchecked Sendable {
     /// Validation belongs *inside* the loop for the same reason. Checked in a
     /// pass ahead of it, one unusable name aborted the whole batch — the exact
     /// failure this function exists to prevent, and worse than the interleaved
-    /// loop it replaced. And an unusable name is reachable without anyone
-    /// mistyping a domain: intercept patterns are never validated when the
-    /// config is parsed, and `getInterceptDomains` only strips a leading `*.`,
-    /// so a rule like `*.foo_bar.example` yields `foo_bar.example`, which
-    /// `domainRegex` rejects. Deleting that rule makes it stale, and the sweep
-    /// for every *other* stale domain used to die with it.
+    /// loop it replaced. An unusable name is reachable without anyone mistyping
+    /// a domain: an intercept pattern like `*.exa mple.com` yields
+    /// `exa mple.com`, deleting the rule makes it stale, and the sweep for
+    /// every *other* stale domain used to die with it. (`*.foo_bar.example`
+    /// used to be the example here. It no longer is — `DomainNameSyntax`
+    /// accepts underscores — but the shape survives, which is why the
+    /// interleaving stays.)
     private func removeAll(_ domains: [String], logger: (any LogSink)?) throws {
         // Deduplicated, order preserved. `clear` concatenates the entry domains
         // and the intercept domains, and a domain configured as both would

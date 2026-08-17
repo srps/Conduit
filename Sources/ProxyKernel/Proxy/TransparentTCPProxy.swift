@@ -506,6 +506,17 @@ package enum SNIParser {
         return nil
     }
 
+    /// Deliberately *not* `DomainNameSyntax`, and deliberately stricter.
+    ///
+    /// This runs on an SNI value parsed out of untrusted wire bytes, where the
+    /// question is not "is this a legal domain name" but "is this plausibly the
+    /// hostname a TLS client meant to reach". RFC 6066 §3 says the SNI
+    /// `HostName` is a DNS hostname, so RFC 952 / RFC 1123 LDH is the right
+    /// grammar here even though it is the wrong one for a resolver domain: no
+    /// underscore, and at least two labels, because a single-label SNI is not
+    /// something a real client sends and accepting it widens what an attacker
+    /// can steer this proxy at. AGENTS.md carries a standing rule against
+    /// weakening this to a whole-string check; a property test backs it.
     private static func isValidHostname(_ host: String) -> Bool {
         guard !host.isEmpty, host.count <= 253 else { return false }
         let labels = host.split(separator: ".", omittingEmptySubsequences: false)

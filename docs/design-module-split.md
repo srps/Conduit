@@ -186,7 +186,7 @@ Package.swift
 
 | Target               | ProxyKernel | ProxyAuth | ProxyPAC | PlatformMac | ConduitShared | NIO* |
 | -------------------- | ----------- | --------- | -------- | ----------- | ------------------ | ---- |
-| `ProxyKernel`        | —           | —         | —        | —           | —                  | ✓    |
+| `ProxyKernel`        | —           | —         | —        | —           | ✓                  | ✓    |
 | `ProxyAuth`          | ✓           | —         | —        | —           | —                  | —    |
 | `ProxyPAC`           | ✓           | —         | —        | —           | —                  | —    |
 | `PlatformMac`        | ✓           | —         | —        | —           | ✓                  | —    |
@@ -202,6 +202,18 @@ Package.swift
 
 
 The `pm-proxy` row is the load-bearing one: dropping its `PlatformMac` dependency is the build-time test that the kernel doesn't sneak a platform import back in.
+
+#### Post-split amendment: `ProxyKernel → ConduitShared`
+
+The original design gave `ProxyKernel` no first-party dependency at all. It has one now, and the `ProxyKernel` row above records it. The reason:
+
+`DomainNameSyntax` (`Sources/ConduitShared/DomainNameSyntax.swift`) is the package's single domain-name grammar. Two consumers have to agree on it and they sit on opposite sides of the graph — `HelperInputValidator` (`ConduitShared`, the helper's input validation) and `ProxyConfig.validate()` (`ProxyKernel`, the config boundary). Before it existed, `ConduitShared` and `PlatformMac` each carried a byte-identical regex and `ProxyKernel` carried a third, looser check; a name the app accepted and the helper refused was a privileged operation failing for no reason the user could see.
+
+`ConduitShared` is the right home and `ProxyKernel` is not, for one asymmetric reason: `ConduitShared` has no dependencies, so the edge adds no cycle and no framework, whereas the inverse edge (`ConduitShared → ProxyKernel`) would drag SwiftNIO into `ConduitHelper` — a root LaunchDaemon whose dependency surface is a security property, not a convenience. Verified after the change: `ConduitHelper`'s linked framework list is unchanged.
+
+What this does **not** change is the rule `ProxyControlBridge` exists to enforce. Wire-contract *types* — `ControlProtocol`, `HelperRequest` / `HelperResponse`, the DTOs — still stay out of `ProxyKernel`, and the kernel still maps into them only through the bridge. The edge added here is for a shared *validator*, which is a grammar rather than a protocol; if it ever starts carrying wire types the edge should be reverted and the type moved.
+
+The import fence in `AGENTS.md` is untouched: `ConduitShared` is Foundation + Darwin only, so nothing on the deny list enters `ProxyKernel` through it.
 
 `pm-sim` keeps its existing `ProxyAuth` dependency for `MockAuthenticator`'s conformance to `ProxyAuthenticator` (which moves with `ProxyAuth`'s caller surface staying in `ProxyKernel/Abstractions/`); it **does not** depend on `ProxyPAC` because no scenario currently exercises real PAC evaluation.
 

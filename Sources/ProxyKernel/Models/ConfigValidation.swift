@@ -147,6 +147,20 @@ extension ProxyConfig {
         }
     }
 
+    /// Deliberately *not* `DomainNameSyntax`, and not a domain grammar at all.
+    ///
+    /// The values this guards — `proxy.host`, `routing.noProxyHosts`,
+    /// `routing.forceProxyHosts` — are host *tokens*, and the shipped defaults
+    /// alone include `[::1]`, `169.254/16`, `.example.com` and `*.local`. None
+    /// of those is a domain name; a bracketed IPv6 literal, a CIDR prefix, a
+    /// leading-dot suffix and a wildcard pattern are four different notations
+    /// that happen to share a field. Forcing them onto the domain grammar would
+    /// reject this product's own out-of-the-box config.
+    ///
+    /// So this stays a character-class check whose job is narrower: keep shell
+    /// metacharacters, whitespace and control bytes out of values that reach
+    /// `networksetup` as argv. `_` is in the set here for the same reason
+    /// `DomainNameSyntax` allows it.
     private static func isSafeHostToken(_ value: String, allowWildcard: Bool) -> Bool {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 253 else { return false }

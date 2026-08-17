@@ -43,6 +43,23 @@ public enum HelperProtocolVersion {
     /// Tightening an existing command is a compatibility break, and it has to
     /// be recorded here with its consequence for old clients, never inferred
     /// from the floor.
+    ///
+    /// Under that rule, recorded rather than inferred: within v4,
+    /// `validateDomain` was **loosened** to accept `_` in a label (see
+    /// `DomainNameSyntax` for why LDH was the wrong grammar for a resolver
+    /// domain). Loosening is not a compatibility break — every frame the old
+    /// validator accepted, this one still accepts — so the floor does not move.
+    /// It does widen what root will act on, which is the part worth stating
+    /// plainly: `_` is inert both as a path component under `/etc/resolver/`
+    /// and as argv to `networksetup`, and the shapes that are not inert (`/`,
+    /// NUL, a leading `-`, an empty or absent label) are all still refused.
+    ///
+    /// The asymmetry to expect while it rolls out: this ships in the helper
+    /// binary, so it takes effect only after `sudo ./install-helper.sh`. Until
+    /// then a new app sending `foo_bar.example` to an old helper gets a clean
+    /// refusal from the old validator — the request fails, nothing is written,
+    /// and the failure names the domain. That is the correct outcome for a
+    /// helper that cannot yet honour it.
     public static let minimumSupported = 3
 
     public static func isSupported(_ version: Int) -> Bool {
@@ -106,9 +123,6 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
 }
 
 public enum HelperInputValidator {
-    private static let domainRegex = try! NSRegularExpression(
-        pattern: #"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"#
-    )
     private static let ipv6Regex = try! NSRegularExpression(
         pattern: #"^[0-9a-fA-F:]+$"#
     )
@@ -137,10 +151,13 @@ public enum HelperInputValidator {
         pattern: #"^[a-zA-Z0-9*._:/\[\]\-]+$"#
     )
 
+    /// Delegates to `DomainNameSyntax`, which is the package's one domain
+    /// grammar. This used to carry its own regex, byte-identical to the one in
+    /// `DNSManager` — two copies of a rule that has to be the same rule,
+    /// because a name the app accepts and the helper refuses is a privileged
+    /// operation that fails for no reason the user can see.
     public static func validateDomain(_ domain: String) -> Bool {
-        guard !domain.isEmpty, domain.count <= 253 else { return false }
-        let range = NSRange(domain.startIndex..<domain.endIndex, in: domain)
-        return domainRegex.firstMatch(in: domain, range: range) != nil
+        DomainNameSyntax.isValid(domain)
     }
 
     public static func validateIPAddress(_ address: String) -> Bool {
