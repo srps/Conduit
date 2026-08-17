@@ -45,14 +45,25 @@ public enum HelperProtocolVersion {
     /// from the floor.
     ///
     /// Under that rule, recorded rather than inferred: within v4,
-    /// `validateDomain` was **loosened** to accept `_` in a label (see
-    /// `DomainNameSyntax` for why LDH was the wrong grammar for a resolver
-    /// domain). Loosening is not a compatibility break — every frame the old
-    /// validator accepted, this one still accepts — so the floor does not move.
-    /// It does widen what root will act on, which is the part worth stating
+    /// `validateDomain` moved in **both** directions (see `DomainNameSyntax`
+    /// for why LDH was the wrong grammar for a resolver domain).
+    ///
+    /// *Loosened* to accept `_` in a label. Not a compatibility break, but it
+    /// does widen what root will act on, which is the part worth stating
     /// plainly: `_` is inert both as a path component under `/etc/resolver/`
     /// and as argv to `networksetup`, and the shapes that are not inert (`/`,
     /// NUL, a leading `-`, an empty or absent label) are all still refused.
+    ///
+    /// *Tightened* to bound each label at 63 octets (RFC 1035 §2.3.4). The old
+    /// regex bounded only the whole name at 253 and left the label unbounded,
+    /// so it accepted a single 100-character label; this one refuses it. That
+    /// is a tightening, so by the rule above it is recorded here rather than
+    /// left to be inferred — do not read the loosening as the whole story. It
+    /// does not move the floor: 63 octets is the protocol's own hard limit, so
+    /// an over-long label could never have resolved, and no client that was
+    /// getting a working resolver file loses one. A client that was sending
+    /// such a name now gets a clean refusal that names the label, instead of a
+    /// file that silently could never answer.
     ///
     /// The asymmetry to expect while it rolls out: this ships in the helper
     /// binary, so it takes effect only after `sudo ./install-helper.sh`. Until
