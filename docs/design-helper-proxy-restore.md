@@ -309,7 +309,21 @@ cannot. Its timeout is generous (2 s) on purpose: reading a live-but-slow
 relay as dead makes launch-time recovery tear DNS out from under a session
 that is serving the machine.
 
-## Deferred: unify `apply`'s privileged path (separate issue)
+## Deferred work, and where it is tracked
+
+Everything this design knowingly left undone now has an issue, so the tracker
+rather than this document is the authority on status:
+
+| Issue | What is left |
+|---|---|
+| [#59](https://github.com/srps/Conduit/issues/59) | The helper discards `networksetup` exit codes for the pre-v4 commands, so a failed privileged write still reports success. Verified live: `disable-autoproxy` and `clear-system-proxy` against a non-existent service both answer `success: true`. Classifying which non-zero exits are benign needs a real machine — exit 8 (unknown service) is a *legitimate* teardown outcome for a vanished interface. |
+| [#60](https://github.com/srps/Conduit/issues/60) | Teardown still leaves our PAC URL on a service that had none. The manual-endpoint half of this was fixed here; the autoproxy half needs `networksetup`'s URL-blanking behaviour established the way `-setwebproxy '' 0` was. |
+| [#61](https://github.com/srps/Conduit/issues/61) | The privileged helper has no test coverage and cannot get any — `ConduitHelper` is not a dependency of the test target. Every helper-side change here is verified by reading and by hand, not by CI. |
+| [#62](https://github.com/srps/Conduit/issues/62) | `apply`'s privileged path still uses the superseded operations (details below). |
+| [#63](https://github.com/srps/Conduit/issues/63) | A rolled-back v3 client with an empty bypass list is still refused, because `setProxyBypass` was tightened here. Accepted trade-off; both alternatives are worse. |
+| [#57](https://github.com/srps/Conduit/issues/57) | The launchd-environment surface still has no launch-time crash recovery. The system-proxy half shipped here. |
+
+## Deferred: unify `apply`'s privileged path ([#62](https://github.com/srps/Conduit/issues/62))
 
 In scope for this change was restore plus the structural fixes it depends on.
 Deliberately **not** done, and worth its own issue:
