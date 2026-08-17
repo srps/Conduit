@@ -29,15 +29,21 @@ package enum CommandRunnerError: Error, LocalizedError {
 }
 
 package enum CommandRunner {
-    /// Per-stream ceiling on what a child may write before we call the output
-    /// runaway. Matches the frame cap the helper socket already enforces on
-    /// both ends (`HelperDaemon`, `HelperToolPrivilegeClient`), so every
-    /// boundary in the app where untrusted bytes arrive agrees on one number.
+    /// Default per-stream ceiling on what a child may write before we call the
+    /// output runaway. Exceeding it fails the call rather than truncating: a
+    /// silently shortened result is one a caller would act on as if complete.
     ///
-    /// Exceeding it fails the call rather than truncating. The only caller that
-    /// reads a whole document is `curlPACFetcher`, and a silently truncated PAC
-    /// script is a routing change, not a cosmetic one.
-    package static let maxOutputBytes = 1_048_576
+    /// 1 MiB is enormous for what this default covers. Every caller on it —
+    /// `networksetup`, `scutil`, `launchctl`, `ifconfig` — answers in a line or
+    /// two, so the number is a runaway guard rather than a working limit.
+    ///
+    /// It is deliberately a *default* and not the only value. A caller reading a
+    /// whole document has a different question to answer, and the honest place to
+    /// answer it is that call site: see `AppState.curlPACFetcher`. An earlier
+    /// version of this comment justified the number by matching the helper
+    /// socket's frame cap, which explained nothing — a protocol frame and a
+    /// document are not the same kind of thing.
+    package static let defaultMaxOutputBytes = 1_048_576
 
     /// Wall-clock ceiling for an ordinary child. Everything on this path
     /// (`networksetup`, `scutil`, `launchctl`, `curl --max-time 15`) answers in
@@ -82,7 +88,8 @@ package enum CommandRunner {
         launchPath: String,
         arguments: [String],
         environment: [String: String] = [:],
-        timeout: TimeInterval = defaultTimeout
+        timeout: TimeInterval = defaultTimeout,
+        maxOutputBytes: Int = defaultMaxOutputBytes
     ) throws -> CommandResult {
         let process = Process()
         let stdout = Pipe()
@@ -107,8 +114,8 @@ package enum CommandRunner {
         // writes more than the pipe buffer (64 KiB on Darwin) blocks in
         // `write` until someone reads; waiting for exit first guarantees
         // nobody ever does, and both sides hang with no timeout to break it.
-        let outputDrain = StreamDrain(stdout.fileHandleForReading, on: drainQueue)
-        let errorDrain = StreamDrain(stderr.fileHandleForReading, on: drainQueue)
+        let outputDrain = StreamDrain(stdout.fileHandleForReading, limit: maxOutputBytes, on: drainQueue)
+        let errorDrain = StreamDrain(stderr.fileHandleForReading, limit: maxOutputBytes, on: drainQueue)
 
         var timedOut = false
         if exited.wait(timeout: .now() + timeout) == .timedOut {
@@ -190,7 +197,7 @@ package enum CommandRunner {
     /// blocked reader — closing it under one invites that number being reissued
     /// by the next `open`, pointing the abandoned read at an unrelated file.
     ///
-    /// Past `maxOutputBytes` the read keeps going and stops accumulating.
+    /// Past its limit the read keeps going and stops accumulating.
     /// Stopping early would leave the child blocked in `write`, which is the
     /// original bug moved into teardown; a child that never stops writing is
     /// bounded by the caller's timeout instead.
@@ -199,7 +206,12 @@ package enum CommandRunner {
         /// The upper bound on how long a cancel takes to be honoured.
         private static let pollSliceMilliseconds: Int32 = 100
 
+        /// How long a cancel gets to be honoured. Comfortably more than one poll
+        /// slice, so it only expires when the read block never started at all.
+        private static let cancelGrace: TimeInterval = 2
+
         private let handle: FileHandle
+        private let limit: Int
         private let lock = NSLock()
         private var collected = Data()
         private var overflowed = false
@@ -210,8 +222,9 @@ package enum CommandRunner {
         private var reachedEOF = false
         private let finished = DispatchSemaphore(value: 0)
 
-        init(_ handle: FileHandle, on queue: DispatchQueue) {
+        init(_ handle: FileHandle, limit: Int, on queue: DispatchQueue) {
             self.handle = handle
+            self.limit = limit
             queue.async { [self] in
                 readUntilDone()
                 finished.signal()
@@ -224,7 +237,15 @@ package enum CommandRunner {
         func join(deadline: DispatchTime) -> DrainedStream {
             if finished.wait(timeout: deadline) == .timedOut {
                 lock.withLock { cancelled = true }
-                finished.wait()
+                // Bounded, where a bare `wait()` would not be. The loop notices
+                // `cancelled` within one poll slice *once its block is running*,
+                // and nothing here can guarantee the block was ever scheduled —
+                // it sits on a queue backed by a shared pool. An unbounded wait
+                // would hang in that case, which is the failure this whole file
+                // exists to remove. Giving up costs one leaked drain instead; a
+                // rare leak beats a certain hang, and #69 tracks moving the
+                // drains off the shared pool so neither outcome is possible.
+                _ = finished.wait(timeout: .now() + Self.cancelGrace)
             }
             return lock.withLock {
                 // Judged from what the loop actually did, and only once it has
@@ -246,6 +267,13 @@ package enum CommandRunner {
         }
 
         private func readUntilDone() {
+            // Closed on every exit, not only the cancel path. `Pipe` going out of
+            // scope in `run` would close it anyway, but an implicit lifetime is
+            // the opposite of what this class argues for — and closing here is
+            // safe on all paths because the loop is the only thing that touches
+            // the handle once it owns it.
+            defer { try? handle.close() }
+
             let fd = handle.fileDescriptor
             let flags = fcntl(fd, F_GETFL, 0)
             guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0 else {
@@ -278,13 +306,11 @@ package enum CommandRunner {
                 }
                 append(buffer, count: count)
             }
-            // Cancelled. Close from here, where nothing is mid-read on it.
-            try? handle.close()
         }
 
         private func append(_ buffer: [UInt8], count: Int) {
             lock.withLock {
-                guard collected.count + count <= maxOutputBytes else {
+                guard collected.count + count <= limit else {
                     overflowed = true
                     return
                 }

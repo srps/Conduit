@@ -399,17 +399,39 @@ final class AppState: ObservableObject {
             throw PACResolverError.fetchFailed("PAC URLs must not contain embedded credentials.")
         }
         return try await Task.detached(priority: .utility) {
-            let result = try CommandRunner.run(
-                launchPath: "/usr/bin/curl",
-                arguments: [
-                    "--silent",
-                    "--show-error",
-                    "--location",
-                    "--fail",
-                    "--max-time", "15",
-                    url.absoluteString,
-                ]
-            )
+            let result: CommandResult
+            do {
+                result = try CommandRunner.run(
+                    launchPath: "/usr/bin/curl",
+                    arguments: [
+                        "--silent",
+                        "--show-error",
+                        "--location",
+                        "--fail",
+                        "--max-time", "15",
+                        url.absoluteString,
+                    ],
+                    // The one caller that reads a whole document, so it states its
+                    // own ceiling rather than inheriting a default sized for
+                    // `networksetup`. A PAC script is JavaScript this process then
+                    // evaluates on every routing decision, which is the real reason
+                    // to bound it — 1 MiB would already be pathological. For scale,
+                    // the corporate PAC this was developed against
+                    // (`rbins.bosch.com/lis.pac`, a full regional host list)
+                    // measures 4,688 bytes, so this is ~220x headroom rather than a
+                    // working limit. Exceeding it fails the fetch, because a
+                    // truncated PAC routes traffic wrongly instead of visibly
+                    // breaking.
+                    maxOutputBytes: CommandRunner.defaultMaxOutputBytes
+                )
+            } catch let error as CommandRunnerError {
+                // Wrapped so every failure on this path is one type. Without it a
+                // PAC that was too large, or a fetch that timed out, surfaced as a
+                // bare `CommandRunnerError` while an HTTP failure surfaced as
+                // `PACResolverError` — and the two read to a user as the same
+                // "PAC unreachable".
+                throw PACResolverError.fetchFailed(error.localizedDescription)
+            }
             guard result.exitCode == 0 else {
                 let message = [result.standardError, result.standardOutput]
                     .filter { !$0.isEmpty }
