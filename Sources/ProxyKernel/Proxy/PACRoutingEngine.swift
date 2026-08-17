@@ -214,10 +214,6 @@ package final class PACRoutingEngine: @unchecked Sendable {
         return false
     }
 
-    package func chainIncludesDirect(for url: String, host: String) -> Bool {
-        routeChain(for: url, host: host).contains(.direct)
-    }
-
     private func refreshInBackgroundIfNeeded(for config: ProxyConfig) {
         let shouldKickOff = lock.withLock {
             guard !refreshInFlight else { return false }
