@@ -131,6 +131,38 @@ final class HelperContractTests: XCTestCase {
         XCTAssertNotNil(HelperCommand(rawValue: "set-dns-servers"))
     }
 
+    // MARK: - Version negotiation
+
+    /// The helper outlives the app that installed it. A rolled-back app leaves
+    /// a newer helper answering an older client — and shipped clients reject
+    /// any reply not stamped with their own version, then rethrow rather than
+    /// degrading to AppleScript. An exact-match helper therefore bricked every
+    /// privileged operation until it was uninstalled by hand.
+    func testHelperHonoursTheSupportedVersionRange() {
+        XCTAssertTrue(HelperProtocolVersion.isSupported(HelperProtocolVersion.current))
+        XCTAssertTrue(HelperProtocolVersion.isSupported(HelperProtocolVersion.minimumSupported))
+        XCTAssertTrue(HelperProtocolVersion.isSupported(3), "v3 and v4 differ only by added commands")
+        XCTAssertLessThanOrEqual(HelperProtocolVersion.minimumSupported, HelperProtocolVersion.current)
+    }
+
+    /// Replies carry the *requester's* version, which is the entire mechanism:
+    /// an older client's exact-match guard has to be satisfied.
+    func testReplyIsStampedWithTheRequestersVersion() {
+        XCTAssertEqual(HelperProtocolVersion.replyVersion(forRequest: 3), 3)
+        XCTAssertEqual(HelperProtocolVersion.replyVersion(forRequest: 4), 4)
+    }
+
+    /// An unversioned frame decodes as 0 and must still be refused — the threat
+    /// model requires it, and a range must not become a way in.
+    func testUnversionedAndOutOfRangeFramesAreStillRefused() {
+        XCTAssertNil(HelperProtocolVersion.replyVersion(forRequest: 0))
+        XCTAssertFalse(HelperProtocolVersion.isSupported(0))
+        XCTAssertNil(HelperProtocolVersion.replyVersion(forRequest: 2),
+                     "below the floor: those commands may have had different argument shapes")
+        XCTAssertNil(HelperProtocolVersion.replyVersion(forRequest: HelperProtocolVersion.current + 1),
+                     "a newer client must not be told we speak its version")
+    }
+
     func testProtocolVersionBumped() {
         XCTAssertGreaterThanOrEqual(HelperProtocolVersion.current, 3,
                                     "Protocol version must be >= 3 after helper trust-boundary hardening")
