@@ -188,14 +188,30 @@ extension ProxyConfig {
     ///   its set from all of them (`forCleanup: true`) — by teardown time the
     ///   enable flags have typically already flipped false — so a disabled rule
     ///   with an unusable pattern can still break a teardown.
+    ///
+    /// An **empty pattern** is not yet configured, and is skipped. It is the
+    /// state of a row the user has just added and not yet typed into, which the
+    /// Settings field already declines to flag and which the runtime already
+    /// treats as inert (`DNSManager.getInterceptDomains` filters empty derived
+    /// domains). Calling it an error made all three disagree, and left the user
+    /// clearing a field, seeing a clean row, and being told on save that the
+    /// config was broken.
+    ///
+    /// A **non-empty** pattern that derives to an empty domain — a bare `*`, or
+    /// `*.` — stays an error, and the distinction is the whole point. That is
+    /// someone who meant something by what they typed and got a rule naming the
+    /// `/etc/resolver` directory itself; there is no half-finished row to be
+    /// generous about.
     private func validateInterceptRules(into errors: inout [ConfigValidationError]) {
         for (i, rule) in dnsInterceptRules.enumerated() {
-            do {
-                try DomainNameSyntax.validate(rule.resolverDomain)
-            } catch {
-                errors.append(
-                    .invalidInterceptPattern(index: i, pattern: rule.pattern, reason: error)
-                )
+            if !rule.pattern.isEmpty {
+                do {
+                    try DomainNameSyntax.validate(rule.resolverDomain)
+                } catch {
+                    errors.append(
+                        .invalidInterceptPattern(index: i, pattern: rule.pattern, reason: error)
+                    )
+                }
             }
             if !IPAddressSyntax.isValid(rule.interceptIP) {
                 errors.append(.invalidInterceptIP(index: i, value: rule.interceptIP))

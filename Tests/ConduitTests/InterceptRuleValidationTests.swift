@@ -76,6 +76,52 @@ final class InterceptRuleValidationTests: XCTestCase {
         XCTAssertEqual(reason, .empty)
     }
 
+    /// `*.` is the same mistake with an extra keystroke, and must not fall
+    /// through the empty-pattern skip below.
+    func testWildcardWithTrailingDotIsRejected() {
+        var config = makeConfig()
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.")]
+        guard case .invalidInterceptPattern(_, _, let reason)? = interceptErrors(config).first else {
+            return XCTFail("'*.' derives to nothing and must not be accepted")
+        }
+        XCTAssertEqual(reason, .empty)
+    }
+
+    /// An empty pattern is a row the user has added and not yet typed into.
+    /// The Settings field declines to flag it and `getInterceptDomains` filters
+    /// it out; calling it a config error made those three disagree, so a user
+    /// who cleared a field saw a clean row and a broken save.
+    func testAnEmptyPatternIsNotYetConfiguredRatherThanWrong() {
+        var config = makeConfig()
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "")]
+        XCTAssertTrue(interceptErrors(config).isEmpty)
+    }
+
+    /// And the skip is on the **pattern**, not on the derived domain — the two
+    /// differ for exactly the shapes that are real mistakes.
+    func testTheSkipIsOnTheEmptyPatternAndNotOnTheEmptyDomain() {
+        var config = makeConfig()
+        config.dnsInterceptRules = [
+            DNSInterceptRule(pattern: ""),
+            DNSInterceptRule(pattern: "*"),
+        ]
+        let errors = interceptErrors(config)
+        XCTAssertEqual(errors.count, 1)
+        guard case .invalidInterceptPattern(let index, _, _)? = errors.first else {
+            return XCTFail("expected the bare wildcard to be the one rejected")
+        }
+        XCTAssertEqual(index, 1)
+    }
+
+    /// The empty pattern excuses the pattern, not the whole rule. An IP the
+    /// resolver cannot parse is still an IP the resolver cannot parse, and the
+    /// Settings field flags it whatever the pattern says.
+    func testAnEmptyPatternDoesNotExcuseAnUnusableIP() {
+        var config = makeConfig()
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "", interceptIP: "not-an-ip")]
+        XCTAssertEqual(interceptErrors(config).count, 1)
+    }
+
     // MARK: - Disabled rules
 
     /// The cleanup path derives its set from every rule including disabled ones

@@ -843,7 +843,10 @@ struct SettingsView: View {
     ///
     /// An empty field reports nothing: a row the user has only just added is
     /// not yet a mistake, and flagging it while they are still typing the
-    /// first character is noise.
+    /// first character is noise. `ProxyConfig.validate()` skips an empty
+    /// pattern for the same reason, so a clean row here is also a clean save.
+    /// A non-empty pattern deriving to an empty domain (`*`) is flagged by
+    /// both.
     static func interceptPatternProblem(_ rule: DNSInterceptRule) -> DomainNameError? {
         guard !rule.pattern.isEmpty else { return nil }
         do {
