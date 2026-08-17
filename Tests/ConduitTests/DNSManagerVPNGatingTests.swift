@@ -406,6 +406,56 @@ final class DNSManagerVPNGatingTests: XCTestCase {
         )
     }
 
+    /// A domain configured as both a split-DNS entry and an intercept rule
+    /// reaches `clear` twice. Removing it twice is harmless — removal is
+    /// idempotent — but reporting "failed to remove 2 resolver file(s)" for one
+    /// file misleads whoever is reading the log to find it.
+    func testADomainConfiguredTwiceIsReportedOnce() {
+        var config = makeConfig()
+        config.dnsEntries = [DomainDNSEntry(domain: "both.example", servers: ["10.1.1.1"])]
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.both.example")]
+        recording.failingDomains = ["both.example"]
+
+        XCTAssertThrowsError(try manager.clear(config: config, logger: nil)) { error in
+            guard let removal = error as? DNSRemovalError else {
+                return XCTFail("expected DNSRemovalError, got \(error)")
+            }
+            XCTAssertEqual(removal.failures.count, 1, "one file, one failure")
+            XCTAssertEqual(removal.domains, ["both.example"])
+        }
+        XCTAssertEqual(
+            recording.commands(matching: .removeDNS).count,
+            1,
+            "and the duplicate is not sent to the privileged helper twice either"
+        )
+    }
+
+    /// Only one error can travel, and the caller asked for the migration — so an
+    /// apply failure is the one that surfaces. The sweep's aggregate must still
+    /// reach the log rather than vanishing, since naming the stranded files is
+    /// the reason it exists.
+    func testApplyFailureWinsButTheSweepFailureIsStillLogged() {
+        var old = makeConfig()
+        old.dnsEntries.append(DomainDNSEntry(domain: "going.example", servers: ["10.9.9.9"]))
+        let new = makeConfig()
+
+        // The stale removal and one of the applies both fail.
+        recording.failingDomains = ["going.example", "corp.example"]
+        let log = RecordingLogSink()
+
+        XCTAssertThrowsError(try manager.reconcile(old: old, new: new, logger: log, vpnConnected: true)) { error in
+            XCTAssertFalse(
+                error is DNSRemovalError,
+                "the migration failure is what the caller acted on, so it is what propagates"
+            )
+        }
+        let messages = log.entries().map(\.message)
+        XCTAssertTrue(
+            messages.contains { $0.contains("stale-file sweep also failed") && $0.contains("going.example") },
+            "the stranded domain has to be named somewhere; got \(messages)"
+        )
+    }
+
     /// The asymmetry is deliberate and worth pinning down. A partial *apply*
     /// reads as not-applied through `isApplied`, and the start path guards on
     /// it, so stopping early costs nothing and the next start repairs it.
