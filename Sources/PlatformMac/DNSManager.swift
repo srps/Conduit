@@ -262,14 +262,6 @@ package final class DNSManager: @unchecked Sendable {
 
         guard !enabledEntries.isEmpty || !interceptDomains.isEmpty else { return }
 
-        for entry in enabledEntries {
-            try Self.validateDomain(entry.domain)
-        }
-
-        for domain in interceptDomains {
-            try Self.validateDomain(domain)
-        }
-
         try removeAll(enabledEntries.map(\.domain) + interceptDomains, logger: logger)
 
         logger?.log(.notice, "Removed managed split-DNS resolver files and intercept rules.", category: .system)
@@ -302,16 +294,35 @@ package final class DNSManager: @unchecked Sendable {
         )
 
         let stale = oldDomains.subtracting(newDomains).sorted()
-        for domain in stale {
-            try Self.validateDomain(domain)
+        var removalError: Error?
+        do {
+            try removeAll(stale, logger: logger)
+        } catch {
+            removalError = error
         }
-        try removeAll(stale, logger: logger)
         if !stale.isEmpty {
-            logger?.log(.notice, "Removed \(stale.count) stale resolver file(s) after config change.", category: .system)
+            let failed = (removalError as? DNSRemovalError)?.failures.count ?? 0
+            logger?.log(
+                .notice,
+                "Removed \(stale.count - failed) of \(stale.count) stale resolver file(s) after config change.",
+                category: .system
+            )
         }
 
-        guard !newDomains.isEmpty else { return }
+        guard !newDomains.isEmpty else {
+            if let removalError { throw removalError }
+            return
+        }
+
+        // The migration is attempted even when part of the sweep failed. The
+        // two sets are disjoint by construction — `stale` is `old - new` — so a
+        // file we could not remove is never one this is about to write, and
+        // leaving the new config unapplied on top of a half-swept machine is
+        // the worse of the two states. `removeAll` has already logged each
+        // domain it left behind; the aggregate is rethrown afterwards so the
+        // caller still sees the failure, just not instead of the migration.
         try apply(config: new, logger: logger, vpnConnected: vpnConnected)
+        if let removalError { throw removalError }
     }
 
     // MARK: - VPN-lifecycle entry files
@@ -356,9 +367,6 @@ package final class DNSManager: @unchecked Sendable {
     package func clearEntryFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
         let entries = config.dnsEntries.filter(\.enabled)
         guard !entries.isEmpty else { return }
-        for entry in entries {
-            try Self.validateDomain(entry.domain)
-        }
         try removeAll(entries.map(\.domain), logger: logger)
         logger?.log(.notice, "Removed \(entries.count) split-DNS entry file(s) while the VPN is disconnected.", category: .system)
     }
@@ -398,9 +406,6 @@ package final class DNSManager: @unchecked Sendable {
     package func clearInterceptFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
         let interceptDomains = getInterceptDomains(from: config, forCleanup: true)
         guard !interceptDomains.isEmpty else { return }
-        for domain in interceptDomains {
-            try Self.validateDomain(domain)
-        }
         try removeAll(interceptDomains, logger: logger)
         logger?.log(.notice, "Cleared intercept resolver files for \(interceptDomains.count) rule(s).", category: .system)
     }
@@ -426,9 +431,36 @@ package final class DNSManager: @unchecked Sendable {
     ///
     /// This is also what `TunnelResolverManager.removeAll` and
     /// `SystemDNSManager.clear` already do; `DNSManager` was the outlier.
+    ///
+    /// Validation belongs *inside* the loop for the same reason. Checked in a
+    /// pass ahead of it, one unusable name aborted the whole batch — the exact
+    /// failure this function exists to prevent, and worse than the interleaved
+    /// loop it replaced. And an unusable name is reachable without anyone
+    /// mistyping a domain: intercept patterns are never validated when the
+    /// config is parsed, and `getInterceptDomains` only strips a leading `*.`,
+    /// so a rule like `*.foo_bar.example` yields `foo_bar.example`, which
+    /// `domainRegex` rejects. Deleting that rule makes it stale, and the sweep
+    /// for every *other* stale domain used to die with it.
     private func removeAll(_ domains: [String], logger: (any LogSink)?) throws {
         var failures: [DNSRemovalError.Failure] = []
         for domain in domains {
+            // The two failures want different advice, so they are reported
+            // separately. An unusable name means no file of ours can exist
+            // under it — every writer validates first — so there is nothing
+            // stranded; the config is what needs fixing.
+            do {
+                try Self.validateDomain(domain)
+            } catch {
+                failures.append(.init(domain: domain, message: error.localizedDescription))
+                logger?.log(
+                    .warning,
+                    "Skipped removing \(domain): \(error.localizedDescription). No resolver file can have been "
+                        + "written under that name, but the config entry that produced it is unusable.",
+                    category: .system
+                )
+                continue
+            }
+
             do {
                 try privilegeClient.execute(.removeDNS, values: [domain])
             } catch {

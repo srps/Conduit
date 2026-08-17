@@ -60,6 +60,15 @@ package enum CommandRunner {
     /// running a script that backgrounds something — leaves a writer alive
     /// after the process we waited on has died. Joining unconditionally would
     /// then hang on exactly the path meant to break a hang.
+    ///
+    /// Note what this means for such a command: it now fails with
+    /// `outputIncomplete` after the grace rather than returning the exit code
+    /// and the output collected so far. That is deliberate — a prefix presented
+    /// as the whole stream is the failure mode this file exists to prevent — but
+    /// it makes `&` in anything run through here a behavioural change, not just
+    /// a style choice. No current caller backgrounds a writer on our pipes:
+    /// `networksetup`, `scutil` and `curl` do not, and `osascript` collects its
+    /// inner script's output itself.
     private static let drainJoinGrace: TimeInterval = 5
 
     private static let drainQueue = DispatchQueue(
@@ -110,6 +119,14 @@ package enum CommandRunner {
         // One deadline shared by both joins, not one each: the streams are read
         // concurrently, so a pipe still held open should cost the grace period
         // once rather than twice.
+        //
+        // A consequence worth naming: if the first join burns the whole grace,
+        // the second starts already expired, so a stderr drain still mid-read is
+        // cancelled at once. That is the right outcome rather than a hazard — by
+        // then `output.failure` is set and the call throws regardless, so the
+        // only thing the extra wait could buy is a prefix nobody will read. A
+        // drain that already reached EOF is unaffected: its semaphore is
+        // signalled, and `wait` succeeds on an expired deadline in that case.
         let joinDeadline = DispatchTime.now() + drainJoinGrace
         let output = outputDrain.join(deadline: joinDeadline)
         let error = errorDrain.join(deadline: joinDeadline)
@@ -273,12 +290,18 @@ package enum CommandRunner {
     }
 
     /// `SIGTERM`, then `SIGKILL` for a child that ignores it.
+    ///
+    /// Both signals are guarded by `isRunning`, which narrows — it cannot close
+    /// — the window in which Foundation has already reaped the child and the pid
+    /// has been handed to someone else. The guard was originally on the
+    /// escalation only; the window is smaller on the first signal but it is the
+    /// same window, and there is no reason to treat them differently.
     private static func kill(_ process: Process, waitingOn exited: DispatchSemaphore) {
-        process.terminate()
+        if process.isRunning {
+            process.terminate()
+        }
         guard exited.wait(timeout: .now() + terminationGrace) == .timedOut else { return }
-        // `isRunning` narrows — it cannot close — the window in which Foundation
-        // has already reaped the child and the pid has been handed to someone
-        // else. A child that has survived `SIGTERM` for the grace period is far
+        // A child that has survived `SIGTERM` for the grace period is far
         // likelier to still be here than to have exited in that instant.
         if process.isRunning {
             Darwin.kill(process.processIdentifier, SIGKILL)

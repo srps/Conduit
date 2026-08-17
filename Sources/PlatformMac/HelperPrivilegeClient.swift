@@ -56,13 +56,20 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
 
     /// The one place the privileged result is inspected.
     ///
-    /// `CommandRunner.runPrivilegedShellScript` only throws when `osascript`
-    /// itself cannot be launched; a script that failed — or a user who
-    /// dismissed the password dialog, which `osascript` reports as exit 1 with
-    /// `User canceled. (-128)` — comes back as an ordinary `CommandResult`.
-    /// Discarding it made a cancelled prompt indistinguishable from a completed
-    /// restore, so `SystemProxyManager.clear` went on to `forgetAll` the only
-    /// copy of the user's previous proxy settings.
+    /// A script that failed — or a user who dismissed the password dialog, which
+    /// `osascript` reports as exit 1 with `User canceled. (-128)` — comes back as
+    /// an ordinary `CommandResult` rather than a thrown error. Discarding it made
+    /// a cancelled prompt indistinguishable from a completed restore, so
+    /// `SystemProxyManager.clear` went on to `forgetAll` the only copy of the
+    /// user's previous proxy settings.
+    ///
+    /// `CommandRunner.runPrivilegedShellScript` throws for launch failure and
+    /// also for its own bounds — `timedOut` at 600s, `outputTooLarge`,
+    /// `outputIncomplete`. Those are not `PrivilegeClientError`s, so they
+    /// propagate as-is; nothing branches on the concrete type, and every caller
+    /// treats any throw from here as "the write did not land", which is the
+    /// answer that keeps the journal records. Do not narrow that to a type check
+    /// without re-reading `SystemProxyManager.write`.
     private func runPrivileged(_ script: String) throws {
         let result = try runner(script)
         guard result.exitCode != 0 else { return }

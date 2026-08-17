@@ -359,6 +359,53 @@ final class DNSManagerVPNGatingTests: XCTestCase {
         )
     }
 
+    /// Validating the whole batch before removing any of it made one unusable
+    /// name abort every removal — worse than the interleaved loop it replaced,
+    /// and the exact failure `removeAll` exists to prevent.
+    ///
+    /// The bad name needs no typo to arrive. Intercept patterns are never
+    /// validated when the config is parsed, and `getInterceptDomains` only
+    /// strips a leading `*.`, so `*.foo_bar.example` yields `foo_bar.example`,
+    /// which `domainRegex` rejects for the underscore.
+    func testAnUnusableDomainDoesNotCancelTheOtherRemovals() {
+        var config = makeConfig()
+        config.dnsInterceptRules = [
+            DNSInterceptRule(pattern: "*.foo_bar.example"),
+            DNSInterceptRule(pattern: "*.intercepted.example"),
+        ]
+        XCTAssertThrowsError(try manager.clear(config: config, logger: nil)) { error in
+            guard let removal = error as? DNSRemovalError else {
+                return XCTFail("expected DNSRemovalError, got \(error)")
+            }
+            XCTAssertEqual(removal.domains, ["foo_bar.example"])
+        }
+        XCTAssertEqual(
+            removedDomains(),
+            ["corp.example", "internal.example", "intercepted.example"],
+            "one rejected name must not strand every other domain"
+        )
+    }
+
+    /// A partly failed sweep must not also cancel the migration. The sets are
+    /// disjoint — `stale` is `old - new` — so a file we could not remove is
+    /// never one the apply is about to write, and skipping the apply leaves the
+    /// machine half-migrated on top of the residue.
+    func testReconcileStillAppliesTheNewConfigAfterAFailedSweep() {
+        var old = makeConfig()
+        old.dnsEntries.append(DomainDNSEntry(domain: "going.example", servers: ["10.9.9.9"]))
+        let new = makeConfig()
+
+        recording.failingDomains = ["going.example"]
+        XCTAssertThrowsError(try manager.reconcile(old: old, new: new, logger: nil, vpnConnected: true))
+
+        XCTAssertEqual(removedDomains(), ["going.example"])
+        XCTAssertEqual(
+            appliedDomains(),
+            ["corp.example", "internal.example"],
+            "the new config's entry files must still be written"
+        )
+    }
+
     /// The asymmetry is deliberate and worth pinning down. A partial *apply*
     /// reads as not-applied through `isApplied`, and the start path guards on
     /// it, so stopping early costs nothing and the next start repairs it.
