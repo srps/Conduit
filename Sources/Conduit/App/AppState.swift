@@ -415,13 +415,11 @@ final class AppState: ObservableObject {
                     // own ceiling rather than inheriting a default sized for
                     // `networksetup`. A PAC script is JavaScript this process then
                     // evaluates on every routing decision, which is the real reason
-                    // to bound it — 1 MiB would already be pathological. For scale,
-                    // the corporate PAC this was developed against
-                    // (`rbins.bosch.com/lis.pac`, a full regional host list)
-                    // measures 4,688 bytes, so this is ~220x headroom rather than a
-                    // working limit. Exceeding it fails the fetch, because a
-                    // truncated PAC routes traffic wrongly instead of visibly
-                    // breaking.
+                    // to bound it — 1 MiB would already be pathological. For scale, a
+                    // measured enterprise PAC carrying a full regional host list came
+                    // to 4,688 bytes, so this is ~220x headroom rather than a working
+                    // limit. Exceeding it fails the fetch, because a truncated PAC
+                    // routes traffic wrongly instead of visibly breaking.
                     maxOutputBytes: CommandRunner.defaultMaxOutputBytes
                 )
             } catch let error as CommandRunnerError {
