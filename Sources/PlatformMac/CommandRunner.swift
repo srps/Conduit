@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+import Darwin
 import Dispatch
 import Foundation
-import NIOConcurrencyHelpers
 import ProxyKernel
 
 package struct CommandResult: Sendable {
@@ -13,7 +13,7 @@ package struct CommandResult: Sendable {
 package enum CommandRunnerError: Error, LocalizedError {
     case timedOut(command: String, seconds: TimeInterval)
     case outputTooLarge(command: String, limitBytes: Int)
-    case outputIncomplete(command: String)
+    case outputIncomplete(command: String, reason: String)
 
     package var errorDescription: String? {
         switch self {
@@ -21,9 +21,9 @@ package enum CommandRunnerError: Error, LocalizedError {
             return "\(command) did not finish within \(Int(seconds))s and was terminated."
         case .outputTooLarge(let command, let limitBytes):
             return "\(command) produced more than \(limitBytes) bytes of output."
-        case .outputIncomplete(let command):
-            return "\(command) exited but something still holds its output pipe open; "
-                 + "the output read back may be incomplete."
+        case .outputIncomplete(let command, let reason):
+            return "\(command) produced output that could not be read in full (\(reason)); "
+                 + "what was read is a prefix, not the whole stream."
         }
     }
 }
@@ -98,8 +98,8 @@ package enum CommandRunner {
         // writes more than the pipe buffer (64 KiB on Darwin) blocks in
         // `write` until someone reads; waiting for exit first guarantees
         // nobody ever does, and both sides hang with no timeout to break it.
-        let joinOutput = drain(stdout.fileHandleForReading)
-        let joinError = drain(stderr.fileHandleForReading)
+        let outputDrain = StreamDrain(stdout.fileHandleForReading, on: drainQueue)
+        let errorDrain = StreamDrain(stderr.fileHandleForReading, on: drainQueue)
 
         var timedOut = false
         if exited.wait(timeout: .now() + timeout) == .timedOut {
@@ -111,8 +111,8 @@ package enum CommandRunner {
         // concurrently, so a pipe still held open should cost the grace period
         // once rather than twice.
         let joinDeadline = DispatchTime.now() + drainJoinGrace
-        let output = joinOutput(joinDeadline)
-        let error = joinError(joinDeadline)
+        let output = outputDrain.join(deadline: joinDeadline)
+        let error = errorDrain.join(deadline: joinDeadline)
 
         if timedOut {
             throw CommandRunnerError.timedOut(command: launchPath, seconds: timeout)
@@ -123,8 +123,8 @@ package enum CommandRunner {
         // Reported, not swallowed: the alternative is handing back a prefix of
         // the output as if it were all of it, and every caller here branches on
         // what the command said.
-        guard output.complete, error.complete else {
-            throw CommandRunnerError.outputIncomplete(command: launchPath)
+        if let failure = output.failure ?? error.failure {
+            throw CommandRunnerError.outputIncomplete(command: launchPath, reason: failure)
         }
 
         return CommandResult(
@@ -154,49 +154,121 @@ package enum CommandRunner {
     private struct DrainedStream {
         var text: String
         var overflowed: Bool
-        /// Whether the read reached EOF. False means the join gave up while a
-        /// writer was still holding the pipe, so `text` is a prefix.
-        var complete: Bool
+        /// Nil when the read reached a clean EOF. Set means `text` is a prefix,
+        /// and says why it stopped short.
+        var failure: String?
     }
 
-    /// Starts reading `handle` on a background queue and returns the join.
+    /// One pipe's background read.
     ///
-    /// Past `maxOutputBytes` the read keeps going and stops accumulating:
-    /// abandoning it would re-create the very deadlock this exists to prevent,
-    /// only moved into teardown. A child that never stops writing is bounded by
-    /// the caller's timeout instead — the two limits compose.
+    /// Cancellable, which is the only reason this is not a
+    /// `readDataToEndOfFile` on a queue. When a join gives up — a grandchild
+    /// holding the pipe behind a child that has already exited — an abandoned
+    /// *blocking* read would hold its thread, its buffer and its descriptor for
+    /// as long as that writer lives. Repeat that path and the drain queue fills
+    /// with parked workers, after which nothing can drain at all and the
+    /// deadlock this file exists to prevent returns by another door. So the
+    /// read polls in slices and can be told to stop, and cancelling closes the
+    /// descriptor *from the thread that owns it* rather than from underneath a
+    /// blocked reader — closing it under one invites that number being reissued
+    /// by the next `open`, pointing the abandoned read at an unrelated file.
     ///
-    /// A join that gives up abandons the read rather than closing the handle
-    /// under it. Closing a descriptor while another thread is blocked reading
-    /// it invites that number being handed straight back out by the next
-    /// `open`, and the abandoned read would then be pointed at an unrelated
-    /// file. The thread costs nothing and ends by itself when the last writer
-    /// closes; the handle stays alive because this closure retains it.
-    private static func drain(_ handle: FileHandle) -> (DispatchTime) -> DrainedStream {
-        let collected = NIOLockedValueBox(Data())
-        let overflowed = NIOLockedValueBox(false)
-        let finished = DispatchSemaphore(value: 0)
+    /// Past `maxOutputBytes` the read keeps going and stops accumulating.
+    /// Stopping early would leave the child blocked in `write`, which is the
+    /// original bug moved into teardown; a child that never stops writing is
+    /// bounded by the caller's timeout instead.
+    private final class StreamDrain: @unchecked Sendable {
+        /// How long a `poll` waits before the loop looks at `cancelled` again.
+        /// The upper bound on how long a cancel takes to be honoured.
+        private static let pollSliceMilliseconds: Int32 = 100
 
-        drainQueue.async {
-            while let chunk = try? handle.read(upToCount: 65_536), !chunk.isEmpty {
-                collected.withLockedValue { buffer in
-                    guard buffer.count + chunk.count <= maxOutputBytes else {
-                        overflowed.withLockedValue { $0 = true }
-                        return
-                    }
-                    buffer.append(chunk)
-                }
+        private let handle: FileHandle
+        private let lock = NSLock()
+        private var collected = Data()
+        private var overflowed = false
+        private var failure: String?
+        private var cancelled = false
+        private let finished = DispatchSemaphore(value: 0)
+
+        init(_ handle: FileHandle, on queue: DispatchQueue) {
+            self.handle = handle
+            queue.async { [self] in
+                readUntilDone()
+                finished.signal()
             }
-            finished.signal()
         }
 
-        return { deadline in
-            let complete = finished.wait(timeout: deadline) == .success
-            return DrainedStream(
-                text: String(decoding: collected.withLockedValue { $0 }, as: UTF8.self),
-                overflowed: overflowed.withLockedValue { $0 },
-                complete: complete
-            )
+        /// Waits for EOF, then reports. If the deadline passes first the read is
+        /// cancelled and this returns only once it has actually stopped, so no
+        /// descriptor or worker outlives the call.
+        func join(deadline: DispatchTime) -> DrainedStream {
+            if finished.wait(timeout: deadline) == .timedOut {
+                lock.withLock {
+                    cancelled = true
+                    if failure == nil {
+                        failure = "a writer still held the pipe open after the child exited"
+                    }
+                }
+                finished.wait()
+            }
+            return lock.withLock {
+                DrainedStream(
+                    text: String(decoding: collected, as: UTF8.self),
+                    overflowed: overflowed,
+                    failure: failure
+                )
+            }
+        }
+
+        private func readUntilDone() {
+            let fd = handle.fileDescriptor
+            let flags = fcntl(fd, F_GETFL, 0)
+            guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) >= 0 else {
+                lock.withLock { failure = "could not set the output pipe non-blocking" }
+                return
+            }
+
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            while !lock.withLock({ cancelled }) {
+                var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let ready = poll(&descriptor, 1, Self.pollSliceMilliseconds)
+                if ready < 0 {
+                    if errno == EINTR { continue }
+                    record(errno: errno, while: "polling")
+                    return
+                }
+                // Nothing yet: fall back to the top so a cancel is noticed.
+                if ready == 0 { continue }
+
+                let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+                if count == 0 { return }   // EOF: every writer has closed.
+                if count < 0 {
+                    if errno == EINTR || errno == EAGAIN { continue }
+                    record(errno: errno, while: "reading")
+                    return
+                }
+                append(buffer, count: count)
+            }
+            // Cancelled. Close from here, where nothing is mid-read on it.
+            try? handle.close()
+        }
+
+        private func append(_ buffer: [UInt8], count: Int) {
+            lock.withLock {
+                guard collected.count + count <= maxOutputBytes else {
+                    overflowed = true
+                    return
+                }
+                collected.append(contentsOf: buffer[0..<count])
+            }
+        }
+
+        /// A read that fails is not a read that ended. Reporting it as EOF would
+        /// hand back a prefix as though it were the whole stream, which is the
+        /// silent truncation the rest of this file exists to prevent.
+        private func record(errno code: Int32, while verb: String) {
+            let message = String(cString: strerror(code))
+            lock.withLock { failure = "\(verb) the output pipe failed: \(message)" }
         }
     }
 
