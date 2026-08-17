@@ -520,17 +520,22 @@ final class AppState: ObservableObject {
 
             if diff.dnsChanged, platformConfig.manageDNSResolvers,
                proxyIsUp || snapshot.dnsRunState == .running {
-                do {
-                    try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
+                DNSResolverReconciliation.run(
+                    after: "config change",
+                    logger: logStore,
+                    reconcile: {
+                        try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
+                    },
                     // `applyConfigChange` above restarted the forwarder if the
                     // DNS section changed, possibly onto a different port, and
                     // `reconcile` does not rewrite intercept files. Re-point
                     // them at the listeners that came back — or remove them if
-                    // none did.
-                    try refreshInterceptFiles(for: new)
-                } catch {
-                    logStore.log(.warning, "Could not reconcile DNS resolver files after config change: \(error.localizedDescription)", category: .system)
-                }
+                    // none did. Runs whatever the reconcile did: see
+                    // `DNSResolverReconciliation`.
+                    refreshInterceptFiles: {
+                        try refreshInterceptFiles(for: new)
+                    }
+                )
             }
 
             if diff.proxyChanged, proxyIsUp {
