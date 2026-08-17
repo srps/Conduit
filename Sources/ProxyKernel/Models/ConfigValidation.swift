@@ -14,6 +14,42 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     case invalidInterceptIP(index: Int, value: String)
     case conflict(description: String)
 
+    /// Whether this error must stop the proxy listener from coming up.
+    ///
+    /// Two categories, and every new case has to pick one deliberately rather
+    /// than inherit "fatal" by being added to the enum:
+    ///
+    /// - **`true`** — the value is one the listener or the kernel behind it
+    ///   actually consumes, so starting with it would bind the wrong thing,
+    ///   trip a downstream `precondition`, or leave a subsystem in a state it
+    ///   has no defined behaviour for. A bad port is the archetype.
+    /// - **`false`** — the value belongs to a feature the listener does not
+    ///   depend on, and the worst case of ignoring it is that the feature
+    ///   withholds its side effects. The intercept cases are these: they
+    ///   describe `/etc/resolver` files written by `DNSManager`, which the
+    ///   proxy does not read, does not bind, and does not need in order to
+    ///   serve a request.
+    ///
+    /// Refusing to start on an intercept rule would be strictly worse than
+    /// #68, the defect the validation was added for. That validation covers
+    /// **disabled** rules on purpose (the cleanup path derives its set from
+    /// all of them), so one leftover unusable rule would take the listener
+    /// down even with `dns.transparentProxyEnabled` false — a user upgrading
+    /// would lose all proxying, not just their intercept files.
+    ///
+    /// This gates only the start path. `AppState.saveConfig` still surfaces
+    /// every error in its banner, and the Settings row still flags the field,
+    /// because showing the problem where the user typed it is what #68 asked
+    /// for.
+    package var blocksProxyStart: Bool {
+        switch self {
+        case .invalidInterceptPattern, .invalidInterceptIP:
+            return false
+        case .invalidPort, .invalidLimit, .invalidDuration, .invalidHost, .conflict:
+            return true
+        }
+    }
+
     package var errorDescription: String? {
         switch self {
         case .invalidPort(let field, let value):
