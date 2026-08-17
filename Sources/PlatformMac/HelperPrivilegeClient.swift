@@ -11,11 +11,22 @@ import ConduitShared
 /// Uses osascript "do shell script ... with administrator privileges" for elevation.
 /// Maps each typed privileged operation to the equivalent networksetup / filesystem operation.
 package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    package init() {}
+    /// How the rendered script is actually run. Injectable only so the
+    /// exit-code handling below is testable: the real implementation raises an
+    /// admin password prompt, which no test may do.
+    private let runner: @Sendable (String) throws -> CommandResult
+
+    package init(
+        runner: @escaping @Sendable (String) throws -> CommandResult = { script in
+            try CommandRunner.runPrivilegedShellScript(script)
+        }
+    ) {
+        self.runner = runner
+    }
 
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
         let script = try shellScript(for: operation, values: values)
-        try CommandRunner.runPrivilegedShellScript(script)
+        try runPrivileged(Self.abortOnFirstFailure(script))
     }
 
     /// One prompt for the whole batch. Every step is still rendered through
@@ -23,11 +34,44 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
     /// this only changes how many times the user is asked.
     package func execute(batch: [PrivilegedBatchStep]) throws {
         guard !batch.isEmpty else { return }
-        try CommandRunner.runPrivilegedShellScript(batchScript(for: batch))
+        try runPrivileged(Self.abortOnFirstFailure(batchScript(for: batch)))
     }
 
     func runPrivilegedScript(_ script: String) throws {
-        try CommandRunner.runPrivilegedShellScript(script)
+        try runPrivileged(script)
+    }
+
+    /// `sh` reports only the *last* command's status, and every script rendered
+    /// here is several `networksetup` calls. Without this a restore whose
+    /// endpoint write failed but whose trailing state write succeeded came back
+    /// as exit 0 — the same hole `SystemProxyManager.write` closes on the
+    /// unprivileged path. Every write is an absolute set, so aborting early and
+    /// retrying the whole sequence is safe.
+    ///
+    /// Not applied to `runPrivilegedScript`: the installer scripts carry their
+    /// own `|| true` guards for steps that are expected to fail.
+    private static func abortOnFirstFailure(_ script: String) -> String {
+        "set -e\n" + script
+    }
+
+    /// The one place the privileged result is inspected.
+    ///
+    /// `CommandRunner.runPrivilegedShellScript` only throws when `osascript`
+    /// itself cannot be launched; a script that failed — or a user who
+    /// dismissed the password dialog, which `osascript` reports as exit 1 with
+    /// `User canceled. (-128)` — comes back as an ordinary `CommandResult`.
+    /// Discarding it made a cancelled prompt indistinguishable from a completed
+    /// restore, so `SystemProxyManager.clear` went on to `forgetAll` the only
+    /// copy of the user's previous proxy settings.
+    private func runPrivileged(_ script: String) throws {
+        let result = try runner(script)
+        guard result.exitCode != 0 else { return }
+        let output = [result.standardError, result.standardOutput]
+            .filter { !$0.isEmpty }
+            .joined(separator: " | ")
+        throw PrivilegeClientError.executionFailed(
+            "Privileged script failed (exit \(result.exitCode)): \(output.isEmpty ? "no output" : output)"
+        )
     }
 
     /// Internal rather than private so tests can assert on what these render
@@ -79,6 +123,18 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
             return "/usr/sbin/networksetup -setproxybypassdomains \(s) \(domains)"
         case .setWebProxyEndpoint:
             guard values.count >= 5 else { throw PrivilegeClientError.executionFailed("setWebProxyEndpoint requires service, kind, host, port, state") }
+            // Same rules the helper applies, for the same reason: this script
+            // runs as root. `state` is the argument that matters most — it is
+            // interpolated bare, because `networksetup` wants a literal
+            // `on`/`off` and quoting it would be the only unquoted-looking
+            // value in the file. Validating it is what makes that safe. The
+            // helper-client path validated first and this one did not, so
+            // `AppleScriptPrivilegeClient` — the default `privilegeClient` for
+            // `SystemProxyManager` — was the unguarded way in.
+            guard HelperInputValidator.validateServiceName(values[0]) else { throw PrivilegeClientError.executionFailed("invalid service name") }
+            guard HelperInputValidator.validateWebProxyKind(values[1]) else { throw PrivilegeClientError.executionFailed("invalid web proxy kind") }
+            guard HelperInputValidator.validateOptionalEndpoint(host: values[2], port: values[3]) else { throw PrivilegeClientError.executionFailed("invalid web proxy endpoint") }
+            guard HelperInputValidator.validateProxyState(values[4]) else { throw PrivilegeClientError.executionFailed("invalid proxy state") }
             let s = values[0].shellQuoted
             let kind = values[1]
             let host = values[2], port = values[3], state = values[4]
@@ -95,6 +151,12 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
             return script
         case .setAutoproxy:
             guard values.count >= 3 else { throw PrivilegeClientError.executionFailed("setAutoproxy requires service, url, state") }
+            // As above: `state` reaches a root shell uninterpolated-safe only
+            // because it is checked here. An empty URL is the "write only the
+            // state" form, so it is the one value allowed to be absent.
+            guard HelperInputValidator.validateServiceName(values[0]) else { throw PrivilegeClientError.executionFailed("invalid service name") }
+            guard values[1].isEmpty || HelperInputValidator.validateAutoproxyURL(values[1]) else { throw PrivilegeClientError.executionFailed("invalid autoproxy URL") }
+            guard HelperInputValidator.validateProxyState(values[2]) else { throw PrivilegeClientError.executionFailed("invalid proxy state") }
             let s = values[0].shellQuoted
             let url = values[1], state = values[2]
             var script = ""

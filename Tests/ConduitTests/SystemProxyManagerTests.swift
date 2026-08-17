@@ -693,6 +693,60 @@ extension SystemProxyManagerTests {
         )
     }
 
+    /// A user who empties their bypass list must still be able to turn the
+    /// proxy on. `setProxyBypass` needs the `Empty` sentinel for a list with no
+    /// domains — teardown has always sent it — but apply hand-assembled
+    /// `[service] + noProxyHosts`, which is a single value the contract
+    /// rejects. Run through the client that actually ships as the default, so
+    /// the contract guard is the thing being tested rather than a fake's
+    /// tolerance of it.
+    func testApplyWithAnEmptyBypassListSendsTheClearSentinel() throws {
+        var config = ProxyConfig.testFixture()
+        config.noProxyHosts = []
+
+        let runner = FakeNetworksetupRunner()
+        runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
+        let recorder = RecordingProxyPrivilegeClient()
+        let manager = SystemProxyManager(
+            privilegeClient: recorder,
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: config, mode: .manual, logger: nil)
+
+        let bypass = try XCTUnwrap(recorder.commands.last { $0.command == .setProxyBypass })
+        XCTAssertEqual(bypass.values, ["Wi-Fi", "Empty"])
+        XCTAssertNoThrow(
+            try AppleScriptPrivilegeClient().shellScript(for: .setProxyBypass, values: bypass.values),
+            "apply must send what the privileged contract accepts"
+        )
+    }
+
+    /// The same hole on the unprivileged path: a bare
+    /// `-setproxybypassdomains <service>` with no domains is answered by
+    /// `networksetup` with its usage text and a non-zero exit, so apply threw
+    /// instead of turning the proxy on.
+    func testApplyScriptWithAnEmptyBypassListWritesTheClearSentinel() throws {
+        var config = ProxyConfig.testFixture()
+        config.noProxyHosts = []
+
+        let runner = FakeNetworksetupRunner()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+
+        try manager.apply(config: config, mode: .manual, logger: nil)
+
+        let script = try XCTUnwrap(runner.shellScripts.last)
+        XCTAssertTrue(
+            script.contains("-setproxybypassdomains 'Wi-Fi' Empty"),
+            "an empty list has a spelling; a command with no domains at all is not it: \(script)"
+        )
+    }
+
     /// Each service is its own unit of work. A failure on one must not decide
     /// the outcome for the others, and must not drop their records.
     func testOneServiceFailingDoesNotDropAnotherServicesRecord() throws {
