@@ -196,10 +196,16 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         )
 
         let config = configProvider()
-        let validationErrors = config.validate()
-        guard validationErrors.isEmpty else {
+        // Only the errors that describe something this listener depends on.
+        // The classification lives on `ConfigValidationError.blocksProxyStart`
+        // rather than as a filter written out here, so the next case added to
+        // the enum has to answer the question instead of inheriting "fatal".
+        // The non-blocking errors are not dropped — `AppState.saveConfig`
+        // banners them and the Settings row flags the field they came from.
+        let blockingErrors = config.validate().filter(\.blocksProxyStart)
+        guard blockingErrors.isEmpty else {
             throw ConfigValidationError.conflict(
-                description: validationErrors.compactMap(\.errorDescription).joined(separator: "; ")
+                description: blockingErrors.compactMap(\.errorDescription).joined(separator: "; ")
             )
         }
         let listenHost = config.effectiveListenHost
