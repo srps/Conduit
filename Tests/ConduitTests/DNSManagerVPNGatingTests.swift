@@ -6,16 +6,35 @@ import XCTest
 
 // MARK: - Test Double
 
+private struct FakePrivilegeFailure: Error, LocalizedError {
+    let domain: String
+    var errorDescription: String? { "helper refused \(domain)" }
+}
+
 private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
     private let lock = NSLock()
     private var _commands: [(PrivilegedOperation, [String])] = []
+    private var _failingDomains: Set<String> = []
+
+    /// Domains whose privileged operation fails, so a test can put a failure in
+    /// the middle of a batch and see what the rest of it did.
+    var failingDomains: Set<String> {
+        get { lock.withLock { _failingDomains } }
+        set { lock.withLock { _failingDomains = newValue } }
+    }
 
     var executedCommands: [(PrivilegedOperation, [String])] {
         lock.withLock { _commands }
     }
 
     func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        lock.withLock { _commands.append((operation, values)) }
+        let domain = values.first
+        try lock.withLock {
+            _commands.append((operation, values))
+            if let domain, _failingDomains.contains(domain) {
+                throw FakePrivilegeFailure(domain: domain)
+            }
+        }
     }
 
     func commands(matching operation: PrivilegedOperation) -> [[String]] {
@@ -270,6 +289,88 @@ final class DNSManagerVPNGatingTests: XCTestCase {
         XCTAssertFalse(
             manager.isApplied(config: makeConfig(), vpnConnected: false),
             "a stranded entry file is pending work, so the caller must not skip apply"
+        )
+    }
+
+    // MARK: - A failed removal must not abandon the rest
+
+    /// The sharp case. `clearEntryFiles` runs on VPN-down and nothing re-runs
+    /// it, so a first failure that cancelled the rest would leave every
+    /// remaining domain pointed at tunnel-internal servers that are now
+    /// unreachable — blackholing them for every process on the machine, and
+    /// deadlocking reconnection when the gateway's own hostname falls under one
+    /// of them.
+    func testClearEntryFilesRemovesTheRestAfterAFailure() {
+        recording.failingDomains = ["corp.example"]
+        XCTAssertThrowsError(try manager.clearEntryFiles(config: makeConfig(), logger: nil))
+        XCTAssertEqual(
+            removedDomains(),
+            ["corp.example", "internal.example"],
+            "the failure is reported, but every later domain is still attempted"
+        )
+    }
+
+    func testAFailedRemovalNamesTheDomainsLeftBehind() {
+        recording.failingDomains = ["corp.example", "internal.example"]
+        XCTAssertThrowsError(try manager.clearEntryFiles(config: makeConfig(), logger: nil)) { error in
+            guard let removal = error as? DNSRemovalError else {
+                return XCTFail("expected DNSRemovalError, got \(error)")
+            }
+            XCTAssertEqual(removal.domains, ["corp.example", "internal.example"])
+            XCTAssertTrue(
+                removal.errorDescription?.contains("corp.example") == true,
+                "an operator reading the log needs the domain names, not a count"
+            )
+        }
+    }
+
+    /// A failure among the entry files must not take the intercept files with
+    /// it: those point at a forwarder this teardown is stopping.
+    func testClearStillRemovesInterceptFilesAfterAnEntryFailure() {
+        recording.failingDomains = ["corp.example"]
+        XCTAssertThrowsError(try manager.clear(config: makeConfig(), logger: nil))
+        XCTAssertEqual(
+            removedDomains(),
+            ["corp.example", "internal.example", "intercepted.example"]
+        )
+    }
+
+    func testClearInterceptFilesRemovesTheRestAfterAFailure() {
+        var config = makeConfig()
+        config.dnsInterceptRules = [
+            DNSInterceptRule(pattern: "*.a.example"),
+            DNSInterceptRule(pattern: "*.b.example"),
+        ]
+        recording.failingDomains = ["a.example"]
+        XCTAssertThrowsError(try manager.clearInterceptFiles(config: config, logger: nil))
+        XCTAssertEqual(removedDomains(), ["a.example", "b.example"])
+    }
+
+    func testReconcileStaleSweepRemovesTheRestAfterAFailure() {
+        let old = makeConfig()
+        var new = makeConfig()
+        new.dnsEntries = []
+        new.dnsInterceptRules = []
+        recording.failingDomains = ["corp.example"]
+        XCTAssertThrowsError(try manager.reconcile(old: old, new: new, logger: nil, vpnConnected: true))
+        XCTAssertEqual(
+            removedDomains(),
+            ["corp.example", "internal.example", "intercepted.example"]
+        )
+    }
+
+    /// The asymmetry is deliberate and worth pinning down. A partial *apply*
+    /// reads as not-applied through `isApplied`, and the start path guards on
+    /// it, so stopping early costs nothing and the next start repairs it.
+    /// Continuing would instead write files for a domain set the caller was
+    /// told had failed.
+    func testApplyStillStopsAtTheFirstFailure() {
+        recording.failingDomains = ["corp.example"]
+        XCTAssertThrowsError(try manager.applyEntryFiles(config: makeConfig(), logger: nil))
+        XCTAssertEqual(
+            appliedDomains(),
+            ["corp.example"],
+            "removals continue past a failure; applies still stop"
         )
     }
 
