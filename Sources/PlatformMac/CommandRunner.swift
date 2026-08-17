@@ -205,6 +205,9 @@ package enum CommandRunner {
         private var overflowed = false
         private var failure: String?
         private var cancelled = false
+        /// Set only by the read loop, when `read` returns 0. The one piece of
+        /// evidence that the stream really ended rather than being given up on.
+        private var reachedEOF = false
         private let finished = DispatchSemaphore(value: 0)
 
         init(_ handle: FileHandle, on queue: DispatchQueue) {
@@ -220,16 +223,21 @@ package enum CommandRunner {
         /// descriptor or worker outlives the call.
         func join(deadline: DispatchTime) -> DrainedStream {
             if finished.wait(timeout: deadline) == .timedOut {
-                lock.withLock {
-                    cancelled = true
-                    if failure == nil {
-                        failure = "a writer still held the pipe open after the child exited"
-                    }
-                }
+                lock.withLock { cancelled = true }
                 finished.wait()
             }
             return lock.withLock {
-                DrainedStream(
+                // Judged from what the loop actually did, and only once it has
+                // stopped. Recording the failure at the moment the deadline fires
+                // would call a stream truncated when the read in fact finished in
+                // the instant between the two — and would turn any later increase
+                // in poll-slice latency, or a large pipe that needs longer than
+                // the grace to flush after the child exits, into a hard failure
+                // on a complete read.
+                if failure == nil, !reachedEOF {
+                    failure = "a writer still held the pipe open after the child exited"
+                }
+                return DrainedStream(
                     text: String(decoding: collected, as: UTF8.self),
                     overflowed: overflowed,
                     failure: failure
@@ -258,7 +266,11 @@ package enum CommandRunner {
                 if ready == 0 { continue }
 
                 let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
-                if count == 0 { return }   // EOF: every writer has closed.
+                if count == 0 {
+                    // EOF: every writer has closed.
+                    lock.withLock { reachedEOF = true }
+                    return
+                }
                 if count < 0 {
                     if errno == EINTR || errno == EAGAIN { continue }
                     record(errno: errno, while: "reading")
@@ -283,8 +295,15 @@ package enum CommandRunner {
         /// A read that fails is not a read that ended. Reporting it as EOF would
         /// hand back a prefix as though it were the whole stream, which is the
         /// silent truncation the rest of this file exists to prevent.
+        /// `strerror_r` rather than `strerror`: both drains share one concurrent
+        /// queue, so this is reachable from two threads at once, and POSIX does
+        /// not require `strerror` to be thread-safe. Darwin returns constants for
+        /// known codes but falls back to a shared static buffer for unknown ones.
         private func record(errno code: Int32, while verb: String) {
-            let message = String(cString: strerror(code))
+            var buffer = [CChar](repeating: 0, count: 256)
+            let message = strerror_r(code, &buffer, buffer.count) == 0
+                ? String(cString: buffer)
+                : "errno \(code)"
             lock.withLock { failure = "\(verb) the output pipe failed: \(message)" }
         }
     }

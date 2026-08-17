@@ -321,7 +321,23 @@ package final class DNSManager: @unchecked Sendable {
         // the worse of the two states. `removeAll` has already logged each
         // domain it left behind; the aggregate is rethrown afterwards so the
         // caller still sees the failure, just not instead of the migration.
-        try apply(config: new, logger: logger, vpnConnected: vpnConnected)
+        do {
+            try apply(config: new, logger: logger, vpnConnected: vpnConnected)
+        } catch {
+            // Only one error can be thrown, and the caller asked for the
+            // migration, so that failure is the one that travels. The sweep's
+            // aggregate would otherwise vanish here — and naming the stranded
+            // files is the whole point of having it — so it is logged before the
+            // apply error goes up.
+            if let removalError {
+                logger?.log(
+                    .warning,
+                    "The stale-file sweep also failed: \(removalError.localizedDescription)",
+                    category: .system
+                )
+            }
+            throw error
+        }
         if let removalError { throw removalError }
     }
 
@@ -442,8 +458,16 @@ package final class DNSManager: @unchecked Sendable {
     /// `domainRegex` rejects. Deleting that rule makes it stale, and the sweep
     /// for every *other* stale domain used to die with it.
     private func removeAll(_ domains: [String], logger: (any LogSink)?) throws {
+        // Deduplicated, order preserved. `clear` concatenates the entry domains
+        // and the intercept domains, and a domain configured as both would
+        // otherwise be counted twice in the aggregate — "failed to remove 2
+        // resolver file(s)" for one file. Removing twice is harmless because
+        // removal is idempotent; miscounting it to the operator is not.
+        var seen = Set<String>()
+        let unique = domains.filter { seen.insert($0).inserted }
+
         var failures: [DNSRemovalError.Failure] = []
-        for domain in domains {
+        for domain in unique {
             // The two failures want different advice, so they are reported
             // separately. An unusable name means no file of ours can exist
             // under it — every writer validates first — so there is nothing
