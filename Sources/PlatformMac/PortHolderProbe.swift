@@ -6,10 +6,10 @@ import ProxyKernel
 /// Names the process listening on a local address, via `libproc`.
 ///
 /// Used to turn "port 3128 is already in use" into "port 3128 is held by
-/// mac-proxy2 (pid 94930, /Library/Bosch/Proxy/mac-proxy2)", which is the
-/// difference between a dead end and something the user can act on. The
-/// motivating case is a corporate proxy agent that claims the same port on
-/// every VPN reconnect.
+/// corp-proxy-agent (pid 94930, /Library/CorpIT/Proxy/corp-proxy-agent)", which
+/// is the difference between a dead end and something the user can act on. The
+/// motivating case is a managed corporate proxy agent that claims the same port
+/// on every VPN reconnect.
 ///
 /// Deliberately does *not* shell out to `lsof`: this runs on a failed start,
 /// where spawning a process that can take seconds to walk every open file on
