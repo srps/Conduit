@@ -64,7 +64,13 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             return "dns.interceptRules[\(index)]: '\(pattern)' does not name a usable "
                  + "resolver domain. \(reason.localizedDescription)"
         case .invalidInterceptIP(let index, let value):
-            return "dns.interceptRules[\(index)]: '\(value)' is not an IP address."
+            // Not "is not an IP address": `::1` is one, and telling someone
+            // who typed a well-formed address that it is malformed sends them
+            // looking for a typo that is not there. The reason is the answer
+            // synthesis, so the message says that.
+            return "dns.interceptRules[\(index)]: '\(value)' is not a usable intercept target. "
+                 + "It must be an IPv4 address — intercept answers are synthesized as A records, "
+                 + "so any other value leaves the domain resolving nowhere."
         case .conflict(let description):
             return description
         }
@@ -213,7 +219,14 @@ extension ProxyConfig {
                     )
                 }
             }
-            if !IPAddressSyntax.isValid(rule.interceptIP) {
+            // IPv4 only, and not as a simplification. `DNSWireFormat`
+            // `.synthesizeDirectResponse` is the code that turns this value
+            // into an answer: it replies NODATA to AAAA and builds an A record
+            // from four dot-separated octets for everything else, so an IPv6
+            // target makes it return nil and `LocalDNSForwarder` answer
+            // SERVFAIL. The domain then resolves in neither family — the exact
+            // blackhole an intercept rule is supposed to prevent.
+            if !IPAddressSyntax.isIPv4(rule.interceptIP) {
                 errors.append(.invalidInterceptIP(index: i, value: rule.interceptIP))
             }
         }

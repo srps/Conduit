@@ -12,24 +12,25 @@ import Foundation
 /// A new check layered on top of it would inherit the same blind spot, so this
 /// calls `inet_pton`, which is the same parser that will later be asked to
 /// interpret the value for real.
+///
+/// One family, one function, because "is this an IP address" turned out to be
+/// nobody's question here either. The callers — the intercept-rule boundary and
+/// its Settings field — need "can this be an A record", since
+/// `DNSWireFormat.synthesizeDirectResponse` builds A records and nothing else.
+/// A general `isValid` briefly existed and both callers reached for it, which
+/// is how a config that blackholes its domain came to be certified as correct.
+/// An `isIPv6` will be needed when `HelperInputValidator.validateIPAddress`
+/// drops its regex, and belongs in that change with its trust-boundary
+/// argument rather than sitting here unreferenced until then.
 public enum IPAddressSyntax {
-    public static func isValid(_ address: String) -> Bool {
-        isIPv4(address) || isIPv6(address)
-    }
-
+    /// Bracketed literals are **not** accepted for either family: brackets are
+    /// URL authority syntax (RFC 3986 §3.2.2), not part of an address, and the
+    /// callers that carry them — `routing.noProxyHosts`, the bypass list —
+    /// carry whole host tokens rather than addresses. Stripping them here would
+    /// make this quietly answer a different question for one caller than for
+    /// the rest.
     public static func isIPv4(_ address: String) -> Bool {
         var buffer = in_addr()
         return inet_pton(AF_INET, address, &buffer) == 1
-    }
-
-    /// Bracketed literals (`[::1]`) are **not** accepted: the brackets are URL
-    /// authority syntax (RFC 3986 §3.2.2), not part of the address, and the
-    /// callers that need them — `routing.noProxyHosts`, the bypass list — carry
-    /// whole host tokens rather than addresses. Stripping them here would make
-    /// this quietly answer a different question for one caller than for the
-    /// rest.
-    public static func isIPv6(_ address: String) -> Bool {
-        var buffer = in6_addr()
-        return inet_pton(AF_INET6, address, &buffer) == 1
     }
 }

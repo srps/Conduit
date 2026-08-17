@@ -68,8 +68,22 @@ final class InterceptRuleFieldValidationTests: XCTestCase {
         for ip in ["127.44.3.0", "::1", "::::::", "ffff", "999.1.1.1", ""] {
             let rule = DNSInterceptRule(pattern: "*.a.example", interceptIP: ip)
             XCTAssertEqual(
-                !IPAddressSyntax.isValid(ip), boundaryRejects(rule),
+                !IPAddressSyntax.isIPv4(ip), boundaryRejects(rule),
                 "the field and the boundary disagree on '\(ip)'"
+            )
+        }
+    }
+
+    /// `::1` used to be asserted *valid* here, which certified a rule that
+    /// blackholes its domain: `DNSWireFormat.synthesizeDirectResponse` answers
+    /// AAAA with NODATA and builds A records from four octets, so an IPv6
+    /// target returns nil and the forwarder replies SERVFAIL. The field has to
+    /// be the place that says so, since it is where the address is typed.
+    func testAnIPv6TargetIsRejectedByTheField() {
+        for ip in ["::1", "fe80::1", "2001:db8::1"] {
+            XCTAssertFalse(
+                IPAddressSyntax.isIPv4(ip),
+                "'\(ip)' is a well-formed address but not one this can answer with"
             )
         }
     }
