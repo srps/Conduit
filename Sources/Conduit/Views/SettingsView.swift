@@ -2,6 +2,7 @@
 import AppKit
 import PlatformMac
 import ProxyKernel
+import ConduitShared
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -760,29 +761,7 @@ struct SettingsView: View {
                 } else {
                     VStack(spacing: 6) {
                         ForEach($appState.config.dnsInterceptRules) { $rule in
-                            HStack(spacing: 10) {
-                                Toggle("", isOn: $rule.enabled)
-                                    .labelsHidden()
-                                    .toggleStyle(.switch)
-                                    .controlSize(.mini)
-                                TextField("Pattern", text: $rule.pattern)
-                                    .textFieldStyle(.roundedBorder)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .frame(minWidth: 160)
-                                Text("→")
-                                    .foregroundStyle(.tertiary)
-                                TextField("IP", text: $rule.interceptIP)
-                                    .textFieldStyle(.roundedBorder)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .frame(width: 120)
-                                Button {
-                                    appState.config.dnsInterceptRules.removeAll { $0.id == rule.id }
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
+                            interceptRuleRow($rule)
                         }
                     }
                 }
@@ -791,6 +770,87 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// One intercept rule, with its own validation state.
+    ///
+    /// Both fields used to be bare `TextField`s. A pattern that derives to an
+    /// unusable domain is now caught at the config boundary (#68), but a
+    /// rejection the user only meets as "Configuration problem: …" in the
+    /// menu-bar banner — after closing Settings — does not tell them which of
+    /// several rows to fix. The validators called here are the same ones the
+    /// boundary uses; the view introduces no grammar of its own.
+    @ViewBuilder
+    private func interceptRuleRow(_ rule: Binding<DNSInterceptRule>) -> some View {
+        let patternProblem = Self.interceptPatternProblem(rule.wrappedValue)
+        let ipIsValid = IPAddressSyntax.isValid(rule.wrappedValue.interceptIP)
+
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 10) {
+                Toggle("", isOn: rule.enabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                TextField("Pattern", text: rule.pattern)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(minWidth: 160)
+                    .modifier(InvalidFieldHighlight(isInvalid: patternProblem != nil))
+                    .accessibilityLabel("Intercept pattern")
+                Text("→")
+                    .foregroundStyle(.tertiary)
+                TextField("IP", text: rule.interceptIP)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(width: 120)
+                    .modifier(InvalidFieldHighlight(isInvalid: !ipIsValid))
+                    .accessibilityLabel("Intercept IP address")
+                Button {
+                    let id = rule.wrappedValue.id
+                    appState.config.dnsInterceptRules.removeAll { $0.id == id }
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Remove intercept rule")
+            }
+
+            if let patternProblem {
+                interceptRuleProblem(patternProblem.localizedDescription)
+            }
+            if !ipIsValid {
+                interceptRuleProblem(
+                    "'\(rule.wrappedValue.interceptIP)' is not an IP address. "
+                        + "Use an IPv4 or IPv6 literal such as 127.44.3.0."
+                )
+            }
+        }
+    }
+
+    private func interceptRuleProblem(_ message: String) -> some View {
+        Label(message, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// The pattern is validated through its **derived** resolver domain, the
+    /// same string `ProxyConfig.validate()` checks and the same one that
+    /// becomes `/etc/resolver/<domain>` — so the leading `*.` a user is
+    /// supposed to type never reads as an error.
+    ///
+    /// An empty field reports nothing: a row the user has only just added is
+    /// not yet a mistake, and flagging it while they are still typing the
+    /// first character is noise.
+    static func interceptPatternProblem(_ rule: DNSInterceptRule) -> DomainNameError? {
+        guard !rule.pattern.isEmpty else { return nil }
+        do {
+            try DomainNameSyntax.validate(rule.resolverDomain)
+            return nil
+        } catch {
+            return error
         }
     }
 
@@ -1607,5 +1667,29 @@ private struct UpstreamDropDelegate: DropDelegate {
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         DropProposal(operation: .move)
+    }
+}
+
+/// Invalid-state treatment for a text field: a thin warning-coloured border
+/// drawn over the control's own.
+///
+/// Deliberately minimal. AppKit has no invalid-field style to adopt and this
+/// app has no precedent to copy — validation surfaces today only as
+/// `AppState`'s "Configuration problem: …" banner — so the affordance stays a
+/// border plus a reason underneath rather than inventing a widget. The colour
+/// matches the `.orange` this settings pane already uses for "this will not
+/// work" notes, and it is never the only signal: the reason is always spelled
+/// out in text below, which is what a user with a colour-vision difference
+/// (or a screen reader) actually reads.
+private struct InvalidFieldHighlight: ViewModifier {
+    let isInvalid: Bool
+
+    func body(content: Content) -> some View {
+        content.overlay {
+            if isInvalid {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(Color.orange, lineWidth: 1.5)
+            }
+        }
     }
 }
