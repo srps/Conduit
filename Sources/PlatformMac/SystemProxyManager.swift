@@ -119,14 +119,20 @@ package final class SystemProxyManager: @unchecked Sendable {
             let s = service.shellQuoted
             let h = config.localHost.shellQuoted
             let p = String(config.localPort)
-            let bypass = config.noProxyHosts.map { $0.shellQuoted }.joined(separator: " ")
+            // Through the shared renderer, which spells an empty list `Empty`.
+            // Interpolating the joined list directly emitted a bare
+            // `-setproxybypassdomains <service>` with no domains when the user
+            // had cleared their bypass list — `networksetup` answers that with
+            // its usage text and a non-zero exit, and `apply` then threw
+            // instead of turning the proxy on.
+            let bypassCommands = ProxyWriteStep.bypass(config.noProxyHosts).shellCommands(service: service)
 
             switch mode {
             case .manual:
                 script += "/usr/sbin/networksetup -setautoproxystate \(s) off\n"
                 script += "/usr/sbin/networksetup -setwebproxy \(s) \(h) \(p)\n"
                 script += "/usr/sbin/networksetup -setsecurewebproxy \(s) \(h) \(p)\n"
-                script += "/usr/sbin/networksetup -setproxybypassdomains \(s) \(bypass)\n"
+                script += bypassCommands.joined(separator: "\n") + "\n"
                 script += "/usr/sbin/networksetup -setwebproxystate \(s) on\n"
                 script += "/usr/sbin/networksetup -setsecurewebproxystate \(s) on\n"
             case .pac:
@@ -449,7 +455,14 @@ package final class SystemProxyManager: @unchecked Sendable {
             case .manual:
                 try privilegeClient.execute(.disableAutoproxy, values: [service])
                 try privilegeClient.execute(.applySystemProxy, values: [service, config.localHost, String(config.localPort)])
-                try privilegeClient.execute(.setProxyBypass, values: [service] + config.noProxyHosts)
+                // Rendered rather than assembled inline: `setProxyBypass` needs
+                // the `Empty` sentinel for a list with no domains, and a caller
+                // that hand-built `[service] + noProxyHosts` sent a single
+                // value instead — which the contract rejects, so a user who had
+                // cleared their bypass list could not turn the proxy on at all
+                // on an admin-required machine. `ProxyWriteStep` already knows
+                // that spelling; teardown has been using it all along.
+                try privilegeClient.execute(batch: [ProxyWriteStep.bypass(config.noProxyHosts).privilegedStep(service: service)])
             case .pac:
                 if !pacURL.isEmpty {
                     // Set PAC first so a failure in clearing manual proxies

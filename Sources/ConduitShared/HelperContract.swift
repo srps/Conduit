@@ -68,8 +68,16 @@ public enum HelperInputValidator {
     /// A leading `-` is rejected separately: these reach `networksetup` as
     /// argv, so an entry that looks like a flag is the one shape that changes
     /// what the command does.
+    ///
+    /// Brackets are in the set because bracketed IPv6 literals are: `[::1]` is
+    /// in this product's own shipped `routing.noProxyHosts` default, and a
+    /// validator that rejects the value the app applies out of the box fails
+    /// every admin-required apply on a stock install. They are also what a
+    /// captured prior list carries back into a restore, since the bypass list
+    /// is read off the machine verbatim. Neither `[` nor `]` is a shell
+    /// metacharacter that survives `shellQuoted`, and as argv they are inert.
     private static let proxyBypassEntryRegex = try! NSRegularExpression(
-        pattern: #"^[a-zA-Z0-9*._:/\-]+$"#
+        pattern: #"^[a-zA-Z0-9*._:/\[\]\-]+$"#
     )
 
     public static func validateDomain(_ domain: String) -> Bool {
