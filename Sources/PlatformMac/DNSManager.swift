@@ -132,15 +132,11 @@ package final class DNSManager: @unchecked Sendable {
             guard config.transparentProxyEnabled else { return [] }
         }
         let rules = forCleanup ? config.dnsInterceptRules : config.enabledInterceptRules
-        return rules.map { rule in
-            var base = rule.pattern
-            if base.hasPrefix("*.") {
-                base = String(base.dropFirst(2))
-            } else if base.hasPrefix("*") {
-                base = String(base.dropFirst(1))
-            }
-            return base
-        }.filter { !$0.isEmpty }
+        // One derivation, on the model, so `ProxyConfig.validate()` checks the
+        // same string this writes. The empty filter stays for configs written
+        // before that validation existed: a bare `*` pattern derives to "", and
+        // `/etc/resolver/` is a directory.
+        return rules.map(\.resolverDomain).filter { !$0.isEmpty }
     }
 
     // MARK: - Entry Processing
