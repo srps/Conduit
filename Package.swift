@@ -75,7 +75,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "Conduit",
-            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "PlatformMac"],
+            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared"],
             path: "Sources/Conduit"
         ),
         .executableTarget(
