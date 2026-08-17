@@ -784,7 +784,11 @@ struct SettingsView: View {
     @ViewBuilder
     private func interceptRuleRow(_ rule: Binding<DNSInterceptRule>) -> some View {
         let patternProblem = Self.interceptPatternProblem(rule.wrappedValue)
-        let ipIsValid = IPAddressSyntax.isValid(rule.wrappedValue.interceptIP)
+        // IPv4 only, same as the config boundary, and for the same reason:
+        // `DNSWireFormat.synthesizeDirectResponse` builds an A record and
+        // nothing else, so an IPv6 target is answered SERVFAIL and the domain
+        // resolves in neither family.
+        let ipIsValid = IPAddressSyntax.isIPv4(rule.wrappedValue.interceptIP)
 
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 10) {
@@ -822,8 +826,9 @@ struct SettingsView: View {
             }
             if !ipIsValid {
                 interceptRuleProblem(
-                    "'\(rule.wrappedValue.interceptIP)' is not an IP address. "
-                        + "Use an IPv4 or IPv6 literal such as 127.44.3.0."
+                    "'\(rule.wrappedValue.interceptIP)' is not a usable intercept target. "
+                        + "Intercept answers are synthesized as A records, so this has to be an "
+                        + "IPv4 literal such as 127.44.3.0."
                 )
             }
         }

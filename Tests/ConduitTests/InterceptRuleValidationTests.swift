@@ -152,11 +152,46 @@ final class InterceptRuleValidationTests: XCTestCase {
     }
 
     func testWellFormedInterceptIPsAreAccepted() {
-        for good in ["127.44.3.0", "10.0.0.1", "::1", "fe80::1", "2001:db8::1"] {
+        for good in ["127.44.3.0", "10.0.0.1", "192.0.2.7"] {
             var config = makeConfig()
             config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.a.example", interceptIP: good)]
-            XCTAssertTrue(interceptErrors(config).isEmpty, "'\(good)' is an IP address")
+            XCTAssertTrue(interceptErrors(config).isEmpty, "'\(good)' is an IPv4 address")
         }
+    }
+
+    /// An IPv6 target is well-formed and unusable, which is the harder case to
+    /// argue and the one that was being certified as fine.
+    /// `DNSWireFormat.synthesizeDirectResponse` answers AAAA with NODATA and
+    /// builds A records out of four dot-separated octets, so an IPv6 address
+    /// makes it return nil and `LocalDNSForwarder` reply SERVFAIL — the domain
+    /// resolves in neither family. See
+    /// `testSynthesizeDirectResponseIPv6TargetReturnsNil`.
+    func testAnIPv6InterceptTargetIsRejected() {
+        for v6 in ["::1", "fe80::1", "2001:db8::1"] {
+            var config = makeConfig()
+            config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.a.example", interceptIP: v6)]
+            XCTAssertEqual(
+                interceptErrors(config).count, 1,
+                "'\(v6)' is an address, but not one an A record can carry"
+            )
+        }
+    }
+
+    /// And the message has to say which of the two it is. "'::1' is not an IP
+    /// address" was false, and sends someone hunting a typo in a string that
+    /// has none.
+    func testTheIPMessageExplainsTheConstraintRatherThanCallingItMalformed() {
+        var config = makeConfig()
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.a.example", interceptIP: "::1")]
+        guard let message = interceptErrors(config).first?.localizedDescription else {
+            return XCTFail("'::1' has to be rejected before its message can be judged")
+        }
+        XCTAssertTrue(message.contains("IPv4"), "the message must name the constraint")
+        XCTAssertTrue(message.contains("A record"), "and why it exists")
+        XCTAssertFalse(
+            message.contains("is not an IP address"),
+            "'::1' is an IP address; saying otherwise is a lie the user cannot act on"
+        )
     }
 
     // MARK: - The privileged path

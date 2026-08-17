@@ -157,6 +157,18 @@ final class TunnelDNSResponderTests: XCTestCase {
         XCTAssertNil(DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: "not-an-ip"))
     }
 
+    /// The fact the intercept-rule validators are constrained by: this
+    /// synthesizes A records and nothing else, so a well-formed IPv6 target is
+    /// as unanswerable as a malformed string. Paired with the AAAA case above,
+    /// which returns NODATA, an IPv6 intercept target resolves in neither
+    /// family — `LocalDNSForwarder` turns the nil into SERVFAIL. Hence
+    /// `IPAddressSyntax.isIPv4` at the config boundary and in Settings.
+    func testSynthesizeDirectResponseIPv6TargetReturnsNil() {
+        let query = DNSWireFormat.buildQuery(domain: "test.example.com", qtype: 1)
+        XCTAssertNil(DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: "::1"))
+        XCTAssertNil(DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: "2001:db8::1"))
+    }
+
     // MARK: - TunnelResolverManager with Recording
 
     @MainActor
