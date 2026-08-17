@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import ConduitShared
 
 package enum ConfigValidationError: Error, LocalizedError, Sendable {
     case invalidPort(field: String, value: Int)
     case invalidLimit(field: String, value: Int, min: Int)
     case invalidDuration(field: String, value: TimeInterval)
     case invalidHost(field: String, value: String)
+    /// An intercept pattern whose derived resolver domain is unusable. Carries
+    /// the index so the Settings row can be pointed at, and the reason so it
+    /// can say which character to change.
+    case invalidInterceptPattern(index: Int, pattern: String, reason: DomainNameError)
+    case invalidInterceptIP(index: Int, value: String)
     case conflict(description: String)
 
     package var errorDescription: String? {
@@ -18,6 +24,11 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             return "\(field): \(value)s is not a valid duration"
         case .invalidHost(let field, let value):
             return "\(field): '\(value)' is not a valid host"
+        case .invalidInterceptPattern(let index, let pattern, let reason):
+            return "dns.interceptRules[\(index)]: '\(pattern)' does not name a usable "
+                 + "resolver domain. \(reason.localizedDescription)"
+        case .invalidInterceptIP(let index, let value):
+            return "dns.interceptRules[\(index)]: '\(value)' is not an IP address."
         case .conflict(let description):
             return description
         }
@@ -80,6 +91,8 @@ extension ProxyConfig {
             errors.append(.invalidHost(field: "routing.pacURL", value: routing.pacURL))
         }
 
+        validateInterceptRules(into: &errors)
+
         for (i, tunnel) in tunnels.definitions.enumerated() {
             let label = tunnel.effectiveLabel
             validatePort("tunnels.definitions[\(i)](\(label)).localPort", tunnel.localPort, into: &errors)
@@ -117,6 +130,41 @@ extension ProxyConfig {
         }
 
         return errors
+    }
+
+    /// Intercept rules, checked here so a bad one never reaches the privileged
+    /// path.
+    ///
+    /// `DNSManager.applyInterceptFiles` validates the whole derived set before
+    /// writing any of it, and that fail-fast is right — a half-applied intercept
+    /// set is worse than none, since the files it did write outlive the process
+    /// and blackhole their domains. The defect (#68) was that a bad pattern got
+    /// that far at all: nothing upstream looked at it, so ONE unusable rule
+    /// silently disabled intercept files for **every** rule.
+    ///
+    /// Two things this deliberately does:
+    ///
+    /// - It validates the **derived** domain (`resolverDomain`), not the
+    ///   pattern. `/etc/resolver/<derived>` is the string that reaches the
+    ///   filesystem and `networksetup`; the pattern's leading `*` is notation
+    ///   that never gets there.
+    /// - It validates **every** rule, enabled or not. The cleanup path derives
+    ///   its set from all of them (`forCleanup: true`) — by teardown time the
+    ///   enable flags have typically already flipped false — so a disabled rule
+    ///   with an unusable pattern can still break a teardown.
+    private func validateInterceptRules(into errors: inout [ConfigValidationError]) {
+        for (i, rule) in dnsInterceptRules.enumerated() {
+            do {
+                try DomainNameSyntax.validate(rule.resolverDomain)
+            } catch {
+                errors.append(
+                    .invalidInterceptPattern(index: i, pattern: rule.pattern, reason: error)
+                )
+            }
+            if !IPAddressSyntax.isValid(rule.interceptIP) {
+                errors.append(.invalidInterceptIP(index: i, value: rule.interceptIP))
+            }
+        }
     }
 
     private func validatePort(_ field: String, _ value: Int, into errors: inout [ConfigValidationError]) {

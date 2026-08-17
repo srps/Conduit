@@ -614,6 +614,23 @@ package struct DNSInterceptRule: Codable, Hashable, Identifiable, Sendable {
         self.enabled = enabled
     }
 
+    /// The domain this rule becomes on disk: `/etc/resolver/<resolverDomain>`.
+    ///
+    /// A pattern is a *suffix* expression (`*.cursor.sh`), but a resolver file
+    /// is named for a domain, and macOS already treats a resolver domain as
+    /// covering its subdomains — so the leading wildcard is stripped rather
+    /// than encoded. This derivation used to live inside
+    /// `DNSManager.getInterceptDomains`, where nothing upstream could reach it;
+    /// it belongs on the model because the config validator has to check the
+    /// **stripped** name, not the pattern. Validating `*.foo` would pass a
+    /// grammar that has no wildcard while the thing actually written to disk
+    /// went unchecked.
+    package var resolverDomain: String {
+        if pattern.hasPrefix("*.") { return String(pattern.dropFirst(2)) }
+        if pattern.hasPrefix("*") { return String(pattern.dropFirst(1)) }
+        return pattern
+    }
+
     package func matches(_ domain: String) -> Bool {
         let lower = domain.lowercased()
         let pat = pattern.lowercased()
