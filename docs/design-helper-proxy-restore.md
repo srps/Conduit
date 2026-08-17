@@ -129,6 +129,24 @@ and launch is when the recorded prior is most likely still the truth. Same
 is *serving* the loopback port the machine points at — see
 [the port probe](#the-port-probe).
 
+Both run **off the main actor and are joined before anything else touches a
+platform surface** (`LaunchRecovery`). Neither half of that is optional. They
+interrogate the machine before deciding anything — the DNS one waits up to two
+seconds for a resolver to answer and then reads every service's servers, the
+proxy one spawns roughly four `networksetup` subprocesses per service — and
+their caller is `AppState.init`, which is `@MainActor` and runs before the menu
+bar exists, so inline they are seconds during which the app is on screen
+nowhere. But recovery restores the *previous* session's settings, so it cannot
+simply be left to land whenever: a `clear()` arriving after a `startProxy()`
+puts the crashed session's settings back over the ones the user just asked for,
+and an `apply()` arriving first makes recovery's own probe find the new
+listener and conclude nothing is orphaned.
+
+**This is the GUI app only.** `DaemonRuntimeHost` calls neither
+`restoreIfNeeded`, so a headless `pm-proxy` that is killed leaves both surfaces
+stranded until something else tears them down. Tracked in
+[#57](https://github.com/srps/Conduit/issues/57).
+
 ### 4. One description, two renderers
 
 `ProxyServiceState` decodes the journal record; `writeSteps` turns it into an

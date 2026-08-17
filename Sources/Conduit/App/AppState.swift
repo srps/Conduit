@@ -104,6 +104,10 @@ final class AppState: ObservableObject {
     /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
     /// every resolver-file apply path consults `entriesWanted`.
     private var splitDNSGate = SplitDNSVPNGate()
+    /// Launch-time crash recovery for the system-proxy and system-DNS surfaces.
+    /// Started by `init` and joined by `awaitLaunchRecovery()` — see
+    /// `LaunchRecovery` for why it is neither inline nor unordered.
+    private var launchRecovery: LaunchRecovery?
 
     init(vpnStatusMonitor: VPNStatusObserving? = nil) {
         let runtimeEnvironment = AppState.runtimeEnvironment()
@@ -301,14 +305,32 @@ final class AppState: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.handleSystemWake() }
         }
-        systemDNSManager.restoreIfNeeded(logger: logStore)
-        // Same reason as the line above: a run that was `SIGKILL`ed never got
-        // to tear down, and launch is when the recorded prior state is most
-        // likely still the truth. Without this the machine keeps pointing at a
-        // dead proxy port until the user next stops the proxy by hand.
-        systemConduit.restoreIfNeeded(logger: logStore)
+        // Crash recovery for both platform surfaces: a run that was `SIGKILL`ed
+        // never got to tear down, and launch is when the recorded prior state is
+        // most likely still the truth. Without this the machine keeps pointing
+        // at a dead proxy port and a dead resolver until the user next stops
+        // them by hand.
+        //
+        // Off the main actor, because both of these interrogate the machine
+        // before deciding anything — see `LaunchRecovery` for the measurements
+        // and for why `join()` has to guard every platform-surface caller.
+        let dnsRecovery = systemDNSManager
+        let proxyRecovery = systemConduit
+        launchRecovery = LaunchRecovery {
+            dnsRecovery.restoreIfNeeded(logger: logStore)
+            proxyRecovery.restoreIfNeeded(logger: logStore)
+        }
         isShowingOnboarding = config.authMode == .ntlmv2 && !credentialManager.hasSavedCredentials(for: config)
         refreshPreflight()
+        // The preflight above used to be guaranteed to read a machine recovery
+        // had already finished with, because recovery ran inline on the line
+        // before it. Now it can read the machine mid-restore and cache
+        // "system proxy applied" for a surface that is about to be handed back.
+        // Re-read once, when recovery lands.
+        Task { @MainActor [weak self] in
+            await self?.awaitLaunchRecovery()
+            self?.refreshPreflight()
+        }
     }
 
     private static func parsePortArgument() -> Int? {
@@ -598,11 +620,20 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Waits for launch-time crash recovery before this session touches a
+    /// platform surface. Free after the first call; see `LaunchRecovery` for
+    /// what goes wrong without it.
+    private func awaitLaunchRecovery() async {
+        await launchRecovery?.join()
+        launchRecovery = nil
+    }
+
     func startProxy() async throws {
         try await startProxy(postNotification: true)
     }
 
     private func startProxy(postNotification: Bool) async throws {
+        await awaitLaunchRecovery()
         guard orchestrator.snapshot.runtimeStatus.state != .starting && orchestrator.snapshot.runtimeStatus.state != .running else { return }
 
         do {
@@ -711,6 +742,7 @@ final class AppState: ObservableObject {
     }
 
     private func stopProxy(postNotification: Bool) async {
+        await awaitLaunchRecovery()
         await orchestrator.stopProxy()
 
         if platformConfig.manageSystemProxy {
@@ -796,6 +828,7 @@ final class AppState: ObservableObject {
     }
 
     func startDNS() async {
+        await awaitLaunchRecovery()
         if platformConfig.manageSystemDNS {
             do {
                 try systemDNSManager.saveCurrentDNS(logger: logStore)
@@ -841,6 +874,7 @@ final class AppState: ObservableObject {
     }
 
     func stopDNS() async {
+        await awaitLaunchRecovery()
         stopDNSHealthTimer()
 
         if platformConfig.manageSystemDNS || systemDNSManager.hasSavedState() {
@@ -1055,6 +1089,14 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Deliberately does *not* `awaitLaunchRecovery()`, unlike every other
+    /// platform-surface caller. `applicationWillTerminate` is synchronous by
+    /// AppKit's contract, so waiting would mean blocking the main thread at
+    /// quit — trading the launch freeze for a shutdown one. Quitting inside the
+    /// recovery window is instead left to overlap, which is safe rather than
+    /// merely unlikely: `PlatformStateJournal` is lock-protected per operation,
+    /// every write both paths make is an absolute set, and whichever finishes
+    /// first leaves the surface marked `.released` so the other skips.
     func performTerminationCleanup() {
         runtime.stop()
         stopDNSHealthTimer()
