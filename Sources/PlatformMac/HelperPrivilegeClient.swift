@@ -118,6 +118,17 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
             """
         case .setProxyBypass:
             guard values.count >= 2 else { throw PrivilegeClientError.executionFailed("setProxyBypass requires service and at least one domain or 'Empty'") }
+            // The one bypass rule this renderer needs, and deliberately not the
+            // helper's whole `validateProxyBypassEntry`. `shellQuoted` already
+            // neutralises every metacharacter, so what survives it is the shape
+            // quoting cannot help with: an entry that reaches `networksetup` as
+            // argv looking like a flag. Applying the full entry regex here
+            // instead would make the fallback reject captured lists the
+            // unprivileged path restores today, which is a teardown failure
+            // rather than a defence.
+            guard !values.dropFirst().contains(where: { $0.hasPrefix("-") }) else {
+                throw PrivilegeClientError.executionFailed("bypass domain must not look like a networksetup flag")
+            }
             let s = values[0].shellQuoted
             let domains = values.dropFirst().map { $0.shellQuoted }.joined(separator: " ")
             return "/usr/sbin/networksetup -setproxybypassdomains \(s) \(domains)"
@@ -255,8 +266,24 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
                     // error, not a reachability problem.
                     throw PrivilegeClientError.executionFailed(response.errorMessage ?? "Command failed")
                 }
-            } catch let error as PrivilegeClientError {
-                guard error.isHelperUnreachable else { throw error }
+            } catch {
+                // One catch, deliberately, and not two. There used to be a
+                // `catch let error as PrivilegeClientError` here and a bare
+                // `catch` below it that degraded just the same with no event —
+                // so a helper whose reply could not be decoded raised an admin
+                // password prompt with nothing in the event stream saying why,
+                // against `AGENTS.md`'s rule that recovery carries a structured
+                // event explaining how. Merging them makes the event a property
+                // of the structure rather than of remembering to add it twice.
+                //
+                // The helper having *run* the command and reported it failed is
+                // the one thing that is not a reachability problem: re-running
+                // it through osascript would raise a prompt only to fail
+                // identically. Everything else — cannot connect, cannot
+                // understand the reply — is worth retrying by another route.
+                if let clientError = error as? PrivilegeClientError, !clientError.isHelperUnreachable {
+                    throw clientError
+                }
                 // The documented fallback, which until now was unreachable:
                 // `sendRequest` throws `helperNotInstalled` on a failed connect
                 // and `communicationFailed` on a version mismatch, and both
@@ -275,9 +302,6 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
                 )
                 // Everything from here on goes through one prompt, including
                 // the step that just failed.
-                try fallback.execute(batch: Array(batch[index...]))
-                return
-            } catch {
                 try fallback.execute(batch: Array(batch[index...]))
                 return
             }

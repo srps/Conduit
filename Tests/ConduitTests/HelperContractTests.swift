@@ -141,7 +141,10 @@ final class HelperContractTests: XCTestCase {
     func testHelperHonoursTheSupportedVersionRange() {
         XCTAssertTrue(HelperProtocolVersion.isSupported(HelperProtocolVersion.current))
         XCTAssertTrue(HelperProtocolVersion.isSupported(HelperProtocolVersion.minimumSupported))
-        XCTAssertTrue(HelperProtocolVersion.isSupported(3), "v3 and v4 differ only by added commands")
+        XCTAssertTrue(
+            HelperProtocolVersion.isSupported(3),
+            "a v3 frame is still read; see minimumSupported for why that is a trade-off and not a claim that nothing changed"
+        )
         XCTAssertLessThanOrEqual(HelperProtocolVersion.minimumSupported, HelperProtocolVersion.current)
     }
 
@@ -370,6 +373,25 @@ final class HelperContractTests: XCTestCase {
         )
         XCTAssertTrue(endpointOnly.contains("-setsecurewebproxy 'Wi-Fi' 'old.example' '9999'"))
         XCTAssertTrue(endpointOnly.contains("-setsecurewebproxystate 'Wi-Fi' off"))
+    }
+
+    /// `AppleScriptPrivilegeClient` is `SystemProxyManager`'s *default*
+    /// privilege client, so it is the unguarded way in whenever the helper
+    /// client validates something it does not. The restore batch is
+    /// `setAutoproxy`, two `setWebProxyEndpoint`s and `setProxyBypass`; the
+    /// first three gained their guards with the operations themselves, and the
+    /// bypass step was left rendering straight into a root shell.
+    func testAppleScriptRendererRejectsAFlagShapedBypassEntry() {
+        let client = AppleScriptPrivilegeClient()
+
+        XCTAssertThrowsError(
+            try client.shellScript(for: .setProxyBypass, values: ["Wi-Fi", "-setwebproxystate"]),
+            "quoting stops metacharacters; it cannot stop an entry that reaches networksetup as a flag"
+        )
+        XCTAssertNoThrow(
+            try client.shellScript(for: .setProxyBypass, values: ["Wi-Fi", "*.local", "169.254/16", "[::1]"]),
+            "real bypass lists carry all three shapes and must still render"
+        )
     }
 
     /// Restoring one service takes four operations, and the AppleScript

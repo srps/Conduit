@@ -4,10 +4,12 @@ import ConduitShared
 
 enum HelperToolError: Error, LocalizedError {
     case invalidInput(String)
+    case commandFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .invalidInput(let msg): return "Invalid input: \(msg)"
+        case .commandFailed(let msg): return msg
         }
     }
 }
@@ -126,15 +128,22 @@ enum HelperTool {
                 // before us must not be left holding ours in its disabled
                 // `Server` field, where re-enabling by hand would hand the user
                 // a dead local address.
-                _ = try run("/usr/sbin/networksetup", [setter, service, "", "0"])
+                try runChecked("/usr/sbin/networksetup", [setter, service, "", "0"])
             } else if !host.isEmpty {
-                _ = try run("/usr/sbin/networksetup", [setter, service, host, port])
+                try runChecked("/usr/sbin/networksetup", [setter, service, host, port])
             }
             // State last: see `HelperCommand.setWebProxyEndpoint`. `-setwebproxy`
             // switches the proxy on as a side effect just as `-setautoproxyurl`
             // does — including when clearing — so writing the state first would
             // leave a restored-but-disabled endpoint switched on.
-            _ = try run("/usr/sbin/networksetup", [stateSetter, service, state])
+            //
+            // `runChecked` also means the address write aborts the sequence.
+            // Address-then-state is one instruction, not two: running the state
+            // write over an address that did not change lands the service in a
+            // configuration no caller asked for — the old address wearing the
+            // new state — and reports it as the restore having succeeded, after
+            // which `forgetAll` drops the only copy of the user's real setting.
+            try runChecked("/usr/sbin/networksetup", [stateSetter, service, state])
 
         case .setAutoproxy:
             guard arguments.values.count >= 3 else {
@@ -151,11 +160,15 @@ enum HelperTool {
                 throw HelperToolError.invalidInput("invalid proxy state: \(state)")
             }
             if !url.isEmpty {
-                _ = try run("/usr/sbin/networksetup", ["-setautoproxyurl", service, url])
+                try runChecked("/usr/sbin/networksetup", ["-setautoproxyurl", service, url])
             }
             // State last, and this one is not stylistic: `-setautoproxyurl`
             // leaves autoproxy reporting `Enabled: Yes` whatever it was before.
-            _ = try run("/usr/sbin/networksetup", ["-setautoproxystate", service, state])
+            // Checked, and therefore aborting: a URL write that failed followed
+            // by a state write that succeeded is a service holding *our* PAC URL
+            // under the user's recorded on/off state, reported as a completed
+            // restore.
+            try runChecked("/usr/sbin/networksetup", ["-setautoproxystate", service, state])
 
         case .setAutoproxyURL:
             guard arguments.values.count >= 2 else {
@@ -226,5 +239,53 @@ enum HelperTool {
         try process.run()
         process.waitUntilExit()
         return process.terminationStatus
+    }
+
+    /// Runs one write and fails the whole operation if it did not land.
+    ///
+    /// The same `networksetup` writes are rendered three ways — as a shell
+    /// script for the unprivileged path, as an `osascript` batch, and as these
+    /// operations — and two of the three already treat a non-zero exit as a
+    /// failed write (`SystemProxyManager.write` and
+    /// `AppleScriptPrivilegeClient.runPrivileged`, both under `set -e`). Only
+    /// the helper discarded the status and answered `.ok()`. Restore is the
+    /// caller that cannot survive the difference: a teardown told it succeeded
+    /// goes on to `forgetAll`, and the journal holds the only copy of the
+    /// user's real proxy settings. Every write here is an absolute set, so
+    /// aborting early and re-running the sequence later is safe.
+    ///
+    /// Deliberately scoped to the two operations protocol 4 adds, and not to
+    /// the pre-4 commands. Those are what `apply` uses, they have clients in
+    /// the field built against today's lenient behaviour, and deciding which of
+    /// *their* non-zero exits are benign needs `networksetup -set*` runs on a
+    /// real machine — which is why the rest stays on issue #59. The two here
+    /// are reached only by restore, where a wrongly-reported failure costs a
+    /// retained journal record and a warning, not a lost setting.
+    private static func runChecked(_ executable: String, _ arguments: [String]) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        // Both streams, because `networksetup` is not consistent about which
+        // one it complains on — `SystemProxyManager.requiresAdmin` reads both
+        // for the same reason.
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        try process.run()
+        // Drained before `waitUntilExit`: a process that fills a pipe buffer
+        // while we wait for it to exit never exits.
+        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus != 0 else { return }
+        let message = [errorData, outputData]
+            .compactMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " | ")
+        throw HelperToolError.commandFailed(
+            "\(executable) \(arguments.first ?? "") exited \(process.terminationStatus)"
+                + (message.isEmpty ? "" : ": \(message)")
+        )
     }
 }
