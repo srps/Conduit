@@ -38,9 +38,18 @@ let package = Package(
         // code lives in `ProxyAuth` / `ProxyPAC` / `PlatformMac`, and
         // cross-target protocols in `Sources/ProxyKernel/Abstractions/`. The
         // dependency graph is documented in `docs/design-module-split.md`.
+        //
+        // `ConduitShared` is the one first-party dependency, and it is
+        // there for `DomainNameSyntax` — the single domain-name grammar, which
+        // the config boundary and the helper's input validation both have to
+        // agree on. `ConduitShared` has no dependencies of its own, so
+        // this adds no cycle and no framework. The inverse would have dragged
+        // NIO into the root-privileged helper. Wire-contract *types* still stay
+        // out of the kernel — that is `ProxyControlBridge`'s job and it is
+        // unchanged.
         .target(
             name: "ProxyKernel",
-            dependencies: nioProducts,
+            dependencies: nioProducts + ["ConduitShared"],
             path: "Sources/ProxyKernel",
             resources: [.process("Resources")]
         ),

@@ -3,6 +3,7 @@ import Foundation
 import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
+@testable import ConduitShared
 
 final class DNSValidationTests: XCTestCase {
 
@@ -22,6 +23,15 @@ final class DNSValidationTests: XCTestCase {
 
     func testSingleLabelDomainAccepted() throws {
         try DNSManager.validateDomain("localhost")
+    }
+
+    /// `/etc/resolver/<domain>` names a resolution domain, not a hostname, so
+    /// the old LDH regex was rejecting names the OS honours — verified live on
+    /// macOS 26. The grammar itself is covered in `DomainNameSyntaxTests`; this
+    /// case pins that `DNSManager` is on it.
+    func testUnderscoredDomainAccepted() throws {
+        try DNSManager.validateDomain("foo_bar.example")
+        try DNSManager.validateDomain("_dmarc.example.com")
     }
 
     func testNumericDomainAccepted() throws {
@@ -80,8 +90,30 @@ final class DNSValidationTests: XCTestCase {
     }
 
     func testDomainExceeding253CharsRejected() {
-        let long = String(repeating: "a", count: 254)
+        // Every label legal on its own, so only the total can reject it.
+        let label = String(repeating: "a", count: 63)
+        let long = Array(repeating: label, count: 4).joined(separator: ".")
+        XCTAssertGreaterThan(long.count, 253)
         XCTAssertThrowsError(try DNSManager.validateDomain(long)) { error in
+            XCTAssertTrue(error is DNSValidationError)
+        }
+    }
+
+    func testLabelExceeding63CharsRejected() {
+        let label = String(repeating: "a", count: 64)
+        XCTAssertThrowsError(try DNSManager.validateDomain("\(label).example")) { error in
+            XCTAssertTrue(error is DNSValidationError)
+        }
+    }
+
+    func testTrailingDotRejected() {
+        XCTAssertThrowsError(try DNSManager.validateDomain("example.com.")) { error in
+            XCTAssertTrue(error is DNSValidationError)
+        }
+    }
+
+    func testNonASCIIDomainRejected() {
+        XCTAssertThrowsError(try DNSManager.validateDomain("bücher.example")) { error in
             XCTAssertTrue(error is DNSValidationError)
         }
     }
@@ -158,9 +190,15 @@ final class DNSValidationTests: XCTestCase {
 
     // MARK: - Error descriptions
 
+    /// The description carries the reason as well as the name: "invalid domain"
+    /// in a log leaves an operator guessing which character to change.
     func testInvalidDomainErrorDescription() {
-        let error = DNSValidationError.invalidDomain("bad;domain")
+        let error = DNSValidationError.invalidDomain(
+            "bad;domain",
+            reason: .invalidCharacter(";", label: "bad;domain")
+        )
         XCTAssertTrue(error.errorDescription!.contains("bad;domain"))
+        XCTAssertTrue(error.errorDescription!.contains("';'"))
     }
 
     func testInvalidServerErrorDescription() {

@@ -180,12 +180,29 @@ final class HelperContractTests: XCTestCase {
         XCTAssertTrue(HelperInputValidator.validateDomain("a"))
     }
 
+    /// The deliberate loosening of the helper's trust boundary, recorded on
+    /// `HelperProtocolVersion.minimumSupported`. `/etc/resolver/<domain>` names
+    /// a resolution domain rather than a hostname, so LDH was the wrong
+    /// grammar; `_` is inert as a path component and as argv.
+    func testValidateDomainAcceptsUnderscores() {
+        XCTAssertTrue(HelperInputValidator.validateDomain("foo_bar.example"))
+        XCTAssertTrue(HelperInputValidator.validateDomain("_dmarc.example.com"))
+        XCTAssertTrue(HelperInputValidator.validateDomain("_http._tcp.example.com"))
+    }
+
     func testValidateDomainRejectsInvalid() {
         XCTAssertFalse(HelperInputValidator.validateDomain(""))
         XCTAssertFalse(HelperInputValidator.validateDomain("../../etc/hosts"))
         XCTAssertFalse(HelperInputValidator.validateDomain("-start.com"))
         XCTAssertFalse(HelperInputValidator.validateDomain("has spaces.com"))
         XCTAssertFalse(HelperInputValidator.validateDomain(String(repeating: "a", count: 254)))
+        // Loosening `_` did not loosen the shapes that reach the filesystem or
+        // argv as something other than a name.
+        XCTAssertFalse(HelperInputValidator.validateDomain("evil/path"))
+        XCTAssertFalse(HelperInputValidator.validateDomain("bad\0.com"))
+        XCTAssertFalse(HelperInputValidator.validateDomain("example.com."))
+        XCTAssertFalse(HelperInputValidator.validateDomain("foo..bar"))
+        XCTAssertFalse(HelperInputValidator.validateDomain("bücher.example"))
     }
 
     func testValidateIPAcceptsValid() {

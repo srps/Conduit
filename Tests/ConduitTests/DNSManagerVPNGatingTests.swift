@@ -365,12 +365,17 @@ final class DNSManagerVPNGatingTests: XCTestCase {
     ///
     /// The bad name needs no typo to arrive. Intercept patterns are never
     /// validated when the config is parsed, and `getInterceptDomains` only
-    /// strips a leading `*.`, so `*.foo_bar.example` yields `foo_bar.example`,
-    /// which `domainRegex` rejects for the underscore.
+    /// strips a leading `*.`, so `*.foo bar.example` yields `foo bar.example`,
+    /// which no writer can use.
+    ///
+    /// The example used to be `*.foo_bar.example`, rejected for its underscore.
+    /// It is a valid domain now — `DomainNameSyntax` allows `_` — so the case
+    /// needs a name that is genuinely unusable rather than one LDH merely
+    /// disliked.
     func testAnUnusableDomainDoesNotCancelTheOtherRemovals() {
         var config = makeConfig()
         config.dnsInterceptRules = [
-            DNSInterceptRule(pattern: "*.foo_bar.example"),
+            DNSInterceptRule(pattern: "*.foo bar.example"),
             DNSInterceptRule(pattern: "*.intercepted.example"),
         ]
         let log = RecordingLogSink()
@@ -385,7 +390,7 @@ final class DNSManagerVPNGatingTests: XCTestCase {
             "one rejected name must not strand every other domain"
         )
         XCTAssertTrue(
-            log.entries().contains { $0.level == .warning && $0.message.contains("foo_bar.example") },
+            log.entries().contains { $0.level == .warning && $0.message.contains("foo bar.example") },
             "skipping it silently would hide an entry that can never work"
         )
     }
