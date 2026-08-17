@@ -133,9 +133,12 @@ package final class DNSManager: @unchecked Sendable {
         }
         let rules = forCleanup ? config.dnsInterceptRules : config.enabledInterceptRules
         // One derivation, on the model, so `ProxyConfig.validate()` checks the
-        // same string this writes. The empty filter stays for configs written
-        // before that validation existed: a bare `*` pattern derives to "", and
-        // `/etc/resolver/` is a directory.
+        // same string this writes. `/etc/resolver/` is a directory, so an empty
+        // derived domain is skipped rather than written. Two shapes reach that:
+        // a rule the user has added but not yet typed a pattern into, which the
+        // boundary deliberately accepts as not-yet-configured; and a bare `*`,
+        // which the boundary rejects but which configs written before that
+        // validation existed may still carry.
         return rules.map(\.resolverDomain).filter { !$0.isEmpty }
     }
 

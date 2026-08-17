@@ -27,6 +27,11 @@ final class InterceptRuleFieldValidationTests: XCTestCase {
         for pattern in [
             "*.cursor.sh", "example.com", "*.foo_bar.example", "_dmarc.example.com",
             "*.foo bar.example", "*.evil/path", "*", "example.com.", "-bad.example",
+            // `""` is the case the list used to omit, and omitting it is what
+            // let the two sides diverge: the field short-circuits an empty
+            // pattern, the boundary rejected it. `*` stays right next to it —
+            // both still reject that one, and the pair is the distinction.
+            "",
         ] {
             let rule = DNSInterceptRule(pattern: pattern)
             let fieldRejects = SettingsView.interceptPatternProblem(rule) != nil
