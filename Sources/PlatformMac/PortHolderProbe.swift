@@ -6,7 +6,7 @@ import ProxyKernel
 /// Names the process listening on a local address, via `libproc`.
 ///
 /// Used to turn "port 3128 is already in use" into "port 3128 is held by
-/// corp-proxy-agent (pid 94930, /Library/CorpIT/Proxy/corp-proxy-agent)", which
+/// corp-proxy-agent (pid 1234, /Library/CorpIT/Proxy/corp-proxy-agent)", which
 /// is the difference between a dead end and something the user can act on. The
 /// motivating case is a managed corporate proxy agent that claims the same port
 /// on every VPN reconnect.
