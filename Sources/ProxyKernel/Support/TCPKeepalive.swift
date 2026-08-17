@@ -40,18 +40,3 @@ package enum TCPKeepaliveOption {
         NIOBSDSocket.Option(rawValue: Darwin.TCP_KEEPCNT)
     }
 }
-
-/// Applies the keepalive options to an already-open channel. Intended for accepted client
-/// channels where NIO has already handed us an opened socket.
-package func applyTCPKeepalive(
-    to channel: Channel,
-    config: TCPKeepaliveConfig = .default
-) -> EventLoopFuture<Void> {
-    channel.setOption(ChannelOptions.socketOption(.so_keepalive), value: 1).flatMap {
-        channel.setOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepIdle), value: CInt(config.keepIdleSeconds))
-    }.flatMap {
-        channel.setOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepInterval), value: CInt(config.keepIntervalSeconds))
-    }.flatMap {
-        channel.setOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepCount), value: CInt(config.keepCountProbes))
-    }
-}

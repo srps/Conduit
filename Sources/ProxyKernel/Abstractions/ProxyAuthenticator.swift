@@ -1,23 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-package enum ProxyAuthError: Error, LocalizedError {
-    case noSuitableScheme
-    case ticketUnavailable
-    case challengeFailed(String)
-
-    package var errorDescription: String? {
-        switch self {
-        case .noSuitableScheme:
-            return "The upstream proxy did not offer a supported authentication scheme."
-        case .ticketUnavailable:
-            return "No Kerberos ticket is available for the target proxy."
-        case .challengeFailed(let detail):
-            return "Proxy authentication challenge failed: \(detail)"
-        }
-    }
-}
-
 /// Strategy for generating Proxy-Authorization headers during the upstream 407 handshake.
 /// Instances are per-connection and may hold mutable state (e.g. GSS context).
 package protocol ProxyAuthenticator: AnyObject, Sendable {

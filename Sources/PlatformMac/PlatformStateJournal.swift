@@ -322,12 +322,6 @@ package final class PlatformStateJournal: @unchecked Sendable {
         saveLocked(records)
     }
 
-    package func forgetEverything() {
-        lock.lock()
-        defer { lock.unlock() }
-        saveLocked([])
-    }
-
     // MARK: - Persistence
 
     private func loadLocked() -> [PlatformStateRecord] {
