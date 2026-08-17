@@ -393,8 +393,25 @@ final class AppState: ObservableObject {
     /// shell out, so the app target provides the closure. Headless daemons
     /// (`pm-proxy`, `pm-tunnel`) use the kernel default that throws, relying
     /// on a TLS-capable PAC URL instead.
+    /// Ceiling on a fetched PAC document, stated here rather than inherited.
+    ///
+    /// This is the one caller that reads a whole document instead of a line or
+    /// two of tool output, so `CommandRunner.defaultMaxOutputBytes` — sized as
+    /// a runaway guard for `networksetup` and friends — answers a different
+    /// question. 256 KiB is not a working limit either: the enterprise PAC this
+    /// path was developed against, carrying a full regional host list, is 4,688
+    /// bytes, so the ceiling is roughly 55x headroom.
+    ///
+    /// The reason to bound it at all is not size but what the bytes become. A
+    /// PAC is JavaScript this process evaluates on **every routing decision**,
+    /// so an unbounded fetch hands an arbitrary-sized script to the hot path
+    /// and holds it for the lifetime of the resolver. Exceeding the ceiling
+    /// fails the fetch rather than truncating, because a half-read PAC routes
+    /// traffic wrongly instead of visibly breaking.
+    nonisolated static let pacMaxOutputBytes = 262_144
+
     @Sendable
-    private static func curlPACFetcher(_ url: URL) async throws -> String {
+    nonisolated static func curlPACFetcher(_ url: URL) async throws -> String {
         guard url.user == nil, url.password == nil else {
             throw PACResolverError.fetchFailed("PAC URLs must not contain embedded credentials.")
         }
@@ -411,16 +428,7 @@ final class AppState: ObservableObject {
                         "--max-time", "15",
                         url.absoluteString,
                     ],
-                    // The one caller that reads a whole document, so it states its
-                    // own ceiling rather than inheriting a default sized for
-                    // `networksetup`. A PAC script is JavaScript this process then
-                    // evaluates on every routing decision, which is the real reason
-                    // to bound it — 1 MiB would already be pathological. For scale, a
-                    // measured enterprise PAC carrying a full regional host list came
-                    // to 4,688 bytes, so this is ~220x headroom rather than a working
-                    // limit. Exceeding it fails the fetch, because a truncated PAC
-                    // routes traffic wrongly instead of visibly breaking.
-                    maxOutputBytes: CommandRunner.defaultMaxOutputBytes
+                    maxOutputBytes: AppState.pacMaxOutputBytes
                 )
             } catch let error as CommandRunnerError {
                 // Wrapped so every failure on this path is one type. Without it a
