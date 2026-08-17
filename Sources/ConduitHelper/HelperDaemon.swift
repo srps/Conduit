@@ -74,11 +74,23 @@ enum HelperDaemon {
             writeLine(fd: fd, response: .error("Invalid request"))
             return
         }
-        guard request.protocolVersion == HelperProtocolVersion.current else {
-            writeLine(fd: fd, response: .error("Unsupported helper protocol version"))
+        // A range, not an exact match. The helper outlives the app that
+        // installed it, so an older client can legitimately be on the other end
+        // — and those clients reject any reply that is not stamped with their
+        // own version, then rethrow instead of degrading. An exact-match helper
+        // therefore broke every privileged operation for a rolled-back app.
+        //
+        // Unversioned frames still fail: they decode as 0, which is outside the
+        // range, and the threat model requires the helper to reject them.
+        guard let replyVersion = HelperProtocolVersion.replyVersion(forRequest: request.protocolVersion) else {
+            writeLine(fd: fd, response: .error(
+                "Unsupported helper protocol version \(request.protocolVersion); this helper speaks \(HelperProtocolVersion.minimumSupported)–\(HelperProtocolVersion.current)"
+            ))
             return
         }
-        let response = processRequest(request)
+        var response = processRequest(request)
+        // Answer in the dialect we were addressed in.
+        response.protocolVersion = replyVersion
         writeLine(fd: fd, response: response)
     }
 

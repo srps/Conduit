@@ -3,6 +3,40 @@ import Foundation
 
 public enum HelperProtocolVersion {
     public static let current = 4
+
+    /// Oldest request version the helper still honours.
+    ///
+    /// The helper outlives the app that installed it. Rolling the app back —
+    /// or running an older build alongside — leaves a newer helper answering
+    /// older clients, and those clients are already in the field with an
+    /// exact-match guard on the response version: they reject anything that is
+    /// not their own number and, because the mismatch surfaces as
+    /// `communicationFailed`, they rethrow instead of degrading to AppleScript.
+    /// A helper that spoke only its own version therefore bricked *every*
+    /// privileged operation for a rolled-back app until the helper was
+    /// uninstalled by hand.
+    ///
+    /// 3 is the floor because v3 and v4 differ only by *added* commands — no
+    /// v3 command changed shape — so honouring a v3 frame costs nothing. A
+    /// future version that changes an existing command's arguments must raise
+    /// this floor rather than silently reinterpret them.
+    public static let minimumSupported = 3
+
+    public static func isSupported(_ version: Int) -> Bool {
+        (minimumSupported...current).contains(version)
+    }
+
+    /// The version to stamp on a reply.
+    ///
+    /// Deliberately the *requester's* version, not ours: the whole point is to
+    /// satisfy an older client's exact-match guard. Returns `nil` for a version
+    /// outside the supported range, where the caller must answer with `current`
+    /// instead — a client we are refusing should be told what we actually
+    /// speak, so a genuine mismatch stays diagnosable rather than being
+    /// papered over by echoing whatever it asked for.
+    public static func replyVersion(forRequest version: Int) -> Int? {
+        isSupported(version) ? version : nil
+    }
 }
 
 public enum HelperCommand: String, Codable, Sendable, CaseIterable {
