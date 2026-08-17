@@ -468,18 +468,21 @@ package final class DNSManager: @unchecked Sendable {
 
         var failures: [DNSRemovalError.Failure] = []
         for domain in unique {
-            // The two failures want different advice, so they are reported
-            // separately. An unusable name means no file of ours can exist
-            // under it — every writer validates first — so there is nothing
-            // stranded; the config is what needs fixing.
+            // An unusable name is warned about but is *not* a removal failure.
+            // No file of ours can exist under it — every writer validates first —
+            // so nothing is stranded and the teardown did in fact achieve what it
+            // set out to. Counting it as a failure made a clean teardown report as
+            // failed, and made the aggregate's "those domains stay overridden"
+            // false for that entry. The broken thing is the config, which is #68's
+            // subject; not silent, because this names it at `.warning`.
             do {
                 try Self.validateDomain(domain)
             } catch {
-                failures.append(.init(domain: domain, message: error.localizedDescription))
                 logger?.log(
                     .warning,
                     "Skipped removing \(domain): \(error.localizedDescription). No resolver file can have been "
-                        + "written under that name, but the config entry that produced it is unusable.",
+                        + "written under that name, so nothing is left overridden — but the config entry that "
+                        + "produced it is unusable and will never take effect.",
                     category: .system
                 )
                 continue

@@ -373,16 +373,20 @@ final class DNSManagerVPNGatingTests: XCTestCase {
             DNSInterceptRule(pattern: "*.foo_bar.example"),
             DNSInterceptRule(pattern: "*.intercepted.example"),
         ]
-        XCTAssertThrowsError(try manager.clear(config: config, logger: nil)) { error in
-            guard let removal = error as? DNSRemovalError else {
-                return XCTFail("expected DNSRemovalError, got \(error)")
-            }
-            XCTAssertEqual(removal.domains, ["foo_bar.example"])
-        }
+        let log = RecordingLogSink()
+        // Not an error: nothing is stranded under a name no writer could have
+        // used, so the teardown achieved what it set out to. Reporting it as a
+        // failed teardown was both untrue and hid the real problem, which is that
+        // the config entry will never take effect (#68).
+        XCTAssertNoThrow(try manager.clear(config: config, logger: log))
         XCTAssertEqual(
             removedDomains(),
             ["corp.example", "internal.example", "intercepted.example"],
             "one rejected name must not strand every other domain"
+        )
+        XCTAssertTrue(
+            log.entries().contains { $0.level == .warning && $0.message.contains("foo_bar.example") },
+            "skipping it silently would hide an entry that can never work"
         )
     }
 
