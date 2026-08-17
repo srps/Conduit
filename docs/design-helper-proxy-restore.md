@@ -240,13 +240,50 @@ still uses `.unchanged`, because an endpoint we never recorded is not ours to
 erase.
 
 **B9 — `SystemDNSManager.isPort53InUse()` had never returned `true` on macOS
-26.** It shells out to `/usr/bin/lsof`, which does not exist on this OS version
-(`lsof` moved to `/usr/sbin`), so the probe threw and answered "port free"
-always — which made `restoreIfNeeded` treat a *running* relay's saved state as
-orphaned and force a restore at launch. The path is now resolved from a list of
-known absolute paths at first use. Absolute, not a `PATH` lookup: resolving tool
-locations from the inherited environment is how a process that may elevate ends
-up running someone else's binary.
+26,** and repairing it turned out to be the wrong repair. It shelled out to
+`/usr/bin/lsof`, which does not exist on this OS version (`lsof` moved to
+`/usr/sbin`), so the probe threw and answered "port free" always. The first fix
+resolved the path from a list of known absolute locations — and made a dormant
+bug live, because "is the port held?" was never the right question.
+
+The relay does not run in the app. It runs inside the privileged LaunchDaemon,
+which is `KeepAlive` and outlives every app process, so a `SIGKILL` leaves it
+bound to 53 and forwarding to a forwarder port nothing serves any more. The
+port is therefore held *in exactly the crash `restoreIfNeeded` exists to
+repair* — and with the path resolved, launch-time DNS recovery switched itself
+off at the moment it was needed. A second branch became reachable at the same
+time and was worse: port held plus a machine where only *some* interfaces are
+still redirected reads as "not applied", and the code deleted the saved
+resolvers while an interface stayed pinned at a dead forwarder.
+
+The probe is gone. `restoreIfNeeded` now gates on `probeLiveness()` — whether
+anything on `127.0.0.1:53` still *answers* — which is the question actually
+being asked: a resolver that resolves belongs to a session serving this
+machine, and one that answers nothing is residue whoever holds the socket. The
+stale-state delete moved to `loopbackResidueExists()`, the any-interface test,
+for the same reason the proxy surface uses one: a single interface left on
+127.0.0.1 is precisely the residue worth keeping records for, and the
+all-interfaces test steps straight past it.
+
+**B11 — the privileged helper reported a failed `networksetup` write as
+success.** `HelperTool.run` returns the child's termination status and every
+call site discarded it, so `HelperDaemon` answered `.ok()` whatever happened;
+`SystemProxyManager.write` then read that as "the restore landed" and
+`forgetAll` destroyed the records. This is B1's exit-code blindness on the
+third renderer — the shell path got `set -e` and the AppleScript path got a
+checked `CommandResult`, and the helper was left as the only one that could not
+report a failure.
+
+Fixed for `setWebProxyEndpoint` and `setAutoproxy` only, via `runChecked`,
+which also makes the address write abort before the state write: those two
+commands are one instruction each, and running the state write over an address
+that did not change lands the service in a configuration no caller asked for.
+Both are new in protocol 4 and reached only by restore, where a wrongly
+reported failure costs a retained record and a warning rather than a lost
+setting. The pre-4 commands are what `apply` uses and have clients in the field
+built against today's lenient behaviour; classifying which of *their* non-zero
+exits are benign needs `networksetup -set*` runs on a real machine, which is
+issue #59.
 
 <a id="the-port-probe"></a>
 ## The port probe
@@ -264,8 +301,13 @@ The proxy surface's "is this still being served?" test does **not** shell out.
 
 A `bind` probe would avoid opening a connection, but it cannot serve the DNS
 case (binding port 53 unprivileged fails with `EACCES` whether or not anything
-holds it) and it misreports listeners using `SO_REUSEPORT`. So the DNS surface
-keeps `lsof`, with its path resolved rather than assumed.
+holds it) and it misreports listeners using `SO_REUSEPORT`.
+
+The DNS surface does not need a *holder* test at all — see B9 above. It asks whether a resolver on `127.0.0.1:53` answers a query, which
+distinguishes a live session from a leftover relay that a socket-holder test
+cannot. Its timeout is generous (2 s) on purpose: reading a live-but-slow
+relay as dead makes launch-time recovery tear DNS out from under a session
+that is serving the machine.
 
 ## Deferred: unify `apply`'s privileged path (separate issue)
 
@@ -288,6 +330,46 @@ Deliberately **not** done, and worth its own issue:
 - **Once `apply` moves over,** `applySystemProxy` / `setAutoproxyURL` /
   `disableAutoproxy` have no remaining callers and the deprecation question
   from the original brief becomes live.
+- **The rest of B11: the pre-4 helper commands still discard their exit
+  status.** Issue #59.
+- **B10 is only fixed for the manual endpoints, not for the PAC URL.**
+  `ProxyEndpoint` gained a `.cleared` case so a service that had no manual
+  proxy before us does not keep ours in its disabled `Server` field, but
+  `ProxyWriteStep.autoproxy` still has only two states — an empty URL means
+  "write the state and leave the URL alone". A service whose recorded prior
+  carries no PAC URL (it had none, or the captured one was discarded by
+  `LocalListenerFingerprint.matchesPACURL` as our own) therefore ends teardown
+  switched off with Conduit's PAC URL still in the field, to be handed
+  back the moment the user re-enables automatic configuration by hand — the
+  exact harm B10 describes, on the other setter. `writeSteps`' own doc comment
+  already states the rule it breaks. Not fixed here because the fix needs a
+  third `autoproxy` case whose renderers depend on how `networksetup` blanks a
+  PAC URL, and that has to be established on a real machine the way `-setwebproxy
+  '' 0` was.
+
+## The protocol floor and `setProxyBypass`
+
+`minimumSupported = 3` is a trade-off, not a statement that v3 and v4 agree on
+every command. `setProxyBypass` **did** change shape in v4 (see [B3](#bugs-found-and-fixed-along-the-way)):
+v3 accepted a bare service name and forwarded the domains unvalidated. A
+rolled-back v3 client whose bypass list is empty sends a one-value frame, and
+this helper refuses it — which that client rethrows rather than degrading, so
+apply fails outright on an admin-required machine.
+
+Kept at 3 anyway, because the alternatives are worse. Raising the floor to 4
+does not rescue that client, it bricks it completely: a refused request is
+answered stamped `current`, which is the exact-match mismatch the range exists
+to avoid. Honouring a one-value v3 frame as "clear the list" would have the
+helper act on a zero-domain request — the one thing B3's tightening exists to
+prevent — and would not restore v3's behaviour either, since
+`networksetup -setproxybypassdomains <service>` with no domains answers with
+its usage text and changes nothing. v3 only *looked* like it worked because it
+discarded the exit status (B11).
+
+The rule for the next bump, which this one got wrong in a doc comment: the
+floor says which frames the helper will read, not that every readable frame is
+still accepted. Tightening an existing command is a compatibility break and has
+to be recorded with its consequence for old clients, never inferred.
 
 ## Constraints honoured
 

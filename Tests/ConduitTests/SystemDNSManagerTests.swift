@@ -31,6 +31,45 @@ private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
     }
 }
 
+/// The `networksetup` reads the DNS surface makes, answered from a described
+/// machine instead of this host. Only the three the recovery path uses.
+private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
+    /// Service name → the DNS servers the machine reports for it.
+    var dnsServers: [String: [String]]
+
+    init(dnsServers: [String: [String]]) {
+        self.dnsServers = dnsServers
+    }
+
+    func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
+        guard launchPath == "/usr/sbin/networksetup", let command = arguments.first else {
+            return CommandResult(exitCode: 1, standardOutput: "", standardError: "unexpected command")
+        }
+        let service = arguments.count > 1 ? arguments[1] : ""
+        switch command {
+        case "-listallnetworkservices":
+            let lines = ["An asterisk (*) denotes that a network service is disabled."]
+                + dnsServers.keys.sorted()
+            return CommandResult(exitCode: 0, standardOutput: lines.joined(separator: "\n"), standardError: "")
+        case "-getinfo":
+            // Every described service counts as connected; which interfaces are
+            // up is not what these tests are about.
+            return CommandResult(exitCode: 0, standardOutput: "IP address: 192.0.2.10", standardError: "")
+        case "-getdnsservers":
+            let servers = dnsServers[service] ?? []
+            return CommandResult(
+                exitCode: 0,
+                standardOutput: servers.isEmpty
+                    ? "There aren't any DNS Servers set on \(service)."
+                    : servers.joined(separator: "\n"),
+                standardError: ""
+            )
+        default:
+            return CommandResult(exitCode: 1, standardOutput: "", standardError: "unexpected read: \(command)")
+        }
+    }
+}
+
 // MARK: - Tests
 
 /// Convenience shape for seeding the journal with per-interface prior DNS
@@ -75,6 +114,18 @@ final class SystemDNSManagerTests: XCTestCase {
     /// Manager under test, wired to this test's isolated state.
     private func makeManager() -> SystemDNSManager {
         SystemDNSManager(privilegeClient: recording, journal: journal)
+    }
+
+    /// Manager under test on a described machine, so the launch-time recovery
+    /// decision can be pinned without depending on what this host's interfaces
+    /// happen to hold.
+    private func makeManager(machine: FakeDNSNetworksetupRunner, relayIsLive: Bool) -> SystemDNSManager {
+        SystemDNSManager(
+            privilegeClient: recording,
+            journal: journal,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            relayIsLive: { relayIsLive }
+        )
     }
 
 
@@ -509,6 +560,72 @@ final class SystemDNSManagerTests: XCTestCase {
         manager.restoreIfNeeded(logger: nil)
 
         XCTAssertFalse(manager.hasSavedState(), "Stale state should always be cleaned up")
+    }
+
+    // MARK: - restoreIfNeeded(): crash recovery vs. a live session
+
+    /// The relay is not in the app. It runs inside the privileged LaunchDaemon,
+    /// which is `KeepAlive` and outlives every app process — so after a
+    /// `SIGKILL` it is still bound to 53 and still forwarding to a forwarder
+    /// port that nothing answers on. "Is the port held?" is therefore `true` in
+    /// exactly the crash this recovery exists for, and gating on it skipped the
+    /// restore. Whether anything still *resolves* is the question being asked.
+    func testRestoreIfNeededRestoresWhenTheLeftoverRelayNoLongerResolves() {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
+
+        let manager = makeManager(machine: machine, relayIsLive: false)
+        manager.restoreIfNeeded(logger: nil)
+
+        XCTAssertEqual(
+            recording.commands(matching: .setDNSServers),
+            [["Wi-Fi", "192.168.1.1"]],
+            "a relay that resolves nothing is residue, whoever is holding the socket"
+        )
+        XCTAssertFalse(manager.hasSavedState(), "the records go once the servers are back")
+    }
+
+    /// The delete branch has to ask "is anything of ours still on the machine",
+    /// not "is everything still ours". A single interface that came back with
+    /// its own resolvers — a VPN link, a service added since — makes the
+    /// all-interfaces test say "not applied", and deleting on that basis throws
+    /// away the recorded servers for the interfaces that are still pinned at
+    /// 127.0.0.1.
+    func testRestoreIfNeededKeepsSavedStateWhileAnyInterfaceIsStillRedirected() {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: [
+            "Wi-Fi": ["127.0.0.1"],
+            "Ethernet": ["10.0.0.1"],
+        ])
+        writeSavedState(SavedDNS(interfaces: [
+            "Wi-Fi": ["192.168.1.1"],
+            "Ethernet": ["10.0.0.53"],
+        ]))
+
+        let manager = makeManager(machine: machine, relayIsLive: true)
+        manager.restoreIfNeeded(logger: nil)
+
+        XCTAssertTrue(
+            manager.hasSavedState(),
+            "Wi-Fi still points at the forwarder, so its recorded servers are the only copy left"
+        )
+        XCTAssertTrue(
+            recording.commands(matching: .setDNSServers).isEmpty,
+            "a live resolver means a session is serving this machine; its DNS is not ours to take"
+        )
+    }
+
+    /// The companion branch: a live resolver and nothing of ours left on any
+    /// interface means the records describe a machine state that no longer
+    /// exists, so they are noise rather than the last copy of anything.
+    func testRestoreIfNeededDropsSavedStateWhenNoInterfacePointsAtTheForwarder() {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["1.1.1.1"]])
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
+
+        let manager = makeManager(machine: machine, relayIsLive: true)
+        manager.restoreIfNeeded(logger: nil)
+
+        XCTAssertFalse(manager.hasSavedState())
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
     }
 
     // MARK: - Liveness probe

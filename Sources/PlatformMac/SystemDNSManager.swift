@@ -9,12 +9,29 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// bespoke snapshot this manager used to keep for itself.
     private let journal: PlatformStateJournal
 
+    /// How `networksetup` is read. Injectable for the same reason
+    /// `SystemProxyManager` takes one: the launch-time recovery decision reads
+    /// per-service DNS off the machine, and a test that cannot say what the
+    /// machine holds cannot pin that decision.
+    private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+
+    /// Whether a local resolver is actually answering on the DNS port.
+    /// Injectable so `restoreIfNeeded` is testable without a live relay,
+    /// mirroring `SystemProxyManager`'s `portProbe`.
+    private let relayIsLive: @Sendable () -> Bool
+
     package init(
         privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
-        journal: PlatformStateJournal
+        journal: PlatformStateJournal,
+        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
+            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
+        },
+        relayIsLive: @escaping @Sendable () -> Bool = { SystemDNSManager.dnsResponds(onPort: 53) }
     ) {
         self.privilegeClient = privilegeClient
         self.journal = journal
+        self.commandRunner = commandRunner
+        self.relayIsLive = relayIsLive
     }
 
     // MARK: - Saved state
@@ -169,13 +186,35 @@ package final class SystemDNSManager: @unchecked Sendable {
             return
         }
 
-        let dnsIsRedirected = isApplied()
-
-        if isPort53InUse() {
-            if dnsIsRedirected {
-                logger?.log(.debug, "DNS saved state exists, port 53 active, DNS is 127.0.0.1 — relay likely still running.", category: .system)
+        // "Is anything holding port 53?" was the wrong question, and repairing
+        // the `lsof` path that made it always answer "no" is what exposed that.
+        // The relay does not run in the app: it runs inside the privileged
+        // LaunchDaemon, which is `KeepAlive` and outlives us. A `SIGKILL`
+        // therefore leaves it listening on 53 and forwarding to a forwarder
+        // port nothing serves any more — so the port is held in precisely the
+        // crash this function exists to repair, and gating on "held" switched
+        // launch-time recovery off at the moment it was needed.
+        //
+        // Liveness answers what is actually being asked. A resolver that still
+        // answers belongs to a session serving this machine, and taking its DNS
+        // away would break every client on it. One that answers nothing is
+        // residue, whoever is holding the socket.
+        if relayIsLive() {
+            // Any interface, not `isApplied()`'s every interface. A machine
+            // where only some services still point at 127.0.0.1 — a VPN
+            // interface that came back with its own resolvers, a service added
+            // since — reads as "not applied", and deleting on that basis throws
+            // away the recorded servers for the interfaces that are still
+            // pinned. That branch was unreachable while the probe always said
+            // "port free"; it is not any more.
+            if loopbackResidueExists() {
+                logger?.log(
+                    .debug,
+                    "DNS saved state exists, a local resolver is answering on :53 and interfaces still point at it — a live session is serving this machine.",
+                    category: .system
+                )
             } else {
-                logger?.log(.notice, "DNS saved state exists but DNS is no longer 127.0.0.1. Cleaning up stale state.", category: .system)
+                logger?.log(.notice, "DNS saved state exists but no interface points at 127.0.0.1 any more. Cleaning up stale state.", category: .system)
                 deleteSavedState()
             }
             return
@@ -195,19 +234,14 @@ package final class SystemDNSManager: @unchecked Sendable {
 
     // MARK: - State Detection
 
-    package func isApplied() -> Bool {
-        guard let services = try? connectedNetworkServices(logger: nil), !services.isEmpty else { return false }
-        return services.allSatisfy { service in
-            let servers = readDNSServers(service: service)
-            return servers == ["127.0.0.1"]
-        }
-    }
-
     /// Whether any connected service still points at our local forwarder.
     ///
-    /// Deliberately *any*, not `isApplied()`'s *all*: a single interface left
-    /// on 127.0.0.1 after a crash is exactly the residue worth cleaning, and
-    /// requiring every service to match would step straight past it.
+    /// Deliberately *any*. There used to be an all-interfaces `isApplied()`
+    /// alongside this, and `restoreIfNeeded` reached for it before deleting
+    /// saved state — so a machine where one interface had come back with its
+    /// own resolvers read as "not applied" and the records for the interfaces
+    /// still pinned at 127.0.0.1 went with it. It had no other caller, so it is
+    /// gone rather than left as the obvious thing to reach for next time.
     private func loopbackResidueExists() -> Bool {
         guard let services = try? connectedNetworkServices(logger: nil) else { return false }
         return services.contains { readDNSServers(service: $0) == ["127.0.0.1"] }
@@ -251,10 +285,8 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func readDNSServers(service: String) -> [String] {
-        guard let result = try? CommandRunner.run(
-            launchPath: "/usr/sbin/networksetup",
-            arguments: ["-getdnsservers", service]
-        ), result.exitCode == 0 else { return [] }
+        guard let result = try? commandRunner("/usr/sbin/networksetup", ["-getdnsservers", service]),
+              result.exitCode == 0 else { return [] }
 
         let output = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         if output.contains("any DNS Servers set") || output.isEmpty {
@@ -264,10 +296,7 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func connectedNetworkServices(logger: (any LogSink)? = nil) throws -> [String] {
-        let result = try CommandRunner.run(
-            launchPath: "/usr/sbin/networksetup",
-            arguments: ["-listallnetworkservices"]
-        )
+        let result = try commandRunner("/usr/sbin/networksetup", ["-listallnetworkservices"])
         let all = result.standardOutput
             .split(separator: "\n")
             .map(String.init)
@@ -292,10 +321,8 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     private func hasIPAddress(service: String) -> Bool {
-        guard let result = try? CommandRunner.run(
-            launchPath: "/usr/sbin/networksetup",
-            arguments: ["-getinfo", service]
-        ), result.exitCode == 0 else { return false }
+        guard let result = try? commandRunner("/usr/sbin/networksetup", ["-getinfo", service]),
+              result.exitCode == 0 else { return false }
 
         for line in result.standardOutput.split(separator: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -369,6 +396,17 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Liveness probe
 
     package func probeLiveness(port: Int = 53) -> Bool {
+        Self.dnsResponds(onPort: port)
+    }
+
+    /// Whether a resolver on `127.0.0.1:port` answers a query at all.
+    ///
+    /// Static because it is also the default for `relayIsLive`, which has to be
+    /// supplied before `self` exists. The generous timeout is deliberate on
+    /// that path: reading a live-but-slow relay as dead makes launch-time
+    /// recovery tear the DNS out from under a session that is serving the
+    /// machine, which is worse than the second it costs to be sure.
+    static func dnsResponds(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> Bool {
         let query = DNSWireFormat.buildQuery(domain: "one.one.one.one", txID: 0xFACE)
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { return false }
@@ -390,7 +428,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         guard sent > 0 else { return false }
 
         var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-        let ready = poll(&pollFD, 1, 2000)
+        let ready = poll(&pollFD, 1, timeoutMilliseconds)
         guard ready > 0, pollFD.revents & Int16(POLLIN) != 0 else { return false }
 
         var buf = [UInt8](repeating: 0, count: 512)
@@ -398,35 +436,5 @@ package final class SystemDNSManager: @unchecked Sendable {
         return n >= 12
     }
 
-    // MARK: - Internal helpers
-
-    /// First existing absolute path for `lsof`, or `nil` if the tool is gone —
-    /// in which case the caller treats the port as free, which is the same
-    /// answer the broken hardcoded path gave, but now a deliberate one.
-    private static let lsofPath: String? = ["/usr/sbin/lsof", "/usr/bin/lsof"]
-        .first { FileManager.default.isExecutableFile(atPath: $0) }
-
-    private func isPort53InUse() -> Bool {
-        // The path is resolved, not hardcoded: `lsof` moved to `/usr/sbin` on
-        // macOS 26 and this probe named `/usr/bin/lsof`, so it threw and
-        // answered "port free" on every modern machine — which made
-        // `restoreIfNeeded` treat a *running* relay's saved state as orphaned
-        // and force a restore at launch.
-        //
-        // Candidates are absolute and known-good rather than a `PATH` lookup:
-        // resolving a tool from the inherited environment is how a process that
-        // may elevate ends up running someone else's binary.
-        //
-        // Unlike the proxy surface, this one cannot be done with a socket. The
-        // relay listens on port 53 as root; an unprivileged `bind` there fails
-        // with `EACCES` whether or not anything holds it, and UDP has no
-        // connect handshake to test instead.
-        guard let lsof = Self.lsofPath else { return false }
-        let result = try? CommandRunner.run(
-            launchPath: lsof,
-            arguments: ["-i", "UDP:53", "-P", "-n"]
-        )
-        return result?.exitCode == 0 && !(result?.standardOutput.isEmpty ?? true)
-    }
 }
 

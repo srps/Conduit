@@ -16,10 +16,33 @@ public enum HelperProtocolVersion {
     /// privileged operation for a rolled-back app until the helper was
     /// uninstalled by hand.
     ///
-    /// 3 is the floor because v3 and v4 differ only by *added* commands — no
-    /// v3 command changed shape — so honouring a v3 frame costs nothing. A
-    /// future version that changes an existing command's arguments must raise
-    /// this floor rather than silently reinterpret them.
+    /// 3 is the floor, and it is a trade-off rather than a claim that nothing
+    /// changed. v4 mostly *adds* commands, but it also tightened one that
+    /// already existed: `setProxyBypass` took a bare service name in v3 and
+    /// forwarded the domains to `networksetup` unvalidated, where v4 requires
+    /// at least one domain or the `Empty` sentinel and validates every entry.
+    /// A rolled-back v3 client whose bypass list is empty sends a one-value
+    /// frame, and this helper refuses it.
+    ///
+    /// That is accepted because both alternatives are worse. Raising the floor
+    /// to 4 does not rescue the rolled-back client, it bricks it: a refused
+    /// request is answered stamped `current`, which is exactly the
+    /// exact-match mismatch that made *every* privileged operation fail before
+    /// this range existed. And honouring a one-value v3 frame as "clear the
+    /// list" would have the helper act on a zero-domain request — the one
+    /// thing the tightening exists to prevent, since a caller that lost its
+    /// argument list is otherwise indistinguishable from one that means
+    /// "clear". v3 cleared nothing here either: `networksetup
+    /// -setproxybypassdomains <service>` with no domains answers with its
+    /// usage text and changes nothing, and the v3 helper only looked like it
+    /// worked because it discarded the exit status.
+    ///
+    /// The rule this version got wrong, for the next one: the floor says which
+    /// *frames* the helper will read, not that every readable frame is still
+    /// accepted — each command's own validation is the authority on shape.
+    /// Tightening an existing command is a compatibility break, and it has to
+    /// be recorded here with its consequence for old clients, never inferred
+    /// from the floor.
     public static let minimumSupported = 3
 
     public static func isSupported(_ version: Int) -> Bool {
