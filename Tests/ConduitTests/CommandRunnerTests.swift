@@ -143,6 +143,50 @@ final class CommandRunnerTests: XCTestCase {
         }
     }
 
+    /// Giving up on a read must release it, not merely stop waiting on it.
+    ///
+    /// An abandoned *blocking* read keeps its thread, its buffer and its
+    /// descriptor alive for as long as the orphan writer lives. Repeat the path
+    /// and the drain queue fills with parked workers, at which point no command
+    /// can drain at all — the deadlock this whole file exists to prevent,
+    /// arrived at from the other side. Descriptor count is the observable
+    /// proxy: two per call, and they must all come back.
+    func testAbandonedDrainsDoNotAccumulate() {
+        runOffThread(timeoutSeconds: 120) {
+            // One warm-up first: the first subprocess in a test process opens
+            // descriptors that stay open (dyld caches, the Foundation reaper),
+            // and counting those as a leak would make this flaky.
+            _ = try? CommandRunner.run(
+                launchPath: "/bin/sh",
+                arguments: ["-c", "echo warm; sleep 20 & exit 0"]
+            )
+
+            let baseline = Self.openDescriptorCount()
+            for _ in 0..<5 {
+                XCTAssertThrowsError(
+                    try CommandRunner.run(
+                        launchPath: "/bin/sh",
+                        arguments: ["-c", "echo held; sleep 20 & exit 0"]
+                    )
+                )
+            }
+            let after = Self.openDescriptorCount()
+
+            XCTAssertLessThanOrEqual(
+                after - baseline,
+                2,
+                "five abandoned drains held \(after - baseline) extra descriptors; "
+                    + "cancelling has to close them, not just stop waiting"
+            )
+        }
+    }
+
+    private static func openDescriptorCount() -> Int {
+        (0..<1024).reduce(into: 0) { count, fd in
+            if fcntl(Int32(fd), F_GETFD) != -1 { count += 1 }
+        }
+    }
+
     func testExitCodeAndStreamsAreReportedSeparately() {
         runOffThread {
             let result = try? CommandRunner.run(
