@@ -4,6 +4,19 @@ import ProxyKernel
 import ConduitShared
 import SystemConfiguration
 
+/// All helper output goes through here — see `HelperLogLine` for why a bare
+/// `fputs` was not enough. Stderr is still the destination; launchd's
+/// `StandardErrorPath` is what makes it a file.
+enum HelperLog {
+    static func error(_ message: String) { write(.error, message) }
+    static func warning(_ message: String) { write(.warning, message) }
+    static func notice(_ message: String) { write(.notice, message) }
+
+    private static func write(_ level: HelperLogLine.Level, _ message: String) {
+        fputs(HelperLogLine.format(level, message, pid: getpid(), at: Date()), stderr)
+    }
+}
+
 enum HelperDaemon {
     static func run() -> Never {
         let socketPath = HelperConstants.socketPath
@@ -12,7 +25,7 @@ enum HelperDaemon {
 
         let serverFD = socket(AF_UNIX, SOCK_STREAM, 0)
         guard serverFD >= 0 else {
-            fputs("Failed to create socket: \(errnoMessage)\n", stderr)
+            HelperLog.error("Failed to create socket: \(errnoMessage)")
             exit(EXIT_FAILURE)
         }
 
@@ -23,7 +36,7 @@ enum HelperDaemon {
             }
         }
         guard bindResult == 0 else {
-            fputs("Failed to bind \(socketPath): \(errnoMessage)\n", stderr)
+            HelperLog.error("Failed to bind \(socketPath): \(errnoMessage)")
             exit(EXIT_FAILURE)
         }
 
@@ -31,7 +44,7 @@ enum HelperDaemon {
         chown(socketPath, 0, 20)  // root:staff – all macOS console users are in gid 20
 
         guard listen(serverFD, 5) == 0 else {
-            fputs("Failed to listen: \(errnoMessage)\n", stderr)
+            HelperLog.error("Failed to listen: \(errnoMessage)")
             exit(EXIT_FAILURE)
         }
 
@@ -44,7 +57,7 @@ enum HelperDaemon {
             exit(EXIT_SUCCESS)
         }
 
-        fputs("ConduitHelper daemon listening on \(socketPath)\n", stderr)
+        HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {
             var clientAddr = sockaddr_un()
@@ -56,7 +69,7 @@ enum HelperDaemon {
             }
             guard clientFD >= 0 else { continue }
             guard peerIsAllowed(clientFD) else {
-                fputs("Rejected connection from unauthorized peer\n", stderr)
+                HelperLog.warning("Rejected connection from unauthorized peer")
                 close(clientFD)
                 continue
             }
@@ -203,7 +216,7 @@ enum HelperDaemon {
         do {
             try r.start(listenPort: 53, targetPort: targetPort)
             relay = r
-            fputs("DNS relay started: 127.0.0.1:53 -> 127.0.0.1:\(targetPort)\n", stderr)
+            HelperLog.notice("DNS relay started: 127.0.0.1:53 -> 127.0.0.1:\(targetPort)")
             return .ok()
         } catch {
             return .error(error.localizedDescription)
@@ -213,7 +226,7 @@ enum HelperDaemon {
     private static func stopDNSRelay() {
         relay?.stop()
         relay = nil
-        fputs("DNS relay stopped\n", stderr)
+        HelperLog.notice("DNS relay stopped")
     }
 
     // MARK: - Transparent TCP Relay
@@ -234,7 +247,7 @@ enum HelperDaemon {
             if status != 0 {
                 // Non-zero also fires when the alias already exists — the
                 // bind below is the authoritative test, so log and continue.
-                fputs("ifconfig lo0 alias \(host) exited \(status); relying on bind to verify\n", stderr)
+                HelperLog.warning("ifconfig lo0 alias \(host) exited \(status); relying on bind to verify")
             }
             currentRelayHost = host
         }
@@ -243,7 +256,7 @@ enum HelperDaemon {
         do {
             try r.start(listenPort: listenPort, targetPort: targetPort, host: host)
             tcpRelay = r
-            fputs("TCP relay started: \(host):\(listenPort) -> \(host):\(targetPort)\n", stderr)
+            HelperLog.notice("TCP relay started: \(host):\(listenPort) -> \(host):\(targetPort)")
             return .ok()
         } catch {
             removeRelayAliasIfNeeded()
@@ -255,14 +268,14 @@ enum HelperDaemon {
         tcpRelay?.stop()
         tcpRelay = nil
         removeRelayAliasIfNeeded()
-        fputs("TCP relay stopped\n", stderr)
+        HelperLog.notice("TCP relay stopped")
     }
 
     private static func removeRelayAliasIfNeeded() {
         guard let host = currentRelayHost else { return }
         let status = runIfconfig(["lo0", "-alias", host])
         if status != 0 {
-            fputs("ifconfig lo0 -alias \(host) exited \(status)\n", stderr)
+            HelperLog.warning("ifconfig lo0 -alias \(host) exited \(status)")
         }
         currentRelayHost = nil
     }
@@ -274,7 +287,7 @@ enum HelperDaemon {
         do {
             try task.run()
         } catch {
-            fputs("failed to launch ifconfig: \(error.localizedDescription)\n", stderr)
+            HelperLog.error("failed to launch ifconfig: \(error.localizedDescription)")
             return -1
         }
         task.waitUntilExit()
