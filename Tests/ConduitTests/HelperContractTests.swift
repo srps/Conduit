@@ -219,6 +219,14 @@ final class HelperContractTests: XCTestCase {
         XCTAssertFalse(HelperInputValidator.validateIPAddress("10.0.0.53; rm -rf /"))
     }
 
+    /// The regex this replaced accepted anything spelled out of hex and
+    /// colons. These all passed it and reach `networksetup` as argv.
+    func testValidateIPRejectsWhatTheOldRegexLetThrough() {
+        for value in ["::::::", "ffff", ":", "fe80::1%en0", "[::1]", "1:2:3:4:5:6:7:8:9"] {
+            XCTAssertFalse(HelperInputValidator.validateIPAddress(value), value)
+        }
+    }
+
     func testValidateAutoproxyURLRejectsUserInfo() {
         XCTAssertTrue(HelperInputValidator.validateAutoproxyURL("https://proxy.example.com/proxy.pac"))
         XCTAssertFalse(HelperInputValidator.validateAutoproxyURL("https://user:secret@proxy.example.com/proxy.pac"))

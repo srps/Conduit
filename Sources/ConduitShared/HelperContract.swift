@@ -71,6 +71,26 @@ public enum HelperProtocolVersion {
     /// refusal from the old validator — the request fails, nothing is written,
     /// and the failure names the domain. That is the correct outcome for a
     /// helper that cannot yet honour it.
+    ///
+    /// Also within v4, recorded rather than inferred, two more moves:
+    ///
+    /// *Tightened* `validateIPAddress` from `^[0-9a-fA-F:]+$` to `inet_pton`.
+    /// The old check accepted `::::::`, `ffff`, `:` and `999.53.53.53` as DNS
+    /// servers; the new one refuses anything the resolver itself would not
+    /// parse. No working client loses anything: a value the old check passed
+    /// and the new one refuses was never an address, and `networksetup` was
+    /// rejecting or misreading it anyway. A client that was sending one gets
+    /// a clean refusal naming the value.
+    ///
+    /// *Added* `HelperResponse.refusal`, an optional field the helper sets when
+    /// it declines to talk to a peer — where it used to close the socket with
+    /// nothing written. Additive on the wire: a v3/v4 client that predates the
+    /// field decodes the frame as an ordinary failed command, which is
+    /// already better than the EOF it got before, since that EOF was read as
+    /// "helper unreachable" and raised an admin prompt. The frame is stamped
+    /// `current` because it is written before the request is read, so a
+    /// client with an exact-match guard on an older version still falls
+    /// back — the behaviour it had before, not a regression.
     public static let minimumSupported = 3
 
     public static func isSupported(_ version: Int) -> Bool {
@@ -134,9 +154,6 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
 }
 
 public enum HelperInputValidator {
-    private static let ipv6Regex = try! NSRegularExpression(
-        pattern: #"^[0-9a-fA-F:]+$"#
-    )
     private static let serviceNameRegex = try! NSRegularExpression(
         pattern: #"^[a-zA-Z0-9 \-_\(\)\./]+$"#
     )
@@ -171,10 +188,15 @@ public enum HelperInputValidator {
         DomainNameSyntax.isValid(domain)
     }
 
+    /// Delegates to `IPAddressSyntax`, the package's one address grammar,
+    /// for the same reason `validateDomain` delegates to `DomainNameSyntax`.
+    /// The regex this replaced, `^[0-9a-fA-F:]+$`, answered "is this spelled
+    /// out of IPv6 characters" — it accepted `::::::`, `ffff` and `:` — which
+    /// is not a question any caller here was asking of a value that becomes
+    /// argv to a root-privileged `networksetup -setdnsservers`. Recorded as a
+    /// tightening on `HelperProtocolVersion.minimumSupported`.
     public static func validateIPAddress(_ address: String) -> Bool {
-        if validateIPv4Address(address) { return true }
-        let range = NSRange(address.startIndex..<address.endIndex, in: address)
-        return ipv6Regex.firstMatch(in: address, range: range) != nil
+        IPAddressSyntax.isLiteral(address)
     }
 
     public static func validateServiceName(_ name: String) -> Bool {
@@ -249,17 +271,6 @@ public enum HelperInputValidator {
         host == "127.0.0.1" || host == "127.44.3.0"
     }
 
-    private static func validateIPv4Address(_ address: String) -> Bool {
-        let parts = address.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
-        return parts.allSatisfy { part in
-            guard !part.isEmpty, part.allSatisfy(\.isNumber), let octet = Int(part) else {
-                return false
-            }
-            return (0...255).contains(octet)
-        }
-    }
-
     private static func containsControlCharacters(_ value: String) -> Bool {
         value.unicodeScalars.contains { scalar in
             scalar.value < 0x20 || scalar.value == 0x7f
@@ -296,6 +307,28 @@ public struct HelperRequest: Codable, Sendable, Equatable {
     }
 }
 
+/// Why the helper would not *talk* to a peer, as distinct from having run a
+/// command that failed.
+///
+/// The helper used to answer an unauthorized peer by closing the socket
+/// with nothing written. The client read EOF, reported
+/// `communicationFailed("Empty response")`, classified that as "helper
+/// unreachable", and degraded to the AppleScript fallback — an admin
+/// password prompt, raised by a *denial*. For relay commands the fallback
+/// then threw "Relay commands require the privileged helper", so the user
+/// typed a password and the relay still did not start.
+///
+/// Two reasons, because they want opposite handling. `unauthorized` is a
+/// verdict: the peer's uid is not the console user's, and asking again
+/// changes nothing. `noConsoleUser` is a moment: `SCDynamicStoreCopyConsoleUser`
+/// reports uid 0 at the loginwindow and during a fast-user switch, and an app
+/// launched at login can reach the helper before the console user is
+/// published. That one is state to show and reconcile past, not to wait on.
+public enum HelperRefusal: String, Codable, Sendable, Equatable {
+    case unauthorized
+    case noConsoleUser
+}
+
 public struct HelperResponse: Codable, Sendable, Equatable {
     public var protocolVersion: Int
     public var success: Bool
@@ -303,6 +336,10 @@ public struct HelperResponse: Codable, Sendable, Equatable {
     public var exitCode: Int32?
     public var standardOutput: String?
     public var standardError: String?
+    /// Set only on a refusal to talk; `nil` on every other frame, including
+    /// an ordinary failed command. Optional, so a helper that predates it
+    /// simply never sends it and a client that predates it ignores the key.
+    public var refusal: HelperRefusal?
 
     public static func ok() -> HelperResponse {
         HelperResponse(protocolVersion: HelperProtocolVersion.current, success: true)
@@ -310,6 +347,15 @@ public struct HelperResponse: Codable, Sendable, Equatable {
 
     public static func error(_ message: String) -> HelperResponse {
         HelperResponse(protocolVersion: HelperProtocolVersion.current, success: false, errorMessage: message)
+    }
+
+    public static func refused(_ refusal: HelperRefusal, _ message: String) -> HelperResponse {
+        HelperResponse(
+            protocolVersion: HelperProtocolVersion.current,
+            success: false,
+            errorMessage: message,
+            refusal: refusal
+        )
     }
 
     public static func scriptResult(exitCode: Int32, stdout: String, stderr: String) -> HelperResponse {
@@ -329,7 +375,8 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         errorMessage: String? = nil,
         exitCode: Int32? = nil,
         standardOutput: String? = nil,
-        standardError: String? = nil
+        standardError: String? = nil,
+        refusal: HelperRefusal? = nil
     ) {
         self.protocolVersion = protocolVersion
         self.success = success
@@ -337,6 +384,7 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         self.exitCode = exitCode
         self.standardOutput = standardOutput
         self.standardError = standardError
+        self.refusal = refusal
     }
 
     enum CodingKeys: String, CodingKey {
@@ -346,6 +394,7 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         case exitCode
         case standardOutput
         case standardError
+        case refusal
     }
 
     public init(from decoder: Decoder) throws {
@@ -356,6 +405,9 @@ public struct HelperResponse: Codable, Sendable, Equatable {
         exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode)
         standardOutput = try container.decodeIfPresent(String.self, forKey: .standardOutput)
         standardError = try container.decodeIfPresent(String.self, forKey: .standardError)
+        // Unknown values decode as `nil` rather than failing the frame: a
+        // refusal reason this client does not know is still a refusal.
+        refusal = try? container.decodeIfPresent(HelperRefusal.self, forKey: .refusal)
     }
 }
 

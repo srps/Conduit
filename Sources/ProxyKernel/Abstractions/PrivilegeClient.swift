@@ -30,26 +30,46 @@ package enum PrivilegedOperation: String, Sendable, CaseIterable {
     case ping
 }
 
+/// Why the privileged helper declined to act. The kernel's own reading of
+/// the wire's `HelperRefusal`, translated in `PlatformMac`, so kernel
+/// consumers are not typed against the helper protocol.
+package enum PrivilegeRefusal: String, Sendable, Equatable {
+    /// A verdict: this process is not the console user's. Nothing to wait for.
+    case unauthorized
+    /// A moment: nobody is at the console yet. State to show and to
+    /// reconcile past — never to sleep on. See `HelperToolPrivilegeClient`.
+    case noConsoleUser
+}
+
 package enum PrivilegeClientError: Error, LocalizedError {
     case executionFailed(String)
     case helperNotInstalled
     case communicationFailed(String)
+    /// The helper was reached and declined to talk — see `PrivilegeRefusal`.
+    /// Not unreachability, and the distinction is the whole point: the
+    /// fallback for "unreachable" is an admin password prompt, and a denial
+    /// must never turn into one.
+    case refused(PrivilegeRefusal, String)
 
     package var errorDescription: String? {
         switch self {
         case .executionFailed(let message): return message
         case .helperNotInstalled: return "Privileged helper is not installed."
         case .communicationFailed(let message): return "Helper communication failed: \(message)"
+        case .refused(.noConsoleUser, _):
+            return "Privileged helper is waiting for a login session before it will act."
+        case .refused(.unauthorized, let message):
+            return "Privileged helper refused this process: \(message)"
         }
     }
 
     /// Whether the helper could not be *reached or understood*, as opposed to
-    /// having run the command and reported it failed. Only the former is worth
-    /// retrying by another route.
+    /// having run the command and reported it failed — or having refused to
+    /// run it at all. Only the first is worth retrying by another route.
     package var isHelperUnreachable: Bool {
         switch self {
         case .helperNotInstalled, .communicationFailed: return true
-        case .executionFailed: return false
+        case .executionFailed, .refused: return false
         }
     }
 }

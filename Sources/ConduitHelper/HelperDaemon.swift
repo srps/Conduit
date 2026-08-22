@@ -68,8 +68,24 @@ enum HelperDaemon {
                 }
             }
             guard clientFD >= 0 else { continue }
-            guard peerIsAllowed(clientFD) else {
-                HelperLog.warning("Rejected connection from unauthorized peer")
+            // One accept loop, no threads: a peer that connects and never
+            // sends its newline would otherwise hold the helper for every
+            // other client. Bounded for everyone, not only the refused.
+            setReadTimeout(clientFD, seconds: 5)
+            if let refusal = peerRefusal(clientFD) {
+                // Drain the request the client is about to write, so the
+                // reply lands on a socket it is reading rather than racing
+                // its write — then say why, instead of EOF. See
+                // `HelperRefusal` for what EOF used to turn into.
+                _ = readLine(fd: clientFD)
+                switch refusal {
+                case .unauthorized:
+                    HelperLog.warning("Rejected connection from unauthorized peer")
+                    writeLine(fd: clientFD, response: .refused(.unauthorized, "peer is not the console user"))
+                case .noConsoleUser:
+                    HelperLog.notice("Deferred connection: no console user is logged in yet")
+                    writeLine(fd: clientFD, response: .refused(.noConsoleUser, "no console user yet"))
+                }
                 close(clientFD)
                 continue
             }
@@ -183,14 +199,22 @@ enum HelperDaemon {
         return addr
     }
 
-    private static func peerIsAllowed(_ fd: Int32) -> Bool {
+    /// `nil` means allowed. Root peers are refused as `unauthorized` rather
+    /// than deferred: a uid-0 *peer* is never the console user, whatever the
+    /// console's state, and nothing is gained by having it wait.
+    private static func peerRefusal(_ fd: Int32) -> HelperRefusal? {
         var euid: uid_t = 0
         var egid: gid_t = 0
-        guard getpeereid(fd, &euid, &egid) == 0 else { return false }
-        guard euid != 0 else { return false }
+        guard getpeereid(fd, &euid, &egid) == 0 else { return .unauthorized }
+        guard euid != 0 else { return .unauthorized }
         let consoleUID = consoleUserUID()
-        guard consoleUID != 0 else { return false }
-        return euid == consoleUID
+        guard consoleUID != 0 else { return .noConsoleUser }
+        return euid == consoleUID ? nil : .unauthorized
+    }
+
+    private static func setReadTimeout(_ fd: Int32, seconds: Int) {
+        var tv = timeval(tv_sec: seconds, tv_usec: 0)
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
     }
 
     private static func consoleUserUID() -> uid_t {
