@@ -200,6 +200,7 @@ final class DaemonRuntimeHost {
     }
 
     func startRuntime() async throws {
+        logNonBlockingConfigProblems()
         do {
             try await orchestrator.startProxy()
         } catch {
@@ -352,6 +353,7 @@ final class DaemonRuntimeHost {
         config = loaded.config
         platformConfig = loaded.platformConfig
         appPreferences = loaded.appPreferences
+        logNonBlockingConfigProblems()
         vpnFlapWindowBox.withLockedValue { window in
             window.graceSeconds = config.vpnFlapGraceSeconds
             window.minVisibleSeconds = config.vpnFlapMinVisibleSeconds
@@ -361,6 +363,17 @@ final class DaemonRuntimeHost {
         reconcilePlatformSideEffects(old: oldConfig, new: config)
         logger.log(.notice, "Daemon configuration reloaded.", category: .general)
         writeSnapshotFile(snapshot: orchestrator.snapshot)
+    }
+
+    /// The errors `LocalProxyServer.start` deliberately ignores. A blocking
+    /// one surfaces as the start failure itself; a non-blocking one — an
+    /// intercept rule whose files will be withheld — surfaced nowhere in this
+    /// host, because the GUI's twin (`AppState.saveConfig`) is where the
+    /// banner lives. Headless, the log is the banner.
+    private func logNonBlockingConfigProblems() {
+        for error in config.validate() where !error.blocksProxyStart {
+            logger.log(.warning, "Config validation: \(error.localizedDescription)", category: .system)
+        }
     }
 
     /// The single place that decides whether intercept resolver files may
