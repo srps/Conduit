@@ -12,6 +12,10 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// can say which character to change.
     case invalidInterceptPattern(index: Int, pattern: String, reason: DomainNameError)
     case invalidInterceptIP(index: Int, value: String)
+    /// `dns.transparentProxyIP` is where every new intercept rule copies its
+    /// target from, so a bad value here is reported once, at its own field,
+    /// instead of once per row that inherited it.
+    case invalidTransparentProxyIP(value: String)
     case conflict(description: String)
 
     /// Whether this error must stop the proxy listener from coming up.
@@ -43,7 +47,10 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// for.
     package var blocksProxyStart: Bool {
         switch self {
-        case .invalidInterceptPattern, .invalidInterceptIP:
+        case .invalidInterceptPattern, .invalidInterceptIP, .invalidTransparentProxyIP:
+            // The transparent-proxy IP is in the same category: the listener
+            // bound to it is `startTransparentProxy`, whose failure is already
+            // a logged warning rather than a start failure.
             return false
         case .invalidPort, .invalidLimit, .invalidDuration, .invalidHost, .conflict:
             return true
@@ -71,6 +78,10 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             return "dns.interceptRules[\(index)]: '\(value)' is not a usable intercept target. "
                  + "It must be an IPv4 address — intercept answers are synthesized as A records, "
                  + "so any other value leaves the domain resolving nowhere."
+        case .invalidTransparentProxyIP(let value):
+            return "dns.transparentProxyIP: '\(value)' is not a usable intercept target. "
+                 + "It must be an IPv4 address — it is the address intercept rules answer with, "
+                 + "and intercept answers are synthesized as A records."
         case .conflict(let description):
             return description
         }
@@ -209,6 +220,13 @@ extension ProxyConfig {
     /// `/etc/resolver` directory itself; there is no half-finished row to be
     /// generous about.
     private func validateInterceptRules(into errors: inout [ConfigValidationError]) {
+        // Only while the feature is on. Unlike the rules below, this value has
+        // no teardown role — nothing derives a file name from it — so when the
+        // feature is off it is unused, and its field is hidden. An error about
+        // a hidden field is the shape #72's review flagged for the rules.
+        if dns.transparentProxyEnabled, !IPAddressSyntax.isIPv4(dns.transparentProxyIP) {
+            errors.append(.invalidTransparentProxyIP(value: dns.transparentProxyIP))
+        }
         for (i, rule) in dnsInterceptRules.enumerated() {
             if !rule.pattern.isEmpty {
                 do {
