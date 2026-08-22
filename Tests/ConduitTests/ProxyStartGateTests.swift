@@ -146,6 +146,9 @@ final class ProxyStartGateTests: XCTestCase {
         XCTAssertFalse(
             ConfigValidationError.invalidInterceptIP(index: 0, value: "x").blocksProxyStart
         )
+        XCTAssertFalse(
+            ConfigValidationError.invalidTransparentProxyIP(value: "x").blocksProxyStart
+        )
         XCTAssertTrue(ConfigValidationError.invalidPort(field: "p", value: -1).blocksProxyStart)
         XCTAssertTrue(
             ConfigValidationError.invalidLimit(field: "l", value: 0, min: 1).blocksProxyStart

@@ -199,6 +199,36 @@ final class InterceptRuleValidationTests: XCTestCase {
     /// The end the issue is about: with one bad rule the whole set used to be
     /// refused at `applyInterceptFiles`, so *no* file was written. Now the
     /// config never carries one, and a valid config writes every rule.
+    // MARK: - The address new rules are seeded from
+
+    /// `dns.transparentProxyIP` is copied into every rule the user adds, so a
+    /// bad value there used to be reported once per row — at the rows — and
+    /// never at the field that produced them.
+    func testAMalformedTransparentProxyIPIsReportedAtItsOwnField() {
+        var config = makeConfig()
+        config.transparentProxyEnabled = true
+        config.transparentProxyIP = "::1"
+        let errors = config.validate()
+        XCTAssertTrue(errors.contains {
+            if case .invalidTransparentProxyIP(let value) = $0 { return value == "::1" }
+            return false
+        }, "\(errors)")
+        XCTAssertFalse(errors.contains(where: \.blocksProxyStart))
+    }
+
+    /// Off means unused: the value derives nothing at teardown — unlike the
+    /// rules — and the Settings field is hidden, so an error here would name
+    /// a field the user cannot see.
+    func testTheTransparentProxyIPIsOnlyCheckedWhileTheFeatureIsOn() {
+        var config = makeConfig()
+        config.transparentProxyEnabled = false
+        config.transparentProxyIP = "not an ip"
+        XCTAssertFalse(config.validate().contains {
+            if case .invalidTransparentProxyIP = $0 { return true }
+            return false
+        })
+    }
+
     func testAValidConfigWritesEveryInterceptFile() throws {
         let recording = RecordingInterceptPrivilegeClient()
         let manager = DNSManager(privilegeClient: recording)
