@@ -883,10 +883,14 @@ final class AppState: ObservableObject {
             if platformConfig.manageSystemDNS {
                 do {
                     try systemDNSManager.apply(forwarderPort: effectiveDNSForwarderPort, logger: logStore)
-                    startDNSHealthTimer()
                 } catch {
                     logStore.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
                 }
+                // Whether or not `apply` succeeded: a refused or failed apply
+                // is exactly what the probe's relay restart exists to retry,
+                // and until now the timer only ran for a start that had
+                // already worked.
+                startDNSHealthTimer()
             }
             // Intercept resolver files are written only from here — `apply` at
             // proxy start deliberately skips them, because at that point the
