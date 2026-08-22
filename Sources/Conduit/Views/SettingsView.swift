@@ -1496,6 +1496,10 @@ struct SettingsView: View {
             return "Not installed"
         case .notResponding:
             return "Installed but not responding"
+        case .waitingForConsoleUser:
+            return "Installed, waiting for a login session"
+        case .unauthorized:
+            return "Installed, but refusing this user"
         }
     }
 
@@ -1509,6 +1513,10 @@ struct SettingsView: View {
             return Color(nsColor: .systemGray)
         case .notResponding:
             return Color(nsColor: .systemRed)
+        case .waitingForConsoleUser:
+            return Color(nsColor: .systemYellow)
+        case .unauthorized:
+            return Color(nsColor: .systemOrange)
         }
     }
 
@@ -1522,6 +1530,9 @@ struct SettingsView: View {
             return "Install Helper"
         case .notResponding:
             return "Repair Helper"
+        case .waitingForConsoleUser, .unauthorized:
+            // Reinstalling changes nothing about who is at the console.
+            return "Reinstall Helper"
         }
     }
 

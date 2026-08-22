@@ -210,8 +210,21 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
 /// Communicates with the installed LaunchDaemon helper via Unix domain socket.
 /// Falls back to AppleScript when the helper is not installed or unreachable.
 package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let fallback = AppleScriptPrivilegeClient()
+    private let fallback: AppleScriptPrivilegeClient
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    private let socketPath: String
+
+    // A refusal — either kind — returns on the first reply. There is no
+    // sleep-and-retry for `noConsoleUser` in here, on purpose: every caller
+    // of `execute` is synchronous on the MainActor (`ProxyOrchestrator`,
+    // `SystemDNSManager` from `AppState`), so a wait here is a frozen UI
+    // that cannot even draw the "waiting for a login session" state it is
+    // waiting for. And the moment is rarer than it looks: the app and the
+    // daemon both run as the user and start after the session exists, so
+    // `SCDynamicStoreCopyConsoleUser` already names them. The refusal is
+    // surfaced as state (`Status.waitingForConsoleUser`) and the hosts'
+    // reconcile paths — the 30 s health tick, wake and VPN changes — re-issue
+    // the work, which is how every other transient is handled here.
 
     /// - Parameter eventSink: notified when the helper cannot be reached and
     ///   the AppleScript fallback takes over. Optional only so the many
@@ -219,8 +232,19 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     ///   production hosts should pass one, because a silent degrade to an
     ///   admin prompt is exactly the kind of recovery `AGENTS.md` requires an
     ///   event for.
-    package init(eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil) {
+    /// - Parameters:
+    ///   - socketPath: injectable only so a test can stand up its own helper
+    ///     on a temporary socket; production uses `HelperConstants.socketPath`.
+    ///   - fallback: the AppleScript client used when the helper is
+    ///     unreachable; injectable so a test can prove it was *not* used.
+    package init(
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        socketPath: String = HelperConstants.socketPath,
+        fallback: AppleScriptPrivilegeClient = AppleScriptPrivilegeClient()
+    ) {
         self.eventSink = eventSink
+        self.socketPath = socketPath
+        self.fallback = fallback
     }
 
     package enum Status: Sendable, Equatable {
@@ -228,6 +252,12 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         case outdated
         case notInstalled
         case notResponding
+        /// Reached, healthy, and declining until someone is logged in at the
+        /// console. Transient by nature — see `HelperRefusal.noConsoleUser`.
+        case waitingForConsoleUser
+        /// Reached and refusing this process for good: its uid is not the
+        /// console user's. Not "repair the helper"; the helper is fine.
+        case unauthorized
     }
 
     package var status: Status {
@@ -236,6 +266,11 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         }
         guard let response = try? sendRequest(HelperRequest(command: .ping, values: [])) else {
             return .notResponding
+        }
+        switch response.refusal {
+        case .noConsoleUser: return .waitingForConsoleUser
+        case .unauthorized: return .unauthorized
+        case nil: break
         }
         guard response.protocolVersion == HelperProtocolVersion.current else {
             return .outdated
@@ -261,6 +296,21 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         for (index, (command, values)) in commands.enumerated() {
             do {
                 let response = try sendRequest(HelperRequest(command: command, values: values))
+                // A refusal is checked before the version guard: the frame
+                // is written before the helper reads the request, so it is
+                // stamped `current` rather than echoing ours, and a version
+                // mismatch on it would read as "unreachable" — the exact
+                // misclassification this field exists to end.
+                if let refusal = response.refusal {
+                    eventSink?(
+                        RuntimeEvent(
+                            kind: .auth,
+                            event: "auth.privilege_helper_refused",
+                            detail: "command=\(command.rawValue) reason=\(refusal.rawValue)"
+                        )
+                    )
+                    throw PrivilegeClientError.refused(PrivilegeRefusal(refusal), response.errorMessage ?? refusal.rawValue)
+                }
                 guard response.protocolVersion == HelperProtocolVersion.current else {
                     throw PrivilegeClientError.communicationFailed(
                         "Helper speaks protocol \(response.protocolVersion), this build speaks \(HelperProtocolVersion.current)."
@@ -493,7 +543,7 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let maxLen = MemoryLayout.size(ofValue: addr.sun_path)
-        HelperConstants.socketPath.withCString { cstr in
+        socketPath.withCString { cstr in
             withUnsafeMutableBytes(of: &addr.sun_path) { buf in
                 let dst = buf.baseAddress!.assumingMemoryBound(to: CChar.self)
                 _ = strlcpy(dst, cstr, maxLen)
@@ -589,5 +639,17 @@ package enum HelperBinaryLocator {
         }
 
         return nil
+    }
+}
+
+extension PrivilegeRefusal {
+    /// The wire reason, read into the kernel's own type. One-to-one today;
+    /// a reason a future helper adds decodes as `nil` on the wire and never
+    /// reaches here.
+    init(_ wire: HelperRefusal) {
+        switch wire {
+        case .unauthorized: self = .unauthorized
+        case .noConsoleUser: self = .noConsoleUser
+        }
     }
 }
