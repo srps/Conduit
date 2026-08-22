@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import XCTest
 @testable import ProxyKernel
 @testable import Conduit
@@ -68,6 +69,46 @@ final class RotatingLogFileTests: XCTestCase {
         store.flushFileLog()
         let text = try String(contentsOf: url, encoding: .utf8)
         XCTAssertTrue(text.contains("[NOTICE] [General] hello file\n"), text)
+    }
+
+    /// A file that cannot be written must say so — once — somewhere other
+    /// than the file. Here the parent "directory" is a regular file, so the
+    /// open fails with ENOTDIR regardless of who runs the tests.
+    func testAnUnwritableFileReportsOnceNotPerLine() throws {
+        let parent = try tempDir().appendingPathComponent("not-a-directory")
+        try Data().write(to: parent)
+        let url = parent.appendingPathComponent("proxy.log")
+        let reports = NIOLockedValueBox<[String]>([])
+        let file = RotatingLogFile(url: url, onFailure: { message in
+            reports.withLockedValue { $0.append(message) }
+        })
+        for i in 1...3 { file.write(Data("line\(i)\n".utf8)) }
+        file.flush()
+        let got = reports.withLockedValue { $0 }
+        XCTAssertEqual(got.count, 1, "\(got)")
+        XCTAssertTrue(got[0].contains(url.path), got[0])
+    }
+
+    /// The store routes the report into its own ring buffer. That report is
+    /// itself offered to the failing file, which must not turn into a second
+    /// report — or a third.
+    @MainActor func testTheStoreSurfacesAFileFailureInTheRingBufferWithoutLooping() async throws {
+        let parent = try tempDir().appendingPathComponent("not-a-directory")
+        try Data().write(to: parent)
+        let store = AppLogStore()
+        store.minStderrLevel = .error
+        store.logFileURL = parent.appendingPathComponent("proxy.log")
+        for i in 1...3 { store.log(.notice, "line \(i)") }
+        store.flushFileLog()
+        // The report hops to MainActor; give it a few turns to land.
+        for _ in 0..<50 where !store.entries.contains(where: { $0.level == .warning }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        store.flushFileLog()
+        try await Task.sleep(for: .milliseconds(20))
+        let warnings = store.entries.filter { $0.level == .warning }
+        XCTAssertEqual(warnings.count, 1, warnings.map(\.message).joined(separator: "\n"))
+        XCTAssertTrue(warnings[0].message.contains("File logging is not recording"), warnings[0].message)
     }
 
     func testFileLoggingIsOnByDefaultAndSurvivesAnOlderPreferencesFile() throws {

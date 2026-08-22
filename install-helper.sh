@@ -66,8 +66,6 @@ cat > "$PLIST_DST" <<'PLIST'
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardErrorPath</key>
-    <string>/var/log/io.github.srps.Conduit.Helper.log</string>
 </dict>
 </plist>
 PLIST
@@ -75,11 +73,10 @@ PLIST
 chown root:wheel "$PLIST_DST"
 chmod 644 "$PLIST_DST"
 
-# Rotate the helper log via newsyslog(8): keep 3 bzip2 archives, roll at 5 MiB.
-# Mirrors HelperConstants.newsyslogEntry.
-NEWSYSLOG_CONF="/etc/newsyslog.d/$BUNDLE_ID.Helper.conf"
-printf '/var/log/%s.Helper.log\t644\t3\t5120\t*\tJ\n' "$BUNDLE_ID" > "$NEWSYSLOG_CONF"
-chmod 644 "$NEWSYSLOG_CONF"
+# The helper logs to the unified log (subsystem $BUNDLE_ID). One release
+# rotated a /var/log file via newsyslog(8); drop that rule if it is still here.
+# Mirrors HelperConstants.legacyNewsyslogConfPath.
+rm -f "/etc/newsyslog.d/$BUNDLE_ID.Helper.conf"
 
 launchctl bootstrap system "$PLIST_DST"
 
@@ -88,6 +85,7 @@ echo "Privileged helper installed successfully."
 echo "  Binary: $HELPER_DST"
 echo "  Plist:  $PLIST_DST"
 echo "  Socket: $SOCKET_PATH"
+echo "  Log:    log show --predicate 'subsystem == \"$BUNDLE_ID\"' --info --last 1d"
 echo ""
 echo "Conduit will use the helper automatically."
 echo "No more repeated admin password prompts."

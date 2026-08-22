@@ -1,19 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import os
 import ProxyKernel
 import ConduitShared
 import SystemConfiguration
 
-/// All helper output goes through here — see `HelperLogLine` for why a bare
-/// `fputs` was not enough. Stderr is still the destination; launchd's
-/// `StandardErrorPath` is what makes it a file.
+/// All helper output goes through here, into the unified log.
+///
+/// It used to be `fputs(stderr)` into a file launchd opened for us, rotated
+/// by a `newsyslog(8)` drop-in. That pairing never bounded anything: newsyslog
+/// renames and compresses the file, but launchd holds the original fd, so a
+/// long-lived helper kept writing into an unlinked inode — lines lost, space
+/// invisible. Rather than own a second log store for a dozen call sites, the
+/// helper now logs where macOS daemons are meant to: the system keeps,
+/// rotates and indexes it, and the app mirrors its own lines under the same
+/// subsystem, so one query reads both processes in order:
+///
+///     log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d
+///
+/// Levels: `notice` → `.default`, `warning` → `.error`, `error` → `.fault`.
+/// Only `.default` and above persist to disk by default, which is exactly
+/// the set worth reading after the fact. Messages are marked public on
+/// purpose — the helper logs ports, hosts and peer verdicts, never secrets —
+/// because a redacted `<private>` is no better than the undated line it
+/// replaces.
 enum HelperLog {
-    static func error(_ message: String) { write(.error, message) }
-    static func warning(_ message: String) { write(.warning, message) }
-    static func notice(_ message: String) { write(.notice, message) }
+    static func error(_ message: String) { write(.fault, message) }
+    static func warning(_ message: String) { write(.error, message) }
+    static func notice(_ message: String) { write(.default, message) }
 
-    private static func write(_ level: HelperLogLine.Level, _ message: String) {
-        fputs(HelperLogLine.format(level, message, pid: getpid(), at: Date()), stderr)
+    private static let logger = Logger(subsystem: HelperConstants.logSubsystem, category: "helper")
+
+    private static func write(_ type: OSLogType, _ message: String) {
+        logger.log(level: type, "\(message, privacy: .public)")
     }
 }
 

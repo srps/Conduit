@@ -286,6 +286,14 @@ sudo ./uninstall-helper.sh
 
 The app automatically falls back to standard macOS admin prompts when the helper is not installed.
 
+The helper logs to the unified log, and the app mirrors its own log lines there under the same subsystem, so one query reads both processes in order:
+
+```bash
+log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d
+```
+
+The app's own log file is `~/Library/Logs/Conduit/proxy.log` (on by default, 5 MiB × 3).
+
 ## Targets
 
 - `ProxyKernel`: portable library with all non-UI, non-platform logic (proxy, PAC routing, DoH, UDP relay, models, kernel-side abstractions). Foundation + Dispatch + NIO* only.

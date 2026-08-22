@@ -497,8 +497,6 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
             <true/>
             <key>KeepAlive</key>
             <true/>
-            <key>StandardErrorPath</key>
-            <string>\(HelperConstants.logPath)</string>
         </dict>
         </plist>
         """
@@ -515,8 +513,7 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         PLISTEOF
         chown root:wheel \(plistDst.shellQuoted)
         chmod 644 \(plistDst.shellQuoted)
-        printf '%s\\n' \(HelperConstants.newsyslogEntry.shellQuoted) > \(HelperConstants.newsyslogConfPath.shellQuoted)
-        chmod 644 \(HelperConstants.newsyslogConfPath.shellQuoted)
+        rm -f \(HelperConstants.legacyNewsyslogConfPath.shellQuoted)
         launchctl bootstrap system \(plistDst.shellQuoted)
         """
 
@@ -526,7 +523,8 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     package func uninstallHelper() throws {
         let script = """
         launchctl bootout system \(HelperConstants.launchdPlistPath.shellQuoted) 2>/dev/null || true
-        rm -f \(HelperConstants.binaryInstallPath.shellQuoted) \(HelperConstants.launchdPlistPath.shellQuoted) \(HelperConstants.socketPath.shellQuoted) \(HelperConstants.newsyslogConfPath.shellQuoted)
+        rm -f \(HelperConstants.binaryInstallPath.shellQuoted) \(HelperConstants.launchdPlistPath.shellQuoted) \(HelperConstants.socketPath.shellQuoted)
+        rm -f \(HelperConstants.legacyNewsyslogConfPath.shellQuoted) \(HelperConstants.legacyLogPath.shellQuoted) \(HelperConstants.legacyLogPath.shellQuoted).*
         """
         try? fallback.runPrivilegedScript(script)
     }
