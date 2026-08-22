@@ -233,13 +233,20 @@ enum HelperDaemon {
     // MARK: - DNS UDP Relay
 
     nonisolated(unsafe) private static var relay: UDPRelay?
+    nonisolated(unsafe) private static var currentDNSRelayTarget: Int?
 
     private static func startDNSRelay(targetPort: Int) -> HelperResponse {
+        // Idempotent: 48 of the field log's DNS-relay starts carried the
+        // same target as the relay already running. See `TCPRelayPlan`.
+        if relay != nil, currentDNSRelayTarget == targetPort {
+            return .ok()
+        }
         stopDNSRelay()
         let r = UDPRelay()
         do {
             try r.start(listenPort: 53, targetPort: targetPort)
             relay = r
+            currentDNSRelayTarget = targetPort
             HelperLog.notice("DNS relay started: 127.0.0.1:53 -> 127.0.0.1:\(targetPort)")
             return .ok()
         } catch {
@@ -248,8 +255,10 @@ enum HelperDaemon {
     }
 
     private static func stopDNSRelay() {
+        guard relay != nil else { return }
         relay?.stop()
         relay = nil
+        currentDNSRelayTarget = nil
         HelperLog.notice("DNS relay stopped")
     }
 
@@ -257,16 +266,31 @@ enum HelperDaemon {
 
     nonisolated(unsafe) private static var tcpRelay: TCPRelay?
     nonisolated(unsafe) private static var currentRelayHost: String?
+    nonisolated(unsafe) private static var currentTCPRelay: TCPRelayParameters?
 
     private static func startTCPRelay(listenPort: Int, targetPort: Int, host: String) -> HelperResponse {
-        stopTCPRelay()
+        let requested = TCPRelayParameters(listenPort: listenPort, targetPort: targetPort, host: host)
+        switch TCPRelayPlan.plan(current: currentTCPRelay, requested: requested) {
+        case .unchanged:
+            return .ok()
+        case .repoint:
+            // Listener only. The alias stays: the app's transparent-proxy
+            // listener is bound to it right now, and this is the re-point
+            // that used to pull it out from under that listener.
+            tcpRelay?.stop()
+            tcpRelay = nil
+            currentTCPRelay = nil
+        case .start:
+            stopTCPRelay()
+        }
 
         // Non-standard loopback addresses (e.g. 127.44.3.0, the transparent-
         // proxy intercept IP) are not bindable/reachable until aliased onto
         // lo0. /32 netmask is the canonical loopback-alias form — a wider
         // mask would make the .0 address a network address. The alias does
-        // not survive reboot; it is re-added on every relay start.
-        if host != "127.0.0.1" {
+        // not survive reboot; it is re-added whenever a relay starts on a
+        // host that has none.
+        if host != "127.0.0.1", currentRelayHost != host {
             let status = runIfconfig(["lo0", "alias", host, "netmask", "255.255.255.255"])
             if status != 0 {
                 // Non-zero also fires when the alias already exists — the
@@ -280,6 +304,7 @@ enum HelperDaemon {
         do {
             try r.start(listenPort: listenPort, targetPort: targetPort, host: host)
             tcpRelay = r
+            currentTCPRelay = requested
             HelperLog.notice("TCP relay started: \(host):\(listenPort) -> \(host):\(targetPort)")
             return .ok()
         } catch {
@@ -289,8 +314,12 @@ enum HelperDaemon {
     }
 
     private static func stopTCPRelay() {
+        // 42 of the field log's `stop-tcp-relay` commands arrived with no
+        // relay running; a no-op should not claim to have stopped one.
+        guard tcpRelay != nil || currentRelayHost != nil else { return }
         tcpRelay?.stop()
         tcpRelay = nil
+        currentTCPRelay = nil
         removeRelayAliasIfNeeded()
         HelperLog.notice("TCP relay stopped")
     }
