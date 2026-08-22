@@ -139,6 +139,9 @@ final class AppState: ObservableObject {
         self.lastReconciledConfig = initialConfig
         self.platformConfig = loadedConfiguration.platformConfig
         self.appPreferences = loadedConfiguration.appPreferences
+        if loadedConfiguration.appPreferences.fileLoggingEnabled {
+            logStore.logFileURL = AppLogStore.defaultLogFileURL
+        }
         // Mirror the two flap-window values into a thread-safe box so the
         // monitor's monitorQueue callback context can read them without
         // hopping back to MainActor on every utun event. The `$config` sink
