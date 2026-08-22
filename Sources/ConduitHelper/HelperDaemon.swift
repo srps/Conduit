@@ -238,8 +238,13 @@ enum HelperDaemon {
     private static func startDNSRelay(targetPort: Int) -> HelperResponse {
         // Idempotent: 48 of the field log's DNS-relay starts carried the
         // same target as the relay already running. See `TCPRelayPlan`.
-        if relay != nil, currentDNSRelayTarget == targetPort {
+        // "Running" is the socket's word, not ours — a relay whose loop
+        // died in place is restarted, not reported.
+        if let running = relay, running.isRunning, currentDNSRelayTarget == targetPort {
             return .ok()
+        }
+        if let dead = relay, !dead.isRunning {
+            HelperLog.warning("DNS relay had died in place; restarting")
         }
         stopDNSRelay()
         let r = UDPRelay()
@@ -270,6 +275,14 @@ enum HelperDaemon {
 
     private static func startTCPRelay(listenPort: Int, targetPort: Int, host: String) -> HelperResponse {
         let requested = TCPRelayParameters(listenPort: listenPort, targetPort: targetPort, host: host)
+        if let dead = tcpRelay, !dead.isRunning {
+            // The accept loop left on its own. Forget the listener, keep the
+            // alias: the app's listener on that address is still bound.
+            HelperLog.warning("TCP relay had died in place; restarting")
+            dead.stop()
+            tcpRelay = nil
+            currentTCPRelay = nil
+        }
         switch TCPRelayPlan.plan(current: currentTCPRelay, requested: requested) {
         case .unchanged:
             return .ok()
@@ -281,7 +294,17 @@ enum HelperDaemon {
             tcpRelay = nil
             currentTCPRelay = nil
         case .start:
-            stopTCPRelay()
+            // The alias follows the host, not the call: it goes only when
+            // the host changes. Nothing running on the same host — a dead
+            // listener, a failed re-point — keeps the alias the app's
+            // listener is bound to.
+            if let previous = currentRelayHost, previous != host {
+                stopTCPRelay()
+            } else {
+                tcpRelay?.stop()
+                tcpRelay = nil
+                currentTCPRelay = nil
+            }
         }
 
         // Non-standard loopback addresses (e.g. 127.44.3.0, the transparent-
@@ -290,7 +313,8 @@ enum HelperDaemon {
         // mask would make the .0 address a network address. The alias does
         // not survive reboot; it is re-added whenever a relay starts on a
         // host that has none.
-        if host != "127.0.0.1", currentRelayHost != host {
+        let addsAlias = host != "127.0.0.1" && currentRelayHost != host
+        if addsAlias {
             let status = runIfconfig(["lo0", "alias", host, "netmask", "255.255.255.255"])
             if status != 0 {
                 // Non-zero also fires when the alias already exists — the
@@ -308,7 +332,11 @@ enum HelperDaemon {
             HelperLog.notice("TCP relay started: \(host):\(listenPort) -> \(host):\(targetPort)")
             return .ok()
         } catch {
-            removeRelayAliasIfNeeded()
+            // Undo only what this call did. An alias that was already there
+            // belongs to a listener that is still bound to it; removing it
+            // on a failed re-point stranded that listener until the next
+            // reassert put the alias back.
+            if addsAlias { removeRelayAliasIfNeeded() }
             return .error("TCP relay bind on \(host):\(listenPort) failed: \(error.localizedDescription)")
         }
     }

@@ -89,6 +89,21 @@ package final class UDPRelay: @unchecked Sendable {
         var sentAt: Date
     }
 
+    /// See `TCPRelay.markDead`: a loop that left on its own must not leave
+    /// `isRunning` true behind it.
+    private func markDead(listenFD lfd: Int32, forwardFD ffd: Int32) {
+        let owned = lock.withLock { () -> Bool in
+            guard listenFD == lfd else { return false }
+            listenFD = -1
+            forwardFD = -1
+            return true
+        }
+        if owned {
+            close(lfd)
+            close(ffd)
+        }
+    }
+
     private func runLoop(listenFD: Int32, forwardFD: Int32, targetPort: Int, targetHost: String) {
         var buf = [UInt8](repeating: 0, count: 12_288)
         var pending: [UInt16: PendingQuery] = [:]
@@ -109,7 +124,10 @@ package final class UDPRelay: @unchecked Sendable {
             fds[0].revents = 0
             fds[1].revents = 0
             let ready = poll(&fds, nfds_t(fds.count), 1000)
-            if ready < 0 { break }
+            if ready < 0 {
+                if errno == EINTR || errno == EAGAIN { continue }
+                break
+            }
 
             let now = Date()
             pending = pending.filter { now.timeIntervalSince($0.value.sentAt) < staleTimeoutSeconds }
@@ -157,6 +175,7 @@ package final class UDPRelay: @unchecked Sendable {
                 }
             }
         }
+        markDead(listenFD: listenFD, forwardFD: forwardFD)
     }
 
     private func nextAvailableRelayTXID(startingAt next: inout UInt16, pending: [UInt16: PendingQuery]) -> UInt16 {

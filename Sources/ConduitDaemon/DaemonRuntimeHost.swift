@@ -266,15 +266,14 @@ final class DaemonRuntimeHost {
             }
             await orchestrator.startDNS()
             if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
+                let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
                 do {
-                    try systemDNSManager.apply(
-                        forwarderPort: orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort,
-                        logger: logger
-                    )
-                    startDNSHealthTimer(forwarderPort: orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort)
+                    try systemDNSManager.apply(forwarderPort: forwarderPort, logger: logger)
                 } catch {
                     logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
                 }
+                // Whether or not `apply` succeeded — see `AppState.startDNS`.
+                startDNSHealthTimer(forwarderPort: forwarderPort)
             }
             // `apply` above wrote the split-DNS entry files only; the intercept
             // files are written here, once the forwarder and the transparent
@@ -522,6 +521,7 @@ final class DaemonRuntimeHost {
     }
 
     private func handleDNSHealthResult(alive: Bool, forwarderPort: Int) {
+        // Twin of `AppState.handleDNSHealthResult`.
         if alive { return }
 
         logger.log(.warning, "DNS liveness probe failed. Attempting relay restart.", category: .system)

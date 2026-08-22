@@ -34,8 +34,8 @@ public enum TCPRelayPlan: Equatable, Sendable {
     case unchanged
     /// Same host, different ports: restart the listener, keep the alias.
     case repoint
-    /// Nothing running, or a different host: full stop (alias included),
-    /// then alias and start.
+    /// Nothing running, or a different host: stop what runs — the alias
+    /// too, but only if the host changes — then alias and start.
     case start
 
     public static func plan(current: TCPRelayParameters?, requested: TCPRelayParameters) -> TCPRelayPlan {

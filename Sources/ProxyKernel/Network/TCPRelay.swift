@@ -114,6 +114,19 @@ package final class TCPRelay: @unchecked Sendable {
         }
     }
 
+    /// The accept loop has left on its own. Close the listener so
+    /// `isRunning` says so — the helper consults it before answering a start
+    /// with "already running", and a dead relay that still looked alive was
+    /// invisible to every recovery path.
+    private func markDead(_ lfd: Int32) {
+        let owned = lock.withLock { () -> Bool in
+            guard listenFD == lfd else { return false }
+            listenFD = -1
+            return true
+        }
+        if owned { close(lfd) }
+    }
+
     private func acceptLoop(listenFD: Int32, targetPort: Int, targetHost: String) {
         while !Thread.current.isCancelled {
             var clientAddr = sockaddr_in()
@@ -124,7 +137,16 @@ package final class TCPRelay: @unchecked Sendable {
                 }
             }
             guard clientFD >= 0 else {
-                if errno == EINTR { continue }
+                let err = errno
+                if err == EINTR || err == ECONNABORTED { continue }
+                if err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM {
+                    // Exhaustion is a moment, not the end: sessions close
+                    // and descriptors come back. Leaving on it left a bound
+                    // listener nobody accepted on — SYNs completed into the
+                    // backlog, so even a connect probe called it healthy.
+                    usleep(100_000)
+                    continue
+                }
                 break
             }
 
@@ -174,6 +196,7 @@ package final class TCPRelay: @unchecked Sendable {
             thread.start()
             lock.withLock { clientThreads.append(thread) }
         }
+        markDead(listenFD)
     }
 
     private static func relayBidirectional(fd1: Int32, fd2: Int32) {
