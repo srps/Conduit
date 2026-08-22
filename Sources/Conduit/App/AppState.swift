@@ -113,6 +113,13 @@ final class AppState: ObservableObject {
         let runtimeEnvironment = AppState.runtimeEnvironment()
         let logStore = AppLogStore()
         let loadedConfiguration = ProxyConfigPersistence.loadAllMigrating(in: runtimeEnvironment)
+        // Attach the file before anything is logged: the load warnings and
+        // the migration notice below are the first lines of a session and
+        // the ones an after-the-fact read most wants, and the ring buffer
+        // is not replayed into the file.
+        if loadedConfiguration.appPreferences.fileLoggingEnabled {
+            logStore.logFileURL = AppLogStore.defaultLogFileURL
+        }
         for warning in loadedConfiguration.warnings {
             logStore.log(.warning, warning, category: .system)
         }
@@ -139,9 +146,6 @@ final class AppState: ObservableObject {
         self.lastReconciledConfig = initialConfig
         self.platformConfig = loadedConfiguration.platformConfig
         self.appPreferences = loadedConfiguration.appPreferences
-        if loadedConfiguration.appPreferences.fileLoggingEnabled {
-            logStore.logFileURL = AppLogStore.defaultLogFileURL
-        }
         // Mirror the two flap-window values into a thread-safe box so the
         // monitor's monitorQueue callback context can read them without
         // hopping back to MainActor on every utun event. The `$config` sink

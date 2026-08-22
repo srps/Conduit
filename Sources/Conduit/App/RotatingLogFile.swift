@@ -16,18 +16,33 @@ import Foundation
 ///
 /// All file work happens on one serial queue; `write` returns immediately.
 /// `flush()` drains the queue and exists for tests and for shutdown.
+///
+/// A file that cannot be opened or written says so **once**, through
+/// `onFailure`, and once more when writes resume — not per line, because
+/// the report goes to a log store that would try to write it here. The
+/// file is the diagnostic of last resort; the one thing it must not do is
+/// fail silently while Settings says it is on.
 package final class RotatingLogFile: @unchecked Sendable {
     package let url: URL
     private let maxBytes: Int
     private let archives: Int
+    private let onFailure: (@Sendable (String) -> Void)?
     private let queue = DispatchQueue(label: "io.github.srps.Conduit.logfile", qos: .utility)
     private var fd: Int32 = -1
     private var size = 0
+    /// Set on the first failed open/write, cleared on the next success.
+    /// Gates the report so a failure streak costs one line, not one per
+    /// entry the streak swallowed.
+    private var failing = false
 
-    package init(url: URL, maxBytes: Int = 5 << 20, archives: Int = 3) {
+    package init(
+        url: URL, maxBytes: Int = 5 << 20, archives: Int = 3,
+        onFailure: (@Sendable (String) -> Void)? = nil
+    ) {
         self.url = url
         self.maxBytes = maxBytes
         self.archives = archives
+        self.onFailure = onFailure
         queue.async { self.open() }
     }
 
@@ -57,25 +72,56 @@ package final class RotatingLogFile: @unchecked Sendable {
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
         fd = Darwin.open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
-        guard fd >= 0 else { return }
+        guard fd >= 0 else {
+            fail("could not open \(url.path): \(errnoMessage)")
+            return
+        }
         var st = stat()
         size = fstat(fd, &st) == 0 ? Int(st.st_size) : 0
     }
 
     private func append(_ data: Data) {
-        guard fd >= 0 else { return }
+        if fd < 0 {
+            // Opening failed earlier (already reported). Try again on each
+            // write so a directory that appears later — or a permission
+            // fixed later — is picked up without a toggle flip.
+            open()
+            guard fd >= 0 else { return }
+        }
         if size + data.count > maxBytes, size > 0 {
             rotate()
+            guard fd >= 0 else { return }
         }
+        var written = 0
+        var failure: String?
         data.withUnsafeBytes { buf in
-            var offset = 0
-            while offset < buf.count {
-                let n = Darwin.write(fd, buf.baseAddress! + offset, buf.count - offset)
-                if n <= 0 { break }
-                offset += n
+            while written < buf.count {
+                let n = Darwin.write(fd, buf.baseAddress! + written, buf.count - written)
+                if n < 0, errno == EINTR { continue }
+                if n <= 0 {
+                    failure = errnoMessage
+                    return
+                }
+                written += n
             }
         }
-        size += data.count
+        size += written
+        if let failure {
+            fail("write to \(url.path) failed: \(failure)")
+        } else if failing {
+            failing = false
+            onFailure?("File logging resumed: \(url.path)")
+        }
+    }
+
+    private func fail(_ message: String) {
+        guard !failing else { return }
+        failing = true
+        onFailure?("File logging is not recording — \(message). Entries are kept in the Logs window only until this clears.")
+    }
+
+    private var errnoMessage: String {
+        String(cString: strerror(errno))
     }
 
     private func rotate() {

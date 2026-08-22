@@ -32,7 +32,9 @@
 import Combine
 import Foundation
 import NIOConcurrencyHelpers
+import os
 import ProxyKernel
+import ConduitShared
 
 @MainActor
 package final class AppLogStore: ObservableObject, LogSink {
@@ -101,9 +103,26 @@ package final class AppLogStore: ObservableObject, LogSink {
             logFile?.close()
             logFile = nil
             guard let url = logFileURL else { return }
-            logFile = RotatingLogFile(url: url, maxBytes: fileLogMaxBytes, archives: fileLogArchives)
+            // The report lands in the ring buffer and stderr — and is offered
+            // to the file too, where it fails again and is swallowed by the
+            // file's own once-per-streak gate. One line, no loop.
+            logFile = RotatingLogFile(
+                url: url, maxBytes: fileLogMaxBytes, archives: fileLogArchives,
+                onFailure: { [weak self] message in
+                    Task { @MainActor in self?.log(.warning, message, category: .system) }
+                }
+            )
         }
     }
+
+    /// Every line that reaches the store is also mirrored to the unified log
+    /// under the subsystem the privileged helper logs to, so a single
+    /// `log show --predicate 'subsystem == "…"'` reads both processes in
+    /// order — the interleaving that two files could only approximate.
+    /// Public on purpose: the lines are already sanitised by `LogSink` and
+    /// already land in a user-readable file. `info`/`debug` are not
+    /// persisted by the system, which matches what is worth reading later.
+    private static let unifiedLog = Logger(subsystem: HelperConstants.logSubsystem, category: "app")
 
     /// Drains pending file writes. For tests and shutdown.
     package func flushFileLog() {
@@ -177,6 +196,7 @@ package final class AppLogStore: ObservableObject, LogSink {
             FileHandle.standardError.write(lineData)
         }
         logFile?.write(lineData)
+        Self.unifiedLog.log(level: level.osLogType, "[\(category.rawValue, privacy: .public)] \(message, privacy: .public)")
     }
 
     package func exportDiagnosticLog() -> String {
@@ -185,5 +205,20 @@ package final class AppLogStore: ObservableObject, LogSink {
 
     package func clearEntries() {
         entries.removeAll()
+    }
+}
+
+extension LogLevel {
+    /// Same mapping as the helper's `HelperLog`, so the two processes read
+    /// alike in Console: `warning` is what the log calls an error, `error`
+    /// is a fault. `info`/`debug` keep their own types and are not persisted.
+    var osLogType: OSLogType {
+        switch self {
+        case .debug: return .debug
+        case .info: return .info
+        case .notice: return .default
+        case .warning: return .error
+        case .error: return .fault
+        }
     }
 }
