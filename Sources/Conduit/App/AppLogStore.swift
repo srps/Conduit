@@ -80,23 +80,40 @@ package final class AppLogStore: ObservableObject, LogSink {
         return min(stderr, buf)
     }
 
-    private var fileHandle: FileHandle?
-    private let fileQueue = DispatchQueue(label: "com.proxymanager.filelog", qos: .utility)
+    private var logFile: RotatingLogFile?
+    private let fileLogMaxBytes: Int
+    private let fileLogArchives: Int
 
+    /// Where the app writes its log by default. On by default — see
+    /// `AppPreferences.fileLoggingEnabled` — because a log that has to be
+    /// switched on before the failure is only useful for failures that can
+    /// be predicted. The one real investigation this product has had found
+    /// a `proxy.log` seven weeks stale for exactly that reason.
+    package static var defaultLogFileURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Conduit/proxy.log")
+    }
+
+    /// Setting this opens the file for **append**; it never truncates. The
+    /// previous implementation did, on every toggle flip.
     package var logFileURL: URL? {
         didSet {
-            fileHandle?.closeFile()
-            fileHandle = nil
+            logFile?.close()
+            logFile = nil
             guard let url = logFileURL else { return }
-            let dir = url.deletingLastPathComponent()
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-            fileHandle = FileHandle(forWritingAtPath: url.path)
-            fileHandle?.seekToEndOfFile()
+            logFile = RotatingLogFile(url: url, maxBytes: fileLogMaxBytes, archives: fileLogArchives)
         }
     }
 
-    package init() {}
+    /// Drains pending file writes. For tests and shutdown.
+    package func flushFileLog() {
+        logFile?.flush()
+    }
+
+    package init(fileLogMaxBytes: Int = 5 << 20, fileLogArchives: Int = 3) {
+        self.fileLogMaxBytes = fileLogMaxBytes
+        self.fileLogArchives = fileLogArchives
+    }
 
     /// `LogSink` protocol primitive. Not called directly — the
     /// `LogSink.log` extension filters by `minLevel` and autoclosures the
@@ -159,10 +176,7 @@ package final class AppLogStore: ObservableObject, LogSink {
         if level >= minStderrLevel {
             FileHandle.standardError.write(lineData)
         }
-        if let fh = fileHandle {
-            let data = lineData
-            fileQueue.async { fh.write(data) }
-        }
+        logFile?.write(lineData)
     }
 
     package func exportDiagnosticLog() -> String {

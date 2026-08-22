@@ -400,17 +400,24 @@ package struct AppPreferences: Codable, Equatable, Sendable {
     package var floatingWindowEnabled: Bool
     package var globalShortcutEnabled: Bool
     package var preferredBrowserTestURL: String
+    /// Default **on**. A menu-bar app that runs unattended for days fails
+    /// when nobody is watching; an opt-in log is only there for failures
+    /// that were predicted. Rolled by size (`RotatingLogFile`), so "on" is
+    /// bounded.
+    package var fileLoggingEnabled: Bool
 
     package init(
         showMenuBarIcon: Bool = true,
         floatingWindowEnabled: Bool = false,
         globalShortcutEnabled: Bool = true,
-        preferredBrowserTestURL: String = ""
+        preferredBrowserTestURL: String = "",
+        fileLoggingEnabled: Bool = true
     ) {
         self.showMenuBarIcon = showMenuBarIcon
         self.floatingWindowEnabled = floatingWindowEnabled
         self.globalShortcutEnabled = globalShortcutEnabled
         self.preferredBrowserTestURL = preferredBrowserTestURL
+        self.fileLoggingEnabled = fileLoggingEnabled
     }
 
     package init(from decoder: Decoder) throws {
@@ -419,5 +426,6 @@ package struct AppPreferences: Codable, Equatable, Sendable {
         floatingWindowEnabled = try c.decodeIfPresent(Bool.self, forKey: .floatingWindowEnabled) ?? false
         globalShortcutEnabled = try c.decodeIfPresent(Bool.self, forKey: .globalShortcutEnabled) ?? true
         preferredBrowserTestURL = try c.decodeIfPresent(String.self, forKey: .preferredBrowserTestURL) ?? ""
+        fileLoggingEnabled = try c.decodeIfPresent(Bool.self, forKey: .fileLoggingEnabled) ?? true
     }
 }
