@@ -51,13 +51,6 @@ package struct DNSRemovalError: Error, LocalizedError {
 }
 
 package final class DNSManager: @unchecked Sendable {
-    private static let ipv4Regex = try! NSRegularExpression(
-        pattern: #"^(\d{1,3}\.){3}\d{1,3}$"#
-    )
-    private static let ipv6Regex = try! NSRegularExpression(
-        pattern: #"^[0-9a-fA-F:]+$"#
-    )
-
     private let privilegeClient: PrivilegeClient
     /// Where resolver files live. Injectable so tests can exercise the
     /// disk-state paths (`isApplied`, `isCleared`, `entryFilesPresent`, and the
@@ -91,11 +84,14 @@ package final class DNSManager: @unchecked Sendable {
         }
     }
 
+    /// Same grammar as the helper's `validateIPAddress`, for the same reason
+    /// `validateDomain` shares `DomainNameSyntax` with it: this is the writer
+    /// and the helper is the privileged executor of the same value, and a
+    /// server the app accepts that the helper refuses is a failure with no
+    /// cause the user can see. The regexes this replaced accepted
+    /// `999.999.999.999` and `::::::`.
     package static func validateServer(_ server: String) throws {
-        let range = NSRange(server.startIndex..<server.endIndex, in: server)
-        let isIPv4 = ipv4Regex.firstMatch(in: server, range: range) != nil
-        let isIPv6 = ipv6Regex.firstMatch(in: server, range: range) != nil
-        guard isIPv4 || isIPv6 else {
+        guard IPAddressSyntax.isLiteral(server) else {
             throw DNSValidationError.invalidServer(server)
         }
     }
