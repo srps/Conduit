@@ -711,11 +711,16 @@ struct SettingsView: View {
             }
 
             if appState.config.transparentProxyEnabled {
+                let ipProblem = Self.transparentProxyIPProblem(appState.config)
                 settingsRow("Intercept IP") {
                     TextField("", text: $appState.config.transparentProxyIP)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 140)
+                        .modifier(InvalidFieldHighlight(isInvalid: ipProblem != nil))
                         .accessibilityLabel("Transparent proxy intercept IP")
+                }
+                if let ipProblem {
+                    interceptRuleProblem(ipProblem)
                 }
                 Text("Dedicated loopback IP for intercepted traffic. Default 127.44.3.0 avoids conflicts with dev servers on 127.0.0.1.")
                     .font(.caption)
@@ -727,7 +732,16 @@ struct SettingsView: View {
                         .frame(width: 80)
                         .accessibilityLabel("Transparent proxy listen port")
                 }
+            }
 
+            // The rule list is shown whenever there are rules, not only while
+            // the feature is on. `ProxyConfig.validate()` checks every rule
+            // regardless of the toggle — it has to, the teardown path derives
+            // its file set from all of them — so a rule that is refused while
+            // the feature is off still puts "Configuration problem" in the
+            // banner. Hiding the list then left that banner pointing at a
+            // field the user could not see, let alone fix.
+            if Self.interceptRulesAreShown(in: appState.config) {
                 Divider().opacity(0.2)
 
                 HStack {
@@ -766,11 +780,36 @@ struct SettingsView: View {
                     }
                 }
 
-                Text("Requires DNS forwarder + system DNS management enabled. Helper required for port 443 relay.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if appState.config.transparentProxyEnabled {
+                    Text("Requires DNS forwarder + system DNS management enabled. Helper required for port 443 relay.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Transparent proxy is off. These rules are kept so their resolver files can be cleaned up, and are still checked on save.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
+    }
+
+    /// Whether the intercept-rule editor is rendered. It is the set of configs
+    /// in which `ProxyConfig.validate()` can report a rule problem — every
+    /// config with rules — plus the on-state, where the "Add" menu has to live
+    /// even before the first rule exists.
+    static func interceptRulesAreShown(in config: ProxyConfig) -> Bool {
+        config.transparentProxyEnabled || !config.dnsInterceptRules.isEmpty
+    }
+
+    /// The field new rules are pre-seeded from. Same check as the boundary,
+    /// and `nil` whenever the boundary is silent — which includes the feature
+    /// being off, when the field is not rendered at all.
+    static func transparentProxyIPProblem(_ config: ProxyConfig) -> String? {
+        guard config.transparentProxyEnabled,
+              !IPAddressSyntax.isIPv4(config.transparentProxyIP) else { return nil }
+        return "'\(config.transparentProxyIP)' is not a usable intercept target. "
+            + "New rules copy this address, and intercept answers are synthesized as "
+            + "A records, so this has to be an IPv4 literal such as 127.44.3.0."
     }
 
     /// One intercept rule, with its own validation state.

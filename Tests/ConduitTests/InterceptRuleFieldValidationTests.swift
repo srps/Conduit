@@ -64,6 +64,43 @@ final class InterceptRuleFieldValidationTests: XCTestCase {
         XCTAssertTrue(problem!.localizedDescription.contains("foo bar"))
     }
 
+    /// `ProxyConfig.validate()` checks every rule whether or not the feature
+    /// is on, so the editor has to be on screen whenever a rule exists —
+    /// otherwise the save banner names a row the user cannot see.
+    func testTheRuleEditorIsShownWheneverTheBoundaryCanComplainAboutARule() {
+        var config = GenericDefaults.shared.makeConfig()
+        config.transparentProxyEnabled = false
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.foo bar.example")]
+        XCTAssertTrue(boundaryRejects(config.dnsInterceptRules[0]))
+        XCTAssertTrue(SettingsView.interceptRulesAreShown(in: config))
+
+        config.dnsInterceptRules = []
+        XCTAssertFalse(SettingsView.interceptRulesAreShown(in: config))
+        config.transparentProxyEnabled = true
+        XCTAssertTrue(SettingsView.interceptRulesAreShown(in: config), "the Add menu lives here")
+    }
+
+    /// The intercept-IP field flags exactly when the boundary does, including
+    /// staying silent while the feature (and the field) is off.
+    func testTheTransparentProxyIPFieldAgreesWithTheConfigBoundary() {
+        for enabled in [true, false] {
+            for ip in ["127.44.3.0", "::1", "999.1.1.1", ""] {
+                var config = GenericDefaults.shared.makeConfig()
+                config.dnsInterceptRules = []
+                config.transparentProxyEnabled = enabled
+                config.transparentProxyIP = ip
+                let boundary = config.validate().contains {
+                    if case .invalidTransparentProxyIP = $0 { return true }
+                    return false
+                }
+                XCTAssertEqual(
+                    SettingsView.transparentProxyIPProblem(config) != nil, boundary,
+                    "field and boundary disagree on '\(ip)' enabled=\(enabled)"
+                )
+            }
+        }
+    }
+
     func testIPFieldUsesTheSameValidatorAsTheBoundary() {
         for ip in ["127.44.3.0", "::1", "::::::", "ffff", "999.1.1.1", ""] {
             let rule = DNSInterceptRule(pattern: "*.a.example", interceptIP: ip)
