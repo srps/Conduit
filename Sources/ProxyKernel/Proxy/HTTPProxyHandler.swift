@@ -438,7 +438,13 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 .whenComplete { result in
                     switch result {
                     case .success(let tunnel):
-                        self.logger.log(.notice, "CONNECT tunnel via \(tunnel.endpoint).", category: .proxy)
+                        // `.info`, not `.notice`: the app's ring buffer and
+                        // stderr both default to `.notice`, and one line per
+                        // tunnel at that level was 21 of the 22 lines in the
+                        // only captured app log — 2000 entries hold well
+                        // under an hour of browsing, so every warning was
+                        // evicted before anyone opened the Logs window.
+                        self.logger.log(.info, "CONNECT tunnel via \(tunnel.endpoint).", category: .proxy)
                         if let authMethod = tunnel.authMethod {
                             self.onConnectionActivity(ConnectionActivity(connectionID: infoID, authMethod: authMethod))
                         }
