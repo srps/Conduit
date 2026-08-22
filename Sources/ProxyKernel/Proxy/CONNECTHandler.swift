@@ -170,6 +170,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 return self.attachHTTPTunnel(
                     clientContext: ctx,
                     upstreamChannel: upstreamChannel,
+                    target: requestHead.uri,
                     onTunnelClosed: { pool.removeDedicatedTunnelByChannel(upstreamChannel); onTunnelClosed() }
                 ).map { (endpoint: endpoint, authMethod: authMethod) }
             }
@@ -178,6 +179,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
     private func attachHTTPTunnel(
         clientContext: ChannelHandlerContext,
         upstreamChannel: Channel,
+        target: String,
         onTunnelClosed: @Sendable @escaping () -> Void
     ) -> EventLoopFuture<Void> {
         let clientChannel = clientContext.channel
@@ -198,8 +200,10 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         }.flatMap {
             clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverHandler)
         }.flatMap {
-            let clientRelay = TunnelRelayHandler(peer: upstreamChannel, logger: self.logger, onClose: onTunnelClosed)
-            let upstreamRelay = TunnelRelayHandler(peer: clientChannel, logger: self.logger)
+            let clientRelay = TunnelRelayHandler(
+                peer: upstreamChannel, target: target, logger: self.logger, onClose: onTunnelClosed
+            )
+            let upstreamRelay = TunnelRelayHandler(peer: clientChannel, target: target, logger: self.logger)
             return clientChannel.pipeline.addHandler(clientRelay).flatMap {
                 upstreamChannel.pipeline.addHandler(upstreamRelay)
             }
@@ -568,11 +572,15 @@ private final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendab
     typealias InboundIn = ByteBuffer
 
     private let peer: Channel
+    /// The CONNECT authority this relay serves, so a failure names what was
+    /// being reached rather than only which side of the relay noticed.
+    private let target: String
     private let logger: any LogSink
     private let onClose: (() -> Void)?
 
-    init(peer: Channel, logger: any LogSink, onClose: (() -> Void)? = nil) {
+    init(peer: Channel, target: String, logger: any LogSink, onClose: (() -> Void)? = nil) {
         self.peer = peer
+        self.target = target
         self.logger = logger
         self.onClose = onClose
     }
@@ -602,7 +610,13 @@ private final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendab
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        logger.log(.warning, "Tunnel relay error: \(error.localizedDescription)", category: .proxy)
+        // `displayDescription`, not `localizedDescription`: for a
+        // `NIOCore.IOError` the latter is the generic Foundation bridge
+        // string ("The operation couldn't be completed. (NIOCore.IOError
+        // error 1.)") with the errno and reason dropped — the one captured
+        // occurrence of this line in a real log was unactionable for
+        // exactly that reason.
+        logger.log(.warning, "Tunnel relay error for \(target): \(error.displayDescription)", category: .proxy)
         gracefulClosePeer()
         context.close(promise: nil)
     }
