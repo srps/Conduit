@@ -364,4 +364,11 @@ public enum HelperConstants {
     public static let binaryInstallPath = "/Library/PrivilegedHelperTools/io.github.srps.Conduit.Helper"
     public static let launchdPlistPath = "/Library/LaunchDaemons/io.github.srps.Conduit.Helper.plist"
     public static let serviceLabel = "io.github.srps.Conduit.Helper"
+    public static let logPath = "/var/log/io.github.srps.Conduit.Helper.log"
+    /// `newsyslog(8)` is how macOS rotates daemon logs — a drop-in here,
+    /// read by the periodic job, no code. Without it `KeepAlive` plus a
+    /// crash loop appends without bound.
+    public static let newsyslogConfPath = "/etc/newsyslog.d/io.github.srps.Conduit.Helper.conf"
+    /// `mode 644, keep 3 archives, rotate at 5 MiB, any time, J = bzip2`.
+    public static let newsyslogEntry = "\(logPath)\t644\t3\t5120\t*\tJ"
 }
