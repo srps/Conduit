@@ -158,6 +158,13 @@ final class DNSValidationTests: XCTestCase {
 
     // MARK: - Invalid server IPs
 
+    /// `^[0-9a-fA-F:]+$` and `^(\d{1,3}\.){3}\d{1,3}$` both passed these.
+    func testServersTheOldRegexesAcceptedAreRefused() {
+        for value in ["::::::", "ffff", "999.999.999.999", "fe80::1%en0"] {
+            XCTAssertThrowsError(try DNSManager.validateServer(value), value)
+        }
+    }
+
     func testHostnameAsServerRejected() {
         XCTAssertThrowsError(try DNSManager.validateServer("dns.example.test")) { error in
             XCTAssertTrue(error is DNSValidationError)
