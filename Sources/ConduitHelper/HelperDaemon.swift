@@ -16,7 +16,7 @@ import SystemConfiguration
 /// rotates and indexes it, and the app mirrors its own lines under the same
 /// subsystem, so one query reads both processes in order:
 ///
-///     log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d
+///     /usr/bin/log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d
 ///
 /// Levels: `notice` → `.default`, `warning` → `.error`, `error` → `.fault`.
 /// Only `.default` and above persist to disk by default, which is exactly

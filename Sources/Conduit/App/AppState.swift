@@ -1253,9 +1253,8 @@ final class AppState: ObservableObject {
             scheduleDNSReconcile()
         }
 
-        // Entry files live and die with the tunnel (vpn-gw.corp.example
-        // under corp.example deadlocks reconnection otherwise — see
-        // `SplitDNSVPNGate`).
+        // Entry files live and die with the tunnel (`vpn-gw.corp.example` under a
+        // `corp.example` entry deadlocks reconnection otherwise — see `SplitDNSVPNGate`).
         guard platformConfig.manageDNSResolvers, entriesWantedChanged else { return }
 
         // The activation preflight consults the gate (deferred entry files

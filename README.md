@@ -289,8 +289,10 @@ The app automatically falls back to standard macOS admin prompts when the helper
 The helper logs to the unified log, and the app mirrors its own log lines there under the same subsystem, so one query reads both processes in order:
 
 ```bash
-log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d
+/usr/bin/log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d
 ```
+
+(`/usr/bin/log` because zsh has a `log` builtin that shadows the command.)
 
 The app's own log file is `~/Library/Logs/Conduit/proxy.log` (on by default, 5 MiB × 3).
 
