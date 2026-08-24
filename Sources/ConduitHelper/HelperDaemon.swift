@@ -18,15 +18,16 @@ import SystemConfiguration
 ///
 ///     /usr/bin/log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d
 ///
-/// Levels: `notice` → `.default`, `warning` → `.error`, `error` → `.fault`.
-/// Only `.default` and above persist to disk by default, which is exactly
-/// the set worth reading after the fact. Messages are marked public on
+/// Levels: `notice`/`warning` → `.default`, `error` → `.error`; `.fault` is
+/// reserved for invariant violations, so Console's loudest column stays
+/// meaningful. Only `.default` and above persist to disk by default, which
+/// is exactly the set worth reading after the fact. Messages are marked public on
 /// purpose — the helper logs ports, hosts and peer verdicts, never secrets —
 /// because a redacted `<private>` is no better than the undated line it
 /// replaces.
 enum HelperLog {
-    static func error(_ message: String) { write(.fault, message) }
-    static func warning(_ message: String) { write(.error, message) }
+    static func error(_ message: String) { write(.error, message) }
+    static func warning(_ message: String) { write(.default, message) }
     static func notice(_ message: String) { write(.default, message) }
 
     private static let logger = Logger(subsystem: HelperConstants.logSubsystem, category: "helper")

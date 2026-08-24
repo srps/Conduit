@@ -210,15 +210,19 @@ package final class AppLogStore: ObservableObject, LogSink {
 
 extension LogLevel {
     /// Same mapping as the helper's `HelperLog`, so the two processes read
-    /// alike in Console: `warning` is what the log calls an error, `error`
-    /// is a fault. `info`/`debug` keep their own types and are not persisted.
+    /// alike in Console, on os_log's own semantics: warnings are handled
+    /// anomalies (`.default`), errors are errors (`.error`), and `.fault`
+    /// stays reserved for invariant violations — which keeps Console's
+    /// Error and Fault columns meaningful instead of one level louder
+    /// than the text. `info`/`debug` keep their own types and are not
+    /// persisted.
     var osLogType: OSLogType {
         switch self {
         case .debug: return .debug
         case .info: return .info
         case .notice: return .default
-        case .warning: return .error
-        case .error: return .fault
+        case .warning: return .default
+        case .error: return .error
         }
     }
 }
