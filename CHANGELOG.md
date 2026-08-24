@@ -4,6 +4,161 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## 0.2.0
+
+Teardown now restores the machine to what it was instead of switching things off, the
+privileged helper speaks a new protocol to make that possible, and the parts of the app
+that talk to subprocesses, the helper and the log no longer have silent failure modes.
+
+**Upgrading:** reinstall the helper (`sudo ./install-helper.sh`) — the helper protocol moved
+from 3 to 4 to carry the restore operations. A `saved-dns.json` left by 0.1.x is imported into
+the new journal on first launch and then removed, so a machine that crashed with system-DNS
+management active gets its resolvers back after the upgrade. The helper accepts protocol 3 as well, so an
+app rolled back to 0.1.x keeps working against the new helper. The helper's own log file
+is gone; it now writes to the unified log, and one query reads both processes in order:
+`/usr/bin/log show --predicate 'subsystem == "io.github.srps.Conduit"' --info --last 1d`.
+
+### Restore, not erase
+
+- Platform side effects record what the machine looked like before Conduit changed it —
+  system proxy settings, system DNS, launchd proxy variables — in a prior-state journal, so
+  teardown puts the user's own settings back instead of blanket-disabling them. A second
+  teardown no longer wipes what the first restored, a restore that only partly lands keeps its
+  records rather than losing them, and teardown decides from the machine's actual state rather
+  than from an empty journal. The legacy DNS snapshot and the optional-journal mode are gone.
+- The privileged helper gained restore operations, so on machines where `networksetup` needs
+  admin rights the restore is a real restore rather than degrading to a clear. Conduit's own
+  leftovers are no longer captured as the user's prior settings, and saved settings survive a
+  privileged write that fails.
+- Fixed a teardown that silently did nothing: every command in the system-proxy clear script
+  ended in `2>/dev/null || true`, which forced a zero exit and discarded the `requires admin`
+  text the privileged-helper fallback keys on. Stopping the proxy on such a machine cleared
+  nothing while reporting success. Permission failures now surface instead of being hidden by
+  a blanket clear.
+- Teardown restores a recorded service that is listed but down — a VPN link, an unplugged
+  adapter — rather than skipping it and forgetting its record, which left it pointed at a
+  dead proxy (or at the stopped resolver) for whenever it came back. And a service whose
+  current settings could not be read is neither recorded nor written: recording the empty
+  default for it turned the next teardown into an erase.
+- A failed start reverts its platform side effects in both hosts. Previously an error out of
+  `startProxy` left the system PAC setting naming a dead port and `/etc/resolver` files naming
+  a dead forwarder, breaking DNS and proxying for every client on the machine.
+- Fixed listener recycling, which could never succeed: it bound a replacement accept socket
+  before closing the old one, burned its retry budget on `EADDRINUSE` against its own socket,
+  and surfaced a raw NIO `IOError`. It now no-ops on a healthy listener and closes-then-binds
+  only when the socket is dead or on the wrong address.
+- Port conflicts report themselves: a typed `ListenerBindError` names the process holding the
+  address, resolved through `libproc` rather than by spawning `lsof` on an already-failing
+  start path. Only failures a wait can resolve are retried, so a permissions error no longer
+  stalls the start path for ten seconds.
+- Split-DNS entry files are removed whenever the VPN is down, not only while the proxy runs,
+  and a start with the VPN down sweeps files a previous run stranded. Both hosts previously
+  skipped reconciliation entirely when the runtime was down — exactly the state a crashed or
+  failed start leaves behind, with the overrides pointing into a tunnel that is gone.
+- Launch-time crash recovery decides from liveness (is the forwarder answering) rather than
+  from socket ownership, runs off the main actor, and is joined before anything depends on it.
+
+### Subprocesses and batches
+
+- `CommandRunner` drains the child's pipes while it waits instead of afterwards, so a child
+  that writes more than a pipe buffer no longer deadlocks against a parent waiting for exit.
+  The drain is cancellable, read errors are no longer mistaken for EOF, the cancel wait is
+  bounded, and the output cap is per caller — the PAC fetch states its own ceiling with a
+  reason, and a PAC that was too large or timed out no longer reads as "PAC unreachable".
+- Resolver-file removal batches finish after a failure and then report it, validate inside
+  the loop, and migrate even after a partial sweep. An unusable domain is warned about and
+  skipped rather than counted as a failed teardown.
+- A thrown DNS reconcile no longer skips the intercept-file refresh, which could leave the
+  intercept files pointing at a pre-restart forwarder port.
+
+### Configuration boundary
+
+- Intercept rules are validated at the config boundary with one RFC-grounded domain grammar
+  (underscores allowed, as in service records). A bad rule withholds the resolver files, not
+  the listener; an empty pattern is unconfigured, not wrong; an intercept target has to be
+  IPv4 because the synthesized answer is an A record; and `dns.transparentProxyIP` is checked
+  at the field new rules copy it from. Settings show the validation on the field that is wrong
+  and keep the rules on screen whenever the boundary can refuse one. The daemon logs the config
+  errors its start gate deliberately ignores.
+- DNS server addresses use one IP-literal grammar, decided by `inet_pton` rather than a regex.
+
+### Logging
+
+- The app's file log is on by default, appended rather than truncated, and rolled by size
+  (5 MiB × 3) at `~/Library/Logs/Conduit/proxy.log`. A file that cannot be written is reported
+  once in the in-app log, and writing resumes silently when it can.
+- The helper logs to the unified log with level and pid, and the app mirrors its own lines
+  there under the same subsystem. The old helper log file and its rotation entry are removed
+  on install and uninstall.
+- Unified-log levels follow os_log's own semantics in both processes: notices and warnings
+  are `.default`, errors are `.error`, and `.fault` is reserved for invariant violations —
+  routine connect failures no longer fill Console's Fault column.
+- Each CONNECT tunnel is logged at info rather than notice, and a tunnel relay failure names
+  the target and the errno. Relay-setup failures are logged, and a read is resumed only once
+  the upstream is writable.
+- SwiftNIO failures are described instead of bridged: "The operation couldn't be completed.
+  (NIOCore.ChannelError error 0.)" — the same text for a connect timeout, a DNS failure and a
+  write to a closed channel — becomes the timeout, the lookup that failed, or each address
+  that refused. The auto-recovery health summary carries the same detail. Expected outcomes
+  log at the level they deserve: an origin that no DoH route answered for during an outage
+  is a warning, a client that went away while the upstream connected is informational.
+
+### Helper and relays
+
+- A helper refusal is an answer, not a dropped connection: "unauthorized" and "no console
+  user" come back as typed frames the app shows as state. Nothing prompts for a password on a
+  refusal and nothing sleeps on it; the reconcile paths (health tick, wake, VPN change) re-issue
+  the work when the situation changes.
+- Relay starts are idempotent, and re-pointing a relay keeps the `lo0` alias with the host it
+  serves. Relay liveness is honest: the accept loop rides out descriptor and buffer exhaustion
+  instead of exiting, and a relay that does die closes its listener so a connect probe cannot
+  be fooled by a backlog that still completes handshakes.
+- The orchestrator probes the transparent TCP relay every 30 s and re-issues it when it is
+  gone — the case being a helper relaunched by launchd after a crash, which comes back with no
+  relays and previously left transparent proxying dead until a manual restart.
+- A connection that closes before the TLS handshake no longer logs a spurious "SNI
+  extraction timed out" ten seconds later. The liveness probe connects and closes without a
+  handshake, which made that warning fire like clockwork — 2,880 lines a day.
+
+### Under an outage
+
+Three days of one machine's proxy log, read against the code, found the places where a
+network that went away turned into work done many times over.
+
+- Fixed a crash in the Kerberos handshake: two connections that both lacked a service ticket
+  ran Heimdal's KDC-locate path at the same time, and the platform SSO plugin on that path is
+  not safe to run twice at once. GSS initiator calls are now serialised process-wide, so one
+  handshake fetches the ticket and the rest find it in the credential cache. After a KDC or
+  network failure the next attempts to that target fail at once for five seconds instead of
+  each waiting on the same unreachable KDC; a missing ticket is still reported every time, so
+  the NTLM fallback and a fresh `kinit` behave as before.
+- Automatic recovery admits one ladder at a time and pauses for a minute after one exhausts.
+  Previously every failed health check started a ladder, and a ladder that exhausted restarted
+  the health loop with an immediate check — 47 ladders in six minutes, overlapping, with their
+  "switch upstream" steps flipping the active upstream back and forth. A healthy check clears
+  the pause. Both decisions are on the event stream (`recovery.suppressed`,
+  `recovery.cooldown_started`).
+- Connects no longer race AAAA answers on a host whose only IPv6 addresses are link-local.
+  Happy-eyeballs picked the AAAA, the connect came back half-open, and the IPv4 fallback then
+  did the real work — a wasted connect and a warning per upstream connection, thousands a
+  day. The resolver attached to every direct connect returns no AAAA while the host has no
+  routable IPv6; the half-open fallback stays as the safety net.
+- One PAC evaluation serves a burst of requests for the same host; before, each queued its
+  own run of the script and waited for all the ones ahead of it, which is how one stalled
+  `dnsResolve()` became a page of timeouts.
+- The PAC is never fetched through the proxy it configures. curl inherited the proxy
+  variables Conduit publishes, and the system session honoured the proxy settings Conduit
+  installs, so a refresh went through the local listener, was routed by the previous PAC,
+  and failed exactly when the upstreams were what had changed. The PAC host is also an
+  implicit bypass in the HTTP and SOCKS5 handlers.
+- During a network outage the transparent proxy's origin lookup remembers a host that no
+  DoH route answered for, for five seconds, instead of paying the full provider × route
+  fan-out of timeouts on every intercepted connection.
+- Bounds on the new caches and queues: a PAC evaluation holds at most 256 waiters and the
+  evaluator queue at most 64 evaluations (past either, a request is answered without routes,
+  as a timeout would, and a `pac.evaluation_refused` event says so), the origin negative
+  cache holds 256 hosts, and the GSS cooldown table 32 targets.
+
 ## 0.1.1
 
 Makes the DNS forwarder usable as a resolver on a split-DNS corporate network, where
