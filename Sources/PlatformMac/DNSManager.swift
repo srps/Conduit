@@ -275,6 +275,8 @@ package final class DNSManager: @unchecked Sendable {
     /// are rewritten in place — never removed first — so a running system
     /// keeps resolving them throughout. This is what makes DNS config edits
     /// take effect without a Conduit restart.
+    /// Removes resolver files the new config no longer wants, then writes the
+    /// entry files it does.
     ///
     /// Intercept files are represented in `newDomains` so a surviving rule is
     /// not mistaken for stale, but this never *writes* them — `apply` doesn't,
