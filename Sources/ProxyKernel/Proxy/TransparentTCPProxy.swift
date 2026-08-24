@@ -134,7 +134,10 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
     func handlerAdded(context: ChannelHandlerContext) {
         nonisolated(unsafe) let ctx = context
         ctx.eventLoop.scheduleTask(in: .seconds(Self.handshakeTimeoutSeconds)) { [weak self] in
-            guard let self, !self.resolved else { return }
+            // `clientGone` too: the 30 s relay-liveness probe connects and closes
+            // without a handshake, and a real client can vanish the same way. The
+            // deadline outliving the connection is not a timeout worth reporting.
+            guard let self, !self.resolved, !self.clientGone else { return }
             self.logger.log(.warning, "Transparent proxy: SNI extraction timed out.", category: .proxy)
             ctx.close(promise: nil)
         }
