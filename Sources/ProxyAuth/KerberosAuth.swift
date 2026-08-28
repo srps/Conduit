@@ -32,13 +32,31 @@ private let hostbasedServiceOIDBytes: [UInt8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0
 package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendable {
     private var gssContext: gss_ctx_id_t?
     private let lock = NSLock()
+    private let gate: GSSInitiatorGate
 
-    package init() {}
+    package init(gate: GSSInitiatorGate = .shared) {
+        self.gate = gate
+    }
 
     package func generateToken(host: String, inputToken: Data?) throws -> Data? {
         lock.lock()
         defer { lock.unlock() }
 
+        // Serialised process-wide: see `GSSInitiatorGate`. A credential-
+        // absence error is cheap to repeat and must stay visible to
+        // `NegotiateAuthenticator`'s NTLM fallback on every call; anything
+        // else (KDC unreachable, clock skew, ...) is a network-class failure
+        // that every queued handshake would otherwise re-run.
+        return try gate.run(shouldCoolDown: { error in
+            guard let kerberosError = error as? KerberosAuthError else { return true }
+            return !kerberosError.isCredentialUnavailable
+        }) {
+            try initiateLocked(host: host, inputToken: inputToken)
+        }
+    }
+
+    /// Caller holds `lock` and the gate.
+    private func initiateLocked(host: String, inputToken: Data?) throws -> Data? {
         // A nil/empty input token means the peer started a fresh handshake
         // (initial leg, or a bare `Negotiate` re-challenge after rejecting a
         // token on a kept-alive connection). Heimdal routes a live context to
