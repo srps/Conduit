@@ -24,7 +24,10 @@ package enum OriginResolverError: Error, LocalizedError, Equatable {
     package var errorDescription: String? {
         switch self {
         case .unresolved(let host):
-            return "no public A record for \(host)"
+            // Not "NXDOMAIN": the lookup fans out over every DoH provider and
+            // every route, and this is what all of them failing looks like —
+            // which during a network outage is simply no path to any of them.
+            return "no DoH route answered for \(host)"
         case .selfReferential(let host, let ip):
             return "\(host) resolved to \(ip) (loopback/link-local) — refusing to relay to ourselves"
         }
@@ -60,6 +63,7 @@ package final class DoHOriginResolver: OriginResolving {
     private let logger: any LogSink
     private let configProvider: @Sendable () -> ProxyConfig
     private let cache = NIOLockedValueBox<[String: CacheEntry]>([:])
+    private let negativeCache = NIOLockedValueBox(NegativeAnswerCache(ttl: 5))
 
     /// Takes the whole config, not just the provider list: reaching a DoH
     /// provider needs the proxy routes too (see `DoHSessionFactory.routes`).
@@ -74,11 +78,15 @@ package final class DoHOriginResolver: OriginResolving {
         if let ip = cachedIP(for: key) {
             return eventLoop.makeCompletedFuture { try Self.address(ip: ip, port: port, host: host) }
         }
+        if negativeCache.withLockedValue({ $0.isNegative(key) }) {
+            return eventLoop.makeFailedFuture(OriginResolverError.unresolved(host: host))
+        }
 
         let config = configProvider()
         let promise = eventLoop.makePromise(of: SocketAddress.self)
         Task { [self] in
             guard let answer = await lookupA(host: key, config: config) else {
+                negativeCache.withLockedValue { $0.recordFailure(key) }
                 promise.fail(OriginResolverError.unresolved(host: host))
                 return
             }
@@ -237,5 +245,37 @@ package final class DoHOriginResolver: OriginResolving {
             return nil
         }
         return (answer.ip, TimeInterval(answer.ttl))
+    }
+}
+
+/// Remembers hosts whose lookup just failed on every route, for a few seconds.
+///
+/// The resolver runs when the network just changed; when the path is gone
+/// every intercepted connection to a host would otherwise pay the full fan-out
+/// (providers × routes × encodings) of request timeouts before failing the
+/// same way. proxy.log showed bursts of a dozen such failures per second.
+package struct NegativeAnswerCache: Sendable {
+    package let ttl: TimeInterval
+    private var failedUntil: [String: Date] = [:]
+    private let now: @Sendable () -> Date
+
+    package init(ttl: TimeInterval, now: @escaping @Sendable () -> Date = { Date() }) {
+        self.ttl = ttl
+        self.now = now
+    }
+
+    package mutating func recordFailure(_ key: String) {
+        let current = now()
+        failedUntil = failedUntil.filter { $0.value > current }
+        failedUntil[key] = current.addingTimeInterval(ttl)
+    }
+
+    package mutating func isNegative(_ key: String) -> Bool {
+        guard let until = failedUntil[key] else { return false }
+        guard until > now() else {
+            failedUntil.removeValue(forKey: key)
+            return false
+        }
+        return true
     }
 }

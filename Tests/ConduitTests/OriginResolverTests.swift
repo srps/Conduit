@@ -177,3 +177,22 @@ final class TransparentProxyRoutingPolicyTests: XCTestCase {
         XCTAssertTrue(HTTPProxyHandler.directFallbackAllowed(strictMode: false, cause: .upstreamsUnreachable))
     }
 }
+
+final class NegativeAnswerCacheTests: XCTestCase {
+    func testFailureIsRememberedForTTLThenForgotten() {
+        final class Clock: @unchecked Sendable { var now = Date(timeIntervalSince1970: 5_000) }
+        let clock = Clock()
+        let t0 = clock.now
+        var cache = NegativeAnswerCache(ttl: 5, now: { clock.now })
+
+        XCTAssertFalse(cache.isNegative("chatgpt.com"))
+        cache.recordFailure("chatgpt.com")
+        XCTAssertTrue(cache.isNegative("chatgpt.com"))
+        XCTAssertFalse(cache.isNegative("api2.cursor.sh"), "entries are per host")
+
+        clock.now = t0 + 4.9
+        XCTAssertTrue(cache.isNegative("chatgpt.com"))
+        clock.now = t0 + 5
+        XCTAssertFalse(cache.isNegative("chatgpt.com"))
+    }
+}
