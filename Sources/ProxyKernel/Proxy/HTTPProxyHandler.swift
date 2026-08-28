@@ -952,7 +952,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         // (surfaced as the opaque "ChannelPipelineError error 1" in logs) and
         // leaks the upstream channel. Short-circuit on the fast path.
         guard clientChannel.isActive else {
-            logger.log(directFailureLevel, "Direct tunnel to \(target): client closed before upstream ready; discarding.", category: .proxy)
+            // The client went away; nothing failed on our side.
+            logger.log(.info, "Direct tunnel to \(target): client closed before upstream ready; discarding.", category: .proxy)
             upstreamChannel.close(mode: .all, promise: nil)
             onRequestCompleted(false, nil)
             onConnectionClosed(infoID)

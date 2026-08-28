@@ -300,8 +300,19 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                         "transparent_proxy.direct_failed",
                         detail: "host=\(host) error=\(error.displayDescription)"
                     )
+                    // The origin lookup goes over DoH on every route we have
+                    // (direct, via upstream, via our own listener). It runs
+                    // exactly when the network just changed, and when the
+                    // physical path is gone all routes fail together — the
+                    // expected outcome of a fallback during an outage, not a
+                    // fault in the relay: 140 such lines in three days of
+                    // proxy.log, every one inside a "network lost" window.
+                    var level: LogLevel = .error
+                    if case .unresolved? = error as? OriginResolverError {
+                        level = .warning
+                    }
                     self.logger.log(
-                        .error,
+                        level,
                         "Transparent proxy: direct relay to \(host) failed — \(error.displayDescription)",
                         category: .proxy
                     )
