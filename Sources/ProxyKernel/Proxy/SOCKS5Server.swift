@@ -376,6 +376,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
 
         let makeBootstrap: @Sendable () -> ClientBootstrap = {
             ClientBootstrap(group: group)
+                .resolver(AddressFamilyAwareResolver(group: group))
                 .connectTimeout(.seconds(10))
                 .channelOption(ChannelOptions.tcpNoDelay, value: 1)
         }

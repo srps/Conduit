@@ -786,6 +786,7 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
         // future there — the TSan soak flagged clientGone/upstream/buffered
         // accesses in this callback racing channelRead/channelInactive.
         ClientBootstrap(group: group)
+            .resolver(AddressFamilyAwareResolver(group: group))
             .connectTimeout(.seconds(10))
             .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             .connect(host: remoteHost, port: remotePort)
