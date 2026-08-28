@@ -114,7 +114,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 case .success(let body):
                     completedBody = body
                 case .failure(let error):
-                    self.logger.log(.warning, "Request body storage failed for \(head.uri): \(error.localizedDescription)", category: .proxy)
+                    self.logger.log(.warning, "Request body storage failed for \(head.uri): \(error.displayDescription)", category: .proxy)
                     self.onRequestCompleted(false, nil)
                     self.writeError(status: .internalServerError, message: "Request body could not be stored for replay.", context: ctx)
                         .whenComplete { _ in ctx.close(promise: nil) }
@@ -192,7 +192,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let pacSaysProxy: Bool
         if case .proxy = pacResult.route { pacSaysProxy = true } else { pacSaysProxy = false }
         let bypass = directModeBypass
-            || NoProxyMatcher.shouldBypass(host: targetHost, patterns: currentConfig.noProxyHosts, forceProxy: forceProxyPatterns)
+            || NoProxyMatcher.shouldBypass(
+                host: targetHost,
+                patterns: currentConfig.noProxyHosts + currentConfig.implicitBypassHosts,
+                forceProxy: forceProxyPatterns
+            )
             || pacBypass
             || (!forceProxy && !pacSaysProxy && cachedDirectReachable(target: target))
         let selectedUpstream = pacResult.proxyChain.first?.endpoint ?? pool.activeUpstream() ?? "pending"
@@ -396,7 +400,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        logger.log(.warning, "Client-side proxy error: \(error.localizedDescription)", category: .proxy)
+        logger.log(.warning, "Client-side proxy error: \(error.displayDescription)", category: .proxy)
         context.close(promise: nil)
     }
 
@@ -454,9 +458,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             self.logger.log(.warning, "CONNECT via upstream failed for \(head.uri), falling back to DIRECT (PAC chain includes DIRECT).", category: .proxy)
                             self.handleDirectConnect(head: head, target: target, infoID: infoID, context: ctx)
                         } else {
-                            self.logger.log(upstreamFailureLevel, "CONNECT tunnel failed: \(error.localizedDescription)", category: .proxy)
+                            self.logger.log(upstreamFailureLevel, "CONNECT tunnel failed: \(error.displayDescription)", category: .proxy)
                             self.onRequestCompleted(false, nil)
-                            self.writeError(status: .badGateway, message: error.localizedDescription, context: ctx)
+                            self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                             self.onConnectionClosed(infoID)
                         }
                     }
@@ -523,10 +527,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         self.logger.log(.warning, "Proxy exchange failed for \(head.uri), falling back to DIRECT.", category: .proxy)
                         self.handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: ctx)
                     } else {
-                        self.logger.log(upstreamFailureLevel, "Proxy exchange failed: \(error.localizedDescription)", category: .proxy)
+                        self.logger.log(upstreamFailureLevel, "Proxy exchange failed: \(error.displayDescription)", category: .proxy)
                         self.onRequestCompleted(false, nil)
                         if ctx.channel.isActive {
-                            self.writeError(status: .badGateway, message: error.localizedDescription, context: ctx)
+                            self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                         }
                         self.onConnectionClosed(infoID)
                         body?.cleanup()
@@ -591,11 +595,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             upstream.close(mode: .all, promise: nil)
                         },
                         onError: { error in
-                            logger.log(directFailureLevel, "Direct HTTP relay failed: \(error.localizedDescription)", category: .proxy)
+                            logger.log(directFailureLevel, "Direct HTTP relay failed: \(error.displayDescription)", category: .proxy)
                             clientEL.execute {
                                 if clientChannel.isActive {
                                     var head = HTTPResponseHead(version: .http1_1, status: .badGateway)
-                                    let content = "Conduit could not complete the request.\n\n\(error.localizedDescription)"
+                                    let content = "Conduit could not complete the request.\n\n\(error.displayDescription)"
                                     var buffer = clientChannel.allocator.buffer(capacity: content.utf8.count)
                                     buffer.writeString(content)
                                     head.headers.add(name: "Content-Length", value: "\(buffer.readableBytes)")
@@ -621,7 +625,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         bodyFuture.flatMap {
                             upstream.writeAndFlush(HTTPClientRequestPart.end(nil))
                         }.whenFailure { error in
-                            logger.log(directFailureLevel, "Direct HTTP request write failed: \(error.localizedDescription)", category: .proxy)
+                            logger.log(directFailureLevel, "Direct HTTP request write failed: \(error.displayDescription)", category: .proxy)
                             onRequestCompleted(false, nil)
                             onConnectionClosed(infoID)
                             body?.cleanup()
@@ -630,13 +634,13 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                     }
                 case .failure(let error):
-                    logger.log(directFailureLevel, "Direct connect to \(host):\(port) failed: \(error.localizedDescription)", category: .proxy)
+                    logger.log(directFailureLevel, "Direct connect to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
                     onRequestCompleted(false, nil)
                     body?.cleanup()
                     clientEL.execute {
                         if clientChannel.isActive {
                             var head = HTTPResponseHead(version: .http1_1, status: .badGateway)
-                            let content = "Conduit could not complete the request.\n\n\(error.localizedDescription)"
+                            let content = "Conduit could not complete the request.\n\n\(error.displayDescription)"
                             var buffer = clientChannel.allocator.buffer(capacity: content.utf8.count)
                             buffer.writeString(content)
                             head.headers.add(name: "Content-Length", value: "\(buffer.readableBytes)")
@@ -735,7 +739,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         bodyFuture.flatMap {
                             upstream.writeAndFlush(HTTPClientRequestPart.end(nil))
                         }.whenFailure { error in
-                            logger.log(directFailureLevel, "Upgrade request write failed: \(error.localizedDescription)", category: .proxy)
+                            logger.log(directFailureLevel, "Upgrade request write failed: \(error.displayDescription)", category: .proxy)
                             onRequestCompleted(false, nil)
                             onConnectionClosed(infoID)
                             body?.cleanup()
@@ -744,10 +748,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                     }
                 case .failure(let error):
-                    logger.log(directFailureLevel, "Direct connect for upgrade to \(host):\(port) failed: \(error.localizedDescription)", category: .proxy)
+                    logger.log(directFailureLevel, "Direct connect for upgrade to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
                     onRequestCompleted(false, nil)
                     body?.cleanup()
-                    self.writeError(status: .badGateway, message: error.localizedDescription, context: ctx)
+                    self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                     onConnectionClosed(infoID)
                 }
             }
@@ -774,9 +778,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         directFailureLevel: directFailureLevel
                     )
                 case .failure(let error):
-                    self.logger.log(directFailureLevel, "Direct connect to \(host):\(port) failed: \(error.localizedDescription)", category: .proxy)
+                    self.logger.log(directFailureLevel, "Direct connect to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
                     self.onRequestCompleted(false, nil)
-                    self.writeError(status: .badGateway, message: error.localizedDescription, context: ctx)
+                    self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                     self.onConnectionClosed(infoID)
                 }
             }
@@ -992,7 +996,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     // rather than `.error` so the UI doesn't flag a VPN-off
                     // session as broken.
                     let level: LogLevel = Self.isBenignTunnelSetupRace(error) ? directFailureLevel : .error
-                    logger.log(level, "Direct tunnel to \(target) aborted during setup: \(error.localizedDescription)", category: .proxy)
+                    logger.log(level, "Direct tunnel to \(target) aborted during setup: \(error.displayDescription)", category: .proxy)
                     clientChannel.close(mode: .all, promise: nil)
                     upstreamChannel.close(mode: .all, promise: nil)
                     onRequestCompleted(false, nil)
@@ -1132,7 +1136,7 @@ final class HTTPUpgradeResponseRelay: ChannelInboundHandler, RemovableChannelHan
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        logger.log(failureLevel, "Upgrade relay to \(targetDescription) failed: \(error.localizedDescription)", category: .proxy)
+        logger.log(failureLevel, "Upgrade relay to \(targetDescription) failed: \(error.displayDescription)", category: .proxy)
         failAndClose(context: context)
     }
 
@@ -1259,7 +1263,7 @@ final class HTTPUpgradeResponseRelay: ChannelInboundHandler, RemovableChannelHan
                 case .failure(let error):
                     self.state = .done
                     let level: LogLevel = HTTPProxyHandler.isBenignTunnelSetupRace(error) ? failureLevel : .error
-                    logger.log(level, "Upgrade splice to \(targetDescription) aborted: \(error.localizedDescription)", category: .proxy)
+                    logger.log(level, "Upgrade splice to \(targetDescription) aborted: \(error.displayDescription)", category: .proxy)
                     self.onFailure()
                     client.close(mode: .all, promise: nil)
                     upstreamChannel.close(mode: .all, promise: nil)

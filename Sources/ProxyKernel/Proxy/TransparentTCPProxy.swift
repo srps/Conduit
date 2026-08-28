@@ -234,7 +234,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                         )
                         self.logger.log(
                             .error,
-                            "Transparent proxy: CONNECT to \(target) failed — \(error.localizedDescription)",
+                            "Transparent proxy: CONNECT to \(target) failed — \(error.displayDescription)",
                             category: .proxy
                         )
                         ctx.close(promise: nil)
@@ -246,7 +246,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                     )
                     self.logger.log(
                         .warning,
-                        "Transparent proxy: CONNECT to \(target) failed (\(error.localizedDescription)) — falling back to direct.",
+                        "Transparent proxy: CONNECT to \(target) failed (\(error.displayDescription)) — falling back to direct.",
                         category: .proxy
                     )
                     self.relayDirect(context: ctx, host: sniHost, initialData: bufferedData)
@@ -297,11 +297,11 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                     // visible to the event stream and not just the log.
                     self.emitEvent(
                         "transparent_proxy.direct_failed",
-                        detail: "host=\(host) error=\(error.localizedDescription)"
+                        detail: "host=\(host) error=\(error.displayDescription)"
                     )
                     self.logger.log(
                         .error,
-                        "Transparent proxy: direct relay to \(host) failed — \(error.localizedDescription)",
+                        "Transparent proxy: direct relay to \(host) failed — \(error.displayDescription)",
                         category: .proxy
                     )
                     ctx.close(promise: nil)
@@ -334,7 +334,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
         clientGone = true
-        logger.log(.warning, "Transparent proxy: client error — \(error.localizedDescription)", category: .proxy)
+        logger.log(.warning, "Transparent proxy: client error — \(error.displayDescription)", category: .proxy)
         context.close(promise: nil)
     }
 
