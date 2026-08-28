@@ -175,7 +175,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        logger.log(.warning, "SOCKS5 error: \(error.localizedDescription)", category: .proxy)
+        logger.log(.warning, "SOCKS5 error: \(error.displayDescription)", category: .proxy)
         context.close(promise: nil)
     }
 
@@ -474,7 +474,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             case .success:
                 clientChannel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
             case .failure(let error):
-                self.logger.log(.error, "SOCKS5 tunnel setup failed: \(error.localizedDescription)", category: .proxy)
+                self.logger.log(.error, "SOCKS5 tunnel setup failed: \(error.displayDescription)", category: .proxy)
                 clientChannel.close(mode: .all, promise: nil)
                 upstream.close(mode: .all, promise: nil)
             }

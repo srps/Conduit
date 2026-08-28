@@ -331,12 +331,25 @@ package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
     /// URLs. Headless daemons get the throwing default (the PAC target
     /// cannot shell out to curl).
     package init(
-        session: URLSession = .shared,
+        session: URLSession = CFPACEvaluator.directSession,
         insecureFetcher: (@Sendable (URL) async throws -> String)? = nil
     ) {
         self.session = session
         self.insecureFetcher = insecureFetcher ?? Self.defaultInsecureFetcher
     }
+
+    /// `URLSession.shared` honours the system proxy settings — which, while
+    /// Conduit is running, point at Conduit. Fetching the PAC that
+    /// way sends the request through the proxy it configures: the request is
+    /// evaluated against the previous PAC, routed to an upstream, and fails
+    /// exactly when the upstreams are what changed. The PAC host is reachable
+    /// without a proxy by construction (clients must fetch it before they
+    /// know of any proxy), so the fetch goes direct.
+    package static let directSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = [:]
+        return URLSession(configuration: configuration)
+    }()
 
     @Sendable
     private static func defaultInsecureFetcher(_ url: URL) async throws -> String {

@@ -117,3 +117,28 @@ final class NoProxyMatcherTests: XCTestCase {
         XCTAssertEqual(NoProxyMatcher.extractHost(from: "https://secure.example.com:8443/api"), "secure.example.com")
     }
 }
+
+final class ImplicitBypassHostsTests: XCTestCase {
+    func testPACHostIsBypassedWhenPACRoutingIsOn() {
+        var config = ProxyConfig()
+        config.pacRoutingEnabled = true
+        config.pacURL = "http://pac.example.test/proxy.pac"
+
+        XCTAssertEqual(config.implicitBypassHosts, ["pac.example.test"])
+        XCTAssertTrue(NoProxyMatcher.shouldBypass(
+            host: "pac.example.test",
+            patterns: config.noProxyHosts + config.implicitBypassHosts
+        ))
+    }
+
+    func testNoImplicitBypassWithoutPACRouting() {
+        var config = ProxyConfig()
+        config.pacRoutingEnabled = false
+        config.pacURL = "http://pac.example.test/proxy.pac"
+        XCTAssertEqual(config.implicitBypassHosts, [])
+
+        config.pacRoutingEnabled = true
+        config.pacURL = ""
+        XCTAssertEqual(config.implicitBypassHosts, [])
+    }
+}
