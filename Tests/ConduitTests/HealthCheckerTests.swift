@@ -27,6 +27,17 @@ final class HealthCheckerTests: XCTestCase {
         checker.stop()
     }
 
+    func testIsRunningTracksStartAndStop() {
+        let checker = HealthChecker()
+        XCTAssertFalse(checker.isRunning)
+        checker.start(interval: 10) {
+            HealthCheckResult(healthy: true, summary: "OK", activeUpstream: nil, responseTimeMS: 0)
+        } onResult: { _ in }
+        XCTAssertTrue(checker.isRunning)
+        checker.stop()
+        XCTAssertFalse(checker.isRunning)
+    }
+
     func testHealthCheckerStopPreventsCallbacks() async throws {
         let checker = HealthChecker()
         let counter = CallbackCounter()
