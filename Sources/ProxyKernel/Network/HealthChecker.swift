@@ -62,6 +62,11 @@ package final class HealthChecker {
         timer.resume()
     }
 
+    /// Whether a loop is scheduled. `start` restarts the loop with an
+    /// immediate check, so callers that only need the loop to *exist* check
+    /// this first instead of restarting it.
+    package var isRunning: Bool { timer != nil }
+
     package func stop() {
         timer?.cancel()
         timer = nil

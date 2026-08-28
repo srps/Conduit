@@ -1066,6 +1066,7 @@ package final class ProxyOrchestrator {
     private lazy var localPACServer = LocalPACServer(logger: logStore)
 
     private lazy var autoRecovery = AutoRecovery(service: localProxyServer, logger: logStore)
+    private var recoveryGate = RecoveryGate()
 
     /// Platform probe that names the process holding a contended listen
     /// address. Nil in portable/headless builds; the bind error then names the
@@ -1959,6 +1960,11 @@ package final class ProxyOrchestrator {
 
     private func startHealthLoop() {
         guard snapshot.directModeCause.runsUpstreamHealthLoop else { return }
+        // `HealthChecker.start` fires a check immediately. A loop that is
+        // already running keeps its adaptive schedule; restarting it from a
+        // failed-recovery path is what turned one failure into a ladder
+        // every 1.5 s (see `RecoveryGate`).
+        guard !healthChecker.isRunning else { return }
         healthChecker.start(interval: config.healthCheckIntervalSeconds) { [weak self] in
             guard let self else {
                 return HealthCheckResult(healthy: false, summary: "ProxyOrchestrator deallocated", activeUpstream: nil, responseTimeMS: 0)
@@ -1985,6 +1991,7 @@ package final class ProxyOrchestrator {
         }
 
         if result.healthy {
+            recoveryGate.reset()
             mutateSnapshot {
                 $0.runtimeStatus.lastHealthSummary = "\(result.summary) (\(result.responseTimeMS) ms)"
                 $0.runtimeStatus.activeUpstream = result.activeUpstream ?? $0.runtimeStatus.activeUpstream
@@ -2000,13 +2007,29 @@ package final class ProxyOrchestrator {
         mutateSnapshot {
             $0.runtimeStatus.lastHealthSummary = "\(result.summary) (\(result.responseTimeMS) ms)"
             $0.runtimeStatus.activeUpstream = result.activeUpstream ?? $0.runtimeStatus.activeUpstream
-            $0.runtimeStatus.state = .degraded
+            if $0.runtimeStatus.state != .recovering {
+                $0.runtimeStatus.state = .degraded
+            }
         }
         refreshUpstreamStatuses()
+
+        switch recoveryGate.begin() {
+        case .alreadyRunning:
+            return
+        case .coolingDown(let remaining):
+            logStore.log(.debug, "Health check still failing (\(result.summary)); next recovery attempt in \(Int(remaining.rounded(.up)))s.", category: .network)
+            return
+        case .run:
+            break
+        }
 
         Task { @MainActor in
             self.mutateSnapshot { $0.runtimeStatus.state = .recovering }
             let recovered = await self.autoRecovery.recover()
+            self.recoveryGate.end(recovered: recovered)
+            if !recovered {
+                self.logStore.log(.notice, "Automatic recovery paused for \(Int(self.recoveryGate.cooldown))s; health checks continue.", category: .network)
+            }
             if recovered {
                 self.mutateSnapshot {
                     $0.runtimeStatus.state = .running

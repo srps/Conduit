@@ -83,3 +83,53 @@ package final class AutoRecovery: @unchecked Sendable {
         return false
     }
 }
+
+/// Admission control for `AutoRecovery.recover()`.
+///
+/// Every failed health check used to start a ladder, and a ladder that
+/// exhausted restarted the health loop with an immediate check — which
+/// failed for the same reason and started the next ladder. proxy.log for
+/// 2026-08-28 shows 47 ladders in six minutes, overlapping, with the
+/// "switch upstream" steps of concurrent runs flipping the active upstream
+/// back and forth several times a second. The gate admits one ladder at a
+/// time and, after one exhausts, none for `cooldown`; a healthy result
+/// clears the cooldown so a real recovery is acted on at once.
+package struct RecoveryGate: Sendable {
+    package enum Decision: Equatable, Sendable {
+        case run
+        case alreadyRunning
+        case coolingDown(remaining: TimeInterval)
+    }
+
+    package let cooldown: TimeInterval
+    package private(set) var inFlight = false
+    private var exhaustedAt: Date?
+
+    package init(cooldown: TimeInterval = 60) {
+        self.cooldown = cooldown
+    }
+
+    /// Ask to start a ladder. `.run` marks it in flight; the caller must
+    /// pair it with `end(recovered:)`.
+    package mutating func begin(now: Date = Date()) -> Decision {
+        if inFlight { return .alreadyRunning }
+        if let exhaustedAt {
+            let remaining = cooldown - now.timeIntervalSince(exhaustedAt)
+            if remaining > 0 { return .coolingDown(remaining: remaining) }
+            self.exhaustedAt = nil
+        }
+        inFlight = true
+        return .run
+    }
+
+    package mutating func end(recovered: Bool, now: Date = Date()) {
+        inFlight = false
+        exhaustedAt = recovered ? nil : now
+    }
+
+    /// A healthy check: forget the last exhaustion so the next failure is
+    /// acted on immediately.
+    package mutating func reset() {
+        exhaustedAt = nil
+    }
+}
