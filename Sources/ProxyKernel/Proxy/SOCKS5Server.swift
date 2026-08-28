@@ -337,7 +337,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         // (mirrors the HTTP proxy handler — see HTTPProxyHandler.channelRead).
         let bypass = NoProxyMatcher.shouldBypass(
             host: host,
-            patterns: currentConfig.noProxyHosts,
+            patterns: currentConfig.noProxyHosts + currentConfig.implicitBypassHosts,
             forceProxy: currentConfig.forceProxyHosts
         )
             || directModeBypass
@@ -451,7 +451,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                     }
                     self.attachRelay(context: ctx, upstream: upstream)
                 case .failure(let error):
-                    self.logger.log(failureLogLevel, "SOCKS5 upstream tunnel failed: \(error.localizedDescription)", category: .proxy)
+                    self.logger.log(failureLogLevel, "SOCKS5 upstream tunnel failed: \(error.displayDescription)", category: .proxy)
                     self.sendReply(context: ctx, rep: 0x05)
                 }
             }

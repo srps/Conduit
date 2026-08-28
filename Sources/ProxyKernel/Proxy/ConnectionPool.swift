@@ -355,7 +355,7 @@ package final class ConnectionPool: @unchecked Sendable {
         } catch {
             return HealthCheckResult(
                 healthy: false,
-                summary: error.localizedDescription,
+                summary: error.displayDescription,
                 activeUpstream: nil,
                 responseTimeMS: Int(Date().timeIntervalSince(start) * 1_000)
             )
@@ -400,7 +400,7 @@ package final class ConnectionPool: @unchecked Sendable {
                             self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                         } catch {
                             self.recordFailure(for: proxy)
-                            self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.localizedDescription)", category: .proxy)
+                            self.logger.log(.debug, "Prewarm failed for \(proxy.endpoint): \(error.displayDescription)", category: .proxy)
                         }
                     }
                 }
@@ -855,7 +855,7 @@ package final class ConnectionPool: @unchecked Sendable {
             return promise.futureResult
         }.flatMapError { error in
             promise.fail(error)
-            self.logger.log(.warning, "Exchange via \(proxy.endpoint) failed: \(error.localizedDescription)", category: .proxy)
+            self.logger.log(.warning, "Exchange via \(proxy.endpoint) failed: \(error.displayDescription)", category: .proxy)
             connection.channel.close(mode: .all, promise: nil)
             self.lock.withLockVoid {
                 self.removeConnectionLocked(id: connection.id)
@@ -903,7 +903,7 @@ package final class ConnectionPool: @unchecked Sendable {
             return promise.futureResult
         }.flatMapError { error in
             promise.fail(error)
-            self.logger.log(.warning, "Streaming exchange via \(proxy.endpoint) failed: \(error.localizedDescription)", category: .proxy)
+            self.logger.log(.warning, "Streaming exchange via \(proxy.endpoint) failed: \(error.displayDescription)", category: .proxy)
             connection.channel.close(mode: .all, promise: nil)
             self.lock.withLockVoid {
                 self.removeConnectionLocked(id: connection.id)
@@ -1230,7 +1230,7 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     package static func streamingResponseInterruptedDetail(uri: String, upstream: String, cause: Error) -> String {
-        "uri=\(uri) upstream=\(upstream) cause=\(cause.localizedDescription)"
+        "uri=\(uri) upstream=\(upstream) cause=\(cause.displayDescription)"
     }
 
     package static func streamingResponseInterruptedEvent(uri: String, upstream: String, cause: Error) -> RuntimeEvent {

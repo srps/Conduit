@@ -91,7 +91,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             }
             logger?.log(.info, "Refreshed PAC routing rules from \(Self.redactedURL(config.pacURL)).", category: .pac)
         } catch {
-            logger?.log(.warning, "PAC refresh failed: \(error.localizedDescription)", category: .pac)
+            logger?.log(.warning, "PAC refresh failed: \(error.displayDescription)", category: .pac)
             throw error
         }
     }

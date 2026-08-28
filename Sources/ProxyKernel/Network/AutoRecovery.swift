@@ -75,7 +75,7 @@ package final class AutoRecovery: @unchecked Sendable {
                 let suffix = detail.map { " \($0);" } ?? ""
                 logger.log(.warning, "Recovery step completed but health check still failing: \(step.description).\(suffix) \(health.summary)", category: .network)
             } catch {
-                logger.log(.warning, "Recovery step failed: \(step.description) (\(error.localizedDescription)).", category: .network)
+                logger.log(.warning, "Recovery step failed: \(step.description) (\(error.displayDescription)).", category: .network)
             }
         }
 

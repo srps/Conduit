@@ -1626,7 +1626,7 @@ package final class ProxyOrchestrator {
         do {
             try await pacRoutingEngine.refresh(force: force)
         } catch {
-            logStore.log(.warning, "Could not refresh PAC routing (non-fatal): \(error.localizedDescription)", category: .pac)
+            logStore.log(.warning, "Could not refresh PAC routing (non-fatal): \(error.displayDescription)", category: .pac)
         }
     }
 

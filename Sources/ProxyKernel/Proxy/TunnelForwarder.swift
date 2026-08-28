@@ -381,7 +381,7 @@ package final class TunnelForwarder: @unchecked Sendable {
                 )
             } catch {
                 batch.failed += 1
-                logger.log(.error, "Tunnel \(tunnel.effectiveLabel) failed to start: \(error.localizedDescription)", category: .tunnel)
+                logger.log(.error, "Tunnel \(tunnel.effectiveLabel) failed to start: \(error.displayDescription)", category: .tunnel)
             }
         }
         return batch
@@ -420,8 +420,8 @@ package final class TunnelForwarder: @unchecked Sendable {
         do {
             try await dnsResponder.start(host: "127.0.0.1", port: TunnelResolverPort.port)
         } catch {
-            logger.log(.warning, "Tunnel DNS responder failed to start: \(error.localizedDescription)", category: .tunnel)
-            return .unavailable(reason: "DNS responder bind failed: \(error.localizedDescription)")
+            logger.log(.warning, "Tunnel DNS responder failed to start: \(error.displayDescription)", category: .tunnel)
+            return .unavailable(reason: "DNS responder bind failed: \(error.displayDescription)")
         }
 
         let loopback = "127.0.0.1"
@@ -645,7 +645,7 @@ private final class ProxiedTunnelClientHandler: ChannelInboundHandler, @unchecke
         case .failure(let error):
             logger.log(
                 .error,
-                "Proxied tunnel \(label): CONNECT failed — \(error.localizedDescription)",
+                "Proxied tunnel \(label): CONNECT failed — \(error.displayDescription)",
                 category: .tunnel
             )
             // channelInactive clears the backlog when this close lands.
@@ -666,7 +666,7 @@ private final class ProxiedTunnelClientHandler: ChannelInboundHandler, @unchecke
             // teardown (upstream close + onTunnelClosed + backlog clear).
             logger.log(
                 .error,
-                "Proxied tunnel \(label): relay setup failed — \(error.localizedDescription)",
+                "Proxied tunnel \(label): relay setup failed — \(error.displayDescription)",
                 category: .tunnel
             )
             clientChannel.close(promise: nil)
@@ -743,7 +743,7 @@ private final class ProxiedTunnelClientHandler: ChannelInboundHandler, @unchecke
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        logger.log(.warning, "Proxied tunnel \(label) error: \(error.localizedDescription)", category: .tunnel)
+        logger.log(.warning, "Proxied tunnel \(label) error: \(error.displayDescription)", category: .tunnel)
         clientGone = true
         if let upstream {
             onTunnelClosed(upstream)
@@ -815,7 +815,7 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
                     finishTunnelSetup(relayResult, upstreamChannel: ch, clientChannel: clientChannel)
                 }
         case .failure(let error):
-            logger.log(.error, "Tunnel to \(remoteHost):\(remotePort) failed: \(error.localizedDescription)", category: .tunnel)
+            logger.log(.error, "Tunnel to \(remoteHost):\(remotePort) failed: \(error.displayDescription)", category: .tunnel)
             clientChannel.close(promise: nil)
         }
     }
@@ -833,7 +833,7 @@ private final class DirectTunnelClientHandler: ChannelInboundHandler, @unchecked
             // teardown (upstream close + backlog clear).
             logger.log(
                 .error,
-                "Tunnel to \(remoteHost):\(remotePort) relay setup failed: \(error.localizedDescription)",
+                "Tunnel to \(remoteHost):\(remotePort) relay setup failed: \(error.displayDescription)",
                 category: .tunnel
             )
             clientChannel.close(promise: nil)
