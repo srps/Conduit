@@ -175,6 +175,16 @@ package struct ProxyConfig: Codable, Equatable {
         set { routing.noProxyHosts = newValue }
     }
 
+    /// Hosts the local proxy always relays directly, on top of
+    /// `noProxyHosts`: today just the PAC host. A request for the PAC must
+    /// not be routed by the PAC — the answer is at best the previous
+    /// document's, and when the upstreams are what changed it is an upstream
+    /// that is down. `forceProxyHosts` still wins, as it does for `noProxyHosts`.
+    package var implicitBypassHosts: [String] {
+        guard pacRoutingEnabled, let host = URL(string: pacURL)?.host, !host.isEmpty else { return [] }
+        return [host]
+    }
+
     package var forceProxyHosts: [String] {
         get { routing.forceProxyHosts }
         set { routing.forceProxyHosts = newValue }

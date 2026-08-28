@@ -433,6 +433,13 @@ final class AppState: ObservableObject {
                         "--location",
                         "--fail",
                         "--max-time", "15",
+                        // The PAC decides how the proxy routes; fetching it
+                        // through that proxy (via the `http_proxy` variables
+                        // Conduit itself publishes) sends the request
+                        // around the loop — evaluated against a stale PAC,
+                        // then to an upstream that is exactly what is
+                        // unreachable when a refresh matters.
+                        "--noproxy", "*",
                         url.absoluteString,
                     ],
                     maxOutputBytes: AppState.pacMaxOutputBytes
