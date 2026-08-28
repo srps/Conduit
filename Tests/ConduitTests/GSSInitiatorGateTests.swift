@@ -20,18 +20,27 @@ final class GSSInitiatorGateTests: XCTestCase {
         let (gate, clock) = makeGate()
         var runs = 0
 
-        XCTAssertThrowsError(try gate.run(shouldCoolDown: { _ in true }) { runs += 1; throw KDCUnreachable() })
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { runs += 1; throw KDCUnreachable() })
         XCTAssertEqual(runs, 1)
 
         clock.now += 4
-        XCTAssertThrowsError(try gate.run(shouldCoolDown: { _ in true }) { runs += 1; return 0 }) { error in
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { runs += 1; return 0 }) { error in
             XCTAssertTrue(error is KDCUnreachable, "cooldown must rethrow the original failure")
         }
         XCTAssertEqual(runs, 1, "body must not run during the cooldown")
 
         clock.now += 2
-        XCTAssertEqual(try gate.run(shouldCoolDown: { _ in true }) { runs += 1; return 42 }, 42)
+        XCTAssertEqual(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { runs += 1; return 42 }, 42)
         XCTAssertEqual(runs, 2)
+    }
+
+    func testCooldownIsScopedToTheFailingTarget() throws {
+        let (gate, _) = makeGate()
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { throw KDCUnreachable() })
+
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { XCTFail("must not run"); return 0 })
+        XCTAssertEqual(try gate.run(target: "proxy-b", shouldCoolDown: { _ in true }) { 7 }, 7,
+                       "failover to the next upstream must not inherit the first one's failure")
     }
 
     func testExemptFailuresDoNotStartCooldown() throws {
@@ -39,17 +48,17 @@ final class GSSInitiatorGateTests: XCTestCase {
         var runs = 0
         let exempt: (Error) -> Bool = { !($0 is NoTicket) }
 
-        XCTAssertThrowsError(try gate.run(shouldCoolDown: exempt) { runs += 1; throw NoTicket() })
-        XCTAssertThrowsError(try gate.run(shouldCoolDown: exempt) { runs += 1; throw NoTicket() })
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: exempt) { runs += 1; throw NoTicket() })
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: exempt) { runs += 1; throw NoTicket() })
         XCTAssertEqual(runs, 2, "a credential-absence error is repeated on every call")
     }
 
     func testSuccessAfterCooldownClearsIt() throws {
         let (gate, clock) = makeGate(cooldown: 1)
-        XCTAssertThrowsError(try gate.run(shouldCoolDown: { _ in true }) { throw KDCUnreachable() })
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { throw KDCUnreachable() })
         clock.now += 1
-        XCTAssertNoThrow(try gate.run(shouldCoolDown: { _ in true }) { () })
-        XCTAssertNoThrow(try gate.run(shouldCoolDown: { _ in true }) { () })
+        XCTAssertNoThrow(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { () })
+        XCTAssertNoThrow(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { () })
     }
 
     private final class OverlapCounter: @unchecked Sendable {
@@ -67,7 +76,7 @@ final class GSSInitiatorGateTests: XCTestCase {
 
         for _ in 0..<16 {
             DispatchQueue.global().async(group: group) {
-                try? gate.run(shouldCoolDown: { _ in false }) {
+                try? gate.run(target: "proxy-a", shouldCoolDown: { _ in false }) {
                     counter.enter()
                     usleep(2_000)
                     counter.leave()
