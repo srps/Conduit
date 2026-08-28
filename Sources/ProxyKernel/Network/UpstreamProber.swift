@@ -74,6 +74,7 @@ package final class UpstreamProber: @unchecked Sendable {
         let channel: Channel
         do {
             channel = try await ClientBootstrap(group: group)
+                .resolver(AddressFamilyAwareResolver(group: group))
                 .connectTimeout(.milliseconds(Int64(timeoutSeconds * 1_000)))
                 .channelInitializer { channel in
                     channel.pipeline.addHandler(

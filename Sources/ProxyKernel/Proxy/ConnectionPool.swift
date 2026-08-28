@@ -671,6 +671,7 @@ package final class ConnectionPool: @unchecked Sendable {
         let timeoutMS = Int64(max(configProvider().connectionCheckTimeoutMS, 500))
         let keepalive = TCPKeepaliveConfig.default
         let bootstrap = ClientBootstrap(group: group)
+            .resolver(AddressFamilyAwareResolver(group: group))
             .connectTimeout(.milliseconds(timeoutMS))
             .channelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
             .channelOption(ChannelOptions.tcpNoDelay, value: 1)

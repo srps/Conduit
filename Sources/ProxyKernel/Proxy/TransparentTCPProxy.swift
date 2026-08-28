@@ -268,6 +268,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         originResolver.resolveOrigin(host: host, port: 443, on: eventLoop)
             .flatMap { address in
                 ClientBootstrap(group: eventLoop)
+                    .resolver(AddressFamilyAwareResolver(group: eventLoop))
                     .channelOption(ChannelOptions.tcpNoDelay, value: 1)
                     .connect(to: address)
             }

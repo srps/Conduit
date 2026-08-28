@@ -140,6 +140,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
     private func probe(host: String, port: Int, timeoutMS: Int64) async -> Bool {
         do {
             let channel = try await ClientBootstrap(group: group)
+                .resolver(AddressFamilyAwareResolver(group: group))
                 .connectTimeout(.milliseconds(timeoutMS))
                 .connect(host: host, port: port)
                 .get()
