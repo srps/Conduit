@@ -256,18 +256,28 @@ package final class DoHOriginResolver: OriginResolving {
 /// same way. proxy.log showed bursts of a dozen such failures per second.
 package struct NegativeAnswerCache: Sendable {
     package let ttl: TimeInterval
+    /// Same bound as the positive cache. Expired entries go first; when
+    /// live entries alone fill it, the soonest to expire is evicted.
+    package let capacity: Int
     private var failedUntil: [String: Date] = [:]
     private let now: @Sendable () -> Date
 
-    package init(ttl: TimeInterval, now: @escaping @Sendable () -> Date = { Date() }) {
+    package init(ttl: TimeInterval, capacity: Int = 256, now: @escaping @Sendable () -> Date = { Date() }) {
         self.ttl = ttl
+        self.capacity = capacity
         self.now = now
     }
+
+    package var count: Int { failedUntil.count }
 
     package mutating func recordFailure(_ key: String) {
         let current = now()
         failedUntil = failedUntil.filter { $0.value > current }
         failedUntil[key] = current.addingTimeInterval(ttl)
+        while failedUntil.count > capacity,
+              let soonest = failedUntil.min(by: { $0.value < $1.value })?.key {
+            failedUntil.removeValue(forKey: soonest)
+        }
     }
 
     package mutating func isNegative(_ key: String) -> Bool {

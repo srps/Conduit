@@ -2015,9 +2015,12 @@ package final class ProxyOrchestrator {
 
         switch recoveryGate.begin() {
         case .alreadyRunning:
+            emitEvent(.health, "recovery.suppressed", detail: "reason=in_flight summary=\(result.summary)")
             return
         case .coolingDown(let remaining):
-            logStore.log(.debug, "Health check still failing (\(result.summary)); next recovery attempt in \(Int(remaining.rounded(.up)))s.", category: .network)
+            let seconds = Int(remaining.rounded(.up))
+            emitEvent(.health, "recovery.suppressed", detail: "reason=cooldown remainingSeconds=\(seconds) summary=\(result.summary)")
+            logStore.log(.debug, "Health check still failing (\(result.summary)); next recovery attempt in \(seconds)s.", category: .network)
             return
         case .run:
             break
@@ -2028,7 +2031,9 @@ package final class ProxyOrchestrator {
             let recovered = await self.autoRecovery.recover()
             self.recoveryGate.end(recovered: recovered)
             if !recovered {
-                self.logStore.log(.notice, "Automatic recovery paused for \(Int(self.recoveryGate.cooldown))s; health checks continue.", category: .network)
+                let seconds = Int(self.recoveryGate.cooldown)
+                self.emitEvent(.health, "recovery.cooldown_started", detail: "seconds=\(seconds)")
+                self.logStore.log(.notice, "Automatic recovery paused for \(seconds)s; health checks continue.", category: .network)
             }
             if recovered {
                 self.mutateSnapshot {

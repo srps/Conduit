@@ -179,6 +179,23 @@ final class TransparentProxyRoutingPolicyTests: XCTestCase {
 }
 
 final class NegativeAnswerCacheTests: XCTestCase {
+    func testCapacityEvictsTheSoonestToExpire() {
+        final class Clock: @unchecked Sendable { var now = Date(timeIntervalSince1970: 5_000) }
+        let clock = Clock()
+        var cache = NegativeAnswerCache(ttl: 5, capacity: 3, now: { clock.now })
+
+        for (i, host) in ["a", "b", "c"].enumerated() {
+            clock.now += TimeInterval(i)
+            cache.recordFailure(host)
+        }
+        cache.recordFailure("d")
+
+        XCTAssertEqual(cache.count, 3)
+        XCTAssertFalse(cache.isNegative("a"), "oldest entry evicted")
+        XCTAssertTrue(cache.isNegative("b"))
+        XCTAssertTrue(cache.isNegative("d"))
+    }
+
     func testFailureIsRememberedForTTLThenForgotten() {
         final class Clock: @unchecked Sendable { var now = Date(timeIntervalSince1970: 5_000) }
         let clock = Clock()

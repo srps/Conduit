@@ -17,18 +17,21 @@ import Foundation
 ///   find it in the credential cache when their turn comes.
 /// - A KDC that is unreachable would otherwise be waited on once per queued
 ///   handshake, in series. After such a failure the gate rethrows the same
-///   error without touching GSS for `cooldown` seconds. Credential-absence
-///   errors are exempt: they are answered from the cache without a network
-///   round trip, and repeating them is what lets a fresh `kinit` take effect
-///   immediately.
+///   error without touching GSS for `cooldown` seconds — for that target
+///   only, so a malformed SPN or a defective challenge from one upstream
+///   never blocks the handshake to the next candidate during failover.
+///   Credential-absence errors are exempt: they are answered from the
+///   cache without a network round trip, and repeating them is what lets a
+///   fresh `kinit` take effect immediately.
 package final class GSSInitiatorGate: @unchecked Sendable {
     package static let shared = GSSInitiatorGate(cooldown: 5)
 
     private let lock = NSLock()
     private let cooldown: TimeInterval
     private let now: @Sendable () -> Date
-    private var coolingDownUntil: Date?
-    private var lastFailure: Error?
+    private var coolingDown: [String: (until: Date, failure: Error)] = [:]
+    /// Targets are upstream proxy hosts — a handful — but bounded regardless.
+    private static let maximumTargets = 32
 
     package init(cooldown: TimeInterval, now: @escaping @Sendable () -> Date = { Date() }) {
         self.cooldown = cooldown
@@ -36,27 +39,32 @@ package final class GSSInitiatorGate: @unchecked Sendable {
     }
 
     /// Run `body` with exclusive access to the GSS initiator. While a
-    /// cooldown is active, throws the failure that started it instead.
-    /// `shouldCoolDown` decides, per error, whether a failure starts one.
+    /// cooldown is active for `target`, throws the failure that started it
+    /// instead. `shouldCoolDown` decides, per error, whether a failure
+    /// starts one.
     package func run<T>(
+        target: String,
         shouldCoolDown: (Error) -> Bool,
         _ body: () throws -> T
     ) throws -> T {
         lock.lock()
         defer { lock.unlock() }
 
-        if let coolingDownUntil, let lastFailure, now() < coolingDownUntil {
-            throw lastFailure
+        let current = now()
+        coolingDown = coolingDown.filter { $0.value.until > current }
+        if let entry = coolingDown[target] {
+            throw entry.failure
         }
-        coolingDownUntil = nil
-        lastFailure = nil
 
         do {
             return try body()
         } catch {
             if shouldCoolDown(error) {
-                coolingDownUntil = now().addingTimeInterval(cooldown)
-                lastFailure = error
+                if coolingDown.count >= Self.maximumTargets,
+                   let oldest = coolingDown.min(by: { $0.value.until < $1.value.until })?.key {
+                    coolingDown.removeValue(forKey: oldest)
+                }
+                coolingDown[target] = (current.addingTimeInterval(cooldown), error)
             }
             throw error
         }

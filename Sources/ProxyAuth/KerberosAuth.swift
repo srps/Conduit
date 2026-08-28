@@ -47,7 +47,7 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
         // `NegotiateAuthenticator`'s NTLM fallback on every call; anything
         // else (KDC unreachable, clock skew, ...) is a network-class failure
         // that every queued handshake would otherwise re-run.
-        return try gate.run(shouldCoolDown: { error in
+        return try gate.run(target: host, shouldCoolDown: { error in
             guard let kerberosError = error as? KerberosAuthError else { return true }
             return !kerberosError.isCredentialUnavailable
         }) {
