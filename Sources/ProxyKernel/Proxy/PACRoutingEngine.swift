@@ -27,6 +27,12 @@ package final class PACRoutingEngine: @unchecked Sendable {
     private var refreshInFlight = false
     private var routeCache: [String: RouteCacheEntry] = [:]
     private var routeCacheOrder: [String] = []
+    /// Requests waiting on an evaluation already running for the same cache
+    /// key. proxy.log showed six identical "PAC evaluation took 1049ms"
+    /// lines with the same millisecond timestamp: a burst of connections
+    /// to one host each ran the script, serially on `jsQueue`, when one
+    /// result would have served all of them.
+    private var pendingEvaluations: [String: [EventLoopPromise<[PACRoute]>]] = [:]
 
     // The pre-split concrete resolver default was
     // removed — the kernel can no longer construct the concrete resolver.
@@ -158,6 +164,18 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
 
         let promise = eventLoop.makePromise(of: [PACRoute].self)
+        let isLeader = lock.withLock { () -> Bool in
+            if pendingEvaluations[cacheKey] != nil {
+                pendingEvaluations[cacheKey]!.append(promise)
+                return false
+            }
+            pendingEvaluations[cacheKey] = []
+            return true
+        }
+        guard isLeader else {
+            return promise.futureResult
+        }
+
         let completion = PACRouteEvaluationCompletion()
         let start = CFAbsoluteTimeGetCurrent()
         let timeout = evalTimeoutSeconds
@@ -165,6 +183,15 @@ package final class PACRoutingEngine: @unchecked Sendable {
         let logger = self.logger
         let slowEvalThresholdSeconds = self.slowEvalThresholdSeconds
         let requestURLForEval = requestURL
+
+        // Leader's result (or timeout) settles every request that queued
+        // behind it. Promises are fulfilled on their own loops.
+        let finish: @Sendable ([PACRoute]) -> Void = { routes in
+            let waiters = self.lock.withLock { self.pendingEvaluations.removeValue(forKey: cacheKey) ?? [] }
+            for waiter in [promise] + waiters {
+                waiter.futureResult.eventLoop.execute { waiter.succeed(routes) }
+            }
+        }
 
         jsQueue.async {
             let result = Result { try evaluator.resolveProxyChain(for: requestURLForEval) }
@@ -180,13 +207,9 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     if let first = routes.first {
                         logger?.log(.debug, "PAC route for \(host): \(first) (chain entries: \(rawChain.count))", category: .pac)
                     }
-                    eventLoop.execute {
-                        promise.succeed(routes)
-                    }
+                    finish(routes)
                 case .failure:
-                    eventLoop.execute {
-                        promise.succeed([])
-                    }
+                    finish([])
                 }
             }
         }
@@ -194,9 +217,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
             completion.complete {
                 logger?.log(.warning, "PAC evaluation timed out (\(Int(timeout))s) for \(host)", category: .pac)
-                eventLoop.execute {
-                    promise.succeed([])
-                }
+                finish([])
             }
         }
 

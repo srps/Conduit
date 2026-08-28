@@ -213,6 +213,36 @@ final class PACRoutingEngineTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "Timeout must not wait for the blocked evaluator queue")
     }
 
+    func testConcurrentFuturesForOneKeyShareASingleEvaluation() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+
+        let scriptEvaluator = SlowCountingPacScriptEvaluator(delay: 0.2)
+        let engine = PACRoutingEngine(
+            configProvider: { config },
+            resolver: StaticPacEvaluator(scriptEvaluator: scriptEvaluator),
+            refreshInterval: 300
+        )
+        try await engine.refresh(force: true)
+
+        let group = MultiThreadedEventLoopGroup.singleton
+        let futures = (0..<6).map { _ in
+            engine.routeChainFuture(for: "https://burst.example.com/", host: "burst.example.com", on: group.next())
+        }
+        let results = try await EventLoopFuture.whenAllSucceed(futures, on: group.next()).get()
+
+        XCTAssertEqual(scriptEvaluator.callCount(), 1, "one evaluation serves the whole burst")
+        XCTAssertEqual(results.count, 6)
+        for routes in results {
+            XCTAssertEqual(routes, [.proxy(host: "cached.proxy.example.com", port: 8080)])
+        }
+
+        // After the burst the entry is served from the route cache.
+        _ = try await engine.routeChainFuture(for: "https://burst.example.com/", host: "burst.example.com", on: group.next()).get()
+        XCTAssertEqual(scriptEvaluator.callCount(), 1)
+    }
+
     func testRouteCacheSeparatesDifferentPathsOnSameHostAndPort() async throws {
         var config = ProxyConfig.testFixture()
         config.pacURL = "http://example.com/proxy.pac"
@@ -356,6 +386,26 @@ private final class CountingPacScriptEvaluator: PacScriptEvaluating, @unchecked 
 
     func resolveProxyChain(for _: URL) throws -> [String] {
         lock.withLock { calls += 1 }
+        return ["PROXY cached.proxy.example.com:8080"]
+    }
+
+    func callCount() -> Int {
+        lock.withLock { calls }
+    }
+}
+
+private final class SlowCountingPacScriptEvaluator: PacScriptEvaluating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private let delay: TimeInterval
+
+    init(delay: TimeInterval) {
+        self.delay = delay
+    }
+
+    func resolveProxyChain(for _: URL) throws -> [String] {
+        lock.withLock { calls += 1 }
+        Thread.sleep(forTimeInterval: delay)
         return ["PROXY cached.proxy.example.com:8080"]
     }
 
