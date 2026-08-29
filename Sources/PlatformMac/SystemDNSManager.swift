@@ -14,6 +14,19 @@ package enum SystemDNSManagerError: Error, LocalizedError {
 }
 
 package final class SystemDNSManager: @unchecked Sendable {
+    /// Journal value for an interface whose servers could not be read at
+    /// capture. `apply` and `reconcile` leave such an interface alone, and
+    /// teardown skips it. Same shape as `SystemProxyManager.untouchedMarkerKey`.
+    static let untouchedMarkerKey = "\u{0}untouched"
+    private static let untouchedMarkerValue = [untouchedMarkerKey: "unreadable"]
+
+    private func isUntouched(_ service: String) -> Bool {
+        if case .wasPresent(let value) = journal.prior(surface: .systemDNS, scope: service) {
+            return value[Self.untouchedMarkerKey] != nil
+        }
+        return false
+    }
+
     private let privilegeClient: PrivilegeClient
     /// Prior per-service DNS servers. Shared with every other platform surface
     /// so there is one answer to "what was here before us" rather than the
@@ -60,6 +73,7 @@ package final class SystemDNSManager: @unchecked Sendable {
     private func savedInterfaces() -> [String: [String]] {
         var interfaces: [String: [String]] = [:]
         for record in journal.records(for: .systemDNS) {
+            if record.priorValue?[Self.untouchedMarkerKey] != nil { continue }
             let servers = record.priorValue?["servers"] ?? ""
             interfaces[record.scope] = servers.isEmpty
                 ? []
@@ -82,15 +96,26 @@ package final class SystemDNSManager: @unchecked Sendable {
 
         try startRelay(forwarderPort: forwarderPort, logger: logger)
 
-        for service in services {
+        // An interface whose servers could not be captured is not redirected:
+        // there would be nothing to put back.
+        let writable = services.filter { !isUntouched($0) }
+        for service in writable {
             try privilegeClient.execute(.setDNSServers, values: [service, "127.0.0.1"])
         }
 
-        logger?.log(.notice, "Set system DNS to 127.0.0.1 via relay :53 -> :\(forwarderPort) on \(services.count) interface(s).", category: .system)
+        logger?.log(.notice, "Set system DNS to 127.0.0.1 via relay :53 -> :\(forwarderPort) on \(writable.count) interface(s).", category: .system)
     }
 
     package func clear(logger: (any LogSink)?) throws {
         guard hasSavedInterfaces() else {
+            // A previous teardown restored this surface. Probing the machine
+            // now would flag a user's own 127.0.0.1 resolver — just restored —
+            // as our residue and reset it.
+            if journal.ownership(of: .systemDNS) == .released {
+                stopRelay(logger: logger)
+                logger?.log(.debug, "System DNS teardown skipped: a previous teardown already restored this surface.", category: .system)
+                return
+            }
             // An empty journal used to mean "reset every connected service to
             // DHCP", which erases resolvers the app may never have touched —
             // the mirror image of the system-proxy surface, where the same
@@ -170,6 +195,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         // 127.0.0.1 — the rule the proxy and launchd surfaces already follow.
         if lastError == nil {
             deleteSavedState()
+            journal.markReleased(surface: .systemDNS)
         } else {
             logger?.log(
                 .warning,
@@ -193,10 +219,14 @@ package final class SystemDNSManager: @unchecked Sendable {
         importLegacySnapshotIfPresent(logger: logger)
         let services = try connectedNetworkServices(logger: logger)
         for service in services {
-            let servers = readDNSServers(service: service)
             // First-write-wins in the journal: a second `saveCurrentDNS` in the
             // same session reads 127.0.0.1 (our own relay) as the current
             // value, and recording that would make restore a no-op.
+            guard let servers = readDNSServersStrict(service: service) else {
+                journal.recordPrior(surface: .systemDNS, scope: service, value: Self.untouchedMarkerValue)
+                logger?.log(.warning, "Could not read the DNS servers on \(service); leaving that interface untouched.", category: .system)
+                continue
+            }
             journal.recordPrior(
                 surface: .systemDNS,
                 scope: service,
@@ -327,8 +357,15 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func readDNSServers(service: String) -> [String] {
+        readDNSServersStrict(service: service) ?? []
+    }
+
+    /// `nil` when the read failed — distinct from "read fine, DHCP default".
+    /// Capture must tell them apart: recording an empty list for an interface
+    /// whose servers were never seen makes teardown reset it to DHCP.
+    package func readDNSServersStrict(service: String) -> [String]? {
         guard let result = try? commandRunner("/usr/sbin/networksetup", ["-getdnsservers", service]),
-              result.exitCode == 0 else { return [] }
+              result.exitCode == 0 else { return nil }
 
         let output = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         if output.contains("any DNS Servers set") || output.isEmpty {
@@ -397,8 +434,14 @@ package final class SystemDNSManager: @unchecked Sendable {
         let currentSet = Set(currentServices)
         let savedSet = Set(savedInterfaces().keys)
 
-        let newInterfaces = currentSet.subtracting(savedSet)
-        let goneInterfaces = savedSet.subtracting(currentSet)
+        // Untouched interfaces are neither pinned nor re-captured.
+        let newInterfaces = currentSet.subtracting(savedSet).filter { !isUntouched($0) }
+        // Gone means no longer listed, not merely disconnected: a VPN service
+        // mid-flap is down, not vanished, and forgetting its record would
+        // leave it pinned at 127.0.0.1 with nothing to restore it from. Without
+        // a listing nothing is forgotten.
+        let listedSet = Set((try? listedNetworkServices(includingDisabled: true)) ?? Array(savedSet))
+        let goneInterfaces = savedSet.subtracting(listedSet)
 
         // Re-pin drifted interfaces we already manage. VPN clients (Cisco
         // Secure Client in particular) rewrite service DNS when the tunnel
@@ -420,7 +463,11 @@ package final class SystemDNSManager: @unchecked Sendable {
         if newInterfaces.isEmpty && goneInterfaces.isEmpty { return }
 
         for iface in newInterfaces {
-            let servers = readDNSServers(service: iface)
+            guard let servers = readDNSServersStrict(service: iface) else {
+                journal.recordPrior(surface: .systemDNS, scope: iface, value: Self.untouchedMarkerValue)
+                logger?.log(.warning, "DNS reconcile: could not read the DNS servers on \(iface); leaving it untouched.", category: .system)
+                continue
+            }
             if servers == ["127.0.0.1"] { continue }
             journal.recordPrior(
                 surface: .systemDNS,

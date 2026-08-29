@@ -41,6 +41,8 @@ private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
     /// Listed with the disabled-service asterisk.
     var disabled: Set<String> = []
     var listingFailuresRemaining = 0
+    /// Services whose `-getdnsservers` read fails.
+    var failingReads: Set<String> = []
 
     init(dnsServers: [String: [String]], disconnected: Set<String> = [], disabled: Set<String> = []) {
         self.dnsServers = dnsServers
@@ -68,6 +70,9 @@ private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
             }
             return CommandResult(exitCode: 0, standardOutput: "IP address: 192.0.2.10", standardError: "")
         case "-getdnsservers":
+            if failingReads.contains(service) {
+                return CommandResult(exitCode: 1, standardOutput: "", standardError: "** Error: read failed")
+            }
             let servers = dnsServers[service] ?? []
             return CommandResult(
                 exitCode: 0,
@@ -269,6 +274,58 @@ final class SystemDNSManagerTests: XCTestCase {
 
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
         XCTAssertTrue(manager.hasSavedState(), "a listing that fails must not read as an empty machine")
+    }
+
+    /// An interface whose servers could not be read is recorded as untouched:
+    /// not redirected by apply, not reset by teardown.
+    func testUnreadableInterfaceIsNeitherRedirectedNorReset() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["192.168.1.1"], "Ethernet": ["10.0.0.1"]])
+        machine.failingReads = ["Ethernet"]
+        let manager = makeManager(machine: machine, relayIsLive: false)
+
+        try manager.saveCurrentDNS(logger: nil)
+        XCTAssertEqual(journal.prior(surface: .systemDNS, scope: "Ethernet"), .wasPresent([SystemDNSManager.untouchedMarkerKey: "unreadable"]))
+
+        try manager.apply(forwarderPort: 5053, logger: nil)
+        XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "127.0.0.1"]], "the unreadable interface is not redirected")
+
+        machine.dnsServers["Wi-Fi"] = ["127.0.0.1"]
+        recording.reset()
+        try manager.clear(logger: nil)
+        XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "192.168.1.1"]], "and not touched by teardown either")
+        XCTAssertFalse(manager.hasSavedState())
+    }
+
+    /// A VPN service mid-flap is down, not gone: its record stays.
+    func testReconcileKeepsTheRecordOfAListedButDisconnectedInterface() throws {
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"], "VPN": ["10.0.0.1"]]))
+        let machine = FakeDNSNetworksetupRunner(
+            dnsServers: ["Wi-Fi": ["127.0.0.1"], "VPN": ["127.0.0.1"]],
+            disconnected: ["VPN"]
+        )
+        makeManager(machine: machine, relayIsLive: true).reconcile(logger: nil)
+
+        XCTAssertEqual(journal.prior(surface: .systemDNS, scope: "VPN"), .wasPresent(["servers": "10.0.0.1"]))
+    }
+
+    /// The user's own resolver was 127.0.0.1. After the first teardown puts it
+    /// back, a second teardown must not read it as our residue.
+    func testSecondTeardownDoesNotResetARestoredLoopbackResolver() throws {
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["127.0.0.1"]]))
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
+
+        try manager.clear(logger: nil)
+        XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "127.0.0.1"]])
+        XCTAssertEqual(journal.ownership(of: .systemDNS), .released)
+
+        recording.reset()
+        try manager.clear(logger: nil)
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty, "a released surface is not probed for residue")
+
+        // A new session takes ownership back.
+        try manager.saveCurrentDNS(logger: nil)
+        XCTAssertEqual(journal.ownership(of: .systemDNS), .applied)
     }
 
     func testClearWithAllVanishedInterfacesSkipsAllAndDeletesFile() throws {
