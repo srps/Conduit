@@ -33,6 +33,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// to one host each ran the script, serially on `jsQueue`, when one
     /// result would have served all of them.
     private var pendingEvaluations: [String: [EventLoopPromise<[PACRoute]>]] = [:]
+    /// Waiters a single evaluation may hold. Past it, a request is answered
+    /// with no routes at once — the same answer a timed-out evaluation gives —
+    /// rather than letting one stalled script queue promises without bound.
+    package static let pendingWaiterLimit = 256
 
     // The pre-split concrete resolver default was
     // removed — the kernel can no longer construct the concrete resolver.
@@ -164,16 +168,25 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
 
         let promise = eventLoop.makePromise(of: [PACRoute].self)
-        let isLeader = lock.withLock { () -> Bool in
-            if pendingEvaluations[cacheKey] != nil {
-                pendingEvaluations[cacheKey]!.append(promise)
-                return false
+        enum Admission { case leader, waiter, refused }
+        let admission = lock.withLock { () -> Admission in
+            guard let waiters = pendingEvaluations[cacheKey] else {
+                pendingEvaluations[cacheKey] = []
+                return .leader
             }
-            pendingEvaluations[cacheKey] = []
-            return true
+            guard waiters.count < Self.pendingWaiterLimit else { return .refused }
+            pendingEvaluations[cacheKey]!.append(promise)
+            return .waiter
         }
-        guard isLeader else {
+        switch admission {
+        case .waiter:
             return promise.futureResult
+        case .refused:
+            logger?.log(.warning, "PAC evaluation for \(host) has \(Self.pendingWaiterLimit) requests waiting; answering without routes.", category: .pac)
+            promise.succeed([])
+            return promise.futureResult
+        case .leader:
+            break
         }
 
         let completion = PACRouteEvaluationCompletion()
