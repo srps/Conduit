@@ -38,10 +38,14 @@ private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
     var dnsServers: [String: [String]]
     /// Listed but without an address.
     var disconnected: Set<String> = []
+    /// Listed with the disabled-service asterisk.
+    var disabled: Set<String> = []
+    var listingFailuresRemaining = 0
 
-    init(dnsServers: [String: [String]], disconnected: Set<String> = []) {
+    init(dnsServers: [String: [String]], disconnected: Set<String> = [], disabled: Set<String> = []) {
         self.dnsServers = dnsServers
         self.disconnected = disconnected
+        self.disabled = disabled
     }
 
     func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
@@ -51,8 +55,12 @@ private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
         let service = arguments.count > 1 ? arguments[1] : ""
         switch command {
         case "-listallnetworkservices":
+            if listingFailuresRemaining > 0 {
+                listingFailuresRemaining -= 1
+                return CommandResult(exitCode: 1, standardOutput: "", standardError: "** Error: transient")
+            }
             let lines = ["An asterisk (*) denotes that a network service is disabled."]
-                + dnsServers.keys.sorted()
+                + dnsServers.keys.sorted().map { disabled.contains($0) ? "*\($0)" : $0 }
             return CommandResult(exitCode: 0, standardOutput: lines.joined(separator: "\n"), standardError: "")
         case "-getinfo":
             if disconnected.contains(service) {
@@ -235,6 +243,32 @@ final class SystemDNSManagerTests: XCTestCase {
             ["Wi-Fi 192.168.1.1", "Ethernet 10.0.0.1"]
         )
         XCTAssertFalse(manager.hasSavedState())
+    }
+
+    func testClearRestoresARecordedInterfaceThatWasDisabledSince() throws {
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"], "Ethernet": ["10.0.0.1"]]))
+        let machine = FakeDNSNetworksetupRunner(
+            dnsServers: ["Wi-Fi": ["127.0.0.1"], "Ethernet": ["127.0.0.1"]],
+            disabled: ["Ethernet"]
+        )
+        try makeManager(machine: machine, relayIsLive: false).clear(logger: nil)
+
+        XCTAssertEqual(
+            Set(recording.commands(matching: .setDNSServers).map { $0.joined(separator: " ") }),
+            ["Wi-Fi 192.168.1.1", "Ethernet 10.0.0.1"]
+        )
+    }
+
+    func testClearKeepsTheRecordsWhenTheListingFails() throws {
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
+        machine.listingFailuresRemaining = 1
+
+        try manager.clear(logger: nil)
+
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
+        XCTAssertTrue(manager.hasSavedState(), "a listing that fails must not read as an empty machine")
     }
 
     func testClearWithAllVanishedInterfacesSkipsAllAndDeletesFile() throws {
