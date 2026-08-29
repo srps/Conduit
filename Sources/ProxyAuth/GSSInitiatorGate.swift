@@ -64,7 +64,10 @@ package final class GSSInitiatorGate: @unchecked Sendable {
                    let oldest = coolingDown.min(by: { $0.value.until < $1.value.until })?.key {
                     coolingDown.removeValue(forKey: oldest)
                 }
-                coolingDown[target] = (current.addingTimeInterval(cooldown), error)
+                // From the time the call *failed*, not entered: a KDC that
+                // takes longer than the cooldown to give up would otherwise
+                // store an already-expired deadline.
+                coolingDown[target] = (now().addingTimeInterval(cooldown), error)
             }
             throw error
         }
