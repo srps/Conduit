@@ -37,6 +37,13 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// with no routes at once — the same answer a timed-out evaluation gives —
     /// rather than letting one stalled script queue promises without bound.
     package static let pendingWaiterLimit = 256
+    /// Evaluations that may be queued on the serial evaluator at once, across
+    /// all keys. A stalled script otherwise lets a stream of unique URLs queue
+    /// closures without bound — each times out for its caller but stays on
+    /// the queue. Past the limit a request is answered without routes.
+    private let queuedEvaluationLimit: Int
+    private var queuedEvaluations = 0
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
 
     // The pre-split concrete resolver default was
     // removed — the kernel can no longer construct the concrete resolver.
@@ -48,11 +55,15 @@ package final class PACRoutingEngine: @unchecked Sendable {
         logger: (any LogSink)? = nil,
         refreshInterval: TimeInterval = 300,
         evalTimeoutSeconds: TimeInterval = 5,
-        pacLoader: (@Sendable (String) async throws -> String)? = nil
+        pacLoader: (@Sendable (String) async throws -> String)? = nil,
+        queuedEvaluationLimit: Int = 64,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
         self.configProvider = configProvider
         self.resolver = resolver
         self.logger = logger
+        self.queuedEvaluationLimit = queuedEvaluationLimit
+        self.eventSink = eventSink
         self.refreshInterval = refreshInterval
         self.evalTimeoutSeconds = evalTimeoutSeconds
         self.pacLoader = pacLoader ?? { url in
@@ -168,21 +179,34 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
 
         let promise = eventLoop.makePromise(of: [PACRoute].self)
-        enum Admission { case leader, waiter, refused }
+        enum Admission { case leader, waiter, refused(reason: String, limit: Int) }
         let admission = lock.withLock { () -> Admission in
             guard let waiters = pendingEvaluations[cacheKey] else {
+                guard queuedEvaluations < queuedEvaluationLimit else {
+                    return .refused(reason: "queue_full", limit: queuedEvaluationLimit)
+                }
+                queuedEvaluations += 1
                 pendingEvaluations[cacheKey] = []
                 return .leader
             }
-            guard waiters.count < Self.pendingWaiterLimit else { return .refused }
+            guard waiters.count < Self.pendingWaiterLimit else {
+                return .refused(reason: "waiters_full", limit: Self.pendingWaiterLimit)
+            }
             pendingEvaluations[cacheKey]!.append(promise)
             return .waiter
         }
         switch admission {
         case .waiter:
             return promise.futureResult
-        case .refused:
-            logger?.log(.warning, "PAC evaluation for \(host) has \(Self.pendingWaiterLimit) requests waiting; answering without routes.", category: .pac)
+        case .refused(let reason, let limit):
+            // Event first: fail-closed routing under overload must be
+            // distinguishable from an ordinary empty PAC answer.
+            eventSink?(RuntimeEvent(
+                kind: .routing,
+                event: "pac.evaluation_refused",
+                detail: "host=\(host) reason=\(reason) limit=\(limit)"
+            ))
+            logger?.log(.warning, "PAC evaluation for \(host) refused (\(reason), limit \(limit)); answering without routes.", category: .pac)
             promise.succeed([])
             return promise.futureResult
         case .leader:
@@ -208,6 +232,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
         jsQueue.async {
             let result = Result { try evaluator.resolveProxyChain(for: requestURLForEval) }
+            self.lock.withLock { self.queuedEvaluations -= 1 }
             completion.complete {
                 switch result {
                 case .success(let rawChain):
