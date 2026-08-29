@@ -359,10 +359,84 @@ extension SystemProxyManagerTests {
         // Manual mode: the PAC script is empty when the fixture has no PAC URL.
         try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
 
-        XCTAssertEqual(journal.scopes(for: .systemProxy), ["Wi-Fi"])
+        XCTAssertEqual(Set(journal.scopes(for: .systemProxy)), ["Wi-Fi", "Ethernet"])
+        XCTAssertEqual(
+            journal.prior(surface: .systemProxy, scope: "Ethernet"),
+            .wasPresent([SystemProxyManager.untouchedMarkerKey: "unreadable"]),
+            "the unreadable service is recorded as untouched, so teardown leaves it alone"
+        )
         let script = runner.shellScripts.joined(separator: "\n")
         XCTAssertTrue(script.contains("Wi-Fi"), script)
         XCTAssertFalse(script.contains("Ethernet"), "an unreadable service is not written either")
+    }
+
+    /// One service readable, one not: the unreadable one is neither written
+    /// nor, at teardown, cleared — the marker in the journal says apply never
+    /// touched it.
+    func testClearLeavesAServiceApplyCouldNotReadUntouched() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.services = ["Wi-Fi", "Ethernet"]
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: { launchPath, arguments in
+                if arguments.first == "-getwebproxy", arguments.dropFirst().first == "Ethernet" {
+                    return CommandResult(exitCode: 1, standardOutput: "", standardError: "** Error")
+                }
+                return try runner.run(launchPath, arguments)
+            }
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        runner.invocations.removeAll()
+
+        try manager.clear(logger: nil)
+
+        let scripts = runner.shellScripts.joined(separator: "\n")
+        XCTAssertTrue(scripts.contains("Wi-Fi"))
+        XCTAssertFalse(scripts.contains("Ethernet"), "teardown must not clear a service apply never wrote: \(scripts)")
+        XCTAssertTrue(journal.scopes(for: .systemProxy).isEmpty)
+    }
+
+    /// A disabled service is starred in the listing, still holds settings and
+    /// still takes writes — and is the one most likely to be re-enabled later
+    /// with our settings on it.
+    func testClearRestoresARecordedServiceThatWasDisabledSince() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.services = ["Wi-Fi", "Ethernet"]
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://corp.example.com/proxy.pac"
+        let journal = makeJournal()
+        let manager = SystemProxyManager(privilegeClient: RecordingProxyPrivilegeClient(), journal: journal, commandRunner: runner.run)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        runner.disabledServices = ["Ethernet"]
+        runner.invocations.removeAll()
+        try manager.clear(logger: nil)
+
+        XCTAssertTrue(runner.shellScripts.joined(separator: "\n").contains("Ethernet"))
+        XCTAssertTrue(journal.scopes(for: .systemProxy).isEmpty)
+    }
+
+    /// Without a listing, "not enumerated this time" cannot be told from "gone
+    /// for good", so records that were not restored stay for a later teardown.
+    func testClearKeepsUnrestoredRecordsWhenTheListingFails() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.services = ["Wi-Fi", "Ethernet"]
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://corp.example.com/proxy.pac"
+        let journal = makeJournal()
+        let manager = SystemProxyManager(privilegeClient: RecordingProxyPrivilegeClient(), journal: journal, commandRunner: runner.run)
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        runner.disconnectedServices = ["Ethernet"]
+        runner.listingFailuresRemaining = 1  // the first listing (all services) fails; the connected one succeeds
+        runner.invocations.removeAll()
+        try manager.clear(logger: nil)
+
+        XCTAssertTrue(runner.shellScripts.joined(separator: "\n").contains("Wi-Fi"), "what could be restored, was")
+        XCTAssertEqual(journal.scopes(for: .systemProxy), ["Ethernet"], "the unrestored service keeps its record")
+        XCTAssertNotEqual(journal.ownership(of: .systemProxy), .released)
     }
 
     func testClearForgetsRecordsForServicesThatVanished() throws {
@@ -1254,6 +1328,10 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
     /// Listed services with no IP address: `networksetup -getinfo` reports
     /// them, `connectedNetworkServices` does not.
     var disconnectedServices: Set<String> = []
+    /// Listed with the leading asterisk `networksetup` uses for a disabled service.
+    var disabledServices: Set<String> = []
+    /// How many `-listallnetworkservices` calls fail before they succeed.
+    var listingFailuresRemaining = 0
     /// `networksetup -get…` reads that fail (non-zero exit), by command.
     var failingReads: Set<String> = []
     var invocations: [(launchPath: String, arguments: [String])] = []
@@ -1282,15 +1360,20 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
         }
         switch command {
         case "-listallnetworkservices":
+            if listingFailuresRemaining > 0 {
+                listingFailuresRemaining -= 1
+                return CommandResult(exitCode: 1, standardOutput: "", standardError: "** Error: transient")
+            }
+            let lines = services.map { disabledServices.contains($0) ? "*\($0)" : $0 }
             return CommandResult(
                 exitCode: 0,
-                standardOutput: (["An asterisk (*) denotes that a network service is disabled."] + services)
+                standardOutput: (["An asterisk (*) denotes that a network service is disabled."] + lines)
                     .joined(separator: "\n"),
                 standardError: ""
             )
         case "-getinfo":
             let service = arguments.count > 1 ? arguments[1] : ""
-            if disconnectedServices.contains(service) {
+            if disconnectedServices.contains(service) || disabledServices.contains(service) {
                 return CommandResult(exitCode: 0, standardOutput: "IP address:\nSubnet mask:", standardError: "")
             }
             return CommandResult(exitCode: 0, standardOutput: "IP address: 192.0.2.10", standardError: "")
