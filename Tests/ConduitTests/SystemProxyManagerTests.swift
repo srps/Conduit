@@ -286,6 +286,85 @@ extension SystemProxyManagerTests {
     /// leaves its record behind for good; if it ever reappears,
     /// first-write-wins would then keep that stale record in preference to the
     /// state the service actually has.
+    /// A service that is listed but has no address — a VPN link down, an
+    /// adapter unplugged — still takes `networksetup` writes. Teardown restores
+    /// it now; skipping it and forgetting its record would leave it pointed at
+    /// a dead proxy for whenever it comes back.
+    func testClearRestoresARecordedServiceThatIsListedButDisconnected() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.services = ["Wi-Fi", "Ethernet"]
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://corp.example.com/proxy.pac"
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+        XCTAssertEqual(Set(journal.scopes(for: .systemProxy)), ["Wi-Fi", "Ethernet"])
+
+        runner.disconnectedServices = ["Ethernet"]
+        runner.invocations.removeAll()
+        try manager.clear(logger: nil)
+
+        let restoreScripts = runner.shellScripts.joined(separator: "\n")
+        XCTAssertTrue(restoreScripts.contains("Ethernet"), "the disconnected service is restored: \(restoreScripts)")
+        XCTAssertTrue(restoreScripts.contains("http://corp.example.com/proxy.pac"))
+        XCTAssertTrue(journal.scopes(for: .systemProxy).isEmpty, "nothing left outstanding")
+    }
+
+    /// Every field `apply` overwrites must have been read. A failed read used
+    /// to be recorded as the empty default, which teardown then "restored" by
+    /// erasing the user's setting.
+    func testApplySkipsAServiceWhosePriorStateCannotBeRead() throws {
+        for failing in ["-getwebproxy", "-getsecurewebproxy", "-getautoproxyurl", "-getproxybypassdomains"] {
+            let runner = FakeNetworksetupRunner()
+            runner.services = ["Wi-Fi", "Ethernet"]
+            runner.failingReads = [failing]
+            let journal = makeJournal()
+            let manager = SystemProxyManager(
+                privilegeClient: RecordingProxyPrivilegeClient(),
+                journal: journal,
+                commandRunner: runner.run
+            )
+
+            XCTAssertThrowsError(try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil), failing) { error in
+                guard case SystemProxyManagerError.priorStateUnreadable = error else {
+                    return XCTFail("\(failing): unexpected \(error)")
+                }
+            }
+            XCTAssertTrue(journal.scopes(for: .systemProxy).isEmpty, "\(failing): nothing recorded")
+            XCTAssertFalse(journal.isMarkedApplied(surface: .systemProxy), "\(failing): nothing applied")
+            XCTAssertTrue(runner.shellScripts.isEmpty, "\(failing): nothing written")
+        }
+    }
+
+    func testApplyTouchesOnlyTheServicesItCouldRead() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.services = ["Wi-Fi", "Ethernet"]
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: journal,
+            commandRunner: { launchPath, arguments in
+                // The bypass read fails on Ethernet only.
+                if arguments.first == "-getproxybypassdomains", arguments.dropFirst().first == "Ethernet" {
+                    return CommandResult(exitCode: 1, standardOutput: "", standardError: "** Error")
+                }
+                return try runner.run(launchPath, arguments)
+            }
+        )
+
+        // Manual mode: the PAC script is empty when the fixture has no PAC URL.
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+
+        XCTAssertEqual(journal.scopes(for: .systemProxy), ["Wi-Fi"])
+        let script = runner.shellScripts.joined(separator: "\n")
+        XCTAssertTrue(script.contains("Wi-Fi"), script)
+        XCTAssertFalse(script.contains("Ethernet"), "an unreadable service is not written either")
+    }
+
     func testClearForgetsRecordsForServicesThatVanished() throws {
         let runner = FakeNetworksetupRunner()
         let journal = makeJournal()
@@ -1172,6 +1251,11 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
     /// Services whose write scripts fail as if `networksetup` rejected them —
     /// a non-admin failure, so no privileged fallback is attempted.
     var failingServices: [String] = []
+    /// Listed services with no IP address: `networksetup -getinfo` reports
+    /// them, `connectedNetworkServices` does not.
+    var disconnectedServices: Set<String> = []
+    /// `networksetup -get…` reads that fail (non-zero exit), by command.
+    var failingReads: Set<String> = []
     var invocations: [(launchPath: String, arguments: [String])] = []
 
     var shellScripts: [String] {
@@ -1193,6 +1277,9 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
         guard launchPath == "/usr/sbin/networksetup", let command = arguments.first else {
             return CommandResult(exitCode: 1, standardOutput: "", standardError: "unexpected command")
         }
+        if failingReads.contains(command) {
+            return CommandResult(exitCode: 1, standardOutput: "", standardError: "** Error: read failed")
+        }
         switch command {
         case "-listallnetworkservices":
             return CommandResult(
@@ -1202,6 +1289,10 @@ private final class FakeNetworksetupRunner: @unchecked Sendable {
                 standardError: ""
             )
         case "-getinfo":
+            let service = arguments.count > 1 ? arguments[1] : ""
+            if disconnectedServices.contains(service) {
+                return CommandResult(exitCode: 0, standardOutput: "IP address:\nSubnet mask:", standardError: "")
+            }
             return CommandResult(exitCode: 0, standardOutput: "IP address: 192.0.2.10", standardError: "")
         case "-getwebproxy":
             return proxyState(enabled: webProxyEnabled)

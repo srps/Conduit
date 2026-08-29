@@ -4,12 +4,15 @@ import ProxyKernel
 
 enum SystemProxyManagerError: Error, LocalizedError {
     case noNetworkServices
+    case priorStateUnreadable(services: [String])
     case commandFailed(String)
 
     package var errorDescription: String? {
         switch self {
         case .noNetworkServices:
             return "No active macOS network services were found."
+        case .priorStateUnreadable(let services):
+            return "Could not read the current proxy settings on \(services.joined(separator: ", ")); nothing was changed."
         case .commandFailed(let message):
             return message
         }
@@ -86,8 +89,8 @@ package final class SystemProxyManager: @unchecked Sendable {
     // MARK: - Apply / Clear
 
     package func apply(config: ProxyConfig, mode: SystemProxyMode, logger: (any LogSink)?, localPACURL: String? = nil) throws {
-        let services = try connectedNetworkServices(logger: logger)
-        guard !services.isEmpty else {
+        let candidates = try connectedNetworkServices(logger: logger)
+        guard !candidates.isEmpty else {
             throw SystemProxyManagerError.noNetworkServices
         }
 
@@ -104,12 +107,23 @@ package final class SystemProxyManager: @unchecked Sendable {
         // with the corporate PAC URL it had replaced gone for good. So
         // anything pointing at our own local listener is discarded at capture.
         let ours = LocalListenerFingerprint(config: config)
-        for service in services {
-            journal.recordPrior(
-                surface: .systemProxy,
-                scope: service,
-                value: capturePriorState(service: service, ours: ours)
-            )
+        var services: [String] = []
+        for service in candidates {
+            guard let prior = capturePriorState(service: service, ours: ours) else {
+                // Nothing recorded and nothing written: a service we cannot
+                // read we also do not touch, so there is nothing to erase.
+                logger?.log(
+                    .warning,
+                    "Could not read the current proxy settings on \(service); leaving that service untouched.",
+                    category: .system
+                )
+                continue
+            }
+            journal.recordPrior(surface: .systemProxy, scope: service, value: prior)
+            services.append(service)
+        }
+        guard !services.isEmpty else {
+            throw SystemProxyManagerError.priorStateUnreadable(services: candidates)
         }
         journal.markApplied(surface: .systemProxy)
 
@@ -218,7 +232,20 @@ package final class SystemProxyManager: @unchecked Sendable {
             }
         }
 
-        let services = (try? connectedNetworkServices(logger: nil)) ?? allNetworkServices()
+        // Connected services get the unconditional treatment (residue with no
+        // record is still cleared). A recorded service that is merely
+        // disconnected — a VPN link down, an adapter unplugged — is still
+        // listed, and `networksetup` writes to it regardless, so it is
+        // restored now rather than left pointing at a dead proxy for when it
+        // comes back. Only a service that no longer exists is skipped, and
+        // its record goes with the surface below.
+        let listed = allNetworkServices()
+        let connected = (try? connectedNetworkServices(logger: nil)) ?? listed
+        let recorded = Set(journal.scopes(for: .systemProxy))
+        var services = connected
+        for service in listed where recorded.contains(service) && !services.contains(service) {
+            services.append(service)
+        }
         guard !services.isEmpty else { return }
 
         var restored: [String] = []
@@ -547,8 +574,15 @@ package final class SystemProxyManager: @unchecked Sendable {
     }
 
     private func readProxyState(service: String, type: String) -> ProxyState {
+        readProxyStateStrict(service: service, type: type) ?? ProxyState()
+    }
+
+    /// `nil` when the read itself failed — as opposed to "read fine, proxy
+    /// off". Capture must tell the two apart: recording defaults for a
+    /// service whose state could not be read turns teardown into an erase.
+    private func readProxyStateStrict(service: String, type: String) -> ProxyState? {
         guard let result = try? commandRunner("/usr/sbin/networksetup", ["-get\(type)", service]),
-              result.exitCode == 0 else { return ProxyState() }
+              result.exitCode == 0 else { return nil }
 
         var state = ProxyState()
         for line in result.standardOutput.split(separator: "\n") {
@@ -576,8 +610,12 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// `readAutoproxyEnabled` and `autoproxyMatches`, each shelling out
     /// separately and pulling one field out of the same output.
     private func readAutoproxy(service: String) -> (enabled: Bool, url: String) {
+        readAutoproxyStrict(service: service) ?? (false, "")
+    }
+
+    private func readAutoproxyStrict(service: String) -> (enabled: Bool, url: String)? {
         guard let result = try? commandRunner("/usr/sbin/networksetup", ["-getautoproxyurl", service]),
-              result.exitCode == 0 else { return (false, "") }
+              result.exitCode == 0 else { return nil }
 
         var url = ""
         var enabled = false
@@ -610,10 +648,17 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// the bypass-domain list. Recording only the enabled endpoints would leave
     /// Conduit's host, port and bypass list sitting in the user's disabled
     /// fields for good, which restore is supposed to undo.
-    private func capturePriorState(service: String, ours: LocalListenerFingerprint) -> [String: String] {
-        var web = readProxyState(service: service, type: "webproxy")
-        var secure = readProxyState(service: service, type: "securewebproxy")
-        var auto = readAutoproxy(service: service)
+    /// `nil` unless every field `apply` is about to overwrite — both proxies,
+    /// the PAC URL and the bypass list — was read successfully. A read that
+    /// failed used to become the empty default, which teardown then "restored"
+    /// by erasing whatever the user had.
+    private func capturePriorState(service: String, ours: LocalListenerFingerprint) -> [String: String]? {
+        guard var web = readProxyStateStrict(service: service, type: "webproxy"),
+              var secure = readProxyStateStrict(service: service, type: "securewebproxy"),
+              var auto = readAutoproxyStrict(service: service),
+              let bypassDomains = readBypassDomainsStrict(service: service) else {
+            return nil
+        }
 
         // A setting that points at our own listener is residue, not a prior.
         // Recording it would make teardown "restore" a dead local port and
@@ -637,7 +682,7 @@ package final class SystemProxyManager: @unchecked Sendable {
             secureEnabled: secure.enabled,
             autoURL: auto.url,
             autoEnabled: auto.enabled,
-            bypassDomains: readBypassDomains(service: service)
+            bypassDomains: bypassDomains
         ).journalValues
     }
 
@@ -710,8 +755,12 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// Bypass domains currently configured for a service. `apply` overwrites
     /// these in manual mode via `-setproxybypassdomains`.
     private func readBypassDomains(service: String) -> [String] {
+        readBypassDomainsStrict(service: service) ?? []
+    }
+
+    private func readBypassDomainsStrict(service: String) -> [String]? {
         guard let result = try? commandRunner("/usr/sbin/networksetup", ["-getproxybypassdomains", service]),
-              result.exitCode == 0 else { return [] }
+              result.exitCode == 0 else { return nil }
         return result.standardOutput
             .split(separator: "\n")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
