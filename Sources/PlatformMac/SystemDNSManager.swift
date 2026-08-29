@@ -2,6 +2,17 @@
 import Foundation
 import ProxyKernel
 
+package enum SystemDNSManagerError: Error, LocalizedError {
+    case listingFailed(exitCode: Int32)
+
+    package var errorDescription: String? {
+        switch self {
+        case .listingFailed(let exitCode):
+            return "networksetup -listallnetworkservices failed (exit \(exitCode))"
+        }
+    }
+}
+
 package final class SystemDNSManager: @unchecked Sendable {
     private let privilegeClient: PrivilegeClient
     /// Prior per-service DNS servers. Shared with every other platform surface
@@ -121,7 +132,15 @@ package final class SystemDNSManager: @unchecked Sendable {
         // still takes the write, and restoring it now is what stops it from
         // coming back pointed at a resolver that is gone. Only an interface
         // that no longer exists is skipped.
-        let currentServices = Set((try? listedNetworkServices()) ?? [])
+        // A listing that fails is a failure of the teardown, not an empty
+        // machine: nothing gets skipped as "gone", and the records stay.
+        let currentServices: Set<String>
+        do {
+            currentServices = Set(try listedNetworkServices(includingDisabled: true))
+        } catch {
+            logger?.log(.warning, "Could not list network services during the DNS teardown (\(error.displayDescription)); keeping the recorded servers so a later teardown can retry.", category: .system)
+            return
+        }
         var restored = 0
         var skipped = 0
         var lastError: Error?
@@ -318,18 +337,23 @@ package final class SystemDNSManager: @unchecked Sendable {
         return output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
-    /// Every enabled service `networksetup` knows, connected or not.
-    package func listedNetworkServices() throws -> [String] {
+    /// Every service `networksetup` knows, connected or not. With
+    /// `includingDisabled`, the starred entries too (asterisk stripped) — they
+    /// still hold settings and still take writes.
+    package func listedNetworkServices(includingDisabled: Bool = false) throws -> [String] {
         let result = try commandRunner("/usr/sbin/networksetup", ["-listallnetworkservices"])
+        guard result.exitCode == 0 else {
+            throw SystemDNSManagerError.listingFailed(exitCode: result.exitCode)
+        }
         return result.standardOutput
             .split(separator: "\n")
-            .map(String.init)
-            .filter { line in
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty { return false }
-                if trimmed.hasPrefix("An asterisk") { return false }
-                if trimmed.hasPrefix("*") { return false }
-                return true
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .compactMap { line in
+                if line.isEmpty || line.hasPrefix("An asterisk") { return nil }
+                if line.hasPrefix("*") {
+                    return includingDisabled ? String(line.dropFirst()).trimmingCharacters(in: .whitespaces) : nil
+                }
+                return line
             }
     }
 
