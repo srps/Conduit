@@ -355,7 +355,10 @@ package final class PlatformStateJournal: @unchecked Sendable {
         }
     }
 
-    private func saveLocked(_ records: [PlatformStateRecord]) {
+    /// Returns whether the records reached disk. The in-memory copy is
+    /// updated either way, so this process keeps working from it.
+    @discardableResult
+    private func saveLocked(_ records: [PlatformStateRecord]) -> Bool {
         loaded = records
         do {
             let data = try JSONEncoder.prettyISO8601Encoder.encode(records)
@@ -367,6 +370,7 @@ package final class PlatformStateJournal: @unchecked Sendable {
             // claim prior values that were never true.
             try data.write(to: fileURL, options: .atomic)
             fileStateBox = .loaded
+            return true
         } catch {
             // The in-memory copy still serves this process, so a failed write
             // is survivable *now* — but it means a crash from here on leaves
@@ -377,6 +381,7 @@ package final class PlatformStateJournal: @unchecked Sendable {
                 "Could not write the platform-state journal at \(fileURL.path) (\(error.displayDescription)); if this process dies, the previous system settings cannot be restored.",
                 category: .system
             )
+            return false
         }
     }
 }
@@ -422,30 +427,48 @@ extension PlatformStateJournal {
     /// as the prior value. The snapshot's own timestamp is kept so the
     /// staleness rule judges the crash, not the upgrade.
     ///
-    /// A journal that already knows the surface wins; the file is left alone
-    /// in that case and only ever removed after a successful import.
-    /// Returns whether an import happened.
+    /// A journal that already knows the surface wins, and an unreadable
+    /// journal refuses: it may describe other surfaces, and a write from here
+    /// would replace it. The snapshot is the last copy of the resolvers, so it
+    /// is removed only once the import is on disk — one atomic write, not a
+    /// record at a time. Returns whether an import happened.
     @discardableResult
     package func importLegacyDNSSnapshot(at fileURL: URL, logger: (any LogSink)? = nil) -> Bool {
         guard let data = try? Data(contentsOf: fileURL) else { return false }
-        guard !isMarkedApplied(surface: .systemDNS), !hasRecords(for: .systemDNS) else {
-            return false
-        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .deferredToDate
         guard let snapshot = try? decoder.decode(LegacyDNSSnapshot.self, from: data) else {
             logger?.log(.warning, "Legacy DNS snapshot at \(fileURL.path) could not be read; leaving it in place.", category: .system)
             return false
         }
+
+        lock.lock()
+        defer { lock.unlock() }
+        var records = loadLocked()
+        guard fileStateBox != .unreadable else {
+            logger?.log(.warning, "Legacy DNS snapshot found but the platform-state journal is unreadable; leaving both in place.", category: .system)
+            return false
+        }
+        guard !records.contains(where: { $0.surface == .systemDNS }) else { return false }
+
         for (service, servers) in snapshot.interfaces {
-            recordPrior(
+            records.append(PlatformStateRecord(
                 surface: .systemDNS,
                 scope: service,
-                value: ["servers": servers.joined(separator: ",")],
-                now: snapshot.savedAt
-            )
+                priorValue: ["servers": servers.joined(separator: ",")],
+                recordedAt: snapshot.savedAt
+            ))
         }
-        markApplied(surface: .systemDNS, now: snapshot.savedAt)
+        records.append(PlatformStateRecord(
+            surface: .systemDNS,
+            scope: Self.appliedMarkerScope,
+            priorValue: nil,
+            recordedAt: snapshot.savedAt
+        ))
+        guard saveLocked(records) else {
+            logger?.log(.warning, "Legacy DNS snapshot could not be written into the journal; keeping \(fileURL.path) as the recovery copy.", category: .system)
+            return false
+        }
         do {
             try FileManager.default.removeItem(at: fileURL)
         } catch {
