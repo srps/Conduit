@@ -562,6 +562,44 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertFalse(manager.hasSavedState(), "Stale state should always be cleaned up")
     }
 
+    // MARK: - restoreIfNeeded(): 0.1.x snapshot
+
+    /// 0.1.1 crashed with DNS pointed at the relay, the user upgraded: the
+    /// resolvers exist only in `saved-dns.json`. Recovery must read that file
+    /// once, restore from it, and not leave it around to be re-imported.
+    func testRestoreIfNeededImportsTheLegacySnapshotBeforeDeciding() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        let legacy = stateDirectory.appendingPathComponent("saved-dns.json")
+        let snapshot = LegacyDNSSnapshot(
+            savedAt: Date().addingTimeInterval(-3600),
+            interfaces: ["Wi-Fi": ["192.168.1.1", "1.1.1.1"]]
+        )
+        try JSONEncoder().encode(snapshot).write(to: legacy)
+
+        let manager = SystemDNSManager(
+            privilegeClient: recording,
+            journal: journal,
+            legacySnapshotFile: legacy,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            relayIsLive: { false }
+        )
+        manager.restoreIfNeeded(logger: nil)
+
+        XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "192.168.1.1", "1.1.1.1"]])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path), "removed after a successful import")
+        XCTAssertFalse(manager.hasSavedState())
+    }
+
+    func testLegacySnapshotDoesNotOverrideAJournalThatKnowsTheSurface() throws {
+        let legacy = stateDirectory.appendingPathComponent("saved-dns.json")
+        try JSONEncoder().encode(LegacyDNSSnapshot(savedAt: .now, interfaces: ["Wi-Fi": ["9.9.9.9"]])).write(to: legacy)
+        journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "192.168.1.1"])
+
+        XCTAssertFalse(journal.importLegacyDNSSnapshot(at: legacy))
+        XCTAssertEqual(journal.prior(surface: .systemDNS, scope: "Wi-Fi"), .wasPresent(["servers": "192.168.1.1"]))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path), "left alone when not imported")
+    }
+
     // MARK: - restoreIfNeeded(): crash recovery vs. a live session
 
     /// The relay is not in the app. It runs inside the privileged LaunchDaemon,
