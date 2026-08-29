@@ -143,11 +143,13 @@ package final class SystemDNSManager: @unchecked Sendable {
 
         let savedInterfaces = savedInterfaces()
         guard !savedInterfaces.isEmpty else {
-            // Applied, but there was nothing to capture: no DNS servers to put
-            // back. The relay still has to go — this was the one teardown path
-            // that left it running.
+            // Applied, but there was nothing to capture — no services, or none
+            // readable, in which case nothing was redirected either. The relay
+            // still has to go. Released, not merely forgotten: the next
+            // teardown must not read a user's own 127.0.0.1 as our residue.
             stopRelay(logger: logger)
             deleteSavedState()
+            journal.markReleased(surface: .systemDNS)
             return
         }
 
