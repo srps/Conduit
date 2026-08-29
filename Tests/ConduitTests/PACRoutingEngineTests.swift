@@ -243,6 +243,34 @@ final class PACRoutingEngineTests: XCTestCase {
         XCTAssertEqual(scriptEvaluator.callCount(), 1)
     }
 
+    func testWaitersBeyondTheLimitAreAnsweredWithoutRoutes() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+
+        let engine = PACRoutingEngine(
+            configProvider: { config },
+            resolver: StaticPacEvaluator(scriptEvaluator: SlowCountingPacScriptEvaluator(delay: 0.3)),
+            refreshInterval: 300
+        )
+        try await engine.refresh(force: true)
+
+        let group = MultiThreadedEventLoopGroup.singleton
+        let loop = group.next()
+        let extra = 5
+        // Issue every request from one loop so admission order is the issue order.
+        let futures = try await loop.submit {
+            (0..<(1 + PACRoutingEngine.pendingWaiterLimit + extra)).map { _ in
+                engine.routeChainFuture(for: "https://flood.example.com/", host: "flood.example.com", on: loop)
+            }
+        }.get()
+        let results = try await EventLoopFuture.whenAllSucceed(futures, on: loop).get()
+
+        let served = results.prefix(1 + PACRoutingEngine.pendingWaiterLimit)
+        XCTAssertTrue(served.allSatisfy { $0 == [.proxy(host: "cached.proxy.example.com", port: 8080)] })
+        XCTAssertTrue(results.suffix(extra).allSatisfy { $0.isEmpty }, "requests past the limit get no routes at once")
+    }
+
     func testRouteCacheSeparatesDifferentPathsOnSameHostAndPort() async throws {
         var config = ProxyConfig.testFixture()
         config.pacURL = "http://example.com/proxy.pac"
