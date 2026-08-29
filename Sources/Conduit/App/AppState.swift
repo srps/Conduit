@@ -68,7 +68,8 @@ final class AppState: ObservableObject {
     private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient)
     private lazy var systemDNSManager = SystemDNSManager(
         privilegeClient: auditedPrivilegeClient,
-        journal: platformStateJournal
+        journal: platformStateJournal,
+        legacySnapshotFile: runtimeEnvironment.legacySavedDNSFile
     )
     private let loginItemManager = LoginItemManager()
     private let networkMonitor = NetworkMonitor()
