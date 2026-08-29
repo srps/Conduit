@@ -35,6 +35,12 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         self.eventsFile = eventsFile ?? configDirectory.appendingPathComponent("events.ndjson")
     }
 
+    /// Where 0.1.x kept the pre-relay DNS servers before the journal existed.
+    /// Read once at launch to seed the journal, then removed.
+    package var legacySavedDNSFile: URL {
+        configDirectory.appendingPathComponent("saved-dns.json")
+    }
+
     package static func userDefault() -> RuntimeEnvironment {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let directory = base.appendingPathComponent("Conduit", isDirectory: true)

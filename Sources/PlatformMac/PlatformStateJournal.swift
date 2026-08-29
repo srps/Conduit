@@ -397,3 +397,61 @@ extension JSONEncoder {
         return encoder
     }
 }
+
+// MARK: - Legacy DNS snapshot
+
+/// The `saved-dns.json` document 0.1.x wrote before the journal existed.
+package struct LegacyDNSSnapshot: Codable, Equatable {
+    package var savedAt: Date
+    package var interfaces: [String: [String]]
+
+    package init(savedAt: Date, interfaces: [String: [String]]) {
+        self.savedAt = savedAt
+        self.interfaces = interfaces
+    }
+}
+
+extension PlatformStateJournal {
+    /// Seeds the DNS surface from a 0.1.x snapshot, then removes the file.
+    ///
+    /// The case this exists for: 0.1.1 crashed with system-DNS management
+    /// active, so the machine still points at 127.0.0.1 and the user's
+    /// resolvers exist only in `saved-dns.json`; then the user upgrades. With
+    /// an empty journal, launch recovery would see nothing to restore and
+    /// leave DNS on a dead relay — and the next apply would record 127.0.0.1
+    /// as the prior value. The snapshot's own timestamp is kept so the
+    /// staleness rule judges the crash, not the upgrade.
+    ///
+    /// A journal that already knows the surface wins; the file is left alone
+    /// in that case and only ever removed after a successful import.
+    /// Returns whether an import happened.
+    @discardableResult
+    package func importLegacyDNSSnapshot(at fileURL: URL, logger: (any LogSink)? = nil) -> Bool {
+        guard let data = try? Data(contentsOf: fileURL) else { return false }
+        guard !isMarkedApplied(surface: .systemDNS), !hasRecords(for: .systemDNS) else {
+            return false
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .deferredToDate
+        guard let snapshot = try? decoder.decode(LegacyDNSSnapshot.self, from: data) else {
+            logger?.log(.warning, "Legacy DNS snapshot at \(fileURL.path) could not be read; leaving it in place.", category: .system)
+            return false
+        }
+        for (service, servers) in snapshot.interfaces {
+            recordPrior(
+                surface: .systemDNS,
+                scope: service,
+                value: ["servers": servers.joined(separator: ",")],
+                now: snapshot.savedAt
+            )
+        }
+        markApplied(surface: .systemDNS, now: snapshot.savedAt)
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+        } catch {
+            logger?.log(.warning, "Imported the legacy DNS snapshot but could not remove \(fileURL.path): \(error.displayDescription)", category: .system)
+        }
+        logger?.log(.notice, "Imported the 0.1.x DNS snapshot (\(snapshot.interfaces.count) interface(s)) into the platform-state journal.", category: .system)
+        return true
+    }
+}

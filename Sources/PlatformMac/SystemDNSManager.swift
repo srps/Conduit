@@ -19,10 +19,14 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// Injectable so `restoreIfNeeded` is testable without a live relay,
     /// mirroring `SystemProxyManager`'s `portProbe`.
     private let relayIsLive: @Sendable () -> Bool
+    /// 0.1.x snapshot, imported into the journal on first launch. See
+    /// `PlatformStateJournal.importLegacyDNSSnapshot`.
+    private let legacySnapshotFile: URL?
 
     package init(
         privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
         journal: PlatformStateJournal,
+        legacySnapshotFile: URL? = RuntimeEnvironment.userDefault().legacySavedDNSFile,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
@@ -32,6 +36,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         self.journal = journal
         self.commandRunner = commandRunner
         self.relayIsLive = relayIsLive
+        self.legacySnapshotFile = legacySnapshotFile
     }
 
     // MARK: - Saved state
@@ -175,6 +180,9 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func restoreIfNeeded(logger: (any LogSink)?) {
+        if let legacySnapshotFile {
+            journal.importLegacyDNSSnapshot(at: legacySnapshotFile, logger: logger)
+        }
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else { return }
 
         let stalenessThreshold: TimeInterval = 7 * 24 * 3600
