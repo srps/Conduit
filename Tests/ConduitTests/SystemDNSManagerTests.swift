@@ -590,6 +590,51 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertFalse(manager.hasSavedState())
     }
 
+    /// The daemon never calls `restoreIfNeeded`; its first DNS act is the save.
+    func testSaveCurrentDNSImportsTheLegacySnapshotBeforeRecording() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        let legacy = stateDirectory.appendingPathComponent("saved-dns.json")
+        try JSONEncoder().encode(LegacyDNSSnapshot(savedAt: .now, interfaces: ["Wi-Fi": ["192.168.1.1"]])).write(to: legacy)
+        let manager = SystemDNSManager(
+            privilegeClient: recording,
+            journal: journal,
+            legacySnapshotFile: legacy,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            relayIsLive: { false }
+        )
+
+        try manager.saveCurrentDNS(logger: nil)
+
+        XCTAssertEqual(
+            journal.prior(surface: .systemDNS, scope: "Wi-Fi"),
+            .wasPresent(["servers": "192.168.1.1"]),
+            "the stranded 127.0.0.1 must not become the recorded prior value"
+        )
+    }
+
+    func testLegacySnapshotIsRefusedWhenTheJournalIsUnreadable() throws {
+        let legacy = stateDirectory.appendingPathComponent("saved-dns.json")
+        try JSONEncoder().encode(LegacyDNSSnapshot(savedAt: .now, interfaces: ["Wi-Fi": ["9.9.9.9"]])).write(to: legacy)
+        try Data("not json".utf8).write(to: stateDirectory.appendingPathComponent("platform-state.json"))
+        let corrupt = PlatformStateJournal(fileURL: stateDirectory.appendingPathComponent("platform-state.json"))
+
+        XCTAssertFalse(corrupt.importLegacyDNSSnapshot(at: legacy))
+        XCTAssertEqual(corrupt.fileState, .unreadable, "the journal is left as it was")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+    }
+
+    func testLegacySnapshotIsKeptWhenTheJournalCannotBeWritten() throws {
+        let legacy = stateDirectory.appendingPathComponent("saved-dns.json")
+        try JSONEncoder().encode(LegacyDNSSnapshot(savedAt: .now, interfaces: ["Wi-Fi": ["9.9.9.9"]])).write(to: legacy)
+        // A directory that cannot be created: a path under a regular file.
+        let blocker = stateDirectory.appendingPathComponent("blocker")
+        try Data().write(to: blocker)
+        let unwritable = PlatformStateJournal(fileURL: blocker.appendingPathComponent("dir/platform-state.json"))
+
+        XCTAssertFalse(unwritable.importLegacyDNSSnapshot(at: legacy))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path), "the last copy of the resolvers stays")
+    }
+
     func testLegacySnapshotDoesNotOverrideAJournalThatKnowsTheSurface() throws {
         let legacy = stateDirectory.appendingPathComponent("saved-dns.json")
         try JSONEncoder().encode(LegacyDNSSnapshot(savedAt: .now, interfaces: ["Wi-Fi": ["9.9.9.9"]])).write(to: legacy)
