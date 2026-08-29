@@ -65,6 +65,27 @@ final class EnvironmentManagerTests: XCTestCase {
         )
     }
 
+    /// A read that failed is not "absent". The variable is left alone by apply
+    /// and by teardown; recording it as absent would have teardown unset a
+    /// value we never saw.
+    func testAVariableWhoseReadFailedIsNeitherWrittenNorUnset() throws {
+        launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
+        launchctl.failingGetenv = ["HTTP_PROXY"]
+
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080", "not overwritten")
+        XCTAssertEqual(launchctl.environment["HTTPS_PROXY"], "http://127.0.0.1:3128", "the readable ones are")
+        XCTAssertEqual(
+            journal.prior(surface: .launchdEnvironment, scope: "HTTP_PROXY"),
+            .wasPresent([EnvironmentManager.untouchedMarkerKey: "unreadable"])
+        )
+
+        try manager.clear(logger: nil)
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080", "and not unset by teardown")
+        XCTAssertNil(launchctl.environment["HTTPS_PROXY"])
+    }
+
     /// Variables we introduced are removed, not left pointing at a proxy that
     /// is no longer listening — every GUI app launched afterwards would inherit
     /// a dead proxy.
@@ -207,6 +228,8 @@ private final class FakeLaunchctl: @unchecked Sendable {
     var environment: [String: String] = [:]
     /// Simulates a transient launchctl failure on writes.
     var failSetenv = false
+    /// Names whose `getenv` fails (non-zero exit).
+    var failingGetenv: Set<String> = []
     private let lock = NSLock()
 
     func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
@@ -227,6 +250,9 @@ private final class FakeLaunchctl: @unchecked Sendable {
             environment.removeValue(forKey: arguments[1])
             return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
         case "getenv" where arguments.count >= 2:
+            if failingGetenv.contains(arguments[1]) {
+                return CommandResult(exitCode: 1, standardOutput: "", standardError: "simulated failure")
+            }
             // Real launchctl prints nothing and still exits 0 for an unset name.
             return CommandResult(exitCode: 0, standardOutput: environment[arguments[1]] ?? "", standardError: "")
         default:
