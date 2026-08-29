@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import XCTest
@@ -269,6 +270,40 @@ final class PACRoutingEngineTests: XCTestCase {
         let served = results.prefix(1 + PACRoutingEngine.pendingWaiterLimit)
         XCTAssertTrue(served.allSatisfy { $0 == [.proxy(host: "cached.proxy.example.com", port: 8080)] })
         XCTAssertTrue(results.suffix(extra).allSatisfy { $0.isEmpty }, "requests past the limit get no routes at once")
+    }
+
+    func testQueuedEvaluationsAreBoundedAcrossKeysAndRefusalIsAnEvent() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacURL = "http://example.com/proxy.pac"
+        config.pacRoutingEnabled = true
+
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let engine = PACRoutingEngine(
+            configProvider: { config },
+            resolver: StaticPacEvaluator(scriptEvaluator: SlowCountingPacScriptEvaluator(delay: 0.2)),
+            refreshInterval: 300,
+            queuedEvaluationLimit: 3,
+            eventSink: { event in events.withLockedValue { $0.append(event) } }
+        )
+        try await engine.refresh(force: true)
+
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let futures = try await loop.submit {
+            (0..<5).map { i in
+                engine.routeChainFuture(for: "https://h\(i).example.com/", host: "h\(i).example.com", on: loop)
+            }
+        }.get()
+        let results = try await EventLoopFuture.whenAllSucceed(futures, on: loop).get()
+
+        XCTAssertTrue(results.prefix(3).allSatisfy { !$0.isEmpty })
+        XCTAssertTrue(results.suffix(2).allSatisfy { $0.isEmpty }, "the 4th and 5th distinct keys are refused")
+        let refused = events.withLockedValue { $0 }.filter { $0.event == "pac.evaluation_refused" }
+        XCTAssertEqual(refused.count, 2)
+        XCTAssertTrue(refused.allSatisfy { $0.detail?.contains("reason=queue_full") == true }, "\(refused)")
+
+        // Once the queue drains, admission resumes.
+        let later = try await engine.routeChainFuture(for: "https://h9.example.com/", host: "h9.example.com", on: loop).get()
+        XCTAssertFalse(later.isEmpty)
     }
 
     func testRouteCacheSeparatesDifferentPathsOnSameHostAndPort() async throws {

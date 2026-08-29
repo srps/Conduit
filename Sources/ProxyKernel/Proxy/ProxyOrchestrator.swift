@@ -983,7 +983,8 @@ package final class ProxyOrchestrator {
         return PACRoutingEngine(
             configProvider: { [configBox] in configBox.current },
             resolver: pacEvaluator,
-            logger: logStore
+            logger: logStore,
+            eventSink: { [eventLog] event in eventLog.append(event) }
         )
     }()
 
