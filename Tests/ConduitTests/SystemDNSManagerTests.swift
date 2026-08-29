@@ -36,9 +36,12 @@ private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
 private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
     /// Service name → the DNS servers the machine reports for it.
     var dnsServers: [String: [String]]
+    /// Listed but without an address.
+    var disconnected: Set<String> = []
 
-    init(dnsServers: [String: [String]]) {
+    init(dnsServers: [String: [String]], disconnected: Set<String> = []) {
         self.dnsServers = dnsServers
+        self.disconnected = disconnected
     }
 
     func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
@@ -52,8 +55,9 @@ private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
                 + dnsServers.keys.sorted()
             return CommandResult(exitCode: 0, standardOutput: lines.joined(separator: "\n"), standardError: "")
         case "-getinfo":
-            // Every described service counts as connected; which interfaces are
-            // up is not what these tests are about.
+            if disconnected.contains(service) {
+                return CommandResult(exitCode: 0, standardOutput: "IP address:\nSubnet mask:", standardError: "")
+            }
             return CommandResult(exitCode: 0, standardOutput: "IP address: 192.0.2.10", standardError: "")
         case "-getdnsservers":
             let servers = dnsServers[service] ?? []
@@ -213,6 +217,25 @@ final class SystemDNSManagerTests: XCTestCase {
 
 
     // MARK: - clear() with RecordingPrivilegeClient
+
+    /// Listed but down — a VPN link, an unplugged adapter — still takes the
+    /// write. Restore it now rather than let it come back pointed at 127.0.0.1.
+    func testClearRestoresARecordedInterfaceThatIsListedButDisconnected() throws {
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"], "Ethernet": ["10.0.0.1"]]))
+        let machine = FakeDNSNetworksetupRunner(
+            dnsServers: ["Wi-Fi": ["127.0.0.1"], "Ethernet": ["127.0.0.1"]],
+            disconnected: ["Ethernet"]
+        )
+        let manager = makeManager(machine: machine, relayIsLive: false)
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(
+            Set(recording.commands(matching: .setDNSServers).map { $0.joined(separator: " ") }),
+            ["Wi-Fi 192.168.1.1", "Ethernet 10.0.0.1"]
+        )
+        XCTAssertFalse(manager.hasSavedState())
+    }
 
     func testClearWithAllVanishedInterfacesSkipsAllAndDeletesFile() throws {
         let state = SavedDNS(interfaces: [

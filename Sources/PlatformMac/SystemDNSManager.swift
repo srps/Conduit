@@ -117,7 +117,11 @@ package final class SystemDNSManager: @unchecked Sendable {
 
         stopRelay(logger: logger)
 
-        let currentServices = Set((try? connectedNetworkServices(logger: nil)) ?? [])
+        // Listed, not connected: a recorded interface that is down right now
+        // still takes the write, and restoring it now is what stops it from
+        // coming back pointed at a resolver that is gone. Only an interface
+        // that no longer exists is skipped.
+        let currentServices = Set((try? listedNetworkServices()) ?? [])
         var restored = 0
         var skipped = 0
         var lastError: Error?
@@ -314,9 +318,10 @@ package final class SystemDNSManager: @unchecked Sendable {
         return output.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
-    package func connectedNetworkServices(logger: (any LogSink)? = nil) throws -> [String] {
+    /// Every enabled service `networksetup` knows, connected or not.
+    package func listedNetworkServices() throws -> [String] {
         let result = try commandRunner("/usr/sbin/networksetup", ["-listallnetworkservices"])
-        let all = result.standardOutput
+        return result.standardOutput
             .split(separator: "\n")
             .map(String.init)
             .filter { line in
@@ -326,6 +331,10 @@ package final class SystemDNSManager: @unchecked Sendable {
                 if trimmed.hasPrefix("*") { return false }
                 return true
             }
+    }
+
+    package func connectedNetworkServices(logger: (any LogSink)? = nil) throws -> [String] {
+        let all = try listedNetworkServices()
 
         var connected: [String] = []
         for service in all {
