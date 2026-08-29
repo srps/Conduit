@@ -164,6 +164,10 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Save / Restore
 
     package func saveCurrentDNS(logger: (any LogSink)?) throws {
+        // The daemon's first act is this save; without the import first it
+        // would record a stranded 127.0.0.1 as the prior value and make the
+        // snapshot unimportable for good.
+        importLegacySnapshotIfPresent(logger: logger)
         let services = try connectedNetworkServices(logger: logger)
         for service in services {
             let servers = readDNSServers(service: service)
@@ -182,10 +186,14 @@ package final class SystemDNSManager: @unchecked Sendable {
         logger?.log(.debug, "Saved current DNS state for \(services.count) interface(s).", category: .system)
     }
 
-    package func restoreIfNeeded(logger: (any LogSink)?) {
+    private func importLegacySnapshotIfPresent(logger: (any LogSink)?) {
         if let legacySnapshotFile {
             journal.importLegacyDNSSnapshot(at: legacySnapshotFile, logger: logger)
         }
+    }
+
+    package func restoreIfNeeded(logger: (any LogSink)?) {
+        importLegacySnapshotIfPresent(logger: logger)
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else { return }
 
         let stalenessThreshold: TimeInterval = 7 * 24 * 3600
