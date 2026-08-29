@@ -93,17 +93,29 @@ package final class EnvironmentManager {
         // Capture before overwriting. A developer with HTTP_PROXY already
         // exported into their launchd domain would otherwise have it silently
         // unset by our teardown, with nothing recording that it existed.
+        //
+        // A read that *failed* is not "absent": recording it as absent would
+        // have teardown unset a value we never saw. Such a variable is marked
+        // untouched, left alone now, and skipped by teardown.
+        var untouched: Set<String> = []
         for name in launchdVariableNames {
-            journal.recordPrior(
-                surface: .launchdEnvironment,
-                scope: name,
-                value: readLaunchdValue(name).map { ["value": $0] }
-            )
+            switch readLaunchdVariable(name) {
+            case .present(let value):
+                journal.recordPrior(surface: .launchdEnvironment, scope: name, value: ["value": value])
+            case .absent:
+                journal.recordPrior(surface: .launchdEnvironment, scope: name, value: nil)
+            case .failed:
+                journal.recordPrior(surface: .launchdEnvironment, scope: name, value: [Self.untouchedMarkerKey: "unreadable"])
+                untouched.insert(name)
+            }
         }
         journal.markApplied(surface: .launchdEnvironment)
+        if !untouched.isEmpty {
+            logger?.log(.warning, "Could not read \(untouched.sorted().joined(separator: ", ")) from the launchd domain; leaving them untouched.", category: .system)
+        }
 
         var failures = 0
-        for name in launchdVariableNames {
+        for name in launchdVariableNames where !untouched.contains(name) {
             guard let value = values[name] else { continue }
             let result = try? commandRunner("/bin/launchctl", ["setenv", name, value])
             if result?.exitCode != 0 { failures += 1 }
@@ -139,6 +151,9 @@ package final class EnvironmentManager {
         for name in launchdVariableNames {
             let result: CommandResult?
             switch journal.prior(surface: .launchdEnvironment, scope: name) {
+            case .wasPresent(let prior) where prior[Self.untouchedMarkerKey] != nil:
+                // apply never wrote this one; nothing of ours to remove.
+                continue
             case .wasPresent(let prior):
                 result = try? commandRunner("/bin/launchctl", ["setenv", name, prior["value"] ?? ""])
                 if result?.exitCode == 0 { restored += 1 }
@@ -185,13 +200,31 @@ package final class EnvironmentManager {
         }
     }
 
-    /// Current value of a launchd variable, or nil when it is not set.
-    private func readLaunchdValue(_ name: String) -> String? {
+    /// Journal value for a variable whose current state could not be read.
+    /// Same shape as `SystemProxyManager.untouchedMarkerKey`.
+    static let untouchedMarkerKey = "\u{0}untouched"
+
+    enum LaunchdRead: Equatable {
+        case present(String)
+        /// `launchctl getenv` prints nothing and exits 0 for an unset name.
+        case absent
+        case failed
+    }
+
+    private func readLaunchdVariable(_ name: String) -> LaunchdRead {
         guard let result = try? commandRunner("/bin/launchctl", ["getenv", name]),
               result.exitCode == 0
-        else { return nil }
+        else { return .failed }
         let value = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? nil : value
+        return value.isEmpty ? .absent : .present(value)
+    }
+
+    /// Current value of a launchd variable, or nil when it is not set or
+    /// could not be read. For residue probing only; capture uses the strict
+    /// reader.
+    private func readLaunchdValue(_ name: String) -> String? {
+        if case .present(let value) = readLaunchdVariable(name) { return value }
+        return nil
     }
 
     private func renderBlock(config: ProxyConfig) -> String {
