@@ -43,6 +43,19 @@ final class GSSInitiatorGateTests: XCTestCase {
                        "failover to the next upstream must not inherit the first one's failure")
     }
 
+    func testCooldownStartsWhenTheCallFailsNotWhenItStarted() throws {
+        let (gate, clock) = makeGate(cooldown: 5)
+        // The KDC takes longer than the cooldown to give up.
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) {
+            clock.now += 8
+            throw KDCUnreachable()
+        })
+
+        var ran = false
+        XCTAssertThrowsError(try gate.run(target: "proxy-a", shouldCoolDown: { _ in true }) { ran = true })
+        XCTAssertFalse(ran, "the cooldown is measured from the failure, so the next call is still inside it")
+    }
+
     func testExemptFailuresDoNotStartCooldown() throws {
         let (gate, _) = makeGate()
         var runs = 0
