@@ -296,6 +296,26 @@ final class SystemDNSManagerTests: XCTestCase {
         XCTAssertFalse(manager.hasSavedState())
     }
 
+    /// Every capture failed: nothing was redirected, so the first teardown has
+    /// nothing to put back — and the second must not read the user's own
+    /// 127.0.0.1 as residue.
+    func testTeardownAfterAFullyUnreadableCaptureReleasesTheSurface() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        machine.failingReads = ["Wi-Fi"]
+        let manager = makeManager(machine: machine, relayIsLive: false)
+
+        try manager.saveCurrentDNS(logger: nil)
+        try manager.apply(forwarderPort: 5053, logger: nil)
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)
+
+        try manager.clear(logger: nil)
+        XCTAssertEqual(journal.ownership(of: .systemDNS), .released)
+
+        machine.failingReads = []
+        try manager.clear(logger: nil)
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty, "a released surface is not probed for residue")
+    }
+
     /// A VPN service mid-flap is down, not gone: its record stays.
     func testReconcileKeepsTheRecordOfAListedButDisconnectedInterface() throws {
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"], "VPN": ["10.0.0.1"]]))
