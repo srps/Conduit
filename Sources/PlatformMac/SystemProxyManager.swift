@@ -88,6 +88,12 @@ package final class SystemProxyManager: @unchecked Sendable {
 
     // MARK: - Apply / Clear
 
+    /// Journal value recorded for a service `apply` did not touch because its
+    /// state could not be read. Teardown skips such a service instead of
+    /// clearing it. Prefixed with a control character like the applied
+    /// marker's scope, so it can never collide with a real field.
+    static let untouchedMarkerKey = "\u{0}untouched"
+
     package func apply(config: ProxyConfig, mode: SystemProxyMode, logger: (any LogSink)?, localPACURL: String? = nil) throws {
         let candidates = try connectedNetworkServices(logger: logger)
         guard !candidates.isEmpty else {
@@ -110,8 +116,11 @@ package final class SystemProxyManager: @unchecked Sendable {
         var services: [String] = []
         for service in candidates {
             guard let prior = capturePriorState(service: service, ours: ours) else {
-                // Nothing recorded and nothing written: a service we cannot
-                // read we also do not touch, so there is nothing to erase.
+                // Nothing written to a service we cannot read — and the
+                // journal says so. Without the marker, teardown would find a
+                // connected service with no record and clear it, which is the
+                // erase this guard exists to prevent.
+                journal.recordPrior(surface: .systemProxy, scope: service, value: [Self.untouchedMarkerKey: "unreadable"])
                 logger?.log(
                     .warning,
                     "Could not read the current proxy settings on \(service); leaving that service untouched.",
@@ -123,6 +132,10 @@ package final class SystemProxyManager: @unchecked Sendable {
             services.append(service)
         }
         guard !services.isEmpty else {
+            // Nothing applied at all: the markers have nothing to guard.
+            for service in candidates {
+                journal.forget(surface: .systemProxy, scope: service)
+            }
             throw SystemProxyManagerError.priorStateUnreadable(services: candidates)
         }
         journal.markApplied(surface: .systemProxy)
@@ -239,14 +252,21 @@ package final class SystemProxyManager: @unchecked Sendable {
         // restored now rather than left pointing at a dead proxy for when it
         // comes back. Only a service that no longer exists is skipped, and
         // its record goes with the surface below.
-        let listed = allNetworkServices()
-        let connected = (try? connectedNetworkServices(logger: nil)) ?? listed
+        //
+        // "Listed" includes disabled services (the starred entries): they take
+        // writes too, and a disabled service is the one most likely to be
+        // re-enabled later with our settings still on it.
+        let listed = try? listNetworkServices(includingDisabled: true)
+        let connected = (try? connectedNetworkServices(logger: nil)) ?? listed ?? []
         let recorded = Set(journal.scopes(for: .systemProxy))
         var services = connected
-        for service in listed where recorded.contains(service) && !services.contains(service) {
+        for service in listed ?? [] where recorded.contains(service) && !services.contains(service) {
             services.append(service)
         }
         guard !services.isEmpty else { return }
+        // Without a listing we cannot tell "gone for good" from "not
+        // enumerated this time", so records we did not restore are kept.
+        let canForgetUnhandled = listed != nil
 
         var restored: [String] = []
         var reset: [String] = []
@@ -259,10 +279,15 @@ package final class SystemProxyManager: @unchecked Sendable {
         // partway through was invisible as long as the final command
         // succeeded, and `forgetAll` then destroyed the records for every
         // service including the one that had not been restored.
+        var untouched: [String] = []
         for service in services {
             let steps: [ProxyWriteStep]
             let isRestore: Bool
             switch journal.prior(surface: .systemProxy, scope: service) {
+            case .wasPresent(let prior) where prior[Self.untouchedMarkerKey] != nil:
+                // apply never wrote here; there is nothing of ours to remove.
+                untouched.append(service)
+                continue
             case .wasPresent(let prior):
                 steps = ProxyServiceState(journalValues: prior).writeSteps
                 isRestore = true
@@ -298,8 +323,24 @@ package final class SystemProxyManager: @unchecked Sendable {
             return
         }
 
-        journal.forgetAll(surface: .systemProxy)
-        journal.markReleased(surface: .systemProxy)
+        if canForgetUnhandled {
+            journal.forgetAll(surface: .systemProxy)
+            journal.markReleased(surface: .systemProxy)
+        } else {
+            for service in restored + reset + untouched {
+                journal.forget(surface: .systemProxy, scope: service)
+            }
+            let outstanding = journal.scopes(for: .systemProxy)
+            if outstanding.isEmpty {
+                journal.markReleased(surface: .systemProxy)
+            } else {
+                logger?.log(
+                    .warning,
+                    "Could not list network services during the proxy teardown; keeping the recorded settings for \(outstanding.count) service(s) so a later teardown can restore them.",
+                    category: .system
+                )
+            }
+        }
 
         if restored.isEmpty {
             logger?.log(.notice, "Cleared macOS proxy settings.", category: .system)
@@ -530,17 +571,23 @@ package final class SystemProxyManager: @unchecked Sendable {
         (try? listNetworkServices()) ?? []
     }
 
-    private func listNetworkServices() throws -> [String] {
+    /// `includingDisabled` keeps the starred entries (with the asterisk
+    /// stripped): services `networksetup` still holds settings for and still
+    /// writes to, just not routing right now.
+    private func listNetworkServices(includingDisabled: Bool = false) throws -> [String] {
         let result = try commandRunner("/usr/sbin/networksetup", ["-listallnetworkservices"])
+        guard result.exitCode == 0 else {
+            throw SystemProxyManagerError.commandFailed("networksetup -listallnetworkservices failed (exit \(result.exitCode))")
+        }
         return result.standardOutput
             .split(separator: "\n")
-            .map(String.init)
-            .filter { line in
-                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty { return false }
-                if trimmed.hasPrefix("An asterisk") { return false }
-                if trimmed.hasPrefix("*") { return false }
-                return true
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .compactMap { line in
+                if line.isEmpty || line.hasPrefix("An asterisk") { return nil }
+                if line.hasPrefix("*") {
+                    return includingDisabled ? String(line.dropFirst()).trimmingCharacters(in: .whitespaces) : nil
+                }
+                return line
             }
     }
 
