@@ -20,13 +20,16 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// mirroring `SystemProxyManager`'s `portProbe`.
     private let relayIsLive: @Sendable () -> Bool
     /// 0.1.x snapshot, imported into the journal on first launch. See
-    /// `PlatformStateJournal.importLegacyDNSSnapshot`.
+    /// `PlatformStateJournal.importLegacyDNSSnapshot`. Comes from the same
+    /// `RuntimeEnvironment` as the journal — never `userDefault()` — so an
+    /// isolated state directory (`PM_CONFIG_DIR`, tests) cannot read or
+    /// delete the real user's file.
     private let legacySnapshotFile: URL?
 
     package init(
         privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
         journal: PlatformStateJournal,
-        legacySnapshotFile: URL? = RuntimeEnvironment.userDefault().legacySavedDNSFile,
+        legacySnapshotFile: URL? = nil,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
