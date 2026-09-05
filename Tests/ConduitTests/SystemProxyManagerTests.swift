@@ -57,7 +57,7 @@ final class SystemProxyManagerTests: XCTestCase {
 
         let runner = FakeNetworksetupRunner()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -80,7 +80,7 @@ final class SystemProxyManagerTests: XCTestCase {
 
         let runner = FakeNetworksetupRunner()
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
-        let privilegeClient = RecordingProxyPrivilegeClient()
+        let privilegeClient = RecordingPrivilegeClient()
         let manager = SystemProxyManager(privilegeClient: privilegeClient, journal: makeJournal(), commandRunner: runner.run)
 
         try manager.apply(config: config, mode: .pac, logger: nil)
@@ -146,28 +146,6 @@ final class SystemProxyManagerTests: XCTestCase {
     }
 }
 
-private final class RecordingProxyPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private(set) var commands: [(command: PrivilegedOperation, values: [String])] = []
-    /// One entry per elevation, so tests can pin how many times a user would be
-    /// prompted rather than only what was run.
-    private(set) var batches: [[PrivilegedBatchStep]] = []
-    private let error: Error?
-
-    init(error: Error? = nil) {
-        self.error = error
-    }
-
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        try execute(batch: [PrivilegedBatchStep(operation, values)])
-    }
-
-    func execute(batch: [PrivilegedBatchStep]) throws {
-        batches.append(batch)
-        commands.append(contentsOf: batch.map { ($0.operation, $0.values) })
-        if let error { throw error }
-    }
-}
-
 // MARK: - Prior-state ownership
 
 extension SystemProxyManagerTests {
@@ -184,7 +162,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -208,7 +186,7 @@ extension SystemProxyManagerTests {
         let runner = FakeNetworksetupRunner()
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -239,7 +217,7 @@ extension SystemProxyManagerTests {
         runner.proxyHost = "proxy.corp.example"
         runner.proxyPort = "8080"
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -260,7 +238,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
 
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -284,7 +262,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -323,7 +301,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://corp.example.com/proxy.pac"
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -350,7 +328,7 @@ extension SystemProxyManagerTests {
             runner.failingReads = [failing]
             let journal = makeJournal()
             let manager = SystemProxyManager(
-                privilegeClient: RecordingProxyPrivilegeClient(),
+                privilegeClient: RecordingPrivilegeClient(),
                 journal: journal,
                 commandRunner: runner.run
             )
@@ -371,7 +349,7 @@ extension SystemProxyManagerTests {
         runner.services = ["Wi-Fi", "Ethernet"]
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: { launchPath, arguments in
                 // The bypass read fails on Ethernet only.
@@ -404,7 +382,7 @@ extension SystemProxyManagerTests {
         runner.services = ["Wi-Fi", "Ethernet"]
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: { launchPath, arguments in
                 if arguments.first == "-getwebproxy", arguments.dropFirst().first == "Ethernet" {
@@ -433,7 +411,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyEnabled = true
         runner.autoProxyURL = "http://corp.example.com/proxy.pac"
         let journal = makeJournal()
-        let manager = SystemProxyManager(privilegeClient: RecordingProxyPrivilegeClient(), journal: journal, commandRunner: runner.run)
+        let manager = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, commandRunner: runner.run)
         try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
 
         runner.disabledServices = ["Ethernet"]
@@ -452,7 +430,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyEnabled = true
         runner.autoProxyURL = "http://corp.example.com/proxy.pac"
         let journal = makeJournal()
-        let manager = SystemProxyManager(privilegeClient: RecordingProxyPrivilegeClient(), journal: journal, commandRunner: runner.run)
+        let manager = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, commandRunner: runner.run)
         try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
 
         runner.disconnectedServices = ["Ethernet"]
@@ -469,7 +447,7 @@ extension SystemProxyManagerTests {
         let runner = FakeNetworksetupRunner()
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -500,7 +478,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -531,7 +509,7 @@ extension SystemProxyManagerTests {
 
         let runner = FakeNetworksetupRunner()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: PlatformStateJournal(fileURL: file),
             commandRunner: runner.run
         )
@@ -553,7 +531,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -583,7 +561,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -609,7 +587,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"   // our own residue
 
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),            // empty: the record is gone
             commandRunner: runner.run
         )
@@ -632,7 +610,7 @@ extension SystemProxyManagerTests {
         runner.secureWebProxyEnabled = false
 
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -654,7 +632,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -685,7 +663,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyEnabled = true
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -708,7 +686,7 @@ extension SystemProxyManagerTests {
         let journal = makeJournal()
         let logger = RecordingLogSink(minLevel: .debug)
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -741,7 +719,7 @@ extension SystemProxyManagerTests {
     func testBlanketClearScriptDoesNotSuppressFailures() throws {
         let runner = FakeNetworksetupRunner()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -770,7 +748,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(error: PrivilegeClientError.helperNotInstalled),
+            privilegeClient: RecordingPrivilegeClient(error: PrivilegeClientError.helperNotInstalled),
             journal: journal,
             commandRunner: runner.run
         )
@@ -807,7 +785,7 @@ extension SystemProxyManagerTests {
         runner.proxyPort = "9999"
         runner.webProxyEnabled = true
 
-        let privilegeClient = RecordingProxyPrivilegeClient()
+        let privilegeClient = RecordingPrivilegeClient()
         let journal = makeJournal()
         let manager = SystemProxyManager(
             privilegeClient: privilegeClient,
@@ -856,7 +834,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyEnabled = true
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
 
-        let privilegeClient = RecordingProxyPrivilegeClient()
+        let privilegeClient = RecordingPrivilegeClient()
         let manager = SystemProxyManager(
             privilegeClient: privilegeClient,
             journal: makeJournal(),
@@ -881,7 +859,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
 
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -908,7 +886,7 @@ extension SystemProxyManagerTests {
 
         let runner = FakeNetworksetupRunner()
         runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
-        let recorder = RecordingProxyPrivilegeClient()
+        let recorder = RecordingPrivilegeClient()
         let manager = SystemProxyManager(
             privilegeClient: recorder,
             journal: makeJournal(),
@@ -935,7 +913,7 @@ extension SystemProxyManagerTests {
 
         let runner = FakeNetworksetupRunner()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -960,7 +938,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(error: PrivilegeClientError.helperNotInstalled),
+            privilegeClient: RecordingPrivilegeClient(error: PrivilegeClientError.helperNotInstalled),
             journal: journal,
             commandRunner: runner.run
         )
@@ -985,7 +963,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://127.0.0.1:8888/user-own.pac"   // the user's, not ours
 
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -1018,7 +996,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyEnabled = true   // so a prior is captured at all
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
 
-        let privilegeClient = RecordingProxyPrivilegeClient()
+        let privilegeClient = RecordingPrivilegeClient()
         let manager = SystemProxyManager(
             privilegeClient: privilegeClient,
             journal: makeJournal(),
@@ -1047,7 +1025,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyEnabled = true
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
 
-        let privilegeClient = RecordingProxyPrivilegeClient()
+        let privilegeClient = RecordingPrivilegeClient()
         let manager = SystemProxyManager(
             privilegeClient: privilegeClient,
             journal: makeJournal(),
@@ -1080,7 +1058,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"   // residue, no record
 
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -1108,7 +1086,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
 
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run
         )
@@ -1143,7 +1121,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -1175,7 +1153,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -1203,7 +1181,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -1231,7 +1209,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -1259,7 +1237,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run
         )
@@ -1289,7 +1267,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
             portProbe: { _ in false }
@@ -1300,7 +1278,7 @@ extension SystemProxyManagerTests {
         // nothing is serving the port.
         runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
         let freshManager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
             portProbe: { _ in false }
@@ -1323,7 +1301,7 @@ extension SystemProxyManagerTests {
 
         let journal = makeJournal()
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: journal,
             commandRunner: runner.run,
             portProbe: { _ in true }
@@ -1349,7 +1327,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
 
         let manager = SystemProxyManager(
-            privilegeClient: RecordingProxyPrivilegeClient(),
+            privilegeClient: RecordingPrivilegeClient(),
             journal: makeJournal(),
             commandRunner: runner.run,
             portProbe: { _ in false }

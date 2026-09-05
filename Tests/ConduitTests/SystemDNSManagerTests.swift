@@ -6,31 +6,6 @@ import XCTest
 
 // MARK: - Test Double
 
-private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _commands: [(PrivilegedOperation, [String])] = []
-    var throwingCommands: Set<PrivilegedOperation> = []
-
-    var executedCommands: [(PrivilegedOperation, [String])] {
-        lock.withLock { _commands }
-    }
-
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        if throwingCommands.contains(operation) {
-            throw PrivilegeClientError.executionFailed("Simulated failure for \(operation.rawValue)")
-        }
-        lock.withLock { _commands.append((operation, values)) }
-    }
-
-    func commands(matching operation: PrivilegedOperation) -> [[String]] {
-        executedCommands.filter { $0.0 == operation }.map(\.1)
-    }
-
-    func reset() {
-        lock.withLock { _commands.removeAll() }
-    }
-}
-
 /// The `networksetup` reads the DNS surface makes, answered from a described
 /// machine instead of this host. Only the three the recovery path uses.
 private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
@@ -442,7 +417,7 @@ final class SystemDNSManagerTests: XCTestCase {
             throw XCTSkip("Need at least 2 connected network services for partial failure test")
         }
 
-        recording.throwingCommands = [.setDNSServers]
+        recording.failing = [.setDNSServers]
         writeSavedState(SavedDNS(interfaces: Dictionary(
             uniqueKeysWithValues: realServices.map { ($0, ["1.1.1.1"]) }
         )))
@@ -543,7 +518,7 @@ final class SystemDNSManagerTests: XCTestCase {
     func testReconcileDoesNothingWithoutSavedState() {
         let manager = makeManager()
         manager.reconcile(logger: nil)
-        XCTAssertTrue(recording.executedCommands.isEmpty, "No saved state means no reconciliation")
+        XCTAssertTrue(recording.commands.isEmpty, "No saved state means no reconciliation")
     }
 
     func testReconcileRepinsDriftedManagedInterfacesWithoutTouchingSavedState() throws {
@@ -570,7 +545,7 @@ final class SystemDNSManagerTests: XCTestCase {
             XCTAssertEqual(Array(command.dropFirst()), ["127.0.0.1"], "Re-pin always restores the loopback override")
         }
         XCTAssertTrue(
-            recording.executedCommands.allSatisfy { $0.0 == .setDNSServers },
+            recording.commands.allSatisfy { $0.0 == .setDNSServers },
             "Reconcile with no new/gone interfaces issues nothing but re-pins"
         )
 
@@ -654,7 +629,7 @@ final class SystemDNSManagerTests: XCTestCase {
     func testRestoreIfNeededNoOpsWithoutFile() {
         let manager = makeManager()
         manager.restoreIfNeeded(logger: nil)
-        XCTAssertTrue(recording.executedCommands.isEmpty)
+        XCTAssertTrue(recording.commands.isEmpty)
     }
 
     func testRestoreIfNeededRestoresWhenPort53FreeAndFileExists() throws {
@@ -668,7 +643,7 @@ final class SystemDNSManagerTests: XCTestCase {
 
         manager.restoreIfNeeded(logger: nil)
 
-        if recording.executedCommands.isEmpty {
+        if recording.commands.isEmpty {
             // Port 53 is in use on this machine (e.g., mDNSResponder), so restore was skipped.
             // This is expected behavior. The test verifies the file isn't blindly deleted.
             XCTAssertTrue(

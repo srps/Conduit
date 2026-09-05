@@ -4,48 +4,6 @@ import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
 
-// MARK: - Test Double
-
-private struct FakePrivilegeFailure: Error, LocalizedError {
-    let domain: String
-    var errorDescription: String? { "helper refused \(domain)" }
-}
-
-private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _commands: [(PrivilegedOperation, [String])] = []
-    private var _failingDomains: Set<String> = []
-
-    /// Domains whose privileged operation fails, so a test can put a failure in
-    /// the middle of a batch and see what the rest of it did.
-    var failingDomains: Set<String> {
-        get { lock.withLock { _failingDomains } }
-        set { lock.withLock { _failingDomains = newValue } }
-    }
-
-    var executedCommands: [(PrivilegedOperation, [String])] {
-        lock.withLock { _commands }
-    }
-
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        let domain = values.first
-        try lock.withLock {
-            _commands.append((operation, values))
-            if let domain, _failingDomains.contains(domain) {
-                throw FakePrivilegeFailure(domain: domain)
-            }
-        }
-    }
-
-    func commands(matching operation: PrivilegedOperation) -> [[String]] {
-        executedCommands.filter { $0.0 == operation }.map(\.1)
-    }
-
-    func reset() {
-        lock.withLock { _commands.removeAll() }
-    }
-}
-
 // MARK: - Tests
 
 /// Split-DNS entry files (`/etc/resolver/<domain>` → corporate DNS servers)

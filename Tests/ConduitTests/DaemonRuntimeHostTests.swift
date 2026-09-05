@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 @testable import ConduitDaemon
+@testable import PlatformMac
 @testable import ProxyKernel
 
 @MainActor
@@ -97,7 +98,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         // instead of spending the bind retry budget on a contended port.
         config.maxConnections = 0
 
-        let recording = RecordingDaemonPrivilegeClient()
+        let recording = RecordingPrivilegeClient()
         let host = DaemonRuntimeHost(
             environment: environment,
             logger: DiscardingLogSink(),
@@ -125,19 +126,47 @@ final class DaemonRuntimeHostTests: XCTestCase {
             "a failed start must not strand resolver files pointing at listeners that never came up"
         )
     }
-}
 
-// MARK: - Test Double
+    /// The `AppState` scenario of the same name, run against its twin. The
+    /// daemon builds its resolver manager without a journal, has no reconcile
+    /// pass for a flag flip, and its stop clears only what the switch names —
+    /// so a file it wrote is stranded the moment the switch is turned off.
+    /// The expectation is strict: when the migration brings the ownership
+    /// guard over (#13), this starts passing and the expectation comes out.
+    func testStopRemovesAResolverFileTheSwitchNoLongerNamesWhenTheHostWroteIt() async throws {
+        let environment = RuntimeEnvironment.isolated(
+            stateDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        )
+        defer { try? FileManager.default.removeItem(at: environment.configDirectory) }
 
-private final class RecordingDaemonPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let lock = NSLock()
-    private var executed: [(PrivilegedOperation, [String])] = []
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
+        try ProxyConfigPersistence.save(config, in: environment)
+        try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageDNSResolvers: true), in: environment)
 
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        lock.withLock { executed.append((operation, values)) }
-    }
+        let machine = FakeMachine(resolverDirectory: environment.configDirectory.appendingPathComponent("resolver", isDirectory: true))
+        let host = DaemonRuntimeHost(
+            environment: environment,
+            logger: DiscardingLogSink(),
+            loadedConfiguration: ProxyConfigPersistence.loadAllMigrating(in: environment),
+            vpnStatusMonitor: FakeVPNStatusObserver(),
+            privilegeClient: machine
+        )
+        try await host.startRuntime()
+        XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53")
 
-    func commands(matching operation: PrivilegedOperation) -> [[String]] {
-        lock.withLock { executed }.filter { $0.0 == operation }.map(\.1)
+        // The switch goes off on disk and the daemon reloads, then stops.
+        try PlatformConfigPersistence.save(PlatformIntegrationConfig(manageDNSResolvers: false), in: environment)
+        await host.reloadConfiguration()
+        await host.stopRuntime()
+
+        XCTExpectFailure(
+            "DaemonRuntimeHost has not taken the ownership guard from #13: no journal behind its resolver manager, no reconcile pass on a flag flip, and stop clears only what the switch names",
+            strict: true
+        ) {
+            XCTAssertNil(machine.resolverFile(for: "corp.example"), "the file the host wrote must go with the switch")
+        }
     }
 }
