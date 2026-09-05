@@ -95,27 +95,10 @@ final class AppState: ObservableObject {
     private var dnsReconcileWork: DispatchWorkItem?
     private var dnsHealthTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
-    /// Snapshot of the config the running subsystems were last reconciled
-    /// against. `saveConfig()` diffs the current config against this to drive
-    /// `orchestrator.applyConfigChange(_:from:)` + platform side-effects
-    /// (resolver files, system proxy, env vars) — the `$config` sink can't be
-    /// used for that because it mirrors every keystroke into
-    /// `orchestrator.config`, which would make an internally-derived diff
-    /// permanently empty. Lifecycle toggles that mutate config themselves
-    /// (start/stopDNS) update this snapshot directly so their own save
-    /// doesn't re-trigger the subsystem they just started or stopped.
-    private var lastReconciledConfig: ProxyConfig
-    /// The platform integration flags the machine was last brought in line
-    /// with. Same role as `lastReconciledConfig` for the other half of
-    /// `saveConfig()`: a flag that changed since is a surface to apply or
-    /// clear now, not at the next restart (#13). Lifecycle code never writes
-    /// these flags, so unlike its sibling nothing has to absorb its own edits.
-    private var lastReconciledPlatformConfig: PlatformIntegrationConfig
-    /// The reconcile pass in flight, awaited by the next one so saves apply
-    /// in order — see `reconcileRuntimeConfig`. `reconcileGeneration` lets
-    /// the last pass in a chain tell it is last and release the handle.
-    private var reconcileTask: Task<Void, Never>?
-    private var reconcileGeneration = 0
+    /// Pushes each save into the running subsystems and the platform
+    /// surfaces, one serialised pass per save, and owns the two "last
+    /// reconciled" baselines. This is its host: see `RuntimeReconcilerHost`.
+    private let reconciler: RuntimeReconciler
     /// VPN-gating policy for split-DNS entry files (single source of truth
     /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
     /// every resolver-file apply path consults `entriesWanted`.
@@ -163,9 +146,8 @@ final class AppState: ObservableObject {
         self.privilegeClient = privilegeClient
         self.auditedPrivilegeClient = auditedPrivilegeClient
         self.config = initialConfig
-        self.lastReconciledConfig = initialConfig
         self.platformConfig = loadedConfiguration.platformConfig
-        self.lastReconciledPlatformConfig = loadedConfiguration.platformConfig
+        self.reconciler = RuntimeReconciler(config: initialConfig, platformConfig: loadedConfiguration.platformConfig)
         self.appPreferences = loadedConfiguration.appPreferences
         // Mirror the two flap-window values into a thread-safe box so the
         // monitor's monitorQueue callback context can read them without
@@ -266,7 +248,8 @@ final class AppState: ObservableObject {
         }
         // Launch flags are a session override, not an edit to reconcile:
         // nothing was applied yet, so there is nothing to clear.
-        lastReconciledPlatformConfig = platformConfig
+        reconciler.markReconciled(platformConfig: platformConfig)
+        reconciler.host = self
         orchestrator.config = config
         orchestrator.onSnapshotChange = { [weak self] snapshot in
             Task { @MainActor in
@@ -280,7 +263,7 @@ final class AppState: ObservableObject {
                 // Orchestrator-originated changes are already live in the
                 // runtime — record them as reconciled so the next saveConfig
                 // doesn't re-apply them.
-                self.lastReconciledConfig = updatedConfig
+                self.reconciler.markReconciled(config: updatedConfig)
             }
         }
         orchestrator.onEvent = { [weak self] event in
@@ -523,7 +506,7 @@ final class AppState: ObservableObject {
             lastErrorMessage = error.localizedDescription
             logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
         }
-        reconcileRuntimeConfig()
+        reconciler.reconcile(config: config, platformConfig: platformConfig)
         // Surface validation problems at edit time instead of at the next
         // proxy (re)start, where LocalProxyServer would reject the config
         // long after the user closed Settings. The save itself is not
@@ -542,146 +525,80 @@ final class AppState: ObservableObject {
         refreshPreflight()
     }
 
-    /// Push config edits into the running subsystems. Historically the GUI
-    /// only persisted edits to disk and the runtime kept the old values until
-    /// the next full restart (the daemon path always called
-    /// `applyConfigChange`; the app never did). Runs after every save; no-ops
-    /// when nothing changed since the last reconcile.
-    ///
-    /// The platform integration flags are reconciled in the same pass, once
-    /// the runtime has settled: `PlatformIntegrationReconciler` turns the flag
-    /// diff into actions, and each runs through the manager call the start
-    /// and stop paths use. When one save changes both a flag and the config
-    /// behind its surface — the Configure sections save on disappear, so one
-    /// window close can carry both — the flag's apply wins and the
-    /// config-driven re-apply is skipped: both would write the same thing, and
-    /// the second write can cost an admin prompt.
-    private func reconcileRuntimeConfig() {
-        let old = lastReconciledConfig
-        let new = config
-        let oldPlatform = lastReconciledPlatformConfig
-        let newPlatform = platformConfig
-        guard old != new || oldPlatform != newPlatform else { return }
-        lastReconciledConfig = new
-        lastReconciledPlatformConfig = newPlatform
-        let diff = ConfigDiff(old: old, new: new)
+    // MARK: - RuntimeReconcilerHost
 
-        // Before the queued pass, not in it: these need no runtime state, and
-        // a quit right after the save would lose whatever the pass has not
-        // reached. See `PlatformIntegrationReconciler.immediateActions`.
-        for action in PlatformIntegrationReconciler.immediateActions(old: oldPlatform, new: newPlatform) {
-            orchestrator.eventLog.append(
-                RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
+    func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
+        await orchestrator.applyConfigChange(new, from: old)
+    }
+
+    /// Read the snapshot, not `runtime`: `applyConfigChange` has just
+    /// mutated it, and the mirror that gates these resolver-file side
+    /// effects is still an async hop behind.
+    func runtimeState() -> RuntimeReconciler.RuntimeState {
+        let snapshot = orchestrator.snapshot
+        let proxyIsUp: Bool
+        switch snapshot.runtimeStatus.state {
+        case .running, .degraded, .recovering: proxyIsUp = true
+        default: proxyIsUp = false
+        }
+        return RuntimeReconciler.RuntimeState(proxyIsUp: proxyIsUp, dnsIsUp: snapshot.dnsRunState == .running)
+    }
+
+    /// Reads `pass.platform` and nothing live. By the time a queued pass
+    /// runs, a later save may have moved a flag again; the pass that save
+    /// queued owns that flag, and this one acts on the flags of its own.
+    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) {
+        let old = pass.old
+        let new = pass.new
+        let platform = pass.platform
+
+        if pass.diff.dnsChanged, platform.manageDNSResolvers, !pass.resolversFollowTheirFlag,
+           pass.runtime.proxyIsUp || pass.runtime.dnsIsUp {
+            DNSResolverReconciliation.run(
+                after: "config change",
+                logger: logStore,
+                reconcile: {
+                    try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
+                },
+                // `applyConfigChange` restarted the forwarder if the DNS
+                // section changed, possibly onto a different port, and
+                // `reconcile` does not rewrite intercept files. Re-point
+                // them at the listeners that came back — or remove them if
+                // none did. Runs whatever the reconcile did: see
+                // `DNSResolverReconciliation`.
+                refreshInterceptFiles: {
+                    try refreshInterceptFiles(for: new)
+                }
             )
-            if !perform(action, config: new, previousConfig: old, platform: newPlatform) {
-                leaveUnreconciled(action, from: oldPlatform, ifStill: newPlatform)
-            }
         }
 
-        // Passes are serialised, not merely ordered. `applyConfigChange`
-        // suspends, and a second save in that window would otherwise run its
-        // actions first and let the first, on resuming, put a surface back to
-        // what its by-then-stale flags said. Each pass waits for the one
-        // before it, so the machine ends in the state of the last save.
-        //
-        // Everything the pass decides reads `newPlatform`, the flags of the
-        // save that queued it, never `platformConfig`: by the time a queued
-        // pass runs, a later save may have moved a flag again, and reading
-        // the live value re-applied a surface this pass was about to clear
-        // and the next pass was about to apply — three privileged writes
-        // and a transient flip for two saves.
-        let previous = reconcileTask
-        reconcileGeneration += 1
-        let generation = reconcileGeneration
-        reconcileTask = Task { @MainActor in
-            await previous?.value
-            if old != new {
-                await orchestrator.applyConfigChange(new, from: old)
-            }
-
-            // Read the snapshot, not `runtime`: `applyConfigChange` just
-            // mutated it, and the mirror that gates these resolver-file
-            // side effects is still an async hop behind.
-            let snapshot = orchestrator.snapshot
-            let proxyIsUp: Bool
-            switch snapshot.runtimeStatus.state {
-            case .running, .degraded, .recovering: proxyIsUp = true
-            default: proxyIsUp = false
-            }
-            let dnsIsUp = snapshot.dnsRunState == .running
-
-            let platformActions = PlatformIntegrationReconciler.actions(
-                old: oldPlatform,
-                new: newPlatform,
-                proxyIsUp: proxyIsUp,
-                dnsIsUp: dnsIsUp
-            )
-            let resolversFollowTheirFlag = platformActions.contains { action in
-                switch action {
-                case .applyResolverEntries, .refreshInterceptFiles, .clearResolvers: return true
-                default: return false
+        if pass.diff.proxyChanged, pass.runtime.proxyIsUp {
+            if platform.manageSystemProxy, !pass.platformActions.contains(.applySystemProxy) {
+                do {
+                    try systemConduit.apply(
+                        config: new,
+                        mode: platform.systemProxyMode,
+                        logger: logStore,
+                        localPACURL: orchestrator.snapshot.bindings.localPACURL
+                    )
+                } catch {
+                    logStore.log(.warning, "Could not re-apply system proxy after config change: \(error.localizedDescription)", category: .system)
                 }
             }
-
-            if diff.dnsChanged, newPlatform.manageDNSResolvers, !resolversFollowTheirFlag,
-               proxyIsUp || dnsIsUp {
-                DNSResolverReconciliation.run(
-                    after: "config change",
-                    logger: logStore,
-                    reconcile: {
-                        try dnsManager.reconcile(old: old, new: new, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
-                    },
-                    // `applyConfigChange` above restarted the forwarder if the
-                    // DNS section changed, possibly onto a different port, and
-                    // `reconcile` does not rewrite intercept files. Re-point
-                    // them at the listeners that came back — or remove them if
-                    // none did. Runs whatever the reconcile did: see
-                    // `DNSResolverReconciliation`.
-                    refreshInterceptFiles: {
-                        try refreshInterceptFiles(for: new)
-                    }
-                )
-            }
-
-            if diff.proxyChanged, proxyIsUp {
-                if newPlatform.manageSystemProxy, !platformActions.contains(.applySystemProxy) {
-                    do {
-                        try systemConduit.apply(
-                            config: new,
-                            mode: newPlatform.systemProxyMode,
-                            logger: logStore,
-                            localPACURL: orchestrator.snapshot.bindings.localPACURL
-                        )
-                    } catch {
-                        logStore.log(.warning, "Could not re-apply system proxy after config change: \(error.localizedDescription)", category: .system)
-                    }
+            if platform.manageEnvironmentVariables, !pass.platformActions.contains(.applyEnvironment) {
+                do {
+                    try environmentManager.apply(config: new, logger: logStore)
+                } catch {
+                    logStore.log(.warning, "Could not re-apply environment variables after config change: \(error.localizedDescription)", category: .system)
                 }
-                if newPlatform.manageEnvironmentVariables, !platformActions.contains(.applyEnvironment) {
-                    do {
-                        try environmentManager.apply(config: new, logger: logStore)
-                    } catch {
-                        logStore.log(.warning, "Could not re-apply environment variables after config change: \(error.localizedDescription)", category: .system)
-                    }
-                }
-            }
-
-            for action in platformActions {
-                // Event first, side effect second: a flag flip is a config
-                // decision, and log lines are derived from events, not the
-                // other way round.
-                orchestrator.eventLog.append(
-                    RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
-                )
-                if !perform(action, config: new, previousConfig: old, platform: newPlatform) {
-                leaveUnreconciled(action, from: oldPlatform, ifStill: newPlatform)
-            }
-            }
-            if reconcileGeneration == generation {
-                // Last in the chain: drop the handle so the chain of awaited
-                // predecessors it retains can go with it.
-                reconcileTask = nil
             }
         }
+    }
+
+    func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action) {
+        orchestrator.eventLog.append(
+            RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
+        )
     }
 
     /// Runs one platform-flag action through the manager the start and stop
@@ -689,7 +606,7 @@ final class AppState: ObservableObject {
     /// could not be applied or cleared is logged, and the rest still run.
     /// Returns whether the action landed, so the caller can leave the flag
     /// unreconciled for the next save to retry.
-    private func perform(
+    func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
@@ -776,35 +693,6 @@ final class AppState: ObservableObject {
             } && !systemDNSManager.hasSavedState()
         case .setLaunchAtLogin(let enabled):
             return loginItemManager.setEnabled(enabled, logger: logStore)
-        }
-    }
-
-    /// A failed action leaves its flag where the machine is, not where the
-    /// switch is, so the next save diffs it again and retries. Only if no
-    /// later pass has moved the flag since: that pass owns it now.
-    private func leaveUnreconciled(
-        _ action: PlatformIntegrationReconciler.Action,
-        from old: PlatformIntegrationConfig,
-        ifStill new: PlatformIntegrationConfig
-    ) {
-        switch action {
-        case .applySystemProxy, .clearSystemProxy:
-            guard lastReconciledPlatformConfig.manageSystemProxy == new.manageSystemProxy,
-                  lastReconciledPlatformConfig.systemProxyMode == new.systemProxyMode else { return }
-            lastReconciledPlatformConfig.manageSystemProxy = old.manageSystemProxy
-            lastReconciledPlatformConfig.systemProxyMode = old.systemProxyMode
-        case .applyEnvironment, .clearEnvironment:
-            guard lastReconciledPlatformConfig.manageEnvironmentVariables == new.manageEnvironmentVariables else { return }
-            lastReconciledPlatformConfig.manageEnvironmentVariables = old.manageEnvironmentVariables
-        case .applyResolverEntries, .refreshInterceptFiles, .clearResolvers:
-            guard lastReconciledPlatformConfig.manageDNSResolvers == new.manageDNSResolvers else { return }
-            lastReconciledPlatformConfig.manageDNSResolvers = old.manageDNSResolvers
-        case .applySystemDNS, .clearSystemDNS:
-            guard lastReconciledPlatformConfig.manageSystemDNS == new.manageSystemDNS else { return }
-            lastReconciledPlatformConfig.manageSystemDNS = old.manageSystemDNS
-        case .setLaunchAtLogin:
-            guard lastReconciledPlatformConfig.launchAtLogin == new.launchAtLogin else { return }
-            lastReconciledPlatformConfig.launchAtLogin = old.launchAtLogin
         }
     }
 
@@ -1167,7 +1055,7 @@ final class AppState: ObservableObject {
             // The flag flip above is our own lifecycle work, not a settings
             // edit — absorb it so the save below doesn't restart the
             // forwarder we just started.
-            lastReconciledConfig = config
+            reconciler.markReconciled(config: config)
             saveConfig()
         } else if let err = orchestrator.snapshot.dnsError {
             notificationManager.post(title: "DNS Forwarder Failed", body: err)
@@ -1205,7 +1093,7 @@ final class AppState: ObservableObject {
 
         config.dnsForwarderEnabled = false
         // Lifecycle flip, not a settings edit — see startDNS.
-        lastReconciledConfig = config
+        reconciler.markReconciled(config: config)
         saveConfig()
     }
 
@@ -1578,3 +1466,5 @@ final class AppState: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
     }
 }
+
+extension AppState: RuntimeReconcilerHost {}
