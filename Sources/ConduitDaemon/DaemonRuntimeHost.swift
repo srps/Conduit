@@ -56,6 +56,19 @@ final class DaemonRuntimeHost {
     private let privilegeClient: any PrivilegeClient
     private let auditedPrivilegeClient: any PrivilegeClient
     private let privilegeAuditSink = DaemonPrivilegeAuditEventSink()
+    /// The subprocess runner behind the `networksetup` and `launchctl`
+    /// managers, and the directories they write. Injectable for the same
+    /// reason as `privilegeClient`: a host test must not rewrite the machine
+    /// it runs on. Same seams as `AppState`.
+    private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+    private let homeDirectory: URL
+    private let resolverDirectory: String
+    /// One serialised pass per config reload: the runtime takes the edit,
+    /// the surfaces whose contents changed are re-applied, and each flipped
+    /// platform flag applies or clears the surface it names. The same type
+    /// the app runs per save, so the daemon has the ownership guard from
+    /// #13 rather than a twin of it.
+    private let reconciler: RuntimeReconciler
 
     // Platform side-effect coordinators. Default daemon
     // startup does not apply side effects until `startRuntime()` is called
@@ -65,14 +78,28 @@ final class DaemonRuntimeHost {
     private lazy var platformStateJournal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
     private lazy var systemConduit = SystemProxyManager(
         privilegeClient: auditedPrivilegeClient,
+        journal: platformStateJournal,
+        commandRunner: commandRunner
+    )
+    private lazy var environmentManager = EnvironmentManager(
+        journal: platformStateJournal,
+        homeDirectory: homeDirectory,
+        commandRunner: commandRunner
+    )
+    /// With the journal: a resolver file is ours only if we recorded it, and
+    /// that record is what lets a stop under a switch that is already off
+    /// remove our file and leave one the user keeps by hand for the same
+    /// domain (#13).
+    private lazy var dnsManager = DNSManager(
+        privilegeClient: auditedPrivilegeClient,
+        resolverDirectory: resolverDirectory,
         journal: platformStateJournal
     )
-    private lazy var environmentManager = EnvironmentManager(journal: platformStateJournal)
-    private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient)
     private lazy var systemDNSManager = SystemDNSManager(
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
-        legacySnapshotFile: environment.legacySavedDNSFile
+        legacySnapshotFile: environment.legacySavedDNSFile,
+        commandRunner: commandRunner
     )
     private let networkMonitor = NetworkMonitor()
     private let vpnStatusMonitor: VPNStatusObserving
@@ -93,13 +120,25 @@ final class DaemonRuntimeHost {
         logger: any LogSink,
         loadedConfiguration: RuntimeConfigurationLoadResult,
         vpnStatusMonitor: VPNStatusObserving? = nil,
-        privilegeClient: (any PrivilegeClient)? = nil
+        privilegeClient: (any PrivilegeClient)? = nil,
+        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        homeDirectory: URL? = nil,
+        resolverDirectory: String? = nil
     ) {
         self.environment = environment
         self.logger = logger
         self.config = loadedConfiguration.config
         self.platformConfig = loadedConfiguration.platformConfig
         self.appPreferences = loadedConfiguration.appPreferences
+        self.commandRunner = commandRunner ?? { launchPath, arguments in
+            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
+        }
+        self.homeDirectory = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
+        self.reconciler = RuntimeReconciler(
+            config: loadedConfiguration.config,
+            platformConfig: loadedConfiguration.platformConfig
+        )
         let flapBox = NIOLockedValueBox(
             DaemonVPNFlapWindowConfig(
                 graceSeconds: loadedConfiguration.config.vpnFlapGraceSeconds,
@@ -180,6 +219,7 @@ final class DaemonRuntimeHost {
                 await self?.handleVPNStateChange(state)
             }
         }
+        reconciler.host = self
     }
 
     func markReady(mode: String) {
@@ -314,14 +354,21 @@ final class DaemonRuntimeHost {
         await orchestrator.stopDNS()
         await orchestrator.stopProxy()
 
-        if platformConfig.manageSystemProxy {
+        // Each surface is cleared when its flag is on *or* when the journal
+        // says the surface is ours, as in `AppState.stopProxy`. The flag alone
+        // skipped the clear whenever the switch had gone off since the
+        // surface was applied; the reload reconciles that flip now, so what
+        // is left for the guard is the residue: a clear the machine refused,
+        // a crash between the flip and the reload, a config file edited by
+        // hand (#13).
+        if platformConfig.manageSystemProxy || systemConduit.hasManagedState() {
             do {
                 try systemConduit.clear(logger: logger)
             } catch {
                 logger.log(.warning, "Could not clear system proxy settings: \(error.localizedDescription)", category: .system)
             }
         }
-        if platformConfig.manageEnvironmentVariables {
+        if platformConfig.manageEnvironmentVariables || environmentManager.hasManagedState() {
             do {
                 try environmentManager.clear(logger: logger)
             } catch {
@@ -331,6 +378,14 @@ final class DaemonRuntimeHost {
         if platformConfig.manageDNSResolvers {
             do {
                 try dnsManager.clear(config: config, logger: logger)
+            } catch {
+                logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
+            }
+        } else if dnsManager.hasManagedState() {
+            // Switch off: only what the journal names as ours, never a file
+            // for a configured domain we did not write.
+            do {
+                try dnsManager.clearRecorded(configs: [config], logger: logger)
             } catch {
                 logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
@@ -345,7 +400,6 @@ final class DaemonRuntimeHost {
     }
 
     func reloadConfiguration() async {
-        let oldConfig = config
         let loaded = ProxyConfigPersistence.loadAllMigrating(in: environment)
         for warning in loaded.warnings {
             logger.log(.warning, warning, category: .system)
@@ -359,8 +413,12 @@ final class DaemonRuntimeHost {
             window.minVisibleSeconds = config.vpnFlapMinVisibleSeconds
         }
         configGeneration += 1
-        await orchestrator.applyConfigChange(config)
-        reconcilePlatformSideEffects(old: oldConfig, new: config)
+        // Queued and then awaited: a caller that reloads and then stops must
+        // see the machine the reload left, and the control path has no
+        // editor to hand back to while the pass runs. What the pass does is
+        // the `RuntimeReconcilerHost` conformance below.
+        reconciler.reconcile(config: config, platformConfig: platformConfig)
+        await reconciler.drain()
         logger.log(.notice, "Daemon configuration reloaded.", category: .general)
         writeSnapshotFile(snapshot: orchestrator.snapshot)
     }
@@ -396,59 +454,6 @@ final class DaemonRuntimeHost {
             return
         }
         try dnsManager.applyInterceptFiles(config: config, logger: logger)
-    }
-
-    /// Push config edits into the applied platform state. The orchestrator
-    /// reconciles its own listeners via `applyConfigChange`, but resolver
-    /// files, system proxy, and env vars are written by this host — without
-    /// this, a daemon config reload leaves them describing the old config
-    /// (e.g. a removed split-DNS entry keeps its /etc/resolver file until
-    /// the next full stop). Twin of `AppState.reapplyConfigDrivenSurfaces(for:)`,
-    /// minus the serialisation `RuntimeReconciler` gives the app's saves.
-    private func reconcilePlatformSideEffects(old: ProxyConfig, new: ProxyConfig) {
-        guard runtimeStarted, old != new else { return }
-        let diff = ConfigDiff(old: old, new: new)
-
-        if diff.dnsChanged, platformConfig.manageDNSResolvers {
-            DNSResolverReconciliation.run(
-                after: "config reload",
-                logger: logger,
-                reconcile: {
-                    try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
-                },
-                // `applyConfigChange` restarted the forwarder if the DNS
-                // section changed, possibly onto a different port, and
-                // `reconcile` does not rewrite intercept files. Re-point them
-                // at the listeners that came back — or remove them if none did.
-                // Runs whatever the reconcile did: see
-                // `DNSResolverReconciliation`.
-                refreshInterceptFiles: {
-                    try refreshInterceptFiles(for: new)
-                }
-            )
-        }
-
-        if diff.proxyChanged {
-            if platformConfig.manageSystemProxy {
-                do {
-                    try systemConduit.apply(
-                        config: new,
-                        mode: platformConfig.systemProxyMode,
-                        logger: logger,
-                        localPACURL: orchestrator.snapshot.bindings.localPACURL
-                    )
-                } catch {
-                    logger.log(.warning, "Could not re-apply system proxy after config reload: \(error.localizedDescription)", category: .system)
-                }
-            }
-            if platformConfig.manageEnvironmentVariables {
-                do {
-                    try environmentManager.apply(config: new, logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not re-apply environment variables after config reload: \(error.localizedDescription)", category: .system)
-                }
-            }
-        }
     }
 
     func testUpstream(named name: String) async -> ProbeResult? {
@@ -563,6 +568,182 @@ final class DaemonRuntimeHost {
     }
 
     nonisolated static let prettyEncoder: JSONEncoder = CanonicalJSON.encoder(prettyPrinted: true)
+}
+
+// MARK: - RuntimeReconcilerHost
+
+/// The daemon's side of a reconcile pass. Each method is the twin of the one
+/// in `AppState`, over this host's managers and logger; the rules about what
+/// a pass may read live in `RuntimeReconciler`, not here.
+extension DaemonRuntimeHost: RuntimeReconcilerHost {
+    func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
+        await orchestrator.applyConfigChange(new, from: old)
+    }
+
+    func runtimeState() -> RuntimeReconciler.RuntimeState {
+        let snapshot = orchestrator.snapshot
+        let proxyIsUp: Bool
+        switch snapshot.runtimeStatus.state {
+        case .running, .degraded, .recovering: proxyIsUp = true
+        default: proxyIsUp = false
+        }
+        return RuntimeReconciler.RuntimeState(proxyIsUp: proxyIsUp, dnsIsUp: snapshot.dnsRunState == .running)
+    }
+
+    /// Pushes a config edit into the applied platform state. The
+    /// orchestrator reconciles its own listeners in `applyConfigChange`, but
+    /// resolver files, the system proxy and the environment block are written
+    /// by this host; without this a reload leaves them describing the old
+    /// config (a removed split-DNS entry keeps its `/etc/resolver` file until
+    /// the next full stop). Reads `pass.platform` and nothing live, as the
+    /// reconciler's contract requires.
+    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) {
+        let old = pass.old
+        let new = pass.new
+        let platform = pass.platform
+
+        if pass.diff.dnsChanged, platform.manageDNSResolvers, !pass.resolversFollowTheirFlag,
+           pass.runtime.proxyIsUp || pass.runtime.dnsIsUp {
+            DNSResolverReconciliation.run(
+                after: "config reload",
+                logger: logger,
+                reconcile: {
+                    try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
+                },
+                // `applyConfigChange` restarted the forwarder if the DNS
+                // section changed, possibly onto a different port, and
+                // `reconcile` does not rewrite intercept files. Re-point them
+                // at the listeners that came back, or remove them if none did.
+                // Runs whatever the reconcile did: see
+                // `DNSResolverReconciliation`.
+                refreshInterceptFiles: {
+                    try refreshInterceptFiles(for: new)
+                }
+            )
+        }
+
+        if pass.diff.proxyChanged, pass.runtime.proxyIsUp {
+            if platform.manageSystemProxy, !pass.platformActions.contains(.applySystemProxy) {
+                do {
+                    try systemConduit.apply(
+                        config: new,
+                        mode: platform.systemProxyMode,
+                        logger: logger,
+                        localPACURL: orchestrator.snapshot.bindings.localPACURL
+                    )
+                } catch {
+                    logger.log(.warning, "Could not re-apply system proxy after config reload: \(error.localizedDescription)", category: .system)
+                }
+            }
+            if platform.manageEnvironmentVariables, !pass.platformActions.contains(.applyEnvironment) {
+                do {
+                    try environmentManager.apply(config: new, logger: logger)
+                } catch {
+                    logger.log(.warning, "Could not re-apply environment variables after config reload: \(error.localizedDescription)", category: .system)
+                }
+            }
+        }
+    }
+
+    func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action) {
+        orchestrator.eventLog.append(
+            RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
+        )
+    }
+
+    /// Runs one platform-flag action through the manager the start and stop
+    /// paths use, with their warning-not-throw treatment. Returns whether the
+    /// action landed, so the reconciler can leave the flag unreconciled for
+    /// the next reload to retry.
+    func perform(
+        _ action: PlatformIntegrationReconciler.Action,
+        config: ProxyConfig,
+        previousConfig: ProxyConfig,
+        platform: PlatformIntegrationConfig
+    ) -> Bool {
+        func attempt(_ failure: String, _ body: () throws -> Void) -> Bool {
+            do {
+                try body()
+                return true
+            } catch {
+                logger.log(.warning, "\(failure): \(error.localizedDescription)", category: .system)
+                return false
+            }
+        }
+
+        switch action {
+        case .applySystemProxy:
+            return attempt("Could not apply system proxy settings after the setting changed") {
+                try systemConduit.apply(
+                    config: config,
+                    mode: platform.systemProxyMode,
+                    logger: logger,
+                    localPACURL: orchestrator.snapshot.bindings.localPACURL
+                )
+            }
+        case .clearSystemProxy:
+            // The managers report a partial teardown by keeping their records,
+            // not by throwing, so the journal is the oracle for "landed":
+            // records left means the next reload must try again.
+            return attempt("Could not clear system proxy after the setting changed") {
+                try systemConduit.clear(logger: logger)
+            } && !systemConduit.hasManagedState()
+        case .applyEnvironment:
+            return attempt("Could not apply environment variables after the setting changed") {
+                try environmentManager.apply(config: config, logger: logger)
+            }
+        case .clearEnvironment:
+            return attempt("Could not clear environment variables after the setting changed") {
+                try environmentManager.clear(logger: logger)
+            } && !environmentManager.hasManagedState()
+        case .applyResolverEntries:
+            if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
+                // The write is skipped; the record must not be. See `adoptAppliedFiles`.
+                dnsManager.adoptAppliedFiles(config: config, vpnConnected: splitDNSGate.entriesWanted)
+                logger.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
+                return true
+            }
+            return attempt("Could not apply DNS resolvers after the setting changed") {
+                try dnsManager.apply(config: config, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
+            }
+        case .refreshInterceptFiles:
+            return attempt("Could not apply intercept resolver files after the setting changed") {
+                try refreshInterceptFiles(for: config)
+            }
+        case .clearResolvers:
+            // Only what the journal names as ours. The switch is off now, so
+            // a file for a configured domain we never wrote is the user's.
+            return attempt("Could not clear DNS resolvers after the setting changed") {
+                try dnsManager.clearRecorded(configs: [previousConfig, config], logger: logger)
+            } && !dnsManager.hasManagedState()
+        case .applySystemDNS:
+            // The same three steps as `startRuntime`, in the same order: the
+            // prior state is captured before the interfaces are pointed at
+            // the relay, and the health timer runs whether or not the apply
+            // succeeded, because its relay restart is the retry.
+            let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
+            let saved = attempt("Could not save current DNS state (non-fatal)") {
+                try systemDNSManager.saveCurrentDNS(logger: logger)
+            }
+            let applied = attempt("Could not set system DNS after the setting changed") {
+                try systemDNSManager.apply(forwarderPort: forwarderPort, logger: logger)
+            }
+            startDNSHealthTimer(forwarderPort: forwarderPort)
+            return saved && applied
+        case .clearSystemDNS:
+            // Timer first: left running, its 30 s probe would restart the
+            // relay the user just asked to remove.
+            stopDNSHealthTimer()
+            return attempt("Could not restore system DNS after the setting changed") {
+                try systemDNSManager.clear(logger: logger)
+            } && !systemDNSManager.hasSavedState()
+        case .setLaunchAtLogin:
+            // The login item is the app's `SMAppService` registration. A
+            // LaunchDaemon has none to keep, so the flag reconciles by being
+            // ignored here; the app applies it when it next runs.
+            return true
+        }
+    }
 }
 
 private extension ProxyOrchestratorBindings {
