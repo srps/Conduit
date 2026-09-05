@@ -91,8 +91,18 @@ final class AppStateHarness {
     }
 
     /// Quits the way the app delegate does, then removes the scratch state.
-    func tearDown() {
-        appState?.performTerminationCleanup()
+    /// `performTerminationCleanup` queues the listener shutdown on a task
+    /// that holds the orchestrator weakly, so the app is kept alive until
+    /// the snapshot reports everything stopped; dropped earlier, the real
+    /// NIO listeners the scenario bound would outlive the test.
+    func tearDown() async {
+        if let appState {
+            appState.performTerminationCleanup()
+            await settle("the runtime has shut down", timeoutMilliseconds: 5_000) {
+                appState.runtimeSnapshot.runtimeStatus.state == .stopped
+                    && appState.runtimeSnapshot.dnsRunState == .stopped
+            }
+        }
         appState = nil
         try? FileManager.default.removeItem(at: stateDirectory)
     }
@@ -105,10 +115,10 @@ final class AppStateHarnessTests: XCTestCase {
 
     private var harness: AppStateHarness!
 
-    override func tearDown() {
-        harness?.tearDown()
+    override func tearDown() async throws {
+        await harness?.tearDown()
         harness = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
     /// Ephemeral ports throughout: the harness runs beside whatever else the
