@@ -89,16 +89,31 @@ package final class DNSManager: @unchecked Sendable {
         return !journal.knowsSurfaceIsIdle(.resolverFile)
     }
 
-    /// Records each domain about to be written as ours. Called before the
-    /// first write, not after the last: a write that fails partway has
-    /// already put files of ours on disk. `recordPrior` is first-write-wins,
-    /// so a rewrite of a domain we already hold changes nothing.
-    private func recordManaged(_ domains: [String]) {
+    /// Records one domain as ours, immediately before its own write. Not
+    /// after: a crash between the write and the record would strand a file
+    /// with nothing naming it. Not for the whole batch up front either: the
+    /// writers fail fast, and a failure on an early domain would leave later,
+    /// never-written domains claimed — and a switch-off teardown, which
+    /// removes exactly what is claimed, would then delete a file the user
+    /// maintains under one of those names. Per domain, the window is one
+    /// write wide. `recordPrior` is first-write-wins, so a rewrite of a domain
+    /// we already hold changes nothing.
+    private func recordManaged(_ domain: String) {
+        journal?.recordPrior(surface: .resolverFile, scope: domain, value: nil)
+    }
+
+    /// Removes only the resolver files the journal names as ours, whatever
+    /// the config says. This is the switch-off teardown: with resolver
+    /// management off, a file for a configured domain that we never wrote is
+    /// the user's, and only the journal can tell the two apart. `clear` is the
+    /// switch-on teardown and removes the configured domains as well, because
+    /// there a lost record must not strand a file. No-op without a journal.
+    package func clearRecorded(logger: (any LogSink)?) throws {
         guard let journal else { return }
-        for domain in domains {
-            journal.recordPrior(surface: .resolverFile, scope: domain, value: nil)
-        }
-        journal.markApplied(surface: .resolverFile)
+        let recorded = journal.scopes(for: .resolverFile)
+        guard !recorded.isEmpty else { return }
+        try removeAll(recorded, logger: logger)
+        logger?.log(.notice, "Removed \(recorded.count) resolver file(s) this app had written.", category: .system)
     }
 
     private func resolverFilePath(for domain: String) -> String {
@@ -290,8 +305,8 @@ package final class DNSManager: @unchecked Sendable {
             }
         }
 
-        recordManaged(enabledEntries.map(\.domain))
         for entry in enabledEntries {
+            recordManaged(entry.domain)
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
         }
 
@@ -418,8 +433,8 @@ package final class DNSManager: @unchecked Sendable {
                 try Self.validateServer(server)
             }
         }
-        recordManaged(entries.map(\.domain))
         for entry in entries {
+            recordManaged(entry.domain)
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
         }
         logger?.log(.notice, "Applied \(entries.count) split-DNS entry file(s) now that the VPN is connected.", category: .system)
@@ -454,8 +469,8 @@ package final class DNSManager: @unchecked Sendable {
         for domain in interceptDomains {
             try Self.validateDomain(domain)
         }
-        recordManaged(interceptDomains)
         for domain in interceptDomains {
+            recordManaged(domain)
             try privilegeClient.execute(.applyDNS, values: [domain, "127.0.0.1", String(config.dnsForwarderPort)])
         }
         logger?.log(.notice, "Applied \(interceptDomains.count) intercept resolver file(s) for the DNS forwarder.", category: .system)
