@@ -85,12 +85,3 @@ final class RelayLifecycleTests: XCTestCase {
         XCTAssertFalse(TCPAcceptProbe.accepts(host: "127.0.0.1", port: 1, timeoutMilliseconds: 200))
     }
 }
-
-private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let lock = NSLock()
-    private var storage: [(PrivilegedOperation, [String])] = []
-    var commands: [(PrivilegedOperation, [String])] { lock.withLock { storage } }
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        lock.withLock { storage.append((operation, values)) }
-    }
-}

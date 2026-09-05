@@ -88,6 +88,21 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   save. The runtime echoed each applied config back into the editor, which was harmless while
   saves applied immediately and became a rollback once they queued behind one another.
 
+### Testing
+
+- `AppState` has a harness. The app's lifecycle composition — start and stop, the ownership
+  guards, termination cleanup, the failed-start revert, the VPN handler and the wiring between
+  the reconciler and the editor — ran only in the app until now; four of the bugs fixed above
+  lived there. `AppState` takes its runtime environment, privilege client, command runner, home
+  directory, resolver directory and login-item manager as parameters with production defaults,
+  and the scenarios in `AppStateHarnessTests` run a real orchestrator on ephemeral ports over a
+  `FakeMachine` that answers `networksetup` and `launchctl`, applies privileged writes to its own
+  model and writes resolver files into a scratch directory. Assertions read the machine and the
+  journal file, not `AppState` internals. One shared `RecordingPrivilegeClient` replaces the
+  eight private copies the suite carried. The ownership scenario also runs against
+  `DaemonRuntimeHost`, as an expected failure that names what the daemon migration has to bring
+  over.
+
 ## 0.2.0
 
 Teardown now restores the machine to what it was instead of switching things off, the

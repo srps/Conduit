@@ -4,27 +4,6 @@ import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
 
-private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _commands: [(PrivilegedOperation, [String])] = []
-    /// Domains whose privileged operation fails.
-    var failingDomains: Set<String> = []
-
-    var executedCommands: [(PrivilegedOperation, [String])] {
-        lock.withLock { _commands }
-    }
-
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        struct Refused: Error {}
-        try lock.withLock {
-            _commands.append((operation, values))
-            if let domain = values.first, failingDomains.contains(domain) {
-                throw Refused()
-            }
-        }
-    }
-}
-
 /// Resolver files are written by the helper and carry no prior value, so the
 /// journal's `resolverFile` surface holds one scope per domain this app wrote
 /// and a released marker once a teardown ran to completion. A host whose user
@@ -104,7 +83,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
     }
 
     private func removedDomains() -> [String] {
-        recording.executedCommands.filter { $0.0 == .removeDNS }.compactMap(\.1.first)
+        recording.commands.filter { $0.0 == .removeDNS }.compactMap(\.1.first)
     }
 
     /// Every teardown derives its domains from the *current* config. A domain
