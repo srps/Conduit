@@ -156,6 +156,42 @@ final class DNSManagerOwnershipTests: XCTestCase {
         XCTAssertFalse(manager.hasManagedState())
     }
 
+    private func makeTwoDomainConfig() -> ProxyConfig {
+        var config = makeConfig()
+        config.dnsEntries.append(DomainDNSEntry(domain: "internal.example", servers: ["10.2.2.2"]))
+        return config
+    }
+
+    /// The writers fail fast. Claiming the whole batch before the first write
+    /// would leave a never-written domain journaled after an early failure,
+    /// and the switch-off teardown would then delete a file the user keeps
+    /// under that name. A domain is claimed one write at a time.
+    func testEarlyWriteFailureClaimsOnlyTheDomainsAttempted() throws {
+        let manager = makeManager()
+        recording.failingDomains = ["corp.example"]
+
+        XCTAssertThrowsError(try manager.apply(config: makeTwoDomainConfig(), logger: nil, vpnConnected: true))
+
+        XCTAssertEqual(journal.scopes(for: .resolverFile), ["corp.example"], "the second domain was never attempted")
+        recording.failingDomains = []
+        try manager.clearRecorded(logger: nil)
+        XCTAssertEqual(removedDomains(), ["corp.example"], "internal.example is not ours to remove")
+    }
+
+    /// With the switch off, a configured domain we never wrote is the user's:
+    /// `clearRecorded` works from the journal alone, unlike `clear`.
+    func testClearRecordedLeavesConfiguredDomainsNeverWrittenAlone() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
+
+        try manager.clearRecorded(logger: nil)
+        XCTAssertEqual(removedDomains(), ["corp.example"])
+        XCTAssertFalse(manager.hasManagedState())
+
+        try manager.clearRecorded(logger: nil)
+        XCTAssertEqual(removedDomains(), ["corp.example"], "nothing recorded, nothing removed")
+    }
+
     /// Without a journal there is no ownership to report, and the daemon and
     /// the other tests construct the manager that way.
     func testNoJournalMeansNoManagedState() throws {
