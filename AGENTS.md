@@ -94,6 +94,12 @@ This repo uses `[jj](https://github.com/jj-vcs/jj)` (Jujutsu) colocated with git
 - Push: `jj git push --bookmark <name>` (auto-tracks since 0.38; add `--allow-new` on first push or set `git.push-new-bookmark = true`).
 - Undo anything: `jj undo` or `jj op restore <op-id>` (`jj op undo` was removed in 0.39).
 
+### AI-assisted commits
+
+- A commit produced with an AI tool ends with one trailer naming the tool as assistance, e.g. `Co-Authored-By: Claude <model> <noreply@anthropic.com>`. The human committer is the author and is accountable for the change.
+- **Never put a session, conversation, or transcript URL in a commit message.** It only resolves for whoever owns the tool account, so in public history it is dead text tied to a private service. Put the link in the pull request description instead, together with the tool's "generated with" line, where reviewers read context and a dead link harms nothing.
+- Commits are split by concern for review. Every commit that is a fix on its own must build on its own; a multi-commit feature only has to build at the branch tip, and the PR is squash-merged if bisectability is wanted.
+
 ## References
 
 - `[docs/roadmap-v2.md](./docs/roadmap-v2.md)` - product plan, pillars, phases, research archive.
