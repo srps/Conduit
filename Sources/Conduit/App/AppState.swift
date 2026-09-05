@@ -256,16 +256,16 @@ final class AppState: ObservableObject {
                 self?.runtime.apply(snapshot: snapshot)
             }
         }
-        orchestrator.onConfigChange = { [weak self] updatedConfig in
-            Task { @MainActor in
-                guard let self, self.config != updatedConfig else { return }
-                self.config = updatedConfig
-                // Orchestrator-originated changes are already live in the
-                // runtime — record them as reconciled so the next saveConfig
-                // doesn't re-apply them.
-                self.reconciler.markReconciled(config: updatedConfig)
-            }
-        }
+        // `onConfigChange` is deliberately not wired. The orchestrator fires
+        // it from `applyConfigChange` and nowhere else, and in this host every
+        // `applyConfigChange` is one of our own saves, so the callback could
+        // only ever echo a config this host already holds — or, worse, one
+        // it has moved past. Passes are serialised, so a queued pass starts
+        // its apply after later edits may have landed in the editor; the
+        // orchestrator writes the pass's config into its box and echoes the
+        // box, and wiring that echo back into `config` replaced the newer
+        // edits with the older save. The daemon keeps the callback: it has
+        // no editor to protect and reads its config back from the runtime.
         orchestrator.onEvent = { [weak self] event in
             Task { @MainActor in
                 self?.handle(orchestratorEvent: event)
