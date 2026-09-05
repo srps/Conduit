@@ -78,7 +78,7 @@ final class DirectModeCauseTests: XCTestCase {
         XCTAssertFalse(DirectModeCause.none.isExpected)
     }
 
-    // MARK: - Health summary strings (drives MainView + lastHealthSummary)
+    // MARK: - Health summary strings (drives OverviewView + lastHealthSummary)
 
     func testHealthSummaryMappingMatchesDesignDoc() {
         // Mapping locked by docs/design-vpn-flap-resilience.md §

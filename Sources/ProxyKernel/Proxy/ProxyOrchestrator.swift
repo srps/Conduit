@@ -735,7 +735,7 @@ package final class ProxyOrchestrator {
             // this, switching from `systemNegotiated` (last outcome=
             // `.kerberos`) to `ntlmv2` would leave the chip reading
             // "Kerberos" until the first new-config handshake fires —
-            // contradicting `MainView.authBadge`'s "runtime over configured"
+            // contradicting `OverviewView.authBadge`'s "runtime over configured"
             // contract. Done unconditionally (regardless of `isProxyActive`)
             // because the snapshot is the source of truth even between
             // proxy run cycles. Mirrors the `stopProxy()` reset of these
@@ -1269,7 +1269,7 @@ package final class ProxyOrchestrator {
             $0.runtimeStatus.metrics.openConnections = $0.activeConnections.count
             $0.runtimeStatus.metrics.inboundConnections = 0
             // Phase 7: cumulative flap telemetry resets on stop. The design doc
-            // (Phase 7 "Telemetry strip") and MainView's `showsFlapTelemetryStrip`
+            // (Phase 7 "Telemetry strip") and OverviewView's `showsTelemetry`
             // comment both promise that the strip is hidden when the proxy is
             // stopped because the counters have been reset — without this reset
             // the strip would reappear on the next start showing carry-over from
@@ -1279,7 +1279,7 @@ package final class ProxyOrchestrator {
             $0.runtimeStatus.metrics.lastVpnFlapAt = nil
             $0.runtimeStatus.metrics.streamsPreservedAcrossFlaps = 0
             // Same rationale as the VPN-flap reset above: the runtime auth
-            // outcome (consumed by `MainView.authBadge`) describes "what
+            // outcome (consumed by `OverviewView.authBadge`) describes "what
             // the last handshake actually did". On stop there is no last
             // handshake any more, and on the next start the UI must not
             // carry forward the previous cycle's outcome until a fresh

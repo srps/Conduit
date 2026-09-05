@@ -5,7 +5,7 @@ import XCTest
 
 /// Phase 7 of `docs/design-vpn-flap-resilience.md`: unit tests for the
 /// pure mapping helpers that translate runtime VPN / direct-mode state
-/// into the strings, colors, and derived numbers `MainView` puts on
+/// into the strings, colors, and derived numbers `OverviewView` puts on
 /// screen. The data layer (`ProxyOrchestrator`, `ProxyMetrics`) has its
 /// own dedicated tests; these cover the UI mapping in isolation so a
 /// regression to the user-visible label set fails before we ship.

@@ -459,7 +459,7 @@ final class VPNTransitionTableTests: XCTestCase {
 
     /// `stopProxy` zeroes the cumulative flap-telemetry counters. Both the
     /// design doc Phase 7 ("cumulative counters are reset on stop") and the
-    /// MainView `showsFlapTelemetryStrip` comment depend on this — without the
+    /// OverviewView `showsTelemetry` comment depend on this — without the
     /// reset, the strip would reappear on next start carrying activity from a
     /// prior session, lying about the new cycle.
     func testStopProxyResetsFlapTelemetryCounters() async throws {

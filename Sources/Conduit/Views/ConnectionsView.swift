@@ -2,57 +2,37 @@
 import SwiftUI
 import ProxyKernel
 
+/// The Connections section: every active request, most recent first, capped
+/// at the mirror's own limit.
 struct ConnectionsView: View {
     @EnvironmentObject private var runtime: RuntimePresentationAdapter
-    let compact: Bool
 
-    init(compact: Bool = false) {
-        self.compact = compact
-    }
+    private static let rowLimit = 50
 
     var body: some View {
-        if compact {
-            compactSummary
-        } else {
-            fullList
-        }
-    }
-
-    // MARK: - Compact summary (no scroll)
-
-    private var compactSummary: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            let connections = runtime.activeConnections
-            Text("Active Connections (\(connections.count))")
-                .font(.headline)
-
-            if connections.isEmpty {
-                Text("No active requests right now.")
-                    .foregroundStyle(.secondary)
-                    .font(.caption)
-            } else {
-                Text("\(connections.filter(\.tunnel).count) tunnel\(connections.filter(\.tunnel).count == 1 ? "" : "s") active")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    // MARK: - Full scrollable list
-
-    private var fullList: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Active Connections")
-                .font(.headline)
+            HStack {
+                Text("\(runtime.activeConnections.count) active")
+                    .font(.headline)
+                    .monospacedDigit()
+                let tunnels = runtime.activeConnections.filter(\.tunnel).count
+                if tunnels > 0 {
+                    Text("· \(tunnels) tunnel\(tunnels == 1 ? "" : "s")")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
 
             if runtime.activeConnections.isEmpty {
                 Text("No active requests right now.")
                     .foregroundStyle(.secondary)
                     .font(.subheadline)
+                Spacer()
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 6) {
-                        ForEach(runtime.activeConnections.prefix(50)) { connection in
+                        ForEach(runtime.activeConnections.prefix(Self.rowLimit)) { connection in
                             HStack(spacing: 8) {
                                 Text(connection.tunnel ? "TLS" : connection.method)
                                     .font(.caption.weight(.semibold).monospaced())

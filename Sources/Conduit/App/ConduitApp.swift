@@ -4,6 +4,8 @@ import SwiftUI
 
 @main
 struct ConduitApp: App {
+    static let mainWindowID = "main"
+
     @StateObject private var appState = AppState()
     @NSApplicationDelegateAdaptor(ConduitAppDelegate.self) private var appDelegate
 
@@ -20,67 +22,38 @@ struct ConduitApp: App {
 
     var body: some Scene {
         let _ = appDelegate.configure(with: appState)
-        MenuBarExtra("Conduit", systemImage: "network") {
+
+        // The menu bar is the product: the glyph answers "is it working" with
+        // zero clicks and the popover answers "can I flip it" with one. The
+        // label is its own view so it re-renders when the runtime mirror
+        // publishes; the `App` body itself does not observe nested objects.
+        MenuBarExtra {
             StatusBarView()
                 .environmentObject(appState)
                 .environmentObject(appState.runtime)
                 .onChange(of: appState.appPreferences.globalShortcutEnabled) { _, _ in
                     appDelegate.configure(with: appState)
                 }
+        } label: {
+            MenuBarLabel()
+                .environmentObject(appState.runtime)
         }
         .menuBarExtraStyle(.window)
 
-        WindowGroup("Conduit", id: "dashboard") {
-            MainView()
+        // One window, single instance. It replaces the dashboard, Settings,
+        // Logs, Connections, and Setup scenes. First-run setup is a sheet on
+        // it, so the window is presented at launch exactly when that sheet
+        // has something to ask; otherwise the app stays in the menu bar.
+        Window("Conduit", id: Self.mainWindowID) {
+            AppWindow()
                 .environmentObject(appState)
                 .environmentObject(appState.runtime)
-                .sheet(isPresented: $appState.isShowingSettings) {
-                    SettingsView()
-                        .environmentObject(appState)
-                        .environmentObject(appState.runtime)
-                }
-                .sheet(isPresented: $appState.isShowingLogs) {
-                    LogView(logStore: appState.logStore)
-                        .frame(width: 780, height: 540)
-                }
-                .sheet(isPresented: $appState.isShowingOnboarding) {
-                    SetupWizardView()
-                        .environmentObject(appState)
-                        .frame(width: 520, height: 420)
-                }
         }
-        .defaultSize(width: 420, height: 540)
-        .defaultLaunchBehavior(.suppressed)
+        .defaultSize(width: 920, height: 640)
+        .defaultLaunchBehavior(appState.isShowingOnboarding ? .presented : .suppressed)
+        .restorationBehavior(.disabled)
         .commands {
-            ConduitCommands()
+            ConduitCommands(appState: appState)
         }
-
-        WindowGroup("Settings", id: "settings") {
-            SettingsView()
-                .environmentObject(appState)
-                .environmentObject(appState.runtime)
-        }
-        .defaultSize(width: 720, height: 620)
-
-        WindowGroup("Logs", id: "logs") {
-            LogView(logStore: appState.logStore)
-                .frame(minWidth: 780, minHeight: 540)
-        }
-        .defaultSize(width: 780, height: 540)
-
-        WindowGroup("Connections", id: "connections") {
-            ConnectionsView(compact: false)
-                .environmentObject(appState.runtime)
-                .padding(20)
-                .frame(minWidth: 520, minHeight: 360)
-        }
-        .defaultSize(width: 560, height: 420)
-
-        WindowGroup("Setup Wizard", id: "setup") {
-            SetupWizardView()
-                .environmentObject(appState)
-                .frame(minWidth: 520, minHeight: 420)
-        }
-        .defaultSize(width: 520, height: 420)
     }
 }

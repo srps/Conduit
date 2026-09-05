@@ -210,7 +210,7 @@ final class ConfigHotReloadTests: XCTestCase {
     // MARK: - Runtime auth outcome lifecycle
 
     /// `applyConfigChange` on the auth section must clear the runtime auth
-    /// outcome so the UI chip (`MainView.authBadge`, which prefers runtime
+    /// outcome so the UI chip (`OverviewView.authBadge`, which prefers runtime
     /// over configured intent) doesn't keep asserting the previous mode's
     /// last handshake against the new configuration. Without this reset,
     /// switching from `systemNegotiated` (last outcome `.kerberos`) to
