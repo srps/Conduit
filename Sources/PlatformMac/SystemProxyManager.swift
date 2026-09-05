@@ -86,6 +86,21 @@ package final class SystemProxyManager: @unchecked Sendable {
         }
     }
 
+    /// Whether the system proxy may still be ours to put back: the journal
+    /// holds prior values or an applied marker, or cannot be read.
+    ///
+    /// This is the question a host asks when the user has turned the
+    /// integration *off*: the flag no longer says to clear, so only evidence
+    /// that we applied can. `isCleared()` is the wrong probe for that — it
+    /// reads whether *any* proxy is enabled, and a user's own proxy is one —
+    /// whereas the journal only ever records what `apply` wrote over. An
+    /// unreadable journal answers `true`, and `clear` then decides for itself
+    /// (it probes for residue rather than trust the flag), because a stranded
+    /// setting is the failure this exists to prevent.
+    package func hasManagedState() -> Bool {
+        !journal.knowsSurfaceIsIdle(.systemProxy)
+    }
+
     // MARK: - Apply / Clear
 
     /// Journal value recorded for a service `apply` did not touch because its

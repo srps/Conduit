@@ -228,6 +228,32 @@ extension SystemProxyManagerTests {
     /// never applied" and "we cannot say what we applied" were the same state,
     /// and teardown blanket-disabled for both — so quitting an app that had
     /// never started the proxy would wipe a user's MDM proxy settings.
+    /// The host asks this when the user has turned the integration *off*, so
+    /// only evidence that we applied can drive the clear (#13). It must come
+    /// from the journal, not from `isCleared()`: that reads whether *any*
+    /// proxy is enabled, and a user's own proxy would make quitting with the
+    /// switch off disable it.
+    func testHasManagedStateFollowsTheJournalNotTheMachine() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.webProxyEnabled = true
+        runner.proxyHost = "proxy.corp.example"
+        runner.proxyPort = "8080"
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+
+        XCTAssertFalse(manager.isCleared(), "the user's own proxy is enabled")
+        XCTAssertFalse(manager.hasManagedState(), "...but nothing of it is ours")
+
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .manual, logger: nil)
+        XCTAssertTrue(manager.hasManagedState())
+
+        try manager.clear(logger: nil)
+        XCTAssertFalse(manager.hasManagedState(), "teardown restored the surface and marked it released")
+    }
+
     func testClearLeavesTheMachineAloneWhenNothingWasEverApplied() throws {
         let runner = FakeNetworksetupRunner()
         runner.autoProxyEnabled = true

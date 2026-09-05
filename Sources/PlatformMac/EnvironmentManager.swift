@@ -58,6 +58,20 @@ package final class EnvironmentManager {
         logger?.log(.notice, "Updated shell environment proxy variables.", category: .system)
     }
 
+    /// Whether anything of ours is still on the machine: a managed block in
+    /// any shell profile, or launchd variables the journal has not seen
+    /// released. Hosts consult this when the integration has been turned
+    /// *off*, where the flag no longer says to clear and only evidence that
+    /// we applied can. The shell half is answered by the marker block, the
+    /// launchd half by the journal — the same two sources `clear` uses.
+    package func hasManagedState() -> Bool {
+        let shellBlockPresent = targetFiles.contains { file in
+            guard let content = try? String(contentsOf: file, encoding: .utf8) else { return false }
+            return content.contains(blockStart)
+        }
+        return shellBlockPresent || !journal.knowsSurfaceIsIdle(.launchdEnvironment)
+    }
+
     package func clear(logger: (any LogSink)?) throws {
         for file in targetFiles where FileManager.default.fileExists(atPath: file.path) {
             let existing = (try? String(contentsOf: file, encoding: .utf8)) ?? ""

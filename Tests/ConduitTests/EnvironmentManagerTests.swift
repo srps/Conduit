@@ -209,6 +209,38 @@ final class EnvironmentManagerTests: XCTestCase {
     }
 
     /// Re-applying must replace our block, not stack copies of it.
+    // MARK: - Ownership
+
+    /// The host asks this when the user has turned the integration *off*:
+    /// the flag no longer says to clear, so only evidence that we applied can
+    /// (#13). Nothing applied means nothing to clean up; an apply means there
+    /// is, until a clear puts everything back.
+    func testHasManagedStateFollowsApplyAndClear() throws {
+        let manager = makeManager()
+        XCTAssertFalse(manager.hasManagedState(), "a fresh home and an empty journal hold nothing of ours")
+
+        try manager.apply(config: makeConfig(), logger: nil)
+        XCTAssertTrue(manager.hasManagedState())
+
+        try manager.clear(logger: nil)
+        XCTAssertFalse(manager.hasManagedState(), "teardown released both the profiles and the launchd domain")
+    }
+
+    /// A managed block left in a profile — by a crash before teardown, or a
+    /// state directory wiped since — is ours by its own delimiters, journal
+    /// or no journal.
+    func testHasManagedStateSeesAStrandedShellBlockWithoutAJournal() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        try FileManager.default.removeItem(at: home.appendingPathComponent("platform-state.json"))
+
+        XCTAssertTrue(
+            EnvironmentManager(journal: PlatformStateJournal(fileURL: home.appendingPathComponent("platform-state.json")), homeDirectory: home, commandRunner: launchctl.run)
+                .hasManagedState(),
+            "the marker block identifies our region of the file without any record"
+        )
+    }
+
     func testRepeatedApplyDoesNotAccumulateBlocks() throws {
         let manager = makeManager()
         try manager.apply(config: makeConfig(), logger: nil)
