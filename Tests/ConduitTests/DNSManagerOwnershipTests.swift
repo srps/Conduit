@@ -302,16 +302,36 @@ final class DNSManagerOwnershipTests: XCTestCase {
     }
 
     /// A user's own entry file with the very line this app would write for
-    /// the same domain survives the upgrade with the switch off.
-    func testUpgradeWithTheSwitchOffLeavesAMatchingEntryFileAlone() throws {
+    /// the same domain survives the upgrade with the switch off — and is
+    /// named in the log, because an earlier release may have written it and
+    /// only the user can tell.
+    func testUpgradeWithTheSwitchOffLeavesAMatchingEntryFileAloneAndNamesIt() throws {
         try writeResolverFile("corp.example", "nameserver 10.1.1.1")
         let manager = makeManager()
+        let log = RecordingLogSink()
 
-        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
-        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
+        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: log)
+        try manager.clearRecorded(configs: [makeConfig()], logger: log)
 
         XCTAssertTrue(removedDomains().isEmpty)
         XCTAssertFalse(manager.hasManagedState())
+        let report = log.entries(at: .warning).map(\.message).first { $0.contains("Recovered resolver ownership") }
+        XCTAssertNotNil(report, "the scan reports what it did")
+        XCTAssertTrue(report?.contains("1 entry file(s) for configured domains left in place") == true, report ?? "")
+        XCTAssertTrue(report?.contains("corp.example") == true, "names the file: \(report ?? "")")
+    }
+
+    /// An entry file that is absent, or one the scan judged as an intercept
+    /// file, is not reported as left in place.
+    func testUpgradeReportsNoEntryFilesWhenNoneAreOnDisk() throws {
+        let log = RecordingLogSink()
+        let manager = makeManager()
+
+        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: log)
+
+        let report = log.entries(at: .warning).map(\.message).first { $0.contains("Recovered resolver ownership") }
+        XCTAssertNotNil(report)
+        XCTAssertFalse(report?.contains("left in place") == true, report ?? "")
     }
 
     /// With the switch still on, the legacy intercept file is the start
