@@ -583,6 +583,13 @@ final class AppState: ObservableObject {
         // actions first and let the first, on resuming, put a surface back to
         // what its by-then-stale flags said. Each pass waits for the one
         // before it, so the machine ends in the state of the last save.
+        //
+        // Everything the pass decides reads `newPlatform`, the flags of the
+        // save that queued it, never `platformConfig`: by the time a queued
+        // pass runs, a later save may have moved a flag again, and reading
+        // the live value re-applied a surface this pass was about to clear
+        // and the next pass was about to apply — three privileged writes
+        // and a transient flip for two saves.
         let previous = reconcileTask
         reconcileGeneration += 1
         let generation = reconcileGeneration
@@ -616,7 +623,7 @@ final class AppState: ObservableObject {
                 }
             }
 
-            if diff.dnsChanged, platformConfig.manageDNSResolvers, !resolversFollowTheirFlag,
+            if diff.dnsChanged, newPlatform.manageDNSResolvers, !resolversFollowTheirFlag,
                proxyIsUp || dnsIsUp {
                 DNSResolverReconciliation.run(
                     after: "config change",
@@ -637,11 +644,11 @@ final class AppState: ObservableObject {
             }
 
             if diff.proxyChanged, proxyIsUp {
-                if platformConfig.manageSystemProxy, !platformActions.contains(.applySystemProxy) {
+                if newPlatform.manageSystemProxy, !platformActions.contains(.applySystemProxy) {
                     do {
                         try systemConduit.apply(
                             config: new,
-                            mode: platformConfig.systemProxyMode,
+                            mode: newPlatform.systemProxyMode,
                             logger: logStore,
                             localPACURL: orchestrator.snapshot.bindings.localPACURL
                         )
@@ -649,7 +656,7 @@ final class AppState: ObservableObject {
                         logStore.log(.warning, "Could not re-apply system proxy after config change: \(error.localizedDescription)", category: .system)
                     }
                 }
-                if platformConfig.manageEnvironmentVariables, !platformActions.contains(.applyEnvironment) {
+                if newPlatform.manageEnvironmentVariables, !platformActions.contains(.applyEnvironment) {
                     do {
                         try environmentManager.apply(config: new, logger: logStore)
                     } catch {
