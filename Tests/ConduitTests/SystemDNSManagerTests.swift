@@ -6,31 +6,6 @@ import XCTest
 
 // MARK: - Test Double
 
-private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _commands: [(PrivilegedOperation, [String])] = []
-    var throwingCommands: Set<PrivilegedOperation> = []
-
-    var executedCommands: [(PrivilegedOperation, [String])] {
-        lock.withLock { _commands }
-    }
-
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        if throwingCommands.contains(operation) {
-            throw PrivilegeClientError.executionFailed("Simulated failure for \(operation.rawValue)")
-        }
-        lock.withLock { _commands.append((operation, values)) }
-    }
-
-    func commands(matching operation: PrivilegedOperation) -> [[String]] {
-        executedCommands.filter { $0.0 == operation }.map(\.1)
-    }
-
-    func reset() {
-        lock.withLock { _commands.removeAll() }
-    }
-}
-
 /// The `networksetup` reads the DNS surface makes, answered from a described
 /// machine instead of this host. Only the three the recovery path uses.
 private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
@@ -442,7 +417,7 @@ final class SystemDNSManagerTests: XCTestCase {
             throw XCTSkip("Need at least 2 connected network services for partial failure test")
         }
 
-        recording.throwingCommands = [.setDNSServers]
+        recording.failing = [.setDNSServers]
         writeSavedState(SavedDNS(interfaces: Dictionary(
             uniqueKeysWithValues: realServices.map { ($0, ["1.1.1.1"]) }
         )))
@@ -465,10 +440,10 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - apply() with RecordingPrivilegeClient
 
     func testApplyNeverCallsResolverOverrideCommands() throws {
-        let manager = makeManager()
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["192.168.1.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
 
-        // apply() will fail at startRelay since recording isn't HelperToolPrivilegeClient,
-        // but it still proceeds to setDNSServers
+        try manager.saveCurrentDNS(logger: nil)
         try manager.apply(forwarderPort: 5053, logger: nil)
 
         let applyDNS = recording.commands(matching: .applyDNS)
@@ -479,16 +454,38 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testApplySetsAllInterfacesToLocalhost() throws {
-        let manager = makeManager()
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["192.168.1.1"], "Ethernet": ["10.0.0.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
 
+        try manager.saveCurrentDNS(logger: nil)
         try manager.apply(forwarderPort: 5053, logger: nil)
 
-        let dnsCommands = recording.commands(matching: .setDNSServers)
-        XCTAssertFalse(dnsCommands.isEmpty, "Should set DNS on at least one interface")
+        XCTAssertEqual(
+            Set(recording.commands(matching: .setDNSServers).map { $0.joined(separator: " ") }),
+            ["Wi-Fi 127.0.0.1", "Ethernet 127.0.0.1"]
+        )
+    }
 
-        for cmd in dnsCommands {
-            XCTAssertEqual(cmd.last, "127.0.0.1", "Every interface should be set to 127.0.0.1")
+    /// Every host treats a failed `saveCurrentDNS` as non-fatal and goes on
+    /// to `apply`. Without the capture there is nothing to restore from, and
+    /// the teardown's residue sweep would reset the redirected interfaces to
+    /// DHCP, so `apply` must refuse rather than redirect.
+    func testApplyRefusesToRedirectWhenNothingWasCaptured() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["192.168.1.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
+
+        machine.listingFailuresRemaining = 1
+        XCTAssertThrowsError(try manager.saveCurrentDNS(logger: nil), "the capture failed")
+
+        XCTAssertThrowsError(try manager.apply(forwarderPort: 5053, logger: nil)) { error in
+            XCTAssertEqual(error as? SystemDNSManagerError, .priorStateNotCaptured)
         }
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty, "no interface was redirected")
+        XCTAssertTrue(recording.commands(matching: .startDNSRelay).isEmpty, "and the relay was not started")
+
+        try manager.saveCurrentDNS(logger: nil)
+        try manager.apply(forwarderPort: 5053, logger: nil)
+        XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "127.0.0.1"]], "the next attempt, with a capture, redirects")
     }
 
     // MARK: - clear() never calls resolver override commands (regression)
@@ -543,7 +540,7 @@ final class SystemDNSManagerTests: XCTestCase {
     func testReconcileDoesNothingWithoutSavedState() {
         let manager = makeManager()
         manager.reconcile(logger: nil)
-        XCTAssertTrue(recording.executedCommands.isEmpty, "No saved state means no reconciliation")
+        XCTAssertTrue(recording.commands.isEmpty, "No saved state means no reconciliation")
     }
 
     func testReconcileRepinsDriftedManagedInterfacesWithoutTouchingSavedState() throws {
@@ -570,7 +567,7 @@ final class SystemDNSManagerTests: XCTestCase {
             XCTAssertEqual(Array(command.dropFirst()), ["127.0.0.1"], "Re-pin always restores the loopback override")
         }
         XCTAssertTrue(
-            recording.executedCommands.allSatisfy { $0.0 == .setDNSServers },
+            recording.commands.allSatisfy { $0.0 == .setDNSServers },
             "Reconcile with no new/gone interfaces issues nothing but re-pins"
         )
 
@@ -654,7 +651,7 @@ final class SystemDNSManagerTests: XCTestCase {
     func testRestoreIfNeededNoOpsWithoutFile() {
         let manager = makeManager()
         manager.restoreIfNeeded(logger: nil)
-        XCTAssertTrue(recording.executedCommands.isEmpty)
+        XCTAssertTrue(recording.commands.isEmpty)
     }
 
     func testRestoreIfNeededRestoresWhenPort53FreeAndFileExists() throws {
@@ -668,7 +665,7 @@ final class SystemDNSManagerTests: XCTestCase {
 
         manager.restoreIfNeeded(logger: nil)
 
-        if recording.executedCommands.isEmpty {
+        if recording.commands.isEmpty {
             // Port 53 is in use on this machine (e.g., mDNSResponder), so restore was skipped.
             // This is expected behavior. The test verifies the file isn't blindly deleted.
             XCTAssertTrue(

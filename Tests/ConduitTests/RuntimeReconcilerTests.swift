@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 @testable import Conduit
+@testable import PlatformMac
 @testable import ProxyKernel
 
 /// Stands in for `AppState`: records every call in order, answers a fixed

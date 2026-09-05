@@ -60,22 +60,43 @@ final class AppState: ObservableObject {
     private let auditedPrivilegeClient: any PrivilegeClient
     private let runtimeEnvironment: RuntimeEnvironment
     private let orchestrator: ProxyOrchestrator
+    /// Where the platform managers act: the process that runs `networksetup`
+    /// and `launchctl`, the home directory whose shell profiles get the proxy
+    /// block, and the directory the resolver files live in. Injected by the
+    /// test harness so a scenario runs against a fake machine and scratch
+    /// directories; production passes nothing and gets the real ones. Plain
+    /// parameters rather than a dependencies type, because the lifecycle
+    /// they serve is slated to move into the daemon and a parameter is
+    /// cheaper to delete than a protocol.
+    private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+    private let homeDirectory: URL
+    private let resolverDirectory: String
 
     /// Prior values of the platform settings we change, so teardown restores
     /// rather than blanket-clearing. Shared by every side-effect manager.
     private lazy var platformStateJournal = PlatformStateJournal(fileURL: runtimeEnvironment.platformStateFile, logger: logStore)
     private lazy var systemConduit = SystemProxyManager(
         privilegeClient: auditedPrivilegeClient,
+        journal: platformStateJournal,
+        commandRunner: commandRunner
+    )
+    private lazy var environmentManager = EnvironmentManager(
+        journal: platformStateJournal,
+        homeDirectory: homeDirectory,
+        commandRunner: commandRunner
+    )
+    private lazy var dnsManager = DNSManager(
+        privilegeClient: auditedPrivilegeClient,
+        resolverDirectory: resolverDirectory,
         journal: platformStateJournal
     )
-    private lazy var environmentManager = EnvironmentManager(journal: platformStateJournal)
-    private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient, journal: platformStateJournal)
     private lazy var systemDNSManager = SystemDNSManager(
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
-        legacySnapshotFile: runtimeEnvironment.legacySavedDNSFile
+        legacySnapshotFile: runtimeEnvironment.legacySavedDNSFile,
+        commandRunner: commandRunner
     )
-    private let loginItemManager = LoginItemManager()
+    private let loginItemManager: LoginItemManager
     private let networkMonitor = NetworkMonitor()
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<VPNFlapWindowConfig>
@@ -98,7 +119,8 @@ final class AppState: ObservableObject {
     /// Pushes each save into the running subsystems and the platform
     /// surfaces, one serialised pass per save, and owns the two "last
     /// reconciled" baselines. This is its host: see `RuntimeReconcilerHost`.
-    private let reconciler: RuntimeReconciler
+    /// Internal so the harness can drain the queued passes before it asserts.
+    let reconciler: RuntimeReconciler
     /// VPN-gating policy for split-DNS entry files (single source of truth
     /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
     /// every resolver-file apply path consults `entriesWanted`.
@@ -108,8 +130,24 @@ final class AppState: ObservableObject {
     /// `LaunchRecovery` for why it is neither inline nor unordered.
     private var launchRecovery: LaunchRecovery?
 
-    init(vpnStatusMonitor: VPNStatusObserving? = nil) {
-        let runtimeEnvironment = AppState.runtimeEnvironment()
+    /// Every parameter defaults to the production collaborator; the test
+    /// harness passes the fakes. See `commandRunner` for why these are
+    /// parameters and not a dependencies type.
+    ///
+    /// - Parameters:
+    ///   - privilegeClient: what the platform managers run privileged writes
+    ///     through. The helper client is still constructed for the Settings
+    ///     surface (`helperStatus`, install, uninstall) either way.
+    init(
+        runtimeEnvironment: RuntimeEnvironment? = nil,
+        privilegeClient: (any PrivilegeClient)? = nil,
+        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        homeDirectory: URL? = nil,
+        resolverDirectory: String? = nil,
+        loginItemManager: LoginItemManager? = nil,
+        vpnStatusMonitor: VPNStatusObserving? = nil
+    ) {
+        let runtimeEnvironment = runtimeEnvironment ?? AppState.runtimeEnvironment()
         let logStore = AppLogStore()
         // Read before the load, which writes a migrated file back: a config
         // file that predates this launch is what tells an upgrade from a
@@ -134,17 +172,23 @@ final class AppState: ObservableObject {
         // The sink also carries the "helper unreachable, falling back to an
         // admin prompt" event, which is a recovery the user needs to see: it
         // means the installed helper is missing or predates a protocol bump.
-        let privilegeClient = HelperToolPrivilegeClient(
+        let helperClient = HelperToolPrivilegeClient(
             eventSink: { event in privilegeAuditEventSink.emit(event) }
         )
         let auditedPrivilegeClient = AuditingPrivilegeClient(
-            base: privilegeClient,
+            base: privilegeClient ?? helperClient,
             eventSink: { event in privilegeAuditEventSink.emit(event) }
         )
         self.runtimeEnvironment = runtimeEnvironment
         self.logStore = logStore
-        self.privilegeClient = privilegeClient
+        self.privilegeClient = helperClient
         self.auditedPrivilegeClient = auditedPrivilegeClient
+        self.commandRunner = commandRunner ?? { launchPath, arguments in
+            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
+        }
+        self.homeDirectory = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
+        self.loginItemManager = loginItemManager ?? LoginItemManager()
         self.config = initialConfig
         self.platformConfig = loadedConfiguration.platformConfig
         self.reconciler = RuntimeReconciler(config: initialConfig, platformConfig: loadedConfiguration.platformConfig)
@@ -524,6 +568,17 @@ final class AppState: ObservableObject {
         }
         refreshPreflight()
     }
+
+    // MARK: - Observability
+
+    /// The orchestrator's own snapshot, for the harness. Read for the same
+    /// reason every lifecycle path here reads it instead of `runtime`: the
+    /// mirror is an async hop behind. Views keep reading `runtime`.
+    var runtimeSnapshot: ProxyOrchestratorSnapshot { orchestrator.snapshot }
+
+    /// The typed event stream, which is what a scenario asserts on: log
+    /// lines are derived from these, not the other way round.
+    var eventLog: RuntimeEventLog { orchestrator.eventLog }
 
     // MARK: - RuntimeReconcilerHost
 

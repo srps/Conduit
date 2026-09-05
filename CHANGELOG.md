@@ -87,6 +87,34 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
 - Edits made while an earlier save was still being applied no longer get replaced by that
   save. The runtime echoed each applied config back into the editor, which was harmless while
   saves applied immediately and became a rollback once they queued behind one another.
+- The daemon host has the same ownership guard as the app. It built its resolver manager
+  without the journal, so a file it wrote was nobody's once the switch went off; a config
+  reload that flipped a platform flag changed the stored value and nothing else; and its stop
+  cleared only what the switches still named. `RuntimeReconciler` and the flag table move into
+  `PlatformMac` and the daemon runs one pass per reload through them, so a flag flipped on disk
+  applies or clears its surface at the reload, a clear the machine refused is retried by the
+  next reload, and stop removes whatever the journal says is the daemon's whatever the switch
+  says now (#13).
+- "Manage system DNS" no longer redirects interfaces it could not capture. Every host treats a
+  failed capture of the current DNS servers as non-fatal and goes on to point the interfaces at
+  the relay, so one transient `networksetup` listing failure left them redirected with nothing
+  to restore from, and the teardown's residue sweep then reset them to DHCP. The manager now
+  refuses the redirect until a capture has landed; the next start or save retries both.
+
+### Testing
+
+- `AppState` has a harness. The app's lifecycle composition — start and stop, the ownership
+  guards, termination cleanup, the failed-start revert, the VPN handler and the wiring between
+  the reconciler and the editor — ran only in the app until now; four of the bugs fixed above
+  lived there. `AppState` takes its runtime environment, privilege client, command runner, home
+  directory, resolver directory and login-item manager as parameters with production defaults,
+  and the scenarios in `AppStateHarnessTests` run a real orchestrator on ephemeral ports over a
+  `FakeMachine` that answers `networksetup` and `launchctl`, applies privileged writes to its own
+  model and writes resolver files into a scratch directory. Assertions read the machine and the
+  journal file, not `AppState` internals. One shared `RecordingPrivilegeClient` replaces the
+  eight private copies the suite carried. The ownership scenarios also run against
+  `DaemonRuntimeHost`, over the same fake machine; the first of them was written as a strict
+  expected failure naming what the daemon lacked, and came out with the fix above.
 
 ## 0.2.0
 

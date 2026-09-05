@@ -23,8 +23,8 @@ import ProxyKernel
 /// - An apply requires the runtime that owns the surface to be up. With it
 ///   down the start path applies the surface later, and applying now would
 ///   point the machine at a listener that is not there.
-struct PlatformIntegrationReconciler {
-    enum Action: Equatable {
+package struct PlatformIntegrationReconciler {
+    package enum Action: Equatable {
         case applySystemProxy
         case clearSystemProxy
         case applyEnvironment
@@ -46,7 +46,7 @@ struct PlatformIntegrationReconciler {
     /// `proxyIsUp` and `dnsIsUp` come from the orchestrator snapshot, never
     /// the presentation mirror, for the reason every lifecycle comment in
     /// `AppState` gives: the mirror is an async hop behind.
-    static func actions(
+    package static func actions(
         old: PlatformIntegrationConfig,
         new: PlatformIntegrationConfig,
         proxyIsUp: Bool,
@@ -108,7 +108,7 @@ struct PlatformIntegrationReconciler {
     /// that — termination cleanup clears whatever is journaled as ours — but
     /// a login item has no teardown, so a persisted "off" with the
     /// registration still in place would launch Conduit indefinitely.
-    static func immediateActions(
+    package static func immediateActions(
         old: PlatformIntegrationConfig,
         new: PlatformIntegrationConfig
     ) -> [Action] {

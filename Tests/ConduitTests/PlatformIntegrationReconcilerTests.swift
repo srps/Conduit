@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 @testable import Conduit
+@testable import PlatformMac
 @testable import ProxyKernel
 
 /// The decision table behind #13: a platform integration switch flipped while

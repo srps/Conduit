@@ -298,7 +298,7 @@ final class TunnelForwarderTests: XCTestCase {
 
         _ = await forwarder.start(tunnels: [proxied], listenHost: "127.0.0.1")
 
-        let appliesAfterStart = recording.commands(for: .applyDNS).map { $0.1[0] }
+        let appliesAfterStart = recording.commands(matching: .applyDNS).map { $0[0] }
         XCTAssertTrue(appliesAfterStart.contains("reconcile-remove.example.com"),
                       "Initial start should apply a resolver file for the proxied hostname")
 
@@ -309,7 +309,7 @@ final class TunnelForwarderTests: XCTestCase {
         XCTAssertEqual(result.dnsOverrideStatus, .notNeeded,
                        "dnsOverrideStatus must reflect the torn-down state, not the stale default")
 
-        let removes = recording.commands(for: .removeDNS).map { $0.1[0] }
+        let removes = recording.commands(matching: .removeDNS).map { $0[0] }
         XCTAssertTrue(removes.contains("reconcile-remove.example.com"),
                       "Removing the last proxied tunnel must emit removeDNS for its hostname")
 
@@ -376,7 +376,7 @@ final class TunnelForwarderTests: XCTestCase {
             "DNS override must include both the unchanged and newly-added proxied hostnames"
         )
 
-        let removedDuringReconcile = recording.commands(for: .removeDNS).map { $0.1[0] }
+        let removedDuringReconcile = recording.commands(matching: .removeDNS).map { $0[0] }
         XCTAssertFalse(
             removedDuringReconcile.contains("keep-me.example.com"),
             "reconcile must not remove the /etc/resolver file for an unchanged proxied tunnel"
@@ -626,23 +626,3 @@ private final class StubAuthenticator: ProxyAuthenticator, @unchecked Sendable {
 
 /// Records helper-command invocations without touching `/etc/resolver`. Used by the DNS
 /// override reconciliation regression tests to verify which hostnames were applied / removed.
-private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _commands: [(PrivilegedOperation, [String])] = []
-
-    var executedCommands: [(PrivilegedOperation, [String])] {
-        lock.withLock { _commands }
-    }
-
-    func commands(for operation: PrivilegedOperation) -> [(PrivilegedOperation, [String])] {
-        executedCommands.filter { $0.0 == operation }
-    }
-
-    func reset() {
-        lock.withLock { _commands.removeAll() }
-    }
-
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        lock.withLock { _commands.append((operation, values)) }
-    }
-}

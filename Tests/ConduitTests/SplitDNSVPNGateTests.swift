@@ -139,16 +139,3 @@ final class SplitDNSVPNGateTests: XCTestCase {
         XCTAssertEqual(gate.action(runtimeStarted: false), .remove, "removal never depends on run state")
     }
 }
-
-private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
-    private let lock = NSLock()
-    private var _commands: [(PrivilegedOperation, [String])] = []
-
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
-        lock.withLock { _commands.append((operation, values)) }
-    }
-
-    func commands(matching operation: PrivilegedOperation) -> [[String]] {
-        lock.withLock { _commands }.filter { $0.0 == operation }.map(\.1)
-    }
-}
