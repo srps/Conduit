@@ -241,6 +241,23 @@ final class EnvironmentManagerTests: XCTestCase {
         )
     }
 
+    /// Same contract as the system proxy: a launchd restore that failed keeps
+    /// its records, and the journal tells a reconciling host to try again.
+    func testHasManagedStateStaysTrueAfterAFailedLaunchdRestore() throws {
+        launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+
+        launchctl.failSetenv = true
+        try manager.clear(logger: nil)
+        XCTAssertTrue(manager.hasManagedState(), "the prior value could not be put back")
+
+        launchctl.failSetenv = false
+        try manager.clear(logger: nil)
+        XCTAssertFalse(manager.hasManagedState())
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080")
+    }
+
     func testRepeatedApplyDoesNotAccumulateBlocks() throws {
         let manager = makeManager()
         try manager.apply(config: makeConfig(), logger: nil)
