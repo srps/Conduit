@@ -466,6 +466,27 @@ final class SystemDNSManagerTests: XCTestCase {
         )
     }
 
+    /// The hosts start the forwarder between the capture and the redirect,
+    /// so an interface can appear in that window. It has no recorded prior,
+    /// and redirecting it would leave the teardown nothing to restore it
+    /// from. `apply` leaves it alone; `reconcile` records it, then redirects.
+    func testApplyLeavesAnInterfaceThatAppearedAfterTheCaptureAlone() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["192.168.1.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
+        try manager.saveCurrentDNS(logger: nil)
+
+        machine.dnsServers["Ethernet"] = ["10.0.0.1"]
+        try manager.apply(forwarderPort: 5053, logger: nil)
+        XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "127.0.0.1"]], "only the captured interface is redirected")
+        XCTAssertEqual(journal.prior(surface: .systemDNS, scope: "Ethernet"), .notRecorded, "and nothing false was recorded for the other")
+
+        machine.dnsServers["Wi-Fi"] = ["127.0.0.1"]
+        recording.reset()
+        manager.reconcile(logger: nil)
+        XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Ethernet", "127.0.0.1"]], "the reconcile redirects it")
+        XCTAssertEqual(journal.prior(surface: .systemDNS, scope: "Ethernet"), .wasPresent(["servers": "10.0.0.1"]), "after recording what it had")
+    }
+
     /// Every host treats a failed `saveCurrentDNS` as non-fatal and goes on
     /// to `apply`. Without the capture there is nothing to restore from, and
     /// the teardown's residue sweep would reset the redirected interfaces to

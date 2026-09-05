@@ -99,7 +99,9 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   failed capture of the current DNS servers as non-fatal and goes on to point the interfaces at
   the relay, so one transient `networksetup` listing failure left them redirected with nothing
   to restore from, and the teardown's residue sweep then reset them to DHCP. The manager now
-  refuses the redirect until a capture has landed; the next start or save retries both.
+  refuses the redirect until a capture has landed, and redirects only the interfaces the capture
+  recorded: one that appears in the window between the capture and the redirect is left for the
+  next reconcile, which records an interface before it redirects it.
 
 ### Testing
 
