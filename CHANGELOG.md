@@ -4,6 +4,60 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+The three surfaces stop competing to be the whole app. The menu bar icon and popover answer
+"is it working, and can I flip it" without scrolling; one app window with a sidebar holds
+everything else; and Settings is no longer a separate thing but a group of sections in that
+window, each pairing a subsystem's live state with its knobs.
+
+**Upgrading:** the global shortcut is now off by default and, when enabled, is ⌃⌥⌘P rather than
+⌘⇧P, which the previous default swallowed in every editor's command palette. A saved
+`globalShortcutEnabled: true` is honoured; only the chord changes. The "Show menu bar icon"
+toggle is gone — nothing read it, and the app has no Dock icon to fall back on.
+
+### Menu bar
+
+- The status item glyph carries the state: stopped, direct (VPN off or no upstreams),
+  proxied, and needs attention (degraded, recovering, failed, or upstreams unreachable). The
+  glyph choice lives in `MenuBarPresentation` next to the labels and has the same unit
+  coverage.
+- The popover is a fixed 320 pt panel that no longer scrolls: one state line ("Proxied via
+  corp-eu-1", "Direct, VPN off", "Failed: port in use") with health, VPN and uptime under it;
+  switches for the proxy, DNS forwarder and tunnels instead of buttons whose label had to be
+  read to know the current state; the active upstream as a traffic-light row with the rest
+  of the pool summarised as one line of counts ("4 fallbacks · 3 healthy · 1 open"), both
+  opening the app on Upstreams; one activity line; the last three events; and Open Conduit, Restart Proxy, Copy
+  Diagnostics and Quit. Fourteen controls became seven.
+- First-run setup no longer waits for the popover to be opened. It is presented at launch as a
+  sheet on the app window when NTLM is configured without saved credentials.
+
+### App window
+
+- One `Window` scene replaces the dashboard, Settings, Logs, Connections and Setup Wizard
+  scenes, which were `WindowGroup`s and could each be opened several times. ⌘0 opens it on
+  Overview; ⌘, opens it on the first Configure section. Closing it returns the app to the menu
+  bar, decided by which windows the app registered rather than by sniffing private window
+  class names.
+- Overview is the old dashboard minus the duplication: three module rows with switches and
+  status pills, a route card, one telemetry line, the richer upstream rows, and Restart Proxy,
+  Test DNS, Open Test URL and Copy Diagnostics as ordinary buttons. Setup Wizard is no longer
+  the most prominent button on a screen users see every day.
+- Settings became eight sidebar sections that follow `ProxyConfig`: Proxy, Upstreams & Routing,
+  Authentication, DNS, Tunnels, Shell Environment, General, Advanced. The "Network" grab bag is
+  gone: launch at login and the shortcut moved to General, the test URLs to General >
+  Diagnostics, the VPN flap sliders to Advanced. NO_PROXY and force-proxy lists moved from Env
+  to Upstreams & Routing > Bypass Rules, next to the PAC that consumes them. Verbose and file
+  logging, import/export and the privileged helper moved to General.
+- Upstreams & Routing, DNS, Tunnels, Proxy and Authentication show a live status strip above
+  their settings: route and per-upstream health with latency on each editable row; DNS
+  queries, cache hit rate and DoH fallbacks with Test DNS; tunnel sessions and DNS override
+  status; bindings; last auth handshake outcome.
+- Every Configure section shows the config boundary's own validation next to the field it
+  refuses, and lists cross-field conflicts it owns, instead of leaving them in the banner.
+- "Detach" and "Detach Full UI" are "Open Conduit"; "Copy Summary" is "Copy Diagnostics";
+  "Enable floating window mode" is "Keep window on top".
+
 ## 0.2.0
 
 Teardown now restores the machine to what it was instead of switching things off, the
