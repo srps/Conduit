@@ -4,24 +4,183 @@ import ProxyKernel
 
 /// Pure presentation / decision helpers for the menu-bar-first control
 /// surface. Keeping these outside `StatusBarView` and `AppState` gives us
-/// cheap unit coverage for the user-visible labels and restart-state
-/// decisions without launching SwiftUI or constructing the full `AppState`
-/// runtime.
+/// cheap unit coverage for the user-visible labels, the status-item glyph,
+/// and the restart-state decisions without launching SwiftUI or constructing
+/// the full `AppState` runtime.
 package enum MenuBarPresentation {
-    package static func proxyButtonTitle(for state: ProxyConnectionState) -> String {
+
+    // MARK: - Status item glyph
+
+    /// The menu bar image is template-rendered, so colour cannot carry state
+    /// and the shape has to. Four glyphs cover every `ProxyConnectionState`
+    /// plus direct mode:
+    ///
+    /// - stopped → `network.slash`
+    /// - direct (VPN off, no upstreams, path changing) → `network`
+    /// - proxied → `network.badge.shield.half.filled`
+    /// - needs attention (degraded, recovering, failed, upstreams unreachable)
+    ///   → `exclamationmark.triangle`
+    ///
+    /// Starting shares the glyph of the state it is heading for; the popover
+    /// spells out the transition. A menu bar icon that animates is noise.
+    package static func menuBarSymbol(state: ProxyConnectionState, directModeCause: DirectModeCause) -> String {
         switch state {
-        case .running, .degraded, .recovering:
-            return "Stop Proxy"
-        case .starting:
-            return "Starting..."
-        case .stopped, .failed:
-            return "Start Proxy"
+        case .stopped:
+            return "network.slash"
+        case .failed, .degraded, .recovering:
+            return "exclamationmark.triangle"
+        case .starting, .running:
+            switch directModeCause {
+            case .none:
+                return "network.badge.shield.half.filled"
+            case .vpnDisconnected, .noUpstreamsConfigured, .transientNetworkChange:
+                return "network"
+            case .upstreamsUnreachable:
+                return "exclamationmark.triangle"
+            }
         }
     }
 
+    // MARK: - State line
+
+    /// The one sentence in the popover header. It merges the old title,
+    /// subtitle, badge, and mode chips into the way the user thinks about
+    /// the proxy: "proxied via X", "direct, VPN off", "stopped", "failed:
+    /// port in use".
+    package static func stateLine(
+        state: ProxyConnectionState,
+        directModeCause: DirectModeCause,
+        activeUpstream: String?,
+        proxyError: String?
+    ) -> String {
+        switch state {
+        case .stopped:
+            return "Stopped"
+        case .starting:
+            return "Starting…"
+        case .failed:
+            if let proxyError, !proxyError.isEmpty {
+                return "Failed: \(proxyError)"
+            }
+            return "Failed"
+        case .running, .degraded, .recovering:
+            if directModeCause.isDirect {
+                return directLine(for: directModeCause)
+            }
+            let via = activeUpstream.map { " via \($0)" } ?? ""
+            switch state {
+            case .degraded: return "Degraded\(via)"
+            case .recovering: return "Recovering\(via)"
+            default: return "Proxied\(via)"
+            }
+        }
+    }
+
+    private static func directLine(for cause: DirectModeCause) -> String {
+        switch cause {
+        case .vpnDisconnected: return "Direct, VPN off"
+        case .noUpstreamsConfigured: return "Direct, no upstreams configured"
+        case .transientNetworkChange: return "Direct, network changing"
+        case .upstreamsUnreachable: return "Direct, upstreams unreachable"
+        case .none: return "Direct"
+        }
+    }
+
+    /// The line under the state line. An app-level error wins because it is
+    /// the thing the user has to act on; otherwise the health summary, the
+    /// VPN state, and the uptime are joined with middle dots. Empty parts are
+    /// dropped so a stopped proxy reads "VPN connected" rather than
+    /// " · VPN connected · ".
+    package static func stateDetail(
+        lastError: String?,
+        healthSummary: String,
+        vpnLabel: String,
+        uptime: String?
+    ) -> String {
+        if let lastError, !lastError.isEmpty {
+            return lastError
+        }
+        var parts: [String] = []
+        if !healthSummary.isEmpty { parts.append(healthSummary) }
+        if !vpnLabel.isEmpty { parts.append("VPN \(lowercasedFirst(vpnLabel))") }
+        if let uptime, !uptime.isEmpty { parts.append("\(uptime) up") }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func lowercasedFirst(_ value: String) -> String {
+        guard let first = value.first else { return value }
+        return first.lowercased() + value.dropFirst()
+    }
+
+    /// The popover shows the active upstream as a row and everything else as
+    /// one line of counts: only one upstream should be carrying traffic, the
+    /// rest are checked fallbacks that matter in aggregate until one is
+    /// needed. "4 fallbacks · 3 healthy · 1 open"; nil when there is nothing
+    /// to summarise.
+    package static func upstreamSummaryLine(closed: Int, halfOpen: Int, open: Int, activeShown: Bool) -> String? {
+        let total = closed + halfOpen + open
+        guard total > 0 else { return nil }
+        let noun = activeShown ? "fallback" : "upstream"
+        var parts = ["\(total) \(noun)\(total == 1 ? "" : "s")"]
+        if closed > 0 { parts.append("\(closed) healthy") }
+        if halfOpen > 0 { parts.append("\(halfOpen) probing") }
+        if open > 0 { parts.append("\(open) open") }
+        return parts.joined(separator: " · ")
+    }
+
+    /// `activeUpstream` is an endpoint ("host:port" or "DIRECT"); the user
+    /// named the upstream, so show the name when the runtime knows it.
+    package static func displayName(forActiveUpstream endpoint: String?, statuses: [UpstreamRuntimeStatus]) -> String? {
+        guard let endpoint else { return nil }
+        if let match = statuses.first(where: { $0.endpoint == endpoint }), !match.name.isEmpty {
+            return match.name
+        }
+        return endpoint
+    }
+
+    /// "1.2k requests · 3 errors · 4 active" — the popover's single activity
+    /// line, replacing three metric cards.
+    package static func activityLine(requests: Int, errors: Int, active: Int) -> String {
+        "\(compactCount(requests)) requests · \(compactCount(errors)) errors · \(compactCount(active)) active"
+    }
+
+    // MARK: - Switches
+
+    /// A switch shows the state and is the control, so "on" has to mean
+    /// "the user asked for it to run". Starting counts as on: the switch was
+    /// just flipped and the subtitle says "Starting…".
+    package static func proxySwitchIsOn(for state: ProxyConnectionState) -> Bool {
+        switch state {
+        case .running, .degraded, .recovering, .starting:
+            return true
+        case .stopped, .failed:
+            return false
+        }
+    }
+
+    /// The switch is disabled only while a transition is in flight.
+    package static func proxySwitchIsEnabled(for state: ProxyConnectionState) -> Bool {
+        state != .starting
+    }
+
+    package static func moduleSwitchIsOn(for state: ModuleRunState) -> Bool {
+        switch state {
+        case .running, .warning, .starting:
+            return true
+        case .stopped, .failed:
+            return false
+        }
+    }
+
+    package static func moduleSwitchIsEnabled(for state: ModuleRunState) -> Bool {
+        state != .starting
+    }
+
+    // MARK: - Restart
+
     /// Restart is useful for running/degraded/recovering/failed runtimes. It
     /// is disabled while starting (already in transition) and while stopped
-    /// (there is nothing to restart; Start Proxy is the correct affordance).
+    /// (there is nothing to restart; the switch is the correct affordance).
     package static func canRestartProxy(for state: ProxyConnectionState) -> Bool {
         switch state {
         case .running, .degraded, .recovering, .failed:
@@ -43,6 +202,8 @@ package enum MenuBarPresentation {
         }
     }
 
+    // MARK: - Formatting
+
     package static func endpoint(host: String?, port: Int?) -> String {
         guard let host, let port else { return "-" }
         return "\(host):\(port)"
@@ -53,7 +214,7 @@ package enum MenuBarPresentation {
     /// metric cards. Below 1 000 the exact value shows; above, k/M/B units
     /// with one decimal while the leading part is a single digit ("1.2k",
     /// "12k", "999k", "1.2M"). Exact values stay available in the copyable
-    /// status summary.
+    /// diagnostics block.
     package static func compactCount(_ value: Int) -> String {
         let magnitude = abs(value)
         guard magnitude >= 1_000 else { return "\(value)" }
@@ -77,22 +238,21 @@ package enum MenuBarPresentation {
         return "\(value)"
     }
 
-    package static func statusSubtitle(
-        state: ProxyConnectionState,
-        proxyError: String?,
-        lastError: String?,
-        directMode: Bool,
-        directModeCause: DirectModeCause,
-        healthSummary: String
-    ) -> String {
-        if let error = proxyError ?? lastError {
-            return error
-        }
-        if directMode {
-            return directModeCause.healthSummary
-        }
-        return healthSummary.isEmpty ? "Menu-bar controller active" : healthSummary
+    /// Hours and minutes since the proxy started, or nil when it is not
+    /// running. Extracted so the popover subtitle and the Overview card agree.
+    package static func uptime(since startedAt: Date?, now: Date = .now) -> String? {
+        guard let startedAt else { return nil }
+        return uptimeFormatter.string(from: startedAt, to: now)
     }
+
+    private static let uptimeFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute]
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+
+    // MARK: - Diagnostics block
 
     package static func statusSummary(
         state: ProxyConnectionState,
