@@ -57,13 +57,32 @@ package final class DNSManager: @unchecked Sendable {
     /// stale-file repair in `apply`) against a temporary directory instead of
     /// needing to write to the real `/etc/resolver`.
     private let resolverDirectory: String
+    /// Ownership marker for the `resolverFile` surface. Unlike the other
+    /// managers no prior values are recorded — the files are written by the
+    /// helper and are ours or nobody's — so the journal answers only "did we
+    /// write any, and have we since removed them". A host whose user has
+    /// turned resolver management *off* needs that answer to tell our file
+    /// from one they maintain by hand for the same domain, which disk
+    /// presence alone cannot. Optional because the daemon and the tests do
+    /// not ask; without one `hasManagedState()` is `false`.
+    private let journal: PlatformStateJournal?
 
     package init(
         privilegeClient: PrivilegeClient = AppleScriptPrivilegeClient(),
-        resolverDirectory: String = "/etc/resolver"
+        resolverDirectory: String = "/etc/resolver",
+        journal: PlatformStateJournal? = nil
     ) {
         self.privilegeClient = privilegeClient
         self.resolverDirectory = resolverDirectory
+        self.journal = journal
+    }
+
+    /// Whether resolver files may still be ours to remove: the journal marks
+    /// the surface applied and not yet released, or cannot be read. See
+    /// `journal`.
+    package func hasManagedState() -> Bool {
+        guard let journal else { return false }
+        return !journal.knowsSurfaceIsIdle(.resolverFile)
     }
 
     private func resolverFilePath(for domain: String) -> String {
@@ -249,6 +268,9 @@ package final class DNSManager: @unchecked Sendable {
             }
         }
 
+        // Marked before the first write, not after the last: a write that
+        // fails partway has already put files of ours on disk.
+        journal?.markApplied(surface: .resolverFile)
         for entry in enabledEntries {
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
         }
@@ -263,6 +285,10 @@ package final class DNSManager: @unchecked Sendable {
         guard !enabledEntries.isEmpty || !interceptDomains.isEmpty else { return }
 
         try removeAll(enabledEntries.map(\.domain) + interceptDomains, logger: logger)
+        // Only once every removal landed: `removeAll` throws after trying
+        // each one, and a marker released over a file still on disk would
+        // stop the next teardown from retrying it.
+        journal?.markReleased(surface: .resolverFile)
 
         logger?.log(.notice, "Removed managed split-DNS resolver files and intercept rules.", category: .system)
     }
@@ -371,6 +397,7 @@ package final class DNSManager: @unchecked Sendable {
                 try Self.validateServer(server)
             }
         }
+        journal?.markApplied(surface: .resolverFile)
         for entry in entries {
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
         }
@@ -406,6 +433,7 @@ package final class DNSManager: @unchecked Sendable {
         for domain in interceptDomains {
             try Self.validateDomain(domain)
         }
+        journal?.markApplied(surface: .resolverFile)
         for domain in interceptDomains {
             try privilegeClient.execute(.applyDNS, values: [domain, "127.0.0.1", String(config.dnsForwarderPort)])
         }
