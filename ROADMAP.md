@@ -67,9 +67,13 @@ the same control plane. Detailed plan: [`docs/design-daemon-first-control-plane.
 the menu bar covers 90% of daily tasks.
 
 - [ ] HIG audit across every view; triage violations and fix bottom-up. [UI]
-- [ ] Liquid Glass menu-bar popover: profile header, per-upstream mini-list with latency, recent events, quick toggles, diag/quit footer. [UI]
-- [ ] Floating status window: minimal, always-on-top, opt-in for screen-sharing/demos. [UI]
-- [ ] Settings redesign aligned to the config sections with inline validation feedback. [UI]
+- [~] Menu-bar popover: state line, quick toggles, active upstream plus fallback summary, recent events, open/restart/diagnostics/quit footer. Remaining: profile header (needs profiles), Liquid Glass. [UI]
+- [~] Floating window: "Keep window on top" in General floats the app window. Remaining: a minimal status-only variant. [UI]
+- [x] Settings redesign aligned to the config sections with inline validation feedback. [UI]
+- [ ] Liquid Glass on the menu-bar popover (chrome only, per HIG); the layout landed without it. [UI]
+- [ ] VoiceOver pass over the popover and the app window: labels exist everywhere, nothing has been verified with VoiceOver running. [UI]
+- [ ] Show the VPN interface name (`utun4`) on the Overview VPN row; the observer knows it, the formatter does not expose it. [UI, Obs]
+- [ ] Inline validation for fields the config boundary does not validate yet (circuit breaker window, warn threshold): add the boundary rule first, the UI picks it up. [UI]
 - [ ] Event inspector window - live, filterable, copyable, exportable (the UI equivalent of `pmctl events --follow`). [UI, Obs]
 - [ ] Upstream detail sheet - latency sparkline, recent auth outcomes, test-now, temporary-disable. [UI, Obs]
 - [ ] Accessibility pass - VoiceOver, Dynamic Type, high-contrast. [UI]

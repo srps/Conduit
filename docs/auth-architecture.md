@@ -242,7 +242,7 @@ The proxy module card on the dashboard shows an auth mode badge:
 
 ### Setup Wizard
 
-Branches by auth mode:
+Presented as a sheet on the app window at launch when the auth mode is NTLMv2 and no credentials are saved, and re-runnable from **Authentication > Run Setup…**. Branches by auth mode:
 - **System Negotiated (default)**: No password prompt. Kerberos info. Optional NTLMv2 fallback in a disclosure group. VPN DNS auto-detection step.
 - **NTLMv2**: Password entry with confirmation. DNS server entry.
 

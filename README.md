@@ -116,16 +116,14 @@ Every change is measured against these axes. A proposed feature either lands und
 
 ### UI
 
-- Module cards dashboard: independent start/stop for HTTP Proxy and DNS Forwarder with live metrics and inline error display when a module fails (multi-line, copyable)
-- Per-module error tracking: proxy and DNS errors appear on their respective cards; non-module errors show in a dismissible global banner
-- SwiftUI desktop app with settings, logs, and setup wizard
-- Translucent material window backgrounds
-- Compact active connections summary (count + top 3 destinations) on the dashboard; full scrollable list available separately
-- Settings with tabbed navigation (Proxy, Auth, Network, DNS, Env, Advanced)
-- Filterable log view with category chips (PAC, Proxy, Auth, Network, System), level picker, text search, and copy buttons for LLM analysis
-- Menu bar extra
-- Floating window support
-- Global keyboard shortcut support
+- Menu bar icon whose glyph carries the state (stopped, direct, proxied, needs attention) and a non-scrolling popover with the state line, switches for the proxy, DNS forwarder and tunnels, upstream traffic lights, an activity line, the last three events, and Open / Restart / Copy Diagnostics / Quit
+- One app window with a sidebar: Overview (module rows with switches, route, telemetry, upstream health), Connections, Events, and one Configure section per subsystem (Proxy, Upstreams & Routing, Authentication, DNS, Tunnels, Shell Environment, General, Advanced), each pairing the subsystem's live state with its settings
+- Per-module error tracking: proxy, DNS and tunnel errors appear on their Overview rows; non-module errors show in a dismissible banner
+- Inline validation on Configure sections, using the same validators as the config boundary
+- Filterable event list with category chips (PAC, Proxy, Auth, Network, System), level picker, text search, and copy buttons for LLM analysis
+- First-run setup sheet presented at launch when NTLM credentials are missing; re-runnable from Authentication
+- Keep-window-on-top option for demos and screen sharing
+- Optional global shortcut (⌃⌥⌘P) to toggle the proxy from any app
 - Notifications when run as an app bundle
 - Config import/export
 - Config files carry a `schemaVersion`; older unversioned configs are normalized and rewritten automatically on load
@@ -270,7 +268,7 @@ sudo ./install-helper.sh
 
 The install script finds the helper binary from the installed app bundle in `/Applications`, the local bundle, or the build directory (in that order). It installs a LaunchDaemon that runs as root. The app communicates with it over a Unix domain socket at `/var/run/io.github.srps.Conduit.Helper.sock`. After installation, proxy enable/disable, DNS changes, and the port 53 relay happen without any further admin prompts.
 
-You can also install/uninstall the helper from within the app: **Settings > Advanced > Privileged Helper**.
+You can also install/uninstall the helper from within the app: **Conduit > General > Privileged Helper**.
 
 **Important**: after updating the app, reinstall the helper to pick up new helper commands:
 
