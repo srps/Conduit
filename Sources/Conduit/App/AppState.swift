@@ -111,6 +111,11 @@ final class AppState: ObservableObject {
     /// clear now, not at the next restart (#13). Lifecycle code never writes
     /// these flags, so unlike its sibling nothing has to absorb its own edits.
     private var lastReconciledPlatformConfig: PlatformIntegrationConfig
+    /// The reconcile pass in flight, awaited by the next one so saves apply
+    /// in order — see `reconcileRuntimeConfig`. `reconcileGeneration` lets
+    /// the last pass in a chain tell it is last and release the handle.
+    private var reconcileTask: Task<Void, Never>?
+    private var reconcileGeneration = 0
     /// VPN-gating policy for split-DNS entry files (single source of truth
     /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
     /// every resolver-file apply path consults `entriesWanted`.
@@ -546,7 +551,16 @@ final class AppState: ObservableObject {
         lastReconciledPlatformConfig = newPlatform
         let diff = ConfigDiff(old: old, new: new)
 
-        Task { @MainActor in
+        // Passes are serialised, not merely ordered. `applyConfigChange`
+        // suspends, and a second save in that window would otherwise run its
+        // actions first and let the first, on resuming, put a surface back to
+        // what its by-then-stale flags said. Each pass waits for the one
+        // before it, so the machine ends in the state of the last save.
+        let previous = reconcileTask
+        reconcileGeneration += 1
+        let generation = reconcileGeneration
+        reconcileTask = Task { @MainActor in
+            await previous?.value
             if old != new {
                 await orchestrator.applyConfigChange(new, from: old)
             }
@@ -618,7 +632,18 @@ final class AppState: ObservableObject {
             }
 
             for action in platformActions {
-                perform(action, config: new, platform: newPlatform, previousConfig: old)
+                // Event first, side effect second: a flag flip is a config
+                // decision, and log lines are derived from events, not the
+                // other way round.
+                orchestrator.eventLog.append(
+                    RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
+                )
+                perform(action, config: new, platform: newPlatform)
+            }
+            if reconcileGeneration == generation {
+                // Last in the chain: drop the handle so the chain of awaited
+                // predecessors it retains can go with it.
+                reconcileTask = nil
             }
         }
     }
@@ -629,8 +654,7 @@ final class AppState: ObservableObject {
     private func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
-        platform: PlatformIntegrationConfig,
-        previousConfig: ProxyConfig
+        platform: PlatformIntegrationConfig
     ) {
         switch action {
         case .applySystemProxy:
@@ -645,14 +669,14 @@ final class AppState: ObservableObject {
                 logStore.log(.warning, "Could not apply system proxy settings after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .clearSystemProxy:
-            if systemConduit.isCleared() {
-                logStore.log(.debug, "System proxy already cleared, skipped.", category: .system)
-            } else {
-                do {
-                    try systemConduit.clear(logger: logStore)
-                } catch {
-                    logStore.log(.warning, "Could not clear system proxy after the setting changed: \(error.localizedDescription)", category: .system)
-                }
+            // No `isCleared()` gate, unlike `stopProxy`: "every proxy is
+            // disabled" is not "nothing to restore" when the journal holds a
+            // corporate proxy that something else switched off after we
+            // applied. `clear` decides for itself from the journal.
+            do {
+                try systemConduit.clear(logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not clear system proxy after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .applyEnvironment:
             do {
@@ -683,10 +707,17 @@ final class AppState: ObservableObject {
                 logStore.log(.warning, "Could not apply intercept resolver files after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .clearResolvers:
-            // Both configs: a save can change the DNS entries and turn the
-            // integration off at once, and the files on disk were written
-            // from the previous one.
-            clearResolverFiles(for: [previousConfig, config])
+            // The current config only: the journal names every domain we
+            // wrote, so a save that also edited the DNS entries loses nothing.
+            if dnsManager.isCleared(config: config) {
+                logStore.log(.debug, "DNS resolvers already cleared, skipped.", category: .system)
+            } else {
+                do {
+                    try dnsManager.clear(config: config, logger: logStore)
+                } catch {
+                    logStore.log(.warning, "Could not clear DNS resolvers after the setting changed: \(error.localizedDescription)", category: .system)
+                }
+            }
         case .applySystemDNS:
             // The same three steps as `startDNS`, in the same order: the
             // prior state is captured before the interfaces are pointed at
@@ -714,19 +745,6 @@ final class AppState: ObservableObject {
             }
         case .setLaunchAtLogin(let enabled):
             loginItemManager.setEnabled(enabled, logger: logStore)
-        }
-    }
-
-    private func clearResolverFiles(for configs: [ProxyConfig]) {
-        var seen: [ProxyConfig] = []
-        for candidate in configs where !seen.contains(candidate) {
-            seen.append(candidate)
-            if dnsManager.isCleared(config: candidate) { continue }
-            do {
-                try dnsManager.clear(config: candidate, logger: logStore)
-            } catch {
-                logStore.log(.warning, "Could not clear DNS resolvers after the setting changed: \(error.localizedDescription)", category: .system)
-            }
         }
     }
 
@@ -904,9 +922,12 @@ final class AppState: ObservableObject {
                 await startDNS()
             }
 
-            // Launch at login is not applied here: it follows its switch
-            // through the platform reconcile in `saveConfig()`, which is what
-            // the toggle promises and does not wait for a proxy start.
+            // The switch itself is handled by the platform reconcile in
+            // `saveConfig()`. This repairs a registration lost outside the
+            // app — removed in System Settings, reset by an upgrade — for a
+            // flag that is already on; `setEnabled` is idempotent.
+            loginItemManager.setEnabled(platformConfig.launchAtLogin, logger: logStore)
+
             saveConfig()
             if postNotification {
                 notificationManager.post(title: "Proxy Enabled", body: runtime.runtimeStatus.activeUpstream ?? "Local proxy is running.")
