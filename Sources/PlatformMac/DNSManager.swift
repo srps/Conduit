@@ -81,12 +81,20 @@ package final class DNSManager: @unchecked Sendable {
         self.journal = journal
     }
 
-    /// Whether resolver files may still be ours to remove: the journal marks
-    /// the surface applied and not yet released, or cannot be read. See
-    /// `journal`.
+    /// Whether resolver files may still be ours to remove: the journal names
+    /// domains, cannot be read, or has never vouched for this surface at all.
+    ///
+    /// The last case is what an upgrade from a release without per-domain
+    /// records looks like, and also what a start finds when the files it
+    /// would write are already on disk: the `isApplied` gate skips the write
+    /// and with it the record. Only a teardown that ran to completion — the
+    /// `released` marker — can say the surface holds nothing of ours. See
+    /// `journal` and `clearRecorded`.
     package func hasManagedState() -> Bool {
         guard let journal else { return false }
-        return !journal.knowsSurfaceIsIdle(.resolverFile)
+        return journal.fileState == .unreadable
+            || journal.hasRecords(for: .resolverFile)
+            || journal.ownership(of: .resolverFile) != .released
     }
 
     /// Records one domain as ours, immediately before its own write. Not
@@ -114,7 +122,11 @@ package final class DNSManager: @unchecked Sendable {
     package func clearRecorded(configs: [ProxyConfig], logger: (any LogSink)?) throws {
         guard let journal else { return }
         if journal.fileState == .unreadable {
-            adoptFilesWeWrote(configs: configs, logger: logger)
+            adoptFilesWeWrote(configs: configs, because: "the resolver journal is unreadable", logger: logger)
+        } else if journal.ownership(of: .resolverFile) == .unknown, !journal.hasRecords(for: .resolverFile) {
+            // Never written to and never released: a pre-record install, or
+            // files a start found already in place and did not rewrite.
+            adoptFilesWeWrote(configs: configs, because: "the resolver journal has no record of this surface", logger: logger)
         }
         let recorded = journal.scopes(for: .resolverFile)
         guard !recorded.isEmpty else { return }
@@ -124,10 +136,11 @@ package final class DNSManager: @unchecked Sendable {
 
     /// Rebuilds the journal's list of our files from the files themselves.
     ///
-    /// An unreadable journal reads as empty, and "empty" here would mean
-    /// "nothing to remove" — the one answer that strands. But removing every
-    /// configured domain instead would delete a file the user maintains by
-    /// hand under a name we also configure, with no evidence it was ours.
+    /// A journal that cannot vouch for the surface — unreadable, or never
+    /// written to — reads as empty, and "empty" here would mean "nothing to
+    /// remove": the one answer that strands. But removing every configured
+    /// domain instead would delete a file the user maintains by hand under a
+    /// name we also configure, with no evidence it was ours.
     /// The file carries the evidence: this app writes exactly `nameserver`
     /// lines for the configured servers (plus a `port` line for an intercept),
     /// so a file with those contents is ours and one with any other contents
@@ -135,7 +148,7 @@ package final class DNSManager: @unchecked Sendable {
     /// rewrites the journal as a readable one, so a removal that fails below
     /// keeps its record and the next teardown retries it. Nothing matching
     /// settles the surface as released rather than leave it forever suspect.
-    private func adoptFilesWeWrote(configs: [ProxyConfig], logger: (any LogSink)?) {
+    private func adoptFilesWeWrote(configs: [ProxyConfig], because reason: String, logger: (any LogSink)?) {
         guard let journal else { return }
         var adopted: [String] = []
         var foreign: [String] = []
@@ -153,7 +166,7 @@ package final class DNSManager: @unchecked Sendable {
         }
         logger?.log(
             .warning,
-            "Resolver journal unreadable; recovered ownership from the files themselves: \(adopted.count) written by this app"
+            "Recovered resolver ownership from the files themselves because \(reason): \(adopted.count) written by this app"
                 + (foreign.isEmpty ? "." : ", \(foreign.count) with other contents left alone (\(foreign.sorted().joined(separator: ", "))).") ,
             category: .system
         )

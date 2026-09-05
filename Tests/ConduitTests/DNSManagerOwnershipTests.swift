@@ -67,7 +67,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
 
     func testHasManagedStateFollowsApplyAndClear() throws {
         let manager = makeManager()
-        XCTAssertFalse(manager.hasManagedState(), "nothing written yet")
+        XCTAssertTrue(manager.hasManagedState(), "nothing has vouched for the surface yet, so it may hold ours")
 
         try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
         XCTAssertTrue(manager.hasManagedState())
@@ -266,6 +266,27 @@ final class DNSManagerOwnershipTests: XCTestCase {
 
         XCTAssertEqual(removedDomains(), ["corp.example", "corp.example"], "retried from the rebuilt journal")
         XCTAssertFalse(manager.hasManagedState())
+    }
+
+    /// An install upgraded from a release without per-domain records has a
+    /// readable journal that has never vouched for this surface, and files
+    /// that release wrote. The same is true after a start that found its
+    /// files already on disk and did not rewrite them. Both are judged by
+    /// contents, and the surface is settled afterwards.
+    func testReadableJournalWithNoRecordOfTheSurfaceRecoversOwnershipFromFiles() throws {
+        // A journal an older release left: readable, other surfaces present,
+        // nothing about resolver files.
+        journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["webEnabled": "0"])
+        try writeResolverFile("corp.example", "nameserver 10.1.1.1")
+        try writeResolverFile("internal.example", "nameserver 192.168.1.1")
+        let manager = makeManager()
+
+        XCTAssertTrue(manager.hasManagedState(), "never released, so it may hold ours")
+        try manager.clearRecorded(configs: [makeTwoDomainConfig()], logger: nil)
+
+        XCTAssertEqual(removedDomains(), ["corp.example"], "the file with foreign contents is not ours")
+        XCTAssertFalse(manager.hasManagedState(), "settled as released")
+        XCTAssertTrue(journal.hasRecords(for: .systemProxy), "other surfaces untouched")
     }
 
     /// Without a journal there is no ownership to report, and the daemon and
