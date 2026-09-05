@@ -99,10 +99,20 @@ struct PlatformIntegrationReconciler {
             break
         }
 
-        if old.launchAtLogin != new.launchAtLogin {
-            actions.append(.setLaunchAtLogin(new.launchAtLogin))
-        }
-
         return actions
+    }
+
+    /// Actions that depend on no runtime state and must not wait for the
+    /// reconcile pass: the pass is queued behind `applyConfigChange`, and a
+    /// quit right after the save would lose it. The other surfaces survive
+    /// that — termination cleanup clears whatever is journaled as ours — but
+    /// a login item has no teardown, so a persisted "off" with the
+    /// registration still in place would launch Conduit indefinitely.
+    static func immediateActions(
+        old: PlatformIntegrationConfig,
+        new: PlatformIntegrationConfig
+    ) -> [Action] {
+        guard old.launchAtLogin != new.launchAtLogin else { return [] }
+        return [.setLaunchAtLogin(new.launchAtLogin)]
     }
 }

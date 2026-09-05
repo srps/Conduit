@@ -124,10 +124,15 @@ final class PlatformIntegrationReconcilerTests: XCTestCase {
 
     // MARK: - Launch at login
 
-    func testLaunchAtLoginAppliesOnChangeRegardlessOfRuntime() {
+    /// Launch at login needs no runtime state and must not wait for the
+    /// queued pass, which a quit right after the save would lose. It is an
+    /// immediate action and never a queued one.
+    func testLaunchAtLoginIsImmediateAndNeverQueued() {
         let on = config { $0.launchAtLogin = true }
-        XCTAssertEqual(actions(from: config(), to: on, proxyIsUp: false, dnsIsUp: false), [.setLaunchAtLogin(true)])
-        XCTAssertEqual(actions(from: on, to: config(), proxyIsUp: false, dnsIsUp: false), [.setLaunchAtLogin(false)])
+        XCTAssertEqual(PlatformIntegrationReconciler.immediateActions(old: config(), new: on), [.setLaunchAtLogin(true)])
+        XCTAssertEqual(PlatformIntegrationReconciler.immediateActions(old: on, new: config()), [.setLaunchAtLogin(false)])
+        XCTAssertEqual(PlatformIntegrationReconciler.immediateActions(old: on, new: on), [])
+        XCTAssertEqual(actions(from: config(), to: on), [], "not in the queued table")
     }
 
     // MARK: - Combined
@@ -142,11 +147,10 @@ final class PlatformIntegrationReconcilerTests: XCTestCase {
         let after = config {
             $0.manageEnvironmentVariables = true
             $0.manageSystemDNS = true
-            $0.launchAtLogin = true
         }
         XCTAssertEqual(
             actions(from: before, to: after),
-            [.clearSystemProxy, .applyEnvironment, .clearResolvers, .applySystemDNS, .setLaunchAtLogin(true)]
+            [.clearSystemProxy, .applyEnvironment, .clearResolvers, .applySystemDNS]
         )
     }
 }
