@@ -108,39 +108,72 @@ package final class DNSManager: @unchecked Sendable {
     /// the user's, and only the journal can tell the two apart. `clear` is the
     /// switch-on teardown and removes the configured domains as well, because
     /// there a lost record must not strand a file. No-op without a journal.
-    /// `configs` matters only for the fallback below; pass every config
-    /// whose domains may be on disk — the caller's previous one too, when a
-    /// single save edited the entries and turned the switch off together.
+    /// `configs` matters only when the journal cannot be read; pass every
+    /// config whose domains may be on disk — the caller's previous one too,
+    /// when a single save edited the entries and turned the switch off.
     package func clearRecorded(configs: [ProxyConfig], logger: (any LogSink)?) throws {
         guard let journal else { return }
-        // An unreadable journal reads as empty, and "empty" here would mean
-        // "nothing to remove" — the one answer that strands. Same fallback
-        // as the other surfaces: the configured domains go, as `clear` would
-        // have them go, because over-clearing is recoverable and stranding
-        // is not.
-        guard journal.fileState != .unreadable else {
-            logger?.log(
-                .warning,
-                "Resolver journal unreadable; removing the configured resolver files rather than leave any of ours behind.",
-                category: .system
-            )
-            var firstError: Error?
-            var seen: [ProxyConfig] = []
-            for config in configs where !seen.contains(config) {
-                seen.append(config)
-                do {
-                    try clear(config: config, logger: logger)
-                } catch {
-                    firstError = firstError ?? error
-                }
-            }
-            if let firstError { throw firstError }
-            return
+        if journal.fileState == .unreadable {
+            adoptFilesWeWrote(configs: configs, logger: logger)
         }
         let recorded = journal.scopes(for: .resolverFile)
         guard !recorded.isEmpty else { return }
         try removeAll(recorded, logger: logger)
         logger?.log(.notice, "Removed \(recorded.count) resolver file(s) this app had written.", category: .system)
+    }
+
+    /// Rebuilds the journal's list of our files from the files themselves.
+    ///
+    /// An unreadable journal reads as empty, and "empty" here would mean
+    /// "nothing to remove" — the one answer that strands. But removing every
+    /// configured domain instead would delete a file the user maintains by
+    /// hand under a name we also configure, with no evidence it was ours.
+    /// The file carries the evidence: this app writes exactly `nameserver`
+    /// lines for the configured servers (plus a `port` line for an intercept),
+    /// so a file with those contents is ours and one with any other contents
+    /// is positively somebody else's. Matching files are recorded, which also
+    /// rewrites the journal as a readable one, so a removal that fails below
+    /// keeps its record and the next teardown retries it. Nothing matching
+    /// settles the surface as released rather than leave it forever suspect.
+    private func adoptFilesWeWrote(configs: [ProxyConfig], logger: (any LogSink)?) {
+        guard let journal else { return }
+        var adopted: [String] = []
+        var foreign: [String] = []
+        for (domain, expected) in expectedFileContents(configs: configs) {
+            guard let actual = try? String(contentsOfFile: resolverFilePath(for: domain), encoding: .utf8) else { continue }
+            if expected.contains(actual.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                journal.recordPrior(surface: .resolverFile, scope: domain, value: nil)
+                adopted.append(domain)
+            } else {
+                foreign.append(domain)
+            }
+        }
+        if adopted.isEmpty {
+            journal.markReleased(surface: .resolverFile)
+        }
+        logger?.log(
+            .warning,
+            "Resolver journal unreadable; recovered ownership from the files themselves: \(adopted.count) written by this app"
+                + (foreign.isEmpty ? "." : ", \(foreign.count) with other contents left alone (\(foreign.sorted().joined(separator: ", "))).") ,
+            category: .system
+        )
+    }
+
+    /// What this app would have written for each configured domain, across
+    /// every config given. A domain configured differently in two configs
+    /// matches either rendering.
+    private func expectedFileContents(configs: [ProxyConfig]) -> [String: Set<String>] {
+        var expected: [String: Set<String>] = [:]
+        for config in configs {
+            for entry in config.dnsEntries where entry.enabled && !entry.servers.isEmpty {
+                expected[entry.domain, default: []]
+                    .insert(entry.servers.map { "nameserver \($0)" }.joined(separator: "\n"))
+            }
+            for domain in getInterceptDomains(from: config, forCleanup: true) {
+                expected[domain, default: []].insert("nameserver 127.0.0.1\nport \(config.dnsForwarderPort)")
+            }
+        }
+        return expected
     }
 
     private func resolverFilePath(for domain: String) -> String {
