@@ -5,7 +5,10 @@ import ServiceManagement
 
 package final class LoginItemManager {
     package init() {}
-    package func setEnabled(_ enabled: Bool, logger: (any LogSink)?) {
+    /// Returns whether the registration changed, so a caller that reconciles
+    /// the switch can retry a failed change on the next save.
+    @discardableResult
+    package func setEnabled(_ enabled: Bool, logger: (any LogSink)?) -> Bool {
         do {
             if enabled {
                 try SMAppService.mainApp.register()
@@ -14,8 +17,10 @@ package final class LoginItemManager {
                 try SMAppService.mainApp.unregister()
                 logger?.log(.notice, "Launch at login disabled.", category: .system)
             }
+            return true
         } catch {
             logger?.log(.warning, "Could not change launch-at-login status: \(error.localizedDescription)", category: .system)
+            return false
         }
     }
 }
