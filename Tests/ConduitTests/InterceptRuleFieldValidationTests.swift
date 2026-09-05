@@ -34,7 +34,7 @@ final class InterceptRuleFieldValidationTests: XCTestCase {
             "",
         ] {
             let rule = DNSInterceptRule(pattern: pattern)
-            let fieldRejects = SettingsView.interceptPatternProblem(rule) != nil
+            let fieldRejects = DNSSettingsView.interceptPatternProblem(rule) != nil
             XCTAssertEqual(
                 fieldRejects, boundaryRejects(rule),
                 "the field and the boundary disagree on '\(pattern)'"
@@ -46,18 +46,18 @@ final class InterceptRuleFieldValidationTests: XCTestCase {
     /// as an error. The field validates the derived resolver domain, same as
     /// the boundary.
     func testWildcardPatternsAreNotFlagged() {
-        XCTAssertNil(SettingsView.interceptPatternProblem(DNSInterceptRule(pattern: "*.cursor.sh")))
+        XCTAssertNil(DNSSettingsView.interceptPatternProblem(DNSInterceptRule(pattern: "*.cursor.sh")))
     }
 
     /// A row the user has only just added is not yet a mistake.
     func testEmptyPatternIsNotFlagged() {
-        XCTAssertNil(SettingsView.interceptPatternProblem(DNSInterceptRule(pattern: "")))
+        XCTAssertNil(DNSSettingsView.interceptPatternProblem(DNSInterceptRule(pattern: "")))
     }
 
     /// The point of a per-reason error type: the row can say which character to
     /// change rather than "invalid".
     func testTheReasonIsSpecificEnoughToShow() {
-        let problem = SettingsView.interceptPatternProblem(
+        let problem = DNSSettingsView.interceptPatternProblem(
             DNSInterceptRule(pattern: "*.foo bar.example")
         )
         XCTAssertEqual(problem, .invalidCharacter(" ", label: "foo bar"))
@@ -72,12 +72,12 @@ final class InterceptRuleFieldValidationTests: XCTestCase {
         config.transparentProxyEnabled = false
         config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.foo bar.example")]
         XCTAssertTrue(boundaryRejects(config.dnsInterceptRules[0]))
-        XCTAssertTrue(SettingsView.interceptRulesAreShown(in: config))
+        XCTAssertTrue(DNSSettingsView.interceptRulesAreShown(in: config))
 
         config.dnsInterceptRules = []
-        XCTAssertFalse(SettingsView.interceptRulesAreShown(in: config))
+        XCTAssertFalse(DNSSettingsView.interceptRulesAreShown(in: config))
         config.transparentProxyEnabled = true
-        XCTAssertTrue(SettingsView.interceptRulesAreShown(in: config), "the Add menu lives here")
+        XCTAssertTrue(DNSSettingsView.interceptRulesAreShown(in: config), "the Add menu lives here")
     }
 
     /// The intercept-IP field flags exactly when the boundary does, including
@@ -94,7 +94,7 @@ final class InterceptRuleFieldValidationTests: XCTestCase {
                     return false
                 }
                 XCTAssertEqual(
-                    SettingsView.transparentProxyIPProblem(config) != nil, boundary,
+                    DNSSettingsView.transparentProxyIPProblem(config) != nil, boundary,
                     "field and boundary disagree on '\(ip)' enabled=\(enabled)"
                 )
             }
