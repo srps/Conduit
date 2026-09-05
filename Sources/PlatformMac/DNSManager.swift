@@ -82,10 +82,9 @@ package final class DNSManager: @unchecked Sendable {
     }
 
     /// Whether resolver files may still be ours to remove: the journal names
-    /// domains, or cannot be read. A journal that has simply never seen this
-    /// surface answers `false`: on a fresh install that is the truth, and a
-    /// stop or quit with the switch off must not go looking. See
-    /// `clearRecorded` for the one moment that may.
+    /// domains, or cannot be read. A journal that has never seen this surface
+    /// answers `false`: `recoverLegacyOwnership` settles that state once, at
+    /// launch, and every writer records from then on.
     package func hasManagedState() -> Bool {
         guard let journal else { return false }
         return journal.fileState == .unreadable || journal.hasRecords(for: .resolverFile)
@@ -111,24 +110,19 @@ package final class DNSManager: @unchecked Sendable {
     /// switch-on teardown and removes the configured domains as well, because
     /// there a lost record must not strand a file. No-op without a journal.
     ///
-    /// `configs` feeds the scan in `adoptFilesWeWrote`; pass every config whose
-    /// domains may be on disk — the caller's previous one too, when a single
-    /// save edited the entries and turned the switch off. The scan runs for an
-    /// unreadable journal always, and for a journal that has never seen this
-    /// surface only when `surfaceWasManaged`: the switch was on until this
-    /// call, so a start may have found its files already in place and skipped
-    /// the write and the record with it, or an older release without records
-    /// wrote them. A moment earlier the switch-on teardown would have removed
-    /// every configured domain outright, so adopting the matching ones is the
-    /// narrower act. With the switch already off — a stop or a quit — an
-    /// unseen surface is left alone: a user's own file can carry the same
-    /// `nameserver` lines, and contents alone are not evidence of ours.
-    package func clearRecorded(configs: [ProxyConfig], surfaceWasManaged: Bool, logger: (any LogSink)?) throws {
+    /// `configs` matters only when the journal cannot be read, where the
+    /// files themselves are scanned instead (`adoptFilesWeWrote`); pass every
+    /// config whose domains may be on disk — the caller's previous one too,
+    /// when a single save edited the entries and turned the switch off. A
+    /// readable journal is trusted as it stands, including one that has
+    /// never seen this surface: a user's own file can carry the same
+    /// `nameserver` line this app would write, so contents alone are not
+    /// evidence of ours, and the switch having been on is not either — it can
+    /// be flipped with every runtime stopped and no writer run.
+    package func clearRecorded(configs: [ProxyConfig], logger: (any LogSink)?) throws {
         guard let journal else { return }
         if journal.fileState == .unreadable {
             adoptFilesWeWrote(configs: configs, because: "the resolver journal is unreadable", logger: logger)
-        } else if surfaceWasManaged, journal.ownership(of: .resolverFile) == .unknown, !journal.hasRecords(for: .resolverFile) {
-            adoptFilesWeWrote(configs: configs, because: "the resolver journal has no record of this surface", logger: logger)
         }
         let recorded = journal.scopes(for: .resolverFile)
         guard !recorded.isEmpty else { return }
@@ -136,18 +130,73 @@ package final class DNSManager: @unchecked Sendable {
         logger?.log(.notice, "Removed \(recorded.count) resolver file(s) this app had written.", category: .system)
     }
 
+    /// Records the entry files a start found already in place.
+    ///
+    /// The hosts gate `apply` on `isApplied`, and a skipped write used to
+    /// skip the record with it, so a start after a crash — or after an
+    /// installer replaced the app — left files this app wrote with nothing
+    /// naming them. `isApplied` has already checked that every entry file
+    /// holds exactly what this app writes. With the switch on, the configured
+    /// domains are this app's to manage — the switch-on teardown removes them
+    /// regardless — so recording them here only changes what a later
+    /// switch-off does, and for the better.
+    package func adoptAppliedFiles(config: ProxyConfig, vpnConnected: Bool) {
+        guard journal != nil else { return }
+        for entry in getEntries(from: config, vpnConnected: vpnConnected)
+        where FileManager.default.fileExists(atPath: resolverFilePath(for: entry.domain)) {
+            recordManaged(entry.domain)
+        }
+    }
+
+    /// One-time recovery for files written by a release without per-domain
+    /// records, run at launch. Older releases turned resolver management off
+    /// without removing their files — the bug this journal surface exists to
+    /// fix — so an upgrade can carry them under a switch that is already off,
+    /// where no start, stop or quit would look for them.
+    ///
+    /// Runs only while the journal has never seen this surface, and settles
+    /// it either way so it never runs again. What separates an upgrade from a
+    /// fresh install is `configFilePredatesLaunch`: a fresh install has no
+    /// config file yet and therefore nothing configured that an older release
+    /// could have written, so it is settled without a scan and a user's own
+    /// resolver files are never judged. An upgrade scans the configured
+    /// domains by contents, adopts the files this app writes, and — with the
+    /// switch off — removes them now rather than at a stop that may never
+    /// come. With the switch on they stay recorded for the start path.
+    package func recoverLegacyOwnership(
+        configs: [ProxyConfig],
+        configFilePredatesLaunch: Bool,
+        resolversManaged: Bool,
+        logger: (any LogSink)?
+    ) {
+        guard let journal, journal.fileState != .unreadable,
+              journal.ownership(of: .resolverFile) == .unknown,
+              !journal.hasRecords(for: .resolverFile) else { return }
+        guard configFilePredatesLaunch else {
+            journal.markReleased(surface: .resolverFile)
+            return
+        }
+        adoptFilesWeWrote(configs: configs, because: "this is the first launch of a release that records resolver files", logger: logger)
+        guard !resolversManaged, journal.hasRecords(for: .resolverFile) else { return }
+        do {
+            try clearRecorded(configs: configs, logger: logger)
+        } catch {
+            logger?.log(.warning, "Could not remove the resolver files an earlier release left: \(error.localizedDescription)", category: .system)
+        }
+    }
+
     /// Rebuilds the journal's list of our files from the files themselves.
     ///
-    /// A journal that cannot vouch for the surface — unreadable, or never
-    /// written to — reads as empty, and "empty" here would mean "nothing to
-    /// remove": the one answer that strands. But removing every configured
-    /// domain instead would delete a file the user maintains by hand under a
-    /// name we also configure, with no evidence it was ours.
+    /// A journal that cannot vouch for the surface — unreadable, or written
+    /// by a release without records — reads as empty, and "empty" here would
+    /// mean "nothing to remove": the one answer that strands. But removing
+    /// every configured domain instead would delete a file the user maintains
+    /// by hand under a name we also configure, with no evidence it was ours.
     /// The file carries the best evidence available: this app writes exactly
     /// `nameserver` lines for the configured servers (plus a `port` line for
     /// an intercept), so a file with any other contents is positively somebody
     /// else's and is left alone, while a match is taken as ours — which is why
-    /// the callers limit when this runs at all, see `clearRecorded`. Matching
+    /// the callers limit when this runs at all. Matching
     /// files are recorded, which also rewrites the journal as a readable one,
     /// so a removal that fails below keeps its record and the next teardown
     /// retries it. Nothing matching settles the surface as released rather
