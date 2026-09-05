@@ -122,7 +122,7 @@ package final class DNSManager: @unchecked Sendable {
     package func clearRecorded(configs: [ProxyConfig], logger: (any LogSink)?) throws {
         guard let journal else { return }
         if journal.fileState == .unreadable {
-            adoptFilesWeWrote(configs: configs, because: "the resolver journal is unreadable", logger: logger)
+            adoptFilesWeWrote(configs: configs, unambiguousOnly: false, because: "the resolver journal is unreadable", logger: logger)
         }
         let recorded = journal.scopes(for: .resolverFile)
         guard !recorded.isEmpty else { return }
@@ -159,10 +159,19 @@ package final class DNSManager: @unchecked Sendable {
     /// fresh install is `configFilePredatesLaunch`: a fresh install has no
     /// config file yet and therefore nothing configured that an older release
     /// could have written, so it is settled without a scan and a user's own
-    /// resolver files are never judged. An upgrade scans the configured
-    /// domains by contents, adopts the files this app writes, and — with the
-    /// switch off — removes them now rather than at a stop that may never
-    /// come. With the switch on they stay recorded for the start path.
+    /// resolver files are never judged.
+    ///
+    /// An upgrade scans the configured domains, but adopts only the files
+    /// whose contents no one but this app writes: an intercept file, which
+    /// names this app's own loopback forwarder port. An entry file holds
+    /// `nameserver` lines for the corporate servers, which a user can and do
+    /// write by hand, so with no record there is no evidence either way and
+    /// the file is left alone — an entry file also keeps resolving without
+    /// this app, where an intercept file left behind blackholes its domain.
+    /// With the switch on, the start path records the entry files it finds
+    /// in place (`adoptAppliedFiles`) and manages them from then on. With the
+    /// switch off the adopted intercept files are removed now, rather than at
+    /// a stop that may never come.
     package func recoverLegacyOwnership(
         configs: [ProxyConfig],
         configFilePredatesLaunch: Bool,
@@ -176,7 +185,12 @@ package final class DNSManager: @unchecked Sendable {
             journal.markReleased(surface: .resolverFile)
             return
         }
-        adoptFilesWeWrote(configs: configs, because: "this is the first launch of a release that records resolver files", logger: logger)
+        adoptFilesWeWrote(
+            configs: configs,
+            unambiguousOnly: true,
+            because: "this is the first launch of a release that records resolver files",
+            logger: logger
+        )
         guard !resolversManaged, journal.hasRecords(for: .resolverFile) else { return }
         do {
             try clearRecorded(configs: configs, logger: logger)
@@ -196,16 +210,23 @@ package final class DNSManager: @unchecked Sendable {
     /// `nameserver` lines for the configured servers (plus a `port` line for
     /// an intercept), so a file with any other contents is positively somebody
     /// else's and is left alone, while a match is taken as ours — which is why
-    /// the callers limit when this runs at all. Matching
+    /// the callers limit when this runs at all, and why `unambiguousOnly`
+    /// restricts the match to intercept files, whose contents name this app's
+    /// own forwarder port and which nobody writes by hand. Matching
     /// files are recorded, which also rewrites the journal as a readable one,
     /// so a removal that fails below keeps its record and the next teardown
     /// retries it. Nothing matching settles the surface as released rather
     /// than leave it forever suspect.
-    private func adoptFilesWeWrote(configs: [ProxyConfig], because reason: String, logger: (any LogSink)?) {
+    private func adoptFilesWeWrote(
+        configs: [ProxyConfig],
+        unambiguousOnly: Bool,
+        because reason: String,
+        logger: (any LogSink)?
+    ) {
         guard let journal else { return }
         var adopted: [String] = []
         var foreign: [String] = []
-        for (domain, expected) in expectedFileContents(configs: configs) {
+        for (domain, expected) in expectedFileContents(configs: configs, includeEntries: !unambiguousOnly) {
             guard let actual = try? String(contentsOfFile: resolverFilePath(for: domain), encoding: .utf8) else { continue }
             if expected.contains(actual.trimmingCharacters(in: .whitespacesAndNewlines)) {
                 journal.recordPrior(surface: .resolverFile, scope: domain, value: nil)
@@ -228,10 +249,10 @@ package final class DNSManager: @unchecked Sendable {
     /// What this app would have written for each configured domain, across
     /// every config given. A domain configured differently in two configs
     /// matches either rendering.
-    private func expectedFileContents(configs: [ProxyConfig]) -> [String: Set<String>] {
+    private func expectedFileContents(configs: [ProxyConfig], includeEntries: Bool) -> [String: Set<String>] {
         var expected: [String: Set<String>] = [:]
         for config in configs {
-            for entry in config.dnsEntries where entry.enabled && !entry.servers.isEmpty {
+            for entry in config.dnsEntries where includeEntries && entry.enabled && !entry.servers.isEmpty {
                 expected[entry.domain, default: []]
                     .insert(entry.servers.map { "nameserver \($0)" }.joined(separator: "\n"))
             }
