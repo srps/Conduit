@@ -558,7 +558,9 @@ final class AppState: ObservableObject {
             orchestrator.eventLog.append(
                 RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
             )
-            perform(action, config: new, platform: newPlatform)
+            if !perform(action, config: new, platform: newPlatform) {
+                leaveUnreconciled(action, from: oldPlatform, ifStill: newPlatform)
+            }
         }
 
         // Passes are serialised, not merely ordered. `applyConfigChange`
@@ -648,7 +650,9 @@ final class AppState: ObservableObject {
                 orchestrator.eventLog.append(
                     RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
                 )
-                perform(action, config: new, platform: newPlatform)
+                if !perform(action, config: new, platform: newPlatform) {
+                leaveUnreconciled(action, from: oldPlatform, ifStill: newPlatform)
+            }
             }
             if reconcileGeneration == generation {
                 // Last in the chain: drop the handle so the chain of awaited
@@ -661,96 +665,118 @@ final class AppState: ObservableObject {
     /// Runs one platform-flag action through the manager the start and stop
     /// paths use, with their warning-not-throw treatment: a surface that
     /// could not be applied or cleared is logged, and the rest still run.
+    /// Returns whether the action landed, so the caller can leave the flag
+    /// unreconciled for the next save to retry.
     private func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         platform: PlatformIntegrationConfig
-    ) {
+    ) -> Bool {
+        func attempt(_ failure: String, _ body: () throws -> Void) -> Bool {
+            do {
+                try body()
+                return true
+            } catch {
+                logStore.log(.warning, "\(failure): \(error.localizedDescription)", category: .system)
+                return false
+            }
+        }
+
         switch action {
         case .applySystemProxy:
-            do {
+            return attempt("Could not apply system proxy settings after the setting changed") {
                 try systemConduit.apply(
                     config: config,
                     mode: platform.systemProxyMode,
                     logger: logStore,
                     localPACURL: orchestrator.snapshot.bindings.localPACURL
                 )
-            } catch {
-                logStore.log(.warning, "Could not apply system proxy settings after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .clearSystemProxy:
             // No `isCleared()` gate, unlike `stopProxy`: "every proxy is
             // disabled" is not "nothing to restore" when the journal holds a
             // corporate proxy that something else switched off after we
             // applied. `clear` decides for itself from the journal.
-            do {
+            return attempt("Could not clear system proxy after the setting changed") {
                 try systemConduit.clear(logger: logStore)
-            } catch {
-                logStore.log(.warning, "Could not clear system proxy after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .applyEnvironment:
-            do {
+            return attempt("Could not apply environment variables after the setting changed") {
                 try environmentManager.apply(config: config, logger: logStore)
-            } catch {
-                logStore.log(.warning, "Could not apply environment variables after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .clearEnvironment:
-            do {
+            return attempt("Could not clear environment variables after the setting changed") {
                 try environmentManager.clear(logger: logStore)
-            } catch {
-                logStore.log(.warning, "Could not clear environment variables after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .applyResolverEntries:
             if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
                 logStore.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
-            } else {
-                do {
-                    try dnsManager.apply(config: config, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
-                } catch {
-                    logStore.log(.warning, "Could not apply DNS resolvers after the setting changed: \(error.localizedDescription)", category: .system)
-                }
+                return true
+            }
+            return attempt("Could not apply DNS resolvers after the setting changed") {
+                try dnsManager.apply(config: config, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
             }
         case .refreshInterceptFiles:
-            do {
+            return attempt("Could not apply intercept resolver files after the setting changed") {
                 try refreshInterceptFiles(for: config)
-            } catch {
-                logStore.log(.warning, "Could not apply intercept resolver files after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .clearResolvers:
             // Only what the journal names as ours. The switch is off now, so
             // a file for a configured domain we never wrote is the user's.
-            do {
-                try dnsManager.clearRecorded(logger: logStore)
-            } catch {
-                logStore.log(.warning, "Could not clear DNS resolvers after the setting changed: \(error.localizedDescription)", category: .system)
+            return attempt("Could not clear DNS resolvers after the setting changed") {
+                try dnsManager.clearRecorded(config: config, logger: logStore)
             }
         case .applySystemDNS:
             // The same three steps as `startDNS`, in the same order: the
             // prior state is captured before the interfaces are pointed at
             // the relay, and the health timer runs whether or not the apply
             // succeeded, because its relay restart is the retry.
-            do {
+            let saved = attempt("Could not save current DNS state (non-fatal)") {
                 try systemDNSManager.saveCurrentDNS(logger: logStore)
-            } catch {
-                logStore.log(.warning, "Could not save current DNS state (non-fatal): \(error.localizedDescription)", category: .system)
             }
-            do {
+            let applied = attempt("Could not set system DNS after the setting changed") {
                 try systemDNSManager.apply(forwarderPort: effectiveDNSForwarderPort, logger: logStore)
-            } catch {
-                logStore.log(.warning, "Could not set system DNS after the setting changed: \(error.localizedDescription)", category: .system)
             }
             startDNSHealthTimer()
+            return saved && applied
         case .clearSystemDNS:
             // Timer first, as in `stopDNS`: left running, its 30 s probe
             // would restart the relay the user just asked to remove.
             stopDNSHealthTimer()
-            do {
+            return attempt("Could not restore system DNS after the setting changed") {
                 try systemDNSManager.clear(logger: logStore)
-            } catch {
-                logStore.log(.warning, "Could not restore system DNS after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .setLaunchAtLogin(let enabled):
-            loginItemManager.setEnabled(enabled, logger: logStore)
+            return loginItemManager.setEnabled(enabled, logger: logStore)
+        }
+    }
+
+    /// A failed action leaves its flag where the machine is, not where the
+    /// switch is, so the next save diffs it again and retries. Only if no
+    /// later pass has moved the flag since: that pass owns it now.
+    private func leaveUnreconciled(
+        _ action: PlatformIntegrationReconciler.Action,
+        from old: PlatformIntegrationConfig,
+        ifStill new: PlatformIntegrationConfig
+    ) {
+        switch action {
+        case .applySystemProxy, .clearSystemProxy:
+            guard lastReconciledPlatformConfig.manageSystemProxy == new.manageSystemProxy,
+                  lastReconciledPlatformConfig.systemProxyMode == new.systemProxyMode else { return }
+            lastReconciledPlatformConfig.manageSystemProxy = old.manageSystemProxy
+            lastReconciledPlatformConfig.systemProxyMode = old.systemProxyMode
+        case .applyEnvironment, .clearEnvironment:
+            guard lastReconciledPlatformConfig.manageEnvironmentVariables == new.manageEnvironmentVariables else { return }
+            lastReconciledPlatformConfig.manageEnvironmentVariables = old.manageEnvironmentVariables
+        case .applyResolverEntries, .refreshInterceptFiles, .clearResolvers:
+            guard lastReconciledPlatformConfig.manageDNSResolvers == new.manageDNSResolvers else { return }
+            lastReconciledPlatformConfig.manageDNSResolvers = old.manageDNSResolvers
+        case .applySystemDNS, .clearSystemDNS:
+            guard lastReconciledPlatformConfig.manageSystemDNS == new.manageSystemDNS else { return }
+            lastReconciledPlatformConfig.manageSystemDNS = old.manageSystemDNS
+        case .setLaunchAtLogin:
+            guard lastReconciledPlatformConfig.launchAtLogin == new.launchAtLogin else { return }
+            lastReconciledPlatformConfig.launchAtLogin = old.launchAtLogin
         }
     }
 
@@ -1013,7 +1039,7 @@ final class AppState: ObservableObject {
             // Switch off: only what the journal names as ours, never a file
             // for a configured domain we did not write.
             do {
-                try dnsManager.clearRecorded(logger: logStore)
+                try dnsManager.clearRecorded(config: config, logger: logStore)
             } catch {
                 logStore.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
@@ -1392,7 +1418,7 @@ final class AppState: ObservableObject {
             }
         } else if dnsManager.hasManagedState() {
             do {
-                try dnsManager.clearRecorded(logger: logStore)
+                try dnsManager.clearRecorded(config: config, logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
