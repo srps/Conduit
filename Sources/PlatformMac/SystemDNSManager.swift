@@ -109,9 +109,17 @@ package final class SystemDNSManager: @unchecked Sendable {
 
         try startRelay(forwarderPort: forwarderPort, logger: logger)
 
-        // An interface whose servers could not be captured is not redirected:
-        // there would be nothing to put back.
-        let writable = services.filter { !isUntouched($0) }
+        // Only interfaces whose servers were captured are redirected: there
+        // is nothing to put back on the others. That excludes an interface
+        // whose read failed (recorded as untouched) and one that appeared
+        // between the capture and this write, which the hosts leave room for
+        // by starting the forwarder in between. The latter is left for the
+        // next `reconcile`, which records an interface before redirecting it.
+        let captured = savedInterfaces()
+        let writable = services.filter { captured[$0] != nil }
+        for service in services where captured[service] == nil && !isUntouched(service) {
+            logger?.log(.notice, "Not redirecting \(service): it appeared after the DNS servers were captured. The next reconcile records it first.", category: .system)
+        }
         for service in writable {
             try privilegeClient.execute(.setDNSServers, values: [service, "127.0.0.1"])
         }
