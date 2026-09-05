@@ -192,23 +192,52 @@ final class DNSManagerOwnershipTests: XCTestCase {
         XCTAssertEqual(removedDomains(), ["corp.example"], "nothing recorded, nothing removed")
     }
 
-    /// An unreadable journal reads as empty, and "nothing recorded" is the
-    /// one answer that strands. The switch-off teardown then falls back to
-    /// the configured domains, as the other surfaces do.
-    func testUnreadableJournalFallsBackToTheConfiguredDomains() throws {
+    private func corruptJournal() throws {
         try Data("{ truncated".utf8).write(to: journalDirectory.appendingPathComponent("platform-state.json"))
+    }
+
+    private func writeResolverFile(_ domain: String, _ contents: String) throws {
+        try contents.write(to: journalDirectory.appendingPathComponent(domain), atomically: true, encoding: .utf8)
+    }
+
+    /// An unreadable journal reads as empty, and "nothing recorded" is the
+    /// one answer that strands — but removing every configured domain would
+    /// delete a file the user keeps under a name we also configure. The file
+    /// itself is the evidence: our exact contents are ours, anything else is
+    /// somebody else's.
+    func testUnreadableJournalRecoversOwnershipFromTheFilesThemselves() throws {
+        try corruptJournal()
+        try writeResolverFile("corp.example", "nameserver 10.1.1.1\n")
+        try writeResolverFile("internal.example", "nameserver 192.168.1.1\nsearch home.arpa\n")
         let manager = makeManager()
 
         XCTAssertTrue(manager.hasManagedState(), "cannot say what we changed, so assume the worst")
+        try manager.clearRecorded(configs: [makeTwoDomainConfig()], logger: nil)
+
+        XCTAssertEqual(removedDomains(), ["corp.example"], "internal.example has contents we never write")
+        XCTAssertFalse(manager.hasManagedState(), "the journal was rebuilt and then released")
+    }
+
+    /// Nothing of ours on disk must settle the surface, not leave it forever
+    /// suspect: every later stop and quit would otherwise re-run the scan.
+    func testUnreadableJournalWithNothingOfOursSettlesTheSurface() throws {
+        try corruptJournal()
+        let manager = makeManager()
+
         try manager.clearRecorded(configs: [makeConfig()], logger: nil)
-        XCTAssertEqual(removedDomains(), ["corp.example"])
+
+        XCTAssertTrue(removedDomains().isEmpty)
+        XCTAssertFalse(manager.hasManagedState())
     }
 
     /// One save can edit the entries and turn the switch off together. With
-    /// the journal unreadable, the fallback has only the configs to go on, so
-    /// the caller passes the previous one too and both sets of domains go.
-    func testUnreadableJournalFallbackCoversThePreviousConfig() throws {
-        try Data("{ truncated".utf8).write(to: journalDirectory.appendingPathComponent("platform-state.json"))
+    /// the journal unreadable, the scan has only the configs to go on, so the
+    /// caller passes the previous one too and both sets of files are judged.
+    func testUnreadableJournalScanCoversThePreviousConfig() throws {
+        try corruptJournal()
+        try writeResolverFile("corp.example", "nameserver 10.1.1.1")
+        try writeResolverFile("internal.example", "nameserver 10.2.2.2")
+        try writeResolverFile("renamed.example", "nameserver 10.3.3.3")
         let manager = makeManager()
 
         var renamed = makeConfig()
@@ -216,6 +245,27 @@ final class DNSManagerOwnershipTests: XCTestCase {
         try manager.clearRecorded(configs: [makeTwoDomainConfig(), renamed], logger: nil)
 
         XCTAssertEqual(Set(removedDomains()), ["corp.example", "internal.example", "renamed.example"])
+    }
+
+    /// Adopting a file records it, so a removal that then fails is retried by
+    /// the next teardown from the journal — even once the config has moved on
+    /// and no longer names the domain.
+    func testUnreadableJournalAdoptionMakesAFailedRemovalRetryable() throws {
+        try corruptJournal()
+        try writeResolverFile("corp.example", "nameserver 10.1.1.1")
+        let manager = makeManager()
+        recording.failingDomains = ["corp.example"]
+
+        XCTAssertThrowsError(try manager.clearRecorded(configs: [makeConfig()], logger: nil))
+        XCTAssertTrue(manager.hasManagedState(), "the failed domain stays recorded")
+
+        recording.failingDomains = []
+        var movedOn = makeConfig()
+        movedOn.dnsEntries = []
+        try manager.clearRecorded(configs: [movedOn], logger: nil)
+
+        XCTAssertEqual(removedDomains(), ["corp.example", "corp.example"], "retried from the rebuilt journal")
+        XCTAssertFalse(manager.hasManagedState())
     }
 
     /// Without a journal there is no ownership to report, and the daemon and
