@@ -189,6 +189,7 @@ package final class DNSManager: @unchecked Sendable {
         adoptFilesWeWrote(
             configs: configs,
             unambiguousOnly: true,
+            resolversManaged: resolversManaged,
             because: "this is the first launch of a release that records resolver files",
             logger: logger
         )
@@ -221,6 +222,7 @@ package final class DNSManager: @unchecked Sendable {
     private func adoptFilesWeWrote(
         configs: [ProxyConfig],
         unambiguousOnly: Bool,
+        resolversManaged: Bool = false,
         because reason: String,
         logger: (any LogSink)?
     ) {
@@ -261,8 +263,15 @@ package final class DNSManager: @unchecked Sendable {
         report += "."
         if !unjudged.isEmpty {
             report += " \(unjudged.count) entry file(s) for configured domains left in place, because a user can write the same"
-                + " contents by hand: \(unjudged.sorted().joined(separator: ", ")). If an earlier Conduit release wrote them,"
-                + " remove them from \(resolverDirectory) yourself."
+                + " contents by hand: \(unjudged.sorted().joined(separator: ", ")). "
+            // With the switch on they are this app's to manage — the next
+            // proxy start records the ones that match and removes them at
+            // stop — so telling the user to delete them would have them
+            // remove a live split-DNS override. Only with the switch off is
+            // nothing going to touch them, and only then is the user asked.
+            report += resolversManaged
+                ? "The next proxy start takes over the ones that match its configuration."
+                : "If an earlier Conduit release wrote them, remove them from \(resolverDirectory) yourself."
         }
         logger?.log(.warning, report, category: .system)
     }

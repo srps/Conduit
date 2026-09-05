@@ -321,6 +321,22 @@ final class DNSManagerOwnershipTests: XCTestCase {
         XCTAssertTrue(report?.contains("corp.example") == true, "names the file: \(report ?? "")")
     }
 
+    /// With the switch on the start path adopts a matching entry file, so
+    /// the report must not send the user to delete what is about to be a
+    /// live override.
+    func testUpgradeWithTheSwitchOnNamesEntryFilesWithoutAskingForTheirRemoval() throws {
+        try writeResolverFile("corp.example", "nameserver 10.1.1.1")
+        let manager = makeManager()
+        let log = RecordingLogSink()
+
+        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: true, logger: log)
+
+        let report = log.entries(at: .warning).map(\.message).first { $0.contains("Recovered resolver ownership") }
+        XCTAssertTrue(report?.contains("corp.example") == true, "still named: \(report ?? "")")
+        XCTAssertTrue(report?.contains("next proxy start takes over") == true, report ?? "")
+        XCTAssertFalse(report?.contains("remove them") == true, report ?? "")
+    }
+
     /// An entry file that is absent, or one the scan judged as an intercept
     /// file, is not reported as left in place.
     func testUpgradeReportsNoEntryFilesWhenNoneAreOnDisk() throws {
