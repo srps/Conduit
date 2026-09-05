@@ -73,6 +73,17 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   hand. Resolver files gain the journal's applied/released marker for this; the system proxy
   and the launchd environment already had one. The guard is the journal, not the machine: a
   proxy or resolver file the user set up themselves is never read as ours.
+- A queued reconcile pass acts on the flags of the save that queued it. Two saves in quick
+  succession, the first carrying a proxy edit plus "system proxy off" and the second turning it
+  back on, used to re-apply the proxy, clear it, and apply it again: three admin-level writes
+  and a transient flip for two saves. The chain of passes now lives in `RuntimeReconciler`,
+  out of `AppState`, with tests for the save that lands while a pass is suspended, the pass
+  that reads its own flags, and the failed action that is retried unless a later save moved
+  the flag.
+- The first launch after an upgrade names the resolver entry files it leaves in place. The
+  scan adopts only intercept files, since an entry file's contents are exactly what a user
+  writes by hand; the entry files it found for configured domains were not mentioned at all.
+  The log now lists them and says to remove them by hand if an earlier release wrote them.
 
 ## 0.2.0
 
