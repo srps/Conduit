@@ -504,7 +504,7 @@ final class ConfigArchitectureTests: XCTestCase {
 
         XCTAssertTrue(prefs.showMenuBarIcon)
         XCTAssertFalse(prefs.floatingWindowEnabled)
-        XCTAssertTrue(prefs.globalShortcutEnabled)
+        XCTAssertFalse(prefs.globalShortcutEnabled, "the global shortcut swallows its chord in every app, so it is opt-in")
         XCTAssertEqual(prefs.preferredBrowserTestURL, "")
     }
 
