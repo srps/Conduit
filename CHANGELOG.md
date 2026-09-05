@@ -84,6 +84,9 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   scan adopts only intercept files, since an entry file's contents are exactly what a user
   writes by hand; the entry files it found for configured domains were not mentioned at all.
   The log now lists them and says to remove them by hand if an earlier release wrote them.
+- Edits made while an earlier save was still being applied no longer get replaced by that
+  save. The runtime echoed each applied config back into the editor, which was harmless while
+  saves applied immediately and became a rollback once they queued behind one another.
 
 ## 0.2.0
 
