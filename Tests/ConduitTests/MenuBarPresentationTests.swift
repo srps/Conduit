@@ -127,6 +127,18 @@ final class MenuBarPresentationTests: XCTestCase {
         }
     }
 
+    func testModuleToggleStopsAWarningModuleInsteadOfStartingASecondOne() {
+        XCTAssertEqual(MenuBarPresentation.moduleToggleAction(for: .running), .stop)
+        XCTAssertEqual(MenuBarPresentation.moduleToggleAction(for: .warning), .stop, "warning is running with an error attached")
+        XCTAssertEqual(MenuBarPresentation.moduleToggleAction(for: .starting), .none)
+        XCTAssertEqual(MenuBarPresentation.moduleToggleAction(for: .stopped), .start)
+        XCTAssertEqual(MenuBarPresentation.moduleToggleAction(for: .failed), .start)
+        for state in ModuleRunState.allCases {
+            let action = MenuBarPresentation.moduleToggleAction(for: state)
+            XCTAssertEqual(action == .stop, MenuBarPresentation.moduleSwitchIsOn(for: state) && state != .starting, "switch and action must agree for \(state)")
+        }
+    }
+
     // MARK: - Restart
 
     func testRestartAvailabilityCoversEveryRuntimeState() {

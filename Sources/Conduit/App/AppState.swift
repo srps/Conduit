@@ -838,10 +838,10 @@ final class AppState: ObservableObject {
         Task {
             // `runtime` is a presentation mirror fed through an async hop, so
             // it lags the orchestrator — never gate a side effect on it.
-            switch orchestrator.snapshot.dnsRunState {
-            case .running: await stopDNS()
-            case .starting: break
-            default: await startDNS()
+            switch MenuBarPresentation.moduleToggleAction(for: orchestrator.snapshot.dnsRunState) {
+            case .stop: await stopDNS()
+            case .none: break
+            case .start: await startDNS()
             }
         }
     }
@@ -968,10 +968,10 @@ final class AppState: ObservableObject {
             // Gate on the orchestrator, not `runtime`: the mirror lags by an
             // async hop, so a rapid toggle could double-start or skip a stop.
             // Same rule as `toggleDNS`/`toggleProxy`.
-            switch orchestrator.snapshot.tunnelsRunState {
-            case .running: await stopTunnels()
-            case .starting: break
-            default: await startTunnels()
+            switch MenuBarPresentation.moduleToggleAction(for: orchestrator.snapshot.tunnelsRunState) {
+            case .stop: await stopTunnels()
+            case .none: break
+            case .start: await startTunnels()
             }
         }
     }

@@ -245,12 +245,11 @@ struct UpstreamsSettingsView: View {
                     in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
-    /// The runtime row for a configured upstream, matched by name first and
-    /// endpoint second so a renamed row keeps its traffic light.
+    /// The runtime row for a configured upstream. `ConnectionPool` keys the
+    /// status by the upstream's own id, so two rows with the same name or
+    /// endpoint still get their own traffic light.
     private func liveStatus(for upstream: UpstreamProxy) -> UpstreamRuntimeStatus? {
-        let endpoint = "\(upstream.host):\(upstream.port)"
-        return runtime.upstreamStatuses.first { !upstream.name.isEmpty && $0.name == upstream.name }
-            ?? runtime.upstreamStatuses.first { $0.endpoint == endpoint }
+        runtime.upstreamStatuses.first { $0.id == upstream.id }
     }
 
     private func circuitColor(for state: UpstreamCircuitState) -> Color {

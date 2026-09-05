@@ -176,6 +176,28 @@ package enum MenuBarPresentation {
         state != .starting
     }
 
+    /// What flipping a module's switch does. `.warning` is running with an
+    /// error attached (partial tunnel bind, DNS health probe failing), so
+    /// the switch shows on and flipping it must stop, not start a second
+    /// set of listeners on top of the first. The lifecycle toggles in
+    /// `AppState` decide through this so the switch and the action agree.
+    package enum ModuleToggleAction: Equatable {
+        case start
+        case stop
+        case none
+    }
+
+    package static func moduleToggleAction(for state: ModuleRunState) -> ModuleToggleAction {
+        switch state {
+        case .running, .warning:
+            return .stop
+        case .starting:
+            return .none
+        case .stopped, .failed:
+            return .start
+        }
+    }
+
     // MARK: - Restart
 
     /// Restart is useful for running/degraded/recovering/failed runtimes. It
