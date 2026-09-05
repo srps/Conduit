@@ -57,14 +57,18 @@ package final class DNSManager: @unchecked Sendable {
     /// stale-file repair in `apply`) against a temporary directory instead of
     /// needing to write to the real `/etc/resolver`.
     private let resolverDirectory: String
-    /// Ownership marker for the `resolverFile` surface. Unlike the other
-    /// managers no prior values are recorded — the files are written by the
-    /// helper and are ours or nobody's — so the journal answers only "did we
-    /// write any, and have we since removed them". A host whose user has
-    /// turned resolver management *off* needs that answer to tell our file
-    /// from one they maintain by hand for the same domain, which disk
-    /// presence alone cannot. Optional because the daemon and the tests do
-    /// not ask; without one `hasManagedState()` is `false`.
+    /// Which resolver files are ours, one `resolverFile` scope per domain we
+    /// wrote. No prior contents are recorded: the files are written by the
+    /// helper and are ours or nobody's, so a scope means "we added this,
+    /// remove it" and is forgotten once the removal lands. Two hosts' questions
+    /// hang on that list. A host whose user has turned resolver management
+    /// *off* needs to tell our file from one they maintain by hand for the
+    /// same domain, which disk presence alone cannot. And every teardown
+    /// derives its domains from the *current* config, so a domain edited out
+    /// of the config file by hand, or one whose removal failed last time,
+    /// would otherwise be left overridden with nothing naming it. Optional
+    /// because the daemon and the tests do not ask; without one
+    /// `hasManagedState()` is `false` and teardown works from the config alone.
     private let journal: PlatformStateJournal?
 
     package init(
@@ -83,6 +87,18 @@ package final class DNSManager: @unchecked Sendable {
     package func hasManagedState() -> Bool {
         guard let journal else { return false }
         return !journal.knowsSurfaceIsIdle(.resolverFile)
+    }
+
+    /// Records each domain about to be written as ours. Called before the
+    /// first write, not after the last: a write that fails partway has
+    /// already put files of ours on disk. `recordPrior` is first-write-wins,
+    /// so a rewrite of a domain we already hold changes nothing.
+    private func recordManaged(_ domains: [String]) {
+        guard let journal else { return }
+        for domain in domains {
+            journal.recordPrior(surface: .resolverFile, scope: domain, value: nil)
+        }
+        journal.markApplied(surface: .resolverFile)
     }
 
     private func resolverFilePath(for domain: String) -> String {
@@ -218,7 +234,13 @@ package final class DNSManager: @unchecked Sendable {
             !FileManager.default.fileExists(atPath: resolverFilePath(for: domain))
         }
 
-        return entriesCleared && interceptCleared
+        // A recorded domain the config no longer names is still ours on disk;
+        // without this a host guarding `clear` on `isCleared` would skip it.
+        let recordedCleared = (journal?.scopes(for: .resolverFile) ?? []).allSatisfy { domain in
+            !FileManager.default.fileExists(atPath: resolverFilePath(for: domain))
+        }
+
+        return entriesCleared && interceptCleared && recordedCleared
     }
 
     // MARK: - Apply / Clear
@@ -268,9 +290,7 @@ package final class DNSManager: @unchecked Sendable {
             }
         }
 
-        // Marked before the first write, not after the last: a write that
-        // fails partway has already put files of ours on disk.
-        journal?.markApplied(surface: .resolverFile)
+        recordManaged(enabledEntries.map(\.domain))
         for entry in enabledEntries {
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
         }
@@ -281,14 +301,15 @@ package final class DNSManager: @unchecked Sendable {
     package func clear(config: ProxyConfig, logger: (any LogSink)?) throws {
         let enabledEntries = config.dnsEntries.filter(\.enabled)
         let interceptDomains = getInterceptDomains(from: config, forCleanup: true)
+        // The config names what we *would* write today; the journal names
+        // what we *did* write. A domain edited out of the config by hand, or
+        // one whose removal failed last time, is only in the second list.
+        let recorded = journal?.scopes(for: .resolverFile) ?? []
+        let domains = enabledEntries.map(\.domain) + interceptDomains + recorded
 
-        guard !enabledEntries.isEmpty || !interceptDomains.isEmpty else { return }
+        guard !domains.isEmpty else { return }
 
-        try removeAll(enabledEntries.map(\.domain) + interceptDomains, logger: logger)
-        // Only once every removal landed: `removeAll` throws after trying
-        // each one, and a marker released over a file still on disk would
-        // stop the next teardown from retrying it.
-        journal?.markReleased(surface: .resolverFile)
+        try removeAll(domains, logger: logger)
 
         logger?.log(.notice, "Removed managed split-DNS resolver files and intercept rules.", category: .system)
     }
@@ -397,7 +418,7 @@ package final class DNSManager: @unchecked Sendable {
                 try Self.validateServer(server)
             }
         }
-        journal?.markApplied(surface: .resolverFile)
+        recordManaged(entries.map(\.domain))
         for entry in entries {
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
         }
@@ -433,7 +454,7 @@ package final class DNSManager: @unchecked Sendable {
         for domain in interceptDomains {
             try Self.validateDomain(domain)
         }
-        journal?.markApplied(surface: .resolverFile)
+        recordManaged(interceptDomains)
         for domain in interceptDomains {
             try privilegeClient.execute(.applyDNS, values: [domain, "127.0.0.1", String(config.dnsForwarderPort)])
         }
@@ -521,6 +542,9 @@ package final class DNSManager: @unchecked Sendable {
 
             do {
                 try privilegeClient.execute(.removeDNS, values: [domain])
+                // Only after the file is gone. A record dropped over a failed
+                // removal is a file we wrote with nothing left saying so.
+                journal?.forget(surface: .resolverFile, scope: domain)
             } catch {
                 failures.append(.init(domain: domain, message: error.localizedDescription))
                 logger?.log(
@@ -530,6 +554,12 @@ package final class DNSManager: @unchecked Sendable {
                     category: .system
                 )
             }
+        }
+        // Every record gone means nothing of ours is left on this surface,
+        // whether this call removed the last file or an earlier one did. A
+        // failed removal keeps its record, so this never releases over one.
+        if let journal, !journal.hasRecords(for: .resolverFile) {
+            journal.markReleased(surface: .resolverFile)
         }
         guard failures.isEmpty else { throw DNSRemovalError(failures: failures) }
     }
