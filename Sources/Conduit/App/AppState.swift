@@ -551,6 +551,16 @@ final class AppState: ObservableObject {
         lastReconciledPlatformConfig = newPlatform
         let diff = ConfigDiff(old: old, new: new)
 
+        // Before the queued pass, not in it: these need no runtime state, and
+        // a quit right after the save would lose whatever the pass has not
+        // reached. See `PlatformIntegrationReconciler.immediateActions`.
+        for action in PlatformIntegrationReconciler.immediateActions(old: oldPlatform, new: newPlatform) {
+            orchestrator.eventLog.append(
+                RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
+            )
+            perform(action, config: new, platform: newPlatform)
+        }
+
         // Passes are serialised, not merely ordered. `applyConfigChange`
         // suspends, and a second save in that window would otherwise run its
         // actions first and let the first, on resuming, put a surface back to
@@ -707,16 +717,12 @@ final class AppState: ObservableObject {
                 logStore.log(.warning, "Could not apply intercept resolver files after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .clearResolvers:
-            // The current config only: the journal names every domain we
-            // wrote, so a save that also edited the DNS entries loses nothing.
-            if dnsManager.isCleared(config: config) {
-                logStore.log(.debug, "DNS resolvers already cleared, skipped.", category: .system)
-            } else {
-                do {
-                    try dnsManager.clear(config: config, logger: logStore)
-                } catch {
-                    logStore.log(.warning, "Could not clear DNS resolvers after the setting changed: \(error.localizedDescription)", category: .system)
-                }
+            // Only what the journal names as ours. The switch is off now, so
+            // a file for a configured domain we never wrote is the user's.
+            do {
+                try dnsManager.clearRecorded(logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not clear DNS resolvers after the setting changed: \(error.localizedDescription)", category: .system)
             }
         case .applySystemDNS:
             // The same three steps as `startDNS`, in the same order: the
@@ -993,7 +999,7 @@ final class AppState: ObservableObject {
                 logStore.log(.warning, "Could not clear environment variables: \(error.localizedDescription)", category: .system)
             }
         }
-        if platformConfig.manageDNSResolvers || dnsManager.hasManagedState() {
+        if platformConfig.manageDNSResolvers {
             if dnsManager.isCleared(config: config) {
                 logStore.log(.debug, "DNS resolvers already cleared, skipped.", category: .system)
             } else {
@@ -1002,6 +1008,14 @@ final class AppState: ObservableObject {
                 } catch {
                     logStore.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
                 }
+            }
+        } else if dnsManager.hasManagedState() {
+            // Switch off: only what the journal names as ours, never a file
+            // for a configured domain we did not write.
+            do {
+                try dnsManager.clearRecorded(logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
         }
 
@@ -1370,9 +1384,15 @@ final class AppState: ObservableObject {
                 logStore.log(.warning, "Termination cleanup could not clear environment variables: \(error.localizedDescription)", category: .system)
             }
         }
-        if platformConfig.manageDNSResolvers || dnsManager.hasManagedState() {
+        if platformConfig.manageDNSResolvers {
             do {
                 try dnsManager.clear(config: config, logger: logStore)
+            } catch {
+                logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
+            }
+        } else if dnsManager.hasManagedState() {
+            do {
+                try dnsManager.clearRecorded(logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
