@@ -403,7 +403,8 @@ final class DaemonRuntimeHost {
     /// files, system proxy, and env vars are written by this host — without
     /// this, a daemon config reload leaves them describing the old config
     /// (e.g. a removed split-DNS entry keeps its /etc/resolver file until
-    /// the next full stop). Twin of `AppState.reconcileRuntimeConfig`.
+    /// the next full stop). Twin of `AppState.reapplyConfigDrivenSurfaces(for:)`,
+    /// minus the serialisation `RuntimeReconciler` gives the app's saves.
     private func reconcilePlatformSideEffects(old: ProxyConfig, new: ProxyConfig) {
         guard runtimeStarted, old != new else { return }
         let diff = ConfigDiff(old: old, new: new)

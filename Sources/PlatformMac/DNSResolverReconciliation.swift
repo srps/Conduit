@@ -5,7 +5,7 @@ import ProxyKernel
 /// The two-step resolver reconcile that follows a DNS-affecting config change,
 /// with the second step independent of how the first ended.
 ///
-/// Both hosts (`AppState.reconcileRuntimeConfig`, `DaemonRuntimeHost`
+/// Both hosts (`AppState.reapplyConfigDrivenSurfaces(for:)`, `DaemonRuntimeHost`
 /// `.reconcilePlatformSideEffects`) used to wrap `DNSManager.reconcile` and
 /// their own `refreshInterceptFiles` in one `do` block. That was safe only
 /// while a throwing `reconcile` meant nothing had been applied — and it stopped
