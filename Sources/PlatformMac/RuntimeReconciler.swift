@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import ProxyKernel
 
-/// The side of `AppState` a reconcile pass talks to. A protocol rather than
+/// The side of a runtime host (`AppState`, `DaemonRuntimeHost`) a reconcile pass talks to. A protocol rather than
 /// a set of closures so the tests can stand in a recording host, and so the
 /// reconciler can hold it weakly: it is owned by the host it calls back.
 @MainActor
-protocol RuntimeReconcilerHost: AnyObject {
+package protocol RuntimeReconcilerHost: AnyObject {
     /// Pushes a config edit into the running subsystems. Suspends, which is
     /// the whole reason passes are serialised.
     func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async
@@ -63,27 +63,32 @@ protocol RuntimeReconcilerHost: AnyObject {
 ///   diffs it again and retries — unless a later pass has moved that flag
 ///   since, in which case that pass owns it.
 @MainActor
-final class RuntimeReconciler {
-    struct RuntimeState: Equatable {
-        var proxyIsUp: Bool
-        var dnsIsUp: Bool
+package final class RuntimeReconciler {
+    package struct RuntimeState: Equatable {
+        package var proxyIsUp: Bool
+        package var dnsIsUp: Bool
+
+        package init(proxyIsUp: Bool, dnsIsUp: Bool) {
+            self.proxyIsUp = proxyIsUp
+            self.dnsIsUp = dnsIsUp
+        }
     }
 
     /// Everything a pass decided from, handed to the host for the
     /// config-driven half. The host reads `platform` from here and nothing
     /// else, which is what keeps the second rule above true.
-    struct Pass {
-        let diff: ConfigDiff
-        let old: ProxyConfig
-        let new: ProxyConfig
-        let platform: PlatformIntegrationConfig
-        let runtime: RuntimeState
-        let platformActions: [PlatformIntegrationReconciler.Action]
+    package struct Pass {
+        package let diff: ConfigDiff
+        package let old: ProxyConfig
+        package let new: ProxyConfig
+        package let platform: PlatformIntegrationConfig
+        package let runtime: RuntimeState
+        package let platformActions: [PlatformIntegrationReconciler.Action]
 
         /// Whether this pass already applies or clears the resolver files
         /// because their switch flipped; the config-driven resolver
         /// reconcile then stands aside.
-        var resolversFollowTheirFlag: Bool {
+        package var resolversFollowTheirFlag: Bool {
             platformActions.contains { action in
                 switch action {
                 case .applyResolverEntries, .refreshInterceptFiles, .clearResolvers: return true
@@ -101,15 +106,15 @@ final class RuntimeReconciler {
     /// permanently empty. Lifecycle toggles that mutate config themselves
     /// (start/stopDNS) call `markReconciled(config:)` so their own save
     /// doesn't re-trigger the subsystem they just started or stopped.
-    private(set) var lastReconciledConfig: ProxyConfig
+    package private(set) var lastReconciledConfig: ProxyConfig
     /// The platform integration flags the machine was last brought in line
     /// with. Same role as `lastReconciledConfig` for the other half of a
     /// save: a flag that changed since is a surface to apply or clear now,
     /// not at the next restart (#13). Lifecycle code never writes these
     /// flags, so unlike its sibling nothing has to absorb its own edits.
-    private(set) var lastReconciledPlatformConfig: PlatformIntegrationConfig
+    package private(set) var lastReconciledPlatformConfig: PlatformIntegrationConfig
 
-    weak var host: (any RuntimeReconcilerHost)?
+    package weak var host: (any RuntimeReconcilerHost)?
 
     /// The pass in flight, awaited by the next one. `generation` lets the
     /// last pass in a chain tell it is last and release the handle, so the
@@ -117,7 +122,7 @@ final class RuntimeReconciler {
     private var task: Task<Void, Never>?
     private var generation = 0
 
-    init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig, host: (any RuntimeReconcilerHost)? = nil) {
+    package init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig, host: (any RuntimeReconcilerHost)? = nil) {
         self.lastReconciledConfig = config
         self.lastReconciledPlatformConfig = platformConfig
         self.host = host
@@ -126,27 +131,27 @@ final class RuntimeReconciler {
     /// For a config change that is already live in the runtime — a
     /// lifecycle flip, or an orchestrator-originated edit — so the next
     /// save does not re-apply it.
-    func markReconciled(config: ProxyConfig) {
+    package func markReconciled(config: ProxyConfig) {
         lastReconciledConfig = config
     }
 
     /// For a flag change nothing was applied under yet: the launch-flag
     /// session overrides.
-    func markReconciled(platformConfig: PlatformIntegrationConfig) {
+    package func markReconciled(platformConfig: PlatformIntegrationConfig) {
         lastReconciledPlatformConfig = platformConfig
     }
 
     /// Whether a pass is queued or running. Tests read it; `drain` waits it out.
-    var hasPassInFlight: Bool { task != nil }
+    package var hasPassInFlight: Bool { task != nil }
 
     /// Waits for every queued pass, including ones queued while waiting.
-    func drain() async {
+    package func drain() async {
         while let task {
             await task.value
         }
     }
 
-    func reconcile(config new: ProxyConfig, platformConfig newPlatform: PlatformIntegrationConfig) {
+    package func reconcile(config new: ProxyConfig, platformConfig newPlatform: PlatformIntegrationConfig) {
         let old = lastReconciledConfig
         let oldPlatform = lastReconciledPlatformConfig
         guard old != new || oldPlatform != newPlatform else { return }
