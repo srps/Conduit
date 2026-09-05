@@ -82,19 +82,13 @@ package final class DNSManager: @unchecked Sendable {
     }
 
     /// Whether resolver files may still be ours to remove: the journal names
-    /// domains, cannot be read, or has never vouched for this surface at all.
-    ///
-    /// The last case is what an upgrade from a release without per-domain
-    /// records looks like, and also what a start finds when the files it
-    /// would write are already on disk: the `isApplied` gate skips the write
-    /// and with it the record. Only a teardown that ran to completion — the
-    /// `released` marker — can say the surface holds nothing of ours. See
-    /// `journal` and `clearRecorded`.
+    /// domains, or cannot be read. A journal that has simply never seen this
+    /// surface answers `false`: on a fresh install that is the truth, and a
+    /// stop or quit with the switch off must not go looking. See
+    /// `clearRecorded` for the one moment that may.
     package func hasManagedState() -> Bool {
         guard let journal else { return false }
-        return journal.fileState == .unreadable
-            || journal.hasRecords(for: .resolverFile)
-            || journal.ownership(of: .resolverFile) != .released
+        return journal.fileState == .unreadable || journal.hasRecords(for: .resolverFile)
     }
 
     /// Records one domain as ours, immediately before its own write. Not
@@ -116,16 +110,24 @@ package final class DNSManager: @unchecked Sendable {
     /// the user's, and only the journal can tell the two apart. `clear` is the
     /// switch-on teardown and removes the configured domains as well, because
     /// there a lost record must not strand a file. No-op without a journal.
-    /// `configs` matters only when the journal cannot be read; pass every
-    /// config whose domains may be on disk — the caller's previous one too,
-    /// when a single save edited the entries and turned the switch off.
-    package func clearRecorded(configs: [ProxyConfig], logger: (any LogSink)?) throws {
+    ///
+    /// `configs` feeds the scan in `adoptFilesWeWrote`; pass every config whose
+    /// domains may be on disk — the caller's previous one too, when a single
+    /// save edited the entries and turned the switch off. The scan runs for an
+    /// unreadable journal always, and for a journal that has never seen this
+    /// surface only when `surfaceWasManaged`: the switch was on until this
+    /// call, so a start may have found its files already in place and skipped
+    /// the write and the record with it, or an older release without records
+    /// wrote them. A moment earlier the switch-on teardown would have removed
+    /// every configured domain outright, so adopting the matching ones is the
+    /// narrower act. With the switch already off — a stop or a quit — an
+    /// unseen surface is left alone: a user's own file can carry the same
+    /// `nameserver` lines, and contents alone are not evidence of ours.
+    package func clearRecorded(configs: [ProxyConfig], surfaceWasManaged: Bool, logger: (any LogSink)?) throws {
         guard let journal else { return }
         if journal.fileState == .unreadable {
             adoptFilesWeWrote(configs: configs, because: "the resolver journal is unreadable", logger: logger)
-        } else if journal.ownership(of: .resolverFile) == .unknown, !journal.hasRecords(for: .resolverFile) {
-            // Never written to and never released: a pre-record install, or
-            // files a start found already in place and did not rewrite.
+        } else if surfaceWasManaged, journal.ownership(of: .resolverFile) == .unknown, !journal.hasRecords(for: .resolverFile) {
             adoptFilesWeWrote(configs: configs, because: "the resolver journal has no record of this surface", logger: logger)
         }
         let recorded = journal.scopes(for: .resolverFile)
@@ -141,13 +143,15 @@ package final class DNSManager: @unchecked Sendable {
     /// remove": the one answer that strands. But removing every configured
     /// domain instead would delete a file the user maintains by hand under a
     /// name we also configure, with no evidence it was ours.
-    /// The file carries the evidence: this app writes exactly `nameserver`
-    /// lines for the configured servers (plus a `port` line for an intercept),
-    /// so a file with those contents is ours and one with any other contents
-    /// is positively somebody else's. Matching files are recorded, which also
-    /// rewrites the journal as a readable one, so a removal that fails below
-    /// keeps its record and the next teardown retries it. Nothing matching
-    /// settles the surface as released rather than leave it forever suspect.
+    /// The file carries the best evidence available: this app writes exactly
+    /// `nameserver` lines for the configured servers (plus a `port` line for
+    /// an intercept), so a file with any other contents is positively somebody
+    /// else's and is left alone, while a match is taken as ours — which is why
+    /// the callers limit when this runs at all, see `clearRecorded`. Matching
+    /// files are recorded, which also rewrites the journal as a readable one,
+    /// so a removal that fails below keeps its record and the next teardown
+    /// retries it. Nothing matching settles the surface as released rather
+    /// than leave it forever suspect.
     private func adoptFilesWeWrote(configs: [ProxyConfig], because reason: String, logger: (any LogSink)?) {
         guard let journal else { return }
         var adopted: [String] = []
