@@ -2,18 +2,23 @@
 import AppKit
 import SwiftUI
 
+/// Menu bar (the system one) commands for the single app window. ⌘0 opens it
+/// on Overview; ⌘, opens it on the first Configure section so the standard
+/// Settings shortcut keeps working even though Settings is a sidebar group
+/// rather than a separate window.
 struct ConduitCommands: Commands {
+    let appState: AppState
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandGroup(after: .appInfo) {
-            Button("Detach Full UI") {
-                openDetachedWindow("dashboard")
+            Button("Open Conduit") {
+                open(.overview)
             }
             .keyboardShortcut("0", modifiers: [.command])
 
-            Button("Settings") {
-                openDetachedWindow("settings")
+            Button("Settings…") {
+                open(AppSection.firstConfigureSection)
             }
             .keyboardShortcut(",", modifiers: [.command])
         }
@@ -26,8 +31,9 @@ struct ConduitCommands: Commands {
         }
     }
 
-    private func openDetachedWindow(_ id: String) {
-        AppWindowPresentation.prepareForDetachedWindow()
-        openWindow(id: id)
+    private func open(_ section: AppSection) {
+        appState.selectedSection = section
+        AppWindowPresentation.prepareForAppWindow()
+        openWindow(id: ConduitApp.mainWindowID)
     }
 }

@@ -12,7 +12,7 @@ struct WindowBehaviorView: NSViewRepresentable {
         NSView()
     }
 
-    /// SwiftUI re-evaluates `MainView`'s body whenever the runtime adapter
+    /// SwiftUI re-evaluates `OverviewView`'s body whenever the runtime adapter
     /// publishes (≥ 1 Hz when proxy is active), and that re-render walks
     /// `.background(WindowBehaviorView(...))` which calls back into
     /// `updateNSView`. Without coalescing we'd dispatch a window-property

@@ -41,9 +41,13 @@ final class AppState: ObservableObject {
     @Published var config: ProxyConfig
     @Published var platformConfig: PlatformIntegrationConfig
     @Published var appPreferences: AppPreferences
-    @Published var isShowingSettings = false
-    @Published var isShowingLogs = false
+    /// First-run setup, presented as a sheet on the app window. Set at init
+    /// when NTLM is configured without saved credentials, so the window is
+    /// presented at launch instead of waiting for the popover to be opened.
     @Published var isShowingOnboarding = false
+    /// The sidebar selection of the single app window. Lives here so the
+    /// popover, the menu commands, and the window agree on it.
+    @Published var selectedSection: AppSection = .overview
     @Published var lastErrorMessage: String?
     @Published private(set) var activationPreflight: ActivationPreflight = .noAdmin
     @Published private(set) var helperStatusState: HelperToolPrivilegeClient.Status = .notInstalled

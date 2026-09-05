@@ -5,9 +5,9 @@ import SwiftUI
 
 /// Phase 7 of `docs/design-vpn-flap-resilience.md`: pure mapping helpers that
 /// translate runtime VPN / direct-mode state into the strings, colors, and
-/// derived numbers `MainView` puts on screen.
+/// derived numbers `OverviewView` puts on screen.
 ///
-/// Lives outside `MainView` for two reasons:
+/// Lives outside `OverviewView` for two reasons:
 ///
 /// - **Testability.** SwiftUI computed properties are awkward to drive from
 ///   XCTest without standing up a view tree; static methods on a namespace

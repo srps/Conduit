@@ -31,7 +31,7 @@ final class RuntimePresentationAdapter: ObservableObject {
     /// `directMode` when they only care about the boolean.
     var directMode: Bool { directModeCause.isDirect }
     @Published private(set) var directModeCause: DirectModeCause = .none
-    /// What the VPN observer believes. Drives the VPN row in `MainView`. Phase 4
+    /// What the VPN observer believes. Drives the VPN row in `OverviewView`. Phase 4
     /// will additionally drive `directModeCause` transitions on this field's
     /// changes — for now Phase 3 just mirrors it for UI display.
     @Published private(set) var vpnState: VPNObservedState = .unknown

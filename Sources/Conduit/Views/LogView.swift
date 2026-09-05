@@ -58,8 +58,6 @@ struct LogView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
             filterBar
             Divider()
             logList
@@ -70,23 +68,6 @@ struct LogView: View {
         .onChange(of: selectedCategories) { _, _ in recomputeFilter() }
         .onChange(of: minimumLevel) { _, _ in recomputeFilter() }
         .onChange(of: logStore.entries.count) { _, _ in recomputeFilter() }
-    }
-
-    // MARK: - Header
-
-    private var header: some View {
-        HStack {
-            Text("Logs")
-                .font(.title2.weight(.semibold))
-            Spacer()
-            Text("\(filteredEntries.count) / \(logStore.entries.count)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 18)
-        .padding(.top, 18)
-        .padding(.bottom, 10)
     }
 
     // MARK: - Filters
@@ -114,6 +95,11 @@ struct LogView: View {
             HStack(spacing: 10) {
                 categoryChips
                 Spacer()
+                Text("\(filteredEntries.count) / \(logStore.entries.count)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .accessibilityLabel("\(filteredEntries.count) of \(logStore.entries.count) entries shown")
                 levelPicker
             }
 
@@ -136,7 +122,7 @@ struct LogView: View {
             }
         }
         .padding(.horizontal, 18)
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
     }
 
     private var categoryChips: some View {

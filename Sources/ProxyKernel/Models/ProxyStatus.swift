@@ -42,7 +42,7 @@ package struct ProxyMetrics: Codable, Equatable {
     /// here too — that matches the user's mental model of "the flap I
     /// noticed", not "every utun jitter the kernel saw".
     ///
-    /// Read by `RuntimePresentationAdapter` for the MainView telemetry
+    /// Read by `RuntimePresentationAdapter` for the OverviewView telemetry
     /// strip and serialized via `ProxyOrchestratorSnapshot` Codable for
     /// pm-proxy NDJSON consumers.
     package var vpnFlapCount: Int
