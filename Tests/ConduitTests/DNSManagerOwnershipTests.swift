@@ -269,40 +269,62 @@ final class DNSManagerOwnershipTests: XCTestCase {
         XCTAssertFalse(manager.hasManagedState())
     }
 
+    private func makeInterceptConfig() -> ProxyConfig {
+        var config = makeConfig()
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.cursor.sh")]
+        return config
+    }
+
     /// An install upgraded from a release without per-domain records has a
     /// readable journal that has never seen this surface, files that release
     /// wrote, and — because turning the switch off did not remove them — a
-    /// switch that may already be off. The first launch of this release judges
-    /// the configured domains by contents, removes the files it recognises as
-    /// its own, leaves the rest, and settles the surface so it never looks
-    /// again.
-    func testUpgradeWithTheSwitchOffRemovesLegacyFilesOnce() throws {
+    /// switch that may already be off. The first launch of this release
+    /// removes the files only this app writes: an intercept file names this
+    /// app's own forwarder port. An entry file holds `nameserver` lines a
+    /// user could have written by hand for the same domain, so with no record
+    /// it is left alone. The surface is settled so this never runs again.
+    func testUpgradeWithTheSwitchOffRemovesOnlyUnambiguouslyOurFilesOnce() throws {
         journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["webEnabled": "0"])
+        let config = makeInterceptConfig()
+        try writeResolverFile("cursor.sh", "nameserver 127.0.0.1\nport \(config.dnsForwarderPort)")
         try writeResolverFile("corp.example", "nameserver 10.1.1.1")
-        try writeResolverFile("internal.example", "nameserver 192.168.1.1")
         let manager = makeManager()
 
-        manager.recoverLegacyOwnership(configs: [makeTwoDomainConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
+        manager.recoverLegacyOwnership(configs: [config], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
 
-        XCTAssertEqual(removedDomains(), ["corp.example"], "the file with foreign contents is not ours")
+        XCTAssertEqual(removedDomains(), ["cursor.sh"], "the entry file's contents are not evidence of ours")
         XCTAssertFalse(manager.hasManagedState(), "settled as released")
         XCTAssertTrue(journal.hasRecords(for: .systemProxy), "other surfaces untouched")
 
-        try writeResolverFile("corp.example", "nameserver 10.1.1.1")
-        manager.recoverLegacyOwnership(configs: [makeTwoDomainConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
-        XCTAssertEqual(removedDomains(), ["corp.example"], "never a second time")
+        try writeResolverFile("cursor.sh", "nameserver 127.0.0.1\nport \(config.dnsForwarderPort)")
+        manager.recoverLegacyOwnership(configs: [config], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
+        XCTAssertEqual(removedDomains(), ["cursor.sh"], "never a second time")
     }
 
-    /// With the switch still on, the legacy files are the start path's to
-    /// manage: recorded now, removed by the next stop or quit as usual.
-    func testUpgradeWithTheSwitchOnRecordsLegacyFilesWithoutRemovingThem() throws {
+    /// A user's own entry file with the very line this app would write for
+    /// the same domain survives the upgrade with the switch off.
+    func testUpgradeWithTheSwitchOffLeavesAMatchingEntryFileAlone() throws {
         try writeResolverFile("corp.example", "nameserver 10.1.1.1")
         let manager = makeManager()
 
-        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: true, logger: nil)
+        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
 
         XCTAssertTrue(removedDomains().isEmpty)
-        XCTAssertEqual(journal.scopes(for: .resolverFile), ["corp.example"])
+        XCTAssertFalse(manager.hasManagedState())
+    }
+
+    /// With the switch still on, the legacy intercept file is the start
+    /// path's to manage: recorded now, removed by the next stop or quit.
+    func testUpgradeWithTheSwitchOnRecordsLegacyFilesWithoutRemovingThem() throws {
+        let config = makeInterceptConfig()
+        try writeResolverFile("cursor.sh", "nameserver 127.0.0.1\nport \(config.dnsForwarderPort)")
+        let manager = makeManager()
+
+        manager.recoverLegacyOwnership(configs: [config], configFilePredatesLaunch: true, resolversManaged: true, logger: nil)
+
+        XCTAssertTrue(removedDomains().isEmpty)
+        XCTAssertEqual(journal.scopes(for: .resolverFile), ["cursor.sh"])
         XCTAssertTrue(manager.hasManagedState())
     }
 
