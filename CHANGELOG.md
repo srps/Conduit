@@ -58,6 +58,22 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
 - "Detach" and "Detach Full UI" are "Open Conduit"; "Copy Summary" is "Copy Diagnostics";
   "Enable floating window mode" is "Keep window on top".
 
+### Fixed
+
+- Turning a platform integration off now undoes it. "Manage macOS proxy settings", "Manage
+  shell proxy environment variables", the resolver files and "Manage system DNS" used to
+  change a stored flag and nothing else while the proxy ran: the system proxy stayed pointed at
+  Conduit, and because teardown checked the same flag, stopping or quitting left it there. A
+  save now diffs the integration flags the way it already diffed the proxy config and applies
+  or clears each surface on the spot, including a PAC/manual mode change and launch at login,
+  which no longer waits for the next proxy start (#13).
+- Quitting cleans up whatever Conduit applied, whatever the switches say now. Stop and
+  termination clear a surface when its flag is on *or* when the prior-state journal shows it
+  is ours, which covers a crash between the flip and the save and a config file edited by
+  hand. Resolver files gain the journal's applied/released marker for this; the system proxy
+  and the launchd environment already had one. The guard is the journal, not the machine: a
+  proxy or resolver file the user set up themselves is never read as ours.
+
 ## 0.2.0
 
 Teardown now restores the machine to what it was instead of switching things off, the

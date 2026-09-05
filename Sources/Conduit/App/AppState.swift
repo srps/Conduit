@@ -69,7 +69,7 @@ final class AppState: ObservableObject {
         journal: platformStateJournal
     )
     private lazy var environmentManager = EnvironmentManager(journal: platformStateJournal)
-    private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient)
+    private lazy var dnsManager = DNSManager(privilegeClient: auditedPrivilegeClient, journal: platformStateJournal)
     private lazy var systemDNSManager = SystemDNSManager(
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
@@ -105,6 +105,12 @@ final class AppState: ObservableObject {
     /// (start/stopDNS) update this snapshot directly so their own save
     /// doesn't re-trigger the subsystem they just started or stopped.
     private var lastReconciledConfig: ProxyConfig
+    /// The platform integration flags the machine was last brought in line
+    /// with. Same role as `lastReconciledConfig` for the other half of
+    /// `saveConfig()`: a flag that changed since is a surface to apply or
+    /// clear now, not at the next restart (#13). Lifecycle code never writes
+    /// these flags, so unlike its sibling nothing has to absorb its own edits.
+    private var lastReconciledPlatformConfig: PlatformIntegrationConfig
     /// VPN-gating policy for split-DNS entry files (single source of truth
     /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
     /// every resolver-file apply path consults `entriesWanted`.
@@ -150,6 +156,7 @@ final class AppState: ObservableObject {
         self.config = initialConfig
         self.lastReconciledConfig = initialConfig
         self.platformConfig = loadedConfiguration.platformConfig
+        self.lastReconciledPlatformConfig = loadedConfiguration.platformConfig
         self.appPreferences = loadedConfiguration.appPreferences
         // Mirror the two flap-window values into a thread-safe box so the
         // monitor's monitorQueue callback context can read them without
@@ -248,6 +255,9 @@ final class AppState: ObservableObject {
         if AppState.hasFlag("--no-env") {
             self.platformConfig.manageEnvironmentVariables = false
         }
+        // Launch flags are a session override, not an edit to reconcile:
+        // nothing was applied yet, so there is nothing to clear.
+        lastReconciledPlatformConfig = platformConfig
         orchestrator.config = config
         orchestrator.onSnapshotChange = { [weak self] snapshot in
             Task { @MainActor in
@@ -517,15 +527,29 @@ final class AppState: ObservableObject {
     /// the next full restart (the daemon path always called
     /// `applyConfigChange`; the app never did). Runs after every save; no-ops
     /// when nothing changed since the last reconcile.
+    ///
+    /// The platform integration flags are reconciled in the same pass, once
+    /// the runtime has settled: `PlatformIntegrationReconciler` turns the flag
+    /// diff into actions, and each runs through the manager call the start
+    /// and stop paths use. When one save changes both a flag and the config
+    /// behind its surface — the Configure sections save on disappear, so one
+    /// window close can carry both — the flag's apply wins and the
+    /// config-driven re-apply is skipped: both would write the same thing, and
+    /// the second write can cost an admin prompt.
     private func reconcileRuntimeConfig() {
         let old = lastReconciledConfig
         let new = config
-        guard old != new else { return }
+        let oldPlatform = lastReconciledPlatformConfig
+        let newPlatform = platformConfig
+        guard old != new || oldPlatform != newPlatform else { return }
         lastReconciledConfig = new
+        lastReconciledPlatformConfig = newPlatform
         let diff = ConfigDiff(old: old, new: new)
 
         Task { @MainActor in
-            await orchestrator.applyConfigChange(new, from: old)
+            if old != new {
+                await orchestrator.applyConfigChange(new, from: old)
+            }
 
             // Read the snapshot, not `runtime`: `applyConfigChange` just
             // mutated it, and the mirror that gates these resolver-file
@@ -536,9 +560,23 @@ final class AppState: ObservableObject {
             case .running, .degraded, .recovering: proxyIsUp = true
             default: proxyIsUp = false
             }
+            let dnsIsUp = snapshot.dnsRunState == .running
 
-            if diff.dnsChanged, platformConfig.manageDNSResolvers,
-               proxyIsUp || snapshot.dnsRunState == .running {
+            let platformActions = PlatformIntegrationReconciler.actions(
+                old: oldPlatform,
+                new: newPlatform,
+                proxyIsUp: proxyIsUp,
+                dnsIsUp: dnsIsUp
+            )
+            let resolversFollowTheirFlag = platformActions.contains { action in
+                switch action {
+                case .applyResolverEntries, .refreshInterceptFiles, .clearResolvers: return true
+                default: return false
+                }
+            }
+
+            if diff.dnsChanged, platformConfig.manageDNSResolvers, !resolversFollowTheirFlag,
+               proxyIsUp || dnsIsUp {
                 DNSResolverReconciliation.run(
                     after: "config change",
                     logger: logStore,
@@ -558,7 +596,7 @@ final class AppState: ObservableObject {
             }
 
             if diff.proxyChanged, proxyIsUp {
-                if platformConfig.manageSystemProxy {
+                if platformConfig.manageSystemProxy, !platformActions.contains(.applySystemProxy) {
                     do {
                         try systemConduit.apply(
                             config: new,
@@ -570,13 +608,124 @@ final class AppState: ObservableObject {
                         logStore.log(.warning, "Could not re-apply system proxy after config change: \(error.localizedDescription)", category: .system)
                     }
                 }
-                if platformConfig.manageEnvironmentVariables {
+                if platformConfig.manageEnvironmentVariables, !platformActions.contains(.applyEnvironment) {
                     do {
                         try environmentManager.apply(config: new, logger: logStore)
                     } catch {
                         logStore.log(.warning, "Could not re-apply environment variables after config change: \(error.localizedDescription)", category: .system)
                     }
                 }
+            }
+
+            for action in platformActions {
+                perform(action, config: new, platform: newPlatform, previousConfig: old)
+            }
+        }
+    }
+
+    /// Runs one platform-flag action through the manager the start and stop
+    /// paths use, with their warning-not-throw treatment: a surface that
+    /// could not be applied or cleared is logged, and the rest still run.
+    private func perform(
+        _ action: PlatformIntegrationReconciler.Action,
+        config: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        previousConfig: ProxyConfig
+    ) {
+        switch action {
+        case .applySystemProxy:
+            do {
+                try systemConduit.apply(
+                    config: config,
+                    mode: platform.systemProxyMode,
+                    logger: logStore,
+                    localPACURL: orchestrator.snapshot.bindings.localPACURL
+                )
+            } catch {
+                logStore.log(.warning, "Could not apply system proxy settings after the setting changed: \(error.localizedDescription)", category: .system)
+            }
+        case .clearSystemProxy:
+            if systemConduit.isCleared() {
+                logStore.log(.debug, "System proxy already cleared, skipped.", category: .system)
+            } else {
+                do {
+                    try systemConduit.clear(logger: logStore)
+                } catch {
+                    logStore.log(.warning, "Could not clear system proxy after the setting changed: \(error.localizedDescription)", category: .system)
+                }
+            }
+        case .applyEnvironment:
+            do {
+                try environmentManager.apply(config: config, logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not apply environment variables after the setting changed: \(error.localizedDescription)", category: .system)
+            }
+        case .clearEnvironment:
+            do {
+                try environmentManager.clear(logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not clear environment variables after the setting changed: \(error.localizedDescription)", category: .system)
+            }
+        case .applyResolverEntries:
+            if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
+                logStore.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
+            } else {
+                do {
+                    try dnsManager.apply(config: config, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
+                } catch {
+                    logStore.log(.warning, "Could not apply DNS resolvers after the setting changed: \(error.localizedDescription)", category: .system)
+                }
+            }
+        case .refreshInterceptFiles:
+            do {
+                try refreshInterceptFiles(for: config)
+            } catch {
+                logStore.log(.warning, "Could not apply intercept resolver files after the setting changed: \(error.localizedDescription)", category: .system)
+            }
+        case .clearResolvers:
+            // Both configs: a save can change the DNS entries and turn the
+            // integration off at once, and the files on disk were written
+            // from the previous one.
+            clearResolverFiles(for: [previousConfig, config])
+        case .applySystemDNS:
+            // The same three steps as `startDNS`, in the same order: the
+            // prior state is captured before the interfaces are pointed at
+            // the relay, and the health timer runs whether or not the apply
+            // succeeded, because its relay restart is the retry.
+            do {
+                try systemDNSManager.saveCurrentDNS(logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not save current DNS state (non-fatal): \(error.localizedDescription)", category: .system)
+            }
+            do {
+                try systemDNSManager.apply(forwarderPort: effectiveDNSForwarderPort, logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not set system DNS after the setting changed: \(error.localizedDescription)", category: .system)
+            }
+            startDNSHealthTimer()
+        case .clearSystemDNS:
+            // Timer first, as in `stopDNS`: left running, its 30 s probe
+            // would restart the relay the user just asked to remove.
+            stopDNSHealthTimer()
+            do {
+                try systemDNSManager.clear(logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not restore system DNS after the setting changed: \(error.localizedDescription)", category: .system)
+            }
+        case .setLaunchAtLogin(let enabled):
+            loginItemManager.setEnabled(enabled, logger: logStore)
+        }
+    }
+
+    private func clearResolverFiles(for configs: [ProxyConfig]) {
+        var seen: [ProxyConfig] = []
+        for candidate in configs where !seen.contains(candidate) {
+            seen.append(candidate)
+            if dnsManager.isCleared(config: candidate) { continue }
+            do {
+                try dnsManager.clear(config: candidate, logger: logStore)
+            } catch {
+                logStore.log(.warning, "Could not clear DNS resolvers after the setting changed: \(error.localizedDescription)", category: .system)
             }
         }
     }
@@ -755,8 +904,9 @@ final class AppState: ObservableObject {
                 await startDNS()
             }
 
-            loginItemManager.setEnabled(platformConfig.launchAtLogin, logger: logStore)
-
+            // Launch at login is not applied here: it follows its switch
+            // through the platform reconcile in `saveConfig()`, which is what
+            // the toggle promises and does not wait for a proxy start.
             saveConfig()
             if postNotification {
                 notificationManager.post(title: "Proxy Enabled", body: runtime.runtimeStatus.activeUpstream ?? "Local proxy is running.")
@@ -797,7 +947,14 @@ final class AppState: ObservableObject {
         await awaitLaunchRecovery()
         await orchestrator.stopProxy()
 
-        if platformConfig.manageSystemProxy {
+        // Each surface is cleared when its flag is on *or* when the manager
+        // holds evidence that the surface is ours. The flag alone skipped the
+        // clear whenever the user had turned the integration off since it was
+        // applied. `saveConfig()` now clears on that flip, so what is left for
+        // the guard is the residue: a crash between the flip and the
+        // reconcile, or a config file edited by hand — either way a machine
+        // still pointing at the listener that is about to stop (#13).
+        if platformConfig.manageSystemProxy || systemConduit.hasManagedState() {
             if systemConduit.isCleared() {
                 logStore.log(.debug, "System proxy already cleared, skipped.", category: .system)
             } else {
@@ -808,14 +965,14 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        if platformConfig.manageEnvironmentVariables {
+        if platformConfig.manageEnvironmentVariables || environmentManager.hasManagedState() {
             do {
                 try environmentManager.clear(logger: logStore)
             } catch {
                 logStore.log(.warning, "Could not clear environment variables: \(error.localizedDescription)", category: .system)
             }
         }
-        if platformConfig.manageDNSResolvers {
+        if platformConfig.manageDNSResolvers || dnsManager.hasManagedState() {
             if dnsManager.isCleared(config: config) {
                 logStore.log(.debug, "DNS resolvers already cleared, skipped.", category: .system)
             } else {
@@ -1175,21 +1332,24 @@ final class AppState: ObservableObject {
         }
         orchestrator.performTerminationCleanup()
 
-        if platformConfig.manageSystemProxy {
+        // Flag or ownership, as in `stopProxy` and the system-DNS guard above:
+        // quitting cleans up whatever Conduit applied, whatever the switch
+        // says now.
+        if platformConfig.manageSystemProxy || systemConduit.hasManagedState() {
             do {
                 try systemConduit.clear(logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear system proxy: \(error.localizedDescription)", category: .system)
             }
         }
-        if platformConfig.manageEnvironmentVariables {
+        if platformConfig.manageEnvironmentVariables || environmentManager.hasManagedState() {
             do {
                 try environmentManager.clear(logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear environment variables: \(error.localizedDescription)", category: .system)
             }
         }
-        if platformConfig.manageDNSResolvers {
+        if platformConfig.manageDNSResolvers || dnsManager.hasManagedState() {
             do {
                 try dnsManager.clear(config: config, logger: logStore)
             } catch {
