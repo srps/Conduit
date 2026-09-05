@@ -292,6 +292,8 @@ Every executable constructs the orchestrator the same way: start with a `LogSink
 
 AppState also owns the `$config` → `persistToDisk` pipeline, VPN auto-enable/disable transitions, system-proxy/DNS/env apply on start-stop, and the sleep/wake observer.
 
+What a save does to the machine is not AppState's own: `RuntimeReconciler` (in `PlatformMac`) runs one serialised pass per save, pushing the config edit into the orchestrator, re-applying the surfaces whose contents changed, and turning each flipped `PlatformIntegrationConfig` flag into the apply or clear `PlatformIntegrationReconciler` names. AppState conforms to `RuntimeReconcilerHost` and supplies the manager calls; `DaemonRuntimeHost` conforms to the same protocol and runs the same pass per config reload, so the two hosts share the ownership rules rather than twin them. `Tests/ConduitTests/AppStateHarnessTests.swift` and the ownership scenarios in `DaemonRuntimeHostTests.swift` drive both over one `FakeMachine`.
+
 ### Headless daemon (`pm-proxy`)
 
 `Sources/pm-proxy/PMProxy.swift` is the `PlatformMac`-free equivalent. Same orchestrator, different wiring:
