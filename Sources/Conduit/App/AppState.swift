@@ -558,7 +558,7 @@ final class AppState: ObservableObject {
             orchestrator.eventLog.append(
                 RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
             )
-            if !perform(action, config: new, platform: newPlatform) {
+            if !perform(action, config: new, previousConfig: old, platform: newPlatform) {
                 leaveUnreconciled(action, from: oldPlatform, ifStill: newPlatform)
             }
         }
@@ -650,7 +650,7 @@ final class AppState: ObservableObject {
                 orchestrator.eventLog.append(
                     RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
                 )
-                if !perform(action, config: new, platform: newPlatform) {
+                if !perform(action, config: new, previousConfig: old, platform: newPlatform) {
                 leaveUnreconciled(action, from: oldPlatform, ifStill: newPlatform)
             }
             }
@@ -670,6 +670,7 @@ final class AppState: ObservableObject {
     private func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
+        previousConfig: ProxyConfig,
         platform: PlatformIntegrationConfig
     ) -> Bool {
         func attempt(_ failure: String, _ body: () throws -> Void) -> Bool {
@@ -724,7 +725,7 @@ final class AppState: ObservableObject {
             // Only what the journal names as ours. The switch is off now, so
             // a file for a configured domain we never wrote is the user's.
             return attempt("Could not clear DNS resolvers after the setting changed") {
-                try dnsManager.clearRecorded(config: config, logger: logStore)
+                try dnsManager.clearRecorded(configs: [previousConfig, config], logger: logStore)
             }
         case .applySystemDNS:
             // The same three steps as `startDNS`, in the same order: the
@@ -1039,7 +1040,7 @@ final class AppState: ObservableObject {
             // Switch off: only what the journal names as ours, never a file
             // for a configured domain we did not write.
             do {
-                try dnsManager.clearRecorded(config: config, logger: logStore)
+                try dnsManager.clearRecorded(configs: [config], logger: logStore)
             } catch {
                 logStore.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
@@ -1418,7 +1419,7 @@ final class AppState: ObservableObject {
             }
         } else if dnsManager.hasManagedState() {
             do {
-                try dnsManager.clearRecorded(config: config, logger: logStore)
+                try dnsManager.clearRecorded(configs: [config], logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }

@@ -108,7 +108,10 @@ package final class DNSManager: @unchecked Sendable {
     /// the user's, and only the journal can tell the two apart. `clear` is the
     /// switch-on teardown and removes the configured domains as well, because
     /// there a lost record must not strand a file. No-op without a journal.
-    package func clearRecorded(config: ProxyConfig, logger: (any LogSink)?) throws {
+    /// `configs` matters only for the fallback below; pass every config
+    /// whose domains may be on disk — the caller's previous one too, when a
+    /// single save edited the entries and turned the switch off together.
+    package func clearRecorded(configs: [ProxyConfig], logger: (any LogSink)?) throws {
         guard let journal else { return }
         // An unreadable journal reads as empty, and "empty" here would mean
         // "nothing to remove" — the one answer that strands. Same fallback
@@ -121,7 +124,17 @@ package final class DNSManager: @unchecked Sendable {
                 "Resolver journal unreadable; removing the configured resolver files rather than leave any of ours behind.",
                 category: .system
             )
-            try clear(config: config, logger: logger)
+            var firstError: Error?
+            var seen: [ProxyConfig] = []
+            for config in configs where !seen.contains(config) {
+                seen.append(config)
+                do {
+                    try clear(config: config, logger: logger)
+                } catch {
+                    firstError = firstError ?? error
+                }
+            }
+            if let firstError { throw firstError }
             return
         }
         let recorded = journal.scopes(for: .resolverFile)

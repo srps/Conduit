@@ -174,7 +174,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
 
         XCTAssertEqual(journal.scopes(for: .resolverFile), ["corp.example"], "the second domain was never attempted")
         recording.failingDomains = []
-        try manager.clearRecorded(config: makeConfig(), logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"], "internal.example is not ours to remove")
     }
 
@@ -184,11 +184,11 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = makeManager()
         try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
 
-        try manager.clearRecorded(config: makeConfig(), logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"])
         XCTAssertFalse(manager.hasManagedState())
 
-        try manager.clearRecorded(config: makeConfig(), logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"], "nothing recorded, nothing removed")
     }
 
@@ -200,8 +200,22 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = makeManager()
 
         XCTAssertTrue(manager.hasManagedState(), "cannot say what we changed, so assume the worst")
-        try manager.clearRecorded(config: makeConfig(), logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"])
+    }
+
+    /// One save can edit the entries and turn the switch off together. With
+    /// the journal unreadable, the fallback has only the configs to go on, so
+    /// the caller passes the previous one too and both sets of domains go.
+    func testUnreadableJournalFallbackCoversThePreviousConfig() throws {
+        try Data("{ truncated".utf8).write(to: journalDirectory.appendingPathComponent("platform-state.json"))
+        let manager = makeManager()
+
+        var renamed = makeConfig()
+        renamed.dnsEntries = [DomainDNSEntry(domain: "renamed.example", servers: ["10.3.3.3"])]
+        try manager.clearRecorded(configs: [makeTwoDomainConfig(), renamed], logger: nil)
+
+        XCTAssertEqual(Set(removedDomains()), ["corp.example", "internal.example", "renamed.example"])
     }
 
     /// Without a journal there is no ownership to report, and the daemon and
