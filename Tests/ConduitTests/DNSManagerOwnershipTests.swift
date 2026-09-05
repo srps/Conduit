@@ -102,6 +102,60 @@ final class DNSManagerOwnershipTests: XCTestCase {
         XCTAssertTrue(manager.hasManagedState(), "the file is still there and still ours")
     }
 
+    private func removedDomains() -> [String] {
+        recording.executedCommands.filter { $0.0 == .removeDNS }.compactMap(\.1.first)
+    }
+
+    /// Every teardown derives its domains from the *current* config. A domain
+    /// edited out of the config file by hand is still ours on disk, and the
+    /// journal is what names it.
+    func testClearRemovesRecordedDomainsTheConfigNoLongerNames() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
+
+        var edited = makeConfig()
+        edited.dnsEntries = []
+        try manager.clear(config: edited, logger: nil)
+
+        XCTAssertEqual(removedDomains(), ["corp.example"])
+        XCTAssertFalse(manager.hasManagedState())
+    }
+
+    /// The hosts guard `clear` on `isCleared`, so it has to see a recorded
+    /// domain the config no longer names or the guard skips the file.
+    func testIsClearedSeesARecordedDomainStillOnDisk() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
+        try "nameserver 10.1.1.1".write(
+            to: journalDirectory.appendingPathComponent("corp.example"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        var edited = makeConfig()
+        edited.dnsEntries = []
+        XCTAssertFalse(manager.isCleared(config: edited), "the recorded file is on disk")
+    }
+
+    /// A removal that failed keeps its record, so the next teardown retries
+    /// it even if the config has moved on — and only then is the surface
+    /// released.
+    func testFailedRemovalIsRetriedByTheNextClear() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
+        recording.failingDomains = ["corp.example"]
+        XCTAssertThrowsError(try manager.clear(config: makeConfig(), logger: nil))
+        XCTAssertTrue(manager.hasManagedState())
+
+        recording.failingDomains = []
+        var edited = makeConfig()
+        edited.dnsEntries = []
+        try manager.clear(config: edited, logger: nil)
+
+        XCTAssertEqual(removedDomains(), ["corp.example", "corp.example"], "retried from the journal alone")
+        XCTAssertFalse(manager.hasManagedState())
+    }
+
     /// Without a journal there is no ownership to report, and the daemon and
     /// the other tests construct the manager that way.
     func testNoJournalMeansNoManagedState() throws {
