@@ -128,6 +128,10 @@ final class AppState: ObservableObject {
     init(vpnStatusMonitor: VPNStatusObserving? = nil) {
         let runtimeEnvironment = AppState.runtimeEnvironment()
         let logStore = AppLogStore()
+        // Read before the load, which writes a migrated file back: a config
+        // file that predates this launch is what tells an upgrade from a
+        // fresh install, and the resolver-file recovery at launch hangs on it.
+        let configFilePredatesLaunch = FileManager.default.fileExists(atPath: runtimeEnvironment.configFile.path)
         let loadedConfiguration = ProxyConfigPersistence.loadAllMigrating(in: runtimeEnvironment)
         // Attach the file before anything is logged: the load warnings and
         // the migration notice below are the first lines of a session and
@@ -343,9 +347,20 @@ final class AppState: ObservableObject {
         // and for why `join()` has to guard every platform-surface caller.
         let dnsRecovery = systemDNSManager
         let proxyRecovery = systemConduit
+        let resolverRecovery = dnsManager
+        let launchConfig = config
+        let resolversManaged = platformConfig.manageDNSResolvers
         launchRecovery = LaunchRecovery {
             dnsRecovery.restoreIfNeeded(logger: logStore)
             proxyRecovery.restoreIfNeeded(logger: logStore)
+            // Once per install: files an earlier release wrote before
+            // resolver files were journaled. See `recoverLegacyOwnership`.
+            resolverRecovery.recoverLegacyOwnership(
+                configs: [launchConfig],
+                configFilePredatesLaunch: configFilePredatesLaunch,
+                resolversManaged: resolversManaged,
+                logger: logStore
+            )
         }
         isShowingOnboarding = config.authMode == .ntlmv2 && !credentialManager.hasSavedCredentials(for: config)
         refreshPreflight()
@@ -711,6 +726,8 @@ final class AppState: ObservableObject {
             }
         case .applyResolverEntries:
             if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
+                // The write is skipped; the record must not be. See `adoptAppliedFiles`.
+                dnsManager.adoptAppliedFiles(config: config, vpnConnected: splitDNSGate.entriesWanted)
                 logStore.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
                 return true
             }
@@ -725,7 +742,7 @@ final class AppState: ObservableObject {
             // Only what the journal names as ours. The switch is off now, so
             // a file for a configured domain we never wrote is the user's.
             return attempt("Could not clear DNS resolvers after the setting changed") {
-                try dnsManager.clearRecorded(configs: [previousConfig, config], surfaceWasManaged: true, logger: logStore)
+                try dnsManager.clearRecorded(configs: [previousConfig, config], logger: logStore)
             }
         case .applySystemDNS:
             // The same three steps as `startDNS`, in the same order: the
@@ -917,6 +934,8 @@ final class AppState: ObservableObject {
             }
             if platformConfig.manageDNSResolvers {
                 if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
+                    // The write is skipped; the record must not be. See `adoptAppliedFiles`.
+                    dnsManager.adoptAppliedFiles(config: config, vpnConnected: splitDNSGate.entriesWanted)
                     logStore.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
                 } else {
                     do {
@@ -1040,7 +1059,7 @@ final class AppState: ObservableObject {
             // Switch off: only what the journal names as ours, never a file
             // for a configured domain we did not write.
             do {
-                try dnsManager.clearRecorded(configs: [config], surfaceWasManaged: false, logger: logStore)
+                try dnsManager.clearRecorded(configs: [config], logger: logStore)
             } catch {
                 logStore.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
@@ -1419,7 +1438,7 @@ final class AppState: ObservableObject {
             }
         } else if dnsManager.hasManagedState() {
             do {
-                try dnsManager.clearRecorded(configs: [config], surfaceWasManaged: false, logger: logStore)
+                try dnsManager.clearRecorded(configs: [config], logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
