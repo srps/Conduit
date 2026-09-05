@@ -713,9 +713,12 @@ final class AppState: ObservableObject {
             // disabled" is not "nothing to restore" when the journal holds a
             // corporate proxy that something else switched off after we
             // applied. `clear` decides for itself from the journal.
+            // The managers report a partial teardown by keeping its records,
+            // not by throwing, so the journal is the oracle for "landed":
+            // records left means the next save must try again.
             return attempt("Could not clear system proxy after the setting changed") {
                 try systemConduit.clear(logger: logStore)
-            }
+            } && !systemConduit.hasManagedState()
         case .applyEnvironment:
             return attempt("Could not apply environment variables after the setting changed") {
                 try environmentManager.apply(config: config, logger: logStore)
@@ -723,7 +726,7 @@ final class AppState: ObservableObject {
         case .clearEnvironment:
             return attempt("Could not clear environment variables after the setting changed") {
                 try environmentManager.clear(logger: logStore)
-            }
+            } && !environmentManager.hasManagedState()
         case .applyResolverEntries:
             if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
                 // The write is skipped; the record must not be. See `adoptAppliedFiles`.
@@ -743,7 +746,7 @@ final class AppState: ObservableObject {
             // a file for a configured domain we never wrote is the user's.
             return attempt("Could not clear DNS resolvers after the setting changed") {
                 try dnsManager.clearRecorded(configs: [previousConfig, config], logger: logStore)
-            }
+            } && !dnsManager.hasManagedState()
         case .applySystemDNS:
             // The same three steps as `startDNS`, in the same order: the
             // prior state is captured before the interfaces are pointed at
@@ -763,7 +766,7 @@ final class AppState: ObservableObject {
             stopDNSHealthTimer()
             return attempt("Could not restore system DNS after the setting changed") {
                 try systemDNSManager.clear(logger: logStore)
-            }
+            } && !systemDNSManager.hasSavedState()
         case .setLaunchAtLogin(let enabled):
             return loginItemManager.setEnabled(enabled, logger: logStore)
         }

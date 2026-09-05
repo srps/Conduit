@@ -677,6 +677,29 @@ extension SystemProxyManagerTests {
 
     /// A teardown that failed for a non-admin reason used to report nothing and
     /// then announce a successful restore anyway.
+    /// The managers report a partial teardown by keeping its records, not by
+    /// throwing, so a host that reconciles the switch asks the journal whether
+    /// the clear landed. Records left means the next save must try again.
+    func testHasManagedStateStaysTrueAfterAFailedTeardownUntilOneSucceeds() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+        let manager = SystemProxyManager(
+            privilegeClient: RecordingProxyPrivilegeClient(),
+            journal: makeJournal(),
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        runner.shellResult = CommandResult(exitCode: 3, standardOutput: "", standardError: "boom")
+        try manager.clear(logger: nil)
+        XCTAssertTrue(manager.hasManagedState(), "nothing was put back, so the surface is still ours to restore")
+
+        runner.shellResult = CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+        try manager.clear(logger: nil)
+        XCTAssertFalse(manager.hasManagedState(), "the retry restored it")
+    }
+
     func testFailedTeardownIsReportedAndNotClaimedAsSuccess() throws {
         let runner = FakeNetworksetupRunner()
         runner.autoProxyEnabled = true
