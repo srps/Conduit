@@ -166,8 +166,9 @@ package final class DNSManager: @unchecked Sendable {
     /// names this app's own loopback forwarder port. An entry file holds
     /// `nameserver` lines for the corporate servers, which a user can and do
     /// write by hand, so with no record there is no evidence either way and
-    /// the file is left alone — an entry file also keeps resolving without
-    /// this app, where an intercept file left behind blackholes its domain.
+    /// the file is left alone, named in the log so the user can remove it —
+    /// an entry file also keeps resolving without this app, where an
+    /// intercept file left behind blackholes its domain.
     /// With the switch on, the start path records the entry files it finds
     /// in place (`adoptAppliedFiles`) and manages them from then on. With the
     /// switch off the adopted intercept files are removed now, rather than at
@@ -226,7 +227,8 @@ package final class DNSManager: @unchecked Sendable {
         guard let journal else { return }
         var adopted: [String] = []
         var foreign: [String] = []
-        for (domain, expected) in expectedFileContents(configs: configs, includeEntries: !unambiguousOnly) {
+        let expectedByDomain = expectedFileContents(configs: configs, includeEntries: !unambiguousOnly)
+        for (domain, expected) in expectedByDomain {
             guard let actual = try? String(contentsOfFile: resolverFilePath(for: domain), encoding: .utf8) else { continue }
             if expected.contains(actual.trimmingCharacters(in: .whitespacesAndNewlines)) {
                 journal.recordPrior(surface: .resolverFile, scope: domain, value: nil)
@@ -238,12 +240,31 @@ package final class DNSManager: @unchecked Sendable {
         if adopted.isEmpty {
             journal.markReleased(surface: .resolverFile)
         }
-        logger?.log(
-            .warning,
-            "Recovered resolver ownership from the files themselves because \(reason): \(adopted.count) written by this app"
-                + (foreign.isEmpty ? "." : ", \(foreign.count) with other contents left alone (\(foreign.sorted().joined(separator: ", "))).") ,
-            category: .system
-        )
+        // The entry files this scan declined to judge are named, not passed
+        // over: an earlier release may well have written them, and the user
+        // is the only one who can tell. Silently leaving them would be the
+        // one outcome nobody could act on.
+        var unjudged = Set<String>()
+        if unambiguousOnly {
+            for config in configs {
+                for entry in config.dnsEntries
+                where entry.enabled && !entry.servers.isEmpty && expectedByDomain[entry.domain] == nil
+                    && FileManager.default.fileExists(atPath: resolverFilePath(for: entry.domain)) {
+                    unjudged.insert(entry.domain)
+                }
+            }
+        }
+        var report = "Recovered resolver ownership from the files themselves because \(reason): \(adopted.count) written by this app"
+        if !foreign.isEmpty {
+            report += ", \(foreign.count) with other contents left alone (\(foreign.sorted().joined(separator: ", ")))"
+        }
+        report += "."
+        if !unjudged.isEmpty {
+            report += " \(unjudged.count) entry file(s) for configured domains left in place, because a user can write the same"
+                + " contents by hand: \(unjudged.sorted().joined(separator: ", ")). If an earlier Conduit release wrote them,"
+                + " remove them from \(resolverDirectory) yourself."
+        }
+        logger?.log(.warning, report, category: .system)
     }
 
     /// What this app would have written for each configured domain, across
