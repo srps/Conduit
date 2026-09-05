@@ -108,8 +108,22 @@ package final class DNSManager: @unchecked Sendable {
     /// the user's, and only the journal can tell the two apart. `clear` is the
     /// switch-on teardown and removes the configured domains as well, because
     /// there a lost record must not strand a file. No-op without a journal.
-    package func clearRecorded(logger: (any LogSink)?) throws {
+    package func clearRecorded(config: ProxyConfig, logger: (any LogSink)?) throws {
         guard let journal else { return }
+        // An unreadable journal reads as empty, and "empty" here would mean
+        // "nothing to remove" — the one answer that strands. Same fallback
+        // as the other surfaces: the configured domains go, as `clear` would
+        // have them go, because over-clearing is recoverable and stranding
+        // is not.
+        guard journal.fileState != .unreadable else {
+            logger?.log(
+                .warning,
+                "Resolver journal unreadable; removing the configured resolver files rather than leave any of ours behind.",
+                category: .system
+            )
+            try clear(config: config, logger: logger)
+            return
+        }
         let recorded = journal.scopes(for: .resolverFile)
         guard !recorded.isEmpty else { return }
         try removeAll(recorded, logger: logger)

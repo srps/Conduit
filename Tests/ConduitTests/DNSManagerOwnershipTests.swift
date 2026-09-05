@@ -174,7 +174,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
 
         XCTAssertEqual(journal.scopes(for: .resolverFile), ["corp.example"], "the second domain was never attempted")
         recording.failingDomains = []
-        try manager.clearRecorded(logger: nil)
+        try manager.clearRecorded(config: makeConfig(), logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"], "internal.example is not ours to remove")
     }
 
@@ -184,12 +184,24 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = makeManager()
         try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
 
-        try manager.clearRecorded(logger: nil)
+        try manager.clearRecorded(config: makeConfig(), logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"])
         XCTAssertFalse(manager.hasManagedState())
 
-        try manager.clearRecorded(logger: nil)
+        try manager.clearRecorded(config: makeConfig(), logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"], "nothing recorded, nothing removed")
+    }
+
+    /// An unreadable journal reads as empty, and "nothing recorded" is the
+    /// one answer that strands. The switch-off teardown then falls back to
+    /// the configured domains, as the other surfaces do.
+    func testUnreadableJournalFallsBackToTheConfiguredDomains() throws {
+        try Data("{ truncated".utf8).write(to: journalDirectory.appendingPathComponent("platform-state.json"))
+        let manager = makeManager()
+
+        XCTAssertTrue(manager.hasManagedState(), "cannot say what we changed, so assume the worst")
+        try manager.clearRecorded(config: makeConfig(), logger: nil)
+        XCTAssertEqual(removedDomains(), ["corp.example"])
     }
 
     /// Without a journal there is no ownership to report, and the daemon and
