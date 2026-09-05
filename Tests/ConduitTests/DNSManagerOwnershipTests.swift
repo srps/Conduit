@@ -26,10 +26,11 @@ private final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
 }
 
 /// Resolver files are written by the helper and carry no prior value, so the
-/// journal's `resolverFile` surface holds only an applied/released marker. A
-/// host whose user has turned resolver management *off* reads that marker to
-/// tell our file from one the user maintains by hand for the same domain
-/// (#13), which the file's presence alone cannot.
+/// journal's `resolverFile` surface holds one scope per domain this app wrote
+/// and a released marker once a teardown ran to completion. A host whose user
+/// has turned resolver management *off* reads those to tell our file from one
+/// the user maintains by hand for the same domain (#13), which the file's
+/// presence alone cannot.
 final class DNSManagerOwnershipTests: XCTestCase {
 
     private var journalDirectory: URL!
@@ -67,7 +68,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
 
     func testHasManagedStateFollowsApplyAndClear() throws {
         let manager = makeManager()
-        XCTAssertTrue(manager.hasManagedState(), "nothing has vouched for the surface yet, so it may hold ours")
+        XCTAssertFalse(manager.hasManagedState(), "nothing written yet")
 
         try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
         XCTAssertTrue(manager.hasManagedState())
@@ -174,7 +175,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
 
         XCTAssertEqual(journal.scopes(for: .resolverFile), ["corp.example"], "the second domain was never attempted")
         recording.failingDomains = []
-        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], surfaceWasManaged: false, logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"], "internal.example is not ours to remove")
     }
 
@@ -184,11 +185,11 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = makeManager()
         try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
 
-        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], surfaceWasManaged: false, logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"])
         XCTAssertFalse(manager.hasManagedState())
 
-        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], surfaceWasManaged: false, logger: nil)
         XCTAssertEqual(removedDomains(), ["corp.example"], "nothing recorded, nothing removed")
     }
 
@@ -212,7 +213,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = makeManager()
 
         XCTAssertTrue(manager.hasManagedState(), "cannot say what we changed, so assume the worst")
-        try manager.clearRecorded(configs: [makeTwoDomainConfig()], logger: nil)
+        try manager.clearRecorded(configs: [makeTwoDomainConfig()], surfaceWasManaged: false, logger: nil)
 
         XCTAssertEqual(removedDomains(), ["corp.example"], "internal.example has contents we never write")
         XCTAssertFalse(manager.hasManagedState(), "the journal was rebuilt and then released")
@@ -224,7 +225,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
         try corruptJournal()
         let manager = makeManager()
 
-        try manager.clearRecorded(configs: [makeConfig()], logger: nil)
+        try manager.clearRecorded(configs: [makeConfig()], surfaceWasManaged: false, logger: nil)
 
         XCTAssertTrue(removedDomains().isEmpty)
         XCTAssertFalse(manager.hasManagedState())
@@ -242,7 +243,7 @@ final class DNSManagerOwnershipTests: XCTestCase {
 
         var renamed = makeConfig()
         renamed.dnsEntries = [DomainDNSEntry(domain: "renamed.example", servers: ["10.3.3.3"])]
-        try manager.clearRecorded(configs: [makeTwoDomainConfig(), renamed], logger: nil)
+        try manager.clearRecorded(configs: [makeTwoDomainConfig(), renamed], surfaceWasManaged: false, logger: nil)
 
         XCTAssertEqual(Set(removedDomains()), ["corp.example", "internal.example", "renamed.example"])
     }
@@ -256,24 +257,24 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = makeManager()
         recording.failingDomains = ["corp.example"]
 
-        XCTAssertThrowsError(try manager.clearRecorded(configs: [makeConfig()], logger: nil))
+        XCTAssertThrowsError(try manager.clearRecorded(configs: [makeConfig()], surfaceWasManaged: false, logger: nil))
         XCTAssertTrue(manager.hasManagedState(), "the failed domain stays recorded")
 
         recording.failingDomains = []
         var movedOn = makeConfig()
         movedOn.dnsEntries = []
-        try manager.clearRecorded(configs: [movedOn], logger: nil)
+        try manager.clearRecorded(configs: [movedOn], surfaceWasManaged: false, logger: nil)
 
         XCTAssertEqual(removedDomains(), ["corp.example", "corp.example"], "retried from the rebuilt journal")
         XCTAssertFalse(manager.hasManagedState())
     }
 
     /// An install upgraded from a release without per-domain records has a
-    /// readable journal that has never vouched for this surface, and files
-    /// that release wrote. The same is true after a start that found its
-    /// files already on disk and did not rewrite them. Both are judged by
-    /// contents, and the surface is settled afterwards.
-    func testReadableJournalWithNoRecordOfTheSurfaceRecoversOwnershipFromFiles() throws {
+    /// readable journal that has never seen this surface, and files that
+    /// release wrote. The same is true after a start that found its files
+    /// already on disk and did not rewrite them. At the moment the switch is
+    /// turned off both are judged by contents, and the surface is settled.
+    func testSwitchOffOnAJournalThatNeverSawTheSurfaceRecoversOwnershipFromFiles() throws {
         // A journal an older release left: readable, other surfaces present,
         // nothing about resolver files.
         journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["webEnabled": "0"])
@@ -281,12 +282,25 @@ final class DNSManagerOwnershipTests: XCTestCase {
         try writeResolverFile("internal.example", "nameserver 192.168.1.1")
         let manager = makeManager()
 
-        XCTAssertTrue(manager.hasManagedState(), "never released, so it may hold ours")
-        try manager.clearRecorded(configs: [makeTwoDomainConfig()], logger: nil)
+        try manager.clearRecorded(configs: [makeTwoDomainConfig()], surfaceWasManaged: true, logger: nil)
 
         XCTAssertEqual(removedDomains(), ["corp.example"], "the file with foreign contents is not ours")
         XCTAssertFalse(manager.hasManagedState(), "settled as released")
         XCTAssertTrue(journal.hasRecords(for: .systemProxy), "other surfaces untouched")
+    }
+
+    /// A fresh install whose user keeps their own resolver file, with the
+    /// same `nameserver` line Conduit would write for the same domain, must
+    /// keep it through every stop and quit with the switch off. Contents are
+    /// not evidence of ours when the switch was never on.
+    func testStopWithTheSwitchOffLeavesAnUnseenSurfaceAlone() throws {
+        try writeResolverFile("corp.example", "nameserver 10.1.1.1")
+        let manager = makeManager()
+
+        XCTAssertFalse(manager.hasManagedState(), "the host would not even call")
+        try manager.clearRecorded(configs: [makeConfig()], surfaceWasManaged: false, logger: nil)
+
+        XCTAssertTrue(removedDomains().isEmpty, "the user's identical file survives")
     }
 
     /// Without a journal there is no ownership to report, and the daemon and
