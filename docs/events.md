@@ -97,6 +97,7 @@ exactly these semantics; do not repurpose them.
 | Event | Emitted when |
 | --- | --- |
 | `config.routing_changed`, `config.logging_changed`, `config.metadata_changed`, `config.proxy_limits_updated`, `config.dns_restart`, `config.health_restart`, `config.proxy_restart`, `config.proxy_restart_failed`, `config.strict_mode_pac_refresh`, `config.tunnels_reconcile`, `config.tunnels_reconcile_rejected`, `config.upstreams_refresh`, `config.upstreams_deferred` | Per-subsystem outcomes of a config reload. The set grows with the targeted-reload work; treat unknown `config.*` names as informational. |
+| `config.platform_integration` | A platform integration switch (system proxy, shell environment, resolver files, system DNS, launch at login) changed on save and its surface is about to be applied or cleared; `detail` names the action. Emitted by the app, before the side effect. |
 
 ### vpn
 | Event | Emitted when |
