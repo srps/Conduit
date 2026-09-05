@@ -14,9 +14,9 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        // Menu-bar-first mode: keep the app resident without presenting the
-        // main dashboard at launch. Users can open Settings / Logs /
-        // Connections / Dashboard explicitly from the MenuBarExtra. Set this
+        // Menu-bar-first mode: keep the app resident without a Dock icon.
+        // The app window flips the policy to regular when it appears (see
+        // `AppWindowPresentation.track`) and back when it closes. Set this
         // before SwiftUI creates the menu-bar extra's focus chain.
         NSApp.setActivationPolicy(.accessory)
     }
@@ -28,8 +28,10 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
             object: nil,
             queue: .main
         ) { _ in
+            // `willClose` fires while the window is still visible; hop once
+            // so the visibility check sees the post-close state.
             Task { @MainActor in
-                AppWindowPresentation.returnToMenuBarModeIfNoDetachedWindowsRemain()
+                AppWindowPresentation.returnToMenuBarModeIfNoAppWindowRemains()
             }
         }
     }
@@ -74,8 +76,13 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// ⌃⌥⌘P. The previous chord, ⌘⇧P, is the command palette in VS Code,
+    /// Cursor, and Zed; the global monitor swallowed it in every application.
+    /// `GeneralSettingsView` shows the binding next to the toggle.
+    static let toggleShortcutDescription = "⌃⌥⌘P"
+
     private func matchesToggleShortcut(_ event: NSEvent) -> Bool {
-        event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command, .shift]
+        event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.control, .option, .command]
             && event.charactersIgnoringModifiers?.lowercased() == "p"
     }
 }

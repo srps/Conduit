@@ -396,8 +396,16 @@ package struct PlatformIntegrationConfig: Codable, Equatable, Sendable {
 // MARK: - App Preferences
 
 package struct AppPreferences: Codable, Equatable, Sendable {
+    /// Retained for file compatibility only. Nothing reads it: the app runs
+    /// as a menu bar accessory with no Dock icon, so hiding the status item
+    /// would leave no way back in. The toggle was removed from the UI.
     package var showMenuBarIcon: Bool
+    /// "Keep window on top" for the app window (demos, screen sharing).
     package var floatingWindowEnabled: Bool
+    /// Default **off**. The shortcut is a global key monitor that swallows
+    /// its chord in every application, so it is opt-in. The chord is
+    /// ⌃⌥⌘P (`ConduitAppDelegate.matchesToggleShortcut`); ⌘⇧P was the
+    /// command palette in every developer editor.
     package var globalShortcutEnabled: Bool
     package var preferredBrowserTestURL: String
     /// Default **on**. A menu-bar app that runs unattended for days fails
@@ -409,7 +417,7 @@ package struct AppPreferences: Codable, Equatable, Sendable {
     package init(
         showMenuBarIcon: Bool = true,
         floatingWindowEnabled: Bool = false,
-        globalShortcutEnabled: Bool = true,
+        globalShortcutEnabled: Bool = false,
         preferredBrowserTestURL: String = "",
         fileLoggingEnabled: Bool = true
     ) {
@@ -424,7 +432,7 @@ package struct AppPreferences: Codable, Equatable, Sendable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         showMenuBarIcon = try c.decodeIfPresent(Bool.self, forKey: .showMenuBarIcon) ?? true
         floatingWindowEnabled = try c.decodeIfPresent(Bool.self, forKey: .floatingWindowEnabled) ?? false
-        globalShortcutEnabled = try c.decodeIfPresent(Bool.self, forKey: .globalShortcutEnabled) ?? true
+        globalShortcutEnabled = try c.decodeIfPresent(Bool.self, forKey: .globalShortcutEnabled) ?? false
         preferredBrowserTestURL = try c.decodeIfPresent(String.self, forKey: .preferredBrowserTestURL) ?? ""
         fileLoggingEnabled = try c.decodeIfPresent(Bool.self, forKey: .fileLoggingEnabled) ?? true
     }
