@@ -2,13 +2,18 @@
 import Foundation
 import ProxyKernel
 
-package enum SystemDNSManagerError: Error, LocalizedError {
+package enum SystemDNSManagerError: Error, LocalizedError, Equatable {
     case listingFailed(exitCode: Int32)
+    /// `apply` was asked to redirect interfaces whose servers were never
+    /// captured: `saveCurrentDNS` threw, or was not called.
+    case priorStateNotCaptured
 
     package var errorDescription: String? {
         switch self {
         case .listingFailed(let exitCode):
             return "networksetup -listallnetworkservices failed (exit \(exitCode))"
+        case .priorStateNotCaptured:
+            return "the current DNS servers were not captured, so the interfaces were left alone"
         }
     }
 }
@@ -91,6 +96,14 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Apply / Clear
 
     package func apply(forwarderPort: Int, logger: (any LogSink)?) throws {
+        // Nothing captured, nothing redirected. Every host calls
+        // `saveCurrentDNS` first and treats its failure as non-fatal, so
+        // without this guard a listing that failed once left the interfaces
+        // pointed at the relay with no record to restore them from, and the
+        // teardown's residue sweep then reset them to DHCP: a user's static
+        // resolvers gone for one transient failure. The per-interface
+        // `isUntouched` check below is the same rule one interface at a time.
+        guard hasSavedInterfaces() else { throw SystemDNSManagerError.priorStateNotCaptured }
         let services = try connectedNetworkServices(logger: logger)
         guard !services.isEmpty else { return }
 

@@ -440,10 +440,10 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - apply() with RecordingPrivilegeClient
 
     func testApplyNeverCallsResolverOverrideCommands() throws {
-        let manager = makeManager()
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["192.168.1.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
 
-        // apply() will fail at startRelay since recording isn't HelperToolPrivilegeClient,
-        // but it still proceeds to setDNSServers
+        try manager.saveCurrentDNS(logger: nil)
         try manager.apply(forwarderPort: 5053, logger: nil)
 
         let applyDNS = recording.commands(matching: .applyDNS)
@@ -454,16 +454,38 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testApplySetsAllInterfacesToLocalhost() throws {
-        let manager = makeManager()
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["192.168.1.1"], "Ethernet": ["10.0.0.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
 
+        try manager.saveCurrentDNS(logger: nil)
         try manager.apply(forwarderPort: 5053, logger: nil)
 
-        let dnsCommands = recording.commands(matching: .setDNSServers)
-        XCTAssertFalse(dnsCommands.isEmpty, "Should set DNS on at least one interface")
+        XCTAssertEqual(
+            Set(recording.commands(matching: .setDNSServers).map { $0.joined(separator: " ") }),
+            ["Wi-Fi 127.0.0.1", "Ethernet 127.0.0.1"]
+        )
+    }
 
-        for cmd in dnsCommands {
-            XCTAssertEqual(cmd.last, "127.0.0.1", "Every interface should be set to 127.0.0.1")
+    /// Every host treats a failed `saveCurrentDNS` as non-fatal and goes on
+    /// to `apply`. Without the capture there is nothing to restore from, and
+    /// the teardown's residue sweep would reset the redirected interfaces to
+    /// DHCP, so `apply` must refuse rather than redirect.
+    func testApplyRefusesToRedirectWhenNothingWasCaptured() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["192.168.1.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
+
+        machine.listingFailuresRemaining = 1
+        XCTAssertThrowsError(try manager.saveCurrentDNS(logger: nil), "the capture failed")
+
+        XCTAssertThrowsError(try manager.apply(forwarderPort: 5053, logger: nil)) { error in
+            XCTAssertEqual(error as? SystemDNSManagerError, .priorStateNotCaptured)
         }
+        XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty, "no interface was redirected")
+        XCTAssertTrue(recording.commands(matching: .startDNSRelay).isEmpty, "and the relay was not started")
+
+        try manager.saveCurrentDNS(logger: nil)
+        try manager.apply(forwarderPort: 5053, logger: nil)
+        XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "127.0.0.1"]], "the next attempt, with a capture, redirects")
     }
 
     // MARK: - clear() never calls resolver override commands (regression)

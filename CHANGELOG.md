@@ -95,6 +95,11 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   applies or clears its surface at the reload, a clear the machine refused is retried by the
   next reload, and stop removes whatever the journal says is the daemon's whatever the switch
   says now (#13).
+- "Manage system DNS" no longer redirects interfaces it could not capture. Every host treats a
+  failed capture of the current DNS servers as non-fatal and goes on to point the interfaces at
+  the relay, so one transient `networksetup` listing failure left them redirected with nothing
+  to restore from, and the teardown's residue sweep then reset them to DHCP. The manager now
+  refuses the redirect until a capture has landed; the next start or save retries both.
 
 ### Testing
 
