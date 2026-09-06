@@ -70,6 +70,49 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected)
     }
 
+    /// The interface name belongs to the delivery it came with. The host
+    /// hops to the main actor between the observer's callback and the
+    /// orchestrator, so a name read after the hop would be whatever the
+    /// monitor had moved on to.
+    func testVPNInterfaceNameIsTheOneDeliveredWithTheState() async throws {
+        let environment = RuntimeEnvironment.isolated(
+            stateDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        )
+        defer { try? FileManager.default.removeItem(at: environment.configDirectory) }
+
+        let observer = FakeVPNStatusObserver()
+        let loaded = RuntimeConfigurationLoadResult(
+            config: GenericDefaults.shared.makeConfig(),
+            platformConfig: PlatformIntegrationConfig(),
+            appPreferences: AppPreferences(),
+            migrated: false,
+            warnings: []
+        )
+        let host = DaemonRuntimeHost(
+            environment: environment,
+            logger: DiscardingLogSink(),
+            loadedConfiguration: loaded,
+            vpnStatusMonitor: observer
+        )
+        observer.start()
+        defer { observer.stop() }
+
+        observer.connectedInterfaceName = "utun4"
+        observer.emit(.connected)
+        // A later transition's refresh, before the queued task has run.
+        observer.connectedInterfaceName = "utun9"
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected)
+        XCTAssertEqual(host.orchestrator.snapshot.vpnInterfaceName, "utun4")
+
+        // The same verdict delivered again with the new name follows it.
+        observer.emit(.connected)
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(host.orchestrator.snapshot.vpnInterfaceName, "utun9")
+    }
+
     /// A start that fails must revert the platform side effects rather than
     /// leave them naming listeners that are not running.
     ///

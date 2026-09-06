@@ -40,8 +40,17 @@ extension VPNStatusObserving {
 package final class FakeVPNStatusObserver: VPNStatusObserving, @unchecked Sendable {
     private let onChangeBox = NIOLockedValueBox<(@Sendable (VPNObservedState) -> Void)?>(nil)
     private let startedBox = NIOLockedValueBox<Bool>(false)
+    private let interfaceBox = NIOLockedValueBox<String?>(nil)
 
     package init() {}
+
+    /// Settable so a test can name the tunnel behind a `.connected` it is
+    /// about to emit, and change it right after to stand in for a later
+    /// transition's refresh.
+    package var connectedInterfaceName: String? {
+        get { interfaceBox.withLockedValue { $0 } }
+        set { interfaceBox.withLockedValue { $0 = newValue } }
+    }
 
     package func setOnChange(_ onChange: @Sendable @escaping (VPNObservedState) -> Void) {
         onChangeBox.withLockedValue { $0 = onChange }

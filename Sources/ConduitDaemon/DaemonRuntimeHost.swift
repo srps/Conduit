@@ -214,9 +214,14 @@ final class DaemonRuntimeHost {
                 await self?.handleNetworkChange(description: description)
             }
         }
-        self.vpnStatusMonitor.setOnChange { [weak self] state in
+        // The interface name is read on the monitor's own delivery, not
+        // after the hop, so a queued transition cannot lend its tunnel's
+        // name to the one delivered before it. Same shape as `AppState`.
+        let vpnStatusMonitor = self.vpnStatusMonitor
+        vpnStatusMonitor.setOnChange { [weak self] state in
+            let interfaceName = vpnStatusMonitor.connectedInterfaceName
             Task { @MainActor in
-                await self?.handleVPNStateChange(state)
+                await self?.handleVPNStateChange(state, interfaceName: interfaceName)
             }
         }
         reconciler.host = self
@@ -481,7 +486,7 @@ final class DaemonRuntimeHost {
         }
     }
 
-    private func handleVPNStateChange(_ state: VPNObservedState) async {
+    private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?) async {
         // Gate update and reconcile must stay on the same side of any await:
         // reconcileEntryFiles reads the gate's current state, and a second
         // VPN transition interleaving at a suspension point would make this
@@ -501,7 +506,7 @@ final class DaemonRuntimeHost {
             )
         }
 
-        await orchestrator.handleVPNStateChange(state, interfaceName: vpnStatusMonitor.connectedInterfaceName)
+        await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             systemDNSManager.reconcile(logger: logger)
         }
