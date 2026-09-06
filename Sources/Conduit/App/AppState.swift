@@ -326,9 +326,10 @@ final class AppState: ObservableObject {
         // not after the hop: two transitions queued behind one another would
         // otherwise both read whatever the monitor sees by the time their
         // tasks run, and a connected state could carry a later tunnel's name.
-        let vpnStatusMonitor = self.vpnStatusMonitor
-        vpnStatusMonitor.setOnChange { [weak self] state in
-            let interfaceName = vpnStatusMonitor.connectedInterfaceName
+        // Weak on both: the monitor stores this closure, so a strong capture
+        // of the monitor would keep a stopped host's observer alive forever.
+        self.vpnStatusMonitor.setOnChange { [weak self, weak monitor = self.vpnStatusMonitor] state in
+            let interfaceName = monitor?.connectedInterfaceName
             Task { @MainActor in
                 self?.handleVPNStateChange(state, interfaceName: interfaceName)
             }
