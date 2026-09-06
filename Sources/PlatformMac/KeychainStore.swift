@@ -19,6 +19,8 @@ package enum KeychainStoreError: Error, LocalizedError {
 
 package struct KeychainStore {
     private let service = "io.github.srps.Conduit"
+
+    package init() {}
     package static var accessibleAttribute: CFString {
         kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
     }
@@ -120,3 +122,16 @@ package struct KeychainStore {
         }
     }
 }
+
+/// What `CredentialManager` keeps secrets in. `KeychainStore` is the
+/// production store; a host over a fake machine injects an in-memory one so
+/// its credential controls never touch the login Keychain entries the
+/// installed app relies on.
+package protocol SecretStore: Sendable {
+    func save(secret: SecretBytes, account: String) throws
+    func load(account: String) throws -> SecretBytes?
+    func exists(account: String) throws -> Bool
+    func delete(account: String) throws
+}
+
+extension KeychainStore: SecretStore {}

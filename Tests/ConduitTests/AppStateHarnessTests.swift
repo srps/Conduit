@@ -25,6 +25,8 @@ final class AppStateHarness {
     let machine: FakeMachine
     let vpn = FakeVPNStatusObserver()
     let loginItems = FakeLoginItems()
+    let helper = FakeHelperLifecycle()
+    let secrets = InMemorySecretStore()
     private(set) var appState: AppState?
 
     init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
@@ -55,6 +57,8 @@ final class AppStateHarness {
         let state = AppState(
             runtimeEnvironment: environment,
             privilegeClient: machine,
+            helperLifecycle: helper,
+            credentialStore: secrets,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,

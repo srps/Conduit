@@ -16,6 +16,10 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   `--upstream` drive the states; `--dev-state-dir` puts the journal where an agent can
   read it. `FakeMachine`, `RecordingPrivilegeClient` and `FakeLoginItems` moved from the
   test target into `PlatformMac` for it.
+- The helper's lifecycle (status, install, uninstall) and the credential store are seams on
+  `AppState`, with a fake and an in-memory store in `PlatformMac`. The dev instance and the
+  harness inject both, so neither the Settings helper controls nor the credential controls
+  can reach the installed helper or the login Keychain from a fake host (#20, in part).
 - The log file follows the state directory: an instance launched with `PM_CONFIG_DIR` or
   `--dev` appends to `proxy.log` beside its config instead of the installed app's
   `~/Library/Logs/Conduit/proxy.log`, which two instances used to interleave.

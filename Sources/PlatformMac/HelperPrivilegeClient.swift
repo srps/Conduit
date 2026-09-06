@@ -651,3 +651,19 @@ extension PrivilegeRefusal {
         }
     }
 }
+
+// MARK: - Helper lifecycle seam
+
+/// The helper's lifecycle as the Settings surface sees it: the status it
+/// shows, and install / uninstall, which on the real client copy a binary
+/// into `/Library/PrivilegedHelperTools` and bootstrap a LaunchDaemon. A
+/// seam of its own, apart from `PrivilegeClient`, because a host over a
+/// fake machine would otherwise still reach the installed helper through
+/// these three calls.
+package protocol HelperLifecycleManaging: Sendable {
+    var status: HelperToolPrivilegeClient.Status { get }
+    func installHelper(from sourcePath: String) throws
+    func uninstallHelper() throws
+}
+
+extension HelperToolPrivilegeClient: HelperLifecycleManaging {}
