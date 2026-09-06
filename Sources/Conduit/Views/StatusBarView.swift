@@ -7,13 +7,28 @@ import SwiftUI
 /// see `MenuBarPresentation.menuBarSymbol`.
 struct MenuBarLabel: View {
     @EnvironmentObject private var runtime: RuntimePresentationAdapter
+    /// A dev instance runs beside the installed app with the same glyph;
+    /// the mark is what tells the two status items apart.
+    var devMark: Bool
+
+    /// Explicit because the private environment property makes the
+    /// synthesized memberwise initializer private too.
+    init(devMark: Bool = false) {
+        self.devMark = devMark
+    }
 
     var body: some View {
-        Image(systemName: MenuBarPresentation.menuBarSymbol(
-            state: runtime.runtimeStatus.state,
-            directModeCause: runtime.directModeCause
-        ))
-        .accessibilityLabel("Conduit: \(stateLine)")
+        HStack(spacing: 3) {
+            Image(systemName: MenuBarPresentation.menuBarSymbol(
+                state: runtime.runtimeStatus.state,
+                directModeCause: runtime.directModeCause
+            ))
+            if devMark {
+                Text("dev")
+                    .font(.caption2)
+            }
+        }
+        .accessibilityLabel(devMark ? "Conduit dev: \(stateLine)" : "Conduit: \(stateLine)")
     }
 
     private var stateLine: String {

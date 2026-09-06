@@ -6,7 +6,7 @@ import SwiftUI
 struct ConduitApp: App {
     static let mainWindowID = "main"
 
-    @StateObject private var appState = AppState()
+    @StateObject private var appState = AppState.forLaunch()
     @NSApplicationDelegateAdaptor(ConduitAppDelegate.self) private var appDelegate
 
     init() {
@@ -35,7 +35,7 @@ struct ConduitApp: App {
                     appDelegate.configure(with: appState)
                 }
         } label: {
-            MenuBarLabel()
+            MenuBarLabel(devMark: DevLaunch.isActive)
                 .environmentObject(appState.runtime)
         }
         .menuBarExtraStyle(.window)
@@ -57,3 +57,4 @@ struct ConduitApp: App {
         }
     }
 }
+
