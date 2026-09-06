@@ -151,6 +151,30 @@ enum DevLaunch {
 
     @MainActor private static var previewPanel: NSPanel?
 
+    /// The state glyph with a dot badge in its lower-right corner, as one
+    /// template image the same width as the glyph, so the dev instance's
+    /// status item is told from the installed app's in any state and still
+    /// fits beside a notch. See `MenuBarLabel`.
+    static func menuBarImage(symbol: String) -> NSImage {
+        let glyph = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 13, weight: .regular))
+            ?? NSImage(size: NSSize(width: 16, height: 16))
+        let size = NSSize(width: ceil(glyph.size.width) + 2, height: ceil(glyph.size.height) + 2)
+        let image = NSImage(size: size, flipped: false) { rect in
+            glyph.draw(in: NSRect(x: 0, y: 2, width: glyph.size.width, height: glyph.size.height))
+            // A cleared ring so the dot reads against the glyph's strokes.
+            let badge = NSRect(x: rect.width - 7, y: 0, width: 7, height: 7)
+            NSGraphicsContext.current?.cgContext.setBlendMode(.clear)
+            NSBezierPath(ovalIn: badge.insetBy(dx: -1.5, dy: -1.5)).fill()
+            NSGraphicsContext.current?.cgContext.setBlendMode(.normal)
+            NSColor.black.setFill()
+            NSBezierPath(ovalIn: badge).fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }
+
     /// The popover in a plain panel, because a `MenuBarExtra` cannot be
     /// opened programmatically and a screenshot or the accessibility
     /// inspector needs a target that stays put. The panel is clear behind
@@ -182,6 +206,12 @@ enum DevLaunch {
         panel.isFloatingPanel = true
         panel.level = .floating
         panel.isReleasedWhenClosed = false
+        // The title bar exists only to make the panel a proper window; its
+        // buttons would sit as three bare dots above the glass.
+        panel.isMovableByWindowBackground = true
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(button)?.isHidden = true
+        }
         panel.contentView = hosting
         panel.center()
         panel.orderFrontRegardless()
@@ -262,7 +292,9 @@ enum DevLaunch {
         }
         state.logStore.log(
             .notice,
-            "Dev mode: fake machine, state in \(options.stateDirectory.path). Nothing here reaches the system.",
+            // Not the path: the log sanitizer redacts a long hex run, and a
+            // temporary directory has one. The log file sits in the directory.
+            "Dev mode: fake machine and scratch state. Nothing here reaches the system.",
             category: .system
         )
         session = Session(options: options, machine: machine, vpn: vpn, loginItems: loginItems)

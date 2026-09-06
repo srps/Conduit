@@ -17,18 +17,26 @@ struct MenuBarLabel: View {
         self.devMark = devMark
     }
 
+    /// Beside the notch a status item has only its own width to fit in:
+    /// the menu bar drops an item that does not fit rather than shrinking
+    /// it, and every variant with "dev" written beside the glyph vanished
+    /// on a MacBook whose status area was full. The mark is a dot badge
+    /// drawn into the glyph's own footprint instead.
     var body: some View {
-        HStack(spacing: 3) {
-            Image(systemName: MenuBarPresentation.menuBarSymbol(
-                state: runtime.runtimeStatus.state,
-                directModeCause: runtime.directModeCause
-            ))
-            if devMark {
-                Text("dev")
-                    .font(.caption2)
-            }
+        if devMark {
+            Image(nsImage: DevLaunch.menuBarImage(symbol: symbol))
+                .accessibilityLabel("Conduit dev: \(stateLine)")
+        } else {
+            Image(systemName: symbol)
+                .accessibilityLabel("Conduit: \(stateLine)")
         }
-        .accessibilityLabel(devMark ? "Conduit dev: \(stateLine)" : "Conduit: \(stateLine)")
+    }
+
+    private var symbol: String {
+        MenuBarPresentation.menuBarSymbol(
+            state: runtime.runtimeStatus.state,
+            directModeCause: runtime.directModeCause
+        )
     }
 
     private var stateLine: String {
