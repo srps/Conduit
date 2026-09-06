@@ -195,12 +195,16 @@ struct UpstreamsSettingsView: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 24)
                 .contentShape(Rectangle())
-                .accessibilityHidden(true)
                 .onDrag {
                     draggedUpstreamID = upstream.wrappedValue.id
                     return NSItemProvider(object: upstream.wrappedValue.id.uuidString as NSString)
                 }
-                .accessibilityLabel("Drag upstream")
+                // A drag is not something VoiceOver can perform, so the handle
+                // carries the same reorder as two actions.
+                .accessibilityLabel("Reorder upstream \(displayName(for: upstream.wrappedValue))")
+                .accessibilityHint("Move Up and Move Down change its priority")
+                .accessibilityAction(named: "Move Up") { moveUpstream(upstream.wrappedValue.id, by: -1) }
+                .accessibilityAction(named: "Move Down") { moveUpstream(upstream.wrappedValue.id, by: 1) }
             Circle()
                 .fill(live.map { circuitColor(for: $0.circuitState) } ?? Color(nsColor: .systemGray).opacity(0.4))
                 .frame(width: 8, height: 8)
@@ -274,6 +278,15 @@ struct UpstreamsSettingsView: View {
 
     private func moveUpstream(_ draggedID: UUID, before targetID: UUID?) {
         appState.config.upstreams = UpstreamOrdering.moving(appState.config.upstreams, id: draggedID, before: targetID)
+    }
+
+    /// One step through the same ordering the drop delegate uses.
+    private func moveUpstream(_ id: UUID, by step: Int) {
+        appState.config.upstreams = UpstreamOrdering.moving(appState.config.upstreams, id: id, by: step)
+    }
+
+    private func displayName(for upstream: UpstreamProxy) -> String {
+        upstream.name.isEmpty ? upstream.host : upstream.name
     }
 
     private func removeLastUpstream() {
