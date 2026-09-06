@@ -1,26 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
-@testable import PlatformMac
-@testable import ProxyKernel
-@testable import ConduitShared
+import ProxyKernel
+import ConduitShared
 
 // The doubles the platform managers and both runtime hosts are tested
-// against. One copy each: the suite used to carry a private recording
-// privilege client per test file, and the host harness needs the same
-// recorder plus a machine model behind it.
+// against, and the machine the app's `--dev` launch mode runs over. They
+// live in Sources rather than Tests for the same reason
+// `FakeVPNStatusObserver` sits next to its protocol in `ProxyKernel`: the
+// dev instance is an executable, and SwiftPM lets nothing but a test
+// target import another executable or a test target. One copy each: the
+// suite used to carry a private recording privilege client per test file,
+// and the host harness needs the same recorder plus a machine model behind
+// it.
 
 // MARK: - RecordingPrivilegeClient
 
 /// Records every privileged operation in order and fails the ones it is told
 /// to. Recording happens before the failure, so a test can see what was
 /// attempted as well as what landed.
-final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
+package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
     /// The refusal a scripted failure throws. Names the domain when the
     /// operation carried one, because the resolver tests match on it.
-    struct Refused: Error, LocalizedError {
+    package struct Refused: Error, LocalizedError {
         let operation: PrivilegedOperation
         let subject: String?
-        var errorDescription: String? { "helper refused \(subject ?? operation.rawValue)" }
+        package var errorDescription: String? { "helper refused \(subject ?? operation.rawValue)" }
     }
 
     private let lock = NSLock()
@@ -32,23 +36,23 @@ final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
 
     /// - Parameter error: thrown by every call, for a client that is down
     ///   altogether (no helper installed, socket refused).
-    init(error: Error? = nil) {
+    package init(error: Error? = nil) {
         self.error = error
     }
 
     /// Every operation, batched or not, in the order it was requested.
-    var commands: [(command: PrivilegedOperation, values: [String])] {
+    package var commands: [(command: PrivilegedOperation, values: [String])] {
         lock.withLock { _commands }
     }
 
     /// One entry per elevation, so a test can pin how many times a user
     /// would be prompted rather than only what was run.
-    var batches: [[PrivilegedBatchStep]] {
+    package var batches: [[PrivilegedBatchStep]] {
         lock.withLock { _batches }
     }
 
     /// Operations that fail whatever their values.
-    var failing: Set<PrivilegedOperation> {
+    package var failing: Set<PrivilegedOperation> {
         get { lock.withLock { _failing } }
         set { lock.withLock { _failing = newValue } }
     }
@@ -56,25 +60,25 @@ final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
     /// Operations whose first value (the domain, for the resolver writes)
     /// is in this set fail, so a test can put a failure in the middle of a
     /// batch and see what the rest of it did.
-    var failingDomains: Set<String> {
+    package var failingDomains: Set<String> {
         get { lock.withLock { _failingDomains } }
         set { lock.withLock { _failingDomains = newValue } }
     }
 
     /// The value lists of every recorded `operation`.
-    func commands(matching operation: PrivilegedOperation) -> [[String]] {
+    package func commands(matching operation: PrivilegedOperation) -> [[String]] {
         commands.filter { $0.command == operation }.map(\.values)
     }
 
-    func reset() {
+    package func reset() {
         lock.withLock { _commands.removeAll(); _batches.removeAll() }
     }
 
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
+    package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
         try execute(batch: [PrivilegedBatchStep(operation, values)])
     }
 
-    func execute(batch: [PrivilegedBatchStep]) throws {
+    package func execute(batch: [PrivilegedBatchStep]) throws {
         let refusal: Error? = lock.withLock {
             _batches.append(batch)
             _commands.append(contentsOf: batch.map { ($0.operation, $0.values) })
@@ -106,14 +110,14 @@ final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
 /// with the "requires admin" answer, so every write reaches the model
 /// through the privilege client and is recorded there. That is also the
 /// configuration a machine without admin rights presents.
-final class FakeMachine: PrivilegeClient, @unchecked Sendable {
-    struct ProxyEndpoint: Equatable {
+package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
+    package struct ProxyEndpoint: Equatable {
         var enabled = false
         var host = ""
         var port = ""
     }
 
-    struct Service: Equatable {
+    package struct Service: Equatable {
         var connected = true
         var webProxy = ProxyEndpoint()
         var secureWebProxy = ProxyEndpoint()
@@ -129,9 +133,9 @@ final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     }
 
     /// Every privileged write, in order, and the failure switches.
-    let privilege = RecordingPrivilegeClient()
+    package let privilege = RecordingPrivilegeClient()
     /// Where the resolver files land. Hand this to the manager under test.
-    let resolverDirectory: URL
+    package let resolverDirectory: URL
 
     private let lock = NSLock()
     private var serviceNames: [String]
@@ -140,7 +144,7 @@ final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     private var _dnsRelayRunning = false
     private var _refusedScripts: [String] = []
 
-    init(services: [String] = ["Wi-Fi"], resolverDirectory: URL) {
+    package init(services: [String] = ["Wi-Fi"], resolverDirectory: URL) {
         self.serviceNames = services
         self._services = Dictionary(uniqueKeysWithValues: services.map { ($0, Service()) })
         self.resolverDirectory = resolverDirectory
@@ -149,11 +153,11 @@ final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     // MARK: State
 
-    func service(_ name: String) -> Service {
+    package func service(_ name: String) -> Service {
         lock.withLock { _services[name] ?? Service() }
     }
 
-    func describe(_ name: String, _ mutate: (inout Service) -> Void) {
+    package func describe(_ name: String, _ mutate: (inout Service) -> Void) {
         lock.withLock {
             var service = _services[name] ?? Service()
             mutate(&service)
@@ -162,28 +166,28 @@ final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         }
     }
 
-    var launchdEnvironment: [String: String] {
+    package var launchdEnvironment: [String: String] {
         get { lock.withLock { _launchdEnvironment } }
         set { lock.withLock { _launchdEnvironment = newValue } }
     }
 
-    var dnsRelayRunning: Bool {
+    package var dnsRelayRunning: Bool {
         lock.withLock { _dnsRelayRunning }
     }
 
     /// The `networksetup` scripts that were refused for lack of admin rights.
-    var refusedScripts: [String] {
+    package var refusedScripts: [String] {
         lock.withLock { _refusedScripts }
     }
 
     /// Contents of the resolver file for `domain`, or `nil` when none exists.
-    func resolverFile(for domain: String) -> String? {
+    package func resolverFile(for domain: String) -> String? {
         try? String(contentsOf: resolverDirectory.appendingPathComponent(domain), encoding: .utf8)
     }
 
     /// Writes a resolver file as a previous run would have, without recording
     /// anything: residue for a scenario to find.
-    func strandResolverFile(for domain: String, contents: String) throws {
+    package func strandResolverFile(for domain: String, contents: String) throws {
         try contents.write(to: resolverDirectory.appendingPathComponent(domain), atomically: true, encoding: .utf8)
     }
 
@@ -203,7 +207,7 @@ final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         CommandResult(exitCode: 0, standardOutput: output, standardError: "")
     }
 
-    func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
+    package func run(_ launchPath: String, _ arguments: [String]) throws -> CommandResult {
         switch launchPath {
         case "/bin/sh":
             lock.withLock { _refusedScripts.append(arguments.count == 2 ? arguments[1] : "") }
@@ -280,11 +284,11 @@ final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     // MARK: PrivilegeClient
 
-    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
+    package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
         try execute(batch: [PrivilegedBatchStep(operation, values)])
     }
 
-    func execute(batch: [PrivilegedBatchStep]) throws {
+    package func execute(batch: [PrivilegedBatchStep]) throws {
         // Recorded first, and a scripted refusal stops the batch before any of
         // it lands — the helper validates the whole batch up front too.
         try privilege.execute(batch: batch)
@@ -378,22 +382,24 @@ final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 /// Stands in for `SMAppService`: records each registration change and can
 /// refuse them, so a host test can flip launch-at-login without registering
 /// the test runner to start at login.
-final class FakeLoginItems: @unchecked Sendable {
+package final class FakeLoginItems: @unchecked Sendable {
+    package init() {}
+
     private let lock = NSLock()
     private var _registrations: [Bool] = []
     private var _fails = false
 
     /// Every change requested, in order.
-    var registrations: [Bool] { lock.withLock { _registrations } }
-    var isRegistered: Bool { registrations.last ?? false }
-    var fails: Bool {
+    package var registrations: [Bool] { lock.withLock { _registrations } }
+    package var isRegistered: Bool { registrations.last ?? false }
+    package var fails: Bool {
         get { lock.withLock { _fails } }
         set { lock.withLock { _fails = newValue } }
     }
 
-    struct Refused: Error {}
+    package struct Refused: Error {}
 
-    func setRegistered(_ enabled: Bool) throws {
+    package func setRegistered(_ enabled: Bool) throws {
         let refused: Bool = lock.withLock {
             _registrations.append(enabled)
             return _fails
@@ -402,7 +408,7 @@ final class FakeLoginItems: @unchecked Sendable {
     }
 
     /// A manager wired to this fake, for the host under test.
-    var manager: LoginItemManager {
+    package var manager: LoginItemManager {
         LoginItemManager(setRegistered: { [self] enabled in try self.setRegistered(enabled) })
     }
 }
