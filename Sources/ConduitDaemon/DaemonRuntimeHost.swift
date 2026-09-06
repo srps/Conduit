@@ -217,9 +217,10 @@ final class DaemonRuntimeHost {
         // The interface name is read on the monitor's own delivery, not
         // after the hop, so a queued transition cannot lend its tunnel's
         // name to the one delivered before it. Same shape as `AppState`.
-        let vpnStatusMonitor = self.vpnStatusMonitor
-        vpnStatusMonitor.setOnChange { [weak self] state in
-            let interfaceName = vpnStatusMonitor.connectedInterfaceName
+        // Weak on both: the monitor stores this closure, so a strong capture
+        // of the monitor would keep a stopped host's observer alive forever.
+        self.vpnStatusMonitor.setOnChange { [weak self, weak monitor = self.vpnStatusMonitor] state in
+            let interfaceName = monitor?.connectedInterfaceName
             Task { @MainActor in
                 await self?.handleVPNStateChange(state, interfaceName: interfaceName)
             }
