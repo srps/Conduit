@@ -217,6 +217,10 @@ enum DevLaunch {
         panel.contentView = hosting
         panel.center()
         panel.orderFrontRegardless()
+        // Counted as an app window, so closing the app window while the
+        // preview is up does not return the process to accessory and take
+        // the Dock icon with it.
+        AppWindowPresentation.track(panel)
         previewPanel = panel
         appState.logStore.log(.notice, "Dev mode: popover preview window shown.", category: .system)
 

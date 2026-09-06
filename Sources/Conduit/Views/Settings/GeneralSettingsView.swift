@@ -37,6 +37,9 @@ struct GeneralSettingsView: View {
                     }
                 }
                 .help("A global shortcut that starts or stops the proxy from any application. Off by default because it claims its chord everywhere.")
+                if DevLaunch.isActive {
+                    SettingsNote("In a dev instance the shortcut works only while this app is frontmost, so it cannot toggle the installed Conduit.")
+                }
             } header: {
                 Text("App")
             }
