@@ -82,6 +82,18 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
 
+        // A dev instance keeps the shortcut while it is frontmost and never
+        // registers it system-wide: the installed app may hold the same
+        // chord, and one keypress toggling both is the proxy going down on
+        // the machine during an isolated test.
+        guard !DevLaunch.isActive else {
+            appState?.logStore.log(
+                .notice,
+                "Dev mode: the global shortcut works while this instance is frontmost and is not registered system-wide.",
+                category: .system
+            )
+            return
+        }
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard self?.matchesToggleShortcut(event) == true else { return }
             Task { @MainActor in
