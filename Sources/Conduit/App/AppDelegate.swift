@@ -7,10 +7,25 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
     private var localMonitor: Any?
     private var globalMonitor: Any?
     private var windowCloseObserver: NSObjectProtocol?
+    private var hasFinishedLaunching = false
+    private var devWindowsPresented = false
 
     func configure(with appState: AppState) {
         self.appState = appState
         installShortcutMonitors()
+        presentDevWindowsIfReady()
+    }
+
+    /// Dev mode presents its windows itself. `Window` scenes with
+    /// `defaultLaunchBehavior(.presented)` never came up for an instance
+    /// launched from a terminal or through `open -n`, and the log is the only
+    /// eyes a script has, so the presentation is explicit and logged. Called
+    /// from both sides because `configure` and `didFinishLaunching` arrive in
+    /// no fixed order.
+    private func presentDevWindowsIfReady() {
+        guard DevLaunch.isActive, hasFinishedLaunching, !devWindowsPresented, let appState else { return }
+        devWindowsPresented = true
+        DevLaunch.presentWindows(appState: appState)
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -18,11 +33,21 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
         // The app window flips the policy to regular when it appears (see
         // `AppWindowPresentation.track`) and back when it closes. Set this
         // before SwiftUI creates the menu-bar extra's focus chain.
-        NSApp.setActivationPolicy(.accessory)
+        //
+        // A dev instance stays a regular app: the Dock icon is one more
+        // thing telling it apart from the installed one, and it is what
+        // lets the popover preview and the app window present at launch.
+        // Read from the arguments because the app state, which owns the
+        // parsed flags, may not exist yet.
+        if !CommandLine.arguments.contains(DevLaunchOptions.flag) {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ProcessInfo.processInfo.disableAutomaticTermination("Conduit must keep the local proxy and menu bar controller resident.")
+        hasFinishedLaunching = true
+        presentDevWindowsIfReady()
         windowCloseObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: nil,
