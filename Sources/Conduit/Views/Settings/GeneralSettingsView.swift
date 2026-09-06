@@ -63,12 +63,12 @@ struct GeneralSettingsView: View {
                     get: { appState.appPreferences.fileLoggingEnabled },
                     set: { enabled in
                         appState.appPreferences.fileLoggingEnabled = enabled
-                        appState.logStore.logFileURL = enabled ? AppLogStore.defaultLogFileURL : nil
+                        appState.logStore.logFileURL = enabled ? appState.logFileURL : nil
                     }
                 ))
                 // Not "all log entries": the file gets what passes the sink's
                 // level, which is notice-and-up unless verbose logging is on.
-                .help("Append notice-and-up entries (everything, with verbose logging) to ~/Library/Logs/Conduit/proxy.log, rolled at 5 MB with 3 archives kept. On by default.")
+                .help("Append notice-and-up entries (everything, with verbose logging) to the log file below, rolled at 5 MB with 3 archives kept. On by default.")
                 if let url = appState.logStore.logFileURL {
                     LabeledContent("Log file") {
                         Text(url.path)

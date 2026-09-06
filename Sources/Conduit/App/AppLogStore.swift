@@ -91,11 +91,6 @@ package final class AppLogStore: ObservableObject, LogSink {
     /// switched on before the failure is only useful for failures that can
     /// be predicted. The one real investigation this product has had found
     /// a `proxy.log` seven weeks stale for exactly that reason.
-    package static var defaultLogFileURL: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/Conduit/proxy.log")
-    }
-
     /// Setting this opens the file for **append**; it never truncates. The
     /// previous implementation did, on every toggle flip.
     package var logFileURL: URL? {
