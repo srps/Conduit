@@ -178,18 +178,23 @@ struct LogView: View {
     private func logRow(_ entry: LogEntry) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
+                // The three chips and the message are read once, through the
+                // row's label below; the copy button stays its own element.
                 Text(entry.level.label)
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(levelColor(for: entry.level))
+                    .accessibilityHidden(true)
                 Text(entry.category.label)
                     .font(.caption2)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 1)
                     .background(chipColor(for: entry.category).opacity(0.12), in: Capsule())
                     .foregroundStyle(chipColor(for: entry.category))
+                    .accessibilityHidden(true)
                 Text(entry.timestamp, style: .time)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .accessibilityHidden(true)
                 Spacer()
                 Button {
                     copyToClipboard(entry.formatted())
@@ -206,9 +211,10 @@ struct LogView: View {
                 .font(.system(size: 12, design: .monospaced))
                 .textSelection(.enabled)
                 .lineLimit(8)
+                .accessibilityHidden(true)
         }
         .padding(.vertical, 4)
-        .accessibilityElement(children: .ignore)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entry.level.label) \(entry.category.label) at \(entry.timestamp.formatted(date: .omitted, time: .standard)): \(entry.message)")
     }
 

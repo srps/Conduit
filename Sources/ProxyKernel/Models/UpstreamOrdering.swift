@@ -40,6 +40,21 @@ package enum UpstreamOrdering {
         return reordered(upstreams, orderedIDs: orderedIDs)
     }
 
+    /// One place up (`step < 0`) or down (`step > 0`) in priority order; a
+    /// step past either end changes nothing. The keyboard and VoiceOver
+    /// counterpart of `moving(_:id:before:)`.
+    package static func moving(_ upstreams: [UpstreamProxy], id: UUID, by step: Int) -> [UpstreamProxy] {
+        let ordered = orderedIDs(for: upstreams)
+        guard step != 0, let index = ordered.firstIndex(of: id) else { return upstreams }
+        let target = index + step
+        guard ordered.indices.contains(target) else { return upstreams }
+        // Moving down lands after the element currently at `target`, so the
+        // anchor is the one past it, or the end when there is none.
+        let before: UUID? = step < 0 ? ordered[target]
+            : (target + 1 < ordered.count ? ordered[target + 1] : nil)
+        return moving(upstreams, id: id, before: before)
+    }
+
     package static func normalized(_ upstreams: [UpstreamProxy]) -> [UpstreamProxy] {
         reordered(upstreams, orderedIDs: orderedIDs(for: upstreams))
     }

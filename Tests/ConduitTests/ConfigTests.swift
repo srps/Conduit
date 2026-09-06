@@ -62,6 +62,23 @@ final class ConfigTests: XCTestCase {
         XCTAssertEqual(moved.map(\.priority), [0, 1, 2])
     }
 
+    func testUpstreamOrderingMovesOneStepEitherWayAndStopsAtTheEnds() {
+        let config = ProxyConfig.testFixture()
+        let ids = config.upstreams.map(\.id)
+
+        let up = UpstreamOrdering.moving(config.upstreams, id: ids[1], by: -1)
+        XCTAssertEqual(up.map(\.host), ["proxy-b.example.test", "proxy-a.example.test", "proxy-c.example.test"])
+
+        let down = UpstreamOrdering.moving(config.upstreams, id: ids[1], by: 1)
+        XCTAssertEqual(down.map(\.host), ["proxy-a.example.test", "proxy-c.example.test", "proxy-b.example.test"])
+        XCTAssertEqual(down.map(\.priority), [0, 1, 2])
+
+        let firstUp = UpstreamOrdering.moving(config.upstreams, id: ids[0], by: -1)
+        XCTAssertEqual(firstUp.map(\.host), config.upstreams.map(\.host), "already first: nothing moves")
+        let lastDown = UpstreamOrdering.moving(config.upstreams, id: ids[2], by: 1)
+        XCTAssertEqual(lastDown.map(\.host), config.upstreams.map(\.host), "already last: nothing moves")
+    }
+
     func testUpstreamOrderingCanMoveRowsToEnd() {
         let config = ProxyConfig.testFixture()
         let moved = UpstreamOrdering.moving(config.upstreams, id: config.upstreams[0].id, before: nil)
