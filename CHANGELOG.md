@@ -31,6 +31,13 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   Diagnostics and Quit. Fourteen controls became seven.
 - First-run setup no longer waits for the popover to be opened. It is presented at launch as a
   sheet on the app window when NTLM is configured without saved credentials.
+- The popover is Liquid Glass. It is chrome over the desktop, which is where the HIG puts the
+  effect; the app window is content and stays on materials. The effect is applied once, to the
+  panel, and the system handles Reduce Transparency on its own.
+- The popover reads as one element per row under VoiceOver: "Proxy, Proxied via corp-eu-1,
+  switch, on" with the health, VPN and uptime line as the hint, and "DNS forwarder,
+  127.0.0.1:5353, Running, switch", instead of the state line, then the switch, then the state
+  again as its value. The upstream rows say that they open Upstreams & Routing.
 
 ### App window
 
@@ -57,6 +64,20 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   refuses, and lists cross-field conflicts it owns, instead of leaving them in the banner.
 - "Detach" and "Detach Full UI" are "Open Conduit"; "Copy Summary" is "Copy Diagnostics";
   "Enable floating window mode" is "Keep window on top".
+- The Overview VPN row names the tunnel: "Connected (utun4)". The VPN observer already tracked
+  the interface; it now names the one carrying its verdict, the orchestrator keeps it on the
+  snapshot next to the VPN state, and the diagnostics summary carries it too. The popover keeps
+  the short form.
+- "Failure Window" and "Connection Warn Threshold" in Advanced show the boundary's reason when
+  refused, like every other field. The window must not be negative (0 still means no window),
+  the threshold must be at least 1, and a threshold at or above "Connection Max Limit" is listed
+  as a conflict, since connections past the limit are rejected before the threshold is checked
+  and the warning could never fire.
+- The live status strips above Upstreams, DNS, Tunnels, Proxy and Authentication read label
+  then value under VoiceOver ("DNS forwarder, running: queries 312, cache hit rate 84%") and
+  keep their Test DNS button as a button. A refused field carries its reason as the hint as well
+  as showing it underneath, decorative symbols are silent, and icon-only buttons (clear filter,
+  copy log line, remove entry) are named.
 
 ### Fixed
 

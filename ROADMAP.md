@@ -67,13 +67,13 @@ the same control plane. Detailed plan: [`docs/design-daemon-first-control-plane.
 the menu bar covers 90% of daily tasks.
 
 - [ ] HIG audit across every view; triage violations and fix bottom-up. [UI]
-- [~] Menu-bar popover: state line, quick toggles, active upstream plus fallback summary, recent events, open/restart/diagnostics/quit footer. Remaining: profile header (needs profiles), Liquid Glass. [UI]
+- [~] Menu-bar popover: state line, quick toggles, active upstream plus fallback summary, recent events, open/restart/diagnostics/quit footer. Remaining: profile header (needs profiles). [UI]
 - [~] Floating window: "Keep window on top" in General floats the app window. Remaining: a minimal status-only variant. [UI]
 - [x] Settings redesign aligned to the config sections with inline validation feedback. [UI]
-- [ ] Liquid Glass on the menu-bar popover (chrome only, per HIG); the layout landed without it. [UI]
-- [ ] VoiceOver pass over the popover and the app window: labels exist everywhere, nothing has been verified with VoiceOver running. [UI]
-- [ ] Show the VPN interface name (`utun4`) on the Overview VPN row; the observer knows it, the formatter does not expose it. [UI, Obs]
-- [ ] Inline validation for fields the config boundary does not validate yet (circuit breaker window, warn threshold): add the boundary rule first, the UI picks it up. [UI]
+- [x] Liquid Glass on the menu-bar popover (chrome only, per HIG). [UI]
+- [~] VoiceOver pass over the popover and the app window. The popover reads one element per row, the live status strips read label then value, decorative symbols are hidden, icon-only buttons are named, and every validation reason is reachable from its field. Remaining: listen to each surface with VoiceOver running; nothing has been verified by ear yet. [UI]
+- [x] Show the VPN interface name (`utun4`) on the Overview VPN row. [UI, Obs]
+- [x] Inline validation for the circuit breaker window and the inbound warn threshold, as boundary rules the UI picks up. [UI]
 - [ ] Event inspector window - live, filterable, copyable, exportable (the UI equivalent of `pmctl events --follow`). [UI, Obs]
 - [ ] Upstream detail sheet - latency sparkline, recent auth outcomes, test-now, temporary-disable. [UI, Obs]
 - [ ] Accessibility pass - VoiceOver, Dynamic Type, high-contrast. [UI]
