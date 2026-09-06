@@ -35,4 +35,37 @@ final class ConfigFieldProblemsTests: XCTestCase {
     func testCleanConfigHasNoProblems() {
         XCTAssertTrue(ConfigFieldProblems(config: ProxyConfig()).isEmpty)
     }
+
+    // The two Advanced fields that had no boundary rule, so their Settings
+    // rows showed nothing when wrong.
+
+    func testCircuitBreakerWindowRefusesNegativeAndAcceptsZero() {
+        var config = ProxyConfig()
+        config.circuitBreakerWindowSeconds = -1
+        XCTAssertNotNil(ConfigFieldProblems(config: config).message(for: "health.circuitBreakerWindowSeconds"))
+
+        config.circuitBreakerWindowSeconds = 0
+        XCTAssertNil(ConfigFieldProblems(config: config).message(for: "health.circuitBreakerWindowSeconds"),
+                     "0 is the documented 'no window' value, not an error")
+    }
+
+    func testInboundWarnThresholdNeedsAtLeastOne() {
+        var config = ProxyConfig()
+        config.inboundConnectionWarnThreshold = 0
+        XCTAssertNotNil(ConfigFieldProblems(config: config).message(for: "proxy.inboundConnectionWarnThreshold"))
+    }
+
+    func testInboundWarnThresholdAtOrAboveMaxLimitIsAConflictTheAdvancedSectionShows() {
+        var config = ProxyConfig()
+        config.inboundConnectionWarnThreshold = config.inboundConnectionMaxLimit
+
+        let problems = ConfigFieldProblems(config: config)
+
+        XCTAssertFalse(problems.conflicts(mentioning: ["proxy.inboundConnection"]).isEmpty)
+        XCTAssertNil(problems.message(for: "proxy.inboundConnectionWarnThreshold"),
+                     "the threshold is a legal number on its own; only the pair conflicts")
+
+        config.inboundConnectionWarnThreshold = config.inboundConnectionMaxLimit - 1
+        XCTAssertTrue(ConfigFieldProblems(config: config).conflicts(mentioning: ["proxy.inboundConnection"]).isEmpty)
+    }
 }

@@ -152,7 +152,7 @@ enum Scenarios {
             originBehavior: .silent,
             maxConnections: 64,
             inboundConnectionLimit: inboundLimit,
-            inboundConnectionWarnThreshold: inboundLimit
+            inboundConnectionWarnThreshold: inboundLimit / 2
         )
         defer { Task { @MainActor in await harness.stop() } }
 

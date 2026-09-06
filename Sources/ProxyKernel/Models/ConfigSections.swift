@@ -228,8 +228,9 @@ package struct HealthSection: Codable, Equatable, Sendable {
     /// Half-open re-trips (one failed probe after a circuit was opened) are
     /// NOT gated by this window — re-tripping is the whole point of half-open.
     ///
-    /// Default 10 s. Range 0...300 (0 disables the guard, restoring legacy
-    /// burst-trip behavior). File-only config — not surfaced in the UI.
+    /// Default 10 s. 0 disables the guard, restoring legacy burst-trip
+    /// behavior; the boundary refuses a negative value. Editable under
+    /// Advanced > Failover & Circuit Breaker as "Failure Window".
     package var circuitBreakerWindowSeconds: TimeInterval
 
     /// Per-upstream circuit-breaker failure threshold. The
