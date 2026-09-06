@@ -412,3 +412,85 @@ package final class FakeLoginItems: @unchecked Sendable {
         LoginItemManager(setRegistered: { [self] enabled in try self.setRegistered(enabled) })
     }
 }
+
+// MARK: - FakeHelperLifecycle
+
+/// Stands in for the installed helper's lifecycle: the status the Settings
+/// section shows, and install / uninstall, recorded and never reaching
+/// `/Library/PrivilegedHelperTools`. Installed by default, so a host over
+/// it sees the machine a helper-backed user does.
+package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _status: HelperToolPrivilegeClient.Status
+    private var _installs: [String] = []
+    private var _uninstalls = 0
+    private var _fails = false
+
+    package struct Refused: Error, LocalizedError {
+        package var errorDescription: String? { "helper lifecycle refused" }
+    }
+
+    package init(status: HelperToolPrivilegeClient.Status = .installed) {
+        _status = status
+    }
+
+    package var status: HelperToolPrivilegeClient.Status {
+        get { lock.withLock { _status } }
+        set { lock.withLock { _status = newValue } }
+    }
+
+    /// The source paths of every install requested, in order.
+    package var installs: [String] { lock.withLock { _installs } }
+    package var uninstalls: Int { lock.withLock { _uninstalls } }
+    package var fails: Bool {
+        get { lock.withLock { _fails } }
+        set { lock.withLock { _fails = newValue } }
+    }
+
+    package func installHelper(from sourcePath: String) throws {
+        let refused: Bool = lock.withLock {
+            _installs.append(sourcePath)
+            if !_fails { _status = .installed }
+            return _fails
+        }
+        if refused { throw Refused() }
+    }
+
+    package func uninstallHelper() throws {
+        let refused: Bool = lock.withLock {
+            _uninstalls += 1
+            if !_fails { _status = .notInstalled }
+            return _fails
+        }
+        if refused { throw Refused() }
+    }
+}
+
+// MARK: - InMemorySecretStore
+
+/// A `SecretStore` that forgets on exit, for a host whose credential
+/// controls must not reach the login Keychain.
+package final class InMemorySecretStore: SecretStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var secrets: [String: SecretBytes] = [:]
+
+    package init() {}
+
+    package var accounts: [String] { lock.withLock { Array(secrets.keys) } }
+
+    package func save(secret: SecretBytes, account: String) throws {
+        lock.withLock { secrets[account] = secret }
+    }
+
+    package func load(account: String) throws -> SecretBytes? {
+        lock.withLock { secrets[account] }
+    }
+
+    package func exists(account: String) throws -> Bool {
+        lock.withLock { secrets[account] != nil }
+    }
+
+    package func delete(account: String) throws {
+        lock.withLock { _ = secrets.removeValue(forKey: account) }
+    }
+}

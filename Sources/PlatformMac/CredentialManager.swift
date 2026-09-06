@@ -38,14 +38,18 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// a parameter (which the protocol doesn't allow).
     package typealias Identity = (domain: String, username: String, profileName: String)
 
-    private let keychain = KeychainStore()
+    private let keychain: any SecretStore
     private let identityProvider: @Sendable () -> Identity
 
     /// Construct with an `identityProvider` closure. AppState wires this
     /// from the orchestrator's `configSnapshotProvider`; tests
     /// pass a fixed-identity closure.
-    package init(identityProvider: @escaping @Sendable () -> Identity) {
+    package init(
+        identityProvider: @escaping @Sendable () -> Identity,
+        store: any SecretStore = KeychainStore()
+    ) {
         self.identityProvider = identityProvider
+        self.keychain = store
     }
 
     // MARK: - CredentialProvider conformance

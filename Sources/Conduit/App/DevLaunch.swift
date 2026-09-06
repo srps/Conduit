@@ -143,6 +143,8 @@ enum DevLaunch {
         let machine: FakeMachine
         let vpn: FakeVPNStatusObserver
         let loginItems: FakeLoginItems
+        let helper: FakeHelperLifecycle
+        let secrets: InMemorySecretStore
     }
 
     @MainActor private(set) static var session: Session?
@@ -273,9 +275,17 @@ enum DevLaunch {
         let machine = FakeMachine(resolverDirectory: resolverDirectory)
         let vpn = FakeVPNStatusObserver()
         let loginItems = FakeLoginItems()
+        // The Settings surface's helper controls and the credential controls
+        // have seams of their own; without these two, "Install Helper" and
+        // "Clear Saved Credentials" in the dev instance would reach the
+        // installed helper and the login Keychain.
+        let helper = FakeHelperLifecycle()
+        let secrets = InMemorySecretStore()
         let state = AppState(
             runtimeEnvironment: environment,
             privilegeClient: machine,
+            helperLifecycle: helper,
+            credentialStore: secrets,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
             homeDirectory: home,
             resolverDirectory: resolverDirectory.path,
@@ -297,7 +307,7 @@ enum DevLaunch {
             "Dev mode: fake machine and scratch state. Nothing here reaches the system.",
             category: .system
         )
-        session = Session(options: options, machine: machine, vpn: vpn, loginItems: loginItems)
+        session = Session(options: options, machine: machine, vpn: vpn, loginItems: loginItems, helper: helper, secrets: secrets)
         return state
     }
 
@@ -314,7 +324,9 @@ enum DevLaunch {
                 config = GenericDefaults.shared.makeConfig()
                 config.profileName = "Dev"
                 config.localPort = 0
+                config.socksPort = 0
                 config.dnsForwarderPort = 0
+                config.transparentProxyPort = 0
                 config.localPACPort = 0
                 config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
                 try PlatformConfigPersistence.save(PlatformIntegrationConfig(), in: environment)

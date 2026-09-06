@@ -56,7 +56,7 @@ final class AppState: ObservableObject {
 
     let logStore: AppLogStore
     let credentialManager: CredentialManager
-    let privilegeClient: HelperToolPrivilegeClient
+    let helperLifecycle: any HelperLifecycleManaging
     private let auditedPrivilegeClient: any PrivilegeClient
     private let runtimeEnvironment: RuntimeEnvironment
     private let orchestrator: ProxyOrchestrator
@@ -136,11 +136,19 @@ final class AppState: ObservableObject {
     ///
     /// - Parameters:
     ///   - privilegeClient: what the platform managers run privileged writes
-    ///     through. The helper client is still constructed for the Settings
-    ///     surface (`helperStatus`, install, uninstall) either way.
+    ///     through.
+    ///   - helperLifecycle: what the Settings surface's helper status,
+    ///     install and uninstall go through. In production the one helper
+    ///     client serves both roles; a host over a fake machine injects both,
+    ///     or its Settings would still reach the installed helper.
+    ///   - credentialStore: where saved credentials live. In production the
+    ///     login Keychain; a fake host keeps them in memory, or its
+    ///     credential controls would edit the installed app's entries.
     init(
         runtimeEnvironment: RuntimeEnvironment? = nil,
         privilegeClient: (any PrivilegeClient)? = nil,
+        helperLifecycle: (any HelperLifecycleManaging)? = nil,
+        credentialStore: (any SecretStore)? = nil,
         commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil,
@@ -181,7 +189,7 @@ final class AppState: ObservableObject {
         )
         self.runtimeEnvironment = runtimeEnvironment
         self.logStore = logStore
-        self.privilegeClient = helperClient
+        self.helperLifecycle = helperLifecycle ?? helperClient
         self.auditedPrivilegeClient = auditedPrivilegeClient
         self.commandRunner = commandRunner ?? { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
@@ -265,7 +273,8 @@ final class AppState: ObservableObject {
             identityProvider: { [snapshotProvider = orchestrator.configSnapshotProvider] in
                 let c = snapshotProvider()
                 return (domain: c.domain, username: c.username, profileName: c.profileName)
-            }
+            },
+            store: credentialStore ?? KeychainStore()
         )
         self.credentialManager = credentialManager
 
@@ -1288,13 +1297,13 @@ final class AppState: ObservableObject {
         let platformConfigSnapshot = platformConfig
         let refreshID = UUID()
         preflightRefreshID = refreshID
-        let privilegeClient = self.privilegeClient
+        let helperLifecycle = self.helperLifecycle
         let systemConduit = self.systemConduit
         let dnsManager = self.dnsManager
         let vpnConnected = splitDNSGate.entriesWanted
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let helperStatus = privilegeClient.status
+            let helperStatus = helperLifecycle.status
             let preflight = ActivationPreflightEvaluator.evaluate(
                 config: configSnapshot,
                 platformConfig: platformConfigSnapshot,
@@ -1325,7 +1334,7 @@ final class AppState: ObservableObject {
             return
         }
         do {
-            try privilegeClient.installHelper(from: source)
+            try helperLifecycle.installHelper(from: source)
             logStore.log(.notice, "Privileged helper installed successfully.", category: .system)
             Task {
                 try? await Task.sleep(for: .seconds(1))
@@ -1339,7 +1348,7 @@ final class AppState: ObservableObject {
 
     func uninstallHelper() {
         do {
-            try privilegeClient.uninstallHelper()
+            try helperLifecycle.uninstallHelper()
             logStore.log(.notice, "Privileged helper uninstalled.", category: .system)
             refreshPreflight()
         } catch {
