@@ -25,7 +25,7 @@ Conduit/
 │   ├── pm-vpn-check/          1 file,     0.1k LOC  — VPN status diagnostic
 │   └── pm-auth-check/         1 file,     0.5k LOC  — auth diagnostic
 └── Tests/
-    └── ConduitTests/    83 files,  ~13k LOC  — 1,100+ tests, 5 skipped
+    └── ConduitTests/    116 files, ~30k LOC  — 1,500+ tests, 6 skipped
 ```
 
 SwiftNIO is a remote SwiftPM dependency (`https://github.com/apple/swift-nio.git`), resolved at build time — there is no vendored copy in-tree.
@@ -148,7 +148,9 @@ Sources/ProxyKernel/
 | `CredentialProvider`     | 2 (`credentials(for:)`, `setCredentials(_:for:)`) | 1 (`AuthenticatorFactory`)                 | `CredentialManager` (PlatformMac, Keychain), `InMemoryCredentialProvider` (kernel, headless/test)       | module split (later widened) |
 | `PacEvaluator`           | 3 (`fetchPAC`, `makeEvaluator`, `routeChain`) | 1 (`PACRoutingEngine`)                         | `CFPACEvaluator` (CFNetwork-backed, ProxyPAC)                                                           | module split (CFNetwork rework) |
 | `PacScriptEvaluating`    | 1 (`resolveProxyChain(for:)`)          | 1 (`PACRoutingEngine.jsEvaluator`)                   | `CFPacScriptEvaluator` (ProxyPAC)                                                                       | module split (CFNetwork rework) |
-| `PrivilegeClient`        | 2 (`execute`, `status`)               | 2 (orchestrator relay calls, AppState helper status) | `HelperPrivilegeClient` (PlatformMac), `AppleScriptPrivilegeClient` (PlatformMac), `RecordingPrivilegeClient` (tests) | pre-split (surfaced during split) |
+| `PrivilegeClient`        | 2 (`execute`, `execute(batch:)`)      | 2 (orchestrator relay calls, platform managers)     | `HelperToolPrivilegeClient`, `AppleScriptPrivilegeClient`, `AuditingPrivilegeClient`, `RecordingPrivilegeClient`, `FakeMachine` (all PlatformMac) | pre-split (surfaced during split) |
+| `HelperLifecycleManaging` (PlatformMac) | 3 (`status`, `installHelper(from:)`, `uninstallHelper`) | 1 (`AppState` Settings surface)      | `HelperToolPrivilegeClient`, `FakeHelperLifecycle` (PlatformMac)                                        | dev mode (#24)           |
+| `SecretStore` (PlatformMac) | 4 (`save`, `load`, `exists`, `delete`) | 1 (`CredentialManager`)                            | `KeychainStore`, `InMemorySecretStore` (PlatformMac)                                                    | dev mode (#24)           |
 | `ProxyAuthenticator`     | Stateful per-handshake                | 4 NIO handlers                                       | `NTLMAuthenticator`, `KerberosAuthenticator`, `NegotiateAuthenticator` (ProxyAuth), `MockAuthenticator` (pm-sim) | pre-split                |
 | `VPNStatusObserving`     | 2 (`setOnChange`, `start`)            | 1 (`AppState`)                                       | `VPNStatusMonitor` (PlatformMac), `FakeVPNStatusObserver` (pm-sim/tests)                                | pre-split                |
 | `TunnelResolverApplying` | 3 (`cleanupStale`, `applyAll`, `removeAll`) | 1 (`TunnelForwarder`)                          | `TunnelResolverManager` (PlatformMac); test no-op on demand                                             | module split             |
@@ -285,14 +287,22 @@ Every executable constructs the orchestrator the same way: start with a `LogSink
 
 `Sources/Conduit/App/AppState.swift` is the wiring layer — the single site in the codebase that links every `PlatformMac` concrete directly. It owns:
 
-- `CredentialManager` (Keychain-backed `CredentialProvider`) — constructed with an `identityProvider` closure that wraps `orchestrator.configSnapshotProvider` (so the Keychain key always reflects the live profile identity)
+- `CredentialManager` (`CredentialProvider` over a `SecretStore`, `KeychainStore` in production) — constructed with an `identityProvider` closure that wraps `orchestrator.configSnapshotProvider` (so the Keychain key always reflects the live profile identity)
 - `SystemProxyManager`, `SystemDNSManager`, `EnvironmentManager`, `LoginItemManager`, `NotificationManager`, `ActivationPreflight`, `DNSManager`, `TunnelResolverManager`, `HelperPrivilegeClient`, `VPNStatusMonitor`, `VPNDNSDetector`, `NetworkMonitor`
 - `AppLogStore` — the `@MainActor` ring buffer that feeds `LogView`; conforms to `LogSink` via its nonisolated `log(_:_:category:)` method which Tasks back to MainActor for the ring-buffer append (with a `MainActor.assumeIsolated` fast path when the caller is already on main, preserving synchronous test semantics)
 - `ProxyOrchestrator` — constructed with `authenticatorProvider: nil` initially; AppState then calls `setAuthenticatorProvider(...)` after the orchestrator is live. This is the one init-order subtlety: the auth factory closure captures `orchestrator.configSnapshotProvider`, which only exists after the orchestrator's init returns. The orchestrator's lazy proxy/tunnel vars capture the closure at first access (`startProxy()` time, after AppState wiring completes), so the pre-init `nil` is never observed.
 
 AppState also owns the `$config` → `persistToDisk` pipeline, VPN auto-enable/disable transitions, system-proxy/DNS/env apply on start-stop, and the sleep/wake observer.
 
+Every collaborator that touches the machine is an `init` parameter with the production default: `runtimeEnvironment` (paths, including the log file), `privilegeClient` (the privileged writes), `helperLifecycle` (the Settings surface's helper status, install and uninstall), `credentialStore` (where saved credentials live), `commandRunner` (`networksetup` and `launchctl` reads), `homeDirectory` (the shell environment file), `resolverDirectory`, `loginItemManager` and `vpnStatusMonitor`. Two compositions inject fakes for all of them, and a seam added for one is added to the other: `AppStateHarness.launch()` in the tests, and `DevLaunch.makeAppState` below.
+
 What a save does to the machine is not AppState's own: `RuntimeReconciler` (in `PlatformMac`) runs one serialised pass per save, pushing the config edit into the orchestrator, re-applying the surfaces whose contents changed, and turning each flipped `PlatformIntegrationConfig` flag into the apply or clear `PlatformIntegrationReconciler` names. AppState conforms to `RuntimeReconcilerHost` and supplies the manager calls; `DaemonRuntimeHost` conforms to the same protocol and runs the same pass per config reload, so the two hosts share the ownership rules rather than twin them. `Tests/ConduitTests/AppStateHarnessTests.swift` and the ownership scenarios in `DaemonRuntimeHostTests.swift` drive both over one `FakeMachine`.
+
+### Dev instance (`Conduit --dev`)
+
+`Sources/Conduit/App/DevLaunch.swift` is the harness's composition as a launch mode, compiled into debug builds only, so a second Conduit runs beside the installed one for visual and VoiceOver checks without touching the machine. `AppState.forLaunch()` parses `--dev`, `--dev-state-dir`, `--section`, `--vpn` and `--upstream`, and builds `AppState` over `FakeMachine` (privilege client and command runner), `FakeLoginItems`, `FakeVPNStatusObserver`, `FakeHelperLifecycle` and `InMemorySecretStore`, with an isolated `RuntimeEnvironment` under `$TMPDIR/conduit-dev` that holds the config, journal, preferences, log, a scratch home and the fake resolver directory. The first launch seeds a config with every listener port at zero and the four platform switches off; later launches keep what was edited.
+
+The popover is shown in a clear `NSPanel` hosting `StatusBarView`, presented from the app delegate once launch has finished and registered with `AppWindowPresentation` so it counts as an app window; with `--section` the app window opens through the Open Conduit menu command. Both presentations are logged to the state directory's `proxy.log`, which is what a script checks. The instance stays a regular app (Dock icon), badges its status-item glyph with a dot, and installs only the in-app shortcut monitor, never the system-wide one. It is launched with `open -n … --args --dev`: `-n` starts a new instance instead of activating the installed app, and a GUI process launched directly from an agent session has no window server access. The dev app bundle with its own identifier is #23.
 
 ### Headless daemon (`pm-proxy`)
 
@@ -384,7 +394,7 @@ Coverage includes:
 - Transparent proxy config (defaults, `Codable` round-trip, backward-compatible decoding)
 - Logging (`LogSink` conformance, `@autoclosure` short-circuit, `RecordingLogSink` capture, file-logging level gating)
 
-Test doubles mirror the protocol surface: `RecordingLogSink`, `RecordingPrivilegeClient`, `FakeVPNStatusObserver`, `MockAuthenticator`, `InMemoryCredentialProvider`. No test constructs a `CredentialManager`, `SystemProxyManager`, or `VPNStatusMonitor` unless it specifically exercises that concrete's Keychain / `networksetup` / `SCDynamicStore` behavior.
+Test doubles mirror the protocol surface. The platform ones live in `Sources/PlatformMac/PlatformFakes.swift` because the dev instance runs over them too: `RecordingPrivilegeClient`, `FakeMachine` (a described machine that answers the `networksetup` and `launchctl` reads and applies privileged writes to its own model), `FakeLoginItems`, `FakeHelperLifecycle`, `InMemorySecretStore`. The kernel-side ones are `RecordingLogSink`, `FakeVPNStatusObserver`, `MockAuthenticator` and `InMemoryCredentialProvider`. No test constructs a `CredentialManager` over the real `KeychainStore`, a `SystemProxyManager` over the real machine, or a `VPNStatusMonitor` unless it specifically exercises that concrete's Keychain / `networksetup` / `SCDynamicStore` behavior; the `AppState` harness injects every fake, so it never pings the installed helper or reads the login Keychain.
 
 ## CI invariants
 
