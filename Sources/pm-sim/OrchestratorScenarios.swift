@@ -73,7 +73,7 @@ enum OrchestratorScenarios {
         config.proxy.port = 0
         config.proxy.maxConnections = 64
         config.proxy.inboundConnectionMaxLimit = 2048
-        config.proxy.inboundConnectionWarnThreshold = 2048
+        config.proxy.inboundConnectionWarnThreshold = 1024
         config.routing.pacRoutingEnabled = false
         config.auth.mode = .systemNegotiated
         config.upstreams = [
