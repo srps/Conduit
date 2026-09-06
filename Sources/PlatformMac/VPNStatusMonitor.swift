@@ -28,6 +28,13 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
 
     private let onChangeBox = NIOLockedValueBox<(@Sendable (VPNObservedState) -> Void)?>(nil)
     private let lifecycleBox = NIOLockedValueBox<LifecycleState>(.init())
+    /// `fuser.connectedInterfaceNames.first`, copied out before every
+    /// callback so a consumer on another thread can read it without touching
+    /// the fuser. Refreshed on every decision, including `.noChange`, so a
+    /// second tunnel replacing the first is recorded here; the consumer only
+    /// learns of that on the next state transition, which is the documented
+    /// limit of the single-state callback.
+    private let connectedInterfaceBox = NIOLockedValueBox<String?>(nil)
 
     /// Mutated only on `monitorQueue`. Not in the lifecycle box because the
     /// fuser holds non-Sendable state (timer book-keeping) that doesn't belong
@@ -76,6 +83,10 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
 
     package func setOnChange(_ onChange: @Sendable @escaping (VPNObservedState) -> Void) {
         onChangeBox.withLockedValue { $0 = onChange }
+    }
+
+    package var connectedInterfaceName: String? {
+        connectedInterfaceBox.withLockedValue { $0 }
     }
 
     package func start() {
@@ -302,6 +313,7 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
     /// Called only on `monitorQueue`.
     private func applyFuserDecision(_ decision: VPNStateFuser.Decision) {
         let callback = onChangeBox.withLockedValue { $0 }
+        refreshConnectedInterface()
         switch decision {
         case .noChange:
             return
@@ -330,6 +342,7 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
                 // Only fire if we're still in the reasserting state. A recovery
                 // would have cancelled this work item before it ran.
                 self.fuser.markGraceExpired()
+                self.refreshConnectedInterface()
                 callback?(then)
             }
             graceWorkItem = work
@@ -369,6 +382,13 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
             minVisibleWorkItems[interfaceName] = work
             monitorQueue.asyncAfter(deadline: .now() + minVisibleSeconds, execute: work)
         }
+    }
+
+    /// Called only on `monitorQueue`, before any callback, so the name a
+    /// consumer reads inside `onChange` belongs to the state being delivered.
+    private func refreshConnectedInterface() {
+        let name = fuser.connectedInterfaceNames.first
+        connectedInterfaceBox.withLockedValue { $0 = name }
     }
 
     /// Extract the utun interface name (e.g. "utun0") from a dynamic store key.

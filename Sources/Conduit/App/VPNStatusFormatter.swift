@@ -25,9 +25,17 @@ enum VPNStatusFormatter {
     /// `"Disconnected"` rendering so users can distinguish "I clicked
     /// Disconnect" from "the network just dropped" without opening the log
     /// viewer.
-    static func label(for state: VPNObservedState) -> String {
+    ///
+    /// `interfaceName` is the utun the observer named for a `.connected`
+    /// verdict; it is appended as "Connected (utun4)" and ignored for every
+    /// other state, which never carries one. The popover passes nothing and
+    /// keeps the short form.
+    static func label(for state: VPNObservedState, interfaceName: String? = nil) -> String {
         switch state {
         case .connected:
+            if let interfaceName, !interfaceName.isEmpty {
+                return "Connected (\(interfaceName))"
+            }
             return "Connected"
         case .reasserting:
             return "Reconnecting…"

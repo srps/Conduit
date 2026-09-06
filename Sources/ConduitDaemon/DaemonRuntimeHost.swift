@@ -501,7 +501,7 @@ final class DaemonRuntimeHost {
             )
         }
 
-        await orchestrator.handleVPNStateChange(state)
+        await orchestrator.handleVPNStateChange(state, interfaceName: vpnStatusMonitor.connectedInterfaceName)
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             systemDNSManager.reconcile(logger: logger)
         }

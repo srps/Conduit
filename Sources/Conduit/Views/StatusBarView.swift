@@ -338,7 +338,7 @@ struct StatusBarView: View {
             failedRequests: runtime.failedRequests,
             activeConnectionCount: runtime.activeConnections.count,
             directModeCause: runtime.directModeCause,
-            vpnLabel: VPNStatusFormatter.label(for: runtime.vpnState)
+            vpnLabel: VPNStatusFormatter.label(for: runtime.vpnState, interfaceName: runtime.vpnInterfaceName)
         )
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(summary, forType: .string)

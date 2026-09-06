@@ -20,6 +20,17 @@ package protocol VPNStatusObserving: AnyObject, Sendable {
     /// Stop observing and release any kernel resources (SCDynamicStore handles,
     /// timers). Idempotent.
     func stop()
+
+    /// The utun carrying the observer's current `.connected` verdict, or nil
+    /// when the state is anything else or the observer cannot name one.
+    /// Consumers read it inside their `onChange` handler, where it describes
+    /// the state just delivered. Observers with no interface to name (the
+    /// fake, a path-monitor fallback) take the default.
+    var connectedInterfaceName: String? { get }
+}
+
+extension VPNStatusObserving {
+    package var connectedInterfaceName: String? { nil }
 }
 
 /// Test/sim injection point. Drives the orchestrator's VPN-state plumbing
