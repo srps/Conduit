@@ -28,12 +28,18 @@ struct MenuBarLabel: View {
 
 /// The popover. One job: status and switches in one click, no scrolling.
 /// Everything that needs reading or configuring lives in the app window.
+///
+/// The panel is chrome over the desktop, which is where the HIG puts Liquid
+/// Glass; the app window is content and stays on materials. The effect is
+/// applied once, to the whole panel, and nowhere inside it. The system
+/// handles Reduce Transparency and Increase Contrast on its own.
 struct StatusBarView: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var runtime: RuntimePresentationAdapter
     @Environment(\.openWindow) private var openWindow
 
     private static let width: CGFloat = 320
+    private static let cornerRadius: CGFloat = 12
     private static let recentEventLimit = 3
 
     var body: some View {
@@ -69,6 +75,7 @@ struct StatusBarView: View {
             commands
         }
         .frame(width: Self.width)
+        .glassEffect(.regular, in: .rect(cornerRadius: Self.cornerRadius, style: .continuous))
     }
 
     // MARK: - Header
