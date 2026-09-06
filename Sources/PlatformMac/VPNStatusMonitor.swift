@@ -30,10 +30,9 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
     private let lifecycleBox = NIOLockedValueBox<LifecycleState>(.init())
     /// `fuser.connectedInterfaceNames.first`, copied out before every
     /// callback so a consumer on another thread can read it without touching
-    /// the fuser. Refreshed on every decision, including `.noChange`, so a
-    /// second tunnel replacing the first is recorded here; the consumer only
-    /// learns of that on the next state transition, which is the documented
-    /// limit of the single-state callback.
+    /// the fuser. Refreshed on every decision, including `.noChange`; when
+    /// the name moves under an unchanged `.connected` (utun4 gone, utun5
+    /// still up) the verdict is delivered again so the consumer re-reads it.
     private let connectedInterfaceBox = NIOLockedValueBox<String?>(nil)
 
     /// Mutated only on `monitorQueue`. Not in the lifecycle box because the
@@ -313,9 +312,16 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
     /// Called only on `monitorQueue`.
     private func applyFuserDecision(_ decision: VPNStateFuser.Decision) {
         let callback = onChangeBox.withLockedValue { $0 }
-        refreshConnectedInterface()
+        let interfaceChanged = refreshConnectedInterface()
         switch decision {
         case .noChange:
+            // The verdict did not move but the tunnel carrying it did.
+            // Deliver the same verdict again so the hosts pick up the new
+            // name; the orchestrator treats a repeated state as a name
+            // update, not a transition, and emits no vpn.* event for it.
+            if interfaceChanged, fuser.lastEmittedState.isConnected {
+                callback?(fuser.lastEmittedState)
+            }
             return
         case .emit(let state):
             // Cancel any pending grace timer — a non-reasserting state supersedes it.
@@ -342,7 +348,7 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
                 // Only fire if we're still in the reasserting state. A recovery
                 // would have cancelled this work item before it ran.
                 self.fuser.markGraceExpired()
-                self.refreshConnectedInterface()
+                _ = self.refreshConnectedInterface()
                 callback?(then)
             }
             graceWorkItem = work
@@ -386,9 +392,13 @@ package final class VPNStatusMonitor: VPNStatusObserving, @unchecked Sendable {
 
     /// Called only on `monitorQueue`, before any callback, so the name a
     /// consumer reads inside `onChange` belongs to the state being delivered.
-    private func refreshConnectedInterface() {
+    /// Returns whether the name moved.
+    private func refreshConnectedInterface() -> Bool {
         let name = fuser.connectedInterfaceNames.first
-        connectedInterfaceBox.withLockedValue { $0 = name }
+        return connectedInterfaceBox.withLockedValue { box in
+            defer { box = name }
+            return box != name
+        }
     }
 
     /// Extract the utun interface name (e.g. "utun0") from a dynamic store key.

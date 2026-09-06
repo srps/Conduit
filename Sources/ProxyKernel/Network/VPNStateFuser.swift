@@ -227,6 +227,10 @@ package struct VPNStateFuser {
     /// empty whenever the fused state is anything else. A utun mid-debounce
     /// counts, for the reason `fuseCurrentState` counts it: from the
     /// orchestrator's point of view it is still serving traffic.
+    /// What the last decision delivered, for a caller that has to re-deliver
+    /// it unchanged (see `VPNStatusMonitor` on an interface swap).
+    package var lastEmittedState: VPNObservedState { lastEmitted }
+
     package var connectedInterfaceNames: [String] {
         interfaces
             .filter { $0.value.phase == .connected || $0.value.phase == .linkDownDebouncing }

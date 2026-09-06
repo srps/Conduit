@@ -322,9 +322,15 @@ final class AppState: ObservableObject {
                 self?.handleNetworkChange(description: description)
             }
         }
-        self.vpnStatusMonitor.setOnChange { [weak self] state in
+        // The interface name is read here, on the monitor's own delivery,
+        // not after the hop: two transitions queued behind one another would
+        // otherwise both read whatever the monitor sees by the time their
+        // tasks run, and a connected state could carry a later tunnel's name.
+        let vpnStatusMonitor = self.vpnStatusMonitor
+        vpnStatusMonitor.setOnChange { [weak self] state in
+            let interfaceName = vpnStatusMonitor.connectedInterfaceName
             Task { @MainActor in
-                self?.handleVPNStateChange(state)
+                self?.handleVPNStateChange(state, interfaceName: interfaceName)
             }
         }
         $config
@@ -1454,13 +1460,9 @@ final class AppState: ObservableObject {
     /// Tier B observer reports a new VPN state. Phase 4 implements the
     /// transition table in the orchestrator (direct-mode flips, breaker
     /// reset, flap recovery, slow reprobe cadence, vpn.* events).
-    private func handleVPNStateChange(_ state: VPNObservedState) {
+    private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?) {
         let entriesWantedChanged = splitDNSGate.update(state)
 
-        // Read now, on the same turn as the state, so the name belongs to the
-        // verdict being delivered rather than to whatever the monitor sees by
-        // the time the task runs.
-        let interfaceName = vpnStatusMonitor.connectedInterfaceName
         Task { @MainActor in
             await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
         }

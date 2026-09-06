@@ -373,6 +373,18 @@ final class AppStateHarnessTests: XCTestCase {
         await harness.settle("the entry file is back") { self.machine.resolverFile(for: "corp.example") != nil }
     }
 
+    /// The interface name belongs to the delivery it came with, read on the
+    /// observer's turn rather than after the main-actor hop.
+    func testVPNInterfaceNameIsTheOneDeliveredWithTheState() async throws {
+        let appState = try launch()
+        harness.vpn.connectedInterfaceName = "utun4"
+        harness.vpn.emit(.connected)
+        harness.vpn.connectedInterfaceName = "utun9"
+        await harness.settle("the app sees the VPN connected") { appState.runtimeSnapshot.vpnState == .connected }
+
+        XCTAssertEqual(appState.runtimeSnapshot.vpnInterfaceName, "utun4")
+    }
+
     // MARK: Launch
 
     /// Crash recovery: a journal recording the user's proxy, a machine still
