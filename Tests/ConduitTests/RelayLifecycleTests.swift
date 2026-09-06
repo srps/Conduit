@@ -3,6 +3,7 @@ import Foundation
 import XCTest
 @testable import ProxyKernel
 @testable import ConduitShared
+@testable import PlatformMac
 
 /// The helper's relay was rebuilt on every start — 48 DNS and 31 TCP starts
 /// in the field log, every one with the parameters already running — and the
