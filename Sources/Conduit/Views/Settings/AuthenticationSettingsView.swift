@@ -28,6 +28,7 @@ struct AuthenticationSettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "person.badge.key")
                             .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Kerberos / SPNEGO")
                                 .font(.subheadline.weight(.medium))

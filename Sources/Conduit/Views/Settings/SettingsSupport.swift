@@ -33,31 +33,48 @@ struct LiveStatusStrip<Trailing: View>: View {
 
     var body: some View {
         HStack(spacing: 14) {
-            if let runState {
-                Circle()
-                    .fill(color(for: runState))
-                    .frame(width: 8, height: 8)
-                    .accessibilityHidden(true)
-            }
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
-                HStack(spacing: 4) {
-                    Text(chip.value)
-                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                        .monospacedDigit()
-                    Text(chip.label)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+            HStack(spacing: 14) {
+                if let runState {
+                    Circle()
+                        .fill(color(for: runState))
+                        .frame(width: 8, height: 8)
+                }
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                ForEach(Array(chips.enumerated()), id: \.offset) { _, chip in
+                    HStack(spacing: 4) {
+                        Text(chip.value)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                        Text(chip.label)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilityLabel)
             Spacer(minLength: 0)
+            // Its own element, so a Test DNS button stays a button rather
+            // than a custom action buried in the strip.
             trailing()
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .accessibilityElement(children: .combine)
+    }
+
+    /// Label then value, which the visual order inverts: "DNS forwarder,
+    /// running: queries 312, cache hit rate 84%". Combining the children
+    /// read "312, queries", value first, and folded the run-state dot into
+    /// nothing.
+    private var accessibilityLabel: String {
+        var head = title
+        if let runState {
+            head += ", \(runState.title.lowercased())"
+        }
+        let values = chips.map { "\($0.label) \($0.value)" }.joined(separator: ", ")
+        return values.isEmpty ? head : "\(head): \(values)"
     }
 
     private func color(for state: ModuleRunState) -> Color {
@@ -135,13 +152,22 @@ struct FieldProblem: View {
 
 extension View {
     /// Highlight a field and put the boundary's reason under it.
+    ///
+    /// The reason is reachable from the field two ways: it is the next
+    /// element after it, and the field carries it as its hint, for whoever
+    /// reads with hints on. Apply this *after* the field's own accessibility
+    /// modifiers; the wrapper is a plain container (`.contain`), so a label
+    /// applied outside it names a group rather than the field, and the
+    /// field's own label wins only when it is set first.
     func configProblem(_ message: String?) -> some View {
         VStack(alignment: .trailing, spacing: 3) {
             modifier(InvalidFieldHighlight(isInvalid: message != nil))
+                .accessibilityHint(message.map { "Problem: \($0)" } ?? "")
             if let message {
                 FieldProblem(message: message)
             }
         }
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -203,6 +229,7 @@ struct HostListEditor: View {
                             .onSubmit { cleanupEntries() }
                             .modifier(InvalidFieldHighlight(isInvalid: problems[index] != nil))
                             .accessibilityLabel("\(accessibilityName) entry \(index + 1)")
+                            .accessibilityHint(problems[index].map { "Problem: \($0)" } ?? "")
 
                         Button(role: .destructive) {
                             removeEntry(at: index)
@@ -397,6 +424,7 @@ struct HelperHintBanner: View {
         HStack(spacing: 8) {
             Image(systemName: "info.circle")
                 .foregroundStyle(.blue)
+                .accessibilityHidden(true)
             Text("Install the privileged helper to avoid admin prompts for DNS and tunnel operations.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

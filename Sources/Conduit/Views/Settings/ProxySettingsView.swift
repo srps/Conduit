@@ -26,12 +26,12 @@ struct ProxySettingsView: View {
 
             Section {
                 TextField("Listen Host", text: $appState.config.localHost)
-                    .configProblem(problems.message(for: "proxy.host"))
                     .accessibilityLabel("Listen host")
+                    .configProblem(problems.message(for: "proxy.host"))
                 TextField("Listen Port", value: $appState.config.localPort, format: .number.grouping(.never))
                     .frame(maxWidth: 220)
-                    .configProblem(problems.message(for: "proxy.port"))
                     .accessibilityLabel("Listen port")
+                    .configProblem(problems.message(for: "proxy.port"))
             } header: {
                 Text("Local Proxy")
             } footer: {
@@ -43,8 +43,8 @@ struct ProxySettingsView: View {
                 TextField("SOCKS5 Port", value: $appState.config.socksPort, format: .number.grouping(.never))
                     .frame(maxWidth: 220)
                     .disabled(!appState.config.socksEnabled)
-                    .configProblem(problems.message(for: "proxy.socksPort"))
                     .accessibilityLabel("SOCKS5 port")
+                    .configProblem(problems.message(for: "proxy.socksPort"))
             } header: {
                 Text("SOCKS5 Proxy")
             } footer: {
@@ -90,8 +90,8 @@ struct ProxySettingsView: View {
                 TextField("Local PAC Port", value: $appState.config.localPACPort, format: .number.grouping(.never))
                     .frame(maxWidth: 220)
                     .disabled(!appState.config.localPACEnabled)
-                    .configProblem(problems.message(for: "routing.localPACPort"))
                     .accessibilityLabel("Local PAC port")
+                    .configProblem(problems.message(for: "routing.localPACPort"))
                 if let localPACURL = runtime.bindings.localPACURL, appState.config.localPACEnabled {
                     LabeledContent("Currently serving") {
                         Text(localPACURL)

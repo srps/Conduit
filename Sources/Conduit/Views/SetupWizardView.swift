@@ -34,6 +34,7 @@ struct SetupWizardView: View {
                 }
                 .labelsHidden()
                 .frame(width: 200)
+                .accessibilityLabel("Auth mode")
             }
 
             if isKerberosMode {
@@ -81,6 +82,7 @@ struct SetupWizardView: View {
             Image(systemName: "person.badge.key")
                 .font(.title2)
                 .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Kerberos / SPNEGO")
                     .font(.headline)
