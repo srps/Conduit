@@ -4,7 +4,7 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.3.0
 
 The three surfaces stop competing to be the whole app. The menu bar icon and popover answer
 "is it working, and can I flip it" without scrolling; one app window with a sidebar holds
