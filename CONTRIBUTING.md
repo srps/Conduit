@@ -29,7 +29,27 @@ point `DEVELOPER_DIR` at Xcode when running them:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
-All 1,100+ tests must pass before submitting a PR. The test suite includes unit tests, integration tests, and fault-injection scenarios.
+All 1,500+ tests must pass before submitting a PR. The test suite includes unit tests, integration tests, and fault-injection scenarios.
+
+## Trying a Change in the App
+
+Do not quit or replace the Conduit that is serving your machine to look at a change. A
+debug build has a dev mode that runs beside it over a fake machine and a scratch state
+directory, so nothing it does reaches the system proxy, the shell environment, the
+resolver files, the helper or the Keychain:
+
+```bash
+./bundle-app.sh
+open -n -a "$PWD/Conduit.app" --args --dev --section dns --vpn utun4
+```
+
+It shows the menu bar popover in a "Popover preview" panel for screenshots and the
+accessibility inspector, opens the app window on the section you name, keeps a Dock icon,
+and badges its menu bar glyph with a dot. Launch it with `open -n`; running the executable
+directly from a script shows nothing. `--upstream host:port` pointed at a running `pm-proxy`
+gives a real "proxied" state, and `--dev-state-dir PATH` places the state (and its
+`proxy.log`, which says when the windows came up) where you want it. See the toolchain
+table in [`AGENTS.md`](AGENTS.md).
 
 ## Running the Headless Proxy
 

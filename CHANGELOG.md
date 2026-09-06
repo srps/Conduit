@@ -12,7 +12,8 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   over the harness's fake machine and a scratch state directory, with every port ephemeral
   and a "Popover preview" panel showing the menu bar popover, so a second instance runs
   beside the installed one for visual and VoiceOver checks without touching the system.
-  It keeps a Dock icon and a dot badge on its menu bar glyph. `--section`, `--vpn` and
+  It keeps a Dock icon and a dot badge on its menu bar glyph, and never registers the
+  global shortcut system-wide. `--section`, `--vpn` and
   `--upstream` drive the states; `--dev-state-dir` puts the journal where an agent can
   read it. `FakeMachine`, `RecordingPrivilegeClient` and `FakeLoginItems` moved from the
   test target into `PlatformMac` for it.
