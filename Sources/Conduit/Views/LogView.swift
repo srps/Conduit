@@ -77,6 +77,7 @@ struct LogView: View {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
                 TextField("Filter messages...", text: $searchText)
                     .textFieldStyle(.plain)
                 if !searchText.isEmpty {
@@ -87,6 +88,7 @@ struct LogView: View {
                             .foregroundStyle(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Clear filter")
                 }
             }
             .padding(8)
@@ -198,6 +200,7 @@ struct LogView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Copy this log line")
+                .accessibilityLabel("Copy log line")
             }
             Text(entry.message)
                 .font(.system(size: 12, design: .monospaced))

@@ -22,8 +22,8 @@ struct UpstreamsSettingsView: View {
 
             Section {
                 TextField("Upstream PAC URL", text: $appState.config.pacURL, prompt: Text("https://…"))
-                    .configProblem(problems.message(for: "routing.pacURL"))
                     .accessibilityLabel("Upstream PAC URL")
+                    .configProblem(problems.message(for: "routing.pacURL"))
                 Toggle("Use upstream PAC for Conduit routing", isOn: $appState.config.pacRoutingEnabled)
                     .disabled(pacURLIsEmpty)
                 HStack {
@@ -194,6 +194,7 @@ struct UpstreamsSettingsView: View {
                 .foregroundStyle(.tertiary)
                 .frame(width: 24)
                 .contentShape(Rectangle())
+                .accessibilityHidden(true)
                 .onDrag {
                     draggedUpstreamID = upstream.wrappedValue.id
                     return NSItemProvider(object: upstream.wrappedValue.id.uuidString as NSString)

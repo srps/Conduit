@@ -80,6 +80,9 @@ struct StatusBarView: View {
 
     // MARK: - Header
 
+    /// The state line and the switch are one thought to VoiceOver: "Proxy,
+    /// Proxied via corp-eu-1, switch, on", with the detail as the hint. The
+    /// texts are hidden so they are not read a second time on their own.
     private var header: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
@@ -95,13 +98,14 @@ struct StatusBarView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .accessibilityHidden(true)
             Spacer(minLength: 0)
             Toggle("Proxy", isOn: proxySwitch)
                 .toggleStyle(.switch)
                 .labelsHidden()
                 .disabled(!MenuBarPresentation.proxySwitchIsEnabled(for: runtime.runtimeStatus.state))
-                .accessibilityLabel("Proxy")
-                .accessibilityValue(stateLine)
+                .accessibilityLabel("Proxy, \(stateLine)")
+                .accessibilityHint(stateDetail)
         }
         .padding(.horizontal, 14)
         .padding(.top, 14)
@@ -125,12 +129,17 @@ struct StatusBarView: View {
     ) -> some View {
         HStack(spacing: 10) {
             Text(title)
+                .accessibilityHidden(true)
             Spacer(minLength: 0)
             Text(detail)
                 .font(.caption.monospaced())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .accessibilityHidden(true)
+            // One element per row, like the header: "DNS forwarder,
+            // 127.0.0.1:5353, Running, switch". A stopped module's detail is
+            // just "off", which the value already says.
             Toggle(title, isOn: Binding(
                 get: { MenuBarPresentation.moduleSwitchIsOn(for: state) },
                 set: { _ in toggle() }
@@ -139,7 +148,7 @@ struct StatusBarView: View {
             .labelsHidden()
             .controlSize(.small)
             .disabled(!MenuBarPresentation.moduleSwitchIsEnabled(for: state))
-            .accessibilityLabel(title)
+            .accessibilityLabel(state == .stopped ? title : "\(title), \(detail)")
             .accessibilityValue(state.title)
         }
         .padding(.horizontal, 14)
@@ -201,6 +210,7 @@ struct StatusBarView: View {
         }
         .buttonStyle(.plain)
         .help("Open Upstreams & Routing")
+        .accessibilityHint("Opens Upstreams & Routing")
     }
 
     /// The upstream carrying traffic, matched by endpoint. Nil in direct mode

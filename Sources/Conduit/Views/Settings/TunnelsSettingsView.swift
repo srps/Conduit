@@ -35,6 +35,7 @@ struct TunnelsSettingsView: View {
                                 Image(systemName: preset.icon)
                                     .foregroundStyle(.secondary)
                                     .frame(width: 20)
+                                    .accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(preset.displayName)
                                         .font(.caption.weight(.medium))
@@ -95,12 +96,12 @@ struct TunnelsSettingsView: View {
             Section {
                 TextField("Global Max Sessions", value: $appState.config.maxTunnelSessions, format: .number.grouping(.never))
                     .frame(maxWidth: 220)
-                    .configProblem(problems.message(for: "tunnels.maxSessions"))
                     .accessibilityLabel("Maximum total tunnel sessions")
+                    .configProblem(problems.message(for: "tunnels.maxSessions"))
                 TextField("Per-Tunnel Max", value: $appState.config.maxSessionsPerTunnel, format: .number.grouping(.never))
                     .frame(maxWidth: 220)
-                    .configProblem(problems.message(for: "tunnels.maxSessionsPerTunnel"))
                     .accessibilityLabel("Maximum sessions per tunnel")
+                    .configProblem(problems.message(for: "tunnels.maxSessionsPerTunnel"))
             } header: {
                 Text("Session Limits")
             } footer: {

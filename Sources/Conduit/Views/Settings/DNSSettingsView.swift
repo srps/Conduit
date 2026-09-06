@@ -78,8 +78,8 @@ struct DNSSettingsView: View {
                 }
                 TextField("Listen Port", value: $appState.config.dnsForwarderPort, format: .number.grouping(.never))
                     .frame(maxWidth: 220)
-                    .configProblem(problems.message(for: "dns.forwarderPort"))
                     .accessibilityLabel("DNS forwarder port")
+                    .configProblem(problems.message(for: "dns.forwarderPort"))
                 if appState.platformConfig.manageSystemDNS {
                     SettingsNote("Port 53 relay runs in the privileged helper. The forwarder listens on the port above.")
                 }
@@ -113,13 +113,13 @@ struct DNSSettingsView: View {
                     let ipProblem = Self.transparentProxyIPProblem(appState.config)
                     TextField("Intercept IP", text: $appState.config.transparentProxyIP)
                         .frame(maxWidth: 260)
-                        .configProblem(ipProblem)
                         .accessibilityLabel("Transparent proxy intercept IP")
+                        .configProblem(ipProblem)
                     SettingsNote("Dedicated loopback IP for intercepted traffic. Default 127.44.3.0 avoids conflicts with dev servers on 127.0.0.1.")
                     TextField("Listen Port", value: $appState.config.transparentProxyPort, format: .number.grouping(.never))
                         .frame(maxWidth: 220)
-                        .configProblem(problems.message(for: "dns.transparentProxyPort"))
                         .accessibilityLabel("Transparent proxy listen port")
+                        .configProblem(problems.message(for: "dns.transparentProxyPort"))
                 }
 
                 // The rule list is shown whenever there are rules, not only while
@@ -186,6 +186,7 @@ struct DNSSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Remove DNS entry")
                 .accessibilityLabel("Delete DNS entry \(name)")
                 .help("Delete this DNS entry")
             }

@@ -32,14 +32,14 @@ struct AdvancedSettingsView: View {
                 TextField("Max Buffered Body (MB)", value: megabytesBinding($appState.config.maxBufferedBodyBytes),
                           format: .number.precision(.fractionLength(0)))
                     .frame(maxWidth: 220)
-                    .configProblem(problems.message(for: "proxy.maxBufferedBodyBytes"))
                     .accessibilityLabel("Max buffered request body megabytes")
+                    .configProblem(problems.message(for: "proxy.maxBufferedBodyBytes"))
                     .help("Request bodies larger than this are not fully buffered. If proxy auth replay is needed, oversized requests will fail.")
                 TextField("Max Spooled Body (MB)", value: megabytesBinding($appState.config.maxSpooledBodyBytes),
                           format: .number.precision(.fractionLength(0)))
                     .frame(maxWidth: 220)
-                    .configProblem(problems.message(for: "proxy.maxSpooledBodyBytes"))
                     .accessibilityLabel("Max spooled request body megabytes")
+                    .configProblem(problems.message(for: "proxy.maxSpooledBodyBytes"))
                     .help("Bodies above the buffered limit spill to a bounded temp file up to this size; larger requests are rejected with 413.")
                 numberField("Pending Auth (global)", value: $appState.config.pendingAuthHandshakeGlobalLimit,
                             field: "auth.pendingHandshakeGlobalLimit", problems: problems,
@@ -146,8 +146,8 @@ struct AdvancedSettingsView: View {
     ) -> some View {
         TextField(title, value: value, format: .number.grouping(.never))
             .frame(maxWidth: 220)
-            .configProblem(field.flatMap { problems.message(for: $0) })
             .accessibilityLabel(accessibility)
+            .configProblem(field.flatMap { problems.message(for: $0) })
     }
 
     private func numberField(
@@ -159,8 +159,8 @@ struct AdvancedSettingsView: View {
     ) -> some View {
         TextField(title, value: value, format: .number.grouping(.never))
             .frame(maxWidth: 220)
-            .configProblem(field.flatMap { problems.message(for: $0) })
             .accessibilityLabel(accessibility)
+            .configProblem(field.flatMap { problems.message(for: $0) })
     }
 
     private func megabytesBinding(_ bytes: Binding<Int>) -> Binding<Double> {
