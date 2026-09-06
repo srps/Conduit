@@ -67,7 +67,7 @@ enum UpstreamFlapScenarios {
         config.proxy.port = 0
         config.proxy.maxConnections = 16
         config.proxy.inboundConnectionMaxLimit = 256
-        config.proxy.inboundConnectionWarnThreshold = 256
+        config.proxy.inboundConnectionWarnThreshold = 128
         config.routing.pacRoutingEnabled = false
         config.auth.mode = .systemNegotiated
         config.health.circuitFailureThreshold = 2

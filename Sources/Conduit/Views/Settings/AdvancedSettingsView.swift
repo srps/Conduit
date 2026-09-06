@@ -24,7 +24,7 @@ struct AdvancedSettingsView: View {
                             field: "proxy.maxConnections", problems: problems,
                             accessibility: "Maximum connections")
                 numberField("Connection Warn Threshold", value: $appState.config.inboundConnectionWarnThreshold,
-                            field: nil, problems: problems,
+                            field: "proxy.inboundConnectionWarnThreshold", problems: problems,
                             accessibility: "Inbound connection warn threshold")
                 numberField("Connection Max Limit", value: $appState.config.inboundConnectionMaxLimit,
                             field: "proxy.inboundConnectionMaxLimit", problems: problems,
@@ -59,7 +59,7 @@ struct AdvancedSettingsView: View {
                             accessibility: "Upstream response timeout seconds")
                     .help("How long to wait for an upstream proxy's response before counting the attempt as failed.")
                 numberField("Failure Window (s)", value: $appState.config.circuitBreakerWindowSeconds,
-                            field: nil, problems: problems,
+                            field: "health.circuitBreakerWindowSeconds", problems: problems,
                             accessibility: "Circuit breaker window seconds")
                     .help("Sliding window over which upstream failures are counted toward tripping the circuit breaker.")
                 numberField("Failure Threshold", value: $appState.config.circuitFailureThreshold,
@@ -131,7 +131,7 @@ struct AdvancedSettingsView: View {
                 Text("Security")
             }
 
-            ConflictList(conflicts: problems.conflicts(mentioning: ["health.", "circuit"]))
+            ConflictList(conflicts: problems.conflicts(mentioning: ["health.", "circuit", "proxy.inboundConnection"]))
         }
     }
 

@@ -32,7 +32,7 @@ final class SimHarness {
         originBehavior: OriginBehavior,
         maxConnections: Int = 128,
         inboundConnectionLimit: Int = 2_048,
-        inboundConnectionWarnThreshold: Int = 2_048,
+        inboundConnectionWarnThreshold: Int = 1_024,
         pendingAuthHandshakeGlobalLimit: Int = 512,
         pendingAuthHandshakesPerSource: Int = 128,
         socksEnabled: Bool = false,

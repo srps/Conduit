@@ -438,7 +438,7 @@ final class VPNFlapHarness {
         config.proxy.port = 0
         config.proxy.maxConnections = 64
         config.proxy.inboundConnectionMaxLimit = 256
-        config.proxy.inboundConnectionWarnThreshold = 256
+        config.proxy.inboundConnectionWarnThreshold = 128
         config.routing.pacRoutingEnabled = false
         config.auth.mode = .systemNegotiated
         config.upstreams = [

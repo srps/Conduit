@@ -100,6 +100,13 @@ extension ProxyConfig {
 
         validateMinimum("proxy.maxConnections", proxy.maxConnections, min: 1, into: &errors)
         validateMinimum("proxy.inboundConnectionMaxLimit", proxy.inboundConnectionMaxLimit, min: 1, into: &errors)
+        validateMinimum("proxy.inboundConnectionWarnThreshold", proxy.inboundConnectionWarnThreshold, min: 1, into: &errors)
+        // `LocalProxyServer` rejects a connection past the max limit before
+        // it compares the count against the warn threshold, so a threshold
+        // at or above the limit is a warning that can never fire.
+        if proxy.inboundConnectionWarnThreshold >= proxy.inboundConnectionMaxLimit {
+            errors.append(.conflict(description: "proxy.inboundConnectionWarnThreshold (\(proxy.inboundConnectionWarnThreshold)) must be below proxy.inboundConnectionMaxLimit (\(proxy.inboundConnectionMaxLimit)); connections past the limit are rejected before the threshold is checked, so the warning would never fire"))
+        }
         validateMinimum("proxy.maxBufferedBodyBytes", proxy.maxBufferedBodyBytes, min: 1, into: &errors)
         validateMinimum("proxy.maxSpooledBodyBytes", proxy.maxSpooledBodyBytes, min: proxy.maxBufferedBodyBytes, into: &errors)
         validateMinimum("auth.pendingHandshakeGlobalLimit", auth.pendingHandshakeGlobalLimit, min: 1, into: &errors)
@@ -119,6 +126,11 @@ extension ProxyConfig {
         validateNonNegative("health.connectionCheckTimeout", health.connectionCheckTimeout, into: &errors)
         validateNonNegative("health.upstreamResponseTimeout", health.upstreamResponseTimeout, into: &errors)
         validateNonNegative("health.directConnectTTL", health.directConnectTTL, into: &errors)
+        // Non-negative, not positive: 0 is the documented "no window" value
+        // (`UpstreamCircuitBreaker` treats `windowSeconds <= 0` as the guard
+        // being off), and the tests that pin the legacy burst-trip behaviour
+        // rely on it.
+        validateNonNegative("health.circuitBreakerWindowSeconds", health.circuitBreakerWindowSeconds, into: &errors)
         validatePositive("health.circuitBaseOpenIntervalSeconds", health.circuitBaseOpenIntervalSeconds, into: &errors)
         validatePositive("health.circuitMaxOpenIntervalSeconds", health.circuitMaxOpenIntervalSeconds, into: &errors)
         if health.circuitMaxOpenIntervalSeconds < health.circuitBaseOpenIntervalSeconds {
