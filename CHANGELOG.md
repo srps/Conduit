@@ -4,6 +4,22 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+### Development
+
+- `Conduit --dev` (debug builds only, launched with `open -n … --args --dev`) runs the app
+  over the harness's fake machine and a scratch state directory, with every port ephemeral
+  and a "Popover preview" panel showing the menu bar popover, so a second instance runs
+  beside the installed one for visual and VoiceOver checks without touching the system.
+  It keeps a Dock icon and marks its menu bar item "dev". `--section`, `--vpn` and
+  `--upstream` drive the states; `--dev-state-dir` puts the journal where an agent can
+  read it. `FakeMachine`, `RecordingPrivilegeClient` and `FakeLoginItems` moved from the
+  test target into `PlatformMac` for it.
+- The log file follows the state directory: an instance launched with `PM_CONFIG_DIR` or
+  `--dev` appends to `proxy.log` beside its config instead of the installed app's
+  `~/Library/Logs/Conduit/proxy.log`, which two instances used to interleave.
+
 ## 0.3.0
 
 The three surfaces stop competing to be the whole app. The menu bar icon and popover answer

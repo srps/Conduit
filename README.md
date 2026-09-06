@@ -219,11 +219,32 @@ Create a local app bundle (stays in the project directory):
 open Conduit.app
 ```
 
-Run a second instance on another port for safe testing:
+Run a dev instance beside the installed app (debug builds only). It runs over a fake
+machine and a scratch state directory, so nothing it does reaches the system proxy, the
+shell environment, the resolver files or the helper, and it shows the menu bar popover in
+a plain "Popover preview" window for screenshots and the accessibility inspector:
 
 ```bash
-Conduit.app/Contents/MacOS/Conduit --port 3129 --no-system-proxy --no-env
+open -n -a "$PWD/Conduit.app" --args --dev --section dns --vpn utun4
 ```
+
+`open -n` starts a new instance instead of activating the installed app. Running the
+executable directly works from a terminal, but from a script or an agent session it has no
+window server access and shows nothing, so `open -n` is the form to script. The dev
+instance keeps a Dock icon and a "dev" mark on its menu bar item so the two are told
+apart. For a "proxied" state, point it at a side-effect-free `pm-proxy`:
+
+```bash
+swift run pm-proxy --port 3129 --state-dir /tmp/pm-dev --status-interval 5      # terminal 1
+open -n -a "$PWD/Conduit.app" --args --dev --upstream 127.0.0.1:3129            # terminal 2
+```
+
+The state directory's `proxy.log` says when the preview window and the app window came
+up, which is what a script checks instead of a screenshot.
+
+State lives under `$TMPDIR/conduit-dev`, or `--dev-state-dir PATH`. The production flags
+`--port`, `--no-system-proxy` and `--no-env` still work on their own for a second real
+instance, which talks to the real helper.
 
 ## Run pm-dns Standalone
 
