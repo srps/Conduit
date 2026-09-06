@@ -150,24 +150,53 @@ struct FieldProblem: View {
     }
 }
 
-extension View {
-    /// Highlight a field and put the boundary's reason under it.
-    ///
-    /// The reason is reachable from the field two ways: it is the next
-    /// element after it, and the field carries it as its hint, for whoever
-    /// reads with hints on. Apply this *after* the field's own accessibility
-    /// modifiers; the wrapper is a plain container (`.contain`), so a label
-    /// applied outside it names a group rather than the field, and the
-    /// field's own label wins only when it is set first.
-    func configProblem(_ message: String?) -> some View {
-        VStack(alignment: .trailing, spacing: 3) {
-            modifier(InvalidFieldHighlight(isInvalid: message != nil))
-                .accessibilityHint(message.map { "Problem: \($0)" } ?? "")
-            if let message {
-                FieldProblem(message: message)
+/// A validated field as a grouped-Form row: the title in the label column,
+/// the control trailing at a fixed width, and the boundary's reason under
+/// the control.
+///
+/// `LabeledContent` is what keeps the two columns. Wrapping a titled
+/// `TextField` in any other container hands the Form a plain view instead of
+/// a labelled control: the title then renders inline inside the field's own
+/// frame, wraps at 220 pt, and the field stops lining up with its neighbours.
+/// That was the shape of the first version of this helper.
+///
+/// The reason is reachable from the field two ways: it is the next element
+/// after it, and the field carries it as its hint, for whoever reads with
+/// hints on. Set the field's own accessibility label inside `field`; the row
+/// adds only the hint.
+struct ConfigFieldRow<Field: View>: View {
+    let title: String
+    let problem: String?
+    let width: CGFloat
+    @ViewBuilder let field: () -> Field
+
+    init(
+        _ title: String,
+        problem: String?,
+        width: CGFloat = 220,
+        @ViewBuilder field: @escaping () -> Field
+    ) {
+        self.title = title
+        self.problem = problem
+        self.width = width
+        self.field = field
+    }
+
+    var body: some View {
+        LabeledContent(title) {
+            VStack(alignment: .trailing, spacing: 3) {
+                field()
+                    .labelsHidden()
+                    .frame(width: width)
+                    .modifier(InvalidFieldHighlight(isInvalid: problem != nil))
+                    .accessibilityHint(problem.map { "Problem: \($0)" } ?? "")
+                if let problem {
+                    FieldProblem(message: problem)
+                        .multilineTextAlignment(.trailing)
+                        .frame(maxWidth: 360, alignment: .trailing)
+                }
             }
         }
-        .accessibilityElement(children: .contain)
     }
 }
 

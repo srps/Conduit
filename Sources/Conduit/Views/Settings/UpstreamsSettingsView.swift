@@ -21,9 +21,10 @@ struct UpstreamsSettingsView: View {
             let problems = problems
 
             Section {
-                TextField("Upstream PAC URL", text: $appState.config.pacURL, prompt: Text("https://…"))
-                    .accessibilityLabel("Upstream PAC URL")
-                    .configProblem(problems.message(for: "routing.pacURL"))
+                ConfigFieldRow("Upstream PAC URL", problem: problems.message(for: "routing.pacURL"), width: 360) {
+                    TextField("Upstream PAC URL", text: $appState.config.pacURL, prompt: Text("https://…"))
+                        .accessibilityLabel("Upstream PAC URL")
+                }
                 Toggle("Use upstream PAC for Conduit routing", isOn: $appState.config.pacRoutingEnabled)
                     .disabled(pacURLIsEmpty)
                 HStack {

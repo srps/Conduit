@@ -25,13 +25,14 @@ struct ProxySettingsView: View {
             let problems = problems
 
             Section {
-                TextField("Listen Host", text: $appState.config.localHost)
-                    .accessibilityLabel("Listen host")
-                    .configProblem(problems.message(for: "proxy.host"))
-                TextField("Listen Port", value: $appState.config.localPort, format: .number.grouping(.never))
-                    .frame(maxWidth: 220)
-                    .accessibilityLabel("Listen port")
-                    .configProblem(problems.message(for: "proxy.port"))
+                ConfigFieldRow("Listen Host", problem: problems.message(for: "proxy.host")) {
+                    TextField("Listen Host", text: $appState.config.localHost)
+                        .accessibilityLabel("Listen host")
+                }
+                ConfigFieldRow("Listen Port", problem: problems.message(for: "proxy.port")) {
+                    TextField("Listen Port", value: $appState.config.localPort, format: .number.grouping(.never))
+                        .accessibilityLabel("Listen port")
+                }
             } header: {
                 Text("Local Proxy")
             } footer: {
@@ -40,11 +41,11 @@ struct ProxySettingsView: View {
 
             Section {
                 Toggle("Enable SOCKS5 server", isOn: $appState.config.socksEnabled)
-                TextField("SOCKS5 Port", value: $appState.config.socksPort, format: .number.grouping(.never))
-                    .frame(maxWidth: 220)
-                    .disabled(!appState.config.socksEnabled)
-                    .accessibilityLabel("SOCKS5 port")
-                    .configProblem(problems.message(for: "proxy.socksPort"))
+                ConfigFieldRow("SOCKS5 Port", problem: problems.message(for: "proxy.socksPort")) {
+                    TextField("SOCKS5 Port", value: $appState.config.socksPort, format: .number.grouping(.never))
+                        .disabled(!appState.config.socksEnabled)
+                        .accessibilityLabel("SOCKS5 port")
+                }
             } header: {
                 Text("SOCKS5 Proxy")
             } footer: {
@@ -87,11 +88,11 @@ struct ProxySettingsView: View {
                 if appState.platformConfig.systemProxyMode == .manual || !appState.config.localPACEnabled {
                     SettingsNote("Manual system proxy mode keeps macOS pinned to the local HTTP/HTTPS proxy. Use it only for clients that cannot honour PAC.", tint: .orange)
                 }
-                TextField("Local PAC Port", value: $appState.config.localPACPort, format: .number.grouping(.never))
-                    .frame(maxWidth: 220)
-                    .disabled(!appState.config.localPACEnabled)
-                    .accessibilityLabel("Local PAC port")
-                    .configProblem(problems.message(for: "routing.localPACPort"))
+                ConfigFieldRow("Local PAC Port", problem: problems.message(for: "routing.localPACPort")) {
+                    TextField("Local PAC Port", value: $appState.config.localPACPort, format: .number.grouping(.never))
+                        .disabled(!appState.config.localPACEnabled)
+                        .accessibilityLabel("Local PAC port")
+                }
                 if let localPACURL = runtime.bindings.localPACURL, appState.config.localPACEnabled {
                     LabeledContent("Currently serving") {
                         Text(localPACURL)
