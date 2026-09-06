@@ -83,6 +83,13 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   keep their Test DNS button as a button. A refused field carries its reason as the hint as well
   as showing it underneath, decorative symbols are silent, and icon-only buttons (clear filter,
   copy log line, remove entry) are named.
+- The log row's copy button is reachable again. Its accessibility description used
+  `children: .ignore`, which hid the button along with the chips and message it had just
+  labelled; the row now reads once through its own label while the button stays its own
+  element. Hiding the upstream drag handle as decorative had taken away the only reorder
+  affordance VoiceOver had, since a drag was never something it could perform — the handle is
+  exposed again with Move Up and Move Down actions, one step at a time through the same
+  ordering the drop delegate uses.
 
 ### Fixed
 
@@ -128,6 +135,15 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   refuses the redirect until a capture has landed, and redirects only the interfaces the capture
   recorded: one that appears in the window between the capture and the redirect is left for the
   next reconcile, which records an interface before it redirects it.
+- The Overview VPN row could show a stale or wrong tunnel name. Both hosts read
+  `connectedInterfaceName` after hopping to the main actor, so two transitions queued behind one
+  another could both read whatever the monitor had already moved on to; and when the fused
+  verdict stayed `.connected` while the tunnel carrying it changed (one interface gone, another
+  still up), the monitor delivered nothing, leaving the old name in place indefinitely. The name
+  is now read on the monitor's own delivery, and a name change re-delivers the unchanged verdict.
+- The VPN observer callback held a strong reference to the monitor, and the monitor held the
+  callback, so a stopped host kept its observer — and the state behind it — alive. Both captures
+  are weak now.
 
 ### Testing
 
