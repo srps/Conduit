@@ -1457,8 +1457,12 @@ final class AppState: ObservableObject {
     private func handleVPNStateChange(_ state: VPNObservedState) {
         let entriesWantedChanged = splitDNSGate.update(state)
 
+        // Read now, on the same turn as the state, so the name belongs to the
+        // verdict being delivered rather than to whatever the monitor sees by
+        // the time the task runs.
+        let interfaceName = vpnStatusMonitor.connectedInterfaceName
         Task { @MainActor in
-            await orchestrator.handleVPNStateChange(state)
+            await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
         }
 
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {

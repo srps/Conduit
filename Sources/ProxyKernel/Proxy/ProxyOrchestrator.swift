@@ -119,6 +119,10 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
     /// the orchestrator transition table. For now it's stored verbatim — the
     /// orchestrator does not yet branch on it.
     package var vpnState: VPNObservedState
+    /// The utun carrying `vpnState == .connected`, when the observer could
+    /// name it. Nil in every other state and for observers that report no
+    /// interface. Display only; nothing in the kernel branches on it.
+    package var vpnInterfaceName: String?
     package var proxyError: String?
     package var dnsError: String?
     package var dnsRunState: ModuleRunState
@@ -153,6 +157,7 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
         upstreamStatuses: [UpstreamRuntimeStatus] = [],
         directModeCause: DirectModeCause = .none,
         vpnState: VPNObservedState = .unknown,
+        vpnInterfaceName: String? = nil,
         proxyError: String? = nil,
         dnsError: String? = nil,
         dnsRunState: ModuleRunState = .stopped,
@@ -174,6 +179,7 @@ package struct ProxyOrchestratorSnapshot: Sendable, Equatable, Codable {
         self.upstreamStatuses = upstreamStatuses
         self.directModeCause = directModeCause
         self.vpnState = vpnState
+        self.vpnInterfaceName = vpnInterfaceName
         self.proxyError = proxyError
         self.dnsError = dnsError
         self.dnsRunState = dnsRunState
@@ -1730,12 +1736,27 @@ package final class ProxyOrchestrator {
     ///   `.networkLost` for now.
     /// * `.disconnected → .connected` → VPN came back from a real outage.
     ///   Reset breakers, full reprobe, exit direct mode if any upstream reachable.
-    package func handleVPNStateChange(_ state: VPNObservedState) async {
+    ///
+    /// `interfaceName` is the utun the observer says carries a `.connected`
+    /// verdict; it is stored for display and ignored for any other state.
+    package func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String? = nil) async {
+        let shownInterface = state == .connected ? interfaceName : nil
         let previous = snapshot.vpnState
-        guard previous != state else { return }
+        guard previous != state else {
+            // Same verdict, possibly a different tunnel carrying it (a second
+            // VPN came up and the first went away). Nothing to react to, but
+            // the name the UI shows follows the observer.
+            if snapshot.vpnInterfaceName != shownInterface {
+                mutateSnapshot { $0.vpnInterfaceName = shownInterface }
+            }
+            return
+        }
 
         vpnConnectedForDNSBox.withLockedValue { $0 = state == .connected }
-        mutateSnapshot { $0.vpnState = state }
+        mutateSnapshot {
+            $0.vpnState = state
+            $0.vpnInterfaceName = shownInterface
+        }
 
         // Reactions are skipped while the proxy listener is stopped — there's
         // nothing to react WITH. The UI snapshot still mirrors the state above.

@@ -70,7 +70,7 @@ struct OverviewView: View {
         card {
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 6) {
                 keyValue("Route", routeText)
-                keyValue("VPN", VPNStatusFormatter.label(for: runtime.vpnState),
+                keyValue("VPN", VPNStatusFormatter.label(for: runtime.vpnState, interfaceName: runtime.vpnInterfaceName),
                          valueColor: VPNStatusFormatter.color(for: runtime.vpnState))
                 keyValue("Uptime", MenuBarPresentation.uptime(since: runtime.uptimeStartedAt) ?? "—")
                 if proxyRunState == .running || proxyRunState == .warning,
@@ -264,7 +264,7 @@ struct OverviewView: View {
             failedRequests: runtime.failedRequests,
             activeConnectionCount: runtime.activeConnections.count,
             directModeCause: runtime.directModeCause,
-            vpnLabel: VPNStatusFormatter.label(for: runtime.vpnState)
+            vpnLabel: VPNStatusFormatter.label(for: runtime.vpnState, interfaceName: runtime.vpnInterfaceName)
         )
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(summary, forType: .string)

@@ -223,6 +223,17 @@ package struct VPNStateFuser {
         interfaces[interfaceName] != nil
     }
 
+    /// The interfaces carrying the fused `.connected` verdict, in name order;
+    /// empty whenever the fused state is anything else. A utun mid-debounce
+    /// counts, for the reason `fuseCurrentState` counts it: from the
+    /// orchestrator's point of view it is still serving traffic.
+    package var connectedInterfaceNames: [String] {
+        interfaces
+            .filter { $0.value.phase == .connected || $0.value.phase == .linkDownDebouncing }
+            .map(\.key)
+            .sorted()
+    }
+
     /// Records the verdict of a *complete* sweep of the utun key space that
     /// found no tunnel carrying IPv4.
     ///

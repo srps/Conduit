@@ -37,6 +37,32 @@ final class VPNStateFuserTests: XCTestCase {
         XCTAssertEqual(decision, .noChange)
     }
 
+    // MARK: - Connected interface names
+
+    func testConnectedInterfaceNamesFollowTheFusedVerdict() {
+        var fuser = VPNStateFuser()
+        XCTAssertEqual(fuser.connectedInterfaceNames, [])
+
+        _ = fuser.applyObservation(interfaceName: "utun5", observation: .connectedFixture())
+        _ = fuser.applyObservation(interfaceName: "utun4", observation: .connectedFixture())
+        XCTAssertEqual(fuser.connectedInterfaceNames, ["utun4", "utun5"], "name order, not arrival order")
+
+        // A debouncing utun still counts as connected, as in `fuseCurrentState`.
+        _ = fuser.applyObservation(
+            interfaceName: "utun4",
+            observation: UtunRawObservation(ipv4Present: false, hasIPv4Address: false, ipv6Present: true)
+        )
+        XCTAssertEqual(fuser.connectedInterfaceNames, ["utun4", "utun5"])
+
+        // Committed flap: utun4 drops out of the list while utun5 carries on.
+        _ = fuser.markMinVisibleExpired(interfaceName: "utun4")
+        XCTAssertEqual(fuser.connectedInterfaceNames, ["utun5"])
+
+        // Removed entirely: nothing is connected, so nothing is named.
+        _ = fuser.applyObservation(interfaceName: "utun5", observation: UtunRawObservation())
+        XCTAssertEqual(fuser.connectedInterfaceNames, [])
+    }
+
     // MARK: - Connected -> debouncing -> awaiting recovery (the flap path)
 
     func testIPv4DropAfterConnectedRequestsMinVisibleTimer() {

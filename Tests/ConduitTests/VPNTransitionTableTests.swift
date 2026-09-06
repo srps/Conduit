@@ -63,6 +63,33 @@ final class VPNTransitionTableTests: XCTestCase {
                        DirectModeCause.transientNetworkChange.healthSummary)
     }
 
+    // MARK: - Interface name
+
+    func testInterfaceNameFollowsTheObserverAndClearsOffConnected() async throws {
+        let orchestrator = makeOrchestrator()
+        try await orchestrator.startProxy()
+        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun4")
+        XCTAssertEqual(orchestrator.snapshot.vpnInterfaceName, "utun4")
+
+        // Same verdict, a different tunnel carrying it: no transition, but
+        // the name the UI shows follows.
+        let cutoff = Date()
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun5")
+        XCTAssertEqual(orchestrator.snapshot.vpnInterfaceName, "utun5")
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .connected)
+        XCTAssertTrue(vpnEvents(in: orchestrator.eventLog, since: cutoff).isEmpty,
+                      "a name change alone is not a VPN transition")
+
+        await orchestrator.handleVPNStateChange(.reasserting, interfaceName: "utun5")
+        XCTAssertNil(orchestrator.snapshot.vpnInterfaceName,
+                     "only a connected verdict carries a name, whatever the observer passed")
+
+        await orchestrator.handleVPNStateChange(.connected)
+        XCTAssertNil(orchestrator.snapshot.vpnInterfaceName, "an observer that names nothing shows nothing")
+    }
+
     // MARK: - .reasserting → .connected (flap recovery)
 
     func testReassertingToConnectedEmitsFlapRecoveredWithDuration() async throws {

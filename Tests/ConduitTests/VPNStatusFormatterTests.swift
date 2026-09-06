@@ -25,6 +25,17 @@ final class VPNStatusFormatterTests: XCTestCase {
         XCTAssertEqual(VPNStatusFormatter.label(for: .unknown), "Not detected")
     }
 
+    func testLabelNamesTheInterfaceOnlyWhenConnected() {
+        XCTAssertEqual(VPNStatusFormatter.label(for: .connected, interfaceName: "utun4"),
+                       "Connected (utun4)")
+        XCTAssertEqual(VPNStatusFormatter.label(for: .connected, interfaceName: ""),
+                       "Connected", "an empty name is no name")
+        XCTAssertEqual(VPNStatusFormatter.label(for: .reasserting, interfaceName: "utun4"),
+                       "Reconnecting…", "a stale name must not decorate a non-connected state")
+        XCTAssertEqual(VPNStatusFormatter.label(for: .disconnected(reason: .networkLost), interfaceName: "utun4"),
+                       "Disconnected (network lost)")
+    }
+
     // MARK: - Active connections split
 
     func testActiveConnectionsLabelOmitsStalledSuffixWhenZero() {

@@ -35,6 +35,9 @@ final class RuntimePresentationAdapter: ObservableObject {
     /// will additionally drive `directModeCause` transitions on this field's
     /// changes — for now Phase 3 just mirrors it for UI display.
     @Published private(set) var vpnState: VPNObservedState = .unknown
+    /// The utun behind `vpnState == .connected`, for the Overview VPN row and
+    /// the diagnostics summary. Nil in every other state.
+    @Published private(set) var vpnInterfaceName: String?
     @Published private(set) var proxyError: String?
     @Published private(set) var dnsError: String?
     @Published private(set) var tunnelsError: String?
@@ -144,6 +147,7 @@ final class RuntimePresentationAdapter: ObservableObject {
             runtimeStatus = snapshot.runtimeStatus
         }
         if vpnState != snapshot.vpnState { vpnState = snapshot.vpnState }
+        if vpnInterfaceName != snapshot.vpnInterfaceName { vpnInterfaceName = snapshot.vpnInterfaceName }
         if dnsRunState != snapshot.dnsRunState { dnsRunState = snapshot.dnsRunState }
         if tunnelsRunState != snapshot.tunnelsRunState { tunnelsRunState = snapshot.tunnelsRunState }
         if directModeCause != snapshot.directModeCause { directModeCause = snapshot.directModeCause }
