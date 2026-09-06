@@ -29,18 +29,18 @@ struct AdvancedSettingsView: View {
                 numberField("Connection Max Limit", value: $appState.config.inboundConnectionMaxLimit,
                             field: "proxy.inboundConnectionMaxLimit", problems: problems,
                             accessibility: "Inbound connection max limit")
-                TextField("Max Buffered Body (MB)", value: megabytesBinding($appState.config.maxBufferedBodyBytes),
-                          format: .number.precision(.fractionLength(0)))
-                    .frame(maxWidth: 220)
-                    .accessibilityLabel("Max buffered request body megabytes")
-                    .configProblem(problems.message(for: "proxy.maxBufferedBodyBytes"))
-                    .help("Request bodies larger than this are not fully buffered. If proxy auth replay is needed, oversized requests will fail.")
-                TextField("Max Spooled Body (MB)", value: megabytesBinding($appState.config.maxSpooledBodyBytes),
-                          format: .number.precision(.fractionLength(0)))
-                    .frame(maxWidth: 220)
-                    .accessibilityLabel("Max spooled request body megabytes")
-                    .configProblem(problems.message(for: "proxy.maxSpooledBodyBytes"))
-                    .help("Bodies above the buffered limit spill to a bounded temp file up to this size; larger requests are rejected with 413.")
+                ConfigFieldRow("Max Buffered Body (MB)", problem: problems.message(for: "proxy.maxBufferedBodyBytes")) {
+                    TextField("Max Buffered Body (MB)", value: megabytesBinding($appState.config.maxBufferedBodyBytes),
+                              format: .number.precision(.fractionLength(0)))
+                        .accessibilityLabel("Max buffered request body megabytes")
+                }
+                .help("Request bodies larger than this are not fully buffered. If proxy auth replay is needed, oversized requests will fail.")
+                ConfigFieldRow("Max Spooled Body (MB)", problem: problems.message(for: "proxy.maxSpooledBodyBytes")) {
+                    TextField("Max Spooled Body (MB)", value: megabytesBinding($appState.config.maxSpooledBodyBytes),
+                              format: .number.precision(.fractionLength(0)))
+                        .accessibilityLabel("Max spooled request body megabytes")
+                }
+                .help("Bodies above the buffered limit spill to a bounded temp file up to this size; larger requests are rejected with 413.")
                 numberField("Pending Auth (global)", value: $appState.config.pendingAuthHandshakeGlobalLimit,
                             field: "auth.pendingHandshakeGlobalLimit", problems: problems,
                             accessibility: "Pending auth handshakes global limit")
@@ -144,10 +144,10 @@ struct AdvancedSettingsView: View {
         problems: ConfigFieldProblems,
         accessibility: String
     ) -> some View {
-        TextField(title, value: value, format: .number.grouping(.never))
-            .frame(maxWidth: 220)
-            .accessibilityLabel(accessibility)
-            .configProblem(field.flatMap { problems.message(for: $0) })
+        ConfigFieldRow(title, problem: field.flatMap { problems.message(for: $0) }) {
+            TextField(title, value: value, format: .number.grouping(.never))
+                .accessibilityLabel(accessibility)
+        }
     }
 
     private func numberField(
@@ -157,10 +157,10 @@ struct AdvancedSettingsView: View {
         problems: ConfigFieldProblems,
         accessibility: String
     ) -> some View {
-        TextField(title, value: value, format: .number.grouping(.never))
-            .frame(maxWidth: 220)
-            .accessibilityLabel(accessibility)
-            .configProblem(field.flatMap { problems.message(for: $0) })
+        ConfigFieldRow(title, problem: field.flatMap { problems.message(for: $0) }) {
+            TextField(title, value: value, format: .number.grouping(.never))
+                .accessibilityLabel(accessibility)
+        }
     }
 
     private func megabytesBinding(_ bytes: Binding<Int>) -> Binding<Double> {

@@ -76,10 +76,10 @@ struct DNSSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                TextField("Listen Port", value: $appState.config.dnsForwarderPort, format: .number.grouping(.never))
-                    .frame(maxWidth: 220)
-                    .accessibilityLabel("DNS forwarder port")
-                    .configProblem(problems.message(for: "dns.forwarderPort"))
+                ConfigFieldRow("Listen Port", problem: problems.message(for: "dns.forwarderPort")) {
+                    TextField("Listen Port", value: $appState.config.dnsForwarderPort, format: .number.grouping(.never))
+                        .accessibilityLabel("DNS forwarder port")
+                }
                 if appState.platformConfig.manageSystemDNS {
                     SettingsNote("Port 53 relay runs in the privileged helper. The forwarder listens on the port above.")
                 }
@@ -111,15 +111,15 @@ struct DNSSettingsView: View {
 
                 if appState.config.transparentProxyEnabled {
                     let ipProblem = Self.transparentProxyIPProblem(appState.config)
-                    TextField("Intercept IP", text: $appState.config.transparentProxyIP)
-                        .frame(maxWidth: 260)
-                        .accessibilityLabel("Transparent proxy intercept IP")
-                        .configProblem(ipProblem)
+                    ConfigFieldRow("Intercept IP", problem: ipProblem, width: 260) {
+                        TextField("Intercept IP", text: $appState.config.transparentProxyIP)
+                            .accessibilityLabel("Transparent proxy intercept IP")
+                    }
                     SettingsNote("Dedicated loopback IP for intercepted traffic. Default 127.44.3.0 avoids conflicts with dev servers on 127.0.0.1.")
-                    TextField("Listen Port", value: $appState.config.transparentProxyPort, format: .number.grouping(.never))
-                        .frame(maxWidth: 220)
-                        .accessibilityLabel("Transparent proxy listen port")
-                        .configProblem(problems.message(for: "dns.transparentProxyPort"))
+                    ConfigFieldRow("Listen Port", problem: problems.message(for: "dns.transparentProxyPort")) {
+                        TextField("Listen Port", value: $appState.config.transparentProxyPort, format: .number.grouping(.never))
+                            .accessibilityLabel("Transparent proxy listen port")
+                    }
                 }
 
                 // The rule list is shown whenever there are rules, not only while

@@ -73,6 +73,11 @@ toggle is gone — nothing read it, and the app has no Dock icon to fall back on
   the threshold must be at least 1, and a threshold at or above "Connection Max Limit" is listed
   as a conflict, since connections past the limit are rejected before the threshold is checked
   and the warning could never fire.
+- Validated fields line up again. Listen Host, the ports, the session limits and every number
+  field in Advanced sat in a plain container that hid them from the grouped form's label
+  column, so their titles wrapped onto two lines inside the field's own 220 pt frame and the
+  fields did not share a trailing edge. Each is now a labelled row: title in the label column,
+  field trailing at a fixed width, the boundary's reason under the field.
 - The live status strips above Upstreams, DNS, Tunnels, Proxy and Authentication read label
   then value under VoiceOver ("DNS forwarder, running: queries 312, cache hit rate 84%") and
   keep their Test DNS button as a button. A refused field carries its reason as the hint as well

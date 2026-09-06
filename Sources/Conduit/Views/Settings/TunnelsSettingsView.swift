@@ -94,14 +94,14 @@ struct TunnelsSettingsView: View {
             }
 
             Section {
-                TextField("Global Max Sessions", value: $appState.config.maxTunnelSessions, format: .number.grouping(.never))
-                    .frame(maxWidth: 220)
-                    .accessibilityLabel("Maximum total tunnel sessions")
-                    .configProblem(problems.message(for: "tunnels.maxSessions"))
-                TextField("Per-Tunnel Max", value: $appState.config.maxSessionsPerTunnel, format: .number.grouping(.never))
-                    .frame(maxWidth: 220)
-                    .accessibilityLabel("Maximum sessions per tunnel")
-                    .configProblem(problems.message(for: "tunnels.maxSessionsPerTunnel"))
+                ConfigFieldRow("Global Max Sessions", problem: problems.message(for: "tunnels.maxSessions")) {
+                    TextField("Global Max Sessions", value: $appState.config.maxTunnelSessions, format: .number.grouping(.never))
+                        .accessibilityLabel("Maximum total tunnel sessions")
+                }
+                ConfigFieldRow("Per-Tunnel Max", problem: problems.message(for: "tunnels.maxSessionsPerTunnel")) {
+                    TextField("Per-Tunnel Max", value: $appState.config.maxSessionsPerTunnel, format: .number.grouping(.never))
+                        .accessibilityLabel("Maximum sessions per tunnel")
+                }
             } header: {
                 Text("Session Limits")
             } footer: {
