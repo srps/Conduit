@@ -12,6 +12,11 @@ package struct RuntimeEnvironment: Sendable, Equatable {
     package var preferencesFile: URL
     package var snapshotFile: URL
     package var eventsFile: URL
+    /// Where the app appends its log: beside the state for an isolated
+    /// instance, under `~/Library/Logs` for the installed one. Two instances
+    /// sharing one log file interleave their lines, which is how the second
+    /// instance's first line was found in the installed app's log.
+    package var logFile: URL
 
     package init(
         configDirectory: URL,
@@ -21,7 +26,8 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         platformConfigFile: URL? = nil,
         preferencesFile: URL? = nil,
         snapshotFile: URL? = nil,
-        eventsFile: URL? = nil
+        eventsFile: URL? = nil,
+        logFile: URL? = nil
     ) {
         self.configDirectory = configDirectory
         self.configFile = configFile ?? configDirectory.appendingPathComponent("config.json")
@@ -33,6 +39,7 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         self.preferencesFile = preferencesFile ?? configDirectory.appendingPathComponent("preferences.json")
         self.snapshotFile = snapshotFile ?? configDirectory.appendingPathComponent("snapshot.json")
         self.eventsFile = eventsFile ?? configDirectory.appendingPathComponent("events.ndjson")
+        self.logFile = logFile ?? configDirectory.appendingPathComponent("proxy.log")
     }
 
     /// Where 0.1.x kept the pre-relay DNS servers before the journal existed.
@@ -44,7 +51,9 @@ package struct RuntimeEnvironment: Sendable, Equatable {
     package static func userDefault() -> RuntimeEnvironment {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let directory = base.appendingPathComponent("Conduit", isDirectory: true)
-        return RuntimeEnvironment(configDirectory: directory)
+        let logFile = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Conduit/proxy.log")
+        return RuntimeEnvironment(configDirectory: directory, logFile: logFile)
     }
 
     package static func isolated(stateDirectory: URL) -> RuntimeEnvironment {

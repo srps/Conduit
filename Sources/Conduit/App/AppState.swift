@@ -159,7 +159,7 @@ final class AppState: ObservableObject {
         // the ones an after-the-fact read most wants, and the ring buffer
         // is not replayed into the file.
         if loadedConfiguration.appPreferences.fileLoggingEnabled {
-            logStore.logFileURL = AppLogStore.defaultLogFileURL
+            logStore.logFileURL = runtimeEnvironment.logFile
         }
         for warning in loadedConfiguration.warnings {
             logStore.log(.warning, warning, category: .system)
@@ -577,6 +577,10 @@ final class AppState: ObservableObject {
     }
 
     // MARK: - Observability
+
+    /// Where file logging appends when it is on. Beside the state directory
+    /// for an isolated instance; see `RuntimeEnvironment.logFile`.
+    var logFileURL: URL { runtimeEnvironment.logFile }
 
     /// The orchestrator's own snapshot, for the harness. Read for the same
     /// reason every lifecycle path here reads it instead of `runtime`: the
