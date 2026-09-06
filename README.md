@@ -231,7 +231,7 @@ open -n -a "$PWD/Conduit.app" --args --dev --section dns --vpn utun4
 `open -n` starts a new instance instead of activating the installed app. Running the
 executable directly works from a terminal, but from a script or an agent session it has no
 window server access and shows nothing, so `open -n` is the form to script. The dev
-instance keeps a Dock icon and a "dev" mark on its menu bar item so the two are told
+instance keeps a Dock icon and a dot badge on its menu bar glyph so the two are told
 apart. For a "proxied" state, point it at a side-effect-free `pm-proxy`:
 
 ```bash
