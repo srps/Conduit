@@ -63,8 +63,8 @@ package final class SystemProxyManager: @unchecked Sendable {
         switch mode {
         case .manual:
             return services.allSatisfy { service in
-                proxyFieldsMatch(service: service, type: "webproxy", host: config.localHost, port: config.localPort)
-                && proxyFieldsMatch(service: service, type: "securewebproxy", host: config.localHost, port: config.localPort)
+                proxyFieldsMatch(service: service, type: "webproxy", host: config.effectiveClientHost, port: config.localPort)
+                && proxyFieldsMatch(service: service, type: "securewebproxy", host: config.effectiveClientHost, port: config.localPort)
             }
         case .pac:
             let pacURL = Self.effectivePACURL(config: config, localPACURL: localPACURL)
@@ -159,7 +159,7 @@ package final class SystemProxyManager: @unchecked Sendable {
         var script = ""
         for service in services {
             let s = service.shellQuoted
-            let h = config.localHost.shellQuoted
+            let h = config.effectiveClientHost.shellQuoted
             let p = String(config.localPort)
             // Through the shared renderer, which spells an empty list `Empty`.
             // Interpolating the joined list directly emitted a bare
@@ -537,7 +537,7 @@ package final class SystemProxyManager: @unchecked Sendable {
             switch mode {
             case .manual:
                 try privilegeClient.execute(.disableAutoproxy, values: [service])
-                try privilegeClient.execute(.applySystemProxy, values: [service, config.localHost, String(config.localPort)])
+                try privilegeClient.execute(.applySystemProxy, values: [service, config.effectiveClientHost, String(config.localPort)])
                 // Rendered rather than assembled inline: `setProxyBypass` needs
                 // the `Empty` sentinel for a list with no domains, and a caller
                 // that hand-built `[service] + noProxyHosts` sent a single
@@ -764,7 +764,7 @@ package final class SystemProxyManager: @unchecked Sendable {
         let pacPort: String
 
         init(config: ProxyConfig) {
-            host = config.localHost
+            host = config.effectiveClientHost
             port = String(config.localPort)
             pacPort = String(config.localPACPort)
         }

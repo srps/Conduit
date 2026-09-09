@@ -46,6 +46,16 @@ final class EnvironmentManagerTests: XCTestCase {
 
     // MARK: - launchd prior state
 
+    func testLocalhostExportsThePinnedLoopbackAddress() throws {
+        var config = makeConfig()
+        config.localHost = "localhost"
+        let manager = makeManager()
+        try manager.apply(config: config, logger: nil)
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://127.0.0.1:3128")
+        XCTAssertEqual(launchctl.environment["HTTPS_PROXY"], "http://127.0.0.1:3128")
+        try manager.clear(logger: nil)
+    }
+
     /// A developer who already exports `HTTP_PROXY` into their launchd domain
     /// must get it back. Teardown used to `unsetenv` every variable it knew
     /// about, with no record that any of them had a value beforehand.

@@ -491,7 +491,7 @@ package final class ProxyOrchestrator {
 
     private func localPACScriptConfig() -> ProxyConfig {
         var scriptConfig = config
-        let actualProxyHost = localProxyServer.listeningHost ?? scriptConfig.localHost
+        let actualProxyHost = localProxyServer.listeningHost ?? scriptConfig.effectiveClientHost
         scriptConfig.localHost = Self.loopbackReachableProxyHost(actualProxyHost)
         if let actualProxyPort = localProxyServer.listeningPort {
             scriptConfig.localPort = actualProxyPort

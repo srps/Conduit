@@ -231,7 +231,7 @@ private struct DoHTransports: @unchecked Sendable {
         }
 
         self.localProxy = DoHSessionFactory.session(
-            for: DoHSessionFactory.Route(proxy: (config.localHost, config.localPort))
+            for: DoHSessionFactory.Route(proxy: (config.effectiveClientHost, config.localPort))
         )
     }
 

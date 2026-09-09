@@ -582,11 +582,23 @@ package struct ProxyConfig: Codable, Equatable {
     // MARK: - Computed Properties
 
     package var localProxyURL: String {
-        "http://\(localHost):\(localPort)"
+        "http://\(localProxyEndpoint)"
+    }
+
+    package var localProxyEndpoint: String {
+        let host = effectiveClientHost
+        let authorityHost = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return "\(authorityHost):\(localPort)"
+    }
+
+    /// Pin the compatibility name in client settings as well as listeners.
+    /// Gateway listeners bind a wildcard; clients retain their configured host.
+    package var effectiveClientHost: String {
+        Self.loopbackBindHost(localHost) ?? localHost
     }
 
     package var effectiveListenHost: String {
-        gatewayMode ? "0.0.0.0" : (Self.loopbackBindHost(localHost) ?? localHost)
+        gatewayMode ? "0.0.0.0" : effectiveClientHost
     }
 
     package var effectiveTunnelListenHost: String {

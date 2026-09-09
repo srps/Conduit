@@ -300,7 +300,7 @@ struct OverviewView: View {
 
     private var proxyDetail: String {
         guard proxyRunState != .stopped else { return "Stopped" }
-        let host = runtime.bindings.proxyHost ?? appState.config.localHost
+        let host = runtime.bindings.proxyHost ?? appState.config.effectiveClientHost
         let port = runtime.bindings.proxyPort ?? appState.config.localPort
         var parts = ["\(host):\(port)"]
         if let socksHost = runtime.bindings.socksHost, let socksPort = runtime.bindings.socksPort {
@@ -326,7 +326,7 @@ struct OverviewView: View {
 
     private var dnsDetail: String {
         guard runtime.dnsRunState != .stopped else { return "Stopped" }
-        let host = runtime.bindings.dnsHost ?? appState.config.localHost
+        let host = runtime.bindings.dnsHost ?? appState.config.effectiveClientHost
         let port = runtime.bindings.dnsPort ?? appState.config.dnsForwarderPort
         if appState.platformConfig.manageSystemDNS {
             return "\(host):53 via :\(port) · system DNS active"
