@@ -1,6 +1,6 @@
 # Security and architecture follow-up plan
 
-Status: S01–S03 implemented on the security-fix branch; full Xcode CI remains the merge gate. See [validation details](security-fixes-2026-09-09.md) and the [original review](review-2026-09-09.md). The findings describe code behavior under their stated preconditions, not confirmed company-environment incidents.
+Status: S01–S03 merged in PR #26. S05 has green CI/review in PR #27; its merge is pending. S06 is implemented on `fix/observable-target-redaction`, with full Xcode CI as its merge gate. See [validation details](security-fixes-2026-09-09.md) and the [original review](review-2026-09-09.md). The findings describe code behavior under their stated preconditions, not confirmed company-environment incidents.
 
 ## Finish the current branch
 
@@ -8,7 +8,7 @@ Status: S01–S03 implemented on the security-fix branch; full Xcode CI remains 
 - Review the behavior changes: PAC auth requires an enabled configured host/port, rejected reloads preserve state, and non-gateway binds require loopback.
 - Open the PR for review once CI passes; require green CI and addressed review findings before merging. Branch publication does not install the app/helper, merge to main, or produce a release.
 
-S05 is implemented independently in [PR #27](https://github.com/srps/Conduit/pull/27), with a failing-before/passing-after network regression and green initial CI. Its remaining gate is review. S06 is the next implementation batch after current review feedback is settled.
+S05 is implemented independently in [PR #27](https://github.com/srps/Conduit/pull/27), with a failing-before/passing-after network regression and green initial CI. Its remaining step is merging. S06 adds observation-only targets and sink/export regressions; S08 is the next implementation batch. Refactor observations encountered during these fixes are tracked in [refactor notes](refactor-notes-2026-09-09.md).
 
 ## Sequenced implementation PRs
 
