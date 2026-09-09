@@ -129,6 +129,7 @@ final class AppState: ObservableObject {
     /// Started by `init` and joined by `awaitLaunchRecovery()` — see
     /// `LaunchRecovery` for why it is neither inline nor unordered.
     private var launchRecovery: LaunchRecovery?
+    private let configurationLoadError: ConfigurationLoadError?
 
     /// Every parameter defaults to the production collaborator; the test
     /// harness passes the fakes. See `commandRunner` for why these are
@@ -161,7 +162,21 @@ final class AppState: ObservableObject {
         // file that predates this launch is what tells an upgrade from a
         // fresh install, and the resolver-file recovery at launch hangs on it.
         let configFilePredatesLaunch = FileManager.default.fileExists(atPath: runtimeEnvironment.configFile.path)
-        let loadedConfiguration = ProxyConfigPersistence.loadAllMigrating(in: runtimeEnvironment)
+        let loadedConfiguration: RuntimeConfigurationLoadResult
+        let loadFailure: ConfigurationLoadError?
+        do {
+            loadedConfiguration = try ProxyConfigPersistence.loadAllMigrating(in: runtimeEnvironment)
+            loadFailure = nil
+        } catch {
+            loadFailure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: runtimeEnvironment.configFile.path, reason: error.localizedDescription)
+            // Display-only state: every activation/save path remains blocked until
+            // the file is repaired and the app restarted. Never persist this value.
+            loadedConfiguration = RuntimeConfigurationLoadResult(
+                config: GenericDefaults.shared.makeConfig(), platformConfig: PlatformIntegrationConfig(),
+                appPreferences: AppPreferences(), migrated: false, warnings: []
+            )
+        }
+        self.configurationLoadError = loadFailure
         // Attach the file before anything is logged: the load warnings and
         // the migration notice below are the first lines of a session and
         // the ones an after-the-fact read most wants, and the ring buffer
@@ -395,6 +410,7 @@ final class AppState: ObservableObject {
         let launchConfig = config
         let resolversManaged = platformConfig.manageDNSResolvers
         launchRecovery = LaunchRecovery {
+            guard loadFailure == nil else { return }
             dnsRecovery.restoreIfNeeded(logger: logStore)
             proxyRecovery.restoreIfNeeded(logger: logStore)
             // Once per install: files an earlier release wrote before
@@ -406,7 +422,12 @@ final class AppState: ObservableObject {
                 logger: logStore
             )
         }
-        isShowingOnboarding = config.authMode == .ntlmv2 && !credentialManager.hasSavedCredentials(for: config)
+        if let loadFailure {
+            orchestrator.eventLog.append(loadFailure.event)
+            lastErrorMessage = loadFailure.localizedDescription + " Restart Conduit after repairing the file."
+            logStore.log(.error, lastErrorMessage ?? loadFailure.localizedDescription, category: .system)
+        }
+        isShowingOnboarding = loadFailure == nil && config.authMode == .ntlmv2 && !credentialManager.hasSavedCredentials(for: config)
         refreshPreflight()
         // The preflight above used to be guaranteed to read a machine recovery
         // had already finished with, because recovery ran inline on the line
@@ -555,9 +576,18 @@ final class AppState: ObservableObject {
         return .userDefault()
     }
 
+    private func rejectUnavailableConfiguration() -> Bool {
+        guard let configurationLoadError else { return false }
+        orchestrator.eventLog.append(configurationLoadError.event)
+        lastErrorMessage = configurationLoadError.localizedDescription + " Restart Conduit after repairing the file."
+        logStore.log(.error, lastErrorMessage ?? configurationLoadError.localizedDescription, category: .system)
+        return true
+    }
+
     // MARK: - Config
 
     func saveConfig() {
+        guard !rejectUnavailableConfiguration() else { return }
         do {
             try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
             try PlatformConfigPersistence.save(platformConfig, in: runtimeEnvironment)
@@ -604,6 +634,7 @@ final class AppState: ObservableObject {
     // MARK: - RuntimeReconcilerHost
 
     func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
+        guard !rejectUnavailableConfiguration() else { return }
         await orchestrator.applyConfigChange(new, from: old)
     }
 
@@ -624,6 +655,7 @@ final class AppState: ObservableObject {
     /// runs, a later save may have moved a flag again; the pass that save
     /// queued owns that flag, and this one acts on the flags of its own.
     func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) {
+        guard !rejectUnavailableConfiguration() else { return }
         let old = pass.old
         let new = pass.new
         let platform = pass.platform
@@ -688,6 +720,7 @@ final class AppState: ObservableObject {
         previousConfig: ProxyConfig,
         platform: PlatformIntegrationConfig
     ) -> Bool {
+        guard !rejectUnavailableConfiguration() else { return false }
         func attempt(_ failure: String, _ body: () throws -> Void) -> Bool {
             do {
                 try body()
@@ -876,6 +909,10 @@ final class AppState: ObservableObject {
     }
 
     private func startProxy(postNotification: Bool) async throws {
+        if let configurationLoadError {
+            _ = rejectUnavailableConfiguration()
+            throw configurationLoadError
+        }
         await awaitLaunchRecovery()
         guard orchestrator.snapshot.runtimeStatus.state != .starting && orchestrator.snapshot.runtimeStatus.state != .running else { return }
 
@@ -1092,6 +1129,7 @@ final class AppState: ObservableObject {
     }
 
     func startDNS() async {
+        guard !rejectUnavailableConfiguration() else { return }
         await awaitLaunchRecovery()
         if platformConfig.manageSystemDNS {
             do {
@@ -1189,6 +1227,7 @@ final class AppState: ObservableObject {
     }
 
     func startTunnels() async {
+        guard !rejectUnavailableConfiguration() else { return }
         await orchestrator.startTunnels()
 
         // `startTunnels` updated the snapshot synchronously; `runtime` has not
@@ -1442,6 +1481,7 @@ final class AppState: ObservableObject {
     // MARK: - Network
 
     private func handleSystemWake() {
+        guard !rejectUnavailableConfiguration() else { return }
         Task { @MainActor in
             await orchestrator.handleSystemWake()
         }
@@ -1458,6 +1498,7 @@ final class AppState: ObservableObject {
     }
 
     private func handleNetworkChange(description: String) {
+        guard !rejectUnavailableConfiguration() else { return }
         Task { @MainActor in
             await orchestrator.handleNetworkChange(description: description)
         }
@@ -1476,6 +1517,7 @@ final class AppState: ObservableObject {
     /// transition table in the orchestrator (direct-mode flips, breaker
     /// reset, flap recovery, slow reprobe cadence, vpn.* events).
     private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?) {
+        guard !rejectUnavailableConfiguration() else { return }
         let entriesWantedChanged = splitDNSGate.update(state)
 
         Task { @MainActor in

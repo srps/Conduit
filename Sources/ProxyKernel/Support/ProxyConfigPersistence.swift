@@ -34,6 +34,14 @@ package struct RuntimeConfigurationLoadResult {
     package let appPreferences: AppPreferences
     package let migrated: Bool
     package let warnings: [String]
+
+    package init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig, appPreferences: AppPreferences, migrated: Bool, warnings: [String]) {
+        self.config = config
+        self.platformConfig = platformConfig
+        self.appPreferences = appPreferences
+        self.migrated = migrated
+        self.warnings = warnings
+    }
 }
 
 // MARK: - Runtime Config Persistence
@@ -50,37 +58,47 @@ package enum ProxyConfigPersistence {
     /// networks the transform exists for. The only thing that distinguishes
     /// this from `loadMigrating` is whether the result is written back, which
     /// is what keeps `pm-proxy` side-effect-free.
-    package static func load(from url: URL) -> ProxyConfig {
-        loadMigrating(from: url, saveMigrated: false).config
+    package static func load(from url: URL, allowMissing: Bool = true) throws -> ProxyConfig {
+        try loadMigrating(from: url, saveMigrated: false, allowMissing: allowMissing).config
     }
 
-    package static func load(in environment: RuntimeEnvironment) -> ProxyConfig {
-        load(from: environment.configFile)
+    package static func load(in environment: RuntimeEnvironment, allowMissing: Bool = true) throws -> ProxyConfig {
+        try load(from: environment.configFile, allowMissing: allowMissing)
     }
 
-    package static func loadAllMigrating(in environment: RuntimeEnvironment) -> RuntimeConfigurationLoadResult {
+    package static func loadAllMigrating(in environment: RuntimeEnvironment, allowMissing: Bool = true) throws -> RuntimeConfigurationLoadResult {
+        // Reject a broken runtime config before migration can write any files.
+        let runtime = try loadMigrating(from: environment.configFile, saveMigrated: false, allowMissing: allowMissing)
         let platform = PlatformConfigPersistence.loadMigrating(in: environment)
         let preferences = AppPreferencesPersistence.loadMigrating(in: environment)
         let sidecarMigrationFailed = !platform.warnings.isEmpty || !preferences.warnings.isEmpty
-        let runtime = loadMigrating(from: environment.configFile, saveMigrated: !sidecarMigrationFailed)
+        var warnings = platform.warnings + preferences.warnings + runtime.warnings
+        if runtime.migrated && !sidecarMigrationFailed {
+            do {
+                try save(runtime.config, in: environment)
+            } catch {
+                warnings.append("Config schema migrated in memory but could not be written to \(environment.configFile.path): \(error.localizedDescription)")
+            }
+        }
         return RuntimeConfigurationLoadResult(
             config: runtime.config,
             platformConfig: platform.config,
             appPreferences: preferences.preferences,
             migrated: runtime.migrated || platform.migrated || preferences.migrated,
-            warnings: platform.warnings + preferences.warnings + runtime.warnings
+            warnings: warnings
         )
     }
 
-    package static func loadMigrating(from url: URL, saveMigrated: Bool = true) -> ProxyConfigMigrationResult {
-        guard let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(ProxyConfig.self, from: data) else {
-            return ProxyConfigMigrationResult(
-                config: GenericDefaults.shared.makeConfig(),
-                migrated: false,
-                warnings: []
-            )
+    package static func loadMigrating(from url: URL, saveMigrated: Bool = true, allowMissing: Bool = true) throws -> ProxyConfigMigrationResult {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile && allowMissing {
+            return ProxyConfigMigrationResult(config: GenericDefaults.shared.makeConfig(), migrated: false, warnings: [])
+        } catch {
+            throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read.")
         }
+        let decoded = try decode(data, source: url.path)
 
         let previousVersion = (try? JSONDecoder().decode(SchemaVersionEnvelope.self, from: data).schemaVersion) ?? 0
         let needsMigration = previousVersion < ProxyConfig.currentSchemaVersion
@@ -103,6 +121,20 @@ package enum ProxyConfigPersistence {
                 warnings: ["Config schema migrated in memory but could not be written to \(url.path): \(error.localizedDescription)"]
             )
         }
+    }
+
+    package static func decode(_ data: Data, source: String) throws -> ProxyConfig {
+        let decoded: ProxyConfig
+        do {
+            decoded = try JSONDecoder().decode(ProxyConfig.self, from: data)
+        } catch {
+            // Do not echo configuration content (which may contain secrets).
+            throw ConfigurationLoadError(source: source, reason: "The configuration is not valid Conduit JSON.")
+        }
+        guard decoded.schemaVersion <= ProxyConfig.currentSchemaVersion else {
+            throw ConfigurationLoadError(source: source, reason: "The configuration requires a newer version of Conduit.")
+        }
+        return decoded
     }
 
     /// Applies every schema transform between `previousVersion` and
@@ -132,6 +164,36 @@ package enum ProxyConfigPersistence {
 
     package static func save(_ config: ProxyConfig, in environment: RuntimeEnvironment) throws {
         try save(config, to: environment.configFile)
+    }
+}
+
+package struct ConfigurationLoadError: Error, LocalizedError, Sendable {
+    package let source: String
+    package let reason: String
+
+    package init(source: String, reason: String) {
+        self.source = source
+        self.reason = reason
+    }
+
+    package var errorDescription: String? {
+        "Cannot load \(source). \(reason) Repair the file and retry; no replacement configuration was applied."
+    }
+
+    package var event: RuntimeEvent {
+        RuntimeEvent(kind: .config, event: "config.load_rejected", detail: errorDescription)
+    }
+
+    /// Startup failures have no orchestrator yet. Still emit canonical NDJSON.
+    package func report(to logger: any LogSink) {
+        let event = self.event
+        do {
+            let data = try CanonicalJSON.encoder().encode(event)
+            FileHandle.standardError.write(data + Data([0x0a]))
+        } catch {
+            logger.log(.error, "Could not encode config rejection event: \(error.localizedDescription)", category: .general)
+        }
+        logger.log(.error, event.detail ?? event.event, category: .general)
     }
 }
 

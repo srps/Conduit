@@ -323,7 +323,7 @@ enum DevLaunch {
             var config: ProxyConfig
             var dirty = false
             if FileManager.default.fileExists(atPath: environment.configFile.path) {
-                config = ProxyConfigPersistence.loadAllMigrating(in: environment).config
+                config = try ProxyConfigPersistence.loadAllMigrating(in: environment).config
             } else {
                 config = GenericDefaults.shared.makeConfig()
                 config.profileName = "Dev"

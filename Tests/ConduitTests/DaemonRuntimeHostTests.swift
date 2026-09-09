@@ -7,6 +7,33 @@ import XCTest
 @MainActor
 final class DaemonRuntimeHostTests: XCTestCase {
 
+    func testRejectedReloadPreservesTheLastConfigurationAndGeneration() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-rejected-reload-\(UUID().uuidString)")
+        let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = GenericDefaults.shared.makeConfig()
+        config.profileName = "Last good config"
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        try ProxyConfigPersistence.save(config, in: environment)
+        let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
+        let host = DaemonRuntimeHost(environment: environment, logger: DiscardingLogSink(),
+                                     loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+                                     vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
+                                     commandRunner: { path, arguments in try machine.run(path, arguments) },
+                                     homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path)
+        for content in ["{", "{\"localHost\":\"192.0.2.1\"}"] {
+            try Data(content.utf8).write(to: environment.configFile)
+            await host.reloadConfiguration()
+            XCTAssertEqual(host.config, config)
+            XCTAssertEqual(host.configGeneration, 0)
+            XCTAssertEqual(host.orchestrator.eventLog.events.last?.event, "config.reload_rejected")
+        }
+        try FileManager.default.removeItem(at: environment.configFile)
+        await host.reloadConfiguration()
+        XCTAssertEqual(host.config, config)
+        XCTAssertEqual(host.configGeneration, 0)
+    }
+
     func testConfigGenerationStartsAtZeroAndIncrementsOnReload() async throws {
         let environment = RuntimeEnvironment.isolated(
             stateDirectory: FileManager.default.temporaryDirectory
@@ -18,7 +45,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.profileName = "Initial"
         try ProxyConfigPersistence.save(config, in: environment)
 
-        let loaded = ProxyConfigPersistence.loadAllMigrating(in: environment)
+        let loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment)
         let host = DaemonRuntimeHost(
             environment: environment,
             logger: DiscardingLogSink(),
@@ -204,12 +231,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         var wifi: FakeMachine.Service { machine.service("Wi-Fi") }
 
-        func makeHost() -> DaemonRuntimeHost {
+        func makeHost() throws -> DaemonRuntimeHost {
             let machine = self.machine
             return DaemonRuntimeHost(
                 environment: environment,
                 logger: DiscardingLogSink(),
-                loadedConfiguration: ProxyConfigPersistence.loadAllMigrating(in: environment),
+                loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
                 vpnStatusMonitor: vpn,
                 privilegeClient: machine,
                 commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
@@ -246,7 +273,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.dnsForwarderPort = 0
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
         harness = try DaemonHarness(config: config, platformConfig: platform)
-        return harness.makeHost()
+        return try harness.makeHost()
     }
 
     /// The `AppState` scenario of the same name, against its twin. This

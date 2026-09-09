@@ -35,7 +35,14 @@ enum PMDns {
         }
 
         let environment = runtimeEnvironment(from: args)
-        let config = ProxyConfigPersistence.load(in: environment)
+        let config: ProxyConfig
+        do {
+            config = try ProxyConfigPersistence.load(in: environment, allowMissing: !args.contains("--config"))
+        } catch {
+            let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
+            failure.report(to: ConsoleLogSink(minLevel: .notice))
+            exit(1)
+        }
         let port = parseIntArg("--port", from: args) ?? config.dnsForwarderPort
         let host = parseStringArg("--host", from: args) ?? config.localHost
         let verbose = args.contains("--verbose")

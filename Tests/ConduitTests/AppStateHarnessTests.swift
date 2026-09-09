@@ -117,6 +117,26 @@ final class AppStateHarness {
 @MainActor
 final class AppStateHarnessTests: XCTestCase {
 
+    func testCorruptConfigurationCannotStartOrOverwriteTheFile() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        let corrupt = Data("{".utf8)
+        try corrupt.write(to: harness.environment.configFile)
+        let state = harness.launch()
+        do {
+            try await state.startProxy()
+            XCTFail("Corrupt configuration started the proxy")
+        } catch is ConfigurationLoadError {}
+        await state.startDNS()
+        await state.startTunnels()
+        state.saveConfig()
+        XCTAssertFalse(isRunning(state))
+        XCTAssertNotEqual(state.runtimeSnapshot.dnsRunState, .running)
+        XCTAssertNotEqual(state.runtimeSnapshot.tunnelsRunState, .running)
+        XCTAssertNotNil(state.lastErrorMessage)
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), corrupt)
+        XCTAssertTrue(machine.privilege.commands(matching: .setWebProxyEndpoint).isEmpty)
+    }
+
     private var harness: AppStateHarness!
 
     override func tearDown() async throws {
@@ -192,7 +212,7 @@ final class AppStateHarnessTests: XCTestCase {
             "the forwarder was not restarted by its own save"
         )
         XCTAssertTrue(
-            ProxyConfigPersistence.loadAllMigrating(in: harness.environment).config.dnsForwarderEnabled,
+            try ProxyConfigPersistence.loadAllMigrating(in: harness.environment).config.dnsForwarderEnabled,
             "and the flag reached disk, so the next launch brings DNS up with the proxy"
         )
     }

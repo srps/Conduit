@@ -644,7 +644,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let result = ProxyConfigPersistence.loadMigrating(from: env.configFile)
+        let result = try ProxyConfigPersistence.loadMigrating(from: env.configFile)
 
         XCTAssertTrue(result.migrated)
         XCTAssertEqual(result.config.profileName, "Legacy")
@@ -674,7 +674,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let result = ProxyConfigPersistence.loadAllMigrating(in: env)
+        let result = try ProxyConfigPersistence.loadAllMigrating(in: env)
 
         XCTAssertTrue(result.migrated)
         XCTAssertTrue(result.warnings.isEmpty)
@@ -712,7 +712,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let result = ProxyConfigPersistence.loadAllMigrating(in: env)
+        let result = try ProxyConfigPersistence.loadAllMigrating(in: env)
 
         XCTAssertTrue(result.migrated)
         XCTAssertFalse(result.warnings.isEmpty)
@@ -743,7 +743,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let config = ProxyConfigPersistence.load(in: env)
+        let config = try ProxyConfigPersistence.load(in: env)
 
         XCTAssertEqual(config.profileName, "Headless")
         XCTAssertEqual(config.schemaVersion, ProxyConfig.currentSchemaVersion)
@@ -764,7 +764,7 @@ final class ConfigArchitectureTests: XCTestCase {
         let env = RuntimeEnvironment(configDirectory: tempDir)
         try ProxyConfigPersistence.save(.testFixture(), in: env)
 
-        let result = ProxyConfigPersistence.loadMigrating(from: env.configFile)
+        let result = try ProxyConfigPersistence.loadMigrating(from: env.configFile)
 
         XCTAssertFalse(result.migrated)
         XCTAssertEqual(result.config.schemaVersion, ProxyConfig.currentSchemaVersion)
