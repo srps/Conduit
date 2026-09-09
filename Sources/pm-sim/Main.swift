@@ -30,6 +30,7 @@ enum PMSim {
               health-check            5 health checks through the pool (orchestrator behavior)
               failover                Stop upstream1, verify switchToNextUpstream recovers via upstream2
               flood-slow-drain        AE5F6815 repro: fast origin flood + slow client, verify no truncation
+              forced-proxy-precedence Routing: force rules override PAC DIRECT across proxy protocols
               direct-mode-silence     Phase 2: prove expected-direct causes log .info, not .error
               vpn-flap-idle           idle CONNECT tunnel survives a brief VPN flap
               vpn-flap-stream         streaming HTTP response survives a brief VPN flap
@@ -105,6 +106,8 @@ enum PMSim {
             return [try await OrchestratorScenarios.upstreamFailover(verbose: verbose)]
         case "flood-slow-drain":
             return [try await Scenarios.floodSlowDrain(verbose: verbose)]
+        case "forced-proxy-precedence":
+            return [try await ForcedRoutingScenarios.forcedProxyPrecedence(verbose: verbose)]
         case "direct-mode-silence":
             return [try await OrchestratorScenarios.directModeSilence(verbose: verbose)]
         case "vpn-flap-idle":

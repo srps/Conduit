@@ -489,6 +489,7 @@ extension Scenarios {
         out.append(try await connectionFlood(verbose: verbose))
         out.append(try await authStorm(verbose: verbose))
         out.append(try await silentThenBurst(silentForMs: 30_000, burstBytes: 262_144, verbose: verbose))
+        out.append(try await ForcedRoutingScenarios.forcedProxyPrecedence(verbose: verbose))
         out.append(try await OrchestratorScenarios.keepaliveReadback(verbose: verbose))
         out.append(try await OrchestratorScenarios.healthCheck(verbose: verbose))
         out.append(try await OrchestratorScenarios.upstreamFailover(verbose: verbose))

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 
@@ -35,6 +36,8 @@ final class FakeOrigin: @unchecked Sendable {
     let group: EventLoopGroup
     let behavior: OriginBehavior
     private(set) var channel: Channel?
+    private let acceptedConnections = NIOLockedValueBox(0)
+    var connectionCount: Int { acceptedConnections.withLockedValue { $0 } }
 
     init(group: EventLoopGroup, behavior: OriginBehavior) {
         self.group = group
@@ -45,10 +48,12 @@ final class FakeOrigin: @unchecked Sendable {
 
     func start(host: String = "127.0.0.1") async throws {
         let behavior = self.behavior
+        let acceptedConnections = self.acceptedConnections
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(OriginSessionHandler(behavior: behavior))
+                acceptedConnections.withLockedValue { $0 += 1 }
+                return channel.pipeline.addHandler(OriginSessionHandler(behavior: behavior))
             }
         self.channel = try await bootstrap.bind(host: host, port: 0).get()
     }

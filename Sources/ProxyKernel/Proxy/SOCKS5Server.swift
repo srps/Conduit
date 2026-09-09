@@ -14,6 +14,7 @@ final class SOCKS5Server: @unchecked Sendable {
     private let directModeProvider: () -> (Bool, DirectModeCause)
     private let pacRoutingEngine: PACRoutingEngine?
     private let configProvider: () -> ProxyConfig
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let gatewayMode: Bool
     private let onConnectionOpened: @Sendable (ActiveConnectionInfo) -> Void
     private let onConnectionClosed: @Sendable (UUID) -> Void
@@ -36,6 +37,7 @@ final class SOCKS5Server: @unchecked Sendable {
         pacRoutingEngine: PACRoutingEngine?,
         configProvider: @escaping () -> ProxyConfig,
         gatewayMode: Bool,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void = { _ in },
         onConnectionClosed: @Sendable @escaping (UUID) -> Void = { _ in },
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in }
@@ -47,6 +49,7 @@ final class SOCKS5Server: @unchecked Sendable {
         self.pacRoutingEngine = pacRoutingEngine
         self.configProvider = configProvider
         self.gatewayMode = gatewayMode
+        self.eventSink = eventSink
         self.onConnectionOpened = onConnectionOpened
         self.onConnectionClosed = onConnectionClosed
         self.onConnectionActivity = onConnectionActivity
@@ -76,6 +79,7 @@ final class SOCKS5Server: @unchecked Sendable {
                             pacRoutingEngine: self.pacRoutingEngine,
                             configProvider: self.configProvider,
                             gatewayMode: self.gatewayMode,
+                            eventSink: self.eventSink,
                             onConnectionOpened: self.onConnectionOpened,
                             onConnectionClosed: self.onConnectionClosed,
                             onConnectionActivity: self.onConnectionActivity
@@ -106,6 +110,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     private let directModeProvider: () -> (Bool, DirectModeCause)
     private let pacRoutingEngine: PACRoutingEngine?
     private let configProvider: () -> ProxyConfig
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let gatewayMode: Bool
     private let onConnectionOpened: @Sendable (ActiveConnectionInfo) -> Void
     private let onConnectionClosed: @Sendable (UUID) -> Void
@@ -123,6 +128,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         pacRoutingEngine: PACRoutingEngine?,
         configProvider: @escaping () -> ProxyConfig,
         gatewayMode: Bool,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void
@@ -134,6 +140,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         self.pacRoutingEngine = pacRoutingEngine
         self.configProvider = configProvider
         self.gatewayMode = gatewayMode
+        self.eventSink = eventSink
         self.onConnectionOpened = onConnectionOpened
         self.onConnectionClosed = onConnectionClosed
         self.onConnectionActivity = onConnectionActivity
@@ -275,9 +282,15 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let (isDirectMode, directCause) = directModeProvider()
         let directModeBypass = isDirectMode && directCause.routesClientTrafficDirectly
         let currentConfig = configProvider()
-        // Only unconditional direct states bypass PAC/upstreams. VPN-connected
-        // degraded states keep PAC policy active for split-DNS safety.
-        if HTTPProxyHandler.shouldEvaluatePAC(isDirectMode: directModeBypass, forceProxy: false),
+        let forceProxy = NoProxyMatcher.matchesAny(host: host, patterns: currentConfig.forceProxyHosts)
+        if forceProxy && !directModeBypass {
+            let event = RuntimeEvent(kind: .routing, event: "routing.socks5_force_proxy", detail: "\(host):\(port)")
+            eventSink?(event)
+            logger.log(.debug, "\(event.event): \(event.detail ?? "")", category: .proxy)
+        }
+        // Force rules skip PAC just as they do in HTTP/CONNECT. Intentional
+        // direct states retain precedence; degraded states retain proxy policy.
+        if HTTPProxyHandler.shouldEvaluatePAC(isDirectMode: directModeBypass, forceProxy: forceProxy),
            let pacRoutingEngine {
             let pacHost = host.contains(":") ? "[\(host)]" : host
             guard buf.readableBytes == 0 else {
