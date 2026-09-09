@@ -52,6 +52,19 @@ final class SOCKS5RoutingTests: XCTestCase {
         )
     }
 
+    func testEquivalentIPv6LiteralsShareForceAndBypassPolicy() {
+        let literals = ["::1", "[::1]", "0:0:0:0:0:0:0:1"]
+        for host in literals {
+            for pattern in literals {
+                XCTAssertTrue(NoProxyMatcher.shouldBypass(host: host, patterns: [pattern]))
+                XCTAssertFalse(NoProxyMatcher.shouldBypass(host: host, patterns: literals, forceProxy: [pattern]))
+            }
+        }
+        XCTAssertTrue(NoProxyMatcher.matchesAny(host: "2001:0DB8:0:0:0:0:0:1", patterns: ["[2001:db8::1]"]))
+        XCTAssertFalse(NoProxyMatcher.matchesAny(host: "::2", patterns: literals))
+        XCTAssertFalse(NoProxyMatcher.matchesAny(host: "example.test", patterns: literals))
+    }
+
     // MARK: - Direct mode interaction
 
     func testDirectModeBypassesEverything() {
