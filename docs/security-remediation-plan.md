@@ -6,7 +6,7 @@ Status: S01–S03 implemented on the security-fix branch; full Xcode CI remains 
 
 - Require the PR's full Swift build, XCTest suite, new security boundary regressions, and existing performance gate to pass.
 - Review the behavior changes: PAC auth requires an enabled configured host/port, rejected reloads preserve state, and non-gateway binds require loopback.
-- Keep the PR draft until CI and review are complete. Branch publication does not install the app/helper, merge to main, or produce a release.
+- Open the PR for review once CI passes; require green CI and addressed review findings before merging. Branch publication does not install the app/helper, merge to main, or produce a release.
 
 S05 is implemented independently in [PR #27](https://github.com/srps/Conduit/pull/27), with a failing-before/passing-after network regression and green initial CI. Its remaining gate is review. S06 is the next implementation batch after current review feedback is settled.
 

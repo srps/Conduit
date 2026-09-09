@@ -118,7 +118,7 @@ sudo ./uninstall-helper.sh
 Run just the DNS-over-HTTPS forwarder:
 
 ```bash
-swift run pm-dns --port 5353 --verbose
+swift run pm-dns --minimal --port 5353 --verbose
 ```
 
 Point your system DNS at `127.0.0.1:5353`. Internal domains go through corporate DNS; external domains resolve via DoH (Cloudflare, Quad9, Google).

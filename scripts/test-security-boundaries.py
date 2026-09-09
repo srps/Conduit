@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise pm-proxy startup/reload boundaries using only a scratch directory.
 
-Build pm-proxy first, then run: python3 scripts/test-security-boundaries.py
+Build all products first, then run: python3 scripts/test-security-boundaries.py
 No company settings, credentials, or privileged operations are used.
 """
 import json
@@ -56,7 +56,48 @@ def startup(directory, args, succeeds=False):
     return result
 
 
+def standalone_dns():
+    binary = BINARY.with_name("pm-dns")
+    with tempfile.TemporaryDirectory(prefix="conduit-dns-sec-", dir="/tmp") as temporary:
+        directory = Path(temporary)
+        config_file = directory / "config.json"
+        command = [str(binary), "--state-dir", str(directory), "--port", "0"]
+
+        def rejects(args=()):
+            result = subprocess.run([*command, *args], capture_output=True, text=True, timeout=10)
+            assert result.returncode != 0 and "config.load_rejected" in result.stderr, result
+
+        def starts(args=()):
+            log = directory / "dns.log"
+            with log.open("w") as output:
+                process = subprocess.Popen([*command, *args], stdout=output, stderr=output)
+                try:
+                    wait_until(lambda: "pm-dns running" in log.read_text() or process.poll() is not None,
+                               "standalone DNS startup")
+                    assert process.poll() is None, log.read_text()
+                finally:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+
+        rejects()  # Absent state must not imply permission for public defaults.
+        starts(["--minimal"])
+        config_file.write_text(json.dumps({"localHost": "127.0.0.1", "dnsForwarderPort": 0}))
+        starts()
+        config_file.unlink()
+        rejects()  # A prior configured run creates no persistent policy marker.
+        config_file.write_text("{")
+        rejects()
+        assert config_file.read_text() == "{"
+        starts(["--minimal"])  # Explicitly file-free even if saved policy is broken.
+        rejects(["--minimal", "--config", str(config_file)])
+
+
 def main():
+    standalone_dns()
     with tempfile.TemporaryDirectory(prefix="conduit-sec-", dir="/tmp") as temporary:
         directory = Path(temporary)
         config_file = directory / "config.json"
@@ -133,7 +174,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-        print("PASS: rejected startup, first run, loopback binds, failed control/SIGHUP reload preservation, repaired reload")
+        print("PASS: standalone DNS policy, rejected startup, first run, loopback binds, failed control/SIGHUP reload preservation, repaired reload")
 
 
 if __name__ == "__main__":

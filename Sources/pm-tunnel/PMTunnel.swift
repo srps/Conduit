@@ -42,7 +42,7 @@ enum PMTunnel {
             let environment = runtimeEnvironment(from: args)
             let config: ProxyConfig
             do {
-                config = try ProxyConfigPersistence.load(in: environment, allowMissing: !args.contains("--config"))
+                config = try ProxyConfigPersistence.load(in: environment, allowMissing: false)
             } catch {
                 let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
                 failure.report(to: ConsoleLogSink(minLevel: .notice))
