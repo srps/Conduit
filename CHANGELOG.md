@@ -11,7 +11,9 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 - `Conduit --dev` (debug builds only, launched with `open -n … --args --dev`) runs the app
   over the harness's fake machine and a scratch state directory, with every port ephemeral
   and a "Popover preview" panel showing the menu bar popover, so a second instance runs
-  beside the installed one for visual and VoiceOver checks without touching the system.
+  beside the installed one for visual and VoiceOver checks with faked system settings,
+  helper and credential operations. Notifications, network-path observation, scratch
+  files and configured network requests remain real.
   It keeps a Dock icon and a dot badge on its menu bar glyph, and never registers the
   global shortcut system-wide. `--section`, `--vpn` and
   `--upstream` drive the states; `--dev-state-dir` puts the journal where an agent can
