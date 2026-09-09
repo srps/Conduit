@@ -134,7 +134,7 @@ enum PMSim {
         case "dns-doh-blocked":
             return [try await DNSResolverScenarios.dohBlockedStillAnswers(verbose: verbose)]
         case "observable-target-redaction":
-            return [try ObservableTargetScenarios.redaction()]
+            return [try await ObservableTargetScenarios.redaction()]
         case "security-boundaries":
             return [try await SecurityScenarios.boundaries(verbose: verbose)]
         default:

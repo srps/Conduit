@@ -333,7 +333,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
 
         guard response.statusCode == 407 else {
             logger.log(.error, "Unexpected status \(response.statusCode) for \(SensitiveValueSanitizer.observableTarget(target))", category: .proxy)
-            fail(ConnectionPoolError.upstreamReturnedStatus(response.statusCode, target: target), context: context)
+            fail(ConnectionPoolError.upstreamReturnedStatus(response.statusCode, target: SensitiveValueSanitizer.observableTarget(target)), context: context)
             return
         }
         cancelResponseTimeout()

@@ -27,6 +27,13 @@ final class ObservableTargetRedactionTests: XCTestCase {
         }
     }
 
+    func testConnectFailureDescriptionsDoNotExposeTargetSuffixes() {
+        let error = ConnectionPoolError.upstreamReturnedStatus(403, target: "example.test:443?sig=short#fragment")
+        XCTAssertEqual(error.errorDescription, "The upstream proxy returned HTTP 403 for example.test:443?<redacted>.")
+        XCTAssertFalse(error.localizedDescription.contains("short"))
+        XCTAssertFalse(error.localizedDescription.contains("fragment"))
+    }
+
     func testUpstreamFailureEventsRedactOriginFormTargets() {
         let target = "/path?sig=short#fragment"
         let timeout = ConnectionPool.upstreamResponseTimedOutEvent(uri: target, upstream: "proxy.test:8080")

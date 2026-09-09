@@ -8,6 +8,7 @@ The live regression fails on the pre-fix parent with `URL secret reached an obse
 
 Validation uses only synthetic tokens and ephemeral loopback listeners:
 
+- The simulation also reproduces a non-200/407 CONNECT rejection against a synthetic upstream. The error retains only the observation target, its description is sanitized, and the wire CONNECT target remains unchanged. This regression fails before the fix with `CONNECT error retained a target secret`.
 - `pm-sim observable-target-redaction` checks observation values, recording logs, events, audit targets, encoded connection records, malformed URLs, and idempotence.
 - `scripts/test-observable-target-redaction.py` runs the real headless runtime. Both absolute and origin-form requests preserve the exact query at the origin. Active snapshots, stdout/stderr, and existing event/audit files omit the tokens across successful requests, body-limit rejection, and refused direct connections.
 - `ObservableTargetRedactionTests` covers kernel/control sanitizer parity, userinfo, fragments, malformed URLs, encoded path delimiters, generic diagnostic exports, and JSON records. XCTest runs in Xcode CI; local builds use the previously documented CLT/macOS 26.5 SDK workaround.

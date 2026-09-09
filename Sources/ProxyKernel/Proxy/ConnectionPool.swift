@@ -60,7 +60,7 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
         case .upstreamResponseTimedOut:
             return "Timed out waiting for the upstream proxy to respond."
         case .upstreamReturnedStatus(let statusCode, let target):
-            return "The upstream proxy returned HTTP \(statusCode) for \(target)."
+            return "The upstream proxy returned HTTP \(statusCode) for \(SensitiveValueSanitizer.observableTarget(target))."
         }
     }
 
