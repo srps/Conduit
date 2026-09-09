@@ -244,6 +244,30 @@ final class PACScriptEmitterTests: XCTestCase {
         }
     }
 
+    func testIPv6ForceAndBypassParityWithNoProxyMatcher() throws {
+        let groups = [
+            ["::1", "[::1]", "0:0:0:0:0:0:0:1"],
+            ["2001:db8::1", "[2001:DB8::1]", "2001:0db8:0:0:0:0:0:1"],
+            ["::ffff:192.0.2.1", "[::ffff:c000:201]", "0:0:0:0:0:ffff:c000:201"],
+            ["192.0.2.1"],
+        ]
+        for literals in groups {
+            for pattern in literals {
+                for host in literals + ["example.test", "::2"] {
+                    for forced in [false, true] {
+                        let config = makeConfig(noProxy: forced ? literals : [pattern],
+                                                forceProxy: forced ? [pattern] : [])
+                        let bypass = NoProxyMatcher.shouldBypass(host: host, patterns: config.noProxyHosts,
+                                                                forceProxy: config.forceProxyHosts)
+                        XCTAssertEqual(try evaluate(config, host: host),
+                                       bypass ? ["DIRECT"] : ["PROXY 127.0.0.1:3128"],
+                                       "host=\(host), pattern=\(pattern), forced=\(forced)")
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Escaping (patterns can legally contain anything)
 
     func testDoubleQuoteInPatternDoesNotBreakScript() throws {
@@ -345,10 +369,11 @@ final class PACScriptEmitterTests: XCTestCase {
         // Patterns are pre-normalized (trimmed + lowercased) at emit time; this
         // helper just runs the five match cases against a lowercased host.
         function matchesAny(host, patterns) {
+          var hostIP = canonicalIPLiteral(host);
           for (var i = 0; i < patterns.length; i++) {
             var pat = patterns[i];
             if (pat.length === 0) continue;
-            if (pat === host) return true;
+            if (pat === host || (hostIP !== null && canonicalIPLiteral(pat) === hostIP)) return true;
             if (pat.length >= 2 && pat.substring(0, 2) === "*.") {
               var suffix = pat.substring(1);
               if (host.length >= suffix.length &&
@@ -371,6 +396,48 @@ final class PACScriptEmitterTests: XCTestCase {
             }
           }
           return false;
+        }
+
+        // Literal comparison only: never resolve a hostname from a PAC decision.
+        function canonicalIPLiteral(value) {
+          if (value.charAt(0) === "[" && value.charAt(value.length - 1) === "]") {
+            value = value.substring(1, value.length - 1);
+          }
+          if (value.length > 45) return null;
+          function ipv4(text) {
+            var octets = text.split(".");
+            if (octets.length !== 4) return null;
+            for (var i = 0; i < 4; i++) {
+              if (!/^(0|[1-9][0-9]{0,2})$/.test(octets[i]) || +octets[i] > 255) return null;
+              octets[i] = +octets[i];
+            }
+            return octets;
+          }
+          if (value.indexOf(":") < 0) {
+            var v4 = ipv4(value);
+            return v4 ? "4:" + v4.join(".") : null;
+          }
+          if (value.indexOf(".") >= 0) {
+            var end = value.lastIndexOf(":");
+            var tail = ipv4(value.substring(end + 1));
+            if (!tail) return null;
+            value = value.substring(0, end + 1) + ((tail[0] << 8) | tail[1]).toString(16) +
+                    ":" + ((tail[2] << 8) | tail[3]).toString(16);
+          }
+          var halves = value.split("::");
+          if (halves.length > 2) return null;
+          var left = halves[0] ? halves[0].split(":") : [];
+          var right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+          var missing = 8 - left.length - right.length;
+          if (halves.length === 1 ? missing !== 0 : missing < 1) return null;
+          var groups = left.concat(right);
+          for (var j = 0; j < groups.length; j++) {
+            if (!/^[0-9a-f]{1,4}$/.test(groups[j])) return null;
+          }
+          while (left.length < 8 - right.length) left.push("0");
+          groups = left.concat(right);
+          for (var k = 0; k < 8; k++) groups[k] = parseInt(groups[k], 16).toString(16);
+          return "6:" + groups.join(":");
         }
 
         """
