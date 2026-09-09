@@ -31,3 +31,9 @@ jobs:
         python3 scripts/test-security-boundaries.py "$conduit_bin_dir/pm-proxy"
     - name: Perf gate
       run: bash ./scripts/perf-gate.sh
+    - name: Forced routing regression
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      run: |
+        conduit_bin_dir="$(xcrun swift build --show-bin-path)"
+        "$conduit_bin_dir/pm-sim" forced-proxy-precedence

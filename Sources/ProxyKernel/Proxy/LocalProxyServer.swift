@@ -263,6 +263,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                 pacRoutingEngine: self.pacRoutingEngine,
                 configProvider: self.configProvider,
                 gatewayMode: config.gatewayMode,
+                eventSink: self.eventSink,
                 onConnectionOpened: self.onConnectionOpened,
                 onConnectionClosed: self.onConnectionClosed,
                 onConnectionActivity: self.onConnectionActivity

@@ -272,7 +272,7 @@ private final class SOCKS5AuditClientHandler: ChannelInboundHandler, @unchecked 
     }
 }
 
-private enum SOCKS5AuditClient {
+enum SOCKS5AuditClient {
     static func exchange(
         group: EventLoopGroup,
         port: Int,
