@@ -49,6 +49,10 @@ public enum ControlDiagnostics {
         case let array as [Any]:
             return array.map { sanitizedJSONObject($0, fileKind: fileKind, path: path) }
         case let string as String:
+            if let key = path.last?.lowercased(), ["destination", "target", "uri"].contains(key),
+               let start = string.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+                return sanitizeString(String(string[...start]) + "<redacted>")
+            }
             return sanitizeString(string)
         default:
             return value
@@ -56,7 +60,7 @@ public enum ControlDiagnostics {
     }
 
     public static func sanitizeString(_ value: String) -> String {
-        var sanitized = redactEmbeddedURLCredentials(in: value)
+        var sanitized = redactEmbeddedURLs(in: value)
         sanitized = redactHeaderLine(sanitized)
         sanitized = redactAuthTokens(in: sanitized)
         return sanitized
@@ -108,18 +112,22 @@ public enum ControlDiagnostics {
         return result
     }
 
-    private static func redactEmbeddedURLCredentials(in value: String) -> String {
-        let pattern = #"\bhttps?://[^\s<>"']+"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return value }
+    private static func redactEmbeddedURLs(in value: String) -> String {
+        let pattern = #"\bhttps?://(?:<redacted>|[^\s<>"'])+"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return value }
 
         var result = value
         let fullRange = NSRange(value.startIndex..<value.endIndex, in: value)
         let matches = regex.matches(in: value, range: fullRange)
         for match in matches.reversed() {
             guard let range = Range(match.range, in: result) else { continue }
-            let candidate = String(result[range])
+            var candidate = String(result[range])
+            if let start = candidate.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+                candidate = String(candidate[...start]) + "<redacted>"
+            }
             guard var components = URLComponents(string: candidate),
                   components.user != nil || components.password != nil else {
+                result.replaceSubrange(range, with: candidate)
                 continue
             }
             components.user = components.user == nil ? nil : "<redacted>"

@@ -44,6 +44,7 @@ enum PMSim {
               audit-socks5-rsv        Audit: SOCKS5 CONNECT non-zero RSV handling
               audit-expect-trailers   Audit: Expect: 100-continue answered, trailers passed through
               dns-doh-blocked         DNS: internal server dead + DoH answering 404 still answers the client
+              observable-target-redaction  Query/fragment privacy across observations
               security-boundaries     Auth destinations, config rejection, and loopback listeners
 
             OPTIONS:
@@ -132,6 +133,8 @@ enum PMSim {
             return [try await AuditScenarios.expectContinueAndTrailers(verbose: verbose)]
         case "dns-doh-blocked":
             return [try await DNSResolverScenarios.dohBlockedStillAnswers(verbose: verbose)]
+        case "observable-target-redaction":
+            return [try ObservableTargetScenarios.redaction()]
         case "security-boundaries":
             return [try await SecurityScenarios.boundaries(verbose: verbose)]
         default:

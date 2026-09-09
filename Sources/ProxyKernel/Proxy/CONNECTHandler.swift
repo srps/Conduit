@@ -75,7 +75,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 return el.makeFailedFuture(error)
             }
             let next = proxyChain[index + 1].endpoint
-            self.logger.log(.warning, "PAC upstream \(forcedProxy.endpoint) failed for \(target), trying \(next).", category: .proxy)
+            self.logger.log(.warning, "PAC upstream \(forcedProxy.endpoint) failed for \(SensitiveValueSanitizer.observableTarget(target)), trying \(next).", category: .proxy)
             return self.attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: index + 1)
         }
     }
@@ -96,7 +96,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 return el.makeFailedFuture(error)
             }
             let next = self.pool.switchToNextUpstream() ?? "unknown"
-            self.logger.log(.warning, "Upstream failed for \(target), switching to \(next) (attempt \(attempt + 1)/\(maxRetries)).", category: .proxy)
+            self.logger.log(.warning, "Upstream failed for \(SensitiveValueSanitizer.observableTarget(target)), switching to \(next) (attempt \(attempt + 1)/\(maxRetries)).", category: .proxy)
             return self.attemptTunnel(target: target, authSource: authSource, attempt: attempt + 1, maxRetries: maxRetries)
         }
     }
@@ -113,7 +113,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
 
-            self.logger.log(.info, "CONNECT handshake to \(connection.proxy.endpoint) for \(target)", category: .proxy)
+            self.logger.log(.info, "CONNECT handshake to \(connection.proxy.endpoint) for \(SensitiveValueSanitizer.observableTarget(target))", category: .proxy)
 
             let promise = connection.channel.eventLoop.makePromise(of: PooledUpstreamConnection.self)
             let handler = RawConnectHandshakeHandler(
@@ -293,7 +293,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
                 let token = try auth.initialToken(for: host)
                 eventLoop.execute {
                     handler.authenticator = auth
-                    handler.logger.log(.debug, "CONNECT + \(auth.scheme) initial for \(handler.target)", category: .auth)
+                    handler.logger.log(.debug, "CONNECT + \(auth.scheme) initial for \(SensitiveValueSanitizer.observableTarget(handler.target))", category: .auth)
                     handler.recordAuthMethod(fromHeader: token)
                     handler.writeRawConnect(authHeader: token, context: capturedCtx)
                 }
@@ -323,16 +323,16 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     }
 
     private func handleResponse(_ response: RawHTTPResponse, context: ChannelHandlerContext) {
-        logger.log(.debug, "Upstream raw response: \(response.statusCode) for \(target)", category: .proxy)
+        logger.log(.debug, "Upstream raw response: \(response.statusCode) for \(SensitiveValueSanitizer.observableTarget(target))", category: .proxy)
 
         if response.statusCode == 200 {
-            logger.log(.debug, "CONNECT tunnel established for \(target)", category: .proxy)
+            logger.log(.debug, "CONNECT tunnel established for \(SensitiveValueSanitizer.observableTarget(target))", category: .proxy)
             succeed(connection)
             return
         }
 
         guard response.statusCode == 407 else {
-            logger.log(.error, "Unexpected status \(response.statusCode) for \(target)", category: .proxy)
+            logger.log(.error, "Unexpected status \(response.statusCode) for \(SensitiveValueSanitizer.observableTarget(target))", category: .proxy)
             fail(ConnectionPoolError.upstreamReturnedStatus(response.statusCode, target: target), context: context)
             return
         }
@@ -357,7 +357,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
                     // (Successful mutual-auth completion arrives as 200, not 407; see RFC 4559 §4.)
                     guard let responseToken = try auth.processChallenge(headerValues: authHeaders, host: host) else {
                         eventLoop.execute {
-                            handler.logger.log(.error, "No suitable challenge response for \(handler.target)", category: .auth)
+                            handler.logger.log(.error, "No suitable challenge response for \(SensitiveValueSanitizer.observableTarget(handler.target))", category: .auth)
                             handler.fail(ConnectionPoolError.authenticationRejected, context: ctx)
                         }
                         return
@@ -365,7 +365,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
                     eventLoop.execute {
                         handler.phase = .awaitingFinal
                         handler.accumulated.clear()
-                        handler.logger.log(.debug, "CONNECT + \(auth.scheme) challenge-response for \(handler.target)", category: .auth)
+                        handler.logger.log(.debug, "CONNECT + \(auth.scheme) challenge-response for \(SensitiveValueSanitizer.observableTarget(handler.target))", category: .auth)
                         handler.recordAuthMethod(fromHeader: responseToken)
                         handler.writeRawConnect(authHeader: responseToken, context: ctx)
                     }
@@ -377,7 +377,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
             }
 
         case .awaitingFinal:
-            logger.log(.error, "Auth rejected after challenge-response for \(target)", category: .auth)
+            logger.log(.error, "Auth rejected after challenge-response for \(SensitiveValueSanitizer.observableTarget(target))", category: .auth)
             fail(ConnectionPoolError.authenticationRejected, context: context)
         }
     }
@@ -617,7 +617,7 @@ private final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendab
         // error 1.)") with the errno and reason dropped — the one captured
         // occurrence of this line in a real log was unactionable for
         // exactly that reason.
-        logger.log(.warning, "Tunnel relay error for \(target): \(error.displayDescription)", category: .proxy)
+        logger.log(.warning, "Tunnel relay error for \(SensitiveValueSanitizer.observableTarget(target)): \(error.displayDescription)", category: .proxy)
         gracefulClosePeer()
         context.close(promise: nil)
     }
