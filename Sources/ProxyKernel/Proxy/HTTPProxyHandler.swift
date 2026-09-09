@@ -86,7 +86,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         case .end:
             guard let head = requestHead else { return }
             guard let target = HTTPRequestTarget.parse(head) else {
-                writeError(status: .badRequest, message: "Invalid request target: \(head.uri)", context: context)
+                writeError(status: .badRequest, message: "Invalid request target: \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
                 requestHead = nil
                 resetRequestBodyState()
                 return
@@ -114,7 +114,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 case .success(let body):
                     completedBody = body
                 case .failure(let error):
-                    self.logger.log(.warning, "Request body storage failed for \(head.uri): \(error.displayDescription)", category: .proxy)
+                    self.logger.log(.warning, "Request body storage failed for \(SensitiveValueSanitizer.observableTarget(head.uri)): \(error.displayDescription)", category: .proxy)
                     self.onRequestCompleted(false, nil)
                     self.writeError(status: .internalServerError, message: "Request body could not be stored for replay.", context: ctx)
                         .whenComplete { _ in ctx.close(promise: nil) }
@@ -122,7 +122,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 }
 
                 if completedBody.tooLarge {
-                    self.logger.log(.warning, "Request body for \(head.uri) exceeded spool limit; rejecting.", category: .proxy)
+                    self.logger.log(.warning, "Request body for \(SensitiveValueSanitizer.observableTarget(head.uri)) exceeded spool limit; rejecting.", category: .proxy)
                     self.onRequestCompleted(false, nil)
                     completedBody.body?.cleanup()
                     self.writeError(status: .payloadTooLarge, message: "Request body exceeds configured spool limit.", context: ctx)
@@ -415,9 +415,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         pacResult: PACResult = PACResult(route: nil, hasDirectFallback: false)
     ) {
         if MetadataBlocklist.isBlocked(host: target.host, gatewayMode: gatewayMode) {
-            logger.log(.warning, "Blocked request to \(head.uri) (metadata/loopback protection).", category: .proxy)
+            logger.log(.warning, "Blocked request to \(SensitiveValueSanitizer.observableTarget(head.uri)) (metadata/loopback protection).", category: .proxy)
             onRequestCompleted(false, nil)
-            writeError(status: .forbidden, message: "Request to \(head.uri) is not allowed.", context: context)
+            writeError(status: .forbidden, message: "Request to \(SensitiveValueSanitizer.observableTarget(head.uri)) is not allowed.", context: context)
             onConnectionClosed(infoID)
             body?.cleanup()
             return
@@ -455,7 +455,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         self.onRequestCompleted(true, tunnel.endpoint)
                     case .failure(let error):
                         if hasDirectFallback {
-                            self.logger.log(.warning, "CONNECT via upstream failed for \(head.uri), falling back to DIRECT (PAC chain includes DIRECT).", category: .proxy)
+                            self.logger.log(.warning, "CONNECT via upstream failed for \(SensitiveValueSanitizer.observableTarget(head.uri)), falling back to DIRECT (PAC chain includes DIRECT).", category: .proxy)
                             self.handleDirectConnect(head: head, target: target, infoID: infoID, context: ctx)
                         } else {
                             self.logger.log(upstreamFailureLevel, "CONNECT tunnel failed: \(error.displayDescription)", category: .proxy)
@@ -479,7 +479,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             // permits; otherwise refuse loudly instead of silently stripping
             // the `Upgrade` header and breaking the handshake.
             if !bypass && !directFallbackAllowedByCurrentMode() {
-                logger.log(.warning, "Upgrade request for \(head.uri) needs a direct origin connection, but strict mode forbids direct routing; rejecting. WebSocket clients should use CONNECT through the upstream proxy.", category: .proxy)
+                logger.log(.warning, "Upgrade request for \(SensitiveValueSanitizer.observableTarget(head.uri)) needs a direct origin connection, but strict mode forbids direct routing; rejecting. WebSocket clients should use CONNECT through the upstream proxy.", category: .proxy)
                 onRequestCompleted(false, nil)
                 writeError(status: .badGateway, message: "Protocol upgrades require CONNECT through the upstream proxy in strict mode.", context: context)
                 onConnectionClosed(infoID)
@@ -487,7 +487,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 return
             }
             if !bypass {
-                logger.log(.info, "Routing Upgrade request for \(head.uri) direct (upstream proxies require CONNECT for protocol upgrades).", category: .proxy)
+                logger.log(.info, "Routing Upgrade request for \(SensitiveValueSanitizer.observableTarget(head.uri)) direct (upstream proxies require CONNECT for protocol upgrades).", category: .proxy)
             }
             handleUpgradeRequest(head: head, body: body, infoID: infoID, target: target, context: context)
             return
@@ -524,7 +524,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         hasDirectFallback: hasDirectFallback,
                         error: error
                     ) {
-                        self.logger.log(.warning, "Proxy exchange failed for \(head.uri), falling back to DIRECT.", category: .proxy)
+                        self.logger.log(.warning, "Proxy exchange failed for \(SensitiveValueSanitizer.observableTarget(head.uri)), falling back to DIRECT.", category: .proxy)
                         self.handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: ctx)
                     } else {
                         self.logger.log(upstreamFailureLevel, "Proxy exchange failed: \(error.displayDescription)", category: .proxy)
@@ -547,7 +547,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         context: ChannelHandlerContext
     ) {
         guard let url = target.directURL else {
-            writeError(status: .badRequest, message: "Invalid direct URL for \(head.uri)", context: context)
+            writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
             body?.cleanup()
             onConnectionClosed(infoID)
             return
@@ -556,7 +556,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let host = url.host ?? ""
         let port = url.port ?? 80
 
-        logger.log(.info, "DIRECT HTTP \(head.method.rawValue) \(url.absoluteString)", category: .proxy)
+        logger.log(.info, "DIRECT HTTP \(head.method.rawValue) \(SensitiveValueSanitizer.observableTarget(url.absoluteString))", category: .proxy)
 
         let clientChannel = context.channel
         let clientEL = context.eventLoop
@@ -669,7 +669,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         context: ChannelHandlerContext
     ) {
         guard let url = target.directURL else {
-            writeError(status: .badRequest, message: "Invalid direct URL for \(head.uri)", context: context)
+            writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
             body?.cleanup()
             onConnectionClosed(infoID)
             return
@@ -678,7 +678,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let host = url.host ?? ""
         let port = url.port ?? 80
 
-        logger.log(.info, "DIRECT upgrade \(head.method.rawValue) \(url.absoluteString) (Upgrade: \(head.headers["Upgrade"].joined(separator: ", ")))", category: .proxy)
+        logger.log(.info, "DIRECT upgrade \(head.method.rawValue) \(SensitiveValueSanitizer.observableTarget(url.absoluteString)) (Upgrade: \(head.headers["Upgrade"].joined(separator: ", ")))", category: .proxy)
 
         nonisolated(unsafe) let ctx = context
         let clientChannel = context.channel

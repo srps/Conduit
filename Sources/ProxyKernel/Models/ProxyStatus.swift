@@ -144,7 +144,7 @@ package struct ActiveConnectionInfo: Identifiable, Hashable, Codable, Sendable {
         authMethod: String? = nil
     ) {
         self.id = id
-        self.destination = destination
+        self.destination = SensitiveValueSanitizer.observableTarget(destination)
         self.upstream = upstream
         self.method = method
         self.startedAt = startedAt

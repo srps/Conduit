@@ -17,31 +17,30 @@ package enum SensitiveValueSanitizer {
     )
 
     private static let urlRegex = try! NSRegularExpression(
-        pattern: #"https?://[^\s<>"']+"#,
+        pattern: #"https?://(?:<redacted>|[^\s<>"'])+"#,
         options: [.caseInsensitive]
     )
 
-    /// Sanitizes a connection-audit `target` (the observed destination). The
-    /// destination can be an absolute request URI (forward-proxy), an
-    /// origin-form request target (`/path?token=…`, with the host in the Host
-    /// header), or a `host:port` (CONNECT / SOCKS5). A query string can carry
-    /// credentials (`?access_token=`, `?sig=`, `?api_key=`), so everything from
-    /// the first `?` is dropped (replaced with `?<redacted>` so its presence is
-    /// still visible). In a URL `?` only ever begins the query, and `host:port`
-    /// targets contain no `?`, so they pass through unchanged. The standard
-    /// sanitizer then masks any userinfo or long tokens left in the host/path.
+    /// Observation-only destination. Never use this value for routing or
+    /// forwarding: query/fragment bytes belong exclusively to the wire target.
+    /// Cut lexically so malformed URL input cannot bypass privacy filtering.
+    package static func observableTarget(_ value: String) -> String {
+        sanitize(redactSuffix(value))
+    }
+
     package static func auditTarget(_ value: String) -> String {
-        var trimmed = value
-        if let queryStart = value.firstIndex(of: "?") {
-            trimmed = String(value[..<queryStart]) + "?<redacted>"
-        }
-        return sanitize(trimmed)
+        observableTarget(value)
+    }
+
+    private static func redactSuffix(_ value: String) -> String {
+        guard let start = value.firstIndex(where: { $0 == "?" || $0 == "#" }) else { return value }
+        return String(value[...start]) + "<redacted>"
     }
 
     package static func sanitize(_ value: String) -> String {
         guard !value.isEmpty else { return value }
 
-        var output = redactURLUserInfo(in: value)
+        var output = redactURLs(in: value)
         output = replaceMatches(
             in: output,
             regex: headerRegex,
@@ -60,7 +59,7 @@ package enum SensitiveValueSanitizer {
         return output
     }
 
-    private static func redactURLUserInfo(in value: String) -> String {
+    private static func redactURLs(in value: String) -> String {
         var result = value
         let matches = urlRegex.matches(
             in: value,
@@ -70,9 +69,10 @@ package enum SensitiveValueSanitizer {
 
         for match in matches {
             guard let range = Range(match.range, in: result) else { continue }
-            let candidate = String(result[range])
+            let candidate = redactSuffix(String(result[range]))
             guard var components = URLComponents(string: candidate),
                   components.user != nil || components.password != nil else {
+                result.replaceSubrange(range, with: candidate)
                 continue
             }
             components.user = components.user == nil ? nil : "<redacted>"

@@ -64,6 +64,18 @@ Current gaps: Swift `String` remains unavoidable for one-shot HTTP header values
 
 Planned work: connection audit log with masked fields only; continue shrinking token lifetime at auth boundaries.
 
+### URL Secrets In Observability
+
+Asset: short signed-URL parameters, query credentials, and fragment values supplied by clients.
+
+Boundary: wire request targets enter ordinary logs, structured events, active connection snapshots, audit records, and exported diagnostics.
+
+Controls: HTTP handlers use `SensitiveValueSanitizer.observableTarget` for observation-only messages. Active connection construction and audit targets apply the same policy. Query/fragment suffixes are cut lexically, including malformed URLs, before URL parsing; encoded path delimiters remain intact. Log/event sanitizers also scrub embedded absolute URLs, and diagnostics apply equivalent filtering plus field-specific topology redaction. Routing and forwarding retain the original request inputs.
+
+Limits: this does not redact arbitrary short secrets embedded in path segments, erase old log files, or establish a universal safe-string type. Kernel and control diagnostics remain separate implementations, with parity tests; see the refactor notes. Fragment stripping from forwarded HTTP URLs follows existing HTTP behavior.
+
+Validation: `pm-sim observable-target-redaction`, XCTest sanitizer/export parity, and `scripts/test-observable-target-redaction.py` verify unchanged query forwarding and private snapshots/logs across success, body-limit rejection, and connection failure, using ephemeral loopback fixtures.
+
 ### Local Proxy Port Hijack
 
 Asset: localhost listener availability and system proxy correctness.

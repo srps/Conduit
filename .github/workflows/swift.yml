@@ -25,6 +25,8 @@ jobs:
         DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
+        "$conduit_bin_dir/pm-sim" observable-target-redaction
+        python3 scripts/test-observable-target-redaction.py "$conduit_bin_dir/pm-proxy"
         "$conduit_bin_dir/pm-sim" security-boundaries
         python3 scripts/test-security-boundaries.py "$conduit_bin_dir/pm-proxy"
     - name: Perf gate
