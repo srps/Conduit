@@ -2,7 +2,7 @@
 
 SOCKS5 previously passed `forceProxy: false` to the shared PAC evaluation gate. When a loaded PAC returned DIRECT, that result could override a matching force-proxy rule even in strict mode. HTTP and CONNECT already computed the real force-rule match.
 
-SOCKS5 now computes that match from the current request's configuration and uses the existing HTTP/CONNECT PAC gate. A forced request skips PAC and uses the configured upstream path. Exact IPv6 rules compare canonical IP literals, so compressed, expanded, and bracketed spellings receive the same policy in both force and bypass matching. Literal parsing performs no DNS lookup; wildcard semantics are unchanged. The matcher still gives force rules precedence over overlapping no-proxy patterns. Each forced SOCKS decision emits `routing.socks5_force_proxy` through the runtime event sink.
+SOCKS5 now computes that match from the current request's configuration and uses the existing HTTP/CONNECT PAC gate. A forced request skips PAC and uses the configured upstream path. Exact IPv6 rules compare canonical IP literals, so compressed, expanded, and bracketed spellings receive the same policy in both force and bypass matching. The emitted local PAC performs the same exact-literal comparison, preserving browser/runtime parity. Literal parsing performs no DNS lookup; wildcard semantics are unchanged. The matcher still gives force rules precedence over overlapping no-proxy patterns. Each forced SOCKS decision emits `routing.socks5_force_proxy` through the runtime event sink.
 
 Intentional direct states such as off-VPN operation retain their existing precedence. This fix does not turn strict mode into a VPN kill switch or change upstream-failure policy.
 
@@ -16,7 +16,7 @@ Before the production fix, the scenario exited 1 with:
 Forced SOCKS5 target reached the direct origin despite PAC DIRECT
 ```
 
-After the fix, it passes with zero direct dials for the forced cases. It also covers removal/restoration of force rules without restarting the listener, exact and wildcard patterns overlapping no-proxy rules, disabling PAC, a previously cached DIRECT result, structured decision events, and intentional off-VPN direct operation. IPv6 ATYP 04 requests with compressed and bracketed force rules also traverse the upstream; without literal normalization those requests take the DIRECT path (and fail on hosts whose resolver suppresses IPv6). Unit tests cover equivalent force/bypass literals independently of host IPv6 availability. It is registered in `pm-sim all` and the PR workflow.
+After the fix, it passes with zero direct dials for the forced cases. It also covers removal/restoration of force rules without restarting the listener, exact and wildcard patterns overlapping no-proxy rules, disabling PAC, a previously cached DIRECT result, structured decision events, and intentional off-VPN direct operation. IPv6 ATYP 04 requests with compressed and bracketed force rules also traverse the upstream; without literal normalization those requests take the DIRECT path (and fail on hosts whose resolver suppresses IPv6). The production CFNetwork PAC evaluator verifies overlapping IPv6 force/bypass rules in the headless scenario. XCTest parity coverage also includes global and IPv4-mapped IPv6 literals, with a pinned script fixture. Unit tests cover equivalent force/bypass literals independently of host IPv6 availability. It is registered in `pm-sim all` and the PR workflow.
 
 Local CLT commands:
 

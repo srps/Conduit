@@ -3,6 +3,7 @@ import Foundation
 import NIOConcurrencyHelpers
 import NIOPosix
 import ProxyKernel
+import ProxyPAC
 
 /// Real listener checks: the direct origin is separate from the upstream's
 /// origin, so a successful handshake cannot conceal an unintended direct dial.
@@ -133,6 +134,21 @@ enum ForcedRoutingScenarios {
     @MainActor
     static func forcedProxyPrecedence(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
+        let literals = ["::1", "[::1]", "0:0:0:0:0:0:0:1"]
+        for pattern in literals {
+            var config = GenericDefaults.shared.makeConfig()
+            config.localHost = "127.0.0.1"
+            config.localPort = 3128
+            config.noProxyHosts = literals
+            config.forceProxyHosts = [pattern]
+            let resolver: any PacEvaluator = CFPACEvaluator()
+            let evaluator = try resolver.makeEvaluator(pacScript: PACScriptEmitter.script(for: config))
+            for host in literals {
+                let authority = host.hasPrefix("[") ? host : "[\(host)]"
+                let routes = try evaluator.resolveProxyChain(for: URL(string: "http://\(authority)/")!)
+                try require(routes == ["PROXY 127.0.0.1:3128"], "Local PAC bypassed equivalent IPv6 force rule: \(pattern) / \(host)")
+            }
+        }
         let fixture = Fixture()
         do {
             try await fixture.start(verbose: verbose)
