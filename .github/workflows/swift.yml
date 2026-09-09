@@ -20,5 +20,12 @@ jobs:
       run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift build -v
     - name: Run tests
       run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift test -v
+    - name: Security boundary regressions
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      run: |
+        conduit_bin_dir="$(xcrun swift build --show-bin-path)"
+        "$conduit_bin_dir/pm-sim" security-boundaries
+        python3 scripts/test-security-boundaries.py "$conduit_bin_dir/pm-proxy"
     - name: Perf gate
       run: bash ./scripts/perf-gate.sh
