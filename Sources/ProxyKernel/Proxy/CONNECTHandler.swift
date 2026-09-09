@@ -15,7 +15,7 @@ package enum ProxyPipelineNames {
 
 package final class CONNECTCoordinator: @unchecked Sendable {
     private let pool: ConnectionPool
-    private let authenticatorProvider: (String) throws -> ProxyAuthenticator
+    private let authenticatorProvider: (UpstreamProxy) throws -> ProxyAuthenticator
     private let logger: any LogSink
     private let authHandshakeLimiter: AuthHandshakeLimiter
     private let authLimitProvider: @Sendable () -> AuthHandshakeLimiter.Limits
@@ -23,7 +23,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
 
     package init(
         pool: ConnectionPool,
-        authenticatorProvider: @escaping (String) throws -> ProxyAuthenticator,
+        authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         logger: any LogSink,
         authHandshakeLimiter: AuthHandshakeLimiter = AuthHandshakeLimiter(),
         authLimitProvider: @escaping @Sendable () -> AuthHandshakeLimiter.Limits = {
@@ -220,7 +220,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     typealias InboundIn = ByteBuffer
 
     private let connection: PooledUpstreamConnection
-    private let authenticatorProvider: (String) throws -> ProxyAuthenticator
+    private let authenticatorProvider: (UpstreamProxy) throws -> ProxyAuthenticator
     private let target: String
     private let authSource: String?
     private let authHandshakeLimiter: AuthHandshakeLimiter
@@ -243,7 +243,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
 
     init(
         connection: PooledUpstreamConnection,
-        authenticatorProvider: @escaping (String) throws -> ProxyAuthenticator,
+        authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         target: String,
         authSource: String?,
         authHandshakeLimiter: AuthHandshakeLimiter,
@@ -278,7 +278,8 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
             return
         }
         nonisolated(unsafe) let provider = self.authenticatorProvider
-        let host = self.connection.proxy.host
+        let upstream = self.connection.proxy
+        let host = upstream.host
         let eventLoop = ctx.eventLoop
         let handler = self
         nonisolated(unsafe) let capturedCtx = ctx
@@ -288,7 +289,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
         }
         Task { @Sendable in
             do {
-                let auth = try provider(host)
+                let auth = try provider(upstream)
                 let token = try auth.initialToken(for: host)
                 eventLoop.execute {
                     handler.authenticator = auth

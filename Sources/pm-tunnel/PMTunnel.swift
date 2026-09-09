@@ -40,7 +40,14 @@ enum PMTunnel {
 
         Task { @MainActor in
             let environment = runtimeEnvironment(from: args)
-            let config = ProxyConfigPersistence.load(in: environment)
+            let config: ProxyConfig
+            do {
+                config = try ProxyConfigPersistence.load(in: environment, allowMissing: false)
+            } catch {
+                let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
+                failure.report(to: ConsoleLogSink(minLevel: .notice))
+                exit(1)
+            }
 
             // See pm-proxy for the AppLogStore → ConsoleLogSink rationale.
             let verbose = args.contains("--verbose")
@@ -63,7 +70,8 @@ enum PMTunnel {
             // is trivially satisfied.
             let authProvider = credentialBasedAuthenticatorProvider(
                 configProvider: { config },
-                credentialProvider: credentialProvider
+                credentialProvider: credentialProvider,
+                eventSink: { event in logger.log(.error, "\(event.event): \(event.detail ?? "")", category: .auth) }
             )
 
             let pool = ConnectionPool(

@@ -580,7 +580,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let platform = PlatformConfigPersistence.load(in: env)
+        let platform = try PlatformConfigPersistence.load(in: env)
         XCTAssertTrue(platform.manageSystemProxy)
         // `autoEnableOnVPN` was retired — no longer asserted here.
         // The presence of the legacy key in the source JSON should not cause
@@ -602,7 +602,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let prefs = AppPreferencesPersistence.load(in: env)
+        let prefs = try AppPreferencesPersistence.load(in: env)
         XCTAssertFalse(prefs.showMenuBarIcon)
         XCTAssertEqual(prefs.preferredBrowserTestURL, "https://test.com")
 
@@ -623,7 +623,7 @@ final class ConfigArchitectureTests: XCTestCase {
         let directJSON = "{\"manageSystemProxy\": false}".data(using: .utf8)!
         try directJSON.write(to: env.platformConfigFile)
 
-        let platform = PlatformConfigPersistence.load(in: env)
+        let platform = try PlatformConfigPersistence.load(in: env)
         XCTAssertFalse(platform.manageSystemProxy, "Direct file should take precedence over legacy")
     }
 
@@ -644,7 +644,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let result = ProxyConfigPersistence.loadMigrating(from: env.configFile)
+        let result = try ProxyConfigPersistence.loadMigrating(from: env.configFile)
 
         XCTAssertTrue(result.migrated)
         XCTAssertEqual(result.config.profileName, "Legacy")
@@ -674,7 +674,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let result = ProxyConfigPersistence.loadAllMigrating(in: env)
+        let result = try ProxyConfigPersistence.loadAllMigrating(in: env)
 
         XCTAssertTrue(result.migrated)
         XCTAssertTrue(result.warnings.isEmpty)
@@ -692,7 +692,7 @@ final class ConfigArchitectureTests: XCTestCase {
         XCTAssertNil(rewrittenConfig["showMenuBarIcon"], "Runtime config rewrite should drop sidecar fields after extracting them")
     }
 
-    func testRuntimeConfigMigrationPreservesLegacyFieldsWhenSidecarWriteFails() throws {
+    func testRuntimeConfigMigrationRejectsUnreadableSidecarBeforeAnyRewrite() throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
@@ -712,14 +712,11 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let result = ProxyConfigPersistence.loadAllMigrating(in: env)
-
-        XCTAssertTrue(result.migrated)
-        XCTAssertFalse(result.warnings.isEmpty)
-        XCTAssertEqual(result.config.schemaVersion, ProxyConfig.currentSchemaVersion)
-        XCTAssertEqual(result.platformConfig.manageSystemProxy, true)
-        XCTAssertEqual(result.appPreferences.showMenuBarIcon, false)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: env.preferencesFile.path))
+        XCTAssertThrowsError(try ProxyConfigPersistence.loadAllMigrating(in: env)) { error in
+            XCTAssertTrue(error is ConfigurationLoadError)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: env.preferencesFile.path))
+        XCTAssertEqual(try Data(contentsOf: env.configFile), legacyJSON)
 
         let preservedConfig = try JSONSerialization.jsonObject(with: Data(contentsOf: env.configFile)) as! [String: Any]
         XCTAssertNil(preservedConfig["schemaVersion"], "Runtime rewrite must be skipped when sidecar migration failed")
@@ -743,7 +740,7 @@ final class ConfigArchitectureTests: XCTestCase {
         """.data(using: .utf8)!
         try legacyJSON.write(to: env.configFile)
 
-        let config = ProxyConfigPersistence.load(in: env)
+        let config = try ProxyConfigPersistence.load(in: env)
 
         XCTAssertEqual(config.profileName, "Headless")
         XCTAssertEqual(config.schemaVersion, ProxyConfig.currentSchemaVersion)
@@ -764,7 +761,7 @@ final class ConfigArchitectureTests: XCTestCase {
         let env = RuntimeEnvironment(configDirectory: tempDir)
         try ProxyConfigPersistence.save(.testFixture(), in: env)
 
-        let result = ProxyConfigPersistence.loadMigrating(from: env.configFile)
+        let result = try ProxyConfigPersistence.loadMigrating(from: env.configFile)
 
         XCTAssertFalse(result.migrated)
         XCTAssertEqual(result.config.schemaVersion, ProxyConfig.currentSchemaVersion)

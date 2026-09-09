@@ -286,7 +286,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
         // Invoking it now should hit the init-time default closure that
         // throws `ProxyAuthenticatorNotConfiguredError`. Proves the captor
         // is live, not stubbed.
-        XCTAssertThrowsError(try capturedAccessor("127.0.0.1:1234")) { error in
+        XCTAssertThrowsError(try capturedAccessor(UpstreamProxy(name: "test", host: "127.0.0.1", port: 1234, priority: 0))) { error in
             XCTAssertTrue(error is ProxyAuthenticatorNotConfiguredError,
                           "Pre-setter capture should throw default-not-configured, got: \(error)")
         }
@@ -299,7 +299,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
         // indirection must route to the spy. Without the `authenticatorBox`
         // refactor, `capturedAccessor` would still be bound to the init-time
         // default closure and this call would throw.
-        _ = try capturedAccessor("127.0.0.1:1234")
+        _ = try capturedAccessor(UpstreamProxy(name: "test", host: "127.0.0.1", port: 1234, priority: 0))
         XCTAssertEqual(spy.providerCallCount, 1,
                        "Late-bound accessor must dereference authenticatorBox per call; " +
                        "a missed call here means setAuthenticatorProvider after lazy-var " +
@@ -309,7 +309,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
         // picks up the newer value too (not just the first setter call).
         let secondSpy = SpyAuthenticatorProvider()
         orchestrator.setAuthenticatorProvider(secondSpy.provide)
-        _ = try capturedAccessor("example.com:8080")
+        _ = try capturedAccessor(UpstreamProxy(name: "test", host: "example.com", port: 8080, priority: 0))
         XCTAssertEqual(secondSpy.providerCallCount, 1,
                        "Subsequent setAuthenticatorProvider swaps must also be observed.")
         XCTAssertEqual(spy.providerCallCount, 1,
@@ -344,7 +344,7 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
             }
         )
 
-        _ = try provider(upstream.endpoint)
+        _ = try provider(upstream)
         try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(orchestrator.snapshot.lastAuthOutcome, .ntlmDirect)
@@ -378,7 +378,7 @@ private final class SpyAuthenticatorProvider: @unchecked Sendable {
         lock.withLock { _instances.last }
     }
 
-    func provide(host: String) throws -> ProxyAuthenticator {
+    func provide(host: UpstreamProxy) throws -> ProxyAuthenticator {
         lock.lock()
         _callCount += 1
         let instance = TrackingMockAuthenticator()

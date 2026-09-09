@@ -17,14 +17,15 @@ enum PMDns {
             OPTIONS:
               --port <port>      UDP port to listen on (default: from config or 5353)
               --host <host>      Host to bind to (default: 127.0.0.1)
-              --config <path>    Path to Conduit config.json
+              --config <path>    Path to Conduit config.json (required unless --minimal)
               --state-dir <path> Directory for config.json and saved runtime state
+              --minimal         Use generic defaults without reading saved configuration
               --verbose          Enable verbose logging
               --help, -h         Show this help
 
             EXAMPLES:
-              pm-dns --port 5353
-              pm-dns --port 5353 --verbose
+              pm-dns --minimal --port 5353
+              pm-dns --minimal --port 5353 --verbose
               pm-dns --config ~/custom-config.json
 
             The forwarder tries corporate DNS first for internal domains,
@@ -35,7 +36,24 @@ enum PMDns {
         }
 
         let environment = runtimeEnvironment(from: args)
-        let config = ProxyConfigPersistence.load(in: environment)
+        let config: ProxyConfig
+        do {
+            if args.contains("--minimal") {
+                guard !args.contains("--config") else {
+                    throw ConfigurationLoadError(source: "command line", reason: "--minimal and --config cannot be combined")
+                }
+                config = GenericDefaults.shared.makeConfig()
+            } else {
+                // This standalone host writes no state markers, so it cannot
+                // distinguish a first run from a deleted policy. Defaults must
+                // be an explicit choice on every invocation.
+                config = try ProxyConfigPersistence.load(in: environment, allowMissing: false)
+            }
+        } catch {
+            let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
+            failure.report(to: ConsoleLogSink(minLevel: .notice))
+            exit(1)
+        }
         let port = parseIntArg("--port", from: args) ?? config.dnsForwarderPort
         let host = parseStringArg("--host", from: args) ?? config.localHost
         let verbose = args.contains("--verbose")

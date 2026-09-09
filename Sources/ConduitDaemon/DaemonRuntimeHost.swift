@@ -188,7 +188,8 @@ final class DaemonRuntimeHost {
             credentialProvider: credentialManager,
             outcomeHandler: { [weak orchestrator] outcome, host, reason in
                 orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason)
-            }
+            },
+            eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
         )
         orchestrator.setAuthenticatorProvider(authenticatorProvider)
         orchestrator.eventLog.setSink { [eventWriter] event in eventWriter.record(event) }
@@ -406,7 +407,17 @@ final class DaemonRuntimeHost {
     }
 
     func reloadConfiguration() async {
-        let loaded = ProxyConfigPersistence.loadAllMigrating(in: environment)
+        let loaded: RuntimeConfigurationLoadResult
+        do {
+            loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: false) { candidate in
+                if let problem = candidate.validate().first(where: \.blocksProxyStart) { throw problem }
+            }
+        } catch {
+            let event = RuntimeEvent(kind: .config, event: "config.reload_rejected", detail: error.localizedDescription)
+            orchestrator.eventLog.append(event)
+            logger.log(.error, event.detail ?? event.event, category: .system)
+            return
+        }
         for warning in loaded.warnings {
             logger.log(.warning, warning, category: .system)
         }

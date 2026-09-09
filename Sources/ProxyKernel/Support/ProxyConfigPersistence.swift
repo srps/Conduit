@@ -13,9 +13,20 @@ private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
     try prettyEncoder.encode(value).write(to: url, options: .atomic)
 }
 
-private func loadJSON<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
-    guard let data = try? Data(contentsOf: url) else { return nil }
-    return try? JSONDecoder().decode(type, from: data)
+private func loadJSON<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
+    let data: Data
+    do {
+        data = try Data(contentsOf: url)
+    } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+        return nil
+    } catch {
+        throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read.")
+    }
+    do {
+        return try JSONDecoder().decode(type, from: data)
+    } catch {
+        throw ConfigurationLoadError(source: url.path, reason: "The configuration is not valid Conduit JSON.")
+    }
 }
 
 private struct SchemaVersionEnvelope: Decodable {
@@ -34,6 +45,14 @@ package struct RuntimeConfigurationLoadResult {
     package let appPreferences: AppPreferences
     package let migrated: Bool
     package let warnings: [String]
+
+    package init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig, appPreferences: AppPreferences, migrated: Bool, warnings: [String]) {
+        self.config = config
+        self.platformConfig = platformConfig
+        self.appPreferences = appPreferences
+        self.migrated = migrated
+        self.warnings = warnings
+    }
 }
 
 // MARK: - Runtime Config Persistence
@@ -50,37 +69,79 @@ package enum ProxyConfigPersistence {
     /// networks the transform exists for. The only thing that distinguishes
     /// this from `loadMigrating` is whether the result is written back, which
     /// is what keeps `pm-proxy` side-effect-free.
-    package static func load(from url: URL) -> ProxyConfig {
-        loadMigrating(from: url, saveMigrated: false).config
+    package static func load(from url: URL, allowMissing: Bool = true) throws -> ProxyConfig {
+        try loadMigrating(from: url, saveMigrated: false, allowMissing: allowMissing).config
     }
 
-    package static func load(in environment: RuntimeEnvironment) -> ProxyConfig {
-        load(from: environment.configFile)
+    package static func load(in environment: RuntimeEnvironment, allowMissing: Bool = true) throws -> ProxyConfig {
+        // Runtime-only hosts do not create configuration sidecars. Their
+        // snapshots/events still distinguish a reused state directory from a
+        // genuine first run. --minimal is the explicit file-free runtime mode.
+        let runtimeArtifacts = [environment.snapshotFile, environment.eventsFile,
+                                environment.configDirectory.appendingPathComponent("ready.json")]
+        let hasPriorState = hasConfigurationState(in: environment)
+            || runtimeArtifacts.contains { FileManager.default.fileExists(atPath: $0.path) }
+        return try load(from: environment.configFile, allowMissing: allowMissing && !hasPriorState)
     }
 
-    package static func loadAllMigrating(in environment: RuntimeEnvironment) -> RuntimeConfigurationLoadResult {
-        let platform = PlatformConfigPersistence.loadMigrating(in: environment)
-        let preferences = AppPreferencesPersistence.loadMigrating(in: environment)
-        let sidecarMigrationFailed = !platform.warnings.isEmpty || !preferences.warnings.isEmpty
-        let runtime = loadMigrating(from: environment.configFile, saveMigrated: !sidecarMigrationFailed)
+    private static func hasConfigurationState(in environment: RuntimeEnvironment) -> Bool {
+        [environment.platformConfigFile, environment.preferencesFile, environment.platformStateFile]
+            .contains { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    package static func loadAllMigrating(
+        in environment: RuntimeEnvironment,
+        allowMissing: Bool = true,
+        validateRuntime: (ProxyConfig) throws -> Void = { _ in }
+    ) throws -> RuntimeConfigurationLoadResult {
+        // Stage every candidate before migration can write any files. A valid
+        // runtime file must not hide a broken platform or preference sidecar.
+        let runtime = try loadMigrating(from: environment.configFile, saveMigrated: false,
+                                        allowMissing: allowMissing && !hasConfigurationState(in: environment))
+        let platform = try PlatformConfigPersistence.loadMigrating(in: environment, saveMigrated: false)
+        let preferences = try AppPreferencesPersistence.loadMigrating(in: environment, saveMigrated: false)
+        try validateRuntime(runtime.config)
+        var warnings = platform.warnings + preferences.warnings + runtime.warnings
+        if platform.migrated {
+            do {
+                try PlatformConfigPersistence.save(platform.config, in: environment)
+            } catch {
+                warnings.append("Platform config migrated in memory but could not be written to \(environment.platformConfigFile.path): \(error.localizedDescription)")
+            }
+        }
+        if preferences.migrated {
+            do {
+                try AppPreferencesPersistence.save(preferences.preferences, in: environment)
+            } catch {
+                warnings.append("App preferences migrated in memory but could not be written to \(environment.preferencesFile.path): \(error.localizedDescription)")
+            }
+        }
+        if runtime.migrated && warnings.isEmpty {
+            do {
+                try save(runtime.config, in: environment)
+            } catch {
+                warnings.append("Config schema migrated in memory but could not be written to \(environment.configFile.path): \(error.localizedDescription)")
+            }
+        }
         return RuntimeConfigurationLoadResult(
             config: runtime.config,
             platformConfig: platform.config,
             appPreferences: preferences.preferences,
             migrated: runtime.migrated || platform.migrated || preferences.migrated,
-            warnings: platform.warnings + preferences.warnings + runtime.warnings
+            warnings: warnings
         )
     }
 
-    package static func loadMigrating(from url: URL, saveMigrated: Bool = true) -> ProxyConfigMigrationResult {
-        guard let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(ProxyConfig.self, from: data) else {
-            return ProxyConfigMigrationResult(
-                config: GenericDefaults.shared.makeConfig(),
-                migrated: false,
-                warnings: []
-            )
+    package static func loadMigrating(from url: URL, saveMigrated: Bool = true, allowMissing: Bool = true) throws -> ProxyConfigMigrationResult {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile && allowMissing {
+            return ProxyConfigMigrationResult(config: GenericDefaults.shared.makeConfig(), migrated: false, warnings: [])
+        } catch {
+            throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read.")
         }
+        let decoded = try decode(data, source: url.path)
 
         let previousVersion = (try? JSONDecoder().decode(SchemaVersionEnvelope.self, from: data).schemaVersion) ?? 0
         let needsMigration = previousVersion < ProxyConfig.currentSchemaVersion
@@ -103,6 +164,20 @@ package enum ProxyConfigPersistence {
                 warnings: ["Config schema migrated in memory but could not be written to \(url.path): \(error.localizedDescription)"]
             )
         }
+    }
+
+    package static func decode(_ data: Data, source: String) throws -> ProxyConfig {
+        let decoded: ProxyConfig
+        do {
+            decoded = try JSONDecoder().decode(ProxyConfig.self, from: data)
+        } catch {
+            // Do not echo configuration content (which may contain secrets).
+            throw ConfigurationLoadError(source: source, reason: "The configuration is not valid Conduit JSON.")
+        }
+        guard decoded.schemaVersion <= ProxyConfig.currentSchemaVersion else {
+            throw ConfigurationLoadError(source: source, reason: "The configuration requires a newer version of Conduit.")
+        }
+        return decoded
     }
 
     /// Applies every schema transform between `previousVersion` and
@@ -135,6 +210,36 @@ package enum ProxyConfigPersistence {
     }
 }
 
+package struct ConfigurationLoadError: Error, LocalizedError, Sendable {
+    package let source: String
+    package let reason: String
+
+    package init(source: String, reason: String) {
+        self.source = source
+        self.reason = reason
+    }
+
+    package var errorDescription: String? {
+        "Cannot load \(source). \(reason) Repair the file and retry; no replacement configuration was applied."
+    }
+
+    package var event: RuntimeEvent {
+        RuntimeEvent(kind: .config, event: "config.load_rejected", detail: errorDescription)
+    }
+
+    /// Startup failures have no orchestrator yet. Still emit canonical NDJSON.
+    package func report(to logger: any LogSink) {
+        let event = self.event
+        do {
+            let data = try CanonicalJSON.encoder().encode(event)
+            FileHandle.standardError.write(data + Data([0x0a]))
+        } catch {
+            logger.log(.error, "Could not encode config rejection event: \(error.localizedDescription)", category: .general)
+        }
+        logger.log(.error, event.detail ?? event.event, category: .general)
+    }
+}
+
 // MARK: - Platform Config Persistence
 
 package struct PlatformConfigMigrationResult {
@@ -144,15 +249,18 @@ package struct PlatformConfigMigrationResult {
 }
 
 package enum PlatformConfigPersistence {
-    package static func load(in environment: RuntimeEnvironment) -> PlatformIntegrationConfig {
-        loadMigrating(in: environment).config
+    package static func load(in environment: RuntimeEnvironment) throws -> PlatformIntegrationConfig {
+        try loadMigrating(in: environment).config
     }
 
-    package static func loadMigrating(in environment: RuntimeEnvironment) -> PlatformConfigMigrationResult {
-        if let config = loadJSON(PlatformIntegrationConfig.self, from: environment.platformConfigFile) {
+    package static func loadMigrating(in environment: RuntimeEnvironment, saveMigrated: Bool = true) throws -> PlatformConfigMigrationResult {
+        if let config = try loadJSON(PlatformIntegrationConfig.self, from: environment.platformConfigFile) {
             return PlatformConfigMigrationResult(config: config, migrated: false, warnings: [])
         }
         if let migrated = LegacyConfigMigration.extractPlatformConfig(from: environment.configFile) {
+            guard saveMigrated else {
+                return PlatformConfigMigrationResult(config: migrated, migrated: true, warnings: [])
+            }
             do {
                 try save(migrated, in: environment)
                 return PlatformConfigMigrationResult(config: migrated, migrated: true, warnings: [])
@@ -181,15 +289,18 @@ package struct AppPreferencesMigrationResult {
 }
 
 package enum AppPreferencesPersistence {
-    package static func load(in environment: RuntimeEnvironment) -> AppPreferences {
-        loadMigrating(in: environment).preferences
+    package static func load(in environment: RuntimeEnvironment) throws -> AppPreferences {
+        try loadMigrating(in: environment).preferences
     }
 
-    package static func loadMigrating(in environment: RuntimeEnvironment) -> AppPreferencesMigrationResult {
-        if let prefs = loadJSON(AppPreferences.self, from: environment.preferencesFile) {
+    package static func loadMigrating(in environment: RuntimeEnvironment, saveMigrated: Bool = true) throws -> AppPreferencesMigrationResult {
+        if let prefs = try loadJSON(AppPreferences.self, from: environment.preferencesFile) {
             return AppPreferencesMigrationResult(preferences: prefs, migrated: false, warnings: [])
         }
         if let migrated = LegacyConfigMigration.extractAppPreferences(from: environment.configFile) {
+            guard saveMigrated else {
+                return AppPreferencesMigrationResult(preferences: migrated, migrated: true, warnings: [])
+            }
             do {
                 try save(migrated, in: environment)
                 return AppPreferencesMigrationResult(preferences: migrated, migrated: true, warnings: [])

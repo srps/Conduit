@@ -249,7 +249,7 @@ instance, which talks to the real helper.
 ## Run pm-dns Standalone
 
 ```bash
-swift run pm-dns --port 5353 --verbose
+swift run pm-dns --minimal --port 5353 --verbose
 ```
 
 Then point your system DNS at `127.0.0.1` and queries for internal domains go through corporate DNS, external domains resolve via DoH. Or enable "Manage system DNS" in the GUI to have it done automatically.

@@ -30,7 +30,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
         let depths = NIOLockedValueBox<[Int]>([])
         let depthsRef = depths
         let credProvider = InMemoryCredentialProvider()
-        let factory: @Sendable (String) throws -> ProxyAuthenticator = credentialBasedAuthenticatorProvider(
+        let factory: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator = credentialBasedAuthenticatorProvider(
             configProvider: { .testFixture() },
             credentialProvider: credProvider,
             outcomeHandler: { _, _, _ in
@@ -57,7 +57,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
             for: upstream
         )
 
-        let ntlmFactory: @Sendable (String) throws -> ProxyAuthenticator = credentialBasedAuthenticatorProvider(
+        let ntlmFactory: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator = credentialBasedAuthenticatorProvider(
             configProvider: { ntlm },
             credentialProvider: credProvider,
             outcomeHandler: { _, _, _ in
@@ -67,7 +67,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
         _ = factory  // silence unused-warning; factory is declared for the .systemNegotiated path baseline
 
         for _ in 0..<20 {
-            _ = try ntlmFactory("proxy.example.com")
+            _ = try ntlmFactory(upstream)
         }
 
         let captured = depths.withLockedValue { $0 }
@@ -107,7 +107,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
 
         let depths = NIOLockedValueBox<[Int]>([])
         let depthsRef = depths
-        let probeProvider: @Sendable (String) throws -> ProxyAuthenticator = { _ in
+        let probeProvider: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator = { _ in
             depthsRef.withLockedValue { $0.append(Thread.callStackSymbols.count) }
             return NTLMAuthenticator(credentials: ProxyCredentials(
                 username: "u", domain: "D", workstation: "W",
@@ -118,7 +118,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
 
         let accessor = orchestrator.lateBoundAuthenticatorProvider
         for _ in 0..<50 {
-            _ = try accessor("proxy.example.com")
+            _ = try accessor(ProxyConfig.testFixture().upstreams[0])
         }
 
         let captured = depths.withLockedValue { $0 }
@@ -144,7 +144,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
             config: .testFixture(),
             logger: DiscardingLogSink()
         )
-        let base: @Sendable (String) throws -> ProxyAuthenticator = { _ in
+        let base: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator = { _ in
             NTLMAuthenticator(credentials: ProxyCredentials(
                 username: "u", domain: "D", workstation: "W",
                 ntHash: SecretBytes.repeating(0, count: 16)
@@ -160,7 +160,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
         // to observed).
         for _ in 0..<500 {
             let current = orchestrator.lateBoundAuthenticatorProvider
-            let wrapped: @Sendable (String) throws -> ProxyAuthenticator = { host in
+            let wrapped: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator = { host in
                 try current(host)
             }
             orchestrator.setAuthenticatorProvider(wrapped)
@@ -179,7 +179,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
         // closures are no longer in the chain (the box now holds the probe
         // directly). So this proves that setAuthenticatorProvider REPLACES,
         // not LAYERS. Depth here should match the bounded-case test above.
-        _ = try accessor("proxy.example.com")
+        _ = try accessor(ProxyConfig.testFixture().upstreams[0])
         let captured = depths.withLockedValue { $0 }
         XCTAssertEqual(captured.count, 1)
         print("[AuthProviderStackDepthTests] post-500-setAuthenticatorProvider depth = \(captured.first ?? -1)")

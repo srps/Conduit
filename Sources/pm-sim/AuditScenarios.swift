@@ -209,7 +209,7 @@ private final class RawHTTPAuditClientHandler: ChannelInboundHandler, @unchecked
     }
 }
 
-private enum RawHTTPAuditClient {
+enum RawHTTPAuditClient {
     static func request(group: EventLoopGroup, host: String, port: Int, request: String) async throws -> String {
         let promise = group.next().makePromise(of: String.self)
         let timeout = promise.futureResult.eventLoop.scheduleTask(in: .seconds(5)) {

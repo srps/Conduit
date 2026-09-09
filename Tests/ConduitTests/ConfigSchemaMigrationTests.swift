@@ -87,7 +87,7 @@ final class ConfigSchemaMigrationTests: XCTestCase {
         try ProxyConfigPersistence.save(config, to: file)
         let before = try Data(contentsOf: file)
 
-        let loaded = ProxyConfigPersistence.load(from: file)
+        let loaded = try ProxyConfigPersistence.load(from: file)
 
         XCTAssertEqual(loaded.dohProviders, DNSSection.defaultDoHProviders)
 
@@ -111,7 +111,7 @@ final class ConfigSchemaMigrationTests: XCTestCase {
         config.dohProviders = DNSSection.legacyHostnameDoHProviders
         try ProxyConfigPersistence.save(config, to: file)
 
-        let result = ProxyConfigPersistence.loadMigrating(from: file)
+        let result = try ProxyConfigPersistence.loadMigrating(from: file)
 
         XCTAssertTrue(result.migrated)
         XCTAssertEqual(result.config.dohProviders, DNSSection.defaultDoHProviders)
@@ -119,7 +119,7 @@ final class ConfigSchemaMigrationTests: XCTestCase {
 
         // The rewrite must be persisted, not just applied in memory, or every
         // launch would migrate again.
-        let reloaded = ProxyConfigPersistence.loadMigrating(from: file)
+        let reloaded = try ProxyConfigPersistence.loadMigrating(from: file)
         XCTAssertFalse(reloaded.migrated)
         XCTAssertEqual(reloaded.config.dohProviders, DNSSection.defaultDoHProviders)
     }

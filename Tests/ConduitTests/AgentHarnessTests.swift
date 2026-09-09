@@ -84,12 +84,12 @@ final class AgentHarnessTests: XCTestCase {
         XCTAssertTrue(config.upstreams.isEmpty, "Inline JSON with no upstreams should decode to empty")
     }
 
-    // MARK: - Persistence Falls Back to Generic Defaults
+    // MARK: - First Run Defaults
 
-    func testPersistenceLoadFallsBackToGenericDefault() {
+    func testMissingFirstRunConfigurationUsesGenericDefaults() throws {
         let bogusDir = URL(fileURLWithPath: "/tmp/pm-test-\(UUID().uuidString)")
         let env = RuntimeEnvironment(configDirectory: bogusDir)
-        let config = ProxyConfigPersistence.load(in: env)
+        let config = try ProxyConfigPersistence.load(in: env)
         XCTAssertEqual(config.profileName, GenericDefaults.shared.profileName)
         XCTAssertTrue(config.upstreams.isEmpty)
     }

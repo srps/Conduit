@@ -117,6 +117,107 @@ final class AppStateHarness {
 @MainActor
 final class AppStateHarnessTests: XCTestCase {
 
+    func testDeletedConfigInEstablishedStateCannotBecomeFirstRunDefaults() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        try FileManager.default.removeItem(at: harness.environment.configFile)
+        let state = harness.launch()
+        do {
+            try await state.startProxy()
+            XCTFail("Deleted policy was replaced with first-run defaults")
+        } catch is ConfigurationLoadError {}
+        state.saveConfig()
+        XCTAssertFalse(isRunning(state))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.environment.configFile.path))
+    }
+
+    func testLocalhostIsPinnedInListenersAndAdvertisedClientSettings() async throws {
+        let state = try launch(
+            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true),
+            configure: { $0.localHost = "localhost" }
+        )
+        try await state.startProxy()
+        XCTAssertEqual(state.runtimeSnapshot.bindings.proxyHost, "127.0.0.1")
+        XCTAssertEqual(wifi.webProxy.host, "127.0.0.1")
+        XCTAssertEqual(wifi.secureWebProxy.host, "127.0.0.1")
+        XCTAssertEqual(URL(string: machine.launchdEnvironment["HTTP_PROXY"] ?? "")?.host, "127.0.0.1")
+        XCTAssertEqual(URL(string: machine.launchdEnvironment["HTTPS_PROXY"] ?? "")?.host, "127.0.0.1")
+    }
+
+    func testCorruptConfigStillRestoresJournaledProxyOnLaunch() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        let prior = ProxyServiceState(
+            webHost: "prior.example.test", webPort: "8080", webEnabled: true,
+            secureHost: "prior.example.test", securePort: "8080", secureEnabled: true,
+            autoURL: "", autoEnabled: false, bypassDomains: ["*.local"]
+        )
+        let journal = harness.journal
+        journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: prior.journalValues)
+        journal.markApplied(surface: .systemProxy)
+        machine.describe("Wi-Fi") {
+            $0.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
+            $0.secureWebProxy = $0.webProxy
+        }
+        let corrupt = Data("{".utf8)
+        try corrupt.write(to: harness.environment.configFile)
+        let state = harness.launch()
+        await harness.settle("journal recovery proceeds despite invalid configuration") {
+            self.wifi.webProxy.host == "prior.example.test" && self.harness.journal.knowsSurfaceIsIdle(.systemProxy)
+        }
+        XCTAssertEqual(wifi.bypassDomains, ["*.local"])
+        do {
+            try await state.startProxy()
+            XCTFail("Invalid configuration allowed activation after recovery")
+        } catch is ConfigurationLoadError {}
+        state.saveConfig()
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), corrupt)
+        XCTAssertFalse(isRunning(state))
+    }
+
+    func testMalformedPlatformSidecarBlocksActivationAndSaving() async throws {
+        try await assertMalformedSidecarBlocksActivation("platform.json")
+    }
+
+    func testMalformedPreferencesSidecarBlocksActivationAndSaving() async throws {
+        try await assertMalformedSidecarBlocksActivation("preferences.json")
+    }
+
+    private func assertMalformedSidecarBlocksActivation(_ filename: String) async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        let path = harness.stateDirectory.appendingPathComponent(filename)
+        let corrupt = Data("{".utf8)
+        let runtimeBytes = try Data(contentsOf: harness.environment.configFile)
+        try corrupt.write(to: path)
+        let state = harness.launch()
+        do {
+            try await state.startProxy()
+            XCTFail("Malformed sidecar allowed activation")
+        } catch is ConfigurationLoadError {}
+        state.saveConfig()
+        XCTAssertFalse(isRunning(state))
+        XCTAssertEqual(try Data(contentsOf: path), corrupt)
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), runtimeBytes)
+    }
+
+    func testCorruptConfigurationCannotStartOrOverwriteTheFile() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        let corrupt = Data("{".utf8)
+        try corrupt.write(to: harness.environment.configFile)
+        let state = harness.launch()
+        do {
+            try await state.startProxy()
+            XCTFail("Corrupt configuration started the proxy")
+        } catch is ConfigurationLoadError {}
+        await state.startDNS()
+        await state.startTunnels()
+        state.saveConfig()
+        XCTAssertFalse(isRunning(state))
+        XCTAssertNotEqual(state.runtimeSnapshot.dnsRunState, .running)
+        XCTAssertNotEqual(state.runtimeSnapshot.tunnelsRunState, .running)
+        XCTAssertNotNil(state.lastErrorMessage)
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), corrupt)
+        XCTAssertTrue(machine.privilege.commands(matching: .setWebProxyEndpoint).isEmpty)
+    }
+
     private var harness: AppStateHarness!
 
     override func tearDown() async throws {
@@ -192,7 +293,7 @@ final class AppStateHarnessTests: XCTestCase {
             "the forwarder was not restarted by its own save"
         )
         XCTAssertTrue(
-            ProxyConfigPersistence.loadAllMigrating(in: harness.environment).config.dnsForwarderEnabled,
+            try ProxyConfigPersistence.loadAllMigrating(in: harness.environment).config.dnsForwarderEnabled,
             "and the flag reached disk, so the next launch brings DNS up with the proxy"
         )
     }

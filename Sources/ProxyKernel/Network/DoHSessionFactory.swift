@@ -36,7 +36,7 @@ enum DoHSessionFactory {
         if let upstream = config.enabledUpstreams.first {
             routes.append(Route(proxy: (upstream.host, upstream.port)))
         }
-        routes.append(Route(proxy: (config.localHost, config.localPort)))
+        routes.append(Route(proxy: (config.effectiveClientHost, config.localPort)))
         return routes
     }
 

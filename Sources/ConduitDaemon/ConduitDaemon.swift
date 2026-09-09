@@ -32,7 +32,14 @@ enum ConduitDaemon {
 
         let logger = ConsoleLogSink(minLevel: args.contains("--verbose") ? .debug : .notice)
         let environment = runtimeEnvironment(from: args)
-        let loaded = ProxyConfigPersistence.loadAllMigrating(in: environment)
+        let loaded: RuntimeConfigurationLoadResult
+        do {
+            loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: !args.contains("--config"))
+        } catch {
+            let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
+            failure.report(to: logger)
+            exit(1)
+        }
         for warning in loaded.warnings {
             logger.log(.warning, warning, category: .system)
         }

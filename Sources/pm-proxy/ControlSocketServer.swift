@@ -9,7 +9,7 @@ final class ControlSocketServer: @unchecked Sendable {
     private let socketPath: String
     private let logger: any LogSink
     private let statusProvider: @MainActor @Sendable () -> ControlDaemonStatus
-    private let reloadHandler: @MainActor @Sendable () async -> Void
+    private let reloadHandler: @MainActor @Sendable () async throws -> Void
     private let stopHandler: @MainActor @Sendable () async -> Void
     private let upstreamTestHandler: @MainActor @Sendable (String) async -> ProbeResult?
     private let queue = DispatchQueue(label: "pm-proxy.control-socket")
@@ -21,7 +21,7 @@ final class ControlSocketServer: @unchecked Sendable {
         socketPath: String,
         logger: any LogSink,
         statusProvider: @escaping @MainActor @Sendable () -> ControlDaemonStatus,
-        reloadHandler: @escaping @MainActor @Sendable () async -> Void,
+        reloadHandler: @escaping @MainActor @Sendable () async throws -> Void,
         stopHandler: @escaping @MainActor @Sendable () async -> Void,
         upstreamTestHandler: @escaping @MainActor @Sendable (String) async -> ProbeResult?
     ) {
@@ -166,10 +166,16 @@ final class ControlSocketServer: @unchecked Sendable {
                 Darwin.close(clientFD)
             case .reload:
                 Task { @MainActor in
-                    await reloadHandler()
+                    let response: ControlResponse
+                    do {
+                        try await reloadHandler()
+                        response = .ok()
+                    } catch {
+                        response = .error(.invalidRequest, "Config reload rejected: \(error.localizedDescription)")
+                    }
                     queue.async {
                         do {
-                            try self.writeResponse(.ok(), to: clientFD)
+                            try self.writeResponse(response, to: clientFD)
                         } catch {
                             self.logger.log(
                                 .warning,

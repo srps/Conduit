@@ -61,7 +61,14 @@ enum PMProxy {
 
         Task { @MainActor in
             let environment = runtimeEnvironment(from: args)
-            var config = loadConfig(from: args, environment: environment)
+            var config: ProxyConfig
+            do {
+                config = try loadConfig(from: args, environment: environment)
+            } catch {
+                let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
+                failure.report(to: ConsoleLogSink(minLevel: .notice))
+                exit(1)
+            }
             applyCLIOverrides(to: &config, from: args)
 
             // Headless daemon uses `ConsoleLogSink` (synchronous stderr
@@ -117,7 +124,8 @@ enum PMProxy {
                 credentialProvider: credentialProvider,
                 outcomeHandler: { [weak orchestrator] outcome, host, reason in
                     orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason)
-                }
+                },
+                eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
             )
             orchestrator.setAuthenticatorProvider(authenticatorProvider)
             let statusInterval = parseDoubleArg("--status-interval", from: args)
@@ -142,7 +150,7 @@ enum PMProxy {
                 return status
             } reloadHandler: {
                 logger.log(.notice, "Received control reload, reloading config...", category: .general)
-                await reloadConfig(
+                try await reloadConfig(
                     args: args,
                     environment: environment,
                     orchestrator: orchestrator,
@@ -175,13 +183,18 @@ enum PMProxy {
             hupSource.setEventHandler {
                 logger.log(.notice, "Received SIGHUP, reloading config...", category: .general)
                 Task { @MainActor in
-                    await reloadConfig(
-                        args: args,
-                        environment: environment,
-                        orchestrator: orchestrator,
-                        logger: logger
-                    )
-                    configGeneration += 1
+                    do {
+                        try await reloadConfig(
+                            args: args,
+                            environment: environment,
+                            orchestrator: orchestrator,
+                            logger: logger
+                        )
+                        configGeneration += 1
+                    } catch {
+                        // reloadConfig already emitted the rejection; keep serving
+                        // the previous config and leave its generation unchanged.
+                    }
                 }
             }
             hupSource.resume()
@@ -253,9 +266,18 @@ enum PMProxy {
         environment: RuntimeEnvironment,
         orchestrator: ProxyOrchestrator,
         logger: any LogSink
-    ) async {
-        var newConfig = loadConfig(from: args, environment: environment)
-        applyCLIOverrides(to: &newConfig, from: args)
+    ) async throws {
+        var newConfig: ProxyConfig
+        do {
+            newConfig = try loadConfig(from: args, environment: environment, isReload: true)
+            applyCLIOverrides(to: &newConfig, from: args)
+            if let problem = newConfig.validate().first(where: \.blocksProxyStart) { throw problem }
+        } catch {
+            let event = RuntimeEvent(kind: .config, event: "config.reload_rejected", detail: error.localizedDescription)
+            orchestrator.eventLog.append(event)
+            logger.log(.error, event.detail ?? event.event, category: .general)
+            throw error
+        }
         // applyConfigChange updates the orchestrator's configBox, so the auth
         // factory's snapshotProvider observes the new config on the next 407.
         await orchestrator.applyConfigChange(newConfig)
@@ -287,16 +309,20 @@ enum PMProxy {
 
     // MARK: - Config Loading
 
-    private static func loadConfig(from args: [String], environment: RuntimeEnvironment) -> ProxyConfig {
+    private static func loadConfig(from args: [String], environment: RuntimeEnvironment, isReload: Bool = false) throws -> ProxyConfig {
+        if args.contains("--config-json") {
+            guard let jsonString = parseStringArg("--config-json", from: args) else {
+                throw ConfigurationLoadError(source: "--config-json", reason: "A JSON argument is required.")
+            }
+            return try ProxyConfigPersistence.decode(Data(jsonString.utf8), source: "--config-json")
+        }
         if args.contains("--minimal") {
             return GenericDefaults.shared.makeConfig()
         }
-        if let jsonString = parseStringArg("--config-json", from: args),
-           let data = jsonString.data(using: .utf8),
-           let config = try? JSONDecoder().decode(ProxyConfig.self, from: data) {
-            return config
+        if args.contains("--config"), parseStringArg("--config", from: args) == nil {
+            throw ConfigurationLoadError(source: "--config", reason: "A file path is required.")
         }
-        return ProxyConfigPersistence.load(in: environment)
+        return try ProxyConfigPersistence.load(in: environment, allowMissing: !isReload && !args.contains("--config"))
     }
 
     /// Resolve the connection audit sink for the headless daemon. Mirrors

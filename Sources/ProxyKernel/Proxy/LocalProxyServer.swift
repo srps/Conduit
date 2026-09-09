@@ -13,7 +13,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// orchestrator's `directModeBox`. See `DirectModeCause` and Phase 2 of
     /// `docs/design-vpn-flap-resilience.md`.
     private let directModeProvider: () -> (Bool, DirectModeCause)
-    private let authenticatorProvider: (String) throws -> ProxyAuthenticator
+    private let authenticatorProvider: (UpstreamProxy) throws -> ProxyAuthenticator
     private let directConnectDetector: DirectConnectDetector
     private let pacRoutingEngine: PACRoutingEngine?
     private let onConnectionOpened: @Sendable (ActiveConnectionInfo) -> Void
@@ -123,7 +123,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         directModeProvider: @escaping () -> (Bool, DirectModeCause),
-        authenticatorProvider: @escaping (String) throws -> ProxyAuthenticator,
+        authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         directConnectDetector: DirectConnectDetector,
         pacRoutingEngine: PACRoutingEngine?,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,

@@ -12,15 +12,13 @@
 // The factory takes an `any CredentialProvider` so `pm-proxy` / `pm-tunnel`
 // can inject `InMemoryCredentialProvider` without linking `PlatformMac`.
 //
-// The provider protocol is keyed `credentials(for: UpstreamProxy)`
-// (per-upstream lookup, Optional return). This factory resolves the
-// host string the orchestrator passes into a matching `UpstreamProxy` from
-// the live config and forwards that to the provider.
+// Routing may discover new endpoints through PAC. Credential authority is
+// narrower: only an enabled, explicitly configured host/port may authenticate.
 
 import Foundation
 import ProxyKernel
 
-/// Returns the same `(host) -> ProxyAuthenticator` closure that
+/// Returns the `(upstream) -> ProxyAuthenticator` closure that
 /// `ProxyOrchestrator.makeAuthenticatorProvider` previously produced. Both
 /// pm-proxy (headless daemon) and the SwiftUI app use this to avoid
 /// duplicating the config-driven authenticator selection.
@@ -41,23 +39,24 @@ import ProxyKernel
 package func credentialBasedAuthenticatorProvider(
     configProvider: @escaping @Sendable () -> ProxyConfig,
     credentialProvider: any CredentialProvider,
-    outcomeHandler: (@Sendable (RuntimeAuthOutcome, String, String?) -> Void)? = nil
-) -> @Sendable (String) throws -> ProxyAuthenticator {
-    { host in
+    outcomeHandler: (@Sendable (RuntimeAuthOutcome, String, String?) -> Void)? = nil,
+    eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+) -> @Sendable (UpstreamProxy) throws -> ProxyAuthenticator {
+    { destination in
         let config = configProvider()
-        // Find the upstream the orchestrator routed this handshake to.
-        // The orchestrator's host parameter is the upstream's `host:port`
-        // string; if no match is found, fall back to the first configured
-        // upstream (matches the prior behaviour where the credential lookup
-        // ignored the upstream entirely).
-        let upstream = matchingUpstream(host: host, in: config)
-            ?? config.upstreams.first
+        guard let upstream = config.enabledUpstreams.first(where: {
+            $0.host.caseInsensitiveCompare(destination.host) == .orderedSame
+                && $0.port == destination.port
+        }) else {
+            eventSink?(RuntimeEvent(kind: .auth, event: "auth.upstream_not_trusted", detail: destination.endpoint))
+            throw UpstreamAuthenticationDenied(endpoint: destination.endpoint)
+        }
+        let host = upstream.endpoint
         switch config.authMode {
         case .systemNegotiated:
             return NegotiateAuthenticator(
                 ntlmFallbackProvider: {
                     guard
-                        let upstream,
                         let credentials = try? credentialProvider.credentials(for: upstream)
                     else {
                         return nil
@@ -72,9 +71,6 @@ package func credentialBasedAuthenticatorProvider(
                 }
             )
         case .ntlmv2:
-            guard let upstream else {
-                throw CredentialManagerError.missingCredentials
-            }
             guard let credentials = try credentialProvider.credentials(for: upstream) else {
                 throw CredentialManagerError.missingCredentials
             }
@@ -84,19 +80,10 @@ package func credentialBasedAuthenticatorProvider(
     }
 }
 
-/// Match the orchestrator's `host:port` (or bare `host`) string against
-/// the configured upstreams. Returns `nil` when no upstream matches —
-/// callers fall back to the first configured upstream so the
-/// "ignore upstream identity" behaviour stays the default.
-private func matchingUpstream(host: String, in config: ProxyConfig) -> UpstreamProxy? {
-    // Try host:port match first (orchestrator's typical format).
-    for upstream in config.upstreams {
-        let key = "\(upstream.host):\(upstream.port)"
-        if key == host { return upstream }
+package struct UpstreamAuthenticationDenied: Error, LocalizedError {
+    package let endpoint: String
+
+    package var errorDescription: String? {
+        "Authentication refused for unconfigured or disabled upstream \(endpoint). Add the trusted endpoint to Upstreams before using credentials there."
     }
-    // Fall back to host-only match — handles callers that pass just the host.
-    for upstream in config.upstreams where upstream.host == host {
-        return upstream
-    }
-    return nil
 }
