@@ -410,9 +410,11 @@ final class AppState: ObservableObject {
         let launchConfig = config
         let resolversManaged = platformConfig.manageDNSResolvers
         launchRecovery = LaunchRecovery {
-            guard loadFailure == nil else { return }
             dnsRecovery.restoreIfNeeded(logger: logStore)
             proxyRecovery.restoreIfNeeded(logger: logStore)
+            // Journal restoration uses recorded prior state, not the failed
+            // runtime config. Only legacy ownership inference needs that config.
+            guard loadFailure == nil else { return }
             // Once per install: files an earlier release wrote before
             // resolver files were journaled. See `recoverLegacyOwnership`.
             resolverRecovery.recoverLegacyOwnership(
