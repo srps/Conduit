@@ -409,8 +409,9 @@ final class DaemonRuntimeHost {
     func reloadConfiguration() async {
         let loaded: RuntimeConfigurationLoadResult
         do {
-            loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: false)
-            if let problem = loaded.config.validate().first(where: \.blocksProxyStart) { throw problem }
+            loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: false) { candidate in
+                if let problem = candidate.validate().first(where: \.blocksProxyStart) { throw problem }
+            }
         } catch {
             let event = RuntimeEvent(kind: .config, event: "config.reload_rejected", detail: error.localizedDescription)
             orchestrator.eventLog.append(event)

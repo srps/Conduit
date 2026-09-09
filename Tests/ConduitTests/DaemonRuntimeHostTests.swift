@@ -7,6 +7,47 @@ import XCTest
 @MainActor
 final class DaemonRuntimeHostTests: XCTestCase {
 
+    func testMalformedSidecarsRejectReloadWithoutReplacingAnyConfiguration() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-sidecar-reload-\(UUID().uuidString)")
+        let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var config = GenericDefaults.shared.makeConfig()
+        config.profileName = "Last good runtime"
+        let platform = PlatformIntegrationConfig(manageSystemProxy: true)
+        var preferences = AppPreferences()
+        preferences.showMenuBarIcon = false
+        try ProxyConfigPersistence.save(config, in: environment)
+        try PlatformConfigPersistence.save(platform, in: environment)
+        try AppPreferencesPersistence.save(preferences, in: environment)
+        let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
+        let host = DaemonRuntimeHost(
+            environment: environment, logger: DiscardingLogSink(),
+            loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
+            commandRunner: { path, arguments in try machine.run(path, arguments) },
+            homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
+        )
+        var candidate = config
+        candidate.profileName = "Must not replace the active runtime"
+        try ProxyConfigPersistence.save(candidate, in: environment)
+        for path in [environment.platformConfigFile, environment.preferencesFile] {
+            let original = try Data(contentsOf: path)
+            let corrupt = Data("{".utf8)
+            try corrupt.write(to: path)
+            await host.reloadConfiguration()
+            XCTAssertEqual(host.config, config)
+            XCTAssertEqual(host.platformConfig, platform)
+            XCTAssertEqual(host.appPreferences, preferences)
+            XCTAssertEqual(host.configGeneration, 0)
+            XCTAssertEqual(try Data(contentsOf: path), corrupt)
+            XCTAssertEqual(host.orchestrator.eventLog.events.last?.event, "config.reload_rejected")
+            try original.write(to: path)
+        }
+        await host.reloadConfiguration()
+        XCTAssertEqual(host.config, candidate)
+        XCTAssertEqual(host.configGeneration, 1)
+    }
+
     func testRejectedReloadPreservesTheLastConfigurationAndGeneration() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-rejected-reload-\(UUID().uuidString)")
         let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
@@ -21,12 +62,15 @@ final class DaemonRuntimeHostTests: XCTestCase {
                                      vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
                                      commandRunner: { path, arguments in try machine.run(path, arguments) },
                                      homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path)
-        for content in ["{", "{\"localHost\":\"192.0.2.1\"}"] {
+        for content in ["{", "{\"localHost\":\"192.0.2.1\",\"manageSystemProxy\":true,\"showMenuBarIcon\":false}"] {
             try Data(content.utf8).write(to: environment.configFile)
             await host.reloadConfiguration()
             XCTAssertEqual(host.config, config)
             XCTAssertEqual(host.configGeneration, 0)
             XCTAssertEqual(host.orchestrator.eventLog.events.last?.event, "config.reload_rejected")
+            XCTAssertEqual(try Data(contentsOf: environment.configFile), Data(content.utf8))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: environment.platformConfigFile.path))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: environment.preferencesFile.path))
         }
         try FileManager.default.removeItem(at: environment.configFile)
         await host.reloadConfiguration()
