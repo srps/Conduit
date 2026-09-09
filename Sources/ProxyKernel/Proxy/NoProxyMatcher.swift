@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOCore
 
 package enum NoProxyMatcher {
     /// Returns true if the host should go directly (bypass proxy).
@@ -13,11 +14,12 @@ package enum NoProxyMatcher {
 
     package static func matchesAny(host: String, patterns: [String]) -> Bool {
         let lowerHost = host.lowercased()
+        let hostIP = canonicalIPLiteral(lowerHost)
         for raw in patterns {
             let pattern = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if pattern.isEmpty { continue }
 
-            if pattern == lowerHost {
+            if pattern == lowerHost || (hostIP != nil && canonicalIPLiteral(pattern) == hostIP) {
                 return true
             }
 
@@ -49,6 +51,14 @@ package enum NoProxyMatcher {
             }
         }
         return false
+    }
+
+    // Literal-only parsing performs no DNS or other blocking system work.
+    // Keep wildcard matching textual while comparing exact IP rules by address.
+    private static func canonicalIPLiteral(_ value: String) -> String? {
+        let literal = value.hasPrefix("[") && value.hasSuffix("]")
+            ? String(value.dropFirst().dropLast()) : value
+        return try? SocketAddress(ipAddress: literal, port: 0).ipAddress
     }
 
     /// Extract host from a request URI. For CONNECT it's "host:port", for HTTP it's the Host header or URL host.

@@ -28,6 +28,7 @@ enum ForcedRoutingScenarios {
     private final class Fixture {
         let group = MultiThreadedEventLoopGroup.singleton
         let directOrigin: FakeOrigin
+        let ipv6Origin: FakeOrigin
         let proxiedOrigin: FakeOrigin
         let config = NIOLockedValueBox(GenericDefaults.shared.makeConfig())
         let directMode = NIOLockedValueBox(false)
@@ -37,6 +38,7 @@ enum ForcedRoutingScenarios {
 
         init() {
             directOrigin = FakeOrigin(group: group, behavior: .silent)
+            ipv6Origin = FakeOrigin(group: group, behavior: .silent)
             proxiedOrigin = FakeOrigin(group: group, behavior: .silent)
         }
 
@@ -44,6 +46,7 @@ enum ForcedRoutingScenarios {
 
         func start(verbose: Bool) async throws {
             try await directOrigin.start()
+            try await ipv6Origin.start(host: "::1")
             try await proxiedOrigin.start()
             let upstream = FakeUpstreamProxy(
                 group: group, originHost: "127.0.0.1", originPort: proxiedOrigin.port,
@@ -89,27 +92,30 @@ enum ForcedRoutingScenarios {
             await server?.stop()
             await liveUpstream?.stop()
             await directOrigin.stop()
+            await ipv6Origin.stop()
             await proxiedOrigin.stop()
         }
 
-        func socksConnect() async throws {
+        func socksConnect(ipv6: Bool = false) async throws {
             guard let port = server?.socksListeningPort else { throw Failure(message: "SOCKS listener missing") }
-            let targetPort = UInt16(directOrigin.port)
+            let targetPort = UInt16(ipv6 ? ipv6Origin.port : directOrigin.port)
+            let address: [UInt8] = ipv6 ? [4] + Array(repeating: 0, count: 15) + [1] : [1, 127, 0, 0, 1]
             let replies = try await SOCKS5AuditClient.exchange(
                 group: group, port: port,
-                writes: [[5, 1, 0], [5, 1, 0, 1, 127, 0, 0, 1, UInt8(targetPort >> 8), UInt8(targetPort & 255)]],
+                writes: [[5, 1, 0], [5, 1, 0] + address + [UInt8(targetPort >> 8), UInt8(targetPort & 255)]],
                 expectedResponses: 2
             )
             try require(replies.count == 2 && replies[0] == [5, 0] && replies[1].prefix(2) == [5, 0], "SOCKS CONNECT failed")
         }
 
         func waitForDirectConnections(_ count: Int) async throws {
+            let origin = directOrigin
             // The origin and SOCKS listener can run on different event loops;
             // wait for the origin's accept callback after a successful dial.
-            for _ in 0..<100 where directOrigin.connectionCount < count {
+            for _ in 0..<100 where origin.connectionCount < count {
                 try await Task.sleep(for: .milliseconds(10))
             }
-            try require(directOrigin.connectionCount == count, "Unexpected direct-origin connection count")
+            try require(origin.connectionCount == count, "Unexpected direct-origin connection count")
         }
 
         func httpConnect(method: String) async throws {
@@ -157,18 +163,30 @@ enum ForcedRoutingScenarios {
             try await fixture.socksConnect()
             try await fixture.waitForDirectConnections(2)
             try require(fixture.directOrigin.connectionCount == 2, "Intentional off-VPN direct behavior changed")
+            fixture.directMode.withLockedValue { $0 = false }
+            for literal in ["::1", "[::1]"] {
+                fixture.config.withLockedValue {
+                    $0.forceProxyHosts = [literal]
+                    $0.noProxyHosts = ["0:0:0:0:0:0:0:1"]
+                }
+                let before = fixture.liveUpstream?.connectCount ?? 0
+                try await fixture.socksConnect(ipv6: true)
+                try require((fixture.liveUpstream?.connectCount ?? 0) > before,
+                            "Equivalent IPv6 force rule did not traverse the upstream: \(literal)")
+                try require(fixture.ipv6Origin.connectionCount == 0, "Forced IPv6 target reached the direct origin")
+            }
             let forceEvents = fixture.events.events.filter { $0.event == "routing.socks5_force_proxy" }
-            try require(forceEvents.count == 3, "Forced SOCKS routes did not emit structured decisions")
+            try require(forceEvents.count == 5, "Forced SOCKS routes did not emit structured decisions")
             await fixture.stop()
         } catch {
             await fixture.stop()
             throw error
         }
         return ScenarioResult(
-            name: "forced-proxy-precedence", clientCount: 7, clientsOpened: 7, clientsWithFirstByte: 7,
+            name: "forced-proxy-precedence", clientCount: 9, clientsOpened: 9, clientsWithFirstByte: 9,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
-            notes: ["PASS: HTTP/CONNECT/SOCKS force precedence, live rule edits, PAC disable/cache, and intentional off-VPN direct behavior"]
+            notes: ["PASS: HTTP/CONNECT/SOCKS force precedence, IPv6 literal equivalence, live rule edits, PAC disable/cache, and intentional off-VPN direct behavior"]
         )
     }
 }
