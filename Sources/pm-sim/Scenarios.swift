@@ -478,7 +478,7 @@ extension Scenarios {
     @MainActor
     static func runAll(verbose: Bool) async throws -> [ScenarioResult] {
         var out: [ScenarioResult] = []
-        out.append(try ObservableTargetScenarios.redaction())
+        out.append(try await ObservableTargetScenarios.redaction())
         out.append(try await SecurityScenarios.boundaries(verbose: verbose))
         out.append(try await baselineBurst(verbose: verbose))
         out.append(try await silentThenBurst(silentForMs: 8_000, burstBytes: 131_072, verbose: verbose))
