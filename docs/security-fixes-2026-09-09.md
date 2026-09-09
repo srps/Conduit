@@ -18,7 +18,9 @@ Runtime configuration reads and JSON decoding now throw on corrupt data, unsuppo
 
 `pm-proxy`, `pm-dns`, `pm-tunnel`, and `ConduitDaemon` stop startup and emit a structured rejection when loading fails. `pm-proxy` control reload returns an existing `invalid_request` response; SIGHUP reports the same rejection through the event stream. Rejected reloads in both runtime hosts retain the previous configuration and generation. Blocking validation errors are rejected before applying a reload.
 
-The app stays available to display the load error, with activation and saving blocked so display defaults cannot replace the file or start a runtime. Repair the file and restart the app. Existing runtime configuration is parsed before sidecar migration can write files. The separate platform/preference sidecar loaders retain their existing behavior; this fix addresses the runtime `config.json` finding.
+The app stays available to display the load error, with activation and saving blocked so display defaults cannot replace the file or start a runtime. Repair the file and restart the app. Journal-backed recovery of orphaned system proxy/DNS settings still runs after a configuration failure; only legacy resolver-ownership inference is withheld because it requires valid runtime configuration.
+
+Aggregate app/daemon loading stages runtime, platform, and preference configuration before migration can write any files. Malformed or unreadable sidecars reject the candidate and remain untouched; legacy extraction is available only when a sidecar is absent. Rejected reloads preserve all three in-memory configurations and their generation. The daemon runs blocking semantic validation on the staged runtime candidate before any migration is persisted.
 
 This does not change the product's intentional direct-mode policies, such as the behavior for unreachable upstreams. It prevents read/decode failures from silently replacing a configured policy with defaults.
 
@@ -26,7 +28,7 @@ This does not change the product's intentional direct-mode policies, such as the
 
 Outside gateway mode, the proxy bind must be an IPv4 loopback literal in `127/8`, IPv6 `::1` (including equivalent expanded/bracketed forms), or `localhost`. The name `localhost` is pinned to `127.0.0.1`, so ambient DNS cannot turn it into a LAN bind. Other hostnames, non-loopback literals, and wildcard addresses are rejected.
 
-Gateway mode keeps the existing proxy client filter. DNS has no such filter, so its configuration and actual UDP/TCP startup boundary require loopback even in gateway mode. HTTP/SOCKS binding uses the normalized address. No LAN binding was used for validation.
+Gateway mode keeps the existing proxy client filter. DNS has no such filter, so its configuration and actual UDP/TCP startup boundary require loopback even in gateway mode. HTTP/SOCKS binding, manual system proxy settings, environment URLs, emitted PAC directives, and internal DoH proxy routes use the normalized address. IPv6 URL authorities retain brackets. No LAN binding was used for validation.
 
 ## Validation
 
@@ -48,6 +50,6 @@ Passed:
 - Explicit malformed configuration launches of `pm-dns`, `pm-tunnel`, and `ConduitDaemon` exited nonzero with `config.load_rejected`.
 - `git diff --check`.
 
-The app and daemon XCTest harnesses include new regressions for blocked startup/save and preservation after rejected reload. Their execution remains **unverified here**: even with SDK 26.5, `swift test` fails with `no such module 'XCTest'`. Run the normal full-Xcode test suite before merging. A larger Mac is unnecessary for these build and headless checks.
+The app and daemon XCTest harnesses include regressions for blocked startup/save, preservation after rejected reload, and journal recovery despite a corrupt config. Local execution is unavailable: even with SDK 26.5, `swift test` fails with `no such module 'XCTest'`. Initial PR #26 CI passed the full Xcode build, 1,531 tests (3 skipped, 0 failures), headless regressions, and performance gate at `609cfa495f77`. The subsequent crash-recovery and strict-sidecar additions require their own green CI run before merging. A larger Mac is unnecessary for these build and headless checks.
 
 Other findings from the architectural/security review remain outside this change.

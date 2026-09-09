@@ -8,6 +8,8 @@ Status: S01–S03 implemented on the security-fix branch; full Xcode CI remains 
 - Review the behavior changes: PAC auth requires an enabled configured host/port, rejected reloads preserve state, and non-gateway binds require loopback.
 - Keep the PR draft until CI and review are complete. Branch publication does not install the app/helper, merge to main, or produce a release.
 
+S05 is implemented independently in [PR #27](https://github.com/srps/Conduit/pull/27), with a failing-before/passing-after network regression and green initial CI. Its remaining gate is review. S06 is the next implementation batch after current review feedback is settled.
+
 ## Sequenced implementation PRs
 
 Each row is a bounded PR. Begin by reproducing the finding with synthetic fixtures, then add a regression with the fix. Prefer existing strategies and protocol seams; shared policy extractions should remove duplicate decisions rather than add another mode flag.

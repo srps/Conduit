@@ -97,6 +97,7 @@ enum SecurityScenarios {
         try ProxyConfigPersistence.save(config, in: environment)
         let loaded = try ProxyConfigPersistence.load(in: environment, allowMissing: false)
         try require(loaded.upstreams == config.upstreams, "Valid config lost its upstreams")
+        try validateSidecarStaging(in: environment)
 
         config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -116,6 +117,12 @@ enum SecurityScenarios {
             config.localHost = host
             try require(!config.validate().contains(where: \.blocksProxyStart), "Loopback bind rejected \(host)")
         }
+        config.localHost = "localhost"
+        try require(config.effectiveClientHost == "127.0.0.1", "Client settings left localhost unpinned")
+        try require(config.localProxyURL == "http://127.0.0.1:0", "Environment proxy URL left localhost unpinned")
+        try require(PACScriptEmitter.script(for: config).contains("PROXY 127.0.0.1:0"), "PAC advertised an unpinned proxy")
+        config.localHost = "[::1]"
+        try require(config.localProxyURL == "http://[::1]:0", "IPv6 proxy URL lost its authority brackets")
         config.localHost = "192.0.2.1"
         config.gatewayMode = true
         try require(!config.validate().contains(where: \.blocksProxyStart), "Gateway opt-in rejected")
@@ -179,5 +186,49 @@ enum SecurityScenarios {
                               clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(start),
                               aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
                               notes: ["PASS: credential destination isolation, lazy NTLM, rejected config persistence, loopback-only listeners, HTTP and CONNECT endpoint propagation"])
+    }
+
+    private static func validateSidecarStaging(in environment: RuntimeEnvironment) throws {
+        let legacy = Data("{\"localPort\":0,\"manageSystemProxy\":true,\"showMenuBarIcon\":false}".utf8)
+        try legacy.write(to: environment.configFile)
+        for (broken, other) in [(environment.platformConfigFile, environment.preferencesFile),
+                                (environment.preferencesFile, environment.platformConfigFile)] {
+            let corrupt = Data("{".utf8)
+            try corrupt.write(to: broken)
+            do {
+                _ = try ProxyConfigPersistence.loadAllMigrating(in: environment)
+                throw Failure(message: "Malformed sidecar silently defaulted")
+            } catch is ConfigurationLoadError {}
+            try require(try Data(contentsOf: broken) == corrupt, "Malformed sidecar was overwritten")
+            try require(try Data(contentsOf: environment.configFile) == legacy, "Runtime migrated before all sidecars validated")
+            try require(!FileManager.default.fileExists(atPath: other.path), "Another sidecar migrated before rejection")
+            try FileManager.default.removeItem(at: broken)
+            try FileManager.default.createDirectory(at: broken, withIntermediateDirectories: false)
+            do {
+                _ = try ProxyConfigPersistence.loadAllMigrating(in: environment)
+                throw Failure(message: "Unreadable sidecar silently defaulted")
+            } catch is ConfigurationLoadError {}
+            try require(!FileManager.default.fileExists(atPath: other.path), "Unreadable sidecar allowed another migration")
+            try FileManager.default.removeItem(at: broken)
+        }
+        let invalidLegacy = Data("{\"localPort\":-1,\"manageSystemProxy\":true,\"showMenuBarIcon\":false}".utf8)
+        try invalidLegacy.write(to: environment.configFile)
+        do {
+            _ = try ProxyConfigPersistence.loadAllMigrating(in: environment) { candidate in
+                if let problem = candidate.validate().first(where: \.blocksProxyStart) { throw problem }
+            }
+            throw Failure(message: "Invalid legacy config was accepted")
+        } catch is ConfigValidationError {}
+        try require(try Data(contentsOf: environment.configFile) == invalidLegacy, "Rejected semantic validation rewrote runtime config")
+        try require(!FileManager.default.fileExists(atPath: environment.platformConfigFile.path)
+                    && !FileManager.default.fileExists(atPath: environment.preferencesFile.path),
+                    "Rejected semantic validation migrated sidecars")
+        try legacy.write(to: environment.configFile)
+        let migrated = try ProxyConfigPersistence.loadAllMigrating(in: environment)
+        try require(migrated.platformConfig.manageSystemProxy && !migrated.appPreferences.showMenuBarIcon,
+                    "Missing sidecars did not preserve legacy settings")
+        try require(FileManager.default.fileExists(atPath: environment.platformConfigFile.path)
+                    && FileManager.default.fileExists(atPath: environment.preferencesFile.path),
+                    "Valid legacy sidecar migration was not saved")
     }
 }
