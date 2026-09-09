@@ -27,6 +27,18 @@ final class ObservableTargetRedactionTests: XCTestCase {
         }
     }
 
+    func testUpstreamFailureEventsRedactOriginFormTargets() {
+        let target = "/path?sig=short#fragment"
+        let timeout = ConnectionPool.upstreamResponseTimedOutEvent(uri: target, upstream: "proxy.test:8080")
+        let interrupted = ConnectionPool.streamingResponseInterruptedEvent(
+            uri: target, upstream: "proxy.test:8080", cause: NSError(domain: "synthetic", code: 1))
+        for event in [timeout, interrupted] {
+            XCTAssertTrue(event.detail?.contains("uri=/path?<redacted>") == true)
+            XCTAssertFalse(event.detail?.contains("short") == true)
+            XCTAssertFalse(event.detail?.contains("fragment") == true)
+        }
+    }
+
     func testLogsEventsAndDiagnosticExportsShareURLPrivacyContract() throws {
         for value in [
             "GET http://example.test/path?sig=short#fragment failed",

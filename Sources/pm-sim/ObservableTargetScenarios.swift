@@ -22,7 +22,10 @@ enum ObservableTargetScenarios {
             // Exercise the sink backstop independently from call-site filtering.
             logs.log(.error, "Failed URL https://example.test/path?sig=s06q#s06f", category: .proxy)
             let encoder = CanonicalJSON.encoder()
-            let outputs = [observed, SensitiveValueSanitizer.auditTarget(value),
+            let timeout = ConnectionPool.upstreamResponseTimedOutEvent(uri: value, upstream: "synthetic:8080")
+            let interrupted = ConnectionPool.streamingResponseInterruptedEvent(
+                uri: value, upstream: "synthetic:8080", cause: NSError(domain: "synthetic", code: 1))
+            let outputs = [timeout.detail ?? "", interrupted.detail ?? "", observed, SensitiveValueSanitizer.auditTarget(value),
                            String(decoding: try encoder.encode(info), as: UTF8.self),
                            String(decoding: try encoder.encode(event), as: UTF8.self)]
                 + logs.entries().map(\.message)

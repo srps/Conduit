@@ -1231,7 +1231,7 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     package static func streamingResponseInterruptedDetail(uri: String, upstream: String, cause: Error) -> String {
-        "uri=\(uri) upstream=\(upstream) cause=\(cause.displayDescription)"
+        "uri=\(SensitiveValueSanitizer.observableTarget(uri)) upstream=\(upstream) cause=\(cause.displayDescription)"
     }
 
     package static func streamingResponseInterruptedEvent(uri: String, upstream: String, cause: Error) -> RuntimeEvent {
@@ -1246,7 +1246,7 @@ package final class ConnectionPool: @unchecked Sendable {
         RuntimeEvent(
             kind: .connection,
             event: "upstream.response_timeout",
-            detail: "uri=\(uri) upstream=\(upstream)"
+            detail: "uri=\(SensitiveValueSanitizer.observableTarget(uri)) upstream=\(upstream)"
         )
     }
 
