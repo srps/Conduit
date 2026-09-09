@@ -286,7 +286,8 @@ final class AppState: ObservableObject {
             credentialProvider: credentialManager,
             outcomeHandler: { [weak orchestrator] outcome, host, reason in
                 orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason)
-            }
+            },
+            eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
         )
         orchestrator.setAuthenticatorProvider(authenticatorProvider)
 

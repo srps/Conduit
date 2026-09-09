@@ -217,7 +217,7 @@ private final class ProxyConfigBox: @unchecked Sendable {
 }
 
 /// Reference-type holder for the authenticator factory. Exists to avoid
-/// `NIOLockedValueBox<@Sendable (String) throws -> ProxyAuthenticator>`,
+/// `NIOLockedValueBox<@Sendable (UpstreamProxy) throws -> ProxyAuthenticator>`,
 /// whose `(inout T) throws -> R` body contract reabstracts closure-typed
 /// values through @in_guaranteed/@guaranteed thunks on every invocation —
 /// the box writes the re-thunked closure back to storage on body return,
@@ -231,23 +231,23 @@ private final class ProxyConfigBox: @unchecked Sendable {
 /// `AuthProviderStackDepthTests.testLateBoundProviderFrameCountIsBounded`.
 private final class AuthProviderHolder: @unchecked Sendable {
     private let lock = NIOLock()
-    private var provider: @Sendable (String) throws -> ProxyAuthenticator
+    private var provider: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator
 
-    init(initial: @escaping @Sendable (String) throws -> ProxyAuthenticator) {
+    init(initial: @escaping @Sendable (UpstreamProxy) throws -> ProxyAuthenticator) {
         self.provider = initial
     }
 
-    func set(_ newProvider: @escaping @Sendable (String) throws -> ProxyAuthenticator) {
+    func set(_ newProvider: @escaping @Sendable (UpstreamProxy) throws -> ProxyAuthenticator) {
         lock.lock()
         defer { lock.unlock() }
         self.provider = newProvider
     }
 
-    func invoke(_ host: String) throws -> ProxyAuthenticator {
+    func invoke(_ upstream: UpstreamProxy) throws -> ProxyAuthenticator {
         lock.lock()
         let snapshot = self.provider
         lock.unlock()
-        return try snapshot(host)
+        return try snapshot(upstream)
     }
 }
 
@@ -918,7 +918,7 @@ package final class ProxyOrchestrator {
     ///
     /// Exposed at `package` visibility so tests can verify the
     /// late-binding semantics without wiring a full 407 handshake.
-    package let lateBoundAuthenticatorProvider: @Sendable (String) throws -> ProxyAuthenticator
+    package let lateBoundAuthenticatorProvider: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator
 
     /// Replace the authenticator factory closure. Safe to call at any
     /// time — before or after `startProxy()` / `startTunnels()`. The
@@ -926,7 +926,7 @@ package final class ProxyOrchestrator {
     /// first access; writes through this setter are observed by every
     /// subsequent invocation of those captors (one `os_unfair_lock`
     /// acquire per auth handshake, dwarfed by the handshake itself).
-    package func setAuthenticatorProvider(_ provider: @escaping @Sendable (String) throws -> ProxyAuthenticator) {
+    package func setAuthenticatorProvider(_ provider: @escaping @Sendable (UpstreamProxy) throws -> ProxyAuthenticator) {
         authenticatorHolder.set(provider)
     }
     private static let localPACListenHost = "127.0.0.1"
@@ -1142,7 +1142,7 @@ package final class ProxyOrchestrator {
         config: ProxyConfig,
         logger: any LogSink = DiscardingLogSink(),
         privilegeClient: PrivilegeClient? = nil,
-        authenticatorProvider: (@Sendable (String) throws -> ProxyAuthenticator)? = nil,
+        authenticatorProvider: (@Sendable (UpstreamProxy) throws -> ProxyAuthenticator)? = nil,
         pacEvaluator: (any PacEvaluator)? = nil,
         auditSink: any ConnectionAuditSink = DiscardingConnectionAuditSink(),
         resolverManager: (any TunnelResolverApplying)? = nil,

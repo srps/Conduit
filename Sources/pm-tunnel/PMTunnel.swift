@@ -63,7 +63,8 @@ enum PMTunnel {
             // is trivially satisfied.
             let authProvider = credentialBasedAuthenticatorProvider(
                 configProvider: { config },
-                credentialProvider: credentialProvider
+                credentialProvider: credentialProvider,
+                eventSink: { event in logger.log(.error, "\(event.event): \(event.detail ?? "")", category: .auth) }
             )
 
             let pool = ConnectionPool(

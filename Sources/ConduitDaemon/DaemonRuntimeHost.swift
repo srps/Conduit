@@ -188,7 +188,8 @@ final class DaemonRuntimeHost {
             credentialProvider: credentialManager,
             outcomeHandler: { [weak orchestrator] outcome, host, reason in
                 orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason)
-            }
+            },
+            eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
         )
         orchestrator.setAuthenticatorProvider(authenticatorProvider)
         orchestrator.eventLog.setSink { [eventWriter] event in eventWriter.record(event) }

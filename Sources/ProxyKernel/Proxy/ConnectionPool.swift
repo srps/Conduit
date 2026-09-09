@@ -178,7 +178,7 @@ package final class ConnectionPool: @unchecked Sendable {
     private let group: EventLoopGroup
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
-    private let authenticatorProvider: (String) throws -> ProxyAuthenticator
+    private let authenticatorProvider: (UpstreamProxy) throws -> ProxyAuthenticator
     private let authHandshakeLimiter: AuthHandshakeLimiter
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let lock = NIOLock()
@@ -201,7 +201,7 @@ package final class ConnectionPool: @unchecked Sendable {
         group: EventLoopGroup,
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
-        authenticatorProvider: @escaping (String) throws -> ProxyAuthenticator,
+        authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         authHandshakeLimiter: AuthHandshakeLimiter = AuthHandshakeLimiter(),
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
@@ -1300,7 +1300,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     }
 
     private let connection: PooledUpstreamConnection
-    private let authenticatorProvider: (String) throws -> ProxyAuthenticator
+    private let authenticatorProvider: (UpstreamProxy) throws -> ProxyAuthenticator
     private let originalHead: HTTPRequestHead
     private let originalBody: HTTPRequestBody?
     private let isAuthenticated: Bool
@@ -1329,7 +1329,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
 
     init(
         connection: PooledUpstreamConnection,
-        authenticatorProvider: @escaping (String) throws -> ProxyAuthenticator,
+        authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         originalHead: HTTPRequestHead,
         body: HTTPRequestBody?,
         isAuthenticated: Bool,
@@ -1358,7 +1358,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
 
     init(
         connection: PooledUpstreamConnection,
-        authenticatorProvider: @escaping (String) throws -> ProxyAuthenticator,
+        authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         originalHead: HTTPRequestHead,
         body: HTTPRequestBody?,
         isAuthenticated: Bool,
@@ -1419,13 +1419,14 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
                 return
             }
             nonisolated(unsafe) let provider = self.authenticatorProvider
-            let host = self.connection.proxy.host
+            let upstream = self.connection.proxy
+            let host = upstream.host
             let eventLoop = ctx.eventLoop
             let handler = self
             nonisolated(unsafe) let capturedCtx = ctx
             Task { @Sendable in
                 do {
-                    let auth = try provider(host)
+                    let auth = try provider(upstream)
                     let token = try auth.initialToken(for: host)
                     eventLoop.execute {
                         handler.authenticator = auth

@@ -117,7 +117,8 @@ enum PMProxy {
                 credentialProvider: credentialProvider,
                 outcomeHandler: { [weak orchestrator] outcome, host, reason in
                     orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason)
-                }
+                },
+                eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
             )
             orchestrator.setAuthenticatorProvider(authenticatorProvider)
             let statusInterval = parseDoubleArg("--status-interval", from: args)
