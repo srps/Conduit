@@ -230,5 +230,10 @@ enum SecurityScenarios {
         try require(FileManager.default.fileExists(atPath: environment.platformConfigFile.path)
                     && FileManager.default.fileExists(atPath: environment.preferencesFile.path),
                     "Valid legacy sidecar migration was not saved")
+        try FileManager.default.removeItem(at: environment.configFile)
+        do {
+            _ = try ProxyConfigPersistence.loadAllMigrating(in: environment)
+            throw Failure(message: "Deleted established configuration became first-run defaults")
+        } catch is ConfigurationLoadError {}
     }
 }

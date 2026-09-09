@@ -117,6 +117,19 @@ final class AppStateHarness {
 @MainActor
 final class AppStateHarnessTests: XCTestCase {
 
+    func testDeletedConfigInEstablishedStateCannotBecomeFirstRunDefaults() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        try FileManager.default.removeItem(at: harness.environment.configFile)
+        let state = harness.launch()
+        do {
+            try await state.startProxy()
+            XCTFail("Deleted policy was replaced with first-run defaults")
+        } catch is ConfigurationLoadError {}
+        state.saveConfig()
+        XCTAssertFalse(isRunning(state))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: harness.environment.configFile.path))
+    }
+
     func testLocalhostIsPinnedInListenersAndAdvertisedClientSettings() async throws {
         let state = try launch(
             platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true),

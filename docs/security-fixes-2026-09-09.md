@@ -22,6 +22,8 @@ The app stays available to display the load error, with activation and saving bl
 
 Aggregate app/daemon loading stages runtime, platform, and preference configuration before migration can write any files. Malformed or unreadable sidecars reject the candidate and remain untouched; legacy extraction is available only when a sidecar is absent. Rejected reloads preserve all three in-memory configurations and their generation. The daemon runs blocking semantic validation on the staged runtime candidate before any migration is persisted.
 
+Missing runtime configuration is accepted only for a genuine first run. Existing platform/preferences files or a platform journal identify established app/daemon state; runtime-only loaders also recognize prior snapshots, events, or readiness files. Deleting `config.json` while that state remains now rejects startup. Use explicit `--minimal` for a file-free headless run in a reused state directory.
+
 This does not change the product's intentional direct-mode policies, such as the behavior for unreachable upstreams. It prevents read/decode failures from silently replacing a configured policy with defaults.
 
 ### S03: loopback listeners

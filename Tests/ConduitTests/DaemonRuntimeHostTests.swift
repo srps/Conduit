@@ -62,6 +62,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                                      vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
                                      commandRunner: { path, arguments in try machine.run(path, arguments) },
                                      homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path)
+        let originalPlatform = try Data(contentsOf: environment.platformConfigFile)
+        let originalPreferences = try Data(contentsOf: environment.preferencesFile)
         for content in ["{", "{\"localHost\":\"192.0.2.1\",\"manageSystemProxy\":true,\"showMenuBarIcon\":false}"] {
             try Data(content.utf8).write(to: environment.configFile)
             await host.reloadConfiguration()
@@ -69,8 +71,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             XCTAssertEqual(host.configGeneration, 0)
             XCTAssertEqual(host.orchestrator.eventLog.events.last?.event, "config.reload_rejected")
             XCTAssertEqual(try Data(contentsOf: environment.configFile), Data(content.utf8))
-            XCTAssertFalse(FileManager.default.fileExists(atPath: environment.platformConfigFile.path))
-            XCTAssertFalse(FileManager.default.fileExists(atPath: environment.preferencesFile.path))
+            XCTAssertEqual(try Data(contentsOf: environment.platformConfigFile), originalPlatform)
+            XCTAssertEqual(try Data(contentsOf: environment.preferencesFile), originalPreferences)
         }
         try FileManager.default.removeItem(at: environment.configFile)
         await host.reloadConfiguration()

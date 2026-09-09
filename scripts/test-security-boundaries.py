@@ -68,6 +68,7 @@ def main():
         assert config_file.read_text() == "{"
         config_file.unlink()
         startup(directory, [], succeeds=True)  # Genuine first run.
+        startup(directory, [])  # Reused runtime state is no longer a first run.
         startup(directory, ["--minimal"], succeeds=True)
         for host in ["192.0.2.1", "10.0.0.1", "::", "host.example.test"]:
             startup(directory, ["--minimal", "--host", host])

@@ -74,7 +74,19 @@ package enum ProxyConfigPersistence {
     }
 
     package static func load(in environment: RuntimeEnvironment, allowMissing: Bool = true) throws -> ProxyConfig {
-        try load(from: environment.configFile, allowMissing: allowMissing)
+        // Runtime-only hosts do not create configuration sidecars. Their
+        // snapshots/events still distinguish a reused state directory from a
+        // genuine first run. --minimal is the explicit file-free runtime mode.
+        let runtimeArtifacts = [environment.snapshotFile, environment.eventsFile,
+                                environment.configDirectory.appendingPathComponent("ready.json")]
+        let hasPriorState = hasConfigurationState(in: environment)
+            || runtimeArtifacts.contains { FileManager.default.fileExists(atPath: $0.path) }
+        return try load(from: environment.configFile, allowMissing: allowMissing && !hasPriorState)
+    }
+
+    private static func hasConfigurationState(in environment: RuntimeEnvironment) -> Bool {
+        [environment.platformConfigFile, environment.preferencesFile, environment.platformStateFile]
+            .contains { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     package static func loadAllMigrating(
@@ -84,7 +96,8 @@ package enum ProxyConfigPersistence {
     ) throws -> RuntimeConfigurationLoadResult {
         // Stage every candidate before migration can write any files. A valid
         // runtime file must not hide a broken platform or preference sidecar.
-        let runtime = try loadMigrating(from: environment.configFile, saveMigrated: false, allowMissing: allowMissing)
+        let runtime = try loadMigrating(from: environment.configFile, saveMigrated: false,
+                                        allowMissing: allowMissing && !hasConfigurationState(in: environment))
         let platform = try PlatformConfigPersistence.loadMigrating(in: environment, saveMigrated: false)
         let preferences = try AppPreferencesPersistence.loadMigrating(in: environment, saveMigrated: false)
         try validateRuntime(runtime.config)
