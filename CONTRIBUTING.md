@@ -29,24 +29,26 @@ point `DEVELOPER_DIR` at Xcode when running them:
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 ```
 
-All 1,500+ tests must pass before submitting a PR. The test suite includes unit tests, integration tests, and fault-injection scenarios.
+Run the full test suite before submitting a PR and account for any expected skips in the CI result. The test suite includes unit tests, integration tests, and fault-injection scenarios.
 
 ## Trying a Change in the App
 
 Do not quit or replace the Conduit that is serving your machine to look at a change. A
 debug build has a dev mode that runs beside it over a fake machine and a scratch state
 directory, so nothing it does reaches the system proxy, the shell environment, the
-resolver files, the helper or the Keychain:
+resolver files, the helper or the Keychain through those injected collaborators:
 
 ```bash
 ./bundle-app.sh
 open -n -a "$PWD/Conduit.app" --args --dev --section dns --vpn utun4
 ```
 
+Dev mode still uses the real notification manager and network-path monitor: an app-bundle launch can request notification permission and post notifications. It also writes scratch files and can make network requests to configured endpoints. Use synthetic configurations on personal machines. The missing notification and network-monitor injection points are tracked in [`docs/refactor-notes-2026-09-09.md`](docs/refactor-notes-2026-09-09.md).
+
 It shows the menu bar popover in a "Popover preview" panel for screenshots and the
 accessibility inspector, opens the app window on the section you name, keeps a Dock icon,
-and badges its menu bar glyph with a dot. Launch it with `open -n`; running the executable
-directly from a script shows nothing. `--upstream host:port` pointed at a running `pm-proxy`
+and badges its menu bar glyph with a dot. Launch it with `open -n`; a direct executable
+launch from an agent session may lack window-server access. `--upstream host:port` pointed at a running `pm-proxy`
 gives a real "proxied" state, and `--dev-state-dir PATH` places the state (and its
 `proxy.log`, which says when the windows came up) where you want it. See the toolchain
 table in [`AGENTS.md`](AGENTS.md).
