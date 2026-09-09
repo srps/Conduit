@@ -586,7 +586,7 @@ package struct ProxyConfig: Codable, Equatable {
     }
 
     package var effectiveListenHost: String {
-        gatewayMode ? "0.0.0.0" : localHost
+        gatewayMode ? "0.0.0.0" : (Self.loopbackBindHost(localHost) ?? localHost)
     }
 
     package var effectiveTunnelListenHost: String {

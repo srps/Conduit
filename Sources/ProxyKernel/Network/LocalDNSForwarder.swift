@@ -93,6 +93,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     /// as, and a resolver serving UDP is far more useful than one that refused
     /// to start; the failure is logged rather than thrown.
     package func start(host: String, port: Int) async throws {
+        guard let host = ProxyConfig.loopbackBindHost(host) else {
+            throw ConfigValidationError.conflict(description: "DNS requires a loopback bind address because it has no client allowlist.")
+        }
         let core = DNSResolutionCore(
             group: group,
             logger: logger,

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOCore
 import ConduitShared
 
 package enum ConfigValidationError: Error, LocalizedError, Sendable {
@@ -89,6 +90,18 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
 }
 
 extension ProxyConfig {
+    /// Resolve only IP literals here. Pin the compatibility name `localhost`
+    /// instead of trusting ambient DNS or /etc/hosts for listener security.
+    package static func loopbackBindHost(_ host: String) -> String? {
+        if host.caseInsensitiveCompare("localhost") == .orderedSame { return "127.0.0.1" }
+        let literal = host.hasPrefix("[") && host.hasSuffix("]") ? String(host.dropFirst().dropLast()) : host
+        guard let address = try? SocketAddress(ipAddress: literal, port: 0), let ip = address.ipAddress else { return nil }
+        if ip == "::1" || (IPAddressSyntax.isIPv4(ip) && ip.split(separator: ".").first == "127") {
+            return ip
+        }
+        return nil
+    }
+
     package func validate() -> [ConfigValidationError] {
         var errors: [ConfigValidationError] = []
 
@@ -140,11 +153,11 @@ extension ProxyConfig {
         if !Self.isSafeHostToken(proxy.host, allowWildcard: false) {
             errors.append(.invalidHost(field: "proxy.host", value: proxy.host))
         }
-        if !proxy.gatewayMode && Self.isWildcardBindHost(proxy.host) {
+        if !proxy.gatewayMode && Self.loopbackBindHost(proxy.host) == nil {
             errors.append(.conflict(description: "proxy.host \(proxy.host) requires gatewayMode so ClientIPFilter/allowedClients are active"))
         }
-        if dns.forwarderEnabled && Self.isWildcardBindHost(proxy.host) {
-            errors.append(.conflict(description: "dns.forwarderEnabled cannot bind through wildcard proxy.host without a DNS client allowlist"))
+        if dns.forwarderEnabled && Self.loopbackBindHost(proxy.host) == nil {
+            errors.append(.conflict(description: "dns.forwarderEnabled requires a loopback proxy.host because DNS has no client allowlist"))
         }
         for (i, host) in routing.noProxyHosts.enumerated() where !Self.isSafeHostToken(host, allowWildcard: true) {
             errors.append(.invalidHost(field: "routing.noProxyHosts[\(i)]", value: host))
@@ -317,10 +330,5 @@ extension ProxyConfig {
     private static func urlContainsUserInfo(_ value: String) -> Bool {
         guard let components = URLComponents(string: value) else { return false }
         return components.user != nil || components.password != nil
-    }
-
-    private static func isWildcardBindHost(_ value: String) -> Bool {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return trimmed == "0.0.0.0" || trimmed == "::" || trimmed == "[::]"
     }
 }
