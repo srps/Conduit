@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import Darwin
 import Foundation
+import ProxyKernel
 
 @main
 enum PMSim {
     static func main() async {
+        defer { ConsoleLogSink().flush() }
         let args = CommandLine.arguments
         let verbose = args.contains("--verbose")
         let perfBaseline = args.contains("--perf-baseline")
@@ -23,6 +25,9 @@ enum PMSim {
               multi-small             10 concurrent bursty streams for 10s
               high-throughput         Single stream, 1ms / 64KB chunks for 5s
               multi-100               100 concurrent bursty streams for 10s
+              bounded-writers         Slow storage, bounded queues and append amplification
+              pac-fetch-bounds        Bounded PAC downloads and last-good retention
+              shared-inbound-budget   Mixed HTTP/SOCKS admission and handshake deadlines
               connection-flood        Saturate inbound connection cap, then verify recovery
               auth-storm              Saturate pending auth handshakes, verify bounded rejection
               long-silent             Single stream, 30s of silence then 256KB burst
@@ -71,6 +76,7 @@ enum PMSim {
             printResults(results, processUsage: perfBaseline ? processUsage : nil)
         } catch {
             FileHandle.standardError.write(Data("pm-sim failed: \(error)\n".utf8))
+            ConsoleLogSink().flush()
             exit(1)
         }
     }
@@ -92,6 +98,12 @@ enum PMSim {
             return [try await Scenarios.highThroughput(durationSeconds: 5, verbose: verbose)]
         case "multi-100":
             return [try await Scenarios.multiConcurrent(clientCount: 100, durationSeconds: 10, verbose: verbose)]
+        case "bounded-writers":
+            return [try await BoundedWriterScenarios.slowStorage()]
+        case "pac-fetch-bounds":
+            return [try await PACFetchScenarios.bounds()]
+        case "shared-inbound-budget":
+            return [try await AdmissionScenarios.sharedBudget(verbose: verbose)]
         case "connection-flood":
             return [try await Scenarios.connectionFlood(verbose: verbose)]
         case "auth-storm":

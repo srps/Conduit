@@ -1,14 +1,8 @@
 # Security and architecture follow-up plan
 
-Status: S01–S03 merged in PR #26. S05 has green CI/review in PR #27; its merge is pending. S06 is implemented on `fix/observable-target-redaction`, with full Xcode CI as its merge gate. See [validation details](security-fixes-2026-09-09.md) and the [original review](review-2026-09-09.md). The findings describe code behavior under their stated preconditions, not confirmed company-environment incidents.
+Status: S01–S03 merged in PR #26, S05 in PR #27, and S06 in PR #28. The next batch implements S08, S09, R03, and standalone `pm-dns` shutdown; see [the batch record](fix-resource-bounds-2026-09-10.md) for behavior and validation. Findings in the [original review](review-2026-09-09.md) describe the reviewed revision, not the current implementation.
 
-## Finish the current branch
-
-- Require the PR's full Swift build, XCTest suite, new security boundary regressions, and existing performance gate to pass.
-- Review the behavior changes: PAC auth requires an enabled configured host/port, rejected reloads preserve state, and non-gateway binds require loopback.
-- Open the PR for review once CI passes; require green CI and addressed review findings before merging. Branch publication does not install the app/helper, merge to main, or produce a release.
-
-S05 is implemented independently in [PR #27](https://github.com/srps/Conduit/pull/27), with a failing-before/passing-after network regression and green initial CI. Its remaining step is merging. S06 adds observation-only targets and sink/export regressions; S08 is the next implementation batch. Refactor observations encountered during these fixes are tracked in [refactor notes](refactor-notes-2026-09-09.md).
+The original sequence below remains a finding-to-acceptance map. S07/R04 helper transaction limits and S04 caller authorization remain open, as do R01 HTTP PAC failover, R02 audit completion accuracy, and R05 active HTTP retirement. The independent IPv6 literal and exact wire-target fixes in [refactor notes](refactor-notes-2026-09-09.md) also remain open.
 
 ## Sequenced implementation PRs
 

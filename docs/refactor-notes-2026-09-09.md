@@ -1,5 +1,7 @@
 # Refactor observations from the security fixes
 
+Update 2026-09-10: the standalone `pm-dns` signal lifetime and bounded recording-sink items are implemented in the [resource-bounds batch](fix-resource-bounds-2026-09-10.md), together with production writer bounds (R03). Other observations remain open.
+
 These are concrete follow-ups encountered while implementing S01–S06 and reconciling the dev-mode documentation in PR #25. They do not expand the current patch. The security/remediation plan remains the implementation queue; entries below identify architectural work or narrower reliability issues to carry into that pass.
 
 | Observation and evidence | Suggested follow-up and acceptance check |
