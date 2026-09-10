@@ -5,6 +5,11 @@ import NIOPosix
 
 @main
 enum PMDns {
+    // The startup task finishes once the listeners bind. These process-owned
+    // slots keep both sources alive until terminal shutdown (exactly two).
+    @MainActor private static var signalSources: (interrupt: DispatchSourceSignal, terminate: DispatchSourceSignal)?
+    @MainActor private static var shutdownTask: Task<Void, Never>?
+
     static func main() {
         let args = CommandLine.arguments
 
@@ -51,7 +56,8 @@ enum PMDns {
             }
         } catch {
             let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
-            failure.report(to: ConsoleLogSink(minLevel: .notice))
+            let failureLogger = ConsoleLogSink(minLevel: .notice)
+            failure.report(to: failureLogger)
             exit(1)
         }
         let port = parseIntArg("--port", from: args) ?? config.dnsForwarderPort
@@ -74,31 +80,13 @@ enum PMDns {
                 configProvider: { config }
             )
 
-            signal(SIGINT, SIG_IGN)
-            let shutdownSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
-            shutdownSource.setEventHandler {
-                logger.log(.notice, "Received SIGINT, stopping...", category: .general)
-                Task {
-                    await forwarder.stop()
-                    exit(0)
-                }
-            }
-            shutdownSource.resume()
-
-            signal(SIGTERM, SIG_IGN)
-            let termSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
-            termSource.setEventHandler {
-                logger.log(.notice, "Received SIGTERM, stopping...", category: .general)
-                Task {
-                    await forwarder.stop()
-                    exit(0)
-                }
-            }
-            termSource.resume()
-
             do {
                 try await forwarder.start(host: host, port: port)
-                logger.log(.notice, "pm-dns running on \(host):\(port). Press Ctrl-C to stop.", category: .general)
+                // Install only after startup completes so stop cannot race a
+                // suspended bind and leave a newly-created listener behind.
+                installSignalSources(forwarder: forwarder, logger: logger)
+                let boundPort = forwarder.listeningPort ?? port
+                logger.log(.notice, "pm-dns running on \(host):\(boundPort). Press Ctrl-C to stop.", category: .general)
             } catch {
                 logger.log(.error, "Failed to start on \(host):\(port): \(error.displayDescription)", category: .general)
                 exit(1)
@@ -106,6 +94,30 @@ enum PMDns {
         }
 
         dispatchMain()
+    }
+
+    @MainActor
+    private static func installSignalSources(forwarder: LocalDNSForwarder, logger: ConsoleLogSink) {
+        func makeSource(_ number: Int32, name: String) -> DispatchSourceSignal {
+            signal(number, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
+            source.setEventHandler {
+                // Both sources run on main; repeated or mixed signals share
+                // one shutdown task while it awaits channel closure.
+                guard shutdownTask == nil else { return }
+                logger.log(.notice, "Received \(name), stopping...", category: .general)
+                shutdownTask = Task { @MainActor in
+                    await forwarder.stop()
+                    signalSources?.interrupt.cancel()
+                    signalSources?.terminate.cancel()
+                    signalSources = nil
+                    exit(0)
+                }
+            }
+            source.resume()
+            return source
+        }
+        signalSources = (makeSource(SIGINT, name: "SIGINT"), makeSource(SIGTERM, name: "SIGTERM"))
     }
 
     private static func runtimeEnvironment(from args: [String]) -> RuntimeEnvironment {
