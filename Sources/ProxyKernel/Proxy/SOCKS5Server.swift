@@ -19,6 +19,8 @@ final class SOCKS5Server: @unchecked Sendable {
     private let onConnectionOpened: @Sendable (ActiveConnectionInfo) -> Void
     private let onConnectionClosed: @Sendable (UUID) -> Void
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
+    private let inboundBudget: InboundConnectionBudget
+    private let handshakeTimeout: TimeAmount
     private var serverChannel: Channel?
 
     var listeningHost: String? {
@@ -37,11 +39,16 @@ final class SOCKS5Server: @unchecked Sendable {
         pacRoutingEngine: PACRoutingEngine?,
         configProvider: @escaping () -> ProxyConfig,
         gatewayMode: Bool,
+        inboundBudget: InboundConnectionBudget = InboundConnectionBudget(),
+        handshakeTimeout: TimeAmount = .seconds(10),
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void = { _ in },
         onConnectionClosed: @Sendable @escaping (UUID) -> Void = { _ in },
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in }
     ) {
+        precondition(handshakeTimeout.nanoseconds > 0)
+        self.inboundBudget = inboundBudget
+        self.handshakeTimeout = handshakeTimeout
         self.group = group
         self.connectCoordinator = connectCoordinator
         self.logger = logger
@@ -60,6 +67,12 @@ final class SOCKS5Server: @unchecked Sendable {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
             .childChannelInitializer { channel in
+                guard self.inboundBudget.admit(
+                    channel, protocolName: "socks5", config: self.configProvider(),
+                    logger: self.logger, eventSink: self.eventSink
+                ) else {
+                    return channel.close().flatMap { channel.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel) }
+                }
                 var future = channel.eventLoop.makeSucceededVoidFuture()
                 if self.gatewayMode {
                     nonisolated(unsafe) let configProvider = self.configProvider
@@ -79,6 +92,7 @@ final class SOCKS5Server: @unchecked Sendable {
                             pacRoutingEngine: self.pacRoutingEngine,
                             configProvider: self.configProvider,
                             gatewayMode: self.gatewayMode,
+                            handshakeTimeout: self.handshakeTimeout,
                             eventSink: self.eventSink,
                             onConnectionOpened: self.onConnectionOpened,
                             onConnectionClosed: self.onConnectionClosed,
@@ -101,7 +115,7 @@ final class SOCKS5Server: @unchecked Sendable {
     }
 }
 
-private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
+final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
 
     private let connectCoordinator: CONNECTCoordinator
@@ -117,6 +131,8 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private enum State { case greeting, request, routing, relaying }
     private var state: State = .greeting
+    private let handshakeTimeout: TimeAmount
+    private var handshakeDeadline: Scheduled<Void>?
     private var connectionID: UUID?
     private var accumulated = ByteBufferAllocator().buffer(capacity: 512)
 
@@ -128,11 +144,14 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         pacRoutingEngine: PACRoutingEngine?,
         configProvider: @escaping () -> ProxyConfig,
         gatewayMode: Bool,
+        handshakeTimeout: TimeAmount = .seconds(10),
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void
     ) {
+        precondition(handshakeTimeout.nanoseconds > 0)
+        self.handshakeTimeout = handshakeTimeout
         self.connectCoordinator = connectCoordinator
         self.logger = logger
         self.group = group
@@ -144,6 +163,27 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         self.onConnectionOpened = onConnectionOpened
         self.onConnectionClosed = onConnectionClosed
         self.onConnectionActivity = onConnectionActivity
+    }
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        nonisolated(unsafe) let context = context
+        // Total greeting + request deadline: drip-fed bytes never reset it.
+        handshakeDeadline = context.eventLoop.scheduleTask(in: handshakeTimeout) { [self] in
+            guard state == .greeting || state == .request else { return }
+            let event = RuntimeEvent(kind: .connection, event: "connection.socks5_handshake_timeout")
+            eventSink?(event)
+            logger.log(.warning, event.event, category: .proxy)
+            context.close(promise: nil)
+        }
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        cancelHandshakeDeadline()
+    }
+
+    private func cancelHandshakeDeadline() {
+        handshakeDeadline?.cancel()
+        handshakeDeadline = nil
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -158,6 +198,15 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
 
+        // RFC 1928: greeting <= 257 bytes, CONNECT request <= 262 bytes.
+        // Reject coalesced payload before growing the negotiation buffer.
+        guard buf.readableBytes <= 519 - accumulated.readableBytes else {
+            let event = RuntimeEvent(kind: .connection, event: "connection.socks5_handshake_oversized")
+            eventSink?(event)
+            logger.log(.warning, event.event, category: .proxy)
+            context.close(promise: nil)
+            return
+        }
         accumulated.writeBuffer(&buf)
         while true {
             switch state {
@@ -174,6 +223,7 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        cancelHandshakeDeadline()
         if let id = connectionID {
             onConnectionClosed(id)
             connectionID = nil
@@ -273,6 +323,16 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             return false
         }
 
+        guard buf.readableBytes == 0 else {
+            let event = RuntimeEvent(kind: .connection, event: "connection.socks5_early_payload_rejected")
+            eventSink?(event)
+            logger.log(.warning, event.event, category: .proxy)
+            context.close(promise: nil)
+            return false
+        }
+        cancelHandshakeDeadline()
+        state = .routing
+
         if MetadataBlocklist.isBlocked(host: host, gatewayMode: gatewayMode) {
             logger.log(.warning, "SOCKS5: blocked connection to \(host):\(port) (metadata/loopback protection).", category: .proxy)
             sendReply(context: context, rep: 0x02)
@@ -293,11 +353,6 @@ private final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         if HTTPProxyHandler.shouldEvaluatePAC(isDirectMode: directModeBypass, forceProxy: forceProxy),
            let pacRoutingEngine {
             let pacHost = host.contains(":") ? "[\(host)]" : host
-            guard buf.readableBytes == 0 else {
-                logger.log(.warning, "SOCKS5: client pipelined payload before CONNECT success; closing to avoid buffering unbounded early payload.", category: .proxy)
-                context.close(promise: nil)
-                return false
-            }
             state = .routing
             context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
             nonisolated(unsafe) let ctx = context

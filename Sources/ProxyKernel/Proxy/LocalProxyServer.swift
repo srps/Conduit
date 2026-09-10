@@ -23,8 +23,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let authHandshakeLimiter = AuthHandshakeLimiter()
     private let group = MultiThreadedEventLoopGroup.singleton
-    private let inboundConnectionCountBox = NIOLockedValueBox(0)
-    private let lastWarnLoggedAt = NIOLockedValueBox<Date>(Date.distantPast)
+    private let inboundBudget = InboundConnectionBudget()
+    private let socksHandshakeTimeout: TimeAmount
     /// Count of accept sockets this server has successfully bound. Lets callers
     /// (and tests) distinguish "the listener was preserved" from "the listener
     /// was re-created on the same port" — the two are indistinguishable from
@@ -108,7 +108,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     }
 
     package var inboundConnectionCount: Int {
-        inboundConnectionCountBox.withLockedValue { $0 }
+        inboundBudget.count
     }
 
     private func authHandshakeLimits() -> AuthHandshakeLimiter.Limits {
@@ -132,8 +132,11 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         onRequestCompleted: @Sendable @escaping (Bool, String?) -> Void,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         bindRetryLimit: Int = 10,
+        socksHandshakeTimeout: TimeAmount = .seconds(10),
         portHolderProbe: (any ListenerPortHolderProbing)? = nil
     ) {
+        precondition(socksHandshakeTimeout.nanoseconds > 0)
+        self.socksHandshakeTimeout = socksHandshakeTimeout
         self.bindRetryLimit = max(1, bindRetryLimit)
         self.portHolderProbe = portHolderProbe
         self.logger = logger
@@ -263,6 +266,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                 pacRoutingEngine: self.pacRoutingEngine,
                 configProvider: self.configProvider,
                 gatewayMode: config.gatewayMode,
+                inboundBudget: self.inboundBudget,
+                handshakeTimeout: self.socksHandshakeTimeout,
                 eventSink: self.eventSink,
                 onConnectionOpened: self.onConnectionOpened,
                 onConnectionClosed: self.onConnectionClosed,
@@ -472,27 +477,11 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             .childChannelOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepInterval), value: CInt(keepalive.keepIntervalSeconds))
             .childChannelOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepCount), value: CInt(keepalive.keepCountProbes))
             .childChannelInitializer { channel in
-                let count = self.inboundConnectionCountBox.withLockedValue { c in c += 1; return c }
-                channel.closeFuture.whenComplete { _ in
-                    self.inboundConnectionCountBox.withLockedValue { c in c -= 1 }
-                }
-
-                let maxLimit = self.configProvider().inboundConnectionMaxLimit
-                if count > maxLimit {
-                    self.logger.log(.error, "Inbound connection limit exceeded (\(count)/\(maxLimit)), rejecting.", category: .proxy)
+                guard self.inboundBudget.admit(
+                    channel, protocolName: "http", config: self.configProvider(),
+                    logger: self.logger, eventSink: self.eventSink
+                ) else {
                     return channel.close().flatMap { channel.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel) }
-                }
-
-                let warnThreshold = self.configProvider().inboundConnectionWarnThreshold
-                if count > warnThreshold {
-                    let shouldLog = self.lastWarnLoggedAt.withLockedValue { last in
-                        let now = Date()
-                        if now.timeIntervalSince(last) > 10 { last = now; return true }
-                        return false
-                    }
-                    if shouldLog {
-                        self.logger.log(.warning, "High inbound connection count: \(count) (warn threshold: \(warnThreshold)).", category: .proxy)
-                    }
                 }
 
                 let decoder = ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes))
