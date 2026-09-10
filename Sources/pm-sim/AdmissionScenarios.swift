@@ -30,7 +30,7 @@ enum AdmissionScenarios {
         let logger: ConsoleLogSink
         let server: LocalProxyServer
         let origin: FakeOrigin
-        private(set) var clients: [Channel] = [] // Fixture has at most twelve peers.
+        private(set) var clients: [Channel] = [] // Fixture has at most fourteen peers.
 
         init(verbose: Bool) {
             let logger = ConsoleLogSink(minLevel: verbose ? .debug : .error)
@@ -63,7 +63,7 @@ enum AdmissionScenarios {
         }
 
         private func connect(_ port: Int) async throws -> Channel {
-            precondition(clients.count < 12)
+            precondition(clients.count < 14)
             let channel = try await ClientBootstrap(group: group).connectTimeout(.seconds(2))
                 .connect(host: "127.0.0.1", port: port).get()
             clients.append(channel)
@@ -114,10 +114,14 @@ enum AdmissionScenarios {
             try await eventually("Recovered SOCKS connection did not reach origin") { origin.connectionCount == 1 }
             try await Task.sleep(for: .milliseconds(1200))
             try require(tunnel.isActive, "Handshake deadline closed an established tunnel")
-            config.withLockedValue { $0.inboundConnectionMaxLimit = 2; $0.inboundConnectionWarnThreshold = 1 }
-            let reduced = try await connect(http)
-            try await eventually("Lowered live budget admitted a new peer") { !reduced.isActive }
-            try require(tunnel.isActive, "Lowered budget evicted an existing tunnel")
+            for limit in [2, 0, -1] {
+                config.withLockedValue { $0.inboundConnectionMaxLimit = limit; $0.inboundConnectionWarnThreshold = 1 }
+                let reduced = try await connect(http)
+                try await eventually("Lowered live budget admitted a new peer") { !reduced.isActive }
+                try require(tunnel.isActive, "Lowered budget evicted an existing tunnel")
+                try require(server.inboundConnectionCount == 3, "Live limit edit lost an existing reservation")
+            }
+            config.withLockedValue { $0.inboundConnectionMaxLimit = 2 }
             for channel in clients where channel.isActive { try await channel.close().get() }
             try await eventually("Client closes leaked admission permits") { server.inboundConnectionCount == 0 }
             let recovered = try await connect(http)
@@ -125,7 +129,7 @@ enum AdmissionScenarios {
             try await recovered.close().get()
             try await eventually("Final permit leaked") { server.inboundConnectionCount == 0 }
             let rejections = events.events.filter { $0.event == "connection.inbound_limit_rejected" }
-            try require(rejections.count == 3, "Missing mixed-protocol rejection events")
+            try require(rejections.count == 5, "Missing mixed-protocol rejection events")
         }
 
         func stop() async {
@@ -152,7 +156,7 @@ enum AdmissionScenarios {
         await fixture.stop()
         return ScenarioResult(
             name: "shared-inbound-budget", clientCount: fixture.clients.count, clientsOpened: fixture.clients.count,
-            clientsWithFirstByte: 1, clientsClosedEarly: 3, totalBytes: 0,
+            clientsWithFirstByte: 1, clientsClosedEarly: 5, totalBytes: 0,
             durationSeconds: Date().timeIntervalSince(start), aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             notes: ["PASS: combined admission, idle/drip deadlines, malformed greeting release, live limit reduction, tunnel survival and recovery"]
