@@ -517,7 +517,7 @@ final class AppState: ObservableObject {
     /// and holds it for the lifetime of the resolver. Exceeding the ceiling
     /// fails the fetch rather than truncating, because a half-read PAC routes
     /// traffic wrongly instead of visibly breaking.
-    nonisolated static let pacMaxOutputBytes = 262_144
+    nonisolated static let pacMaxOutputBytes = PACFetchLimits.maxScriptBytes
 
     @Sendable
     nonisolated static func curlPACFetcher(_ url: URL) async throws -> String {

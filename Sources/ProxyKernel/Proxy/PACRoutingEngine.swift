@@ -103,6 +103,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 }
                 return try result!.get()
             }()
+            try Task.checkCancellation()
             lock.withLock {
                 cachedPACURL = config.pacURL
                 jsEvaluator = newEvaluator

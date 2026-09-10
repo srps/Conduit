@@ -19,6 +19,11 @@
 
 import Foundation
 
+/// Shared fetch ceiling for HTTPS, local files, and the app's curl fallback.
+package enum PACFetchLimits {
+    package static let maxScriptBytes = 262_144
+}
+
 /// A PAC-script evaluator bound to a specific script text. Produced by
 /// `PacEvaluator.makeEvaluator(pacScript:)`; consumed by `PACRoutingEngine`
 /// on each `routeChain(for:host:)` call.
@@ -45,6 +50,8 @@ package protocol PacEvaluator: Sendable {
     /// Fetch the PAC script from a URL. Must handle `http://`, `https://`,
     /// and `file://` schemes; ATS-forbidden plaintext URLs (corporate
     /// networks) fall back to a cleartext fetcher controlled by the impl.
+    /// Transports enforce `PACFetchLimits.maxScriptBytes` during reads and
+    /// throw on overflow rather than returning a truncated script.
     func fetchPAC(from urlString: String) async throws -> String
 
     /// Parse a PAC script into an evaluator. Synchronous; may take tens of
