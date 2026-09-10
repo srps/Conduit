@@ -11,7 +11,7 @@ import ProxyKernel
 final class SimHarness {
     let group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton
     // pm-sim is a headless harness that doesn't need a UI ring buffer.
-    // ConsoleLogSink writes synchronously to stderr (no MainActor hop) which
+    // ConsoleLogSink writes through a bounded stderr queue, which
     // is what scenarios assert on via captured stderr or via embedded
     // RecordingLogSink in tests that care about log content.
     let logger: any LogSink

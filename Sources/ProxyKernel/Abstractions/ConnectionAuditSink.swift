@@ -25,7 +25,13 @@ package protocol ConnectionAuditSink: Sendable {
     /// Queue the supplied audit record for emission. Returns immediately;
     /// the implementation decides whether to write synchronously, batch,
     /// or flush asynchronously. For the file-backed sink, an explicit
-    /// `flush()` (called at daemon shutdown / config reload) guarantees
-    /// durability.
+    /// `flush()` (called at daemon shutdown / config reload) waits up to its deadline; false reports incomplete draining.
     func record(_ record: ConnectionAuditRecord)
+    var statistics: RecordWriterStatistics { get }
+    @discardableResult func flush(timeout: TimeInterval) -> Bool
+}
+
+extension ConnectionAuditSink {
+    package var statistics: RecordWriterStatistics { .init() }
+    @discardableResult package func flush(timeout: TimeInterval = 2) -> Bool { true }
 }

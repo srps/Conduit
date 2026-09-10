@@ -377,8 +377,7 @@ enum VPNFlapScenarios {
         // Scenarios that previously set `minBufferedLevel = .info`
         // assert on `orchestrator.eventLog` (RuntimeEventLog), not on the
         // logger's ring buffer — so the buffered-level configuration was
-        // dead code. ConsoleLogSink writes synchronously to stderr and
-        // doesn't buffer.
+        // dead code. ConsoleLogSink uses a bounded asynchronous stderr queue.
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
         var config = ProxyConfig()
         config.proxy.host = "127.0.0.1"

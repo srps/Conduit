@@ -38,6 +38,7 @@ enum ConduitDaemon {
         } catch {
             let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
             failure.report(to: logger)
+            logger.flush()
             exit(1)
         }
         for warning in loaded.warnings {
@@ -59,6 +60,7 @@ enum ConduitDaemon {
             } catch {
                 logger.log(.error, "Daemon runtime start failed: \(error.localizedDescription)", category: .general)
                 host.flushEvents()
+                logger.flush()
                 exit(1)
             }
         }
@@ -88,6 +90,7 @@ enum ConduitDaemon {
             if args.contains("--start-runtime") {
                 await host.stopRuntime()
             }
+            logger.flush()
             return
         }
 

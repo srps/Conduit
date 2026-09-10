@@ -5,7 +5,7 @@
 // own extension — the kernel doesn't ship a UI-flavoured sink.
 //
 // Which executable picks which sink:
-//   - pm-proxy / pm-tunnel / pm-dns: `ConsoleLogSink` (synchronous stderr)
+//   - pm-proxy / pm-tunnel / pm-dns: `ConsoleLogSink` (bounded asynchronous stderr)
 //   - pm-sim default scenarios: `ConsoleLogSink` (sim wants its own output)
 //   - pm-sim assertion-on-content scenarios: `RecordingLogSink`
 //   - Tests that exercise log content: `RecordingLogSink`
@@ -19,21 +19,29 @@
 import Foundation
 import NIOConcurrencyHelpers
 
-/// Writes formatted log lines synchronously to stderr. The default for
-/// headless daemons (`pm-proxy`, `pm-tunnel`, `pm-dns`). Synchronous write
-/// is intentional: NIO event loops calling `log(...)` pay one
-/// `FileHandle.write` syscall and continue — no Task hop, no MainActor
-/// scheduling pressure.
+/// stderr may be a stalled pipe. A shared bounded writer isolates its syscalls
+/// from NIO loops, and caps pending bytes even when the reader stops forever.
 package struct ConsoleLogSink: LogSink {
+    private static let writer = BoundedRecordWriter(write: { records in
+        var data = Data()
+        for record in records { data.append(record) }
+        try FileHandle.standardError.write(contentsOf: data)
+    }, reportFailure: { _ in
+        // stderr is the failed destination. The structured failedRecords counter
+        // remains available without recursively trying to log to the same pipe.
+    })
     package let minLevel: LogLevel
 
-    package init(minLevel: LogLevel = .notice) {
-        self.minLevel = minLevel
-    }
+    package init(minLevel: LogLevel = .notice) { self.minLevel = minLevel }
+
+    package var statistics: RecordWriterStatistics { Self.writer.statistics }
+
+    @discardableResult
+    package func flush(timeout: TimeInterval = 2) -> Bool { Self.writer.flush(timeout: timeout) }
 
     package func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
         let entry = LogEntry(level: level, category: category, message: message)
-        FileHandle.standardError.write(Data((entry.formatted() + "\n").utf8))
+        Self.writer.append(Data((entry.formatted() + "\n").utf8))
     }
 }
 
@@ -67,6 +75,9 @@ package struct DiscardingLogSink: LogSink {
 package final class RecordingLogSink: LogSink, @unchecked Sendable {
     private let entriesBox = NIOLockedValueBox<[LogEntry]>([])
     private let minLevelBox: NIOLockedValueBox<LogLevel>
+    private let capacity: Int
+    private let dropped = NIOLockedValueBox<UInt64>(0)
+    package var droppedRecords: UInt64 { dropped.withLockedValue { $0 } }
 
     /// Filter threshold. Defaults to `.debug` so the recorder captures
     /// everything; tests that want to assert "this didn't log a warning"
@@ -74,7 +85,9 @@ package final class RecordingLogSink: LogSink, @unchecked Sendable {
     /// production sinks more closely. The filtering happens in the
     /// `LogSink.log` extension before `logImpl` is called, so below-
     /// threshold levels never reach the captured buffer.
-    package init(minLevel: LogLevel = .debug) {
+    package init(minLevel: LogLevel = .debug, capacity: Int = 10_000) {
+        precondition(capacity > 0)
+        self.capacity = capacity
         self.minLevelBox = NIOLockedValueBox<LogLevel>(minLevel)
     }
 
@@ -84,7 +97,13 @@ package final class RecordingLogSink: LogSink, @unchecked Sendable {
 
     package func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
         let entry = LogEntry(level: level, category: category, message: message)
-        entriesBox.withLockedValue { $0.append(entry) }
+        entriesBox.withLockedValue {
+            guard $0.count < capacity, entry.message.utf8.count <= 65_536 else {
+                dropped.withLockedValue { $0 &+= 1 }
+                return
+            }
+            $0.append(entry)
+        }
     }
 
     /// Snapshot copy of the captured entries. Safe to iterate from any

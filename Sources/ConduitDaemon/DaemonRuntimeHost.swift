@@ -233,7 +233,7 @@ final class DaemonRuntimeHost {
         orchestrator.eventLog.append(RuntimeEvent(kind: .lifecycle, event: "daemon.ready", detail: "mode=\(mode)"))
         writeReadyFile()
         writeSnapshotFile(snapshot: orchestrator.snapshot)
-        eventWriter.flush()
+        flushEvents()
     }
 
     func status() -> ControlDaemonStatus {
@@ -400,7 +400,7 @@ final class DaemonRuntimeHost {
 
         logger.log(.notice, "Daemon runtime stopped.", category: .general)
         writeSnapshotFile(snapshot: orchestrator.snapshot)
-        eventWriter.flush()
+        flushEvents()
         if exitAfterStop {
             exit(0)
         }
@@ -478,7 +478,32 @@ final class DaemonRuntimeHost {
     }
 
     func flushEvents() {
-        eventWriter.flush()
+        let auditFlushed = orchestrator.auditSink.flush(timeout: 2)
+        reportWriterLoss()
+        let eventsFlushed = eventWriter.flush()
+        if !auditFlushed || !eventsFlushed {
+            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "observability.flush_timeout",
+                detail: "auditFlushed=\(auditFlushed) eventsFlushed=\(eventsFlushed)"))
+            logger.log(.warning, "Observability shutdown flush deadline exceeded.", category: .general)
+        }
+        logger.flush(timeout: 2)
+    }
+
+    private var lastWriterLoss: UInt64 = 0
+
+    private func reportWriterLoss() {
+        let statistics = ["events": eventWriter.statistics, "audit": orchestrator.auditSink.statistics,
+                          "console": logger.statistics]
+        let loss = statistics.values.reduce(UInt64(0)) { $0 &+ $1.droppedRecords &+ $1.failedRecords &+ $1.flushTimeouts }
+        guard loss != lastWriterLoss else { return }
+        lastWriterLoss = loss
+        do {
+            let data = try CanonicalJSON.encoder().encode(statistics)
+            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "observability.writer_loss",
+                detail: String(decoding: data, as: UTF8.self)))
+        } catch {
+            logger.log(.warning, "Failed to encode writer statistics: \(error.localizedDescription)", category: .general)
+        }
     }
 
     private func handle(orchestratorEvent event: ProxyOrchestratorEvent) {
@@ -575,6 +600,7 @@ final class DaemonRuntimeHost {
     }
 
     private func writeSnapshotFile(snapshot: ProxyOrchestratorSnapshot) {
+        reportWriterLoss()
         do {
             try FileManager.default.createDirectory(at: environment.snapshotFile.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try Self.prettyEncoder.encode(snapshot)

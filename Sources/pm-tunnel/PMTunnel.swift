@@ -45,7 +45,9 @@ enum PMTunnel {
                 config = try ProxyConfigPersistence.load(in: environment, allowMissing: false)
             } catch {
                 let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
-                failure.report(to: ConsoleLogSink(minLevel: .notice))
+                let failureLogger = ConsoleLogSink(minLevel: .notice)
+                failure.report(to: failureLogger)
+                failureLogger.flush()
                 exit(1)
             }
 
@@ -97,6 +99,7 @@ enum PMTunnel {
             let activeTunnels = config.tunnelDefinitions.filter(\.enabled)
             guard !activeTunnels.isEmpty else {
                 logger.log(.error, "No enabled tunnel definitions in config.", category: .tunnel)
+                logger.flush()
                 exit(1)
             }
 
@@ -112,6 +115,7 @@ enum PMTunnel {
 
             guard result.started > 0 else {
                 logger.log(.error, "All tunnel listeners failed to bind.", category: .tunnel)
+                logger.flush()
                 exit(1)
             }
 
@@ -132,6 +136,7 @@ enum PMTunnel {
                     Task { @MainActor in
                         await forwarder.stop()
                         pool.closeAll()
+                        logger.flush()
                         exit(0)
                     }
                 }

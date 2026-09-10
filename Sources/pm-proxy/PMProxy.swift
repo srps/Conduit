@@ -66,13 +66,14 @@ enum PMProxy {
                 config = try loadConfig(from: args, environment: environment)
             } catch {
                 let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
-                failure.report(to: ConsoleLogSink(minLevel: .notice))
+                let failureLogger = ConsoleLogSink(minLevel: .notice)
+                failure.report(to: failureLogger)
+                failureLogger.flush()
                 exit(1)
             }
             applyCLIOverrides(to: &config, from: args)
 
-            // Headless daemon uses `ConsoleLogSink` (synchronous stderr
-            // write, no MainActor hop, no ring buffer). The Combine-backed
+            // Headless daemon uses bounded asynchronous stderr output. The Combine-backed
             // `AppLogStore` it used to construct lives in the SwiftUI app
             // target and is not linkable from `pm-proxy`.
             let verbose = args.contains("--verbose")
@@ -116,6 +117,9 @@ enum PMProxy {
                 fileURL: environment.eventsFile,
                 logger: logger
             )
+            writerStatistics = {
+                ["events": eventFileWriter.statistics, "audit": auditSink.statistics, "console": logger.statistics]
+            }
             orchestrator.eventLog.setSink { event in
                 eventFileWriter.record(event)
             }
@@ -207,6 +211,7 @@ enum PMProxy {
                     guard orchestrator.snapshot.dnsRunState == .running else {
                         let message = orchestrator.snapshot.dnsError ?? "DNS forwarder failed to start."
                         logger.log(.error, message, category: .network)
+                        logger.flush()
                         exit(1)
                     }
                 }
@@ -215,6 +220,7 @@ enum PMProxy {
                     guard orchestrator.snapshot.tunnelsRunState != .failed else {
                         let message = orchestrator.snapshot.tunnelsError ?? "Protocol tunnels failed to start."
                         logger.log(.error, message, category: .tunnel)
+                        logger.flush()
                         exit(1)
                     }
                 }
@@ -253,6 +259,7 @@ enum PMProxy {
                 logger.log(.notice, "pm-proxy is running. Press Ctrl-C to stop.", category: .general)
             } catch {
                 logger.log(.error, "Failed to start pm-proxy: \(error.displayDescription)", category: .general)
+                logger.flush()
                 exit(1)
             }
         }
@@ -303,7 +310,21 @@ enum PMProxy {
         await orchestrator.stopTunnels()
         await orchestrator.stopDNS()
         await orchestrator.stopProxy()
-        eventFileWriter.flush()
+        let auditFlushed = orchestrator.auditSink.flush(timeout: 2)
+        let eventsFlushed = eventFileWriter.flush()
+        if !auditFlushed || !eventsFlushed {
+            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "observability.flush_timeout",
+                detail: "auditFlushed=\(auditFlushed) eventsFlushed=\(eventsFlushed)"))
+        }
+        // Shutdown diagnostics use bounded stderr; an unread stdout pipe must
+        // not introduce a new unbounded wait after the flush deadline.
+        do {
+            let data = try CanonicalJSON.encoder().encode(writerStatistics?())
+            ConsoleLogSink().log(.notice, "observability.writer_statistics \(String(decoding: data, as: UTF8.self))")
+        } catch {
+            ConsoleLogSink().log(.warning, "Failed to encode shutdown statistics: \(error.localizedDescription)")
+        }
+        ConsoleLogSink().flush()
         exit(exitCode)
     }
 
@@ -440,7 +461,8 @@ enum PMProxy {
         timer.setEventHandler {
             Task { @MainActor in
                 let current = orchestrator.snapshot
-                guard current != lastEmittedSnapshot else { return }
+                // Writer loss can change without a proxy snapshot mutation.
+                // Keep status heartbeats so operators can observe stalled sinks.
                 writeSnapshotFile(snapshot: current, environment: environment, logger: logger)
                 lastEmittedSnapshot = current
                 do {
@@ -454,12 +476,16 @@ enum PMProxy {
         retainedSources.append(timer)
     }
 
+    @MainActor
+    private static var writerStatistics: (() -> [String: RecordWriterStatistics])?
+
+    @MainActor
     private static func emitStatusEvent(
         kind: StatusEventKind,
         snapshot: ProxyOrchestratorSnapshot,
         startupMilliseconds: Int? = nil
     ) throws {
-        let payload = StatusEvent(kind: kind, snapshot: snapshot, startupMilliseconds: startupMilliseconds)
+        let payload = StatusEvent(kind: kind, snapshot: snapshot, startupMilliseconds: startupMilliseconds, observability: writerStatistics?())
         let data = try statusEncoder.encode(payload)
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data([0x0A]))
@@ -510,6 +536,7 @@ private struct StatusEvent: Codable {
     let kind: StatusEventKind
     let snapshot: ProxyOrchestratorSnapshot
     let startupMilliseconds: Int?
+    let observability: [String: RecordWriterStatistics]?
 }
 
 private enum StatusEventKind: String, Codable {

@@ -21,122 +21,90 @@ package final class DiscardingConnectionAuditSink: ConnectionAuditSink, @uncheck
 /// itself never uses it. Thread-safe (`NIOLockedValueBox`) so concurrent
 /// records from multiple event loops are captured without interleaving.
 package final class RecordingConnectionAuditSink: ConnectionAuditSink, @unchecked Sendable {
-    private let captured = NIOLockedValueBox<[ConnectionAuditRecord]>([])
+    private struct State {
+        var records: [ConnectionAuditRecord] = []
+        var statistics = RecordWriterStatistics()
+    }
+    private let captured = NIOLockedValueBox(State())
+    private let capacity: Int
+    private let maxBytes: Int
 
-    package init() {}
-
-    package func record(_ record: ConnectionAuditRecord) {
-        captured.withLockedValue { $0.append(record) }
+    package init(capacity: Int = 10_000, maxBytes: Int = 4 * 1_048_576) {
+        precondition(capacity > 0 && maxBytes > 0)
+        self.capacity = capacity
+        self.maxBytes = maxBytes
     }
 
-    /// Snapshot of the records captured so far, in insertion order. The
-    /// underlying buffer is unbounded — tests that emit a lot of records
-    /// should read and discard periodically.
+    package var statistics: RecordWriterStatistics { captured.withLockedValue { $0.statistics } }
+
+    package func record(_ record: ConnectionAuditRecord) {
+        do {
+            let bytes = try CanonicalJSON.encoder().encode(record).count
+            captured.withLockedValue {
+                guard $0.records.count < capacity, bytes <= maxBytes - $0.statistics.pendingBytes else {
+                    $0.statistics.droppedRecords &+= 1
+                    return
+                }
+                $0.records.append(record)
+                $0.statistics.pendingBytes += bytes
+                $0.statistics.pendingRecords += 1
+            }
+        } catch {
+            captured.withLockedValue { $0.statistics.failedRecords &+= 1 }
+        }
+    }
+
+    /// Insertion-ordered bounded capture; overflow drops incoming records.
     package func records() -> [ConnectionAuditRecord] {
-        captured.withLockedValue { $0 }
+        captured.withLockedValue { $0.records }
     }
 
     package func clear() {
-        captured.withLockedValue { $0.removeAll(keepingCapacity: false) }
+        captured.withLockedValue {
+            $0.records.removeAll(keepingCapacity: false)
+            $0.statistics.pendingBytes = 0
+            $0.statistics.pendingRecords = 0
+        }
     }
 }
 
 // MARK: - FileConnectionAuditSink
 
-/// Bounded NDJSON file `ConnectionAuditSink`. One JSON object per line.
-/// Disk usage is capped at `maxBytes` via in-place trim: when the
-/// post-append file exceeds the cap, the oldest bytes are dropped from
-/// the front (NDJSON-aware — trim is aligned to a newline boundary so
-/// no partial record is left behind). This mirrors the existing
-/// `RuntimeEventFileWriter` discipline rather than introducing a
-/// second on-disk-rotation pattern.
-///
-/// Concurrency: writes are serialized through a single `DispatchQueue`
-/// (the same shape `RuntimeEventFileWriter` uses) so each NDJSON line
-/// is intact even when multiple event loops emit records concurrently.
-/// `record(_:)` returns immediately; `flush()` blocks until the queue
-/// has drained for tests / shutdown.
-///
-/// Errors during write or directory creation are SURFACED via the
-/// injected `LogSink` (matches `RuntimeEventFileWriter`'s error
-/// handling). The audit sink is best-effort observability — a disk-full
-/// or permission error must not crash the proxy or block client
-/// requests, but the operator deserves to know about it.
+/// Bounded asynchronous NDJSON writer using batched append and record-aligned rotation.
 package final class FileConnectionAuditSink: ConnectionAuditSink, @unchecked Sendable {
     package static let defaultMaxBytes = 10 * 1_048_576
-
-    private let fileURL: URL
+    private let writer: BoundedRecordWriter
     private let maxBytes: Int
     private let logger: any LogSink
-    private let queue = DispatchQueue(label: "pm-proxy.audit-file")
 
-    package init(
-        fileURL: URL,
-        maxBytes: Int = FileConnectionAuditSink.defaultMaxBytes,
-        logger: any LogSink
-    ) {
-        precondition(maxBytes > 0, "FileConnectionAuditSink.maxBytes must be positive (got \(maxBytes))")
-        self.fileURL = fileURL
+    package init(fileURL: URL, maxBytes: Int = FileConnectionAuditSink.defaultMaxBytes,
+                 logger: any LogSink, limits: RecordWriterLimits = .init()) {
+        precondition(maxBytes > 0)
         self.maxBytes = maxBytes
         self.logger = logger
+        let file = RotatingRecordFile(fileURL: fileURL, maxBytes: maxBytes)
+        writer = BoundedRecordWriter(limits: limits, write: { try file.append($0) },
+            reportFailure: { logger.log(.warning, "Failed to write audit.ndjson: \($0)", category: .general) })
     }
+
+    package var statistics: RecordWriterStatistics { writer.statistics }
 
     package func record(_ record: ConnectionAuditRecord) {
-        queue.async { [self] in
-            do {
-                try append(record)
-            } catch {
-                logger.log(
-                    .warning,
-                    "Failed to write audit.ndjson: \(error.localizedDescription)",
-                    category: .general
-                )
+        do {
+            var data = try CanonicalJSON.encoder().encode(record)
+            data.append(0x0A)
+            guard data.count <= maxBytes else {
+                writer.recordDrop()
+                logger.log(.warning, "Skipping oversized audit record (>= maxBytes).", category: .general)
+                return
             }
+            writer.append(data)
+        } catch {
+            writer.recordDrop()
+            logger.log(.warning, "Failed to encode audit record: \(error.localizedDescription)", category: .general)
         }
     }
 
-    /// Block until the queue has drained. Tests call this before
-    /// reading the file back; the daemon calls it on shutdown to
-    /// guarantee in-flight records are durable.
-    package func flush() {
-        queue.sync {}
-    }
-
-    // MARK: - Private
-
-    private func append(_ record: ConnectionAuditRecord) throws {
-        try FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
-        var line = try ConnectionAuditRecord.canonicalEncoder.encode(record)
-        line.append(0x0A)
-        guard line.count <= maxBytes else {
-            // Single record larger than the entire cap is suspicious
-            // (`maxBytes` typically defaults to 10 MiB). Drop with a
-            // warning so the operator notices, rather than truncating
-            // the cap to one record.
-            logger.log(.warning, "Skipping oversized audit record (>= maxBytes).", category: .general)
-            return
-        }
-
-        var data = (try? Data(contentsOf: fileURL)) ?? Data()
-        data.append(line)
-        data = trim(data)
-        try data.write(to: fileURL, options: .atomic)
-    }
-
-    /// Drop bytes from the front of `data` until the result fits in
-    /// `maxBytes`. NDJSON-aware: after dropping the suffix-aligned
-    /// prefix, advance to the next newline so the remaining file
-    /// starts at a record boundary (no half-decoded leading line).
-    private func trim(_ data: Data) -> Data {
-        guard data.count > maxBytes else { return data }
-        var suffix = data.suffix(maxBytes)
-        if let newline = suffix.firstIndex(of: 0x0A) {
-            suffix = suffix[suffix.index(after: newline)...]
-        }
-        return Data(suffix)
-    }
+    @discardableResult
+    package func flush(timeout: TimeInterval = 2) -> Bool { writer.flush(timeout: timeout) }
 }

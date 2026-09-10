@@ -5,7 +5,7 @@
 // or @MainActor types.
 //
 // Two stock implementations live next door in Support/StandardLogSinks.swift:
-// `ConsoleLogSink` (writes inline to stderr — used by pm-proxy / pm-sim /
+// `ConsoleLogSink` (writes asynchronously to stderr — used by pm-proxy / pm-sim /
 // pm-tunnel headless daemons) and `DiscardingLogSink` (no-op — used by tests
 // and pm-sim scenarios that don't need to assert on log output).
 //
@@ -34,6 +34,8 @@ package protocol LogSink: Sendable {
     /// Read at most a handful of times per request. The existential cost is
     /// dwarfed by the saved string-interpolation work when filtered out.
     var minLevel: LogLevel { get }
+    var statistics: RecordWriterStatistics { get }
+    @discardableResult func flush(timeout: TimeInterval) -> Bool
 
     /// Raw sink primitive. Conformers implement this to consume already-
     /// built log lines — they do **not** need to re-check `minLevel`
@@ -47,7 +49,7 @@ package protocol LogSink: Sendable {
     /// `log` extension itself, which is the only legitimate caller.
     ///
     /// Called from any thread / any actor. Implementations decide their
-    /// own threading: `ConsoleLogSink` writes inline; `AppLogStore` hops
+    /// own threading: `ConsoleLogSink` uses a bounded queue; `AppLogStore` hops
     /// to MainActor for its ring buffer; future `FileLogSink` may
     /// dispatch to a background queue. Implementations MUST NOT assume
     /// the calling thread.
@@ -55,6 +57,9 @@ package protocol LogSink: Sendable {
 }
 
 extension LogSink {
+    package var statistics: RecordWriterStatistics { .init() }
+    @discardableResult package func flush(timeout: TimeInterval = 2) -> Bool { true }
+
     /// Filtered entry point. Every in-tree call site uses this method —
     /// the 127 occurrences of `logger.log(.level, "msg", category: .cat)`
     /// resolve to this extension (no same-named method exists on the
