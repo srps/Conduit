@@ -38,4 +38,18 @@ package final class RuntimeEventFileWriter: @unchecked Sendable {
 
     @discardableResult
     package func flush(timeout: TimeInterval = 2) -> Bool { writer.flush(timeout: timeout) }
+
+    /// Shutdown gets one bounded retry to persist the timeout observation.
+    /// The retry never generates another event, even if storage stays blocked.
+    @discardableResult
+    package func flushReportingTimeout(
+        auditFlushed: Bool, eventLog: RuntimeEventLog, timeout: TimeInterval = 2
+    ) -> Bool {
+        let eventsFlushed = flush(timeout: timeout)
+        guard !auditFlushed || !eventsFlushed else { return true }
+        eventLog.append(RuntimeEvent(kind: .health, event: "observability.flush_timeout",
+            detail: "auditFlushed=\(auditFlushed) eventsFlushed=\(eventsFlushed)"))
+        flush(timeout: timeout)
+        return false
+    }
 }

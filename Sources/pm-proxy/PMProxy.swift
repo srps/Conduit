@@ -32,7 +32,7 @@ enum PMProxy {
               --socks-port <port>   SOCKS5 port override and enable SOCKS5
               --dns-port <port>     DNS forwarder port override and enable DNS
               --host <host>         Host to bind proxy and DNS listeners to
-              --status-interval <s> Emit status NDJSON snapshots every N seconds
+              --status-interval <s> Emit changed status at most every N seconds (min 0.1)
               --assert-ready-under-ms <ms>
                                     Exit non-zero if startup-to-ready exceeds this budget
               --exit-after-ready    Stop immediately after writing the ready event/files
@@ -311,11 +311,7 @@ enum PMProxy {
         await orchestrator.stopDNS()
         await orchestrator.stopProxy()
         let auditFlushed = orchestrator.auditSink.flush(timeout: 2)
-        let eventsFlushed = eventFileWriter.flush()
-        if !auditFlushed || !eventsFlushed {
-            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "observability.flush_timeout",
-                detail: "auditFlushed=\(auditFlushed) eventsFlushed=\(eventsFlushed)"))
-        }
+        eventFileWriter.flushReportingTimeout(auditFlushed: auditFlushed, eventLog: orchestrator.eventLog)
         // Shutdown diagnostics use bounded stderr; an unread stdout pipe must
         // not introduce a new unbounded wait after the flush deadline.
         do {
@@ -448,6 +444,8 @@ enum PMProxy {
 
     @MainActor
     private static var lastEmittedSnapshot: ProxyOrchestratorSnapshot?
+    @MainActor
+    private static var lastEmittedWriterStatistics: [String: RecordWriterStatistics]?
 
     @MainActor
     private static func startStatusStream(
@@ -457,16 +455,22 @@ enum PMProxy {
         logger: any LogSink
     ) {
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + interval, repeating: interval)
+        // Match the orchestrator's maximum counter publication rate (10 Hz).
+        // A tiny CLI interval must not flood the main queue with timer work.
+        let boundedInterval = interval.isFinite ? max(interval, 0.1) : 0.1
+        timer.schedule(deadline: .now() + boundedInterval, repeating: boundedInterval)
         timer.setEventHandler {
-            Task { @MainActor in
+            // This source is explicitly dispatched on .main. Handle its tick
+            // directly so slow output cannot accumulate one Task per tick.
+            MainActor.assumeIsolated {
                 let current = orchestrator.snapshot
-                // Writer loss can change without a proxy snapshot mutation.
-                // Keep status heartbeats so operators can observe stalled sinks.
-                writeSnapshotFile(snapshot: current, environment: environment, logger: logger)
-                lastEmittedSnapshot = current
+                let statistics = writerStatistics?()
+                guard current != lastEmittedSnapshot || statistics != lastEmittedWriterStatistics else { return }
+                if current != lastEmittedSnapshot {
+                    writeSnapshotFile(snapshot: current, environment: environment, logger: logger)
+                }
                 do {
-                    try emitStatusEvent(kind: .status, snapshot: current)
+                    try emitStatusEvent(kind: .status, snapshot: current, observability: statistics)
                 } catch {
                     logger.log(.warning, "Failed to emit status snapshot: \(error.localizedDescription)", category: .general)
                 }
@@ -483,12 +487,16 @@ enum PMProxy {
     private static func emitStatusEvent(
         kind: StatusEventKind,
         snapshot: ProxyOrchestratorSnapshot,
-        startupMilliseconds: Int? = nil
+        startupMilliseconds: Int? = nil,
+        observability: [String: RecordWriterStatistics]? = nil
     ) throws {
-        let payload = StatusEvent(kind: kind, snapshot: snapshot, startupMilliseconds: startupMilliseconds, observability: writerStatistics?())
+        let statistics = observability ?? writerStatistics?()
+        let payload = StatusEvent(kind: kind, snapshot: snapshot, startupMilliseconds: startupMilliseconds, observability: statistics)
         let data = try statusEncoder.encode(payload)
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data([0x0A]))
+        lastEmittedSnapshot = snapshot
+        lastEmittedWriterStatistics = statistics
     }
 
     private static let snapshotFileEncoder: JSONEncoder = CanonicalJSON.encoder(prettyPrinted: true)

@@ -46,3 +46,4 @@ jobs:
         "$conduit_bin_dir/pm-sim" pac-fetch-bounds
         "$conduit_bin_dir/pm-sim" bounded-writers
         python3 scripts/test-dns-shutdown.py "$conduit_bin_dir/pm-dns"
+        python3 scripts/test-status-stream.py "$conduit_bin_dir/pm-proxy"

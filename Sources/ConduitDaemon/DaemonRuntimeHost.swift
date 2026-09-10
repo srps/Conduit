@@ -480,10 +480,7 @@ final class DaemonRuntimeHost {
     func flushEvents() {
         let auditFlushed = orchestrator.auditSink.flush(timeout: 2)
         reportWriterLoss()
-        let eventsFlushed = eventWriter.flush()
-        if !auditFlushed || !eventsFlushed {
-            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "observability.flush_timeout",
-                detail: "auditFlushed=\(auditFlushed) eventsFlushed=\(eventsFlushed)"))
+        if !eventWriter.flushReportingTimeout(auditFlushed: auditFlushed, eventLog: orchestrator.eventLog) {
             logger.log(.warning, "Observability shutdown flush deadline exceeded.", category: .general)
         }
         logger.flush(timeout: 2)
