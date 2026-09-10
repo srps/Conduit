@@ -45,6 +45,7 @@ enum BoundedWriterScenarios {
               writer.statistics.writtenRecords == 16 else {
             throw Failure(message: "Storage capacity failed to recover after unblocking")
         }
+        try shutdownTimeoutPersistence()
         let appendNote = try appendAmplification()
         return ScenarioResult(
             name: "bounded-writers", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
@@ -56,6 +57,25 @@ enum BoundedWriterScenarios {
 
     private static func storageStarted(_ signal: DispatchSemaphore) -> Bool {
         signal.wait(timeout: .now() + 2) == .success
+    }
+
+    private static func shutdownTimeoutPersistence() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("conduit-flush-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("events.ndjson")
+        let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink())
+        let events = RuntimeEventLog(capacity: 8)
+        events.setSink { writer.record($0) }
+        guard !writer.flushReportingTimeout(auditFlushed: false, eventLog: events) else {
+            throw Failure(message: "Shutdown concealed the audit flush failure")
+        }
+        let rows = try Data(contentsOf: url).split(separator: 0x0A).map {
+            try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0))
+        }
+        guard rows.count == 1, rows.first?.event == "observability.flush_timeout",
+              writer.statistics.pendingRecords == 0 else {
+            throw Failure(message: "Shutdown returned before persisting its timeout event")
+        }
     }
 
     private static func appendAmplification() throws -> String {

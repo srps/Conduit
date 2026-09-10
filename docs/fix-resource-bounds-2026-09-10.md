@@ -26,7 +26,7 @@ Event, audit, and console writers share a bounded queue implementation. Defaults
 
 Disk writes append batches rather than reading and rewriting the retained file for every record. A full generation is truncated before the next generation begins; only the current generation is retained, so history may shrink sharply at a boundary. A torn trailing record or oversized existing file retires that generation before new JSON is appended. The event/audit file caps remain 1 MiB/10 MiB by default. This is bounded retention, not a lossless audit archive or an fsync durability guarantee.
 
-Flush waits have a two-second default deadline. A timed-out OS write is not forcibly cancelled; retained memory remains bounded. Hosts drain queued records at termination and expose loss through status statistics or structured observations. Existing synchronous periodic stdout status output remains outside this stderr/file-writer fix. The app's existing asynchronous final connection teardown still limits which final close records have been produced before process termination.
+Flush waits have a two-second default deadline. Both daemon shutdown paths allow one final bounded event drain after recording a timeout, without recursively producing more timeout events. A timed-out OS write is not forcibly cancelled; retained memory remains bounded. Hosts drain queued records at termination and expose loss through status statistics or structured observations. Periodic status output emits only when the snapshot or writer statistics change, at no more than 10 Hz. Writer-only changes do not rewrite the snapshot file, and ticks run directly on the main-queue timer without queuing another task. Existing synchronous stdout backpressure remains outside this stderr/file-writer fix. The app's existing asynchronous final connection teardown still limits which final close records have been produced before process termination.
 
 `pm-sim bounded-writers` blocks a storage callback while a real NIO loop produces records, checks retained byte/record caps and loss counts, proves a flush deadline, and checks recovery. A real file test counts bytes passed to file writes, exercises rotation, and decodes retained NDJSON. XCTest adds failure handling, torn-tail recovery, and recording-sink limits.
 
@@ -56,3 +56,9 @@ DEVELOPER_DIR="/Library/Developer/CommandLineTools" xcrun swift build \
 ```
 
 The performance script used a temporary wrapper that adds those SDK/build-system flags, preserving the existing performance thresholds. Tests use synthetic data, temporary directories, and loopback peers; they do not install or invoke the privileged helper or alter the running app, Keychain, VPN, or system network settings.
+
+### PR #29 review follow-ups
+
+The first Xcode run executed 1,564 tests (three skipped) and found one regression: a valid SOCKS greeting coalesced with an oversized request no longer received its method-selection response. The bounded parser now preserves that response using only a bounded greeting prefix and still rejects the request before routing; fragmented greeting cases have regressions too.
+
+Devin and Codex identified the shutdown timeout-event ordering; both daemon paths now use the same bounded final-drain operation. Codex also identified unconditional status heartbeat flooding; changed-value suppression and a 100 ms minimum interval now preserve writer-only observability without idle output floods. `scripts/test-status-stream.py` covers tiny requested intervals, unchanged snapshots, writer-only changes after rejected reload, and the publication rate ceiling.

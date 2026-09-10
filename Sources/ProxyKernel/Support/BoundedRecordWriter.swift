@@ -11,7 +11,7 @@ package struct RecordWriterLimits: Sendable {
     package init() {}
 }
 
-package struct RecordWriterStatistics: Sendable, Codable {
+package struct RecordWriterStatistics: Sendable, Codable, Equatable {
     package var pendingRecords = 0
     package var pendingBytes = 0
     package var writtenRecords: UInt64 = 0

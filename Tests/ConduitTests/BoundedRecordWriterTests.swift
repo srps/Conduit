@@ -133,6 +133,25 @@ final class BoundedRecordWriterTests: XCTestCase {
         XCTAssertEqual(sink.records().count, 1)
     }
 
+    func testShutdownPersistsAuditTimeoutBeforeReturning() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("events.ndjson")
+        let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink())
+        let events = RuntimeEventLog(capacity: 8)
+        events.setSink { writer.record($0) }
+        XCTAssertFalse(writer.flushReportingTimeout(auditFlushed: false, eventLog: events))
+        let rows = try Data(contentsOf: url).split(separator: 0x0A).map {
+            try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0))
+        }
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.event, "observability.flush_timeout")
+        XCTAssertEqual(rows.first?.detail, "auditFlushed=false eventsFlushed=true")
+        XCTAssertEqual(writer.statistics.pendingRecords, 0)
+        XCTAssertTrue(writer.flushReportingTimeout(auditFlushed: true, eventLog: events))
+        XCTAssertEqual(events.totalCount, 1)
+    }
+
     func testRecordingLogSinkDropsAtCapacityAndReportsLoss() {
         let sink = RecordingLogSink(capacity: 2)
         for i in 0..<3 { sink.log(.warning, "entry-\(i)", category: .general) }
