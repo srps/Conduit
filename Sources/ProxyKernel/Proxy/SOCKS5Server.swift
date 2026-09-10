@@ -199,8 +199,17 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         // RFC 1928: greeting <= 257 bytes, CONNECT request <= 262 bytes.
-        // Reject coalesced payload before growing the negotiation buffer.
+        // A coalesced valid greeting still receives its method selection,
+        // even when the later request/payload exceeds the negotiation bound.
+        // Copy only the greeting's bounded prefix; never route the request.
         guard buf.readableBytes <= 519 - accumulated.readableBytes else {
+            if state == .greeting {
+                let prefixLength = min(buf.readableBytes, 257 - accumulated.readableBytes)
+                if var prefix = buf.readSlice(length: prefixLength) {
+                    accumulated.writeBuffer(&prefix)
+                }
+                _ = handleGreeting(context: context, buf: &accumulated)
+            }
             let event = RuntimeEvent(kind: .connection, event: "connection.socks5_handshake_oversized")
             eventSink?(event)
             logger.log(.warning, event.event, category: .proxy)
