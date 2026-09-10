@@ -55,13 +55,8 @@ package final class CFPacScriptEvaluator: PacScriptEvaluating, @unchecked Sendab
     private static let runLoopModeName = "Conduit.CFPACEvaluator"
 
     package init(pacScript: String) throws {
-        // CFNetwork doesn't validate scripts at construction; it parses on
-        // each invocation. We could parse-test by running FindProxyForURL
-        // against a dummy URL once here, but that's wasted work — most
-        // scripts are valid; parse errors surface on the first real call
-        // via the callback's `CFError` path and become
-        // `PACResolverError.evaluationFailed`. Invalid scripts surface on
-        // first `resolveProxyChain`, not at init.
+        // CFNetwork parses on invocation. The production makeEvaluator
+        // factory probes a candidate before handing it to the routing cache.
         self.script = pacScript
     }
 
@@ -361,34 +356,101 @@ package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
     }
 
     package func fetchPAC(from urlString: String) async throws -> String {
+        try Task.checkCancellation()
         guard let url = URL(string: urlString) else {
             throw PACResolverError.invalidURL
-        }
-
-        if url.isFileURL {
-            return try String(contentsOf: url, encoding: .utf8)
         }
         guard url.user == nil, url.password == nil else {
             throw PACResolverError.fetchFailed("PAC URLs must not contain embedded credentials.")
         }
 
+        if url.isFileURL {
+            let read = Task.detached(priority: .utility) { try Self.readFile(url) }
+            return try await withTaskCancellationHandler {
+                try await read.value
+            } onCancel: {
+                read.cancel()
+            }
+        }
         if url.scheme?.lowercased() == "http" {
-            return try await insecureFetcher(url)
+            return try await fetchInsecure(url)
+        }
+
+        guard url.scheme?.lowercased() == "https" else {
+            throw PACResolverError.invalidURL
         }
 
         do {
-            let (data, _) = try await session.data(from: url)
-            return String(decoding: data, as: UTF8.self)
+            return try await fetchHTTPS(url)
         } catch {
             if Self.isATSError(error) {
-                return try await insecureFetcher(url)
+                return try await fetchInsecure(url)
             }
             throw error
         }
     }
 
+    private func fetchHTTPS(_ url: URL) async throws -> String {
+        let download = PACBoundedDownload()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                download.start(url: url, configuration: session.configuration, continuation: continuation)
+            }
+        } onCancel: {
+            download.cancel()
+        }
+    }
+
+    private func fetchInsecure(_ url: URL) async throws -> String {
+        // Injected transports must bound their own reads (the app's curl
+        // transport does); also enforce the contract on their returned script.
+        let script = try await insecureFetcher(url)
+        try Task.checkCancellation()
+        guard script.utf8.count <= PACFetchLimits.maxScriptBytes else { throw Self.sizeLimitError }
+        return script
+    }
+
+    fileprivate static var sizeLimitError: PACResolverError {
+        .fetchFailed("PAC script exceeds the \(PACFetchLimits.maxScriptBytes)-byte limit.")
+    }
+
+    private static func readFile(_ url: URL) throws -> String {
+        try Task.checkCancellation()
+        let info = try url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+        guard info.isRegularFile == true else {
+            throw PACResolverError.fetchFailed("PAC file must be a regular file.")
+        }
+        guard (info.fileSize ?? 0) <= PACFetchLimits.maxScriptBytes else { throw sizeLimitError }
+        let handle = try FileHandle(forReadingFrom: url)
+        // FileHandle closes its descriptor on deinit, including thrown reads.
+        var data = Data()
+        while true {
+            try Task.checkCancellation()
+            // Probe one byte beyond the ceiling even if the file grew after
+            // its metadata was read. Never allocate the whole untrusted file.
+            let count = min(16_384, PACFetchLimits.maxScriptBytes - data.count + 1)
+            guard let chunk = try handle.read(upToCount: count), !chunk.isEmpty else { break }
+            guard chunk.count <= PACFetchLimits.maxScriptBytes - data.count else { throw sizeLimitError }
+            data.append(chunk)
+        }
+        try handle.close()
+        try Task.checkCancellation()
+        guard let script = String(data: data, encoding: .utf8) else {
+            throw PACResolverError.fetchFailed("PAC file is not valid UTF-8.")
+        }
+        return script
+    }
+
     package func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating {
-        try CFPacScriptEvaluator(pacScript: pacScript)
+        let evaluator = try CFPacScriptEvaluator(pacScript: pacScript)
+        // CFNetwork construction alone does not parse JavaScript. Probe the
+        // candidate before replacing the last working evaluator so a 200 HTML
+        // error page, syntax error, or missing FindProxyForURL fails refresh.
+        // The literal needs no DNS; script-provided DNS work still observes
+        // the normal evaluation deadline. This cannot validate every branch.
+        _ = try evaluator.resolveProxyChain(for: URL(string: "http://127.0.0.1/")!)
+        return evaluator
     }
 
     package func routeChain(for entries: [String]) -> [PACRoute] {
@@ -436,5 +498,100 @@ package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
         components.user = nil
         components.password = nil
         return components.string ?? "<redacted-url>"
+    }
+}
+
+/// A single bounded transfer. URLSession's response delegate is the admission
+/// boundary: neither advertised overflow nor HTTP errors need a body byte to
+/// fail. State also admits cancellation before start installs its continuation.
+private final class PACBoundedDownload: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+    private var data = Data()
+    private var continuation: CheckedContinuation<String, Error>?
+    private var session: URLSession?
+
+    func start(url: URL, configuration: URLSessionConfiguration,
+               continuation: CheckedContinuation<String, Error>) {
+        let cancelled = lock.withLock {
+            guard !completed else { return true }
+            self.continuation = continuation
+            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+            self.session = session
+            session.dataTask(with: url).resume()
+            return false
+        }
+        if cancelled { continuation.resume(throwing: CancellationError()) }
+    }
+
+    func cancel() { finish(.failure(CancellationError())) }
+
+    private func finish(_ result: Result<String, Error>) {
+        let resources = lock.withLock { () -> (CheckedContinuation<String, Error>?, URLSession?) in
+            guard !completed else { return (nil, nil) }
+            completed = true
+            let resources = (continuation, session)
+            continuation = nil
+            session = nil
+            data = Data()
+            return resources
+        }
+        // Invalidation breaks URLSession's retention of its delegate on every
+        // exit (success, response/body rejection, transport error, cancellation).
+        resources.1?.invalidateAndCancel()
+        resources.0?.resume(with: result)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void) {
+        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            finish(.failure(PACResolverError.fetchFailed("PAC HTTP response was not successful (status \(status)).")))
+            completionHandler(.cancel)
+            return
+        }
+        guard response.expectedContentLength <= PACFetchLimits.maxScriptBytes else {
+            finish(.failure(CFPACEvaluator.sizeLimitError))
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(lock.withLock { completed } ? .cancel : .allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive chunk: Data) {
+        let overflow = lock.withLock {
+            guard !completed else { return false }
+            guard chunk.count <= PACFetchLimits.maxScriptBytes - data.count else { return true }
+            data.append(chunk)
+            return false
+        }
+        if overflow { finish(.failure(CFPACEvaluator.sizeLimitError)) }
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            finish(.failure(error))
+        } else {
+            let script = lock.withLock { String(decoding: data, as: UTF8.self) }
+            finish(.success(script))
+        }
+    }
+
+    // Preserve HTTPS redirects while refusing credential-bearing URLs and
+    // scheme downgrades before sending the redirected request.
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        guard let url = request.url, url.scheme?.lowercased() == "https",
+              url.user == nil, url.password == nil else {
+            finish(.failure(PACResolverError.fetchFailed(
+                "PAC redirect rejected (status \(response.statusCode)): HTTPS without embedded credentials is required."
+            )))
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 }
