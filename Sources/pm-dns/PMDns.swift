@@ -58,6 +58,7 @@ enum PMDns {
             let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
             let failureLogger = ConsoleLogSink(minLevel: .notice)
             failure.report(to: failureLogger)
+            failureLogger.flush()
             exit(1)
         }
         let port = parseIntArg("--port", from: args) ?? config.dnsForwarderPort
@@ -89,6 +90,7 @@ enum PMDns {
                 logger.log(.notice, "pm-dns running on \(host):\(boundPort). Press Ctrl-C to stop.", category: .general)
             } catch {
                 logger.log(.error, "Failed to start on \(host):\(port): \(error.displayDescription)", category: .general)
+                logger.flush()
                 exit(1)
             }
         }
@@ -111,6 +113,7 @@ enum PMDns {
                     signalSources?.interrupt.cancel()
                     signalSources?.terminate.cancel()
                     signalSources = nil
+                    logger.flush()
                     exit(0)
                 }
             }

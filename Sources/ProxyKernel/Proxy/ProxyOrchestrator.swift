@@ -1945,6 +1945,14 @@ package final class ProxyOrchestrator {
     }
 
     package func performTerminationCleanup() {
+        // AppKit termination is synchronous. Drain already accepted audit rows
+        // within a deadline; final channel-close callbacks remain asynchronous.
+        if !auditSink.flush(timeout: 2) {
+            let event = RuntimeEvent(kind: .health, event: "observability.audit_flush_timeout",
+                                     detail: "Queued audit records did not drain before termination deadline.")
+            eventLog.append(event)
+            logStore.log(.warning, event.detail ?? event.event, category: .general)
+        }
         healthChecker.stop()
         stopDirectModeReprobeTimer()
         stopSnapshotCoalesceTimer()
