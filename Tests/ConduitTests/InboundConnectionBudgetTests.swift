@@ -38,6 +38,47 @@ final class InboundConnectionBudgetTests: XCTestCase {
         XCTAssertEqual(budget.count, 0)
         XCTAssertEqual(events.events.filter { $0.event == "connection.inbound_limit_rejected" }.count, 2)
     }
+    func testNonpositiveLiveLimitsRejectWithoutLosingReservationsAndRecover() throws {
+        for invalidLimit in [0, -1, Int.min] {
+            let budget = InboundConnectionBudget()
+            let events = RuntimeEventLog(capacity: 8)
+            let logger = DiscardingLogSink()
+            var config = GenericDefaults.shared.makeConfig()
+            config.inboundConnectionMaxLimit = 1
+            let existing = EmbeddedChannel()
+            XCTAssertTrue(budget.admit(existing, protocolName: "http", config: config,
+                                       logger: logger, eventSink: events.append))
+
+            config.inboundConnectionMaxLimit = invalidLimit
+            let rejected = EmbeddedChannel()
+            XCTAssertFalse(budget.admit(rejected, protocolName: "socks5", config: config,
+                                        logger: logger, eventSink: events.append))
+            XCTAssertEqual(budget.count, 1, "Invalid live limit must preserve existing reservations")
+            try rejected.close().wait()
+            rejected.embeddedEventLoop.run()
+            XCTAssertEqual(budget.count, 1, "Rejected close must not release another peer's reservation")
+            try existing.close().wait()
+            existing.embeddedEventLoop.run()
+            XCTAssertEqual(budget.count, 0)
+
+            let replacement = EmbeddedChannel()
+            XCTAssertFalse(budget.admit(replacement, protocolName: "http", config: config,
+                                        logger: logger, eventSink: events.append))
+            XCTAssertEqual(budget.count, 0, "Empty budget must still reject a nonpositive limit")
+            let rejections = events.events.filter { $0.event == "connection.inbound_limit_rejected" }
+            XCTAssertEqual(rejections.count, 2)
+            XCTAssertTrue(rejections.allSatisfy { $0.detail?.contains("limit=\(invalidLimit)") == true })
+
+            config.inboundConnectionMaxLimit = 1
+            XCTAssertTrue(budget.admit(replacement, protocolName: "http", config: config,
+                                       logger: logger, eventSink: events.append))
+            XCTAssertEqual(budget.count, 1)
+            try replacement.close().wait()
+            replacement.embeddedEventLoop.run()
+            XCTAssertEqual(budget.count, 0)
+        }
+    }
+
     func testSOCKSRequestDeadlineDoesNotResetAfterProgress() throws {
         let loop = EmbeddedEventLoop()
         let events = RuntimeEventLog(capacity: 8)

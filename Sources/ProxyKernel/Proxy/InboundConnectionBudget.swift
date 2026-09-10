@@ -19,7 +19,8 @@ final class InboundConnectionBudget: Sendable {
         logger: any LogSink, eventSink: (@Sendable (RuntimeEvent) -> Void)?
     ) -> Bool {
         let limit = config.inboundConnectionMaxLimit
-        precondition(limit > 0)
+        // Live UI edits can expose an invalid draft before config validation.
+        // A nonpositive limit rejects new peers without disturbing reservations.
         let decision = state.withLockedValue { state -> (accepted: Bool, count: Int, warn: Bool) in
             guard state.count < limit else { return (false, state.count, false) }
             state.count += 1
