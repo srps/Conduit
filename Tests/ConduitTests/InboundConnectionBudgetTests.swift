@@ -71,6 +71,35 @@ final class InboundConnectionBudgetTests: XCTestCase {
         _ = try channel.finish(acceptAlreadyClosed: true)
     }
 
+    func testSOCKSOversizedPipelinedPayloadPreservesGreetingReply() throws {
+        // Cover coalescing, a split header, and the maximum 255-method list
+        // split before its last method. None may start request routing.
+        for (methodCount, prefixLength) in [(1, 0), (1, 1), (1, 2), (255, 256)] {
+            let loop = EmbeddedEventLoop()
+            let events = RuntimeEventLog(capacity: 8)
+            let channel = try makeSOCKSChannel(loop: loop, events: events)
+            var bytes = channel.allocator.buffer(capacity: 1040)
+            let greeting: [UInt8] = [5, UInt8(methodCount)] + Array(repeating: 0, count: methodCount)
+            if prefixLength > 0 {
+                bytes.writeBytes(greeting.prefix(prefixLength))
+                try channel.writeInbound(bytes)
+                XCTAssertNil(try channel.readOutbound(as: ByteBuffer.self))
+                bytes.clear()
+            }
+            bytes.writeBytes(greeting.dropFirst(prefixLength))
+            bytes.writeBytes([UInt8(5), 1, 0, 1, 127, 0, 0, 1, 0, 80])
+            bytes.writeRepeatingByte(0x41, count: 1024)
+            try channel.writeInbound(bytes)
+            let reply = try channel.readOutbound(as: ByteBuffer.self)
+            XCTAssertEqual(reply.map { Array($0.readableBytesView) }, [5, 0])
+            XCTAssertNil(try channel.readOutbound(as: ByteBuffer.self), "Early payload must not receive CONNECT success")
+            XCTAssertTrue(events.events.contains { $0.event == "connection.socks5_handshake_oversized" })
+            loop.advanceTime(by: .seconds(2))
+            XCTAssertFalse(events.events.contains { $0.event == "connection.socks5_handshake_timeout" })
+            _ = try channel.finish(acceptAlreadyClosed: true)
+        }
+    }
+
     private func makeSOCKSChannel(loop: EmbeddedEventLoop, events: RuntimeEventLog) throws -> EmbeddedChannel {
         let config = GenericDefaults.shared.makeConfig()
         let logger = DiscardingLogSink()
@@ -82,7 +111,7 @@ final class InboundConnectionBudgetTests: XCTestCase {
             connectCoordinator: coordinator, logger: logger, group: loop,
             directModeProvider: { (true, .noUpstreamsConfigured) }, pacRoutingEngine: nil,
             configProvider: { config }, gatewayMode: false, handshakeTimeout: .seconds(1),
-            eventSink: events.append, onConnectionOpened: { _ in }, onConnectionClosed: { _ in },
+            eventSink: events.append, onConnectionOpened: { _ in XCTFail("Negotiation rejection started routing") }, onConnectionClosed: { _ in },
             onConnectionActivity: { _ in }
         ), loop: loop)
     }

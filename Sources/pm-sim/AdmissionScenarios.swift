@@ -100,10 +100,11 @@ enum AdmissionScenarios {
             let invalid = try await connect(socks)
             try await write(invalid, [4, 1, 0])
             try await eventually("Malformed greeting did not release permit") { !invalid.isActive && server.inboundConnectionCount == 2 }
-            let oversized = try await connect(socks)
-            try await write(oversized, Array(repeating: 0, count: 520))
-            try await eventually("Oversized negotiation did not release permit") { !oversized.isActive && server.inboundConnectionCount == 2 }
             let port = UInt16(origin.port)
+            let oversized = try await connect(socks)
+            let greetingAndRequest: [UInt8] = [5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1, UInt8(port >> 8), UInt8(port & 255)]
+            try await write(oversized, greetingAndRequest + Array(repeating: 0x41, count: 1024))
+            try await eventually("Oversized negotiation did not release permit") { !oversized.isActive && server.inboundConnectionCount == 2 }
             let early = try await connect(socks)
             try await write(early, [5, 1, 0, 5, 1, 0, 1, 127, 0, 0, 1, UInt8(port >> 8), UInt8(port & 255), 42])
             try await eventually("Early payload did not release permit") { !early.isActive && server.inboundConnectionCount == 2 }
