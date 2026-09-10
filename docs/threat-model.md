@@ -24,6 +24,8 @@ Boundary: PAC text is remote input. It enters through `CFPACEvaluator` and is co
 
 Existing controls: PAC execution uses macOS CFNetwork rather than JavaScriptCore; PAC routing has evaluation timeout behavior, route cache bounds, and a local PAC serving layer that keeps browsers pointed at a stable loopback PAC.
 
+Fetch bounds: HTTPS and regular-file PAC reads enforce the shared 256 KiB ceiling during accumulation; HTTPS rejects unsuccessful status responses and cancels incomplete transfers. Refresh failures retain the previous evaluator. Candidate evaluation checks basic script validity before installation, within the existing evaluation timeout; it cannot validate every script branch.
+
 Current gaps: PAC source authenticity is still inherited from the configured URL and the corporate network. Audit logging of PAC decisions is planned but not shipped.
 
 Planned work: connection audit log, upstream certificate pinning, and `pm-sim pac-fallback`.
@@ -83,6 +85,8 @@ Asset: localhost listener availability and system proxy correctness.
 Boundary: clients connect to local HTTP/SOCKS/DNS/PAC listeners; system proxy settings point clients at those listeners.
 
 Existing controls: listeners bind loopback by default; gateway mode is explicit; port validation occurs before helper/relay casts; `ready.json` and snapshots expose actual bound ports; port retry and restart paths recover quick restarts.
+
+Admission bounds: HTTP and SOCKS5 share `inboundConnectionMaxLimit`, including idle accepted peers. SOCKS greeting and CONNECT-request parsing share a ten-second total deadline, which partial progress cannot reset; negotiation buffering is capped at the protocol maximum. Lowering the admission cap rejects new arrivals without evicting existing sessions.
 
 Current gaps: daemon-first LaunchAgent ownership and socket/control-plane lifecycle are not shipped yet, so the GUI still owns runtime lifetime in app mode.
 

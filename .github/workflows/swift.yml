@@ -37,3 +37,12 @@ jobs:
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
         "$conduit_bin_dir/pm-sim" forced-proxy-precedence
+    - name: Resource bounds and standalone shutdown regressions
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      run: |
+        conduit_bin_dir="$(xcrun swift build --show-bin-path)"
+        "$conduit_bin_dir/pm-sim" shared-inbound-budget
+        "$conduit_bin_dir/pm-sim" pac-fetch-bounds
+        "$conduit_bin_dir/pm-sim" bounded-writers
+        python3 scripts/test-dns-shutdown.py "$conduit_bin_dir/pm-dns"
