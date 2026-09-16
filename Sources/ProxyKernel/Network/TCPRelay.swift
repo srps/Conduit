@@ -35,7 +35,11 @@ package final class TCPRelay: @unchecked Sendable {
     /// See `UDPRelay.generation`.
     private var generation: UInt64 = 0
     private let lock = NSLock()
-    private let sessionFDTracker = TCPRelaySessionFDTracker()
+    /// One tracker per start. A session evicted by `stop()` still exits on
+    /// its own and asks its tracker whether it owns its descriptors; with a
+    /// tracker shared across starts it would find the next relay's sessions
+    /// registered under the same numbers and close them.
+    private var sessionFDTracker = TCPRelaySessionFDTracker()
     private var clientThreads: [Thread] = []
 
     package init() {}
@@ -85,14 +89,16 @@ package final class TCPRelay: @unchecked Sendable {
             throw TCPRelayError.listenFailed(errnoMessage)
         }
 
+        let tracker = TCPRelaySessionFDTracker()
         let generation = lock.withLock { () -> UInt64 in
             self.generation &+= 1
             listenFD = lfd
+            sessionFDTracker = tracker
             return self.generation
         }
 
         let thread = Thread { [weak self] in
-            self?.acceptLoop(generation: generation, listenFD: lfd, targetPort: targetPort, targetHost: host)
+            self?.acceptLoop(generation: generation, listenFD: lfd, tracker: tracker, targetPort: targetPort, targetHost: host)
         }
         thread.name = "tcp-relay-\(listenPort)->\(targetPort)"
         thread.qualityOfService = .userInteractive
@@ -101,16 +107,17 @@ package final class TCPRelay: @unchecked Sendable {
     }
 
     package func stop() {
-        let (lfd, thread, threads) = lock.withLock {
+        let (lfd, thread, threads, tracker) = lock.withLock {
             let lfd = listenFD
             let thread = acceptThread
             let threads = clientThreads
+            let tracker = sessionFDTracker
             listenFD = -1
             acceptThread = nil
             clientThreads.removeAll()
-            return (lfd, thread, threads)
+            return (lfd, thread, threads, tracker)
         }
-        let sessionFDs = sessionFDTracker.takeAll()
+        let sessionFDs = tracker.takeAll()
         if lfd >= 0 { close(lfd) }
         thread?.cancel()
         for t in threads { t.cancel() }
@@ -135,7 +142,13 @@ package final class TCPRelay: @unchecked Sendable {
         if owned { close(lfd) }
     }
 
-    private func acceptLoop(generation: UInt64, listenFD: Int32, targetPort: Int, targetHost: String) {
+    private func acceptLoop(
+        generation: UInt64,
+        listenFD: Int32,
+        tracker: TCPRelaySessionFDTracker,
+        targetPort: Int,
+        targetHost: String
+    ) {
         while !Thread.current.isCancelled {
             var clientAddr = sockaddr_in()
             var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -190,12 +203,11 @@ package final class TCPRelay: @unchecked Sendable {
             Self.setNoDelay(clientFD)
             Self.setNoDelay(targetFD)
 
-            sessionFDTracker.insert(clientFD, targetFD)
+            tracker.insert(clientFD, targetFD)
 
-            let sessionFDTracker = sessionFDTracker
-            let thread = Thread { [sessionFDTracker] in
+            let thread = Thread { [tracker] in
                 Self.relayBidirectional(fd1: clientFD, fd2: targetFD)
-                let (relayOwnsClient, relayOwnsTarget) = sessionFDTracker.takeOwnership(of: clientFD, targetFD)
+                let (relayOwnsClient, relayOwnsTarget) = tracker.takeOwnership(of: clientFD, targetFD)
                 if relayOwnsClient { close(clientFD) }
                 if relayOwnsTarget { close(targetFD) }
             }
