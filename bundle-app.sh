@@ -20,19 +20,27 @@ for arg in "$@"; do
     esac
 done
 
-BUILD_DIR="$SCRIPT_DIR/.build/${ARCH}-apple-macosx/$BUILD_CONFIG"
-
 echo "Building ($BUILD_CONFIG, $ARCH)..."
 cd "$SCRIPT_DIR"
 # Do not set SWIFTCI_USE_LOCAL_DEPS here. That flag makes swift-nio depend on
 # sibling path checkouts (../swift-atomics, etc.), which SPM treats as
 # unstable and rejects when the root package uses a versioned swift-nio dep.
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
-if [[ "$BUILD_CONFIG" == "release" ]]; then
-    swift build --disable-sandbox -c release
-else
-    swift build --disable-sandbox
-fi
+swift build --disable-sandbox -c "$BUILD_CONFIG"
+
+# Ask SwiftPM where it put the products rather than assuming
+# `.build/<arch>-apple-macosx/<config>`. Xcode 27's build system writes to
+# `.build/out/Products/<Config>` and leaves the old directory untouched, so
+# the assumed path kept a binary from 2026-09-06 that every install since
+# shipped, helper included, while the build above succeeded.
+BUILD_DIR="$(swift build --disable-sandbox -c "$BUILD_CONFIG" --show-bin-path)"
+for product in "$APP_NAME" ConduitHelper pm-dns; do
+    if [[ ! -x "$BUILD_DIR/$product" ]]; then
+        echo "Built product missing: $BUILD_DIR/$product" >&2
+        exit 1
+    fi
+done
+echo "Products: $BUILD_DIR"
 
 echo "Creating app bundle..."
 rm -rf "$APP_DIR"
