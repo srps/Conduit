@@ -40,22 +40,27 @@ package final class AuthCredentialRetry: @unchecked Sendable {
         self.now = now
     }
 
-    /// `auth.initialToken(for:)`, retried per the policy above.
+    /// `auth.initialToken(for:)`, retried per the policy above. `host` is the
+    /// authentication target (the SPN); `outageKey` scopes the outage, and
+    /// callers pass the upstream endpoint so two proxies on one host with
+    /// different ports do not share it. Defaults to `host`.
     package func initialToken(
         from auth: any ProxyAuthenticator,
         host: String,
+        outageKey: String? = nil,
         logger: (any LogSink)? = nil,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) async throws -> String {
+        let key = outageKey ?? host
         var attempt = 0
         while true {
             do {
                 let token = try auth.initialToken(for: host)
-                clearOutage(host: host)
+                clearOutage(host: key)
                 return token
             } catch where error.isCredentialRetryable {
-                guard attempt < attempts, !isInOutage(host: host) else {
-                    markOutage(host: host)
+                guard attempt < attempts, !isInOutage(host: key) else {
+                    markOutage(host: key)
                     throw error
                 }
                 attempt += 1

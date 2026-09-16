@@ -25,6 +25,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     private let onConnectionClosed: @Sendable (UUID) -> Void
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private let onRequestCompleted: @Sendable (Bool, String?) -> Void
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
 
     private let configProvider: () -> ProxyConfig
     private var requestHead: HTTPRequestHead?
@@ -48,11 +49,13 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void,
-        onRequestCompleted: @Sendable @escaping (Bool, String?) -> Void
+        onRequestCompleted: @Sendable @escaping (Bool, String?) -> Void,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
         self.pool = pool
         self.connectCoordinator = connectCoordinator
         self.logger = logger
+        self.eventSink = eventSink
         self.configProvider = configProvider
         self.directModeProvider = directModeProvider
         self.directConnectDetector = directConnectDetector
@@ -836,6 +839,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let linkLocal = LinkLocalConnectPolicy.isLinkLocal(host: host)
         let memoTarget = "\(host):\(port)"
         if linkLocal, let recent = LinkLocalFailureMemo.shared.recentFailure(target: memoTarget) {
+            eventSink?(RuntimeEvent(kind: .connection, event: "direct.link_local_refused",
+                                    detail: "target=\(memoTarget) secondsAgo=\(recent.secondsAgo)"))
             return clientEL.makeFailedFuture(recent)
         }
         let connectTimeout: TimeAmount = linkLocal ? LinkLocalConnectPolicy.connectTimeout : .seconds(10)
