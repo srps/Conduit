@@ -364,7 +364,7 @@ package final class KerberosAuthenticator: ProxyAuthenticator, @unchecked Sendab
 /// if Kerberos fails and NTLM credentials are available.
 /// Only falls back on credential-class errors (missing/expired ticket).
 /// Configuration and integrity errors propagate without downgrading.
-package final class NegotiateAuthenticator: ProxyAuthenticator, @unchecked Sendable {
+package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unchecked Sendable {
     package let scheme = "Negotiate"
 
     /// Callback invoked on successful initial-leg Kerberos token production.
@@ -435,6 +435,13 @@ package final class NegotiateAuthenticator: ProxyAuthenticator, @unchecked Senda
     }
 
     package func initialToken(for host: String) throws -> String {
+        try initialToken(for: host, allowFallback: true).token
+    }
+
+    /// `FallbackDeferringAuthenticator`: with `allowFallback` false a
+    /// credential-unavailable Kerberos failure is thrown instead of answered
+    /// with NTLM, so the kernel's retry can give the ticket a moment to return.
+    package func initialToken(for host: String, allowFallback: Bool) throws -> (token: String, usedFallback: Bool) {
         lock.lock()
         defer { lock.unlock() }
 
@@ -442,12 +449,12 @@ package final class NegotiateAuthenticator: ProxyAuthenticator, @unchecked Senda
             let token = try kerberos.initialToken(for: host)
             usingFallback = false
             onKerberosSuccess?(host)
-            return token
+            return (token, false)
         } catch let kerberosError as KerberosAuthError where kerberosError.isCredentialUnavailable {
-            if let fallback = resolvedFallback() {
+            if allowFallback, let fallback = resolvedFallback() {
                 usingFallback = true
                 onKerberosFallback?(host, kerberosError.fallbackReasonCode)
-                return try fallback.initialToken(for: host)
+                return (try fallback.initialToken(for: host), true)
             }
             throw kerberosError
         }

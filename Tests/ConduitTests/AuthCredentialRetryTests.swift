@@ -131,6 +131,63 @@ final class AuthCredentialRetryTests: XCTestCase {
         XCTAssertFalse(retry.isInOutage(host: "b.example"))
     }
 
+    /// Primary fails `primaryFailures` times, then answers; the fallback
+    /// answers whenever it is allowed. Records each call's `allowFallback`.
+    private final class DeferringAuthenticator: FallbackDeferringAuthenticator, @unchecked Sendable {
+        let scheme = "Negotiate"
+        private let lock = NIOLock()
+        private var remainingPrimaryFailures: Int
+        private(set) var allowFlags: [Bool] = []
+
+        init(primaryFailures: Int) { self.remainingPrimaryFailures = primaryFailures }
+
+        var flags: [Bool] { lock.withLock { allowFlags } }
+
+        func initialToken(for host: String) throws -> String {
+            try initialToken(for: host, allowFallback: true).token
+        }
+
+        func initialToken(for host: String, allowFallback: Bool) throws -> (token: String, usedFallback: Bool) {
+            try lock.withLock {
+                allowFlags.append(allowFallback)
+                if remainingPrimaryFailures > 0 {
+                    remainingPrimaryFailures -= 1
+                    if allowFallback { return ("NTLM token", true) }
+                    throw CredentialGone()
+                }
+                return ("Negotiate token", false)
+            }
+        }
+
+        func processChallenge(headerValues: [String], host: String) throws -> String? { nil }
+        func canHandle(scheme: String) -> Bool { true }
+        func reset() {}
+    }
+
+    func testFallbackIsWithheldUntilTheLastAttempt() async throws {
+        let clock = Clock()
+        let retry = makeRetry(clock)
+
+        // Primary comes back on the second try: no downgrade.
+        let recovers = DeferringAuthenticator(primaryFailures: 1)
+        let token = try await retry.initialToken(from: recovers, host: "proxy.example", outageKey: "proxy.example:8080")
+        XCTAssertEqual(token, "Negotiate token")
+        XCTAssertEqual(recovers.flags, [false, false])
+        XCTAssertFalse(retry.isInOutage(host: "proxy.example:8080"))
+
+        // Primary stays down: the last attempt allows the fallback, and the
+        // downgrade opens an outage so later handshakes go straight to it.
+        let down = DeferringAuthenticator(primaryFailures: 10)
+        let fallback = try await retry.initialToken(from: down, host: "proxy.example", outageKey: "proxy.example:8080")
+        XCTAssertEqual(fallback, "NTLM token")
+        XCTAssertEqual(down.flags, [false, false, true])
+        XCTAssertTrue(retry.isInOutage(host: "proxy.example:8080"))
+
+        let next = DeferringAuthenticator(primaryFailures: 10)
+        _ = try await retry.initialToken(from: next, host: "proxy.example", outageKey: "proxy.example:8080")
+        XCTAssertEqual(next.flags, [true], "inside the outage the fallback is allowed at once")
+    }
+
     func testOtherAuthFailuresAreNotRetried() async throws {
         let clock = Clock()
         let retry = makeRetry(clock)

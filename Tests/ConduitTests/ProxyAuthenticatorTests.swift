@@ -241,6 +241,23 @@ final class ProxyAuthenticatorTests: XCTestCase {
         XCTAssert(token.hasPrefix("NTLM "), "Should fall back to NTLM when Kerberos ticket unavailable")
     }
 
+    /// The kernel's retry withholds the fallback while it retries Kerberos,
+    /// then allows it; the authenticator reports which scheme answered.
+    func testNegotiateAuthenticatorWithholdsNTLMWhenFallbackIsNotAllowed() throws {
+        let creds = ProxyCredentials(
+            username: "user", domain: "DOMAIN", workstation: "WS",
+            ntHash: SecretBytes.repeating(0xAA, count: 16)
+        )
+        let auth = NegotiateAuthenticator(ntlmFallback: NTLMAuthenticator(credentials: creds))
+
+        XCTAssertThrowsError(try auth.initialToken(for: "proxy.example.com", allowFallback: false)) { error in
+            XCTAssertTrue(error.isCredentialUnavailable, "the Kerberos failure surfaces so the retry can wait on it: \(error)")
+        }
+        let result = try auth.initialToken(for: "proxy.example.com", allowFallback: true)
+        XCTAssertTrue(result.usedFallback)
+        XCTAssert(result.token.hasPrefix("NTLM "))
+    }
+
     func testNegotiateAuthenticatorWithoutFallbackThrowsWhenKerberosUnavailable() {
         let auth = NegotiateAuthenticator(ntlmFallback: nil)
         XCTAssertThrowsError(try auth.initialToken(for: "proxy.example.com")) { error in

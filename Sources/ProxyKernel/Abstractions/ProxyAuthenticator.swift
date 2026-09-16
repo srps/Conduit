@@ -31,3 +31,16 @@ package protocol ProxyAuthenticator: AnyObject, Sendable {
     /// Discard any connection-scoped state (called on pool eviction or reconnect).
     func reset()
 }
+
+/// An authenticator with a weaker fallback scheme it would otherwise switch
+/// to on a credential failure of its primary one. `AuthCredentialRetry`
+/// withholds the fallback while it retries the primary, then allows it on
+/// the last attempt, so a ticket that returns a moment later is used rather
+/// than downgraded past.
+package protocol FallbackDeferringAuthenticator: ProxyAuthenticator {
+    /// `initialToken(for:)`, with the fallback permitted or not. With
+    /// `allowFallback` false a primary credential failure is thrown. Reports
+    /// whether the token came from the fallback, so the caller can treat a
+    /// downgrade as the primary's outage rather than as a recovery.
+    func initialToken(for host: String, allowFallback: Bool) throws -> (token: String, usedFallback: Bool)
+}
