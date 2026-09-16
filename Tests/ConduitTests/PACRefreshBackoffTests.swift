@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOConcurrencyHelpers
+import NIOPosix
 import XCTest
 @testable import ProxyKernel
 @testable import ProxyPAC
@@ -145,6 +146,72 @@ final class PACRefreshBackoffTests: XCTestCase {
         XCTAssertNil(engine.route(for: "https://github.com/", host: "github.com"), "and its route cache is gone")
 
         gate.signal()
+        for _ in 0..<50 where engine.route(for: "https://github.com/", host: "github.com") == nil {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), .proxy(host: "new.example.com", port: 8080))
+    }
+
+    /// An evaluation of the old PAC that is still running when the URL
+    /// changes: its answer is neither cached nor handed to waiters.
+    func testAnEvaluationInFlightAcrossAURLChangeIsDiscarded() async throws {
+        final class GatedEvaluator: PacScriptEvaluating, @unchecked Sendable {
+            let gate = DispatchSemaphore(value: 0)
+            let answer: [String]
+            init(answer: [String]) { self.answer = answer }
+            func resolveProxyChain(for url: URL) throws -> [String] {
+                gate.wait()
+                return answer
+            }
+        }
+        struct ImmediateEvaluator: PacScriptEvaluating {
+            let answer: [String]
+            func resolveProxyChain(for url: URL) throws -> [String] { answer }
+        }
+        /// The first PAC evaluates behind a gate; any later PAC answers at once.
+        final class GatedResolver: PacEvaluator, @unchecked Sendable {
+            let evaluator = GatedEvaluator(answer: ["PROXY old.example.com:8080"])
+            private let made = NIOLockedValueBox(0)
+            func fetchPAC(from urlString: String) async throws -> String { "" }
+            func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating {
+                let count = made.withLockedValue { $0 += 1; return $0 }
+                return count == 1 ? evaluator : ImmediateEvaluator(answer: ["PROXY new.example.com:8080"])
+            }
+            func routeChain(for entries: [String]) -> [PACRoute] {
+                entries.compactMap { entry in
+                    let parts = entry.split(separator: " ")
+                    guard parts.count == 2, parts[0] == "PROXY" else { return nil }
+                    let hostPort = parts[1].split(separator: ":")
+                    return .proxy(host: String(hostPort[0]), port: Int(hostPort[1]) ?? 0)
+                }
+            }
+        }
+
+        let resolver = GatedResolver()
+        let config = makeConfig()
+        let engine = PACRoutingEngine(
+            configProvider: { config.current },
+            resolver: resolver,
+            refreshInterval: 300,
+            pacLoader: { _ in "" }
+        )
+        try await engine.refresh(force: true)
+
+        // Leader evaluation blocks on the gate with the old PAC.
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let pending = engine.routeChainFuture(for: "https://github.com/", host: "github.com", on: loop)
+        try await Task.sleep(for: .milliseconds(100))
+
+        // The URL changes; a request observes it and drops the old evaluator.
+        config.setPACURL("http://pac.example.com/other.pac")
+        XCTAssertNil(engine.route(for: "https://example.org/", host: "example.org"))
+
+        resolver.evaluator.gate.signal()
+        let routes = try await pending.get()
+        XCTAssertEqual(routes, [PACRoute](), "the superseded PAC's answer does not reach the waiter")
+
+        // The old answer was not cached: once the new PAC is in, the same
+        // request is evaluated afresh and answers with the new route.
         for _ in 0..<50 where engine.route(for: "https://github.com/", host: "github.com") == nil {
             try await Task.sleep(for: .milliseconds(50))
         }
