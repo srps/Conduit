@@ -33,10 +33,18 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-# Newest candidate by default: a helper-only change is built, not bundled or
-# installed, and the reinstall must pick that build up. The installed app used
-# to win whenever it existed, so a rebuilt helper stayed uninstalled.
+# Build products first: a helper-only change is built, not bundled or
+# installed, and the reinstall must pick that build up. Between the two
+# products the newer wins, which is reliable because both are written by
+# the compiler. App bundles come after: copying a bundle refreshes its
+# helper's timestamp without changing its code, so a bundle's mtime says
+# nothing about freshness. `--source installed|local` selects a bundle
+# explicitly.
 HELPER_SRC=""
+for name in installed local release debug; do
+    candidate="${CANDIDATES[$name]}"
+    [ -f "$candidate" ] && echo "  candidate $name: $(date -r "$(stat -f %m "$candidate")" '+%Y-%m-%d %H:%M:%S')  $candidate"
+done
 if [ -n "$SOURCE" ]; then
     HELPER_SRC="${CANDIDATES[$SOURCE]:-}"
     if [ -z "$HELPER_SRC" ] || [ ! -f "$HELPER_SRC" ]; then
@@ -45,16 +53,21 @@ if [ -n "$SOURCE" ]; then
     fi
 else
     NEWEST=0
-    for name in installed local release debug; do
+    for name in release debug; do
         candidate="${CANDIDATES[$name]}"
         [ -f "$candidate" ] || continue
         mtime=$(stat -f %m "$candidate")
-        echo "  candidate $name: $(date -r "$mtime" '+%Y-%m-%d %H:%M:%S')  $candidate"
         if [ "$mtime" -gt "$NEWEST" ]; then
             NEWEST=$mtime
             HELPER_SRC="$candidate"
         fi
     done
+    if [ -z "$HELPER_SRC" ]; then
+        for name in local installed; do
+            candidate="${CANDIDATES[$name]}"
+            if [ -f "$candidate" ]; then HELPER_SRC="$candidate"; break; fi
+        done
+    fi
 fi
 
 if [ -z "$HELPER_SRC" ]; then
