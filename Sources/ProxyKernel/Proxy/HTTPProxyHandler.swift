@@ -854,7 +854,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         return makeBootstrap()
             .connect(host: host, port: port)
             .flatMapErrorThrowing { error in
-                if linkLocal, case ChannelError.connectTimeout = error {
+                if linkLocal, LinkLocalConnectPolicy.isConnectTimeout(error) {
                     LinkLocalFailureMemo.shared.recordFailure(target: memoTarget)
                 }
                 throw error
