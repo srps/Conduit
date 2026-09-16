@@ -92,12 +92,10 @@ enum HelperDaemon {
             // sends its newline would otherwise hold the helper for every
             // other client. Bounded for everyone, not only the refused.
             setReadTimeout(clientFD, seconds: 5)
-            if let refusal = peerRefusal(clientFD) {
-                // Drain the request the client is about to write, so the
-                // reply lands on a socket it is reading rather than racing
-                // its write — then say why, instead of EOF. See
-                // `HelperRefusal` for what EOF used to turn into.
-                _ = readLine(fd: clientFD)
+            // Read the request first: at the loginwindow the verdict depends
+            // on the command, and the reply must not race the client's write.
+            let request = readLine(fd: clientFD).flatMap { try? JSONDecoder().decode(HelperRequest.self, from: $0) }
+            if let refusal = peerRefusal(clientFD, command: request?.command) {
                 switch refusal {
                 case .unauthorized:
                     HelperLog.warning("Rejected connection from unauthorized peer")
@@ -109,17 +107,15 @@ enum HelperDaemon {
                 close(clientFD)
                 continue
             }
-            handleConnection(clientFD)
+            handleConnection(clientFD, request: request)
             close(clientFD)
         }
     }
 
     // MARK: - Connection Handling
 
-    private static func handleConnection(_ fd: Int32) {
-        guard let lineData = readLine(fd: fd),
-              let request = try? JSONDecoder().decode(HelperRequest.self, from: lineData)
-        else {
+    private static func handleConnection(_ fd: Int32, request: HelperRequest?) {
+        guard let request else {
             writeLine(fd: fd, response: .error("Invalid request"))
             return
         }
@@ -222,15 +218,25 @@ enum HelperDaemon {
     /// `nil` means allowed. Root peers are refused as `unauthorized` rather
     /// than deferred: a uid-0 *peer* is never the console user, whatever the
     /// console's state, and nothing is gained by having it wait.
-    private static func peerRefusal(_ fd: Int32) -> HelperRefusal? {
+    /// Reads the peer and the console; `HelperAdmission.refusal` decides.
+    private static func peerRefusal(_ fd: Int32, command: HelperCommand?) -> HelperRefusal? {
         var euid: uid_t = 0
         var egid: gid_t = 0
         guard getpeereid(fd, &euid, &egid) == 0 else { return .unauthorized }
-        guard euid != 0 else { return .unauthorized }
         let consoleUID = consoleUserUID()
-        guard consoleUID != 0 else { return .noConsoleUser }
-        return euid == consoleUID ? nil : .unauthorized
+        if consoleUID != 0 {
+            lastConsoleUID = consoleUID
+        }
+        return HelperAdmission.refusal(
+            peerUID: euid,
+            consoleUID: consoleUID,
+            lastConsoleUID: lastConsoleUID,
+            command: command
+        )
     }
+
+    /// Last non-zero console uid seen. Single accept loop, no threads.
+    nonisolated(unsafe) private static var lastConsoleUID: uid_t?
 
     private static func setReadTimeout(_ fd: Int32, seconds: Int) {
         var tv = timeval(tv_sec: seconds, tv_usec: 0)
