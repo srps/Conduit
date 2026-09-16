@@ -138,6 +138,7 @@ extension ProxyConfig {
         validateNonNegative("health.checkInterval", health.checkInterval, into: &errors)
         validateNonNegative("health.connectionCheckTimeout", health.connectionCheckTimeout, into: &errors)
         validateNonNegative("health.upstreamResponseTimeout", health.upstreamResponseTimeout, into: &errors)
+        validateNonNegative("health.upstreamConnectTimeout", health.upstreamConnectTimeout, into: &errors)
         validateNonNegative("health.directConnectTTL", health.directConnectTTL, into: &errors)
         // Non-negative, not positive: 0 is the documented "no window" value
         // (`UpstreamCircuitBreaker` treats `windowSeconds <= 0` as the guard

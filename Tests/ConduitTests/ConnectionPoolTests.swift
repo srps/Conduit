@@ -489,7 +489,7 @@ final class ConnectionPoolTests: XCTestCase {
 
         var config = ProxyConfig.testFixture()
         config.maxConnections = 1
-        config.connectionCheckTimeoutMS = 500
+        config.upstreamConnectTimeoutSeconds = 0.5
         config.upstreams = [
             UpstreamProxy(name: "Slow", host: "192.0.2.1", port: 9999, priority: 0)
         ]

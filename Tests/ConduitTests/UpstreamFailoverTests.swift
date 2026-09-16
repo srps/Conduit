@@ -12,7 +12,8 @@ final class UpstreamFailoverTests: XCTestCase {
     private func makeConfig(upstreams: [UpstreamProxy]) -> ProxyConfig {
         var config = ProxyConfig.testFixture()
         config.upstreams = upstreams
-        config.connectionCheckTimeoutMS = 200
+        // Bounds each dead-upstream dial; the pool floors it at 500 ms.
+        config.upstreamConnectTimeoutSeconds = 0.2
         return config
     }
 

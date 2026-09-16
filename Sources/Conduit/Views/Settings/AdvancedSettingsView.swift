@@ -66,19 +66,24 @@ struct AdvancedSettingsView: View {
                             field: "health.circuitFailureThreshold", problems: problems,
                             accessibility: "Circuit breaker failure threshold")
                     .help("Failures within the window before the upstream's circuit opens and traffic fails over.")
+                numberField("Upstream Connect Timeout (s)", value: $appState.config.upstreamConnectTimeoutSeconds,
+                            field: "health.upstreamConnectTimeout", problems: problems,
+                            accessibility: "Upstream connect timeout seconds")
+                    .help("How long a TCP connect to an upstream proxy may take before the next upstream is tried. Separate from the probe timeout below.")
             } header: {
                 Text("Failover & Circuit Breaker")
             }
 
             Section {
-                numberField("Connect Timeout (ms)", value: $appState.config.connectionCheckTimeoutMS,
+                numberField("Probe Timeout (ms)", value: $appState.config.connectionCheckTimeoutMS,
                             field: "health.connectionCheckTimeout", problems: problems,
-                            accessibility: "Direct connect timeout milliseconds")
+                            accessibility: "Probe timeout milliseconds")
+                    .help("Bounds health probes and direct-reachability checks only; it does not bound real connections.")
                 numberField("Cache TTL (min)", value: $appState.config.directConnectTTLMinutes,
                             field: "health.directConnectTTL", problems: problems,
                             accessibility: "Direct connect cache TTL minutes")
             } header: {
-                Text("Direct Connect")
+                Text("Probes & Direct Connect")
             }
 
             // Two sliders for the two-stage debounce that absorbs transient
