@@ -328,7 +328,7 @@ package enum CommandRunner {
         private func record(errno code: Int32, while verb: String) {
             var buffer = [CChar](repeating: 0, count: 256)
             let message = strerror_r(code, &buffer, buffer.count) == 0
-                ? String(cString: buffer)
+                ? String(nulTerminated: buffer)
                 : "errno \(code)"
             lock.withLock { failure = "\(verb) the output pipe failed: \(message)" }
         }

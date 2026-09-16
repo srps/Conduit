@@ -263,7 +263,9 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
     ///
     /// The client's TLS session terminates at the origin — we only move bytes,
     /// so its certificate validation is unaffected by the detour.
-    private func relayDirect(context ctx: ChannelHandlerContext, host: String, initialData: ByteBuffer) {
+    private func relayDirect(context: ChannelHandlerContext, host: String, initialData: ByteBuffer) {
+        // Every use is on the context's event loop.
+        nonisolated(unsafe) let ctx = context
         let eventLoop = ctx.eventLoop
         originResolver.resolveOrigin(host: host, port: 443, on: eventLoop)
             .flatMap { address in

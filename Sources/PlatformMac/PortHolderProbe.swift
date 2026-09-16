@@ -135,11 +135,11 @@ package struct PortHolderProbe: ListenerPortHolderProbing {
         // not imported into Swift; spell it out from `MAXPATHLEN`, which is.
         var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
         let pathLength = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
-        let path = pathLength > 0 ? String(cString: pathBuffer) : nil
+        let path = pathLength > 0 ? String(nulTerminated: pathBuffer) : nil
 
         var nameBuffer = [CChar](repeating: 0, count: 256)
         let nameLength = proc_name(pid, &nameBuffer, UInt32(nameBuffer.count))
-        let name = nameLength > 0 ? String(cString: nameBuffer) : nil
+        let name = nameLength > 0 ? String(nulTerminated: nameBuffer) : nil
 
         // `proc_name` truncates to 15 characters, so prefer the executable's
         // own filename when we have the full path.

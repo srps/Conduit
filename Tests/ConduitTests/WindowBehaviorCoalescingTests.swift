@@ -79,7 +79,7 @@ final class WindowBehaviorCoalescingTests: XCTestCase {
     /// guard skipped the second `false` call.
     func testDecideUpdate_reviewerReportedRapidToggleScenario() {
         // Initial state: lastApplied=false (steady), no pending.
-        var lastApplied: Bool? = false
+        let lastApplied: Bool? = false
         var pendingTarget: Bool? = nil
 
         // Call 1: target=true. The first toggle.
@@ -126,7 +126,7 @@ final class WindowBehaviorCoalescingTests: XCTestCase {
     func testDecideUpdate_reverseRapidToggleScenario() {
         // Same shape but mirrored: lastApplied=true, then true → false → true.
         // Must also collapse cleanly to the no-op end state.
-        var lastApplied: Bool? = true
+        let lastApplied: Bool? = true
         var pendingTarget: Bool? = nil
 
         var decision = WindowBehaviorView.decideUpdate(

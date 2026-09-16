@@ -2463,7 +2463,7 @@ package final class ProxyOrchestrator {
                   let port = self.snapshot.bindings.transparentProxyPort else { return }
             let probe = self.relayAcceptProbe
             // A connect can sit out its timeout; not on the main thread.
-            DispatchQueue.global(qos: .utility).async {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
                 let accepting = probe(host, 443)
                 guard !accepting else { return }
                 Task { @MainActor [weak self] in

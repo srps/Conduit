@@ -73,7 +73,7 @@ final class TunnelHealthProbeTests: XCTestCase {
 
         var bound = sockaddr_in()
         var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        withUnsafeMutablePointer(to: &bound) { ptr in
+        _ = withUnsafeMutablePointer(to: &bound) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
                 getsockname(serverFD, sockPtr, &len)
             }

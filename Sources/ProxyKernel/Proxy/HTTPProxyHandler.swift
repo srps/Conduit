@@ -1196,11 +1196,12 @@ final class HTTPUpgradeResponseRelay: ChannelInboundHandler, RemovableChannelHan
         // and fatal-error. After this tick the decoder is in upgrade mode
         // and emits nothing but leftover raw bytes on removal.
         nonisolated(unsafe) let ctx = context
+        let sanitizedHead = sanitized
         context.eventLoop.execute {
             self.runSpliceChain(
                 context: ctx,
                 upstreamRelay: upstreamRelay,
-                sanitizedHead: sanitized
+                sanitizedHead: sanitizedHead
             )
         }
     }

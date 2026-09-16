@@ -1567,7 +1567,7 @@ final class AppState: ObservableObject {
             // block up to 2 s) so a relay that died across sleep/VPN churn is
             // restarted now rather than at the next 30 s health tick.
             let manager = self.systemDNSManager
-            DispatchQueue.global(qos: .utility).async {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
                 let alive = manager.probeLiveness()
                 Task { @MainActor [weak self] in
                     // Authoritative "is the forwarder up?"; the mirror's
