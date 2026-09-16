@@ -1000,10 +1000,13 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     }
 
     /// A pool-exhausted or handshake-limited request never reached the
-    /// upstream: it is logged like any failure but gets no upstream event.
-    /// The limiter emits `auth.handshake_rejected` for its own refusals.
+    /// upstream, so it does not get the upstream's failure event. Pool
+    /// exhaustion is reported as `connection.pool_exhausted`; the limiter
+    /// already emits `auth.handshake_rejected` for its own refusals.
     static func upstreamFailureEvent(_ event: String, for error: Error) -> String? {
-        ConnectionPoolError.isLocalNonUpstreamFailure(error) ? nil : event
+        if ConnectionPoolError.isPoolExhausted(error) { return "connection.pool_exhausted" }
+        if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) { return nil }
+        return event
     }
 
     private func attachDirectTunnel(
