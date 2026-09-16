@@ -49,6 +49,16 @@ final class HelperAdmissionTests: XCTestCase {
         XCTAssertEqual(HelperAdmission.refusal(peerUID: user, consoleUID: 0, lastConsoleUID: user, command: nil), .noConsoleUser)
     }
 
+    /// System-DNS teardown stops the relay first, so a service must at least
+    /// go back to DHCP at the loginwindow; the recorded servers wait.
+    func testDNSResetToDHCPIsAdmittedAtTheLoginwindowButServersAreNot() {
+        XCTAssertNil(HelperAdmission.refusal(peerUID: user, consoleUID: 0, lastConsoleUID: user, command: .setDNSServers, values: ["Wi-Fi", "Empty"]))
+        XCTAssertNil(HelperAdmission.refusal(peerUID: user, consoleUID: 0, lastConsoleUID: user, command: .setDNSServers, values: ["Wi-Fi", "empty"]))
+        XCTAssertEqual(HelperAdmission.refusal(peerUID: user, consoleUID: 0, lastConsoleUID: user, command: .setDNSServers, values: ["Wi-Fi", "10.0.0.53"]), .noConsoleUser)
+        XCTAssertEqual(HelperAdmission.refusal(peerUID: user, consoleUID: 0, lastConsoleUID: user, command: .setDNSServers, values: ["Wi-Fi", "Empty", "10.0.0.53"]), .noConsoleUser)
+        XCTAssertEqual(HelperAdmission.refusal(peerUID: other, consoleUID: 0, lastConsoleUID: user, command: .setDNSServers, values: ["Wi-Fi", "Empty"]), .noConsoleUser)
+    }
+
     func testTeardownClassification() {
         XCTAssertFalse(HelperAdmission.isTeardownOnly(.applyDNS))
         XCTAssertFalse(HelperAdmission.isTeardownOnly(.applySystemProxy))
