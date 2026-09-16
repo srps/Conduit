@@ -5,13 +5,19 @@ import XCTest
 @testable import ProxyKernel
 
 /// `upstream.tunnel_failed` and `upstream.exchange_failed` say the upstream
-/// failed. A request the pool refused locally never reached it and gets no
-/// such event (Codex on PR #42); the limiter already emits
-/// `auth.handshake_rejected` for its own refusals.
+/// failed. A request the pool refused locally never reached it (Codex on
+/// PR #42): exhaustion reports as `connection.pool_exhausted`, and the
+/// limiter already emits `auth.handshake_rejected` for its own refusals.
 final class ConnectFailureEventTests: XCTestCase {
     func testLocalPoolRefusalsGetNoUpstreamEvent() {
-        XCTAssertNil(HTTPProxyHandler.upstreamFailureEvent("upstream.tunnel_failed", for: ConnectionPoolError.poolExhausted))
-        XCTAssertNil(HTTPProxyHandler.upstreamFailureEvent("upstream.exchange_failed", for: ConnectionPoolError.authHandshakeLimitExceeded))
+        XCTAssertEqual(
+            HTTPProxyHandler.upstreamFailureEvent("upstream.tunnel_failed", for: ConnectionPoolError.poolExhausted),
+            "connection.pool_exhausted"
+        )
+        XCTAssertNil(
+            HTTPProxyHandler.upstreamFailureEvent("upstream.exchange_failed", for: ConnectionPoolError.authHandshakeLimitExceeded),
+            "the limiter emits auth.handshake_rejected itself"
+        )
     }
 
     func testUpstreamFailuresKeepTheirEvent() {
