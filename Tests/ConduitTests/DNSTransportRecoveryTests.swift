@@ -56,6 +56,37 @@ final class DNSTransportRecoveryTests: XCTestCase {
         let resets = transportResetEvents(in: orchestrator.eventLog, since: cutoff)
         XCTAssertEqual(resets.count, 1)
         XCTAssertEqual(resets.first?.detail, "source=network_change")
+
+        let change = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_changed" })
+        XCTAssertEqual(change.kind, .health)
+        XCTAssertEqual(change.detail, "satisfied=true dns=reset pac=refresh path=Wi-Fi path changed")
+        XCTAssertLessThanOrEqual(change.timestamp, resets[0].timestamp, "the path event precedes what it decided")
+    }
+
+    /// The event is the record and the log line derives from it (AGENTS:
+    /// structured events first). An unsatisfied path decides "skip" inside
+    /// the same event rather than through a second one (#40).
+    func testNetworkChangeEmitsThePathEventBeforeItsLogLine() async throws {
+        let logger = RecordingLogSink(minLevel: .info)
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        let orchestrator = ProxyOrchestrator(config: config, logger: logger)
+
+        let cutoff = Date()
+        await orchestrator.handleNetworkChange(description: "en0 lost", pathSatisfied: false)
+
+        let change = try XCTUnwrap(orchestrator.eventLog.events.last { $0.event == "network.path_changed" })
+        XCTAssertEqual(change.kind, .health)
+        XCTAssertEqual(change.detail, "satisfied=false dns=idle pac=skipped_unsatisfied path=en0 lost")
+        let line = try XCTUnwrap(logger.entries().last { $0.message.hasPrefix("Network changed: en0 lost") })
+        XCTAssertEqual(line.level, .info)
+        XCTAssertLessThanOrEqual(change.timestamp, line.timestamp)
+        XCTAssertFalse(
+            orchestrator.eventLog.events.contains { $0.timestamp >= cutoff && $0.event == "pac.refresh_skipped" },
+            "the skip is a token on the path event, not a second event"
+        )
+        XCTAssertTrue(transportResetEvents(in: orchestrator.eventLog, since: cutoff).isEmpty, "DNS was not running")
     }
 
     // MARK: - handleSystemWake

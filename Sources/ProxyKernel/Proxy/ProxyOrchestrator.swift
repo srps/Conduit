@@ -1941,15 +1941,20 @@ package final class ProxyOrchestrator {
     ///
     /// An unsatisfied path still recycles the DoH transports but has nothing
     /// to fetch the PAC over. The fetch honours the engine's failure backoff.
+    /// One `network.path_changed` event records the change and both
+    /// decisions; the log line derives from it.
     package func handleNetworkChange(description: String, pathSatisfied: Bool = true) async {
+        let resetsDNS = snapshot.dnsRunState == .running
+        emitEvent(
+            .health, "network.path_changed",
+            detail: "satisfied=\(pathSatisfied) dns=\(resetsDNS ? "reset" : "idle") "
+                + "pac=\(pathSatisfied ? "refresh" : "skipped_unsatisfied") path=\(description)"
+        )
         logStore.log(.info, "Network changed: \(description) (\(pathSatisfied ? "satisfied" : "unsatisfied"))", category: .network)
-        if snapshot.dnsRunState == .running {
+        if resetsDNS {
             resetDNSTransportsForRecovery(source: "network_change")
         }
-        guard pathSatisfied else {
-            emitEvent(.routing, "pac.refresh_skipped", detail: "reason=path_unsatisfied")
-            return
-        }
+        guard pathSatisfied else { return }
         await refreshPACRouting(force: true, honorBackoff: true)
     }
 
