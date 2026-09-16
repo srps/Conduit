@@ -215,6 +215,10 @@ package struct HealthSection: Codable, Equatable, Sendable {
     /// user-visible request wait on a blackholed but still-established upstream
     /// socket. Default 45 s. File-only config for now.
     package var upstreamResponseTimeout: TimeInterval
+    /// TCP connect budget for upstream proxies on the data path, in seconds.
+    /// Default 5 s. Kept apart from `connectionCheckTimeout`, which bounds
+    /// probes and must stay short. `ConnectionPool` floors it at 500 ms.
+    package var upstreamConnectTimeout: TimeInterval
     /// Direct-connect TTL in seconds (stored canonically; legacy JSON uses minutes).
     package var directConnectTTL: TimeInterval
     /// Phase 5 of `docs/design-vpn-flap-resilience.md`. Minimum elapsed time
@@ -286,6 +290,7 @@ package struct HealthSection: Codable, Equatable, Sendable {
         checkInterval: TimeInterval = 30,
         connectionCheckTimeout: TimeInterval = 2,
         upstreamResponseTimeout: TimeInterval = 45,
+        upstreamConnectTimeout: TimeInterval = 5,
         directConnectTTL: TimeInterval = 300,
         circuitBreakerWindowSeconds: TimeInterval = 10,
         circuitFailureThreshold: Int = 5,
@@ -298,6 +303,7 @@ package struct HealthSection: Codable, Equatable, Sendable {
         self.checkInterval = checkInterval
         self.connectionCheckTimeout = connectionCheckTimeout
         self.upstreamResponseTimeout = upstreamResponseTimeout
+        self.upstreamConnectTimeout = upstreamConnectTimeout
         self.directConnectTTL = directConnectTTL
         self.circuitBreakerWindowSeconds = circuitBreakerWindowSeconds
         self.circuitFailureThreshold = circuitFailureThreshold

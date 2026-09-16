@@ -275,6 +275,13 @@ package struct ProxyConfig: Codable, Equatable {
         set { health.upstreamResponseTimeout = newValue }
     }
 
+    /// TCP connect budget for the upstream data path. Separate from
+    /// `connectionCheckTimeoutMS`, which bounds probes.
+    package var upstreamConnectTimeoutSeconds: TimeInterval {
+        get { health.upstreamConnectTimeout }
+        set { health.upstreamConnectTimeout = newValue }
+    }
+
     /// Legacy accessor: minutes as Int. Canonical storage is seconds in `health.directConnectTTL`.
     package var directConnectTTLMinutes: Int {
         get { Int(health.directConnectTTL / 60) }
@@ -398,7 +405,7 @@ package struct ProxyConfig: Codable, Equatable {
         case dnsEntries, noProxyHosts, forceProxyHosts
         case healthCheckURL, healthCheckIntervalSeconds
         case stalledConnectionTimeoutSeconds
-        case maxConnections, connectionCheckTimeoutMS, upstreamResponseTimeoutSeconds, directConnectTTLMinutes
+        case maxConnections, connectionCheckTimeoutMS, upstreamResponseTimeoutSeconds, upstreamConnectTimeoutSeconds, directConnectTTLMinutes
         case circuitBreakerWindowSeconds
         case circuitFailureThreshold
         case circuitBaseOpenIntervalSeconds
@@ -487,6 +494,7 @@ package struct ProxyConfig: Codable, Equatable {
             checkInterval: try c.decodeIfPresent(TimeInterval.self, forKey: .healthCheckIntervalSeconds) ?? g.health.checkInterval,
             connectionCheckTimeout: rawCheckTimeoutMS.map { TimeInterval($0) / 1000.0 } ?? g.health.connectionCheckTimeout,
             upstreamResponseTimeout: try c.decodeIfPresent(TimeInterval.self, forKey: .upstreamResponseTimeoutSeconds) ?? g.health.upstreamResponseTimeout,
+            upstreamConnectTimeout: try c.decodeIfPresent(TimeInterval.self, forKey: .upstreamConnectTimeoutSeconds) ?? g.health.upstreamConnectTimeout,
             directConnectTTL: rawTTLMinutes.map { TimeInterval($0) * 60 } ?? g.health.directConnectTTL,
             circuitBreakerWindowSeconds: try c.decodeIfPresent(TimeInterval.self, forKey: .circuitBreakerWindowSeconds) ?? g.health.circuitBreakerWindowSeconds,
             circuitFailureThreshold: try c.decodeIfPresent(Int.self, forKey: .circuitFailureThreshold) ?? g.health.circuitFailureThreshold,
@@ -564,6 +572,7 @@ package struct ProxyConfig: Codable, Equatable {
         try c.encode(health.checkInterval, forKey: .healthCheckIntervalSeconds)
         try c.encode(Int(health.connectionCheckTimeout * 1000), forKey: .connectionCheckTimeoutMS)
         try c.encode(health.upstreamResponseTimeout, forKey: .upstreamResponseTimeoutSeconds)
+        try c.encode(health.upstreamConnectTimeout, forKey: .upstreamConnectTimeoutSeconds)
         try c.encode(Int(health.directConnectTTL / 60), forKey: .directConnectTTLMinutes)
         try c.encode(health.circuitBreakerWindowSeconds, forKey: .circuitBreakerWindowSeconds)
         try c.encode(health.circuitFailureThreshold, forKey: .circuitFailureThreshold)

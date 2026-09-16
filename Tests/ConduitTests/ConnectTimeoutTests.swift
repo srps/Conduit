@@ -17,7 +17,9 @@ final class ConnectTimeoutTests: XCTestCase {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
 
         var modifiedConfig = ProxyConfig.testFixture()
-        modifiedConfig.connectionCheckTimeoutMS = 200
+        // The probe timeout stays long: it must not bound this connect.
+        modifiedConfig.upstreamConnectTimeoutSeconds = 0.2
+        modifiedConfig.connectionCheckTimeoutMS = 10_000
         modifiedConfig.upstreams = [
             UpstreamProxy(name: "Unreachable", host: "192.0.2.1", port: 9999, priority: 0)
         ]

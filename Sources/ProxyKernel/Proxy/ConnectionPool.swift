@@ -668,7 +668,8 @@ package final class ConnectionPool: @unchecked Sendable {
     private func upstreamProxyBootstrap(
         channelInitializer: (@Sendable (Channel) -> EventLoopFuture<Void>)? = nil
     ) -> ClientBootstrap {
-        let timeoutMS = Int64(max(configProvider().connectionCheckTimeoutMS, 500))
+        // Data-path budget; `connectionCheckTimeoutMS` bounds probes only.
+        let timeoutMS = Int64(max(configProvider().upstreamConnectTimeoutSeconds * 1000, 500))
         let keepalive = TCPKeepaliveConfig.default
         let bootstrap = ClientBootstrap(group: group)
             .resolver(AddressFamilyAwareResolver(group: group))

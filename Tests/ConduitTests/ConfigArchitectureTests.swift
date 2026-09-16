@@ -412,6 +412,7 @@ final class ConfigArchitectureTests: XCTestCase {
     func testHealthUnitsRoundTripViaJSON() throws {
         var config = ProxyConfig()
         config.health.connectionCheckTimeout = 0.75
+        config.health.upstreamConnectTimeout = 3.5
         config.health.directConnectTTL = 600
 
         let data = try JSONEncoder().encode(config)
@@ -419,12 +420,28 @@ final class ConfigArchitectureTests: XCTestCase {
 
         XCTAssertEqual(json["connectionCheckTimeoutMS"] as? Int, 750)
         XCTAssertEqual(json["upstreamResponseTimeoutSeconds"] as? Double, 45)
+        XCTAssertEqual(json["upstreamConnectTimeoutSeconds"] as? Double, 3.5)
         XCTAssertEqual(json["directConnectTTLMinutes"] as? Int, 10)
 
         let decoded = try JSONDecoder().decode(ProxyConfig.self, from: data)
         XCTAssertEqual(decoded.health.connectionCheckTimeout, 0.75, accuracy: 0.001)
         XCTAssertEqual(decoded.health.upstreamResponseTimeout, 45, accuracy: 0.001)
+        XCTAssertEqual(decoded.health.upstreamConnectTimeout, 3.5, accuracy: 0.001)
         XCTAssertEqual(decoded.health.directConnectTTL, 600, accuracy: 0.01)
+    }
+
+    func testUpstreamConnectTimeoutDefaultsIndependentlyOfProbeTimeout() throws {
+        let legacy = Data("""
+        {"schemaVersion": 2, "connectionCheckTimeoutMS": 500}
+        """.utf8)
+        let decoded = try JSONDecoder().decode(ProxyConfig.self, from: legacy)
+        XCTAssertEqual(decoded.connectionCheckTimeoutMS, 500)
+        XCTAssertEqual(decoded.upstreamConnectTimeoutSeconds, 5, accuracy: 0.001)
+
+        var negative = ProxyConfig()
+        negative.upstreamConnectTimeoutSeconds = -1
+        let errors = negative.validate()
+        XCTAssertTrue(errors.contains { if case .invalidDuration(let f, _) = $0 { return f.contains("upstreamConnectTimeout") } else { return false } })
     }
 
     func testConfigEncodingIncludesCurrentSchemaVersion() throws {
