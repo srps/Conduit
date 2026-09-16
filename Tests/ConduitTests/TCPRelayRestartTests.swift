@@ -12,6 +12,23 @@ final class TCPRelayRestartTests: XCTestCase {
         let portB = portA + 10
         try relay.start(listenPort: portA, targetPort: portA + 1, host: "127.0.0.1")
         XCTAssertTrue(relay.isRunning)
+
+        // Leave a session open on the first relay so the restart evicts a
+        // live session thread, whose descriptors the second relay's
+        // sessions are then handed. Its tracker is its own; it must not
+        // close what the second relay registered under the same numbers.
+        let firstTarget = listen(on: portA + 1)
+        XCTAssertTrue(firstTarget >= 0)
+        defer { close(firstTarget) }
+        let firstClient = connect(to: portA)
+        XCTAssertTrue(firstClient >= 0)
+        defer { close(firstClient) }
+        var firstProbe = pollfd(fd: firstTarget, events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(poll(&firstProbe, 1, 2000), 1, "the first relay must relay before the restart")
+        let firstAccepted = accept(firstTarget, nil, nil)
+        XCTAssertTrue(firstAccepted >= 0)
+        defer { if firstAccepted >= 0 { close(firstAccepted) } }
+
         try relay.start(listenPort: portB, targetPort: portB + 1, host: "127.0.0.1")
         XCTAssertTrue(relay.isRunning)
         defer { relay.stop() }
