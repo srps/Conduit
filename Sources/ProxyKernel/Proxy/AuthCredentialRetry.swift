@@ -53,7 +53,7 @@ package final class AuthCredentialRetry: @unchecked Sendable {
                 let token = try auth.initialToken(for: host)
                 clearOutage(host: host)
                 return token
-            } catch where error.isCredentialUnavailable {
+            } catch where error.isCredentialRetryable {
                 guard attempt < attempts, !isInOutage(host: host) else {
                     markOutage(host: host)
                     throw error

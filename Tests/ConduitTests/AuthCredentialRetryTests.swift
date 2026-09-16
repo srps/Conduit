@@ -13,6 +13,12 @@ final class AuthCredentialRetryTests: XCTestCase {
         var isCredentialUnavailable: Bool { false }
     }
 
+    /// A store with no entry: unavailable, but waiting will not help.
+    private struct CredentialMissing: CredentialFailureClassifying {
+        var isCredentialUnavailable: Bool { true }
+        var isCredentialRetryable: Bool { false }
+    }
+
     private struct PlainFailure: Error {}
 
     /// Fails `failures` times with `error`, then answers.
@@ -128,11 +134,14 @@ final class AuthCredentialRetryTests: XCTestCase {
     func testOtherAuthFailuresAreNotRetried() async throws {
         let clock = Clock()
         let retry = makeRetry(clock)
-        for error in [ProtocolBroken() as Error, PlainFailure() as Error] {
+        for error in [ProtocolBroken() as Error, PlainFailure() as Error, CredentialMissing() as Error] {
             let auth = ScriptedAuthenticator(failures: 1, error: error)
             _ = try? await retry.initialToken(from: auth, host: "proxy.example")
-            XCTAssertEqual(auth.callCount, 1, "\(error) is not a credential failure")
+            XCTAssertEqual(auth.callCount, 1, "\(error) is not retryable")
         }
+        XCTAssertTrue(CredentialManagerError.missingCredentials.isCredentialUnavailable)
+        XCTAssertFalse(CredentialManagerError.missingCredentials.isCredentialRetryable)
+        XCTAssertFalse(CredentialManagerError.invalidPayload.isCredentialUnavailable)
         XCTAssertEqual(clock.sleeps, [])
         XCTAssertFalse(retry.isInOutage(host: "proxy.example"))
     }
