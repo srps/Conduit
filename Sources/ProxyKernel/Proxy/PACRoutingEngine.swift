@@ -22,9 +22,23 @@ package final class PACRoutingEngine: @unchecked Sendable {
     private let slowEvalThresholdSeconds: Double = 0.5
 
     private var cachedPACURL = ""
+    /// URL of the last fetch started. The backoff is per URL.
+    private var lastAttemptedPACURL = ""
     private var jsEvaluator: (any PacScriptEvaluating)?
     private var lastRefreshAt: Date?
     private var refreshInFlight = false
+    /// Failure backoff state; see `refresh(force:honorBackoff:)`.
+    private var consecutiveFailures = 0
+    private var lastFailureAt: Date?
+    package static let backoffBase: TimeInterval = 30
+    package static let backoffCap: TimeInterval = 600
+
+    private enum RefreshDecision {
+        case run
+        case fresh
+        case alreadyRunning
+        case backingOff(remaining: TimeInterval, failures: Int)
+    }
     private var routeCache: [String: RouteCacheEntry] = [:]
     private var routeCacheOrder: [String] = []
     /// Requests waiting on an evaluation already running for the same cache
@@ -71,20 +85,46 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
     }
 
-    package func refresh(force: Bool = false) async throws {
+    /// Fetch and compile the PAC.
+    ///
+    /// `force` ignores the refresh interval. `honorBackoff` yields to the
+    /// failure backoff (`backoffBase` doubling to `backoffCap`): network-path
+    /// updates pass it; wake, VPN reconnect and user action do not. A changed
+    /// URL always fetches. One refresh runs at a time; a call during one returns.
+    package func refresh(force: Bool = false, honorBackoff: Bool = false) async throws {
         let config = configProvider()
         guard config.pacRoutingEnabled, !config.pacURL.isEmpty else {
             clearCachedEvaluator()
             return
         }
 
-        let shouldRefresh = lock.withLock {
-            force || jsEvaluator == nil || cachedPACURL != config.pacURL || refreshExpired(at: lastRefreshAt)
+        let decision: RefreshDecision = lock.withLock {
+            guard !refreshInFlight else { return .alreadyRunning }
+            let needsRefresh = force || jsEvaluator == nil || cachedPACURL != config.pacURL || refreshExpired(at: lastRefreshAt)
+            guard needsRefresh else { return .fresh }
+            // Per attempted URL, so a URL that never loaded still backs off.
+            let urlChanged = lastAttemptedPACURL != config.pacURL
+            if honorBackoff, !urlChanged, let remaining = backoffRemainingLocked(now: Date()) {
+                return .backingOff(remaining: remaining, failures: consecutiveFailures)
+            }
+            refreshInFlight = true
+            lastAttemptedPACURL = config.pacURL
+            return .run
         }
 
-        guard shouldRefresh else { return }
+        switch decision {
+        case .run:
+            break
+        case .alreadyRunning, .fresh:
+            return
+        case .backingOff(let remaining, let failures):
+            let seconds = Int(remaining.rounded(.up))
+            eventSink?(RuntimeEvent(kind: .routing, event: "pac.refresh_backoff",
+                                    detail: "failures=\(failures) remainingSeconds=\(seconds)"))
+            logger?.log(.info, "PAC refresh skipped after \(failures) failed fetch(es); next attempt in \(seconds)s.", category: .pac)
+            return
+        }
 
-        markRefreshInFlight(true)
         defer { markRefreshInFlight(false) }
 
         do {
@@ -108,14 +148,35 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 cachedPACURL = config.pacURL
                 jsEvaluator = newEvaluator
                 lastRefreshAt = .now
+                consecutiveFailures = 0
+                lastFailureAt = nil
                 routeCache.removeAll()
                 routeCacheOrder.removeAll()
             }
             logger?.log(.info, "Refreshed PAC routing rules from \(Self.redactedURL(config.pacURL)).", category: .pac)
         } catch {
+            lock.withLock {
+                consecutiveFailures += 1
+                lastFailureAt = Date()
+            }
+            // Logged here only; callers must not log the rethrown error again.
             logger?.log(.warning, "PAC refresh failed: \(error.displayDescription)", category: .pac)
             throw error
         }
+    }
+
+    /// Caller holds `lock`.
+    private func backoffRemainingLocked(now: Date) -> TimeInterval? {
+        guard consecutiveFailures > 0, let lastFailureAt else { return nil }
+        let exponent = min(consecutiveFailures - 1, 10)
+        let delay = min(Self.backoffBase * pow(2, Double(exponent)), Self.backoffCap)
+        let remaining = delay - now.timeIntervalSince(lastFailureAt)
+        return remaining > 0 ? remaining : nil
+    }
+
+    /// Seconds until the backoff admits a fetch; `nil` when none is in force.
+    package func backoffRemaining(now: Date = Date()) -> TimeInterval? {
+        lock.withLock { backoffRemainingLocked(now: now) }
     }
 
     package func routeChain(for url: String, host: String) -> [PACRoute] {
@@ -275,19 +336,19 @@ package final class PACRoutingEngine: @unchecked Sendable {
     }
 
     private func refreshInBackgroundIfNeeded(for config: ProxyConfig) {
+        // Pre-check only: `refresh` claims the in-flight slot. Silent, since
+        // this runs on every routing decision.
         let shouldKickOff = lock.withLock {
             guard !refreshInFlight else { return false }
             let needsRefresh = jsEvaluator == nil || cachedPACURL != config.pacURL || refreshExpired(at: lastRefreshAt)
-            if needsRefresh {
-                refreshInFlight = true
-            }
-            return needsRefresh
+            guard needsRefresh else { return false }
+            return lastAttemptedPACURL != config.pacURL || backoffRemainingLocked(now: Date()) == nil
         }
 
         guard shouldKickOff else { return }
 
         Task {
-            try? await refresh()
+            try? await refresh(honorBackoff: true)
         }
     }
 
@@ -299,9 +360,12 @@ package final class PACRoutingEngine: @unchecked Sendable {
     private func clearCachedEvaluator() {
         lock.withLock {
             cachedPACURL = ""
+            lastAttemptedPACURL = ""
             jsEvaluator = nil
             lastRefreshAt = nil
             refreshInFlight = false
+            consecutiveFailures = 0
+            lastFailureAt = nil
             routeCache.removeAll()
             routeCacheOrder.removeAll()
         }

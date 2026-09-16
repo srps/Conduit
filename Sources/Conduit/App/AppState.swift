@@ -342,9 +342,9 @@ final class AppState: ObservableObject {
         }
         runtime.apply(snapshot: orchestrator.snapshot)
 
-        networkMonitor.onChange = { [weak self] description, _ in
+        networkMonitor.onChange = { [weak self] change in
             Task { @MainActor in
-                self?.handleNetworkChange(description: description)
+                self?.handleNetworkChange(change)
             }
         }
         // The interface name is read here, on the monitor's own delivery,
@@ -1499,10 +1499,10 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func handleNetworkChange(description: String) {
+    private func handleNetworkChange(_ change: NetworkMonitor.PathChange) {
         guard !rejectUnavailableConfiguration() else { return }
         Task { @MainActor in
-            await orchestrator.handleNetworkChange(description: description)
+            await orchestrator.handleNetworkChange(description: change.description, pathSatisfied: change.satisfied)
         }
 
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {

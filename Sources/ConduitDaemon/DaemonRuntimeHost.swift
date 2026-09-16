@@ -210,9 +210,9 @@ final class DaemonRuntimeHost {
                 self?.handle(orchestratorEvent: event)
             }
         }
-        networkMonitor.onChange = { [weak self] description, _ in
+        networkMonitor.onChange = { [weak self] change in
             Task { @MainActor in
-                await self?.handleNetworkChange(description: description)
+                await self?.handleNetworkChange(change)
             }
         }
         // The interface name is read on the monitor's own delivery, not
@@ -513,8 +513,8 @@ final class DaemonRuntimeHost {
         }
     }
 
-    private func handleNetworkChange(description: String) async {
-        await orchestrator.handleNetworkChange(description: description)
+    private func handleNetworkChange(_ change: NetworkMonitor.PathChange) async {
+        await orchestrator.handleNetworkChange(description: change.description, pathSatisfied: change.satisfied)
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             systemDNSManager.reconcile(logger: logger)
         }

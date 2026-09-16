@@ -1633,12 +1633,14 @@ package final class ProxyOrchestrator {
         logStore.log(.notice, "Protocol tunnels stopped.", category: .tunnel)
     }
 
-    package func refreshPACRouting(force: Bool = false) async {
+    /// Non-fatal: a failed fetch keeps the validated routing. The engine
+    /// logs the failure; do not log it again here.
+    package func refreshPACRouting(force: Bool = false, honorBackoff: Bool = false) async {
         guard let pacRoutingEngine else { return }
         do {
-            try await pacRoutingEngine.refresh(force: force)
+            try await pacRoutingEngine.refresh(force: force, honorBackoff: honorBackoff)
         } catch {
-            logStore.log(.warning, "Could not refresh PAC routing (non-fatal): \(error.displayDescription)", category: .pac)
+            emitEvent(.routing, "pac.refresh_failed", detail: error.displayDescription)
         }
     }
 
@@ -1940,12 +1942,19 @@ package final class ProxyOrchestrator {
     /// events from VPN events eliminates the historical per-`NWPathMonitor`-event
     /// upstream-reprobe storm (Wi-Fi roams, IPv6 RAs, captive-portal checks all
     /// triggered redundant 3-second probe cycles). See `docs/design-vpn-flap-resilience.md`.
-    package func handleNetworkChange(description: String) async {
-        logStore.log(.info, "Network changed: \(description)", category: .network)
+    ///
+    /// An unsatisfied path still recycles the DoH transports but has nothing
+    /// to fetch the PAC over. The fetch honours the engine's failure backoff.
+    package func handleNetworkChange(description: String, pathSatisfied: Bool = true) async {
+        logStore.log(.info, "Network changed: \(description) (\(pathSatisfied ? "satisfied" : "unsatisfied"))", category: .network)
         if snapshot.dnsRunState == .running {
             resetDNSTransportsForRecovery(source: "network_change")
         }
-        await refreshPACRouting(force: true)
+        guard pathSatisfied else {
+            emitEvent(.routing, "pac.refresh_skipped", detail: "reason=path_unsatisfied")
+            return
+        }
+        await refreshPACRouting(force: true, honorBackoff: true)
     }
 
     package func performTerminationCleanup() {
