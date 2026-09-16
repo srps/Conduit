@@ -5,6 +5,10 @@ package final class UDPRelay: @unchecked Sendable {
     private var listenFD: Int32 = -1
     private var forwardFD: Int32 = -1
     private var relayThread: Thread?
+    /// Counts starts. A loop that exits on its own identifies itself by the
+    /// generation it was started with, not by its descriptors: `stop()`
+    /// closes them and the next `start()` is handed the same numbers back.
+    private var generation: UInt64 = 0
     private let lock = NSLock()
     private let staleTimeoutSeconds: TimeInterval = 10
 
@@ -53,13 +57,15 @@ package final class UDPRelay: @unchecked Sendable {
             throw UDPRelayError.socketCreationFailed(errnoMessage)
         }
 
-        lock.withLock {
+        let generation = lock.withLock { () -> UInt64 in
+            self.generation &+= 1
             listenFD = lfd
             forwardFD = ffd
+            return self.generation
         }
 
         let thread = Thread { [weak self] in
-            self?.runLoop(listenFD: lfd, forwardFD: ffd, targetPort: targetPort, targetHost: host)
+            self?.runLoop(generation: generation, listenFD: lfd, forwardFD: ffd, targetPort: targetPort, targetHost: host)
         }
         thread.name = "udp-relay-\(listenPort)->\(targetPort)"
         thread.qualityOfService = .userInteractive
@@ -91,9 +97,9 @@ package final class UDPRelay: @unchecked Sendable {
 
     /// See `TCPRelay.markDead`: a loop that left on its own must not leave
     /// `isRunning` true behind it.
-    private func markDead(listenFD lfd: Int32, forwardFD ffd: Int32) {
+    private func markDead(generation: UInt64, listenFD lfd: Int32, forwardFD ffd: Int32) {
         let owned = lock.withLock { () -> Bool in
-            guard listenFD == lfd else { return false }
+            guard self.generation == generation, listenFD == lfd else { return false }
             listenFD = -1
             forwardFD = -1
             return true
@@ -104,7 +110,7 @@ package final class UDPRelay: @unchecked Sendable {
         }
     }
 
-    private func runLoop(listenFD: Int32, forwardFD: Int32, targetPort: Int, targetHost: String) {
+    private func runLoop(generation: UInt64, listenFD: Int32, forwardFD: Int32, targetPort: Int, targetHost: String) {
         var buf = [UInt8](repeating: 0, count: 12_288)
         var pending: [UInt16: PendingQuery] = [:]
         var nextRelayTXID: UInt16 = 0
@@ -175,7 +181,7 @@ package final class UDPRelay: @unchecked Sendable {
                 }
             }
         }
-        markDead(listenFD: listenFD, forwardFD: forwardFD)
+        markDead(generation: generation, listenFD: listenFD, forwardFD: forwardFD)
     }
 
     private func nextAvailableRelayTXID(startingAt next: inout UInt16, pending: [UInt16: PendingQuery]) -> UInt16 {

@@ -23,6 +23,10 @@ final class UDPRelayTests: XCTestCase {
         XCTAssertFalse(relay.isRunning)
     }
 
+    /// `stop()` closes the first loop's descriptors and the second start is
+    /// handed the same numbers back. The evicted loop reports itself dead a
+    /// moment later; identified by descriptor it would close its successor's
+    /// sockets and flip `isRunning` (#37, seen on CI as a flake).
     func testRelayStartTwiceStopsFirst() throws {
         let relay = UDPRelay()
         let portA = randomHighPort()
@@ -31,7 +35,36 @@ final class UDPRelayTests: XCTestCase {
         XCTAssertTrue(relay.isRunning)
         try relay.start(listenPort: portB, targetPort: portB + 1)
         XCTAssertTrue(relay.isRunning)
-        relay.stop()
+        defer { relay.stop() }
+
+        Thread.sleep(forTimeInterval: 0.3)
+        XCTAssertTrue(relay.isRunning, "the evicted loop must not take its successor down with it")
+
+        let echoFD = createUDPSocket(port: portB + 1)
+        XCTAssertTrue(echoFD >= 0, "Failed to create echo socket")
+        defer { close(echoFD) }
+        let echoThread = Thread {
+            var buf = [UInt8](repeating: 0, count: 4096)
+            var addr = sockaddr_in()
+            var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let n = withUnsafeMutablePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    recvfrom(echoFD, &buf, buf.count, 0, sockPtr, &addrLen)
+                }
+            }
+            if n > 0 {
+                withUnsafePointer(to: &addr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                        _ = sendto(echoFD, buf, n, 0, sockPtr, addrLen)
+                    }
+                }
+            }
+        }
+        echoThread.start()
+
+        let payload: [UInt8] = [0x00, 0x01, 0xAB, 0xCD]
+        let response = sendAndReceiveUDP(host: "127.0.0.1", port: portB, payload: payload, timeoutSec: 3)
+        XCTAssertEqual(response, payload, "the second relay must still forward after the first loop has left")
     }
 
     func testRelayFailsOnPortConflict() throws {
