@@ -227,7 +227,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             return cached
         }
 
-        let evaluator = lock.withLock { jsEvaluator }
+        let (evaluator, evaluatedURL) = lock.withLock { (jsEvaluator, cachedPACURL) }
         guard let evaluator else { return [] }
 
         let start = CFAbsoluteTimeGetCurrent()
@@ -250,7 +250,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         guard let rawChain else { return [] }
 
         let routes = resolver.routeChain(for: rawChain)
-        storeCachedRoutes(routes, forKey: cacheKey)
+        guard storeCachedRoutes(routes, forKey: cacheKey, evaluatedWith: evaluatedURL) else { return [] }
         if let first = routes.first {
             logger?.log(.debug, "PAC route for \(host): \(first) (chain entries: \(rawChain.count))", category: .pac)
         }
@@ -270,7 +270,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             return eventLoop.makeSucceededFuture(cached)
         }
 
-        let evaluator = lock.withLock { jsEvaluator }
+        let (evaluator, evaluatedURL) = lock.withLock { (jsEvaluator, cachedPACURL) }
         guard let evaluator else {
             return eventLoop.makeSucceededFuture([])
         }
@@ -334,8 +334,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 switch result {
                 case .success(let rawChain):
                     let elapsed = CFAbsoluteTimeGetCurrent() - start
-                    let routes = resolver.routeChain(for: rawChain)
-                    self.storeCachedRoutes(routes, forKey: cacheKey)
+                    let evaluated = resolver.routeChain(for: rawChain)
+                    // A result from a PAC the configuration no longer names
+                    // is neither cached nor handed to the waiters.
+                    let routes = self.storeCachedRoutes(evaluated, forKey: cacheKey, evaluatedWith: evaluatedURL) ? evaluated : []
                     if elapsed > slowEvalThresholdSeconds {
                         logger?.log(.warning, "PAC evaluation took \(Int(elapsed * 1000))ms for \(host)", category: .pac)
                     }
@@ -433,14 +435,20 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
     }
 
-    private func storeCachedRoutes(_ routes: [PACRoute], forKey key: String) {
+    /// Caches `routes` if the PAC they came from is still the loaded one.
+    /// Returns whether it did; a `false` means the result is superseded and
+    /// must not be used either.
+    @discardableResult
+    private func storeCachedRoutes(_ routes: [PACRoute], forKey key: String, evaluatedWith pacURL: String) -> Bool {
         lock.withLock {
+            guard cachedPACURL == pacURL, jsEvaluator != nil else { return false }
             routeCache[key] = RouteCacheEntry(
                 routes: routes,
                 expiresAt: Date().addingTimeInterval(Self.routeCacheTTL)
             )
             touchRouteCacheKeyLocked(key)
             evictRouteCacheIfNeededLocked(now: .now)
+            return true
         }
     }
 
