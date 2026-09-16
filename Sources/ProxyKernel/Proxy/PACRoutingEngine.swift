@@ -127,42 +127,68 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
         defer { markRefreshInFlight(false) }
 
-        do {
-            let pacScript = try await pacLoader(config.pacURL)
-            let resolver = self.resolver
-            let timeout = evalTimeoutSeconds
-            let newEvaluator: any PacScriptEvaluating = try {
-                nonisolated(unsafe) var result: Result<any PacScriptEvaluating, Error>?
-                let semaphore = DispatchSemaphore(value: 0)
-                jsQueue.async {
-                    result = Result { try resolver.makeEvaluator(pacScript: pacScript) }
-                    semaphore.signal()
+        var url = config.pacURL
+        while true {
+            do {
+                let newEvaluator = try await fetchAndCompile(url: url)
+                try Task.checkCancellation()
+                // The URL may have changed while this fetch ran. An evaluator
+                // for the old URL is discarded, and the new URL fetched now,
+                // so no request routes by a PAC the configuration no longer names.
+                let current = configProvider()
+                guard current.pacRoutingEnabled, !current.pacURL.isEmpty else {
+                    clearCachedEvaluator()
+                    return
                 }
-                if semaphore.wait(timeout: .now() + timeout) == .timedOut {
-                    throw PACResolverError.evaluationFailed("PAC script evaluation timed out after \(Int(timeout))s")
+                if current.pacURL != url {
+                    url = current.pacURL
+                    lock.withLock { lastAttemptedPACURL = url }
+                    continue
                 }
-                return try result!.get()
-            }()
-            try Task.checkCancellation()
-            lock.withLock {
-                cachedPACURL = config.pacURL
-                jsEvaluator = newEvaluator
-                lastRefreshAt = .now
-                consecutiveFailures = 0
-                lastFailureAt = nil
-                routeCache.removeAll()
-                routeCacheOrder.removeAll()
+                lock.withLock {
+                    cachedPACURL = url
+                    jsEvaluator = newEvaluator
+                    lastRefreshAt = .now
+                    consecutiveFailures = 0
+                    lastFailureAt = nil
+                    routeCache.removeAll()
+                    routeCacheOrder.removeAll()
+                }
+                logger?.log(.info, "Refreshed PAC routing rules from \(Self.redactedURL(url)).", category: .pac)
+                return
+            } catch {
+                lock.withLock {
+                    consecutiveFailures += 1
+                    lastFailureAt = Date()
+                }
+                // Event first, then the derived log line; callers add neither.
+                eventSink?(RuntimeEvent(kind: .routing, event: "pac.refresh_failed", detail: error.displayDescription))
+                logger?.log(.warning, "PAC refresh failed: \(error.displayDescription)", category: .pac)
+                throw error
             }
-            logger?.log(.info, "Refreshed PAC routing rules from \(Self.redactedURL(config.pacURL)).", category: .pac)
-        } catch {
-            lock.withLock {
-                consecutiveFailures += 1
-                lastFailureAt = Date()
-            }
-            // Logged here only; callers must not log the rethrown error again.
-            logger?.log(.warning, "PAC refresh failed: \(error.displayDescription)", category: .pac)
-            throw error
         }
+    }
+
+    private func fetchAndCompile(url: String) async throws -> any PacScriptEvaluating {
+        let pacScript = try await pacLoader(url)
+        return try compile(pacScript)
+    }
+
+    /// Synchronous on purpose: the evaluator is built on `jsQueue` and waited
+    /// for with a semaphore, which an async context may not do.
+    private func compile(_ pacScript: String) throws -> any PacScriptEvaluating {
+        let resolver = self.resolver
+        let timeout = evalTimeoutSeconds
+        nonisolated(unsafe) var result: Result<any PacScriptEvaluating, Error>?
+        let semaphore = DispatchSemaphore(value: 0)
+        jsQueue.async {
+            result = Result { try resolver.makeEvaluator(pacScript: pacScript) }
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
+            throw PACResolverError.evaluationFailed("PAC script evaluation timed out after \(Int(timeout))s")
+        }
+        return try result!.get()
     }
 
     /// Caller holds `lock`.

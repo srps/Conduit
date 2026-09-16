@@ -1634,14 +1634,10 @@ package final class ProxyOrchestrator {
     }
 
     /// Non-fatal: a failed fetch keeps the validated routing. The engine
-    /// logs the failure; do not log it again here.
+    /// emits `pac.refresh_failed` and logs it; nothing to add here.
     package func refreshPACRouting(force: Bool = false, honorBackoff: Bool = false) async {
         guard let pacRoutingEngine else { return }
-        do {
-            try await pacRoutingEngine.refresh(force: force, honorBackoff: honorBackoff)
-        } catch {
-            emitEvent(.routing, "pac.refresh_failed", detail: error.displayDescription)
-        }
+        try? await pacRoutingEngine.refresh(force: force, honorBackoff: honorBackoff)
     }
 
     package func handleSystemWake() async {
