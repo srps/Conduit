@@ -7,38 +7,61 @@ HELPER_DST="/Library/PrivilegedHelperTools/$BUNDLE_ID.Helper"
 PLIST_DST="/Library/LaunchDaemons/$BUNDLE_ID.Helper.plist"
 SOCKET_PATH="/var/run/$BUNDLE_ID.Helper.sock"
 
-INSTALLED_APP="/Applications/Conduit.app/Contents/Library/LaunchServices/$BUNDLE_ID.Helper"
-LOCAL_APP="$SCRIPT_DIR/Conduit.app/Contents/Library/LaunchServices/$BUNDLE_ID.Helper"
-# `.build/debug` and `.build/release` are the symlinks SwiftPM maintains to
-# the current products directory under either build system. The
-# `<arch>-apple-macosx/<config>` directories are the old build system's only,
-# and hold whatever it last produced: with Xcode 27 that was a binary from
-# 2026-09-06 that this script and `bundle-app.sh` kept installing.
-BUILD_BIN_DEBUG="$SCRIPT_DIR/.build/debug/ConduitHelper"
-BUILD_BIN_RELEASE="$SCRIPT_DIR/.build/release/ConduitHelper"
+# Candidate helpers. `.build/debug` and `.build/release` are the symlinks
+# SwiftPM maintains to the current products directory under either build
+# system (the `<arch>-apple-macosx/<config>` directories are the old build
+# system's only). This script runs as root and does not invoke SwiftPM.
+typeset -A CANDIDATES
+CANDIDATES[installed]="/Applications/Conduit.app/Contents/Library/LaunchServices/$BUNDLE_ID.Helper"
+CANDIDATES[local]="$SCRIPT_DIR/Conduit.app/Contents/Library/LaunchServices/$BUNDLE_ID.Helper"
+CANDIDATES[release]="$SCRIPT_DIR/.build/release/ConduitHelper"
+CANDIDATES[debug]="$SCRIPT_DIR/.build/debug/ConduitHelper"
+
+SOURCE=""
+for arg in "$@"; do
+    case "$arg" in
+        --source=*) SOURCE="${arg#--source=}" ;;
+        --source) ;;  # value follows
+        installed|local|release|debug) SOURCE="$arg" ;;
+        *) echo "Unknown argument: $arg"; echo "Usage: sudo ./install-helper.sh [--source installed|local|release|debug]"; exit 1 ;;
+    esac
+done
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "This script must be run with sudo."
-    echo "Usage: sudo ./install-helper.sh"
+    echo "Usage: sudo ./install-helper.sh [--source installed|local|release|debug]"
     exit 1
 fi
 
-if [ -f "$INSTALLED_APP" ]; then
-    HELPER_SRC="$INSTALLED_APP"
-elif [ -f "$LOCAL_APP" ]; then
-    HELPER_SRC="$LOCAL_APP"
-elif [ -f "$BUILD_BIN_RELEASE" ]; then
-    HELPER_SRC="$BUILD_BIN_RELEASE"
-elif [ -f "$BUILD_BIN_DEBUG" ]; then
-    HELPER_SRC="$BUILD_BIN_DEBUG"
+# Newest candidate by default: a helper-only change is built, not bundled or
+# installed, and the reinstall must pick that build up. The installed app used
+# to win whenever it existed, so a rebuilt helper stayed uninstalled.
+HELPER_SRC=""
+if [ -n "$SOURCE" ]; then
+    HELPER_SRC="${CANDIDATES[$SOURCE]:-}"
+    if [ -z "$HELPER_SRC" ] || [ ! -f "$HELPER_SRC" ]; then
+        echo "No helper at the requested source '$SOURCE': ${CANDIDATES[$SOURCE]:-unknown}"
+        exit 1
+    fi
 else
+    NEWEST=0
+    for name in installed local release debug; do
+        candidate="${CANDIDATES[$name]}"
+        [ -f "$candidate" ] || continue
+        mtime=$(stat -f %m "$candidate")
+        echo "  candidate $name: $(date -r "$mtime" '+%Y-%m-%d %H:%M:%S')  $candidate"
+        if [ "$mtime" -gt "$NEWEST" ]; then
+            NEWEST=$mtime
+            HELPER_SRC="$candidate"
+        fi
+    done
+fi
+
+if [ -z "$HELPER_SRC" ]; then
     echo "Helper binary not found. Searched:"
-    echo "  $INSTALLED_APP"
-    echo "  $LOCAL_APP"
-    echo "  $BUILD_BIN_RELEASE"
-    echo "  $BUILD_BIN_DEBUG"
+    for name in installed local release debug; do echo "  ${CANDIDATES[$name]}"; done
     echo ""
-    echo "Run './bundle-app.sh --install' first."
+    echo "Run 'swift build' or './bundle-app.sh' first."
     exit 1
 fi
 
