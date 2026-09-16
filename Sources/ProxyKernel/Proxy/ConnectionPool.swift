@@ -1451,7 +1451,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
                 do {
                     let auth = try provider(upstream)
                     let token = try await AuthCredentialRetry.shared.initialToken(
-                        from: auth, host: host, eventSink: handler.eventSink
+                        from: auth, host: host, outageKey: upstream.endpoint, eventSink: handler.eventSink
                     )
                     eventLoop.execute {
                         handler.authenticator = auth

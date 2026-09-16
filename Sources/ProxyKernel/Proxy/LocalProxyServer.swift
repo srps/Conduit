@@ -500,7 +500,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                     onConnectionOpened: self.onConnectionOpened,
                     onConnectionClosed: self.onConnectionClosed,
                     onConnectionActivity: self.onConnectionActivity,
-                    onRequestCompleted: self.onRequestCompleted
+                    onRequestCompleted: self.onRequestCompleted,
+                    eventSink: self.eventSink
                 )
 
                 do {
