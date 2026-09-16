@@ -118,6 +118,21 @@ final class PACRefreshBackoffTests: XCTestCase {
         XCTAssertEqual(loader.callCount, 2, "a new URL is a new PAC; the old one's backoff does not apply")
     }
 
+    func testANewURLStartsItsOwnBackoffCount() async throws {
+        let loader = Loader(failing: true)
+        let config = makeConfig()
+        let engine = makeEngine(loader: loader, config: config)
+        for _ in 1...6 {
+            await XCTAssertThrowsErrorAsync(try await engine.refresh(force: true))
+        }
+        XCTAssertEqual(try XCTUnwrap(engine.backoffRemaining()), PACRoutingEngine.backoffCap, accuracy: 1)
+
+        config.setPACURL("http://pac.example.com/other.pac")
+        await XCTAssertThrowsErrorAsync(try await engine.refresh(force: true, honorBackoff: true))
+        XCTAssertEqual(try XCTUnwrap(engine.backoffRemaining()), PACRoutingEngine.backoffBase, accuracy: 1,
+                       "the first failure on the new URL waits the base delay, not the old URL's cap")
+    }
+
     /// A URL edited while its predecessor is downloading: the old evaluator is
     /// discarded and the new URL fetched before the refresh returns.
     func testURLChangedDuringFetchIsFetchedBeforeTheOldEvaluatorIsUsed() async throws {

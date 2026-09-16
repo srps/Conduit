@@ -108,7 +108,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 return .backingOff(remaining: remaining, failures: consecutiveFailures)
             }
             refreshInFlight = true
-            lastAttemptedPACURL = config.pacURL
+            if urlChanged {
+                lastAttemptedPACURL = config.pacURL
+                consecutiveFailures = 0
+                lastFailureAt = nil
+            }
             return .run
         }
 
@@ -142,7 +146,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 }
                 if current.pacURL != url {
                     url = current.pacURL
-                    lock.withLock { lastAttemptedPACURL = url }
+                    lock.withLock {
+                        lastAttemptedPACURL = url
+                        consecutiveFailures = 0
+                        lastFailureAt = nil
+                    }
                     continue
                 }
                 lock.withLock {
@@ -154,6 +162,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     routeCache.removeAll()
                     routeCacheOrder.removeAll()
                 }
+                eventSink?(RuntimeEvent(kind: .routing, event: "pac.refreshed", detail: "url=\(Self.redactedURL(url))"))
                 logger?.log(.info, "Refreshed PAC routing rules from \(Self.redactedURL(url)).", category: .pac)
                 return
             } catch {
@@ -389,7 +398,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
             lastAttemptedPACURL = ""
             jsEvaluator = nil
             lastRefreshAt = nil
-            refreshInFlight = false
+            // `refreshInFlight` belongs to the refresh that claimed it; it
+            // releases the slot itself after re-reading the configuration.
             consecutiveFailures = 0
             lastFailureAt = nil
             routeCache.removeAll()
