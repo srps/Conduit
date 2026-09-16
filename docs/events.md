@@ -69,6 +69,9 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `direct_mode.entered` | Routing flipped to direct (`detail` carries the cause). |
 | `local_pac.starting` / `started` / `stopping` / `stopped` / `restarting` / `updated` / `failed` | Local PAC server lifecycle; `detail: reason=…`. |
+| `pac.refreshed` | The routing engine installed a freshly fetched PAC (`url=`, credentials stripped). |
+| `pac.refresh_failed` | A PAC fetch or compile failed; `detail` is the error text. The last working evaluator stays in place. |
+| `pac.refresh_backoff` | A path-triggered refresh was skipped because the URL is in failure backoff (`failures=`, `remainingSeconds=`). Wake, VPN reconnect, user action and a changed URL bypass it. |
 
 ### auth
 | Event | Emitted when |
@@ -77,6 +80,9 @@ exactly these semantics; do not repurpose them.
 | `auth.kerberos_fallback_ntlm` | Credential-class Kerberos failure downgraded to NTLM (`host=`, `reason=` one of `no_credential`, `credentials_expired`, `bad_mech`, `failure`, `no_ticket`, `routine_<n>`). |
 | `auth.ntlm_configured` | NTLM credentials became available to the authenticator stack. |
 | `auth.handshake_rejected` | Pending-handshake bound (global or per-source) rejected a new upstream 407 handshake. |
+| `auth.credential_retry` | The initial Kerberos token was unavailable and is being retried (`host=`, `attempt=`, `delayMs=`). |
+| `auth.credential_outage` | A retried handshake still had no credential; further handshakes to that upstream fail at once for the hold (`upstream=`, `holdSeconds=`). |
+| `recovery.skipped` | The recovery ladder was not run because the health check failed for a missing credential, which no ladder step can supply (`reason=credential_unavailable`, `summary=`). |
 | `auth.privilege_request` | A privileged-helper call was made; request/outcome pair, raw helper values never included. |
 | `config.auth_changed` / `config.auth_reauth_failed` / `config.tunnel_auth_reauth` | Auth-section config reload outcomes. |
 
@@ -85,6 +91,9 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `streaming.response_interrupted` | Upstream died mid-streamed-response; the client connection is closed rather than silently truncated (`uri=`, `upstream=`, `cause=`). |
 | `upstream.response_timeout` | Upstream exceeded `upstreamResponseTimeout` for a response. |
+| `upstream.tunnel_failed` / `upstream.exchange_failed` | A CONNECT tunnel or an HTTP exchange through the upstream failed and the client got a 502 (`target=`, `reason=`). Emitted before the error log line. Not emitted for a failure the cause makes expected (a transient path change), which is logged at info. |
+| `direct.connect_failed` | A direct connect the request was routed to failed unexpectedly (`target=`, `reason=`). Direct failures while the VPN is off, and repeats of a remembered link-local timeout, are info log lines only. |
+| `direct.link_local_refused` | A direct connect to a link-local literal was refused at once because one timed out within the last minute (`target=`, `secondsAgo=`). |
 
 ### health
 | Event | Emitted when |
@@ -92,6 +101,10 @@ exactly these semantics; do not repurpose them.
 | `upstream.circuit_opened` / `circuit_half_opened` / `circuit_closed` | Circuit-breaker transitions per upstream. |
 | `upstream.test.invalid` / `not_found` / `probe_empty` | `test-upstream` command edge outcomes. |
 | `dns.pipeline_unresponsive` / `dns.relay_restarted` / `dns.transports_reset` | DNS forwarder self-healing actions. |
+| `network.path_changed` | A debounced network-path update reached the orchestrator, with what it decided (`satisfied=`, `dns=reset|idle`, `pac=refresh|skipped_unsatisfied`, `path=` the description). Emitted before the log line and before the actions it names. |
+| `error_rate.alarm` | The recent-failure window crossed the alarm threshold (`failures=`, `windowSeconds=`); the window is drained and the alarm holds off for 30 s. |
+| `recovery.suppressed` / `recovery.cooldown_started` | A health failure did not start the ladder because one is in flight or a cooldown is running (`reason=`, `remainingSeconds=`, `summary=`); a finished ladder starts its cooldown (`seconds=`). |
+| `tcp_relay.reasserted` / `tcp_relay.unresponsive` | The transparent-proxy relay probe found the helper's port-443 relay gone and reissued it, or found it bound but not accepting (`host=`, `target=`). |
 
 ### config
 | Event | Emitted when |

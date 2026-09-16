@@ -4,6 +4,37 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+### Fixed
+
+- A streamed HTTP response through the upstream finished on the client channel's event
+  loop while the upstream loop was removing the same handler; ThreadSanitizer reported the
+  race in the scheduled soak. The finish now hops to the handler's loop.
+- The helper's DNS and port-443 relays identified a loop that exited on its own by its
+  descriptor numbers. `stop()` closes those and the next `start()` gets the same numbers
+  back, so the evicted loop could close the fresh relay's sockets a moment after a restart.
+  Each start now has a generation.
+- `install-helper.sh --source` takes exactly one of `installed|local|release|debug`, refuses
+  a missing or repeated value, and checks its arguments before the root check. The bare-word
+  form is gone.
+
+### Logging
+
+- A network-path update emits one `network.path_changed` event carrying the path, whether
+  it is satisfied, and both decisions (DNS transport reset, PAC refresh or skip) before the
+  log line and the actions; `pac.refresh_skipped` is folded into it.
+- An upstream CONNECT or exchange failure emits `upstream.tunnel_failed` or
+  `upstream.exchange_failed`, and an unexpected direct-connect failure emits
+  `direct.connect_failed`, before the error line. Expected failures (VPN off, a memo repeat,
+  a transient path change) stay info lines with no event. `docs/events.md` catalogues these
+  and the events 0.3.1 added without documenting.
+
+### Development
+
+- `pm-sim direct-mode-silence` asserts on the request outcome, the failure event and the
+  log level instead of matching log text.
+
 ## 0.3.1
 
 A maintenance release: the fixes from twelve days of the installed app's log, the
