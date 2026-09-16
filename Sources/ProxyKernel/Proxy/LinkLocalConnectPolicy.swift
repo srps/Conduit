@@ -64,10 +64,10 @@ package enum LinkLocalConnectPolicy {
             return v4.value & 0xffff_0000 == 0xa9fe_0000
         }
         if literal.contains(":") {
-            let lowered = literal.lowercased()
-            guard lowered.count >= 4, lowered.hasPrefix("fe") else { return false }
-            let third = lowered[lowered.index(lowered.startIndex, offsetBy: 2)]
-            return "89ab".contains(third)
+            // First hextet, parsed: `fe8::1` is 0fe8, not fe80.
+            let firstHextet = literal.prefix { $0 != ":" }
+            guard (1...4).contains(firstHextet.count), let value = UInt16(firstHextet, radix: 16) else { return false }
+            return value & 0xffc0 == 0xfe80
         }
         return false
     }
