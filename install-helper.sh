@@ -9,10 +9,13 @@ SOCKET_PATH="/var/run/$BUNDLE_ID.Helper.sock"
 
 INSTALLED_APP="/Applications/Conduit.app/Contents/Library/LaunchServices/$BUNDLE_ID.Helper"
 LOCAL_APP="$SCRIPT_DIR/Conduit.app/Contents/Library/LaunchServices/$BUNDLE_ID.Helper"
-BUILD_DIR_DEBUG="$SCRIPT_DIR/.build/$(uname -m)-apple-macosx/debug"
-BUILD_DIR_RELEASE="$SCRIPT_DIR/.build/$(uname -m)-apple-macosx/release"
-BUILD_BIN_DEBUG="$BUILD_DIR_DEBUG/ConduitHelper"
-BUILD_BIN_RELEASE="$BUILD_DIR_RELEASE/ConduitHelper"
+# `.build/debug` and `.build/release` are the symlinks SwiftPM maintains to
+# the current products directory under either build system. The
+# `<arch>-apple-macosx/<config>` directories are the old build system's only,
+# and hold whatever it last produced: with Xcode 27 that was a binary from
+# 2026-09-06 that this script and `bundle-app.sh` kept installing.
+BUILD_BIN_DEBUG="$SCRIPT_DIR/.build/debug/ConduitHelper"
+BUILD_BIN_RELEASE="$SCRIPT_DIR/.build/release/ConduitHelper"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "This script must be run with sudo."
