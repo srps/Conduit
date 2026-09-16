@@ -345,20 +345,19 @@ package final class ConnectionPool: @unchecked Sendable {
         do {
             let response = try await exchange(head: head, body: nil).get()
             let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
-            let healthy = (200..<500).contains(Int(response.head.status.code))
-            return HealthCheckResult(
-                healthy: healthy,
-                summary: healthy ? "Healthy via \(response.upstream.endpoint)" : "HTTP \(response.head.status.code) via \(response.upstream.endpoint)",
-                activeUpstream: response.upstream.endpoint,
-                responseTimeMS: elapsed
-            )
+            let code = Int(response.head.status.code)
+            let upstream = response.upstream.endpoint
+            if (200..<500).contains(code) {
+                return .healthy(summary: "Healthy via \(upstream)", activeUpstream: upstream, responseTimeMS: elapsed)
+            }
+            return .unhealthy(.upstreamStatus(code: code, upstream: upstream), activeUpstream: upstream, responseTimeMS: elapsed)
         } catch {
-            return HealthCheckResult(
-                healthy: false,
-                summary: error.displayDescription,
-                activeUpstream: nil,
-                responseTimeMS: Int(Date().timeIntervalSince(start) * 1_000)
-            )
+            let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
+            let detail = error.displayDescription
+            let failure: HealthCheckFailure = error.isCredentialUnavailable
+                ? .credentialUnavailable(detail: detail)
+                : .unreachable(detail: detail)
+            return .unhealthy(failure, responseTimeMS: elapsed)
         }
     }
 
@@ -1428,7 +1427,9 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
             Task { @Sendable in
                 do {
                     let auth = try provider(upstream)
-                    let token = try auth.initialToken(for: host)
+                    let token = try await AuthCredentialRetry.shared.initialToken(
+                        from: auth, host: host, eventSink: handler.eventSink
+                    )
                     eventLoop.execute {
                         handler.authenticator = auth
                         handler.recordAuthMethod(fromHeader: token)

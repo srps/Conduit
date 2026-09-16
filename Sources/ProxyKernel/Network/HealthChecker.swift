@@ -2,17 +2,49 @@
 import Foundation
 import NIOConcurrencyHelpers
 
+/// Why a health check was unhealthy. Recovery branches on the case.
+package enum HealthCheckFailure: Error, Equatable, Sendable {
+    /// The upstream challenged and no usable credential answered; the
+    /// recovery ladder cannot supply one. See `CredentialFailureClassifying`.
+    case credentialUnavailable(detail: String)
+    /// The upstream answered with a status outside 2xx–4xx.
+    case upstreamStatus(code: Int, upstream: String)
+    /// No usable answer: unreachable, timed out, refused, or the proxy is stopped.
+    case unreachable(detail: String)
+
+    package var summary: String {
+        switch self {
+        case .credentialUnavailable(let detail), .unreachable(let detail):
+            return detail
+        case .upstreamStatus(let code, let upstream):
+            return "HTTP \(code) via \(upstream)"
+        }
+    }
+}
+
 package struct HealthCheckResult: Equatable {
     package var healthy: Bool
     package var summary: String
     package var activeUpstream: String?
     package var responseTimeMS: Int
+    package var failure: HealthCheckFailure?
 
     package init(healthy: Bool, summary: String, activeUpstream: String?, responseTimeMS: Int) {
         self.healthy = healthy
         self.summary = summary
         self.activeUpstream = activeUpstream
         self.responseTimeMS = responseTimeMS
+        self.failure = nil
+    }
+
+    package static func healthy(summary: String, activeUpstream: String?, responseTimeMS: Int) -> HealthCheckResult {
+        HealthCheckResult(healthy: true, summary: summary, activeUpstream: activeUpstream, responseTimeMS: responseTimeMS)
+    }
+
+    package static func unhealthy(_ failure: HealthCheckFailure, activeUpstream: String? = nil, responseTimeMS: Int) -> HealthCheckResult {
+        var result = HealthCheckResult(healthy: false, summary: failure.summary, activeUpstream: activeUpstream, responseTimeMS: responseTimeMS)
+        result.failure = failure
+        return result
     }
 }
 

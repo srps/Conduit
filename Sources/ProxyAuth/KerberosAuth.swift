@@ -187,7 +187,8 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
 
 // MARK: - KerberosAuthError
 
-package enum KerberosAuthError: Error, LocalizedError {
+/// `CredentialFailureClassifying` lets the kernel tell a missing ticket from a broken exchange.
+package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassifying {
     case importNameFailed(OM_uint32, OM_uint32)
     case initSecContextFailed(OM_uint32, OM_uint32)
     case emptyToken

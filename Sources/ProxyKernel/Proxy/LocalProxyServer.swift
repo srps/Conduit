@@ -613,7 +613,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
 
     package func performHealthCheck() async -> HealthCheckResult {
         guard let pool = self.pool else {
-            return HealthCheckResult(healthy: false, summary: "Proxy stopped", activeUpstream: nil, responseTimeMS: 0)
+            return .unhealthy(.unreachable(detail: "Proxy stopped"), responseTimeMS: 0)
         }
         return await pool.healthCheck(urlString: configProvider().healthCheckURL)
     }
