@@ -77,6 +77,12 @@ enum HelperDaemon {
             exit(EXIT_SUCCESS)
         }
 
+        // Seed from the live console so a helper restarted mid-session can
+        // admit teardown at logout without having served a request first.
+        let consoleAtStart = consoleUserUID()
+        if consoleAtStart != 0 {
+            lastConsoleUID = consoleAtStart
+        }
         HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {

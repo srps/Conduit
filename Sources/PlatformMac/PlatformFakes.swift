@@ -65,6 +65,14 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
         set { lock.withLock { _failingDomains = newValue } }
     }
 
+    /// Answers as the helper does at the loginwindow: operations that set a
+    /// value are refused with `.noConsoleUser`; clear, remove and stop land.
+    package var atLoginwindow: Bool {
+        get { lock.withLock { _atLoginwindow } }
+        set { lock.withLock { _atLoginwindow = newValue } }
+    }
+    private var _atLoginwindow = false
+
     /// The value lists of every recorded `operation`.
     package func commands(matching operation: PrivilegedOperation) -> [[String]] {
         commands.filter { $0.command == operation }.map(\.values)
@@ -84,6 +92,9 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
             _commands.append(contentsOf: batch.map { ($0.operation, $0.values) })
             if let error { return error }
             for step in batch {
+                if _atLoginwindow, !HelperAdmission.isTeardownOnly(HelperCommand(step.operation)) {
+                    return PrivilegeClientError.refused(.noConsoleUser, "no console user yet")
+                }
                 if _failing.contains(step.operation) {
                     return Refused(operation: step.operation, subject: nil)
                 }
