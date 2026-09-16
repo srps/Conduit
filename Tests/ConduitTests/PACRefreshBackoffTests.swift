@@ -118,6 +118,42 @@ final class PACRefreshBackoffTests: XCTestCase {
         XCTAssertEqual(loader.callCount, 2, "a new URL is a new PAC; the old one's backoff does not apply")
     }
 
+    /// A URL edited while its predecessor is downloading: the old evaluator is
+    /// discarded and the new URL fetched before the refresh returns.
+    func testURLChangedDuringFetchIsFetchedBeforeTheOldEvaluatorIsUsed() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        let fetched = NIOLockedValueBox<[String]>([])
+        let config = makeConfig()
+        let engine = PACRoutingEngine(
+            configProvider: { config.current },
+            resolver: CFPACEvaluator(),
+            refreshInterval: 300,
+            pacLoader: { url in
+                fetched.withLockedValue { $0.append(url) }
+                if url.hasSuffix("proxy.pac") {
+                    await withCheckedContinuation { continuation in
+                        DispatchQueue.global().async {
+                            gate.wait()
+                            continuation.resume()
+                        }
+                    }
+                    return "function FindProxyForURL(url, host) { return \"PROXY old.example.com:8080\"; }"
+                }
+                return "function FindProxyForURL(url, host) { return \"PROXY new.example.com:8080\"; }"
+            }
+        )
+
+        let refresh = Task { try await engine.refresh(force: true) }
+        try await Task.sleep(for: .milliseconds(100))
+        config.setPACURL("http://pac.example.com/other.pac")
+        gate.signal()
+        try await refresh.value
+
+        XCTAssertEqual(fetched.withLockedValue { $0 }, ["http://pac.example.com/proxy.pac", "http://pac.example.com/other.pac"])
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), .proxy(host: "new.example.com", port: 8080))
+        XCTAssertNil(engine.backoffRemaining())
+    }
+
     func testConcurrentForcedRefreshesShareOneFetch() async throws {
         let gate = DispatchSemaphore(value: 0)
         let calls = NIOLockedValueBox(0)
