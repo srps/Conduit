@@ -62,9 +62,10 @@ Findings from twelve days of the installed app's `proxy.log` (2026-09-05 to 09-1
   `.build/out/Products/<Config>` and leaves the old directory untouched, so every
   `make install` since the toolchain update rebuilt successfully and then shipped the app
   and helper from 2026-09-05/06. The script now fails if a product is missing.
-  `install-helper.sh` installs the newest helper among the installed app, the local bundle
-  and the build products (it used to prefer the installed app whenever one existed, so a
-  rebuilt helper stayed uninstalled); `--source installed|local|release|debug` picks one.
+  `install-helper.sh` installs the newer of the two build products when one exists, and
+  falls back to the local bundle, then the installed app (it used to prefer the installed
+  app whenever one existed, so a rebuilt helper stayed uninstalled, and a copied bundle's
+  timestamp says nothing about its code); `--source installed|local|release|debug` picks one.
 - Warning-free build: the pure decision functions on `WindowBehaviorView` are
   `nonisolated`, NUL-terminated C buffers decode through `String(nulTerminated:)`,
   the local PAC server adds its handlers synchronously, and the remaining Sendable and
