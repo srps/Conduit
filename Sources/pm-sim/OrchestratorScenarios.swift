@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import ProxyKernel
@@ -147,49 +148,23 @@ enum OrchestratorScenarios {
 
     // MARK: - Connect-failure log severity gating.
 
-    /// Drives `LocalProxyServer` through two failure shapes and asserts that the
-    /// `DirectModeCause`-driven log severity gating works end-to-end:
+    /// Direct-mode silence: a direct connect that fails while the VPN is off
+    /// is expected and must stay quiet, an upstream that fails under an
+    /// unexpected cause must be loud. "Quiet" and "loud" are measured on the
+    /// contract, not on message text: the request is reported failed either
+    /// way, a loud failure emits its `*_failed` event and an `.error` line in
+    /// the proxy category, a quiet one emits neither (#36).
     ///
-    ///   * **Run 1 — silenced direct-connect failure under `.vpnDisconnected`.**
-    ///     Empty upstreams, `directModeProvider = (true, .vpnDisconnected)`,
-    ///     CONNECT to an RFC 5737 black-hole address. Because
-    ///     `.vpnDisconnected.routesClientTrafficDirectly` is `true`, the
-    ///     handler attempts a direct connect, which fails. The failure must
-    ///     log at `.info` (silenced) per `directFailureLogLevel(for:)` —
-    ///     the user intentionally turned off the VPN; loud errors here
-    ///     would be noise.
-    ///   * **Run 2 — loud upstream failure under `.upstreamsUnreachable`.**
-    ///     One configured upstream pointing at an RFC 5737 black-hole,
-    ///     `directModeProvider = (true, .upstreamsUnreachable)`, CONNECT to
-    ///     a real-looking target. Because
-    ///     `.upstreamsUnreachable.routesClientTrafficDirectly` is `false`
-    ///     (post-`c376eb1` design — VPN-connected degraded states keep
-    ///     PAC/upstream routing for strict corporate profiles), the handler
-    ///     attempts the upstream tunnel, which fails. The failure must log
-    ///     at `.error` (loud) per `upstreamFailureLogLevel(for:)`.
-    ///
-    /// Pre-`c376eb1` this scenario tried to drive Run 2 through the same
-    /// direct-connect path as Run 1 by lying to `directModeProvider`.
-    /// That stopped working when the routing model split `isDirect` from
-    /// `routesClientTrafficDirectly`: `.upstreamsUnreachable` no longer
-    /// drives direct connects at all, so the "Direct connect failed" line
-    /// the test was searching for never fired. The fix is to test the
-    /// path that's actually emitted under the unexpected cause —
-    /// upstream-failure logging — instead of forcing a counterfactual
-    /// direct-connect.
+    /// Run 2 goes through the upstream path on purpose: since `c376eb1`,
+    /// `.upstreamsUnreachable` does not route client traffic directly even
+    /// when `directModeProvider` says direct, so the loud line the product
+    /// emits under that cause is the upstream failure.
     @MainActor
     static func directModeSilence(verbose: Bool) async throws -> ScenarioResult {
         let name = "directModeSilence(VPN-off vs upstreams-unreachable)"
         let group = MultiThreadedEventLoopGroup.singleton
         var notes: [String] = []
         let start = Date()
-
-        // Capture every log entry at .info or above so we can scan for severity.
-        // pm-sim no longer constructs AppLogStore (app target only); the
-        // RecordingLogSink kernel-side stock impl gives us the same in-memory
-        // capture without the @MainActor / Combine machinery.
-        let expectedLogger = RecordingLogSink(minLevel: .info)
-        let unexpectedLogger = RecordingLogSink(minLevel: .info)
 
         // RFC 5737 reserved for documentation; TCP SYN reliably fails without
         // depending on local network state and resolves through .connectTimeout
@@ -199,29 +174,24 @@ enum OrchestratorScenarios {
         let unreachablePort = 9999
 
         // Run #1: cause = .vpnDisconnected (expected) + empty upstreams →
-        // direct-connect attempted → "Direct connect ... failed" must be .info.
+        // direct connect attempted → quiet.
         var directOnlyConfig = ProxyConfig()
         directOnlyConfig.proxy.host = "127.0.0.1"
         directOnlyConfig.proxy.port = 0
         directOnlyConfig.routing.pacRoutingEnabled = false
         directOnlyConfig.upstreams = []  // forces the direct path under the (true, .vpnDisconnected) gate
-        let infoResult = try await runFailureLogProbe(
+        let expected = try await runFailureProbe(
             cause: .vpnDisconnected,
-            logger: expectedLogger,
+            logger: RecordingLogSink(minLevel: .info),
             config: directOnlyConfig,
             group: group,
-            target: "\(unreachableHost):\(unreachablePort)",
-            messageMatch: { $0.contains("Direct connect") && $0.contains("failed") }
+            target: "\(unreachableHost):\(unreachablePort)"
         )
-        notes.append("expected(VPN off): direct-failure logged at \(infoResult.severityLabel)")
+        let expectedPass = expected.requestFailed && expected.loudProxyLevels.isEmpty && expected.failureEvents.isEmpty
+        notes.append("expected(VPN off): \(expected.summary) → \(expectedPass ? "quiet" : "LOUD")")
 
         // Run #2: cause = .upstreamsUnreachable (unexpected) + one configured
-        // upstream pointing at the black-hole → upstream tunnel attempted →
-        // "CONNECT tunnel failed" must be .error. Cannot reuse the direct-
-        // connect path here: post-c376eb1, .upstreamsUnreachable does not
-        // route client traffic directly even when directModeProvider says
-        // isDirect = true. The relevant loud log surfaces on the upstream-
-        // failure path instead.
+        // upstream pointing at the black hole → upstream tunnel attempted → loud.
         var upstreamFailingConfig = ProxyConfig()
         upstreamFailingConfig.proxy.host = "127.0.0.1"
         upstreamFailingConfig.proxy.port = 0
@@ -234,17 +204,19 @@ enum OrchestratorScenarios {
                 priority: 0
             )
         ]
-        let errorResult = try await runFailureLogProbe(
+        let unexpected = try await runFailureProbe(
             cause: .upstreamsUnreachable,
-            logger: unexpectedLogger,
+            logger: RecordingLogSink(minLevel: .info),
             config: upstreamFailingConfig,
             group: group,
-            target: "example.invalid:443",
-            messageMatch: { $0.contains("CONNECT tunnel failed") }
+            target: "example.invalid:443"
         )
-        notes.append("unexpected(upstreams unreachable): upstream-failure logged at \(errorResult.severityLabel)")
+        let unexpectedPass = unexpected.requestFailed
+            && unexpected.loudProxyLevels.contains(.error)
+            && unexpected.failureEvents.contains("upstream.tunnel_failed")
+        notes.append("unexpected(upstreams unreachable): \(unexpected.summary) → \(unexpectedPass ? "loud" : "QUIET")")
 
-        let pass = infoResult.severity == .info && errorResult.severity == .error
+        let pass = expectedPass && unexpectedPass
         notes.append(pass ? "PASS" : "FAIL")
 
         return ScenarioResult(
@@ -262,25 +234,20 @@ enum OrchestratorScenarios {
         )
     }
 
-    /// Generalised log-severity probe used by `directModeSilence`. Spins up a
-    /// `LocalProxyServer` with the supplied fixed direct-mode cause + config,
-    /// sends one CONNECT to `target`, polls the recording logger for a line
-    /// matching `messageMatch`, and reports the line's severity (or
-    /// `<no log line found>` if the poll exhausts).
-    ///
-    /// `messageMatch` is a closure rather than a single substring so each
-    /// caller can describe the precise log shape its code path emits
-    /// ("Direct connect ... failed" vs "CONNECT tunnel failed") without
-    /// each path having to share an artificial common prefix.
+    /// Spins up a `LocalProxyServer` with the supplied fixed direct-mode
+    /// cause and config, sends one CONNECT to `target`, waits for the request
+    /// to be reported failed, and returns what the failure left behind: the
+    /// `.proxy` log lines at `.warning` or above and the `*_failed` events.
     @MainActor
-    private static func runFailureLogProbe(
+    private static func runFailureProbe(
         cause: DirectModeCause,
         logger: RecordingLogSink,
         config: ProxyConfig,
         group: EventLoopGroup,
-        target: String,
-        messageMatch: @Sendable @escaping (String) -> Bool
-    ) async throws -> FailureLogProbeResult {
+        target: String
+    ) async throws -> FailureProbeResult {
+        let events = RuntimeEventLog(capacity: 64)
+        let failedRequests = NIOLockedValueBox(0)
         let detector = DirectConnectDetector(group: group, logger: logger)
         let server = LocalProxyServer(
             logger: logger,
@@ -292,7 +259,10 @@ enum OrchestratorScenarios {
             onConnectionOpened: { _ in },
             onConnectionClosed: { _ in },
             onConnectionActivity: { _ in },
-            onRequestCompleted: { _, _ in }
+            onRequestCompleted: { succeeded, _ in
+                if !succeeded { failedRequests.withLockedValue { $0 += 1 } }
+            },
+            eventSink: { events.append($0) }
         )
         try await server.start()
         defer { Task { @MainActor in await server.stop() } }
@@ -301,10 +271,6 @@ enum OrchestratorScenarios {
             throw NSError(domain: "directModeSilence", code: 1)
         }
 
-        // Issue a CONNECT through the proxy. Whether it lands on the direct
-        // path or the upstream path is determined by the cause + config combo
-        // the caller supplied; the probe only cares about the severity of the
-        // resulting failure log.
         let client = FakeClient(
             id: 0,
             group: group,
@@ -315,29 +281,31 @@ enum OrchestratorScenarios {
         )
         try await client.run()
 
-        // Wait for the failure to materialize and the log to flush. The 10s
-        // connect timeout in handleDirectConnect plus the bridge() task hop
-        // means we need to poll the entries buffer for a few seconds. Cap at
-        // 15 s to avoid hanging pm-sim if the underlying behavior changes.
-        var lastMatchingLine: LogEntry?
+        // The failure is logged and its event emitted before the request is
+        // reported completed, so the callback is the signal to stop waiting.
+        // The direct path spends up to its 10 s connect timeout first; cap at
+        // 15 s so pm-sim cannot hang if the underlying behaviour changes.
         for _ in 0..<60 {
             try await Task.sleep(for: .milliseconds(250))
-            if let entry = logger.entries().last(where: { messageMatch($0.message) && $0.message.lowercased().contains("fail") }) {
-                lastMatchingLine = entry
-                break
-            }
+            if failedRequests.withLockedValue({ $0 }) > 0 { break }
         }
         await client.close()
 
-        guard let line = lastMatchingLine else {
-            return FailureLogProbeResult(severity: .debug, severityLabel: "<no log line found>")
-        }
-        return FailureLogProbeResult(severity: line.level, severityLabel: line.level.rawValue)
+        return FailureProbeResult(
+            requestFailed: failedRequests.withLockedValue { $0 } > 0,
+            loudProxyLevels: logger.entries().filter { $0.category == .proxy && $0.level >= .warning }.map(\.level),
+            failureEvents: events.events.map(\.event).filter { $0.hasSuffix("_failed") }
+        )
     }
 
-    private struct FailureLogProbeResult {
-        let severity: LogLevel
-        let severityLabel: String
+    private struct FailureProbeResult {
+        let requestFailed: Bool
+        let loudProxyLevels: [LogLevel]
+        let failureEvents: [String]
+
+        var summary: String {
+            "requestFailed=\(requestFailed) loudProxyLines=\(loudProxyLevels.map(\.rawValue)) failureEvents=\(failureEvents)"
+        }
     }
 
     // MARK: - Keepalive readback: verify OS accepted the options on a dedicated client socket.
