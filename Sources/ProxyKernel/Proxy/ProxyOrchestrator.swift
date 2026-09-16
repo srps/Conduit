@@ -2010,7 +2010,7 @@ package final class ProxyOrchestrator {
         guard !healthChecker.isRunning else { return }
         healthChecker.start(interval: config.healthCheckIntervalSeconds) { [weak self] in
             guard let self else {
-                return HealthCheckResult(healthy: false, summary: "ProxyOrchestrator deallocated", activeUpstream: nil, responseTimeMS: 0)
+                return .unhealthy(.unreachable(detail: "ProxyOrchestrator deallocated"), responseTimeMS: 0)
             }
             return await self.localProxyServer.performHealthCheck()
         } onResult: { [weak self] result in
@@ -2035,6 +2035,7 @@ package final class ProxyOrchestrator {
 
         if result.healthy {
             recoveryGate.reset()
+            credentialOutageReported = false
             mutateSnapshot {
                 $0.runtimeStatus.lastHealthSummary = "\(result.summary) (\(result.responseTimeMS) ms)"
                 $0.runtimeStatus.activeUpstream = result.activeUpstream ?? $0.runtimeStatus.activeUpstream
@@ -2055,6 +2056,16 @@ package final class ProxyOrchestrator {
             }
         }
         refreshUpstreamStatuses()
+
+        // The ladder cannot supply a credential; report once and keep checking.
+        if case .credentialUnavailable = result.failure {
+            if !credentialOutageReported {
+                credentialOutageReported = true
+                emitEvent(.auth, "recovery.skipped", detail: "reason=credential_unavailable summary=\(result.summary)")
+                logStore.log(.warning, "Upstream authentication has no usable credential; automatic recovery cannot supply one and is not attempted. Health checks continue and routing resumes once a ticket is available (kinit, or the Kerberos SSO extension). \(result.summary)", category: .network)
+            }
+            return
+        }
 
         switch recoveryGate.begin() {
         case .alreadyRunning:

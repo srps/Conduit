@@ -290,7 +290,9 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
         Task { @Sendable in
             do {
                 let auth = try provider(upstream)
-                let token = try auth.initialToken(for: host)
+                let token = try await AuthCredentialRetry.shared.initialToken(
+                    from: auth, host: host, logger: handler.logger, eventSink: handler.eventSink
+                )
                 eventLoop.execute {
                     handler.authenticator = auth
                     handler.logger.log(.debug, "CONNECT + \(auth.scheme) initial for \(SensitiveValueSanitizer.observableTarget(handler.target))", category: .auth)
