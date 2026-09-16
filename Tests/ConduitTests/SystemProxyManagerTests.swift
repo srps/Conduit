@@ -849,6 +849,31 @@ extension SystemProxyManagerTests {
         XCTAssertEqual(privilegeClient.batches[0].count, 4)
     }
 
+    /// At logout the helper refuses the setters a restore needs. The service
+    /// is cleared instead, so the machine does not point at a dead listener,
+    /// and the records stay for the next launch to restore.
+    func testTeardownAtTheLoginwindowClearsAndKeepsTheRecordsForRestore() throws {
+        let runner = FakeNetworksetupRunner()
+        runner.autoProxyEnabled = true
+        runner.autoProxyURL = "http://mdm.corp.example/managed.pac"
+
+        let privilegeClient = RecordingPrivilegeClient()
+        let journal = makeJournal()
+        let manager = SystemProxyManager(
+            privilegeClient: privilegeClient,
+            journal: journal,
+            commandRunner: runner.run
+        )
+        try manager.apply(config: ProxyConfig.testFixture(), mode: .pac, logger: nil)
+
+        runner.shellResult = CommandResult(exitCode: 14, standardOutput: "", standardError: "requires admin")
+        privilegeClient.atLoginwindow = true
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(privilegeClient.commands(matching: .clearSystemProxy), [["Wi-Fi"]])
+        XCTAssertEqual(journal.scopes(for: .systemProxy), ["Wi-Fi"], "the recorded prior state waits for the next launch")
+    }
+
     /// `sh -c` reports only the *last* command's exit status, so a restore
     /// whose endpoint write failed but whose trailing bypass write succeeded
     /// used to report success — after which the records, the only copy of the

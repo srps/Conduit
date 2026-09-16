@@ -56,7 +56,9 @@ final class HelperAdmissionTests: XCTestCase {
         XCTAssertFalse(HelperAdmission.isTeardownOnly(.startTCPRelay))
         XCTAssertTrue(HelperAdmission.isTeardownOnly(.removeDNS))
         XCTAssertTrue(HelperAdmission.isTeardownOnly(.clearSystemProxy))
-        XCTAssertTrue(HelperAdmission.isTeardownOnly(.setWebProxyEndpoint), "restores the recorded prior endpoint")
         XCTAssertTrue(HelperAdmission.isTeardownOnly(.stopTCPRelay))
+        for setter: HelperCommand in [.setWebProxyEndpoint, .setAutoproxyURL, .setAutoproxy, .setProxyBypass, .setDNSServers] {
+            XCTAssertFalse(HelperAdmission.isTeardownOnly(setter), "\(setter) carries a value; a restore is not distinguishable from an apply")
+        }
     }
 }

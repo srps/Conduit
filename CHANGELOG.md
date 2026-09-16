@@ -17,10 +17,13 @@ Findings from twelve days of the installed app's `proxy.log` (2026-09-05 to 09-1
   VPN that merely took longer than that to answer a SYN. The probe field is now labelled
   "Probe Timeout" under "Probes & Direct Connect", with help text saying what it bounds.
 - The helper lets the last console user undo at the loginwindow: remove resolver files,
-  restore or clear the system proxy, stop relays. A logout used to hit "waiting for a
-  login session" on every teardown call, leaving the Wi-Fi proxy pointed at a listener
-  that no longer existed until the next launch. Applying fresh redirection still waits for
-  a session, and a different user's process is still deferred. Requires a helper reinstall.
+  clear the system proxy, stop relays. A logout used to hit "waiting for a login session"
+  on every teardown call, leaving the Wi-Fi proxy pointed at a listener that no longer
+  existed until the next launch. Setting a value still waits for a session, so a restore
+  at logout clears the proxy instead and the recorded settings are restored at the next
+  launch; a different user's process is still deferred. The helper seeds the console user
+  at start, so one restarted mid-session admits the logout teardown too. Requires a helper
+  reinstall.
 - A Kerberos handshake whose credential is momentarily unavailable is retried twice at
   750 ms before failing; after a retried handshake still fails, further handshakes to that
   upstream fail at once for 30 s. The SSO extension takes a moment after a VPN reconnect

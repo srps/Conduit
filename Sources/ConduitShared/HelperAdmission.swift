@@ -6,22 +6,21 @@ import Foundation
 /// The console user is the peer the helper serves. At the loginwindow the
 /// console reports uid 0, which is also when an app quitting for logout asks
 /// the helper to undo what it applied. So while no console user is
-/// published, the last console user may still undo, restore and stop;
-/// applying fresh redirection waits for a session. The peer must be that
-/// uid, not merely non-root: during a fast user switch the console is also
-/// uid 0, and another user's process must not reshape the system proxy.
+/// published, the last console user may still clear, remove and stop;
+/// anything that sets a value waits for a session, since the helper
+/// cannot tell a restore from an apply. The peer must be that uid, not
+/// merely non-root: during a fast user switch the console is also uid 0,
+/// and another user's process must not reshape the system proxy.
 public enum HelperAdmission {
-    /// Commands that only undo, restore or stop.
+    /// Commands that take no value: they only clear, remove or stop.
     public static func isTeardownOnly(_ command: HelperCommand) -> Bool {
         switch command {
         case .ping, .removeDNS, .clearSystemProxy, .disableAutoproxy,
-             .stopDNSRelay, .stopTCPRelay,
+             .stopDNSRelay, .stopTCPRelay:
+            return true
+        case .applyDNS, .applySystemProxy, .startDNSRelay, .startTCPRelay,
              .setWebProxyEndpoint, .setAutoproxyURL, .setAutoproxy,
              .setProxyBypass, .setDNSServers:
-            // The setters restore a recorded prior state during teardown;
-            // the helper cannot tell a restore from an apply.
-            return true
-        case .applyDNS, .applySystemProxy, .startDNSRelay, .startTCPRelay:
             return false
         }
     }

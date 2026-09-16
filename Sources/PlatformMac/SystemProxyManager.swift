@@ -428,6 +428,26 @@ package final class SystemProxyManager: @unchecked Sendable {
                 category: .system
             )
             return true
+        } catch PrivilegeClientError.refused(.noConsoleUser, _) {
+            // At the loginwindow the helper admits clearing but not the
+            // setters a restore needs. Clear now so the machine does not
+            // point at a dead listener; the records stay for the next
+            // launch to restore.
+            do {
+                try privilegeClient.execute(.clearSystemProxy, values: [service])
+                logger?.log(
+                    .warning,
+                    "Cleared the proxy on \(service) at the loginwindow instead of restoring it; the recorded settings are restored at the next launch.",
+                    category: .system
+                )
+            } catch {
+                logger?.log(
+                    .error,
+                    "Could not clear the proxy on \(service) at the loginwindow (\(error.displayDescription)); the system may still point at a proxy that is not running.",
+                    category: .system
+                )
+            }
+            return false
         } catch {
             logger?.log(
                 .error,
