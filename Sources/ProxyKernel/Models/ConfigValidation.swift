@@ -138,7 +138,7 @@ extension ProxyConfig {
         validateNonNegative("health.checkInterval", health.checkInterval, into: &errors)
         validateNonNegative("health.connectionCheckTimeout", health.connectionCheckTimeout, into: &errors)
         validateNonNegative("health.upstreamResponseTimeout", health.upstreamResponseTimeout, into: &errors)
-        validateNonNegative("health.upstreamConnectTimeout", health.upstreamConnectTimeout, into: &errors)
+        validateBounded("health.upstreamConnectTimeout", health.upstreamConnectTimeout, max: HealthSection.maximumUpstreamConnectTimeout, into: &errors)
         validateNonNegative("health.directConnectTTL", health.directConnectTTL, into: &errors)
         // Non-negative, not positive: 0 is the documented "no window" value
         // (`UpstreamCircuitBreaker` treats `windowSeconds <= 0` as the guard
@@ -290,6 +290,14 @@ extension ProxyConfig {
 
     private func validateNonNegative(_ field: String, _ value: TimeInterval, into errors: inout [ConfigValidationError]) {
         if value < 0 {
+            errors.append(.invalidDuration(field: field, value: value))
+        }
+    }
+
+    /// Non-negative and at most `max`. Use for durations the kernel converts
+    /// to integer milliseconds, which traps on a value outside `Int64`.
+    private func validateBounded(_ field: String, _ value: TimeInterval, max: TimeInterval, into errors: inout [ConfigValidationError]) {
+        if !(value >= 0 && value <= max) {
             errors.append(.invalidDuration(field: field, value: value))
         }
     }
