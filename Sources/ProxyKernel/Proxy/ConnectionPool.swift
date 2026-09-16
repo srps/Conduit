@@ -342,8 +342,14 @@ package final class ConnectionPool: @unchecked Sendable {
         let start = Date()
         var head = HTTPRequestHead(version: .http1_1, method: .HEAD, uri: urlString)
         head.headers.add(name: "Host", value: URL(string: urlString)?.host ?? "example.com")
+        // The probe timeout bounds a connect made for this check; a pooled
+        // connection is reused as is.
+        let probeTimeout = TimeAmount.milliseconds(Int64(max(configProvider().connectionCheckTimeoutMS, 1)))
         do {
-            let response = try await exchange(head: head, body: nil).get()
+            let response = try await bufferedExchange(
+                head: head, requestBody: nil, forcedProxy: nil, allowRetry: true,
+                preferFreshConnection: false, authSource: nil, connectTimeout: probeTimeout
+            ).get()
             let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
             let code = Int(response.head.status.code)
             let upstream = response.upstream.endpoint
@@ -531,7 +537,14 @@ package final class ConnectionPool: @unchecked Sendable {
         case exhausted
     }
 
-    private func acquireConnection(for proxy: UpstreamProxy, preferFreshConnection: Bool) -> EventLoopFuture<PooledUpstreamConnection> {
+    /// `connectTimeout` overrides the data-path budget for a new connection;
+    /// the health check passes the probe timeout. An idle pooled connection
+    /// is reused without connecting.
+    private func acquireConnection(
+        for proxy: UpstreamProxy,
+        preferFreshConnection: Bool,
+        connectTimeout: TimeAmount? = nil
+    ) -> EventLoopFuture<PooledUpstreamConnection> {
         let config = configProvider()
         let maxConns = config.maxConnections
         let result: AcquireResult = lock.withLock {
@@ -566,7 +579,7 @@ package final class ConnectionPool: @unchecked Sendable {
         case .exhausted:
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
         case .needsNew:
-            return makeConnection(to: proxy).always { [weak self] _ in
+            return makeConnection(to: proxy, connectTimeout: connectTimeout).always { [weak self] _ in
                 self?.lock.withLockVoid {
                     self?.pendingConnectionCount -= 1
                     self?.preconditionCapacityLocked(maxConnections: maxConns)
@@ -642,8 +655,8 @@ package final class ConnectionPool: @unchecked Sendable {
             }
     }
 
-    private func makeConnection(to proxy: UpstreamProxy) -> EventLoopFuture<PooledUpstreamConnection> {
-        return connectToUpstreamProxy(proxy) { channel in
+    private func makeConnection(to proxy: UpstreamProxy, connectTimeout: TimeAmount? = nil) -> EventLoopFuture<PooledUpstreamConnection> {
+        return connectToUpstreamProxy(proxy, connectTimeout: connectTimeout) { channel in
             do {
                 try channel.pipeline.syncOperations.addHandler(HTTPRequestEncoder(), name: ProxyPipelineNames.upstreamEncoder)
                 try channel.pipeline.syncOperations.addHandler(ByteToMessageHandler(HTTPResponseDecoder(leftOverBytesStrategy: .forwardBytes)), name: ProxyPipelineNames.upstreamDecoder)
@@ -664,15 +677,21 @@ package final class ConnectionPool: @unchecked Sendable {
             }
     }
 
+    /// The data-path connect budget. Clamped as well as validated:
+    /// `Int64(_:)` traps on an out-of-range Double.
+    private var dataPathConnectTimeout: TimeAmount {
+        let seconds = min(max(configProvider().upstreamConnectTimeoutSeconds, 0.5), HealthSection.maximumUpstreamConnectTimeout)
+        return .milliseconds(Int64(seconds * 1000))
+    }
+
     private func upstreamProxyBootstrap(
+        connectTimeout: TimeAmount? = nil,
         channelInitializer: (@Sendable (Channel) -> EventLoopFuture<Void>)? = nil
     ) -> ClientBootstrap {
-        // Data-path budget; `connectionCheckTimeoutMS` bounds probes only.
-        let timeoutMS = Int64(max(configProvider().upstreamConnectTimeoutSeconds * 1000, 500))
         let keepalive = TCPKeepaliveConfig.default
         let bootstrap = ClientBootstrap(group: group)
             .resolver(AddressFamilyAwareResolver(group: group))
-            .connectTimeout(.milliseconds(timeoutMS))
+            .connectTimeout(connectTimeout ?? dataPathConnectTimeout)
             .channelOption(ChannelOptions.socketOption(.so_keepalive), value: 1)
             .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             .channelOption(ChannelOptions.tcpOption(TCPKeepaliveOption.keepIdle), value: CInt(keepalive.keepIdleSeconds))
@@ -687,13 +706,14 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private func connectToUpstreamProxy(
         _ proxy: UpstreamProxy,
+        connectTimeout: TimeAmount? = nil,
         channelInitializer: (@Sendable (Channel) -> EventLoopFuture<Void>)? = nil
     ) -> EventLoopFuture<Channel> {
         let makeBootstrap: @Sendable () -> ClientBootstrap = { [weak self] in
             guard let self else {
                 return ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             }
-            return self.upstreamProxyBootstrap(channelInitializer: channelInitializer)
+            return self.upstreamProxyBootstrap(connectTimeout: connectTimeout, channelInitializer: channelInitializer)
         }
 
         return makeBootstrap()
@@ -770,7 +790,8 @@ package final class ConnectionPool: @unchecked Sendable {
         forcedProxy: UpstreamProxy?,
         allowRetry: Bool,
         preferFreshConnection: Bool,
-        authSource: String?
+        authSource: String?,
+        connectTimeout: TimeAmount? = nil
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
         let config = configProvider()
         guard let proxy = forcedProxy ?? selectProxy(from: config) else {
@@ -780,7 +801,8 @@ package final class ConnectionPool: @unchecked Sendable {
         let start = Date()
         let attempt: EventLoopFuture<UpstreamExchangeResponse> = acquireConnection(
             for: proxy,
-            preferFreshConnection: preferFreshConnection
+            preferFreshConnection: preferFreshConnection,
+            connectTimeout: connectTimeout
         ).flatMap { [weak self] connection in
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
@@ -818,7 +840,8 @@ package final class ConnectionPool: @unchecked Sendable {
                     forcedProxy: proxy,
                     allowRetry: false,
                     preferFreshConnection: true,
-                    authSource: authSource
+                    authSource: authSource,
+                    connectTimeout: connectTimeout
                 )
             }
             if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {

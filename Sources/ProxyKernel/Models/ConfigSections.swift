@@ -217,8 +217,12 @@ package struct HealthSection: Codable, Equatable, Sendable {
     package var upstreamResponseTimeout: TimeInterval
     /// TCP connect budget for upstream proxies on the data path, in seconds.
     /// Default 5 s. Kept apart from `connectionCheckTimeout`, which bounds
-    /// probes and must stay short. `ConnectionPool` floors it at 500 ms.
+    /// probes and must stay short. `ConnectionPool` clamps it to
+    /// 0.5 s ... `maximumUpstreamConnectTimeout`.
     package var upstreamConnectTimeout: TimeInterval
+    /// Upper bound the boundary enforces; the kernel converts to `Int64`
+    /// milliseconds, which traps on an unbounded value.
+    package static let maximumUpstreamConnectTimeout: TimeInterval = 600
     /// Direct-connect TTL in seconds (stored canonically; legacy JSON uses minutes).
     package var directConnectTTL: TimeInterval
     /// Phase 5 of `docs/design-vpn-flap-resilience.md`. Minimum elapsed time

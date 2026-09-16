@@ -438,10 +438,15 @@ final class ConfigArchitectureTests: XCTestCase {
         XCTAssertEqual(decoded.connectionCheckTimeoutMS, 500)
         XCTAssertEqual(decoded.upstreamConnectTimeoutSeconds, 5, accuracy: 0.001)
 
-        var negative = ProxyConfig()
-        negative.upstreamConnectTimeoutSeconds = -1
-        let errors = negative.validate()
-        XCTAssertTrue(errors.contains { if case .invalidDuration(let f, _) = $0 { return f.contains("upstreamConnectTimeout") } else { return false } })
+        func refuses(_ value: TimeInterval) -> Bool {
+            var config = ProxyConfig()
+            config.upstreamConnectTimeoutSeconds = value
+            return config.validate().contains { if case .invalidDuration(let f, _) = $0 { return f.contains("upstreamConnectTimeout") } else { return false } }
+        }
+        XCTAssertTrue(refuses(-1))
+        XCTAssertTrue(refuses(1e20), "a value the kernel cannot convert to Int64 milliseconds is refused at the boundary")
+        XCTAssertFalse(refuses(HealthSection.maximumUpstreamConnectTimeout))
+        XCTAssertFalse(refuses(0))
     }
 
     func testConfigEncodingIncludesCurrentSchemaVersion() throws {
