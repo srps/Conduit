@@ -88,7 +88,7 @@ package struct ProxyCredentials: Equatable {
     }
 }
 
-package enum CredentialManagerError: Error, LocalizedError {
+package enum CredentialManagerError: Error, LocalizedError, CredentialFailureClassifying {
     case missingCredentials
     case invalidPayload
 
@@ -100,4 +100,16 @@ package enum CredentialManagerError: Error, LocalizedError {
             return "Saved proxy credentials are invalid."
         }
     }
+
+    /// Only the user can supply a missing credential; a corrupt payload is
+    /// a store problem, not a credential outage.
+    package var isCredentialUnavailable: Bool {
+        switch self {
+        case .missingCredentials: return true
+        case .invalidPayload: return false
+        }
+    }
+
+    /// Nothing arrives by waiting; the store has no entry.
+    package var isCredentialRetryable: Bool { false }
 }
