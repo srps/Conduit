@@ -4,11 +4,16 @@ import Foundation
 private final class TCPRelaySessionFDTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var activeFDs: Set<Int32> = []
+    private var retired = false
 
-    func insert(_ fd1: Int32, _ fd2: Int32) {
+    /// False once `takeAll()` has run: an accept that completed after the
+    /// relay was stopped must not start a session nobody will stop.
+    func insert(_ fd1: Int32, _ fd2: Int32) -> Bool {
         lock.withLock {
+            guard !retired else { return false }
             activeFDs.insert(fd1)
             activeFDs.insert(fd2)
+            return true
         }
     }
 
@@ -22,6 +27,7 @@ private final class TCPRelaySessionFDTracker: @unchecked Sendable {
 
     func takeAll() -> Set<Int32> {
         lock.withLock {
+            retired = true
             let sessionFDs = activeFDs
             activeFDs.removeAll()
             return sessionFDs
@@ -203,7 +209,13 @@ package final class TCPRelay: @unchecked Sendable {
             Self.setNoDelay(clientFD)
             Self.setNoDelay(targetFD)
 
-            tracker.insert(clientFD, targetFD)
+            guard tracker.insert(clientFD, targetFD) else {
+                // stop() drained this tracker while the accept or the target
+                // connect was in flight.
+                close(clientFD)
+                close(targetFD)
+                break
+            }
 
             let thread = Thread { [tracker] in
                 Self.relayBidirectional(fd1: clientFD, fd2: targetFD)
