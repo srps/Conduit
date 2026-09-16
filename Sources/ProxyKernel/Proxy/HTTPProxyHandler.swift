@@ -469,7 +469,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             self.onRequestCompleted(false, nil)
                             self.onConnectionClosed(infoID)
                         } else {
-                            self.logger.log(upstreamFailureLevel, "CONNECT tunnel failed: \(error.displayDescription)", category: .proxy)
+                            Self.reportConnectFailure(
+                                "upstream.tunnel_failed", level: upstreamFailureLevel,
+                                target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
+                                message: "CONNECT tunnel failed: \(error.displayDescription)",
+                                logger: self.logger, eventSink: self.eventSink
+                            )
                             self.onRequestCompleted(false, nil)
                             self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                             self.onConnectionClosed(infoID)
@@ -538,7 +543,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         self.logger.log(.warning, "Proxy exchange failed for \(SensitiveValueSanitizer.observableTarget(head.uri)), falling back to DIRECT.", category: .proxy)
                         self.handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: ctx)
                     } else {
-                        self.logger.log(upstreamFailureLevel, "Proxy exchange failed: \(error.displayDescription)", category: .proxy)
+                        Self.reportConnectFailure(
+                            "upstream.exchange_failed", level: upstreamFailureLevel,
+                            target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
+                            message: "Proxy exchange failed: \(error.displayDescription)",
+                            logger: self.logger, eventSink: self.eventSink
+                        )
                         self.onRequestCompleted(false, nil)
                         if ctx.channel.isActive {
                             self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
@@ -572,6 +582,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let clientChannel = context.channel
         let clientEL = context.eventLoop
         let logger = self.logger
+        let eventSink = self.eventSink
         let onRequestCompleted = self.onRequestCompleted
         let onConnectionClosed = self.onConnectionClosed
         // Capture cause once for log-severity decisions in the failure handlers.
@@ -645,7 +656,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                     }
                 case .failure(let error):
-                    logger.log(Self.directConnectFailureLevel(error, default: directFailureLevel), "Direct connect to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
+                    Self.reportConnectFailure(
+                        "direct.connect_failed", level: Self.directConnectFailureLevel(error, default: directFailureLevel),
+                        target: "\(host):\(port)", error: error,
+                        message: "Direct connect to \(host):\(port) failed: \(error.displayDescription)",
+                        logger: logger, eventSink: eventSink
+                    )
                     onRequestCompleted(false, nil)
                     body?.cleanup()
                     clientEL.execute {
@@ -695,6 +711,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let clientChannel = context.channel
         let clientEL = context.eventLoop
         let logger = self.logger
+        let eventSink = self.eventSink
         let onRequestCompleted = self.onRequestCompleted
         let onConnectionClosed = self.onConnectionClosed
         let directFailureLevel = Self.directFailureLogLevel(for: directModeProvider().1)
@@ -759,7 +776,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                     }
                 case .failure(let error):
-                    logger.log(directFailureLevel, "Direct connect for upgrade to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
+                    Self.reportConnectFailure(
+                        "direct.connect_failed", level: Self.directConnectFailureLevel(error, default: directFailureLevel),
+                        target: "\(host):\(port)", error: error,
+                        message: "Direct connect for upgrade to \(host):\(port) failed: \(error.displayDescription)",
+                        logger: logger, eventSink: eventSink
+                    )
                     onRequestCompleted(false, nil)
                     body?.cleanup()
                     self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
@@ -789,7 +811,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         directFailureLevel: directFailureLevel
                     )
                 case .failure(let error):
-                    self.logger.log(Self.directConnectFailureLevel(error, default: directFailureLevel), "Direct connect to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
+                    Self.reportConnectFailure(
+                        "direct.connect_failed", level: Self.directConnectFailureLevel(error, default: directFailureLevel),
+                        target: "\(host):\(port)", error: error,
+                        message: "Direct connect to \(host):\(port) failed: \(error.displayDescription)",
+                        logger: self.logger, eventSink: self.eventSink
+                    )
                     self.onRequestCompleted(false, nil)
                     self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                     self.onConnectionClosed(infoID)
@@ -950,6 +977,26 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// A memo refusal repeats a failure already logged; log it at `.info`.
     static func directConnectFailureLevel(_ error: Error, default level: LogLevel) -> LogLevel {
         error is LinkLocalFailureMemo.RecentFailure ? .info : level
+    }
+
+    /// Records a connect failure as an event and then as the log line derived
+    /// from it. A failure logged at `.info` is expected (direct mode off-VPN,
+    /// a memo repeat, a transient path change) and stays out of the event
+    /// stream, which the popover shows.
+    static func reportConnectFailure(
+        _ event: String,
+        level: LogLevel,
+        target: String,
+        error: Error,
+        message: String,
+        logger: any LogSink,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    ) {
+        if level >= .warning {
+            eventSink?(RuntimeEvent(kind: .connection, event: event,
+                                    detail: "target=\(target) reason=\(error.displayDescription)"))
+        }
+        logger.log(level, message, category: .proxy)
     }
 
     private func attachDirectTunnel(
