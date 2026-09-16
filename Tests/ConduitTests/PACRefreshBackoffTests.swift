@@ -118,6 +118,39 @@ final class PACRefreshBackoffTests: XCTestCase {
         XCTAssertEqual(loader.callCount, 2, "a new URL is a new PAC; the old one's backoff does not apply")
     }
 
+    /// Once the URL changes, the old PAC stops routing at once; requests get
+    /// no PAC routes until the new one has loaded.
+    func testAChangedURLStopsTheOldEvaluatorRoutingBeforeTheNewOneLoads() async throws {
+        let gate = DispatchSemaphore(value: 0)
+        let config = makeConfig()
+        let engine = PACRoutingEngine(
+            configProvider: { config.current },
+            resolver: CFPACEvaluator(),
+            refreshInterval: 300,
+            pacLoader: { url in
+                if url.hasSuffix("other.pac") {
+                    await withCheckedContinuation { continuation in
+                        DispatchQueue.global().async { gate.wait(); continuation.resume() }
+                    }
+                    return "function FindProxyForURL(url, host) { return \"PROXY new.example.com:8080\"; }"
+                }
+                return "function FindProxyForURL(url, host) { return \"PROXY old.example.com:8080\"; }"
+            }
+        )
+        try await engine.refresh(force: true)
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), .proxy(host: "old.example.com", port: 8080))
+
+        config.setPACURL("http://pac.example.com/other.pac")
+        XCTAssertNil(engine.route(for: "https://github.com/", host: "github.com"), "the superseded PAC no longer routes")
+        XCTAssertNil(engine.route(for: "https://github.com/", host: "github.com"), "and its route cache is gone")
+
+        gate.signal()
+        for _ in 0..<50 where engine.route(for: "https://github.com/", host: "github.com") == nil {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), .proxy(host: "new.example.com", port: 8080))
+    }
+
     func testANewURLStartsItsOwnBackoffCount() async throws {
         let loader = Loader(failing: true)
         let config = makeConfig()

@@ -374,6 +374,13 @@ package final class PACRoutingEngine: @unchecked Sendable {
         // Pre-check only: `refresh` claims the in-flight slot. Silent, since
         // this runs on every routing decision.
         let shouldKickOff = lock.withLock {
+            // A superseded PAC must not keep routing while its replacement
+            // loads; routes fall back to the non-PAC behaviour until then.
+            if jsEvaluator != nil, cachedPACURL != config.pacURL {
+                jsEvaluator = nil
+                routeCache.removeAll()
+                routeCacheOrder.removeAll()
+            }
             guard !refreshInFlight else { return false }
             let needsRefresh = jsEvaluator == nil || cachedPACURL != config.pacURL || refreshExpired(at: lastRefreshAt)
             guard needsRefresh else { return false }
