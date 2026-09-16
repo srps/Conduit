@@ -974,6 +974,10 @@ package final class ProxyOrchestrator {
     private var directModeReprobeTimer: DispatchSourceTimer?
     private var recentFailureTimestamps: [Date] = []
     private var errorRateReprobeScheduled = false
+    /// Last alarm; none fires again within `errorRateCooldown`.
+    private var errorRateAlarmAt: Date?
+    /// One warning per credential outage.
+    private var credentialOutageReported = false
 
     private lazy var directConnectDetector: DirectConnectDetector = {
         DirectConnectDetector(
@@ -2222,12 +2226,18 @@ package final class ProxyOrchestrator {
 
     private static let errorRateWindow: TimeInterval = 5
     private static let errorRateThreshold = 20
+    /// Quiet period after the alarm; without it the alarm re-arms as soon as
+    /// the probe returns.
+    package static let errorRateCooldown: TimeInterval = 30
 
     private func trackFailureForErrorRate() {
         let now = Date()
         recentFailureTimestamps.append(now)
         let cutoff = now.addingTimeInterval(-Self.errorRateWindow)
         recentFailureTimestamps.removeAll { $0 < cutoff }
+        if let errorRateAlarmAt, now.timeIntervalSince(errorRateAlarmAt) < Self.errorRateCooldown {
+            return
+        }
 
         // Phase 2: skip the alarm entirely when we're in direct mode for an
         // *expected* reason (VPN off, no upstreams configured, transient flap).
@@ -2245,7 +2255,12 @@ package final class ProxyOrchestrator {
               snapshot.runtimeStatus.state != .starting else { return }
 
         errorRateReprobeScheduled = true
-        logStore.log(.warning, "High error rate (\(recentFailureTimestamps.count) failures in \(Int(Self.errorRateWindow))s) — triggering upstream re-probe.", category: .network)
+        errorRateAlarmAt = now
+        let failureCount = recentFailureTimestamps.count
+        // Spend the failures that raised the alarm.
+        recentFailureTimestamps.removeAll()
+        emitEvent(.health, "error_rate.alarm", detail: "failures=\(failureCount) windowSeconds=\(Int(Self.errorRateWindow))")
+        logStore.log(.warning, "High error rate (\(failureCount) failures in \(Int(Self.errorRateWindow))s) — triggering upstream re-probe.", category: .network)
 
         Task { @MainActor in
             defer { self.errorRateReprobeScheduled = false }

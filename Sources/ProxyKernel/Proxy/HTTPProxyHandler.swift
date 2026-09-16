@@ -642,7 +642,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                     }
                 case .failure(let error):
-                    logger.log(directFailureLevel, "Direct connect to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
+                    logger.log(Self.directConnectFailureLevel(error, default: directFailureLevel), "Direct connect to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
                     onRequestCompleted(false, nil)
                     body?.cleanup()
                     clientEL.execute {
@@ -786,7 +786,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         directFailureLevel: directFailureLevel
                     )
                 case .failure(let error):
-                    self.logger.log(directFailureLevel, "Direct connect to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
+                    self.logger.log(Self.directConnectFailureLevel(error, default: directFailureLevel), "Direct connect to \(host):\(port) failed: \(error.displayDescription)", category: .proxy)
                     self.onRequestCompleted(false, nil)
                     self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                     self.onConnectionClosed(infoID)
@@ -831,10 +831,19 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let logger = self.logger
         let gatewayMode = self.gatewayMode
 
+        // Link-local literals: a shorter budget, and a fast failure while a
+        // timeout against the same target is fresh. See `LinkLocalConnectPolicy`.
+        let linkLocal = LinkLocalConnectPolicy.isLinkLocal(host: host)
+        let memoTarget = "\(host):\(port)"
+        if linkLocal, let recent = LinkLocalFailureMemo.shared.recentFailure(target: memoTarget) {
+            return clientEL.makeFailedFuture(recent)
+        }
+        let connectTimeout: TimeAmount = linkLocal ? LinkLocalConnectPolicy.connectTimeout : .seconds(10)
+
         let makeBootstrap: @Sendable () -> ClientBootstrap = {
             let bootstrap = ClientBootstrap(group: eventLoopGroup)
                 .resolver(AddressFamilyAwareResolver(group: eventLoopGroup))
-                .connectTimeout(.seconds(10))
+                .connectTimeout(connectTimeout)
                 .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             if let channelInitializer {
                 return bootstrap.channelInitializer(channelInitializer)
@@ -844,6 +853,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
 
         return makeBootstrap()
             .connect(host: host, port: port)
+            .flatMapErrorThrowing { error in
+                if linkLocal, case ChannelError.connectTimeout = error {
+                    LinkLocalFailureMemo.shared.recordFailure(target: memoTarget)
+                }
+                throw error
+            }
             .hop(to: clientEL)
             .flatMap { upstreamChannel in
                 if upstreamChannel.remoteAddress == nil {
@@ -938,6 +953,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
 
     static func upstreamFailureLogLevel(for cause: DirectModeCause) -> LogLevel {
         cause == .transientNetworkChange ? .info : .error
+    }
+
+    /// A memo refusal repeats a failure already logged; log it at `.info`.
+    static func directConnectFailureLevel(_ error: Error, default level: LogLevel) -> LogLevel {
+        error is LinkLocalFailureMemo.RecentFailure ? .info : level
     }
 
     private func attachDirectTunnel(
