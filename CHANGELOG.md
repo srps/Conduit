@@ -20,8 +20,9 @@ Findings from twelve days of the installed app's `proxy.log` (2026-09-05 to 09-1
   clear the system proxy, stop relays. A logout used to hit "waiting for a login session"
   on every teardown call, leaving the Wi-Fi proxy pointed at a listener that no longer
   existed until the next launch. Setting a value still waits for a session, so a restore
-  at logout clears the proxy instead and the recorded settings are restored at the next
-  launch; a different user's process is still deferred. The helper seeds the console user
+  at logout clears the proxy instead, and a redirected system DNS goes back to DHCP rather
+  than staying on a stopped 127.0.0.1 relay; the recorded settings are restored at the next
+  launch. A different user's process is still deferred. The helper seeds the console user
   at start, so one restarted mid-session admits the logout teardown too. Requires a helper
   reinstall.
 - A Kerberos handshake whose credential is momentarily unavailable is retried twice at

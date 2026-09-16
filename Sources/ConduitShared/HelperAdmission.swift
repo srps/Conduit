@@ -25,21 +25,31 @@ public enum HelperAdmission {
         }
     }
 
+    /// `set-dns-servers <service> Empty` returns a service to DHCP. It is the
+    /// only value-carrying form admitted at the loginwindow: system-DNS
+    /// teardown stops the relay first, and a service left on 127.0.0.1 after
+    /// that has no resolver at all.
+    public static func isDNSReset(_ command: HelperCommand, values: [String]) -> Bool {
+        command == .setDNSServers && values.count == 2
+            && values[1].caseInsensitiveCompare(HelperInputValidator.emptyListSentinel) == .orderedSame
+    }
+
     /// `nil` admits the request. `consoleUID` 0 means nobody; `lastConsoleUID`
     /// is the most recent non-zero console uid this helper has seen; `command`
-    /// is `nil` when the request did not parse.
+    /// is `nil` when the request did not parse; `values` are its arguments.
     public static func refusal(
         peerUID: uid_t,
         consoleUID: uid_t,
         lastConsoleUID: uid_t?,
-        command: HelperCommand?
+        command: HelperCommand?,
+        values: [String] = []
     ) -> HelperRefusal? {
         guard peerUID != 0 else { return .unauthorized }
         if consoleUID != 0 {
             return peerUID == consoleUID ? nil : .unauthorized
         }
-        if let lastConsoleUID, peerUID == lastConsoleUID,
-           let command, isTeardownOnly(command) {
+        if let lastConsoleUID, peerUID == lastConsoleUID, let command,
+           isTeardownOnly(command) || isDNSReset(command, values: values) {
             return nil
         }
         return .noConsoleUser

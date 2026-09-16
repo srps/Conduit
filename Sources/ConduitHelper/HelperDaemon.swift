@@ -101,7 +101,7 @@ enum HelperDaemon {
             // Read the request first: at the loginwindow the verdict depends
             // on the command, and the reply must not race the client's write.
             let request = readLine(fd: clientFD).flatMap { try? JSONDecoder().decode(HelperRequest.self, from: $0) }
-            if let refusal = peerRefusal(clientFD, command: request?.command) {
+            if let refusal = peerRefusal(clientFD, command: request?.command, values: request?.values ?? []) {
                 switch refusal {
                 case .unauthorized:
                     HelperLog.warning("Rejected connection from unauthorized peer")
@@ -225,7 +225,7 @@ enum HelperDaemon {
     /// than deferred: a uid-0 *peer* is never the console user, whatever the
     /// console's state, and nothing is gained by having it wait.
     /// Reads the peer and the console; `HelperAdmission.refusal` decides.
-    private static func peerRefusal(_ fd: Int32, command: HelperCommand?) -> HelperRefusal? {
+    private static func peerRefusal(_ fd: Int32, command: HelperCommand?, values: [String]) -> HelperRefusal? {
         var euid: uid_t = 0
         var egid: gid_t = 0
         guard getpeereid(fd, &euid, &egid) == 0 else { return .unauthorized }
@@ -237,7 +237,8 @@ enum HelperDaemon {
             peerUID: euid,
             consoleUID: consoleUID,
             lastConsoleUID: lastConsoleUID,
-            command: command
+            command: command,
+            values: values
         )
     }
 

@@ -239,6 +239,25 @@ final class SystemDNSManagerTests: XCTestCase {
         )
     }
 
+    /// At logout the helper admits a reset to DHCP but not the recorded
+    /// servers. The relay is already stopped, so the service must not stay on
+    /// 127.0.0.1; the records wait for the next launch.
+    func testClearAtTheLoginwindowResetsToDHCPAndKeepsTheRecords() throws {
+        writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])
+        let manager = makeManager(machine: machine, relayIsLive: false)
+        recording.atLoginwindow = true
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(
+            recording.commands(matching: .setDNSServers).map { $0.joined(separator: " ") },
+            ["Wi-Fi 192.168.1.1", "Wi-Fi empty"],
+            "the refused restore is followed by a reset to DHCP"
+        )
+        XCTAssertTrue(manager.hasSavedState(), "the recorded servers are restored at the next launch")
+    }
+
     func testClearKeepsTheRecordsWhenTheListingFails() throws {
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
         let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["127.0.0.1"]])

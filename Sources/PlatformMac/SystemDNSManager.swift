@@ -191,6 +191,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         }
         var restored = 0
         var skipped = 0
+        var deferredToNextLaunch = 0
         var lastError: Error?
 
         for (service, servers) in savedInterfaces {
@@ -206,9 +207,22 @@ package final class SystemDNSManager: @unchecked Sendable {
                     try privilegeClient.execute(.setDNSServers, values: [service] + servers)
                 }
                 restored += 1
+            } catch PrivilegeClientError.refused(.noConsoleUser, _) {
+                // At the loginwindow the helper admits a reset to DHCP but not
+                // the recorded servers. The relay is already stopped, so a
+                // service left on 127.0.0.1 has no resolver; reset it now and
+                // keep the record for the next launch to restore.
+                do {
+                    try privilegeClient.execute(.setDNSServers, values: [service, "empty"])
+                    deferredToNextLaunch += 1
+                    logger?.log(.warning, "Reset DNS on \(service) to DHCP at the loginwindow instead of restoring it; the recorded servers are restored at the next launch.", category: .system)
+                } catch {
+                    lastError = error
+                    logger?.log(.warning, "Failed to reset DNS for \(service) at the loginwindow: \(error.displayDescription)", category: .system)
+                }
             } catch {
                 lastError = error
-                logger?.log(.warning, "Failed to restore DNS for \(service): \(error.localizedDescription)", category: .system)
+                logger?.log(.warning, "Failed to restore DNS for \(service): \(error.displayDescription)", category: .system)
             }
         }
 
@@ -216,10 +230,10 @@ package final class SystemDNSManager: @unchecked Sendable {
         // Forgetting after a partial failure destroys the only copy of the
         // remaining interfaces' real servers while leaving them pinned at
         // 127.0.0.1 — the rule the proxy and launchd surfaces already follow.
-        if lastError == nil {
+        if lastError == nil, deferredToNextLaunch == 0 {
             deleteSavedState()
             journal.markReleased(surface: .systemDNS)
-        } else {
+        } else if lastError != nil {
             logger?.log(
                 .warning,
                 "Restored system DNS for \(restored) interface(s) but some failed; keeping the recorded servers so a later teardown can retry.",

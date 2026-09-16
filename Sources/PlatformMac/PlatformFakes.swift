@@ -92,8 +92,11 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
             _commands.append(contentsOf: batch.map { ($0.operation, $0.values) })
             if let error { return error }
             for step in batch {
-                if _atLoginwindow, !HelperAdmission.isTeardownOnly(HelperCommand(step.operation)) {
-                    return PrivilegeClientError.refused(.noConsoleUser, "no console user yet")
+                if _atLoginwindow {
+                    let command = HelperCommand(step.operation)
+                    if !HelperAdmission.isTeardownOnly(command), !HelperAdmission.isDNSReset(command, values: step.values) {
+                        return PrivilegeClientError.refused(.noConsoleUser, "no console user yet")
+                    }
                 }
                 if _failing.contains(step.operation) {
                     return Refused(operation: step.operation, subject: nil)
