@@ -10,23 +10,32 @@ import XCTest
 /// limiter already emits `auth.handshake_rejected` for its own refusals.
 final class ConnectFailureEventTests: XCTestCase {
     func testLocalPoolRefusalsGetNoUpstreamEvent() {
-        XCTAssertEqual(
-            HTTPProxyHandler.upstreamFailureEvent("upstream.tunnel_failed", for: ConnectionPoolError.poolExhausted),
-            "connection.pool_exhausted"
-        )
-        XCTAssertNil(
-            HTTPProxyHandler.upstreamFailureEvent("upstream.exchange_failed", for: ConnectionPoolError.authHandshakeLimitExceeded),
-            "the limiter emits auth.handshake_rejected itself"
-        )
+        let exhausted = HTTPProxyHandler.upstreamFailureReport("upstream.tunnel_failed", level: .error, for: ConnectionPoolError.poolExhausted)
+        XCTAssertEqual(exhausted.event, "connection.pool_exhausted")
+        XCTAssertEqual(exhausted.level, .error)
+        let limited = HTTPProxyHandler.upstreamFailureReport("upstream.exchange_failed", level: .error, for: ConnectionPoolError.authHandshakeLimitExceeded)
+        XCTAssertNil(limited.event, "the limiter emits auth.handshake_rejected itself")
+        XCTAssertEqual(limited.level, .error)
+    }
+
+    /// A transient path change demotes upstream failures to info; a cap hit
+    /// during that window is still a cap hit, loud and with its event.
+    func testALocalRefusalDoesNotFollowTheTransientDemotion() {
+        let exhausted = HTTPProxyHandler.upstreamFailureReport("upstream.tunnel_failed", level: .info, for: ConnectionPoolError.poolExhausted)
+        XCTAssertEqual(exhausted.event, "connection.pool_exhausted")
+        XCTAssertEqual(exhausted.level, .error)
+        let upstream = HTTPProxyHandler.upstreamFailureReport("upstream.tunnel_failed", level: .info, for: ConnectionPoolError.upstreamResponseTimedOut)
+        XCTAssertEqual(upstream.event, "upstream.tunnel_failed")
+        XCTAssertEqual(upstream.level, .info, "an upstream failure keeps the cause's level")
     }
 
     func testUpstreamFailuresKeepTheirEvent() {
         XCTAssertEqual(
-            HTTPProxyHandler.upstreamFailureEvent("upstream.tunnel_failed", for: ConnectionPoolError.upstreamResponseTimedOut),
+            HTTPProxyHandler.upstreamFailureReport("upstream.tunnel_failed", level: .error, for: ConnectionPoolError.upstreamResponseTimedOut).event,
             "upstream.tunnel_failed"
         )
         XCTAssertEqual(
-            HTTPProxyHandler.upstreamFailureEvent("upstream.exchange_failed", for: ConnectionPoolError.noUpstreamsConfigured),
+            HTTPProxyHandler.upstreamFailureReport("upstream.exchange_failed", level: .error, for: ConnectionPoolError.noUpstreamsConfigured).event,
             "upstream.exchange_failed"
         )
     }
