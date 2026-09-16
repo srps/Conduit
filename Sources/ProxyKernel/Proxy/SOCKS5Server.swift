@@ -451,35 +451,39 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let logger = self.logger
         let gatewayMode = self.gatewayMode
 
-        let makeBootstrap: @Sendable () -> ClientBootstrap = {
-            ClientBootstrap(group: group)
-                .resolver(AddressFamilyAwareResolver(group: group))
-                .connectTimeout(.seconds(10))
-                .channelOption(ChannelOptions.tcpNoDelay, value: 1)
-        }
-
-        makeBootstrap()
-            .connect(host: host, port: Int(port))
-            .hop(to: clientEL)
-            .flatMap { upstreamChannel -> EventLoopFuture<Channel> in
-                // Mirror the HTTP handler's direct path: NIO's happy-eyeballs
-                // connector can hand back a half-open channel (remoteAddress nil)
-                // that later fails; fall back to an explicit first-A-record IPv4
-                // connect. Shared, unit-tested logic — see HalfOpenChannelFallback.
-                if upstreamChannel.remoteAddress == nil {
-                    logger.log(.warning, "SOCKS5: half-open channel detected for \(host):\(port) (remoteAddress nil); falling back to explicit IPv4 connect", category: .proxy)
-                }
-                return HalfOpenChannelFallback.apply(
-                    upstreamChannel: upstreamChannel,
-                    host: host,
-                    port: Int(port),
-                    on: clientEL,
-                    ipv4Reconnect: { address in
-                        logger.log(.info, "SOCKS5: half-open fallback reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
-                        return makeBootstrap().connect(to: address).hop(to: clientEL)
-                    }
-                )
+        // Same direct-dial policy as `HTTPProxyHandler`: link-local literals
+        // get a short budget and a remembered timeout fails the next attempt at once.
+        LinkLocalConnectPolicy.dial(host: host, port: Int(port), on: clientEL, eventSink: eventSink) { connectTimeout in
+            let makeBootstrap: @Sendable () -> ClientBootstrap = {
+                ClientBootstrap(group: group)
+                    .resolver(AddressFamilyAwareResolver(group: group))
+                    .connectTimeout(connectTimeout)
+                    .channelOption(ChannelOptions.tcpNoDelay, value: 1)
             }
+
+            return makeBootstrap()
+                .connect(host: host, port: Int(port))
+                .hop(to: clientEL)
+                .flatMap { upstreamChannel -> EventLoopFuture<Channel> in
+                    // Mirror the HTTP handler's direct path: NIO's happy-eyeballs
+                    // connector can hand back a half-open channel (remoteAddress nil)
+                    // that later fails; fall back to an explicit first-A-record IPv4
+                    // connect. Shared, unit-tested logic — see HalfOpenChannelFallback.
+                    if upstreamChannel.remoteAddress == nil {
+                        logger.log(.warning, "SOCKS5: half-open channel detected for \(host):\(port) (remoteAddress nil); falling back to explicit IPv4 connect", category: .proxy)
+                    }
+                    return HalfOpenChannelFallback.apply(
+                        upstreamChannel: upstreamChannel,
+                        host: host,
+                        port: Int(port),
+                        on: clientEL,
+                        ipv4Reconnect: { address in
+                            logger.log(.info, "SOCKS5: half-open fallback reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
+                            return makeBootstrap().connect(to: address).hop(to: clientEL)
+                        }
+                    )
+                }
+        }
             .flatMapThrowing { channel -> Channel in
                 // DNS-rebinding guard: re-check the *resolved* peer against the
                 // metadata/loopback blocklist (the pre-connect host check can't
