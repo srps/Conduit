@@ -6,8 +6,63 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+### Fixed
+
+Findings from twelve days of the installed app's `proxy.log` (2026-09-05 to 09-16).
+
+- Upstream connects on the data path have their own budget, `upstreamConnectTimeoutSeconds`
+  (default 5 s, floored at 500 ms), editable under Advanced > Failover & Circuit Breaker as
+  "Upstream Connect Timeout". The pool used to borrow the probe timeout, and a profile tuned
+  to 500 ms for snappy probes failed 56 CONNECTs in one day against a corporate proxy over
+  VPN that merely took longer than that to answer a SYN. The probe field is now labelled
+  "Probe Timeout" under "Probes & Direct Connect", with help text saying what it bounds.
+- The helper lets the last console user undo at the loginwindow: remove resolver files,
+  restore or clear the system proxy, stop relays. A logout used to hit "waiting for a
+  login session" on every teardown call, leaving the Wi-Fi proxy pointed at a listener
+  that no longer existed until the next launch. Applying fresh redirection still waits for
+  a session, and a different user's process is still deferred. Requires a helper reinstall.
+- A Kerberos handshake whose credential is momentarily unavailable is retried twice at
+  750 ms before failing; after a retried handshake still fails, further handshakes to that
+  upstream fail at once for 30 s. The SSO extension takes a moment after a VPN reconnect
+  to hand the ticket back, and every CONNECT in that window used to fail outright.
+- The recovery ladder is not run for a missing credential. Closing connections, resetting
+  auth, switching upstream and recycling the listener cannot supply a ticket, and the
+  ladder ended by suggesting the password had changed. One warning names the state; the
+  health loop keeps checking until a ticket appears.
+- The error-rate alarm has a 30 s cooldown and spends the failures that raised it. It used
+  to re-arm as soon as the probe returned, eight times in four seconds.
+- Network-path updates are debounced for 2 s and carry whether the path is satisfied; an
+  unsatisfied path still recycles the DoH transports but does not fetch the PAC. A dark
+  wake produces several updates, each of which used to start a `curl`.
+- A forced PAC refresh no longer overlaps one in flight, and a failed fetch backs off
+  (30 s doubling to 10 min) for path-triggered refreshes. Wake, VPN reconnect and user
+  action still fetch at once, and a changed URL always fetches.
+- Direct connects to link-local literals (169.254/16, fe80::/10) get a 2 s budget instead
+  of 10 s, and a timeout is remembered for 60 s so the next attempt fails at once. A cloud
+  SDK probing the metadata endpoint held a connection for 10 s on each of 178 attempts.
+
+### Logging
+
+- Transparent-proxy relay lines moved from notice to info; two hosts alone were half of the
+  log file.
+- A PAC fetch failure is logged once, by the engine, instead of twice.
+- A CONNECT abandoned by the client before the upstream tunnel came up is logged at info
+  as such, not as an ERROR `I/O on closed channel`.
+- `IOError` text no longer carries NIO's stray parenthesis, and a resolver failure reads as
+  `getaddrinfo`'s wording rather than a struct dump.
+
 ### Development
 
+- `bundle-app.sh` and `install-helper.sh` ask SwiftPM where the products are instead of
+  assuming `.build/<arch>-apple-macosx/<config>`. Xcode 27's build system writes to
+  `.build/out/Products/<Config>` and leaves the old directory untouched, so every
+  `make install` since the toolchain update rebuilt successfully and then shipped the app
+  and helper from 2026-09-05/06. The script now fails if a product is missing.
+- Warning-free build: the pure decision functions on `WindowBehaviorView` are
+  `nonisolated`, NUL-terminated C buffers decode through `String(nulTerminated:)`,
+  the local PAC server adds its handlers synchronously, and the remaining Sendable and
+  capture diagnostics in the kernel and tests are resolved. `CC_MD4` in NTLM stays: the
+  protocol requires it.
 - `Conduit --dev` (debug builds only, launched with `open -n … --args --dev`) runs the app
   over the harness's fake machine and a scratch state directory, with every port ephemeral
   and a "Popover preview" panel showing the menu bar popover, so a second instance runs
