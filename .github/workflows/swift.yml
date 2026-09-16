@@ -20,6 +20,8 @@ jobs:
       run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift build -v
     - name: Run tests
       run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift test -v
+    - name: Install script argument parsing
+      run: bash ./scripts/test-install-helper-args.sh
     - name: Security boundary regressions
       env:
         DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
