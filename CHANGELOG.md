@@ -4,7 +4,18 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.3.1
+
+A maintenance release: the fixes from twelve days of the installed app's log, the
+trust-boundary and resource-bound fixes from the September source review, and a dev
+instance that runs beside the installed app. It also repairs the install scripts, which
+had shipped a stale build since the Xcode 27 update.
+
+**Upgrading:** reinstall the helper (`sudo ./install-helper.sh`) so a logout can tear the
+proxy down. Credentials now go only to upstreams listed under Upstreams, so an endpoint a
+PAC names but the list does not must be added there to authenticate. Outside gateway mode
+the proxy binds only to loopback. A `config.json` that fails to load is no longer replaced
+with defaults: the app opens on the error and waits for the file to be repaired.
 
 ### Fixed
 
@@ -44,6 +55,48 @@ Findings from twelve days of the installed app's `proxy.log` (2026-09-05 to 09-1
 - Direct connects to link-local literals (169.254/16, fe80::/10) get a 2 s budget instead
   of 10 s, and a timeout is remembered for 60 s so the next attempt fails at once. A cloud
   SDK probing the metadata endpoint held a connection for 10 s on each of 178 attempts.
+
+### Security
+
+Fixes from the source review of 2026-09-09 (`docs/review-2026-09-09.md`), recorded in
+`docs/security-fixes-2026-09-09.md` and `docs/fix-resource-bounds-2026-09-10.md`.
+
+- Credentials go only to configured upstreams. The authenticator is built for the upstream
+  the request is going to, matched by host (case-insensitive) and port against the enabled
+  entries in Upstreams; an endpoint a PAC names that is not listed emits
+  `auth.upstream_not_trusted` and gets no handshake. There is no fallback to the first
+  configured upstream.
+- A configuration that fails to load is rejected, not replaced with defaults. Corrupt JSON,
+  an unsupported future schema or an unreadable file stop `pm-proxy`, `pm-dns`, `pm-tunnel`
+  and the daemon with `config.load_rejected`; a rejected reload keeps the previous
+  configuration and generation. Defaults apply only on a genuine first run or with
+  `--minimal`; a `config.json` deleted beside established state is rejected, and `pm-dns`
+  always needs a configuration or `--minimal`. Journal-backed recovery of orphaned system
+  proxy and DNS settings still runs after a load failure.
+- Outside gateway mode the proxy binds only to loopback: `127/8`, `::1`, or `localhost`
+  pinned to `127.0.0.1` so ambient DNS cannot turn it into a LAN bind. The DNS transports
+  require loopback even in gateway mode. The advertised endpoint, the generated PAC and the
+  environment URLs carry the normalized address.
+- Observations are separated from wire inputs: query strings and fragments, origin-form
+  targets and rejected CONNECT targets are redacted from logs, events, active records and
+  audit targets, while the forwarded bytes are unchanged.
+- SOCKS honours forced-proxy rules before the PAC, as HTTP and CONNECT already did, and
+  force and bypass rules match equivalent IPv6 literals (compressed, bracketed) in both the
+  router and the generated browser PAC.
+- HTTP and SOCKS reserve from one inbound admission budget (`inboundConnectionMaxLimit`).
+  SOCKS negotiation has a 10 s deadline and a 519-byte buffer bound, and a greeting reply is
+  still sent before an oversized payload is rejected. Lowering the limit live stops new
+  admissions without evicting connections; a nonpositive limit is rejected.
+- PAC fetches are bounded to 256 KiB over HTTPS, HTTP and file sources, HTTPS redirects stay
+  on HTTPS without credentials, and a candidate script is probed once before it is
+  installed, so a failed fetch or a broken script keeps the last working evaluator.
+- Event, audit and console writers share a bounded queue (4,096 records or 4 MiB pending,
+  batches of 128 records or 256 KiB) that drops and counts on overflow instead of growing.
+  Disk writers append batches rather than rewriting the file per record, flushes have a 2 s
+  deadline, and shutdown drains once. Periodic status is written only on change, at most
+  10 Hz.
+- `pm-dns` keeps its signal sources for the process lifetime, so TERM and INT close the
+  forwarder and exit normally instead of being dropped.
 
 ### Logging
 
