@@ -469,8 +469,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             self.onRequestCompleted(false, nil)
                             self.onConnectionClosed(infoID)
                         } else {
+                            let report = Self.upstreamFailureReport("upstream.tunnel_failed", level: upstreamFailureLevel, for: error)
                             Self.reportConnectFailure(
-                                Self.upstreamFailureEvent("upstream.tunnel_failed", for: error), level: upstreamFailureLevel,
+                                report.event, level: report.level,
                                 target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
                                 message: "CONNECT tunnel failed: \(error.displayDescription)",
                                 logger: self.logger, eventSink: self.eventSink
@@ -543,8 +544,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         self.logger.log(.warning, "Proxy exchange failed for \(SensitiveValueSanitizer.observableTarget(head.uri)), falling back to DIRECT.", category: .proxy)
                         self.handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: ctx)
                     } else {
+                        let report = Self.upstreamFailureReport("upstream.exchange_failed", level: upstreamFailureLevel, for: error)
                         Self.reportConnectFailure(
-                            Self.upstreamFailureEvent("upstream.exchange_failed", for: error), level: upstreamFailureLevel,
+                            report.event, level: report.level,
                             target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
                             message: "Proxy exchange failed: \(error.displayDescription)",
                             logger: self.logger, eventSink: self.eventSink
@@ -999,14 +1001,19 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         logger.log(level, message, category: .proxy)
     }
 
-    /// A pool-exhausted or handshake-limited request never reached the
-    /// upstream, so it does not get the upstream's failure event. Pool
-    /// exhaustion is reported as `connection.pool_exhausted`; the limiter
+    /// What a failure on the upstream path reports. A pool-exhausted or
+    /// handshake-limited request never reached the upstream: it is a local
+    /// refusal, so it neither gets the upstream's failure event nor the
+    /// level the direct-mode cause assigns to upstream failures (a transient
+    /// path change demotes those to info; a cap hit is loud regardless).
+    /// Exhaustion reports as `connection.pool_exhausted`; the limiter
     /// already emits `auth.handshake_rejected` for its own refusals.
-    static func upstreamFailureEvent(_ event: String, for error: Error) -> String? {
-        if ConnectionPoolError.isPoolExhausted(error) { return "connection.pool_exhausted" }
-        if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) { return nil }
-        return event
+    static func upstreamFailureReport(
+        _ event: String, level: LogLevel, for error: Error
+    ) -> (event: String?, level: LogLevel) {
+        if ConnectionPoolError.isPoolExhausted(error) { return ("connection.pool_exhausted", .error) }
+        if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) { return (nil, .error) }
+        return (event, level)
     }
 
     private func attachDirectTunnel(
