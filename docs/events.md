@@ -91,7 +91,7 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `streaming.response_interrupted` | Upstream died mid-streamed-response; the client connection is closed rather than silently truncated (`uri=`, `upstream=`, `cause=`). |
 | `upstream.response_timeout` | Upstream exceeded `upstreamResponseTimeout` for a response. |
-| `upstream.tunnel_failed` / `upstream.exchange_failed` | A CONNECT tunnel or an HTTP exchange through the upstream failed and the client got a 502 (`target=`, `reason=`). Emitted before the error log line. Not emitted for a failure the cause makes expected (a transient path change), which is logged at info. |
+| `upstream.tunnel_failed` / `upstream.exchange_failed` | A CONNECT tunnel or an HTTP exchange through the upstream failed and the client got a 502 (`target=`, `reason=`). Emitted before the error log line. Not emitted for a failure the cause makes expected (a transient path change), which is logged at info, nor for a request the pool refused locally (pool exhausted, handshake limit), which never reached the upstream. |
 | `direct.connect_failed` | A direct connect the request was routed to failed unexpectedly (`target=`, `reason=`). Direct failures while the VPN is off, and repeats of a remembered link-local timeout, are info log lines only. |
 | `direct.link_local_refused` | A direct connect to a link-local literal was refused at once because one timed out within the last minute (`target=`, `secondsAgo=`). |
 

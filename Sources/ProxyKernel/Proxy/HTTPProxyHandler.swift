@@ -470,7 +470,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             self.onConnectionClosed(infoID)
                         } else {
                             Self.reportConnectFailure(
-                                "upstream.tunnel_failed", level: upstreamFailureLevel,
+                                Self.upstreamFailureEvent("upstream.tunnel_failed", for: error), level: upstreamFailureLevel,
                                 target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
                                 message: "CONNECT tunnel failed: \(error.displayDescription)",
                                 logger: self.logger, eventSink: self.eventSink
@@ -544,7 +544,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         self.handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: ctx)
                     } else {
                         Self.reportConnectFailure(
-                            "upstream.exchange_failed", level: upstreamFailureLevel,
+                            Self.upstreamFailureEvent("upstream.exchange_failed", for: error), level: upstreamFailureLevel,
                             target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
                             message: "Proxy exchange failed: \(error.displayDescription)",
                             logger: self.logger, eventSink: self.eventSink
@@ -984,7 +984,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// a memo repeat, a transient path change) and stays out of the event
     /// stream, which the popover shows.
     static func reportConnectFailure(
-        _ event: String,
+        _ event: String?,
         level: LogLevel,
         target: String,
         error: Error,
@@ -992,11 +992,18 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         logger: any LogSink,
         eventSink: (@Sendable (RuntimeEvent) -> Void)?
     ) {
-        if level >= .warning {
+        if let event, level >= .warning {
             eventSink?(RuntimeEvent(kind: .connection, event: event,
                                     detail: "target=\(target) reason=\(error.displayDescription)"))
         }
         logger.log(level, message, category: .proxy)
+    }
+
+    /// A pool-exhausted or handshake-limited request never reached the
+    /// upstream: it is logged like any failure but gets no upstream event.
+    /// The limiter emits `auth.handshake_rejected` for its own refusals.
+    static func upstreamFailureEvent(_ event: String, for error: Error) -> String? {
+        ConnectionPoolError.isLocalNonUpstreamFailure(error) ? nil : event
     }
 
     private func attachDirectTunnel(
