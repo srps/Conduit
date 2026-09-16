@@ -834,54 +834,41 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let logger = self.logger
         let gatewayMode = self.gatewayMode
 
-        // Link-local literals: a shorter budget, and a fast failure while a
-        // timeout against the same target is fresh. See `LinkLocalConnectPolicy`.
-        let linkLocal = LinkLocalConnectPolicy.isLinkLocal(host: host)
-        let memoTarget = "\(host):\(port)"
-        if linkLocal, let recent = LinkLocalFailureMemo.shared.recentFailure(target: memoTarget) {
-            eventSink?(RuntimeEvent(kind: .connection, event: "direct.link_local_refused",
-                                    detail: "target=\(memoTarget) secondsAgo=\(recent.secondsAgo)"))
-            return clientEL.makeFailedFuture(recent)
-        }
-        let connectTimeout: TimeAmount = linkLocal ? LinkLocalConnectPolicy.connectTimeout : .seconds(10)
-
-        let makeBootstrap: @Sendable () -> ClientBootstrap = {
-            let bootstrap = ClientBootstrap(group: eventLoopGroup)
-                .resolver(AddressFamilyAwareResolver(group: eventLoopGroup))
-                .connectTimeout(connectTimeout)
-                .channelOption(ChannelOptions.tcpNoDelay, value: 1)
-            if let channelInitializer {
-                return bootstrap.channelInitializer(channelInitializer)
-            }
-            return bootstrap
-        }
-
-        return makeBootstrap()
-            .connect(host: host, port: port)
-            .flatMapErrorThrowing { error in
-                if linkLocal, LinkLocalConnectPolicy.isConnectTimeout(error) {
-                    LinkLocalFailureMemo.shared.recordFailure(target: memoTarget)
+        // Link-local literals get a short budget and a remembered timeout;
+        // the SOCKS direct path shares this dial. See `LinkLocalConnectPolicy`.
+        return LinkLocalConnectPolicy.dial(host: host, port: port, on: clientEL, eventSink: eventSink) { connectTimeout in
+            let makeBootstrap: @Sendable () -> ClientBootstrap = {
+                let bootstrap = ClientBootstrap(group: eventLoopGroup)
+                    .resolver(AddressFamilyAwareResolver(group: eventLoopGroup))
+                    .connectTimeout(connectTimeout)
+                    .channelOption(ChannelOptions.tcpNoDelay, value: 1)
+                if let channelInitializer {
+                    return bootstrap.channelInitializer(channelInitializer)
                 }
-                throw error
+                return bootstrap
             }
-            .hop(to: clientEL)
-            .flatMap { upstreamChannel in
-                if upstreamChannel.remoteAddress == nil {
-                    logger.log(.warning, "Half-open channel detected for \(host):\(port) (remoteAddress nil, localAddress \(String(describing: upstreamChannel.localAddress))); falling back to explicit IPv4 connect", category: .proxy)
-                }
-                return Self.applyHalfOpenFallback(
-                    upstreamChannel: upstreamChannel,
-                    host: host,
-                    port: port,
-                    on: clientEL,
-                    ipv4Reconnect: { address in
-                        logger.log(.info, "Half-open fallback: reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
-                        return makeBootstrap()
-                            .connect(to: address)
-                            .hop(to: clientEL)
+
+            return makeBootstrap()
+                .connect(host: host, port: port)
+                .hop(to: clientEL)
+                .flatMap { upstreamChannel in
+                    if upstreamChannel.remoteAddress == nil {
+                        logger.log(.warning, "Half-open channel detected for \(host):\(port) (remoteAddress nil, localAddress \(String(describing: upstreamChannel.localAddress))); falling back to explicit IPv4 connect", category: .proxy)
                     }
-                )
-            }
+                    return Self.applyHalfOpenFallback(
+                        upstreamChannel: upstreamChannel,
+                        host: host,
+                        port: port,
+                        on: clientEL,
+                        ipv4Reconnect: { address in
+                            logger.log(.info, "Half-open fallback: reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
+                            return makeBootstrap()
+                                .connect(to: address)
+                                .hop(to: clientEL)
+                        }
+                    )
+                }
+        }
             .flatMapThrowing { channel in
                 // DNS-rebinding guard: re-check the *resolved* peer against the
                 // metadata/loopback blocklist. The pre-connect host check can't

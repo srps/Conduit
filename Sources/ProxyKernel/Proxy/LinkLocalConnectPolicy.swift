@@ -26,6 +26,34 @@ package enum LinkLocalConnectPolicy {
         }
     }
 
+    /// Wraps a direct dial in the policy: a fresh remembered failure fails at
+    /// once (with `direct.link_local_refused`), a link-local literal gets
+    /// `connectTimeout` instead of `defaultTimeout`, and a timeout anywhere in
+    /// `connect` (Happy Eyeballs or the IPv4 fallback) is remembered. Shared
+    /// by the HTTP and SOCKS direct paths so they cannot diverge.
+    package static func dial(
+        host: String,
+        port: Int,
+        on eventLoop: EventLoop,
+        defaultTimeout: TimeAmount = .seconds(10),
+        eventSink: (@Sendable (RuntimeEvent) -> Void)?,
+        _ connect: (TimeAmount) -> EventLoopFuture<Channel>
+    ) -> EventLoopFuture<Channel> {
+        let linkLocal = isLinkLocal(host: host)
+        let target = "\(host):\(port)"
+        if linkLocal, let recent = LinkLocalFailureMemo.shared.recentFailure(target: target) {
+            eventSink?(RuntimeEvent(kind: .connection, event: "direct.link_local_refused",
+                                    detail: "target=\(target) secondsAgo=\(recent.secondsAgo)"))
+            return eventLoop.makeFailedFuture(recent)
+        }
+        return connect(linkLocal ? connectTimeout : defaultTimeout).flatMapErrorThrowing { error in
+            if linkLocal, isConnectTimeout(error) {
+                LinkLocalFailureMemo.shared.recordFailure(target: target)
+            }
+            throw error
+        }
+    }
+
     /// `true` for a 169.254.0.0/16 or fe80::/10 literal. Hostnames are not resolved.
     package static func isLinkLocal(host: String) -> Bool {
         var literal = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))

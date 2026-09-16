@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import XCTest
@@ -72,6 +73,41 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
         } catch {
             XCTAssertTrue(LinkLocalConnectPolicy.isConnectTimeout(error), "\(error)")
         }
+    }
+
+    /// The shared dial: a link-local timeout is remembered, and the next dial
+    /// to that target fails at once with an event, without connecting.
+    func testDialRemembersALinkLocalTimeoutAndRefusesTheNextAttempt() async throws {
+        LinkLocalFailureMemo.shared.reset()
+        defer { LinkLocalFailureMemo.shared.reset() }
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let events = NIOLockedValueBox<[String]>([])
+        let sink: @Sendable (RuntimeEvent) -> Void = { event in events.withLockedValue { $0.append(event.event) } }
+        let budgets = NIOLockedValueBox<[TimeAmount]>([])
+
+        func dial(_ host: String) async throws -> Channel {
+            try await LinkLocalConnectPolicy.dial(host: host, port: 80, on: loop, eventSink: sink) { budget in
+                budgets.withLockedValue { $0.append(budget) }
+                return loop.makeFailedFuture(ChannelError.connectTimeout(budget))
+            }.get()
+        }
+
+        _ = try? await dial("169.254.169.254")
+        XCTAssertEqual(budgets.withLockedValue { $0 }, [LinkLocalConnectPolicy.connectTimeout])
+        XCTAssertEqual(LinkLocalFailureMemo.shared.count, 1)
+
+        do {
+            _ = try await dial("169.254.169.254")
+            XCTFail("expected the remembered failure")
+        } catch {
+            XCTAssertTrue(error is LinkLocalFailureMemo.RecentFailure, "\(error)")
+        }
+        XCTAssertEqual(budgets.withLockedValue { $0.count }, 1, "the second dial did not connect")
+        XCTAssertEqual(events.withLockedValue { $0 }, ["direct.link_local_refused"])
+
+        _ = try? await dial("192.0.2.1")
+        XCTAssertEqual(budgets.withLockedValue { $0.last }, TimeAmount.seconds(10), "a routable target keeps the default budget")
+        XCTAssertEqual(LinkLocalFailureMemo.shared.count, 1, "and is not remembered")
     }
 
     func testRepeatedFailureIsLoggedQuietly() {
