@@ -52,14 +52,31 @@ package final class AuthCredentialRetry: @unchecked Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) async throws -> String {
         let key = outageKey ?? host
+        let deferring = auth as? any FallbackDeferringAuthenticator
         var attempt = 0
         while true {
+            // The fallback scheme, if the authenticator has one, is withheld
+            // until the last attempt so the primary gets its retries.
+            let lastAttempt = attempt >= attempts || isInOutage(host: key)
             do {
+                if let deferring {
+                    let result = try deferring.initialToken(for: host, allowFallback: lastAttempt)
+                    // A downgrade is the primary's outage: later handshakes go
+                    // straight to the fallback until the hold expires.
+                    if result.usedFallback {
+                        markOutage(host: key)
+                        eventSink?(RuntimeEvent(kind: .auth, event: "auth.credential_outage",
+                                                detail: "upstream=\(key) holdSeconds=\(Int(outageHold))"))
+                    } else {
+                        clearOutage(host: key)
+                    }
+                    return result.token
+                }
                 let token = try auth.initialToken(for: host)
                 clearOutage(host: key)
                 return token
             } catch where error.isCredentialRetryable {
-                guard attempt < attempts, !isInOutage(host: key) else {
+                guard !lastAttempt else {
                     markOutage(host: key)
                     throw error
                 }
