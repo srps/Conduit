@@ -1501,7 +1501,11 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         case .end(let trailers):
             if isStreaming, let clientChannel {
                 nonisolated(unsafe) let ctx = context
+                // The client write completes on the client channel's loop.
+                // Handler state is confined to this loop, so hop back before
+                // touching it; `handlerRemoved` runs here too.
                 let finish: @Sendable (Result<Void, Error>) -> Void = { result in
+                    ctx.eventLoop.assertInEventLoop()
                     self.backpressure?.complete()
                     ctx.pipeline.removeHandler(self, promise: nil)
                     switch result {
@@ -1519,9 +1523,11 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
                 // chunked responses that carry them (gRPC-Web status, digest
                 // trailers). The direct path already forwards them.
                 if let backpressure {
-                    backpressure.write(.end(trailers), flush: true, upstreamContext: context).whenComplete(finish)
+                    backpressure.write(.end(trailers), flush: true, upstreamContext: context)
+                        .hop(to: context.eventLoop).whenComplete(finish)
                 } else {
-                    clientChannel.writeAndFlush(HTTPServerResponsePart.end(trailers)).whenComplete(finish)
+                    clientChannel.writeAndFlush(HTTPServerResponsePart.end(trailers))
+                        .hop(to: context.eventLoop).whenComplete(finish)
                 }
             } else {
                 handleEnd(context: context)
