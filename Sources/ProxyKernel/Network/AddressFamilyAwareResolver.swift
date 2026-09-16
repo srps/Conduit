@@ -87,9 +87,16 @@ package final class AddressFamilyAwareResolver: Resolver, Sendable {
     /// `getaddrinfo` cannot be cancelled; the connector drops the future.
     package func cancelQueries() {}
 
-    package struct ResolutionError: Error, Equatable {
+    package struct ResolutionError: Error, Equatable, CustomStringConvertible, LocalizedError {
         package let host: String
         package let rc: Int32
+
+        /// `gai_strerror` wording; `String(describing:)` printed the struct.
+        package var description: String {
+            "could not resolve \(host): \(String(cString: gai_strerror(rc))) (EAI \(rc))"
+        }
+
+        package var errorDescription: String? { description }
     }
 
     /// Every address of `family` for `host`, in resolver order. Runs

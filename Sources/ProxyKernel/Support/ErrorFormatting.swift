@@ -12,7 +12,11 @@ package extension Error {
     /// there to record.
     var displayDescription: String {
         if let nioError = self as? IOError {
-            return nioError.description
+            // NIO's template has a stray ")" before "(errno:". The reason text
+            // is only reachable through a deprecated accessor, so repair the
+            // template; a no-op once NIO fixes it.
+            let errnoSuffix = " (errno: \(nioError.errnoCode))"
+            return nioError.description.replacingOccurrences(of: ")\(errnoSuffix)", with: errnoSuffix)
         }
 
         if let connectionError = self as? NIOConnectionError {

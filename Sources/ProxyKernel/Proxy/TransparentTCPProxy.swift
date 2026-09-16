@@ -204,7 +204,8 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                         upstreamChannel.close(mode: .all, promise: nil)
                         return
                     }
-                    self.logger.log(.notice, "Transparent proxy: tunnel established for \(sniHost) via \(endpoint).", category: .proxy)
+                    // `.info`: one line per intercepted connection floods the file at `.notice`.
+                    self.logger.log(.info, "Transparent proxy: tunnel established for \(sniHost) via \(endpoint).", category: .proxy)
                     self.attachRelay(
                         context: ctx,
                         upstreamChannel: upstreamChannel,
@@ -283,7 +284,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                         return
                     }
                     self.logger.log(
-                        .notice,
+                        .info,
                         "Transparent proxy: direct relay established for \(host).",
                         category: .proxy
                     )
