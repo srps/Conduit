@@ -17,19 +17,43 @@ CANDIDATES[local]="$SCRIPT_DIR/Conduit.app/Contents/Library/LaunchServices/$BUND
 CANDIDATES[release]="$SCRIPT_DIR/.build/release/ConduitHelper"
 CANDIDATES[debug]="$SCRIPT_DIR/.build/debug/ConduitHelper"
 
+usage() {
+    echo "Usage: sudo ./install-helper.sh [--source installed|local|release|debug]"
+}
+
+# Arguments are checked before the root check so a typo fails without sudo.
 SOURCE=""
-for arg in "$@"; do
-    case "$arg" in
-        --source=*) SOURCE="${arg#--source=}" ;;
-        --source) ;;  # value follows
-        installed|local|release|debug) SOURCE="$arg" ;;
-        *) echo "Unknown argument: $arg"; echo "Usage: sudo ./install-helper.sh [--source installed|local|release|debug]"; exit 1 ;;
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --source=*) value="${1#--source=}" ;;
+        --source)
+            if [ $# -lt 2 ]; then
+                echo "--source needs a value: installed, local, release or debug"
+                usage
+                exit 1
+            fi
+            shift
+            value="$1"
+            ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown argument: $1"; usage; exit 1 ;;
     esac
+    case "$value" in
+        installed|local|release|debug) ;;
+        *) echo "Unknown --source '$value': expected installed, local, release or debug"; usage; exit 1 ;;
+    esac
+    if [ -n "$SOURCE" ]; then
+        echo "--source given twice"
+        usage
+        exit 1
+    fi
+    SOURCE="$value"
+    shift
 done
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "This script must be run with sudo."
-    echo "Usage: sudo ./install-helper.sh [--source installed|local|release|debug]"
+    usage
     exit 1
 fi
 
