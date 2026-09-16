@@ -32,6 +32,8 @@ private final class TCPRelaySessionFDTracker: @unchecked Sendable {
 package final class TCPRelay: @unchecked Sendable {
     private var listenFD: Int32 = -1
     private var acceptThread: Thread?
+    /// See `UDPRelay.generation`.
+    private var generation: UInt64 = 0
     private let lock = NSLock()
     private let sessionFDTracker = TCPRelaySessionFDTracker()
     private var clientThreads: [Thread] = []
@@ -83,10 +85,14 @@ package final class TCPRelay: @unchecked Sendable {
             throw TCPRelayError.listenFailed(errnoMessage)
         }
 
-        lock.withLock { listenFD = lfd }
+        let generation = lock.withLock { () -> UInt64 in
+            self.generation &+= 1
+            listenFD = lfd
+            return self.generation
+        }
 
         let thread = Thread { [weak self] in
-            self?.acceptLoop(listenFD: lfd, targetPort: targetPort, targetHost: host)
+            self?.acceptLoop(generation: generation, listenFD: lfd, targetPort: targetPort, targetHost: host)
         }
         thread.name = "tcp-relay-\(listenPort)->\(targetPort)"
         thread.qualityOfService = .userInteractive
@@ -117,17 +123,19 @@ package final class TCPRelay: @unchecked Sendable {
     /// The accept loop has left on its own. Close the listener so
     /// `isRunning` says so — the helper consults it before answering a start
     /// with "already running", and a dead relay that still looked alive was
-    /// invisible to every recovery path.
-    private func markDead(_ lfd: Int32) {
+    /// invisible to every recovery path. The generation check keeps a loop
+    /// that `stop()` evicted from closing the descriptor a later `start()`
+    /// was handed with the same number.
+    private func markDead(generation: UInt64, _ lfd: Int32) {
         let owned = lock.withLock { () -> Bool in
-            guard listenFD == lfd else { return false }
+            guard self.generation == generation, listenFD == lfd else { return false }
             listenFD = -1
             return true
         }
         if owned { close(lfd) }
     }
 
-    private func acceptLoop(listenFD: Int32, targetPort: Int, targetHost: String) {
+    private func acceptLoop(generation: UInt64, listenFD: Int32, targetPort: Int, targetHost: String) {
         while !Thread.current.isCancelled {
             var clientAddr = sockaddr_in()
             var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
@@ -196,7 +204,7 @@ package final class TCPRelay: @unchecked Sendable {
             thread.start()
             lock.withLock { clientThreads.append(thread) }
         }
-        markDead(listenFD)
+        markDead(generation: generation, listenFD)
     }
 
     private static func relayBidirectional(fd1: Int32, fd2: Int32) {
