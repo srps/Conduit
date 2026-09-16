@@ -457,6 +457,14 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         if hasDirectFallback {
                             self.logger.log(.warning, "CONNECT via upstream failed for \(SensitiveValueSanitizer.observableTarget(head.uri)), falling back to DIRECT (PAC chain includes DIRECT).", category: .proxy)
                             self.handleDirectConnect(head: head, target: target, infoID: infoID, context: ctx)
+                        } else if Self.isBenignTunnelSetupRace(error), !ctx.channel.isActive {
+                            // The client hung up during the upstream dial. The
+                            // inactive client channel tells this apart from an
+                            // upstream socket closing mid-handshake, which
+                            // raises the same error and stays loud.
+                            self.logger.log(.info, "CONNECT tunnel abandoned by the client before setup completed: \(error.displayDescription)", category: .proxy)
+                            self.onRequestCompleted(false, nil)
+                            self.onConnectionClosed(infoID)
                         } else {
                             self.logger.log(upstreamFailureLevel, "CONNECT tunnel failed: \(error.displayDescription)", category: .proxy)
                             self.onRequestCompleted(false, nil)
