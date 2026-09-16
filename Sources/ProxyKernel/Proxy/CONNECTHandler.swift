@@ -630,7 +630,7 @@ private final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendab
         }
         // Write 0 bytes then flush; the future fires when all previously-queued writes
         // have been dispatched to the kernel send buffer. Then close cleanly.
-        peer.writeAndFlush(NIOAny(peer.allocator.buffer(capacity: 0))).whenComplete { _ in
+        peer.writeAndFlush(peer.allocator.buffer(capacity: 0)).whenComplete { _ in
             peer.close(mode: .all, promise: nil)
         }
     }

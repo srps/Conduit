@@ -90,7 +90,8 @@ struct WindowBehaviorView: NSViewRepresentable {
         case updatePendingOnly(Bool)
         case scheduleApply(Bool)
     }
-    static func decideUpdate(
+    // Pure functions; tests call them off the main actor.
+    nonisolated static func decideUpdate(
         target: Bool,
         lastApplied: Bool?,
         pendingTarget: Bool?
@@ -113,7 +114,7 @@ struct WindowBehaviorView: NSViewRepresentable {
         case skip
         case apply(Bool)
     }
-    static func decideApplyOutcome(
+    nonisolated static func decideApplyOutcome(
         pendingTarget: Bool?,
         windowAvailable: Bool,
         lastApplied: Bool?

@@ -45,13 +45,14 @@ package final class LocalPACServer: @unchecked Sendable {
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                let handler = LocalPACHTTPHandler(scriptBox: self.scriptBox)
-                let decoder = ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes))
-                let encoder = HTTPResponseEncoder()
-                return channel.pipeline.addHandler(decoder).flatMap {
-                    channel.pipeline.addHandler(encoder)
-                }.flatMap {
-                    channel.pipeline.addHandler(handler)
+                // On the child's loop: add synchronously rather than chain
+                // non-Sendable handlers through futures.
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandlers([
+                        ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes)),
+                        HTTPResponseEncoder(),
+                        LocalPACHTTPHandler(scriptBox: self.scriptBox),
+                    ])
                 }
             }
 
@@ -136,8 +137,9 @@ private final class LocalPACHTTPHandler: ChannelInboundHandler {
             buffer.writeBytes(data)
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
         }
+        let boundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
         context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
-            context.close(promise: nil)
+            boundContext.value.close(promise: nil)
         }
     }
 
@@ -161,8 +163,9 @@ private final class LocalPACHTTPHandler: ChannelInboundHandler {
         var buffer = context.channel.allocator.buffer(capacity: bodyData.count)
         buffer.writeBytes(bodyData)
         context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
+        let boundContext = NIOLoopBound(context, eventLoop: context.eventLoop)
         context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
-            context.close(promise: nil)
+            boundContext.value.close(promise: nil)
         }
     }
 

@@ -72,8 +72,10 @@ final class RuntimeReconcilerTests: XCTestCase {
     private let proxyOn = PlatformIntegrationConfig(manageSystemProxy: true)
     private let proxyOff = PlatformIntegrationConfig(manageSystemProxy: false)
 
-    override func setUp() {
-        super.setUp()
+    // The async override runs on the main actor, where the host and the
+    // reconciler live; the synchronous one inherits XCTest's nonisolation.
+    override func setUp() async throws {
+        try await super.setUp()
         host = RecordingHost()
         reconciler = RuntimeReconciler(config: baseConfig, platformConfig: proxyOn, host: host)
     }

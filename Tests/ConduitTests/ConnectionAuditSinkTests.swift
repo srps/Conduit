@@ -250,8 +250,9 @@ final class FileConnectionAuditSinkTests: XCTestCase {
         let group = DispatchGroup()
         for i in 0..<writeCount {
             group.enter()
+            let record = sampleRecord(target: "concurrent-\(i):443")
             DispatchQueue.global().async {
-                sink.record(self.sampleRecord(target: "concurrent-\(i):443"))
+                sink.record(record)
                 group.leave()
             }
         }

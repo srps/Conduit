@@ -1099,7 +1099,7 @@ private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
         }
 
         outstandingQueries += 1
-        Task { @Sendable in
+        Task { @Sendable [weak self] in
             let response = await core.resolve(query: queryBytes)
             core.releaseQuery()
             eventLoop.execute { [weak self] in

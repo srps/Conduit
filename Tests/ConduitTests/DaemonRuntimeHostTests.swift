@@ -305,10 +305,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     private var harness: DaemonHarness!
 
-    override func tearDown() {
+    // The async override runs on the main actor, where `harness` lives.
+    override func tearDown() async throws {
         harness?.tearDown()
         harness = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
     /// Ephemeral ports, one split-DNS entry: the same config the app

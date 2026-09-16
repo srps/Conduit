@@ -59,12 +59,13 @@ struct PMTlsCheck {
 
     // MARK: - Connection / chain capture
 
-    struct CapturedChain {
+    /// Immutable once built and handed over exactly once.
+    struct CapturedChain: @unchecked Sendable {
         let trust: SecTrust
         let chain: [SecCertificate]
     }
 
-    enum CaptureResult {
+    enum CaptureResult: Sendable {
         case success(CapturedChain)
         case failure(String)
     }

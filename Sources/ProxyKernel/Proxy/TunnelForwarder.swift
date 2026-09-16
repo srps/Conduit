@@ -320,6 +320,8 @@ package final class TunnelForwarder: @unchecked Sendable {
             do {
                 let def = tunnel
                 let tracker = self.sessionTracker
+                // The initializer already holds `self` for the listener's life.
+                let pool = self.connectionPool
                 let bootstrap = ServerBootstrap(group: group)
                     .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
                     .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
@@ -339,8 +341,8 @@ package final class TunnelForwarder: @unchecked Sendable {
                                     label: def.effectiveLabel,
                                     connectCoordinator: self.connectCoordinator,
                                     logger: self.logger,
-                                    onTunnelClosed: { [weak self] upstreamChannel in
-                                        self?.connectionPool.removeDedicatedTunnelByChannel(upstreamChannel)
+                                    onTunnelClosed: { upstreamChannel in
+                                        pool.removeDedicatedTunnelByChannel(upstreamChannel)
                                     }
                                 )
                             )
@@ -948,7 +950,7 @@ private final class TunnelPeerRelay: ChannelInboundHandler, @unchecked Sendable 
         }
         // Write 0 bytes then flush; the future fires when all previously-queued writes
         // have been dispatched to the kernel send buffer. Then close cleanly.
-        peer.writeAndFlush(NIOAny(peer.allocator.buffer(capacity: 0))).whenComplete { _ in
+        peer.writeAndFlush(peer.allocator.buffer(capacity: 0)).whenComplete { _ in
             peer.close(mode: .all, promise: nil)
         }
     }
