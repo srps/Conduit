@@ -2,6 +2,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOPosix
 
 /// Direct connects to link-local literals get a short budget and a short
 /// memory of failure.
@@ -12,6 +13,18 @@ import NIOCore
 /// refused outright; a Thunderbolt-bridge or self-assigned peer answers fast.
 package enum LinkLocalConnectPolicy {
     package static let connectTimeout: TimeAmount = .seconds(2)
+
+    /// `true` when a connect gave up on a timeout, whether NIO reports it as
+    /// a bare `ChannelError.connectTimeout` or, from `connect(host:port:)`,
+    /// wrapped in `NIOConnectionError` per attempted address.
+    package static func isConnectTimeout(_ error: Error) -> Bool {
+        if case ChannelError.connectTimeout = error { return true }
+        guard let connection = error as? NIOConnectionError, !connection.connectionErrors.isEmpty else { return false }
+        return connection.connectionErrors.allSatisfy { attempt in
+            if case ChannelError.connectTimeout = attempt.error { return true }
+            return false
+        }
+    }
 
     /// `true` for a 169.254.0.0/16 or fe80::/10 literal. Hostnames are not resolved.
     package static func isLinkLocal(host: String) -> Bool {

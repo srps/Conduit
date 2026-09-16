@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOCore
+import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
@@ -49,6 +50,28 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
         XCTAssertEqual(memo.count, 3)
         XCTAssertNil(memo.recentFailure(target: "169.254.0.0:80", now: start.addingTimeInterval(10)), "the oldest entries were evicted")
         XCTAssertNotNil(memo.recentFailure(target: "169.254.0.9:80", now: start.addingTimeInterval(10)))
+    }
+
+    func testConnectTimeoutIsRecognisedBareAndWrapped() {
+        XCTAssertTrue(LinkLocalConnectPolicy.isConnectTimeout(ChannelError.connectTimeout(.seconds(2))))
+        XCTAssertFalse(LinkLocalConnectPolicy.isConnectTimeout(ChannelError.ioOnClosedChannel))
+        XCTAssertFalse(LinkLocalConnectPolicy.isConnectTimeout(IOError(errnoCode: ECONNREFUSED, reason: "connect")))
+    }
+
+    /// Whatever shape `ClientBootstrap.connect(host:port:)` reports a timeout
+    /// in (bare for an address literal, wrapped in `NIOConnectionError` for a
+    /// resolved name), the classifier recognises it.
+    func testTimeoutFromARealHostConnectIsRecognised() async throws {
+        do {
+            // TEST-NET-1 is unroutable; the connect times out rather than refuses.
+            _ = try await ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+                .connectTimeout(.milliseconds(100))
+                .connect(host: "192.0.2.1", port: 9)
+                .get()
+            XCTFail("expected the connect to fail")
+        } catch {
+            XCTAssertTrue(LinkLocalConnectPolicy.isConnectTimeout(error), "\(error)")
+        }
     }
 
     func testRepeatedFailureIsLoggedQuietly() {
