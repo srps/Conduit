@@ -232,7 +232,6 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     private let promise: EventLoopPromise<PooledUpstreamConnection>
     private let logger: any LogSink
 
-    private let maxAccumulatedBytes = RawConnectResponseParser.maxResponseBytes
     private enum Phase { case awaitingChallenge, awaitingFinal }
     private var phase: Phase = .awaitingChallenge
     private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
@@ -314,11 +313,6 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
         var buf = unwrapInboundIn(data)
         accumulated.writeBuffer(&buf)
 
-        if accumulated.readableBytes > maxAccumulatedBytes {
-            fail(ConnectionPoolError.invalidResponse, context: context)
-            return
-        }
-
         do {
             guard let response = try RawConnectResponseParser.parse(&accumulated) else { return }
             handleResponse(response, context: context)
@@ -338,7 +332,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     private func handleResponse(_ response: RawHTTPResponse, context: ChannelHandlerContext) {
         logger.log(.debug, "Upstream raw response: \(response.statusCode) for \(SensitiveValueSanitizer.observableTarget(target))", category: .proxy)
 
-        if response.statusCode == 200 {
+        if response.isTunnelEstablished {
             logger.log(.debug, "CONNECT tunnel established for \(SensitiveValueSanitizer.observableTarget(target))", category: .proxy)
             succeed(connection)
             return
@@ -504,6 +498,8 @@ struct RawHTTPResponse {
     let statusCode: Int
     let rawHeaders: [(String, String)]
 
+    var isTunnelEstablished: Bool { (200...299).contains(statusCode) }
+
     func headers(named name: String) -> [String] {
         rawHeaders
             .filter { $0.0.lowercased() == name.lowercased() }
@@ -518,16 +514,17 @@ enum RawConnectResponseParser {
     private static let crlf = Data([13, 10])
     private static let headerTerminator = Data([13, 10, 13, 10])
 
+    /// The ceiling bounds the response, not tunnel bytes that follow a 2xx
+    /// in the same read: those can exceed it and stay in `buffer`.
     static func parse(_ buffer: inout ByteBuffer) throws -> RawHTTPResponse? {
-        guard buffer.readableBytes <= maxResponseBytes else { throw ConnectionPoolError.invalidResponse }
-        let bytes = Data(buffer.readableBytesView)
-        guard let boundary = bytes.range(of: headerTerminator) else { return nil }
+        let bytes = Data(buffer.readableBytesView.prefix(maxResponseBytes))
+        guard let boundary = bytes.range(of: headerTerminator) else { return try incomplete(buffer) }
         let response = try parseHead(bytes[..<boundary.lowerBound])
         let bodyStart = boundary.upperBound
         let end: Int
-        // CONNECT success ends HTTP framing at the blank line. Any subsequent
-        // bytes are tunnel data, regardless of Content-Length/Transfer-Encoding.
-        if response.statusCode == 200 {
+        // RFC 9110 §9.3.6: any 2xx to CONNECT switches to tunnel mode at the
+        // blank line, regardless of Content-Length/Transfer-Encoding.
+        if response.isTunnelEstablished {
             end = bodyStart
         } else {
             let lengths = response.headers(named: "Content-Length")
@@ -536,7 +533,7 @@ enum RawConnectResponseParser {
                   lengths.isEmpty || encodings.isEmpty else { throw ConnectionPoolError.invalidResponse }
             if let encoding = encodings.first {
                 guard encoding.lowercased() == "chunked" else { throw ConnectionPoolError.invalidResponse }
-                guard let chunkEnd = try chunkedEnd(bytes, start: bodyStart) else { return nil }
+                guard let chunkEnd = try chunkedEnd(bytes, start: bodyStart) else { return try incomplete(buffer) }
                 end = chunkEnd
             } else {
                 let length = try lengths.first.map { try boundedNumber($0, radix: 10) } ?? 0
@@ -547,6 +544,12 @@ enum RawConnectResponseParser {
         }
         buffer.moveReaderIndex(forwardBy: end)
         return response
+    }
+
+    /// More bytes can complete a response only while it is under the ceiling.
+    private static func incomplete(_ buffer: ByteBuffer) throws -> RawHTTPResponse? {
+        guard buffer.readableBytes < maxResponseBytes else { throw ConnectionPoolError.invalidResponse }
+        return nil
     }
 
     private static func parseHead(_ bytes: Data) throws -> RawHTTPResponse {
@@ -603,8 +606,10 @@ enum RawConnectResponseParser {
             guard let line = bytes.range(of: crlf, in: offset..<bytes.count) else { return nil }
             guard let sizeLine = String(data: bytes[offset..<line.lowerBound], encoding: .isoLatin1),
                   validFieldValue(sizeLine) else { throw ConnectionPoolError.invalidResponse }
+            // chunk-ext allows BWS before its `;` (RFC 9112 §7.1.1).
             let sizeText = sizeLine.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)[0]
-            let size = try boundedNumber(String(sizeText), radix: 16)
+            let digits = sizeText.reversed().drop { $0 == " " || $0 == "\t" }.reversed()
+            let size = try boundedNumber(String(digits), radix: 16)
             offset = line.upperBound
             if size == 0 { return try trailersEnd(bytes, start: offset) }
             guard size <= maxResponseBytes - offset - 2 else { throw ConnectionPoolError.invalidResponse }
