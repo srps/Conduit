@@ -232,7 +232,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     private let promise: EventLoopPromise<PooledUpstreamConnection>
     private let logger: any LogSink
 
-    private let maxAccumulatedBytes = 65_536
+    private let maxAccumulatedBytes = RawConnectResponseParser.maxResponseBytes
     private enum Phase { case awaitingChallenge, awaitingFinal }
     private var phase: Phase = .awaitingChallenge
     private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
@@ -319,8 +319,16 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
             return
         }
 
-        guard let response = tryParseResponse() else { return }
-        handleResponse(response, context: context)
+        do {
+            guard let response = try RawConnectResponseParser.parse(&accumulated) else { return }
+            handleResponse(response, context: context)
+        } catch {
+            let event = RuntimeEvent(kind: .connection, event: "connection.upstream_invalid_response",
+                                     detail: "upstream=\(connection.proxy.endpoint) malformed CONNECT response")
+            eventSink?(event)
+            logger.log(.warning, event.detail ?? event.event, category: .proxy)
+            fail(error, context: context)
+        }
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
@@ -490,80 +498,9 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
         }.joined(separator: ", ")
     }
 
-    private func tryParseResponse() -> RawHTTPResponse? {
-        guard let str = accumulated.getString(at: accumulated.readerIndex, length: accumulated.readableBytes) else {
-            return nil
-        }
-
-        guard let headerEnd = str.range(of: "\r\n\r\n") else { return nil }
-
-        let headerSection = String(str[str.startIndex..<headerEnd.lowerBound])
-        let lines = headerSection.split(separator: "\r\n", omittingEmptySubsequences: false)
-        guard let statusLine = lines.first else { return nil }
-
-        let statusParts = statusLine.split(separator: " ", maxSplits: 2)
-        guard statusParts.count >= 2, let statusCode = Int(statusParts[1]) else { return nil }
-
-        var headers: [(String, String)] = []
-        for line in lines.dropFirst() {
-            if let colonIdx = line.firstIndex(of: ":") {
-                let name = String(line[line.startIndex..<colonIdx]).trimmingCharacters(in: .whitespaces)
-                let value = String(line[line.index(after: colonIdx)...]).trimmingCharacters(in: .whitespaces)
-                headers.append((name, value))
-            }
-        }
-
-        let afterHeaders = str[headerEnd.upperBound...]
-        let contentLength: Int
-        if headers.contains(where: {
-            $0.0.caseInsensitiveCompare("Transfer-Encoding") == .orderedSame
-                && $0.1.lowercased().split(separator: ",").contains {
-                    String($0).trimmingCharacters(in: .whitespaces) == "chunked"
-                }
-        }) {
-            guard let chunkedLength = Self.chunkedBodyByteCount(in: String(afterHeaders)) else {
-                return nil
-            }
-            contentLength = chunkedLength
-        } else {
-            contentLength = headers.first { $0.0.lowercased() == "content-length" }
-                .flatMap { Int($0.1) } ?? 0
-        }
-
-        if afterHeaders.utf8.count < contentLength {
-            return nil
-        }
-
-        let totalConsumed = str.distance(from: str.startIndex, to: headerEnd.upperBound) + contentLength
-        accumulated.moveReaderIndex(forwardBy: totalConsumed)
-
-        return RawHTTPResponse(statusCode: statusCode, rawHeaders: headers)
-    }
-
-    private static func chunkedBodyByteCount(in body: String) -> Int? {
-        var index = body.startIndex
-        while true {
-            guard let lineEnd = body[index...].range(of: "\r\n") else { return nil }
-            let sizeLine = body[index..<lineEnd.lowerBound]
-            let sizeText = sizeLine.split(separator: ";", maxSplits: 1).first.map(String.init) ?? ""
-            guard let size = Int(sizeText.trimmingCharacters(in: .whitespaces), radix: 16) else {
-                return nil
-            }
-            index = lineEnd.upperBound
-            guard let chunkEnd = body.index(index, offsetBy: size, limitedBy: body.endIndex) else {
-                return nil
-            }
-            guard body[chunkEnd...].hasPrefix("\r\n") else { return nil }
-            index = body.index(chunkEnd, offsetBy: 2)
-            if size == 0 {
-                guard let trailerEnd = body[index...].range(of: "\r\n") else { return nil }
-                return body.distance(from: body.startIndex, to: trailerEnd.upperBound)
-            }
-        }
-    }
 }
 
-private struct RawHTTPResponse {
+struct RawHTTPResponse {
     let statusCode: Int
     let rawHeaders: [(String, String)]
 
@@ -571,6 +508,127 @@ private struct RawHTTPResponse {
         rawHeaders
             .filter { $0.0.lowercased() == name.lowercased() }
             .map(\.1)
+    }
+}
+
+/// Bounded HTTP framing for the raw, connection-authenticated CONNECT exchange.
+/// No buffer indices are changed until the entire response has been validated.
+enum RawConnectResponseParser {
+    static let maxResponseBytes = 65_536
+    private static let crlf = Data([13, 10])
+    private static let headerTerminator = Data([13, 10, 13, 10])
+
+    static func parse(_ buffer: inout ByteBuffer) throws -> RawHTTPResponse? {
+        guard buffer.readableBytes <= maxResponseBytes else { throw ConnectionPoolError.invalidResponse }
+        let bytes = Data(buffer.readableBytesView)
+        guard let boundary = bytes.range(of: headerTerminator) else { return nil }
+        let response = try parseHead(bytes[..<boundary.lowerBound])
+        let bodyStart = boundary.upperBound
+        let end: Int
+        // CONNECT success ends HTTP framing at the blank line. Any subsequent
+        // bytes are tunnel data, regardless of Content-Length/Transfer-Encoding.
+        if response.statusCode == 200 {
+            end = bodyStart
+        } else {
+            let lengths = response.headers(named: "Content-Length")
+            let encodings = response.headers(named: "Transfer-Encoding")
+            guard lengths.count <= 1, encodings.count <= 1,
+                  lengths.isEmpty || encodings.isEmpty else { throw ConnectionPoolError.invalidResponse }
+            if let encoding = encodings.first {
+                guard encoding.lowercased() == "chunked" else { throw ConnectionPoolError.invalidResponse }
+                guard let chunkEnd = try chunkedEnd(bytes, start: bodyStart) else { return nil }
+                end = chunkEnd
+            } else {
+                let length = try lengths.first.map { try boundedNumber($0, radix: 10) } ?? 0
+                guard length <= maxResponseBytes - bodyStart else { throw ConnectionPoolError.invalidResponse }
+                guard length <= bytes.count - bodyStart else { return nil }
+                end = bodyStart + length
+            }
+        }
+        buffer.moveReaderIndex(forwardBy: end)
+        return response
+    }
+
+    private static func parseHead(_ bytes: Data) throws -> RawHTTPResponse {
+        guard let text = String(data: bytes, encoding: .isoLatin1) else { throw ConnectionPoolError.invalidResponse }
+        let lines = text.components(separatedBy: "\r\n")
+        let status = lines[0].split(separator: " ", maxSplits: 2, omittingEmptySubsequences: false)
+        guard status.count >= 2, ["HTTP/1.0", "HTTP/1.1"].contains(String(status[0])),
+              status[1].utf8.count == 3,
+              status[1].utf8.allSatisfy({ (48...57).contains($0) }),
+              let code = Int(status[1]), (100...599).contains(code),
+              validFieldValue(lines[0]) else { throw ConnectionPoolError.invalidResponse }
+        let headers = try lines.dropFirst().map(parseField)
+        return RawHTTPResponse(statusCode: code, rawHeaders: headers)
+    }
+
+    private static func parseField(_ line: String) throws -> (String, String) {
+        guard let colon = line.firstIndex(of: ":") else { throw ConnectionPoolError.invalidResponse }
+        let name = String(line[..<colon])
+        let value = String(line[line.index(after: colon)...])
+        let punctuation = Array("!#$%&'*+-.^_`|~".utf8)
+        guard !name.isEmpty, name.utf8.allSatisfy({ byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                || punctuation.contains(byte)
+        }), validFieldValue(value) else { throw ConnectionPoolError.invalidResponse }
+        return (name, value.trimmingCharacters(in: CharacterSet(charactersIn: " \t")))
+    }
+
+    private static func validFieldValue(_ text: String) -> Bool {
+        text.unicodeScalars.allSatisfy { $0.value == 9 || ($0.value >= 32 && $0.value != 127) }
+    }
+
+    private static func boundedNumber(_ text: String, radix: Int) throws -> Int {
+        guard !text.isEmpty else { throw ConnectionPoolError.invalidResponse }
+        var number = 0
+        for byte in text.utf8 {
+            let digit: Int
+            switch byte {
+            case 48...57: digit = Int(byte - 48)
+            case 65...70 where radix == 16: digit = Int(byte - 65) + 10
+            case 97...102 where radix == 16: digit = Int(byte - 97) + 10
+            default: throw ConnectionPoolError.invalidResponse
+            }
+            guard digit < radix, number <= (maxResponseBytes - digit) / radix else {
+                throw ConnectionPoolError.invalidResponse
+            }
+            number = number * radix + digit
+        }
+        return number
+    }
+
+    private static func chunkedEnd(_ bytes: Data, start: Int) throws -> Int? {
+        var offset = start
+        while true {
+            guard let line = bytes.range(of: crlf, in: offset..<bytes.count) else { return nil }
+            guard let sizeLine = String(data: bytes[offset..<line.lowerBound], encoding: .isoLatin1),
+                  validFieldValue(sizeLine) else { throw ConnectionPoolError.invalidResponse }
+            let sizeText = sizeLine.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)[0]
+            let size = try boundedNumber(String(sizeText), radix: 16)
+            offset = line.upperBound
+            if size == 0 { return try trailersEnd(bytes, start: offset) }
+            guard size <= maxResponseBytes - offset - 2 else { throw ConnectionPoolError.invalidResponse }
+            guard size <= bytes.count - offset, bytes.count - offset - size >= 2 else { return nil }
+            offset += size
+            guard bytes[offset] == 13, bytes[offset + 1] == 10 else { throw ConnectionPoolError.invalidResponse }
+            offset += 2
+        }
+    }
+
+    private static func trailersEnd(_ bytes: Data, start: Int) throws -> Int? {
+        var offset = start
+        while let line = bytes.range(of: crlf, in: offset..<bytes.count) {
+            if line.lowerBound == offset { return line.upperBound }
+            guard let text = String(data: bytes[offset..<line.lowerBound], encoding: .isoLatin1) else {
+                throw ConnectionPoolError.invalidResponse
+            }
+            let field = try parseField(text)
+            guard !["content-length", "transfer-encoding"].contains(field.0.lowercased()) else {
+                throw ConnectionPoolError.invalidResponse
+            }
+            offset = line.upperBound
+        }
+        return nil
     }
 }
 
