@@ -70,6 +70,44 @@ final class RawConnectResponseParserTests: XCTestCase {
         try assertEverySplit(bytes)
     }
 
+    func testAnyTwoHundredEndsFramingAtTheHeaderAndKeepsTunnelBytes() throws {
+        for status in ["200 Connection established", "204 No Content", "299 Custom"] {
+            var input = buffer("HTTP/1.1 \(status)\r\nContent-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n")
+            input.writeBytes([0x53, 0x53, 0x48, 0, 0xff])
+            XCTAssertEqual(try XCTUnwrap(RawConnectResponseParser.parse(&input), status).isTunnelEstablished, true)
+            XCTAssertEqual(input.readBytes(length: input.readableBytes), [0x53, 0x53, 0x48, 0, 0xff], status)
+        }
+    }
+
+    func testTunnelBytesAfterTheHeaderDoNotCountAgainstTheResponseCeiling() throws {
+        var input = buffer("HTTP/1.1 200 Connection established\r\n\r\n")
+        let head = input.readableBytes
+        input.writeRepeatingByte(0x41, count: RawConnectResponseParser.maxResponseBytes * 2)
+        XCTAssertEqual(try RawConnectResponseParser.parse(&input)?.statusCode, 200)
+        XCTAssertEqual(input.readerIndex, head)
+        XCTAssertEqual(input.readableBytes, RawConnectResponseParser.maxResponseBytes * 2)
+    }
+
+    func testOversizedHeadOrBodyThrowsInsteadOfWaiting() {
+        var head = buffer(challenge + "X-Pad: ")
+        head.writeRepeatingByte(0x61, count: RawConnectResponseParser.maxResponseBytes)
+        XCTAssertThrowsError(try RawConnectResponseParser.parse(&head))
+
+        var chunked = buffer(challenge + "Transfer-Encoding: chunked\r\n\r\n")
+        while chunked.readableBytes < RawConnectResponseParser.maxResponseBytes {
+            chunked.writeString("1\r\na\r\n")
+        }
+        XCTAssertThrowsError(try RawConnectResponseParser.parse(&chunked))
+    }
+
+    func testChunkSizeAcceptsWhitespaceBeforeAnExtension() throws {
+        var input = buffer(challenge + "Transfer-Encoding: chunked\r\n\r\n4 \t;ext=1\r\nBODY\r\n0\r\n\r\nNEXT")
+        XCTAssertEqual(try RawConnectResponseParser.parse(&input)?.statusCode, 407)
+        XCTAssertEqual(input.readString(length: input.readableBytes), "NEXT")
+        var leading = buffer(challenge + "Transfer-Encoding: chunked\r\n\r\n 4\r\nBODY\r\n0\r\n\r\n")
+        XCTAssertThrowsError(try RawConnectResponseParser.parse(&leading))
+    }
+
     private func assertEverySplit(_ bytes: [UInt8]) throws {
         for split in 0..<bytes.count {
             var input = ByteBuffer()
