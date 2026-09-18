@@ -638,7 +638,7 @@ private final class ProxiedTunnelClientHandler: ChannelInboundHandler, @unchecke
             // The addHandler future completes on the UPSTREAM channel's
             // event loop; hop back before touching handler state (the same
             // race the TSan soak flagged on the direct path).
-            upstreamChannel.pipeline.addHandler(relay)
+            CONNECTCoordinator.attachRelay(relay, toUpstreamTunnel: upstreamChannel)
                 .hop(to: clientChannel.eventLoop)
                 .whenComplete { [self] relayResult in
                     finishTunnelSetup(relayResult, upstreamChannel: upstreamChannel, clientChannel: clientChannel)

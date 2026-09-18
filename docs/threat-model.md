@@ -40,7 +40,7 @@ Existing controls: upstream host/port values are validated through `ProxyConfig`
 
 Current gaps: upstream certificate pinning is not implemented, and most corporate proxy connections are explicit proxy TCP connections rather than a pinned TLS channel.
 
-CONNECT response framing is parsed under a 64 KiB accumulation ceiling using byte offsets. Malformed, signed, overflowing, duplicate, or conflicting body lengths and invalid chunk framing fail the handshake with a structured event. A successful CONNECT ends HTTP framing at its header boundary. This parser boundary does not yet guarantee delivery of server-first bytes during the subsequent relay handoff; that lifecycle work remains separate.
+CONNECT response framing is parsed under a 64 KiB accumulation ceiling using byte offsets. Malformed, signed, overflowing, duplicate, or conflicting body lengths and invalid chunk framing fail the handshake with a structured event. Any 2xx ends HTTP framing at its header boundary. Upstream reads then pause, and bytes the server sent first stay with the handshake handler until the consumer's relay is installed, which then receives them once and in order (`CONNECTCoordinator.attachRelay`). Tunnel bytes do not count against the response ceiling.
 
 Planned work: per-upstream SPKI hash config with mismatch refusal and structured event.
 

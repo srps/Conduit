@@ -379,7 +379,10 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
 
         context.pipeline.removeHandler(self).whenComplete { _ in
             clientChannel.pipeline.addHandler(clientRelay).whenComplete { _ in
-                upstreamChannel.pipeline.addHandler(upstreamRelay).whenComplete { _ in
+                let attached = pooledTunnel
+                    ? CONNECTCoordinator.attachRelay(upstreamRelay, toUpstreamTunnel: upstreamChannel)
+                    : upstreamChannel.pipeline.addHandler(upstreamRelay)
+                attached.whenComplete { _ in
                     if initialData.readableBytes > 0 {
                         upstreamChannel.writeAndFlush(initialData, promise: nil)
                     }

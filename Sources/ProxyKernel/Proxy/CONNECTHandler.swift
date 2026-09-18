@@ -129,7 +129,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 logger: self.logger
             )
 
-            return connection.channel.pipeline.addHandler(handler, name: "rawConnectHandshake").flatMap {
+            return connection.channel.pipeline.addHandler(handler, name: Self.handshakeHandlerName).flatMap {
                 handler.start()
                 return promise.futureResult
             }.flatMap { (established: PooledUpstreamConnection) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
@@ -137,9 +137,11 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                     for: established.proxy,
                     latencyMS: Int(Date().timeIntervalSince(start) * 1_000)
                 )
-                return established.channel.pipeline.removeHandler(name: "rawConnectHandshake").map {
+                // The handshake handler stays, holding reads paused and any
+                // server-first bytes, until `attachRelay` hands them over.
+                return established.channel.eventLoop.makeSucceededFuture(
                     (channel: established.channel, endpoint: established.proxy.endpoint, authMethod: established.authMethod)
-                }
+                )
             }.flatMapError { error in
                 connection.channel.close(mode: .all, promise: nil)
                 pool.removeDedicatedTunnel(connection)
@@ -148,6 +150,22 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                 }
                 return connection.channel.eventLoop.makeFailedFuture(error)
             }
+        }
+    }
+
+    private static let handshakeHandlerName = "rawConnectHandshake"
+
+    /// Install the relay that consumes a tunnel from `connectUpstreamTunnel`.
+    /// Every consumer attaches through here: the handshake handler holds the
+    /// tunnel's reads paused and any bytes the server sent first (in the
+    /// 2xx's read or after it), and releases them into `relay`, in order and
+    /// once, only when its removal follows the relay's installation.
+    package static func attachRelay(
+        _ relay: any ChannelHandler & Sendable,
+        toUpstreamTunnel upstream: Channel
+    ) -> EventLoopFuture<Void> {
+        upstream.pipeline.addHandler(relay).flatMap {
+            upstream.pipeline.removeHandler(name: handshakeHandlerName)
         }
     }
 
@@ -203,7 +221,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             )
             let upstreamRelay = TunnelRelayHandler(peer: clientChannel, target: target, logger: self.logger)
             return clientChannel.pipeline.addHandler(clientRelay).flatMap {
-                upstreamChannel.pipeline.addHandler(upstreamRelay)
+                Self.attachRelay(upstreamRelay, toUpstreamTunnel: upstreamChannel)
             }
         }.flatMap {
             // Removal synchronously releases CONNECT's buffered raw bytes.
@@ -241,6 +259,9 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     private var authPermit: AuthHandshakePermit?
     private var responseTimeoutTask: Scheduled<Void>?
     private var completed = false
+    /// Set once a 2xx establishes the tunnel: reads are paused and anything
+    /// that still arrives is tunnel data for the relay, not a response.
+    private var awaitingRelay = false
 
     init(
         connection: PooledUpstreamConnection,
@@ -271,6 +292,16 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
         self.ctx = nil
+        guard awaitingRelay else { return }
+        awaitingRelay = false
+        // Server-first bytes go to the relay installed after this handler.
+        if accumulated.readableBytes > 0 {
+            let serverFirst = accumulated
+            accumulated = context.channel.allocator.buffer(capacity: 0)
+            context.fireChannelRead(NIOAny(serverFirst))
+            context.fireChannelReadComplete()
+        }
+        context.channel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
     }
 
     func start() {
@@ -312,6 +343,8 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buf = unwrapInboundIn(data)
         accumulated.writeBuffer(&buf)
+        // Bounded by the read cycle in progress when the 2xx paused reads.
+        guard !awaitingRelay else { return }
 
         do {
             guard let response = try RawConnectResponseParser.parse(&accumulated) else { return }
@@ -426,6 +459,12 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     private func succeed(_ connection: PooledUpstreamConnection) {
         guard !completed else { return }
         completed = true
+        awaitingRelay = true
+        // Pause before the promise's callbacks run, so no read can outrun
+        // the relay; `handlerRemoved` resumes after handing the bytes over.
+        // On the channel's own loop this applies immediately; it fails only
+        // on a closed channel, whose bytes have nowhere to go anyway.
+        ctx?.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
         cancelResponseTimeout()
         finishAuthHandshake()
         connection.markAuthenticated(authMethod: lastAuthMethod ?? connection.authMethod)

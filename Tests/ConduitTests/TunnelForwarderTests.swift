@@ -147,6 +147,61 @@ final class TunnelForwarderTests: XCTestCase {
         try await mockProxy.close().get()
     }
 
+    // MARK: - Server-first bytes through a proxied tunnel
+
+    /// The upstream's greeting shares a write with its `200`, and a second
+    /// one follows before the client speaks. Both reach the client in order,
+    /// and neither is mistaken for a malformed CONNECT response.
+    @MainActor
+    func testProxiedTunnelDeliversServerFirstBytes() async throws {
+        let logger = RecordingLogSink(minLevel: .debug)
+        let greetings: [[UInt8]] = [Array("SSH-2.0-Upstream\r\n".utf8) + [0, 0xff], Array("220 later\r\n".utf8)]
+        let proxy = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(GreetingConnectProxy(greetings: greetings))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        var config = ProxyConfig.testFixture()
+        config.upstreams = [UpstreamProxy(name: "greeting", host: "127.0.0.1", port: proxy.localAddress!.port!, priority: 0)]
+        let fixedConfig = config
+        let events = NIOLockedValueBox<[String]>([])
+        let pool = ConnectionPool(
+            group: group, logger: logger, configProvider: { fixedConfig }, authenticatorProvider: { _ in StubAuthenticator() }
+        )
+        defer { pool.closeAll() }
+        let coordinator = CONNECTCoordinator(
+            pool: pool, authenticatorProvider: { _ in StubAuthenticator() }, logger: logger,
+            eventSink: { event in events.withLockedValue { $0.append(event.event) } }
+        )
+        let forwarder = TunnelForwarder(group: group, connectCoordinator: coordinator, connectionPool: pool, logger: logger)
+        let result = await forwarder.start(
+            tunnels: [TunnelDefinition(localPort: 0, remoteHost: "origin.test", remotePort: 22, enabled: true, proxied: true, label: "server-first")],
+            listenHost: "127.0.0.1"
+        )
+        let tunnelPort = try XCTUnwrap(result.boundPorts.first)
+
+        let expected = greetings.flatMap { $0 }
+        let received = group.next().makePromise(of: [UInt8].self)
+        let client = try await ClientBootstrap(group: group)
+            .channelInitializer { channel in
+                channel.pipeline.addHandler(CollectBytes(count: expected.count, promise: received))
+            }
+            .connect(host: "127.0.0.1", port: tunnelPort)
+            .get()
+        let timeout = group.next().scheduleTask(in: .seconds(5)) {
+            received.fail(ChannelError.connectTimeout(.seconds(5)))
+        }
+        let bytes = try await received.futureResult.get()
+        timeout.cancel()
+
+        XCTAssertEqual(bytes, expected)
+        XCTAssertFalse(events.withLockedValue { $0 }.contains("connection.upstream_invalid_response"))
+        try await client.close().get()
+        await forwarder.stop()
+        try await proxy.close().get()
+    }
+
     // MARK: - Startup result reporting: partial bind failure
 
     @MainActor
@@ -639,3 +694,52 @@ private final class StubAuthenticator: ProxyAuthenticator, @unchecked Sendable {
 
 /// Records helper-command invocations without touching `/etc/resolver`. Used by the DNS
 /// override reconciliation regression tests to verify which hostnames were applied / removed.
+
+/// Answers any CONNECT with a `200` and the first greeting in one write, then
+/// the remaining greetings; it never needs the client to speak.
+private final class GreetingConnectProxy: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    private let greetings: [[UInt8]]
+    private var request: [UInt8] = []
+    private var answered = false
+
+    init(greetings: [[UInt8]]) { self.greetings = greetings }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        request += buffer.readBytes(length: buffer.readableBytes) ?? []
+        guard !answered, String(decoding: request, as: UTF8.self).contains("\r\n\r\n") else { return }
+        answered = true
+        var out = context.channel.allocator.buffer(capacity: 256)
+        out.writeString("HTTP/1.1 200 Connection Established\r\n\r\n")
+        out.writeBytes(greetings[0])
+        context.writeAndFlush(NIOAny(out), promise: nil)
+        for later in greetings.dropFirst() {
+            var next = context.channel.allocator.buffer(capacity: later.count)
+            next.writeBytes(later)
+            context.writeAndFlush(NIOAny(next), promise: nil)
+        }
+    }
+}
+
+private final class CollectBytes: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    private let count: Int
+    private let promise: EventLoopPromise<[UInt8]>
+    private var bytes: [UInt8] = []
+
+    init(count: Int, promise: EventLoopPromise<[UInt8]>) {
+        self.count = count
+        self.promise = promise
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        bytes += buffer.readBytes(length: buffer.readableBytes) ?? []
+        if bytes.count >= count { promise.succeed(bytes) }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        promise.fail(ChannelError.eof)
+    }
+}
