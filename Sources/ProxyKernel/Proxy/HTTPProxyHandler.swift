@@ -569,7 +569,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         target: HTTPRequestTarget,
         context: ChannelHandlerContext
     ) {
-        guard let url = target.directURL else {
+        guard let url = target.directURL, let originForm = target.originForm else {
             writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
             body?.cleanup()
             onConnectionClosed(infoID)
@@ -640,8 +640,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     )
                     upstream.pipeline.addHandler(forwarder).whenSuccess {
                         var reqHead = head
-                        let path = url.path.isEmpty ? "/" : url.path
-                        reqHead.uri = url.query.map { "\(path)?\($0)" } ?? path
+                        reqHead.uri = originForm
                         HTTPHopByHopHeaders.sanitizeForwardedRequestHeaders(&reqHead.headers)
                         upstream.write(HTTPClientRequestPart.head(reqHead), promise: nil)
                         let bodyFuture = body?.writeClientBody(channel: upstream)
@@ -697,7 +696,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         target: HTTPRequestTarget,
         context: ChannelHandlerContext
     ) {
-        guard let url = target.directURL else {
+        guard let url = target.directURL, let originForm = target.originForm else {
             writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
             body?.cleanup()
             onConnectionClosed(infoID)
@@ -760,8 +759,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     )
                     upstream.pipeline.addHandler(relay).whenSuccess {
                         var reqHead = head
-                        let path = url.path.isEmpty ? "/" : url.path
-                        reqHead.uri = url.query.map { "\(path)?\($0)" } ?? path
+                        reqHead.uri = originForm
                         HTTPHopByHopHeaders.sanitizeForwardedUpgradeRequestHeaders(&reqHead.headers)
                         upstream.write(HTTPClientRequestPart.head(reqHead), promise: nil)
                         let bodyFuture = body?.writeClientBody(channel: upstream)
