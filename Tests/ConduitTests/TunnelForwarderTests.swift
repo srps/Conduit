@@ -20,6 +20,15 @@ final class TunnelForwarderTests: XCTestCase {
         try? group.syncShutdownGracefully()
     }
 
+    /// Polls `condition` until it holds or `timeout` passes; the caller's
+    /// assertions then report what was (or was not) observed.
+    private static func waitUntil(timeout: Duration = .seconds(5), _ condition: @Sendable () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     // MARK: - Direct tunnel through production TunnelForwarder
 
     @MainActor
@@ -61,10 +70,12 @@ final class TunnelForwarderTests: XCTestCase {
         sendBuf.writeString("hello")
         try await clientChannel.writeAndFlush(sendBuf).get()
 
-        try await Task.sleep(for: .milliseconds(500))
+        // Wait for the bytes, not the clock: a loaded CI runner can take
+        // longer than any fixed sleep to connect the tunnel (#56).
+        try await Self.waitUntil { targetReceived.withLockedValue { $0 } != nil }
 
         let received = targetReceived.withLockedValue { $0 }
-        XCTAssertNotNil(received, "Target should have received data through direct tunnel")
+        XCTAssertNotNil(received, "Target should have received data through direct tunnel; log: \(logger.entries().map { "[\($0.level)] \($0.message)" })")
         if let received {
             XCTAssertEqual(received.getString(at: received.readerIndex, length: received.readableBytes), "hello")
         }
@@ -120,10 +131,12 @@ final class TunnelForwarderTests: XCTestCase {
         sendBuf.writeString("proxy")
         try await clientChannel.writeAndFlush(sendBuf).get()
 
-        try await Task.sleep(for: .milliseconds(500))
+        // Wait for the bytes, not the clock: a loaded CI runner can take
+        // longer than any fixed sleep to connect the tunnel (#56).
+        try await Self.waitUntil { targetReceived.withLockedValue { $0 } != nil }
 
         let received = targetReceived.withLockedValue { $0 }
-        XCTAssertNotNil(received, "Target should have received data through proxied tunnel")
+        XCTAssertNotNil(received, "Target should have received data through proxied tunnel; log: \(logger.entries().map { "[\($0.level)] \($0.message)" })")
         if let received {
             XCTAssertEqual(received.getString(at: received.readerIndex, length: received.readableBytes), "proxy")
         }
