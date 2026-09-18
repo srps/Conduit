@@ -24,10 +24,12 @@ final class TrailingDebouncerTests: XCTestCase {
         let queue = DispatchQueue(label: "debouncer.test")
         let debouncer = TrailingDebouncer<Int>(interval: 0.1, queue: queue) { deliveries.append($0) }
 
-        // Signal back to back: a sleep between signals could outlast the
-        // interval on a loaded runner and legitimately deliver early.
-        for value in 1...5 {
-            debouncer.signal(value)
+        // Hold the delivery queue while signalling: no timer can fire until
+        // every earlier item is cancelled, however long this thread stalls.
+        queue.sync {
+            for value in 1...5 {
+                debouncer.signal(value)
+            }
         }
         try await waitUntil { !deliveries.all.isEmpty }
         // Anything else would have to be a second trailing delivery.
