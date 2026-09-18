@@ -194,11 +194,9 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             // raw bytes can never reach a typed unwrap.
             clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverExpectContinue)
         }.flatMap {
-            clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverDecoder)
+            clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverHandler)
         }.flatMap {
             clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverEncoder)
-        }.flatMap {
-            clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverHandler)
         }.flatMap {
             let clientRelay = TunnelRelayHandler(
                 peer: upstreamChannel, target: target, logger: self.logger, onClose: onTunnelClosed
@@ -207,6 +205,10 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             return clientChannel.pipeline.addHandler(clientRelay).flatMap {
                 upstreamChannel.pipeline.addHandler(upstreamRelay)
             }
+        }.flatMap {
+            // Removal synchronously releases CONNECT's buffered raw bytes.
+            // Both relays must be ready and every typed handler gone first.
+            clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverDecoder)
         }
     }
 

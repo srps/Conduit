@@ -11,6 +11,48 @@ import NIOPosix
 /// origin's `101` (including a frame the origin pushed in the same flight),
 /// and then become a transparent byte relay in both directions.
 enum UpgradeScenarios {
+    /// Exercise the production CONNECT splice with bytes already held by the
+    /// HTTP decoder. A type mismatch crashes this isolated harness; byte loss,
+    /// corruption, or a refused handshake throws and makes pm-sim exit nonzero.
+    @MainActor
+    static func connectEarlyData(direct: Bool, verbose: Bool) async throws -> ScenarioResult {
+        let start = Date()
+        let harness = SimHarness(verbose: verbose)
+        let early = "EARLY\u{0}TUNNEL\r\nBYTES"
+        let late = "AFTER-200"
+        do {
+            try await harness.start(
+                originBehavior: .echo,
+                directMode: direct,
+                directModeCause: direct ? .noUpstreamsConfigured : .none
+            )
+            let target = "127.0.0.1:\(harness.origin?.port ?? 0)"
+            let request = "CONNECT \(target) HTTP/1.1\r\nHost: \(target)\r\n\r\n" + early
+            let transcript = try await RawUpgradeClient.run(
+                group: harness.group, host: harness.localProxyHost, port: harness.localProxyPort,
+                request: request, frameToSend: late, expectedFrames: [early, late], expectedStatus: 200
+            )
+            guard transcript.hasPrefix("HTTP/1.1 200 "),
+                  let boundary = transcript.range(of: "\r\n\r\n"),
+                  String(transcript[boundary.upperBound...]) == early + late,
+                  harness.upstream?.connectCount == (direct ? 0 : 1) else {
+                throw UpgradeScenarioError.invalidTranscript
+            }
+            await harness.stop()
+            let bytes = early.utf8.count + late.utf8.count
+            return ScenarioResult(
+                name: direct ? "connect-early-direct" : "connect-early-upstream",
+                clientCount: 1, clientsOpened: 1, clientsWithFirstByte: 1, clientsClosedEarly: 0,
+                totalBytes: bytes, durationSeconds: Date().timeIntervalSince(start), aggregateMBps: 0,
+                minBytes: bytes, maxBytes: bytes, medianBytes: bytes, earliestClose: nil, latestClose: nil,
+                notes: ["PASS: early binary bytes and post-200 bytes echoed exactly in order"]
+            )
+        } catch {
+            await harness.stop()
+            throw error
+        }
+    }
+
     @MainActor
     static func websocketUpgrade(verbose: Bool) async throws -> ScenarioResult {
         let name = "websocket-upgrade"
@@ -75,10 +117,12 @@ enum UpgradeScenarios {
 
 private enum UpgradeScenarioError: Error, LocalizedError {
     case timeout(String)
+    case invalidTranscript
 
     var errorDescription: String? {
         switch self {
         case .timeout(let message): return message
+        case .invalidTranscript: return "CONNECT early-data transcript was refused, truncated, reordered, or duplicated"
         }
     }
 }
@@ -93,14 +137,16 @@ private final class RawUpgradeClientHandler: ChannelInboundHandler, @unchecked S
     private let request: String
     private let frameToSend: String
     private let expectedFrames: [String]
+    private let expectedStatus: Int
     private let promise: EventLoopPromise<String>
     private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
     private var sentFrame = false
 
-    init(request: String, frameToSend: String, expectedFrames: [String], promise: EventLoopPromise<String>) {
+    init(request: String, frameToSend: String, expectedFrames: [String], expectedStatus: Int, promise: EventLoopPromise<String>) {
         self.request = request
         self.frameToSend = frameToSend
         self.expectedFrames = expectedFrames
+        self.expectedStatus = expectedStatus
         self.promise = promise
     }
 
@@ -119,13 +165,13 @@ private final class RawUpgradeClientHandler: ChannelInboundHandler, @unchecked S
         ) else { return }
 
         if !sentFrame, transcript.contains("\r\n\r\n") {
-            if transcript.contains("101") {
+            if transcript.hasPrefix("HTTP/1.1 \(expectedStatus) ") {
                 sentFrame = true
                 var frame = context.channel.allocator.buffer(capacity: frameToSend.utf8.count)
                 frame.writeString(frameToSend)
                 context.writeAndFlush(wrapOutboundOut(frame), promise: nil)
             } else {
-                // Non-101: the handshake was refused; return what we have.
+                // Unexpected status: the handshake was refused; return it.
                 promise.succeed(transcript)
                 context.close(promise: nil)
                 return
@@ -151,7 +197,8 @@ private enum RawUpgradeClient {
         port: Int,
         request: String,
         frameToSend: String,
-        expectedFrames: [String]
+        expectedFrames: [String],
+        expectedStatus: Int = 101
     ) async throws -> String {
         let promise = group.next().makePromise(of: String.self)
         let timeout = promise.futureResult.eventLoop.scheduleTask(in: .seconds(5)) {
@@ -164,6 +211,7 @@ private enum RawUpgradeClient {
                         request: request,
                         frameToSend: frameToSend,
                         expectedFrames: expectedFrames,
+                        expectedStatus: expectedStatus,
                         promise: promise
                     )
                 )

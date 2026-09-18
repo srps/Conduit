@@ -507,6 +507,8 @@ extension Scenarios {
         out.append(try await NetworkTransitionScenarios.networkTransition(verbose: verbose))
         out.append(try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose))
         out.append(try await UpgradeScenarios.websocketUpgrade(verbose: verbose))
+        out.append(try await UpgradeScenarios.connectEarlyData(direct: true, verbose: verbose))
+        out.append(try await UpgradeScenarios.connectEarlyData(direct: false, verbose: verbose))
         out.append(try await AuditScenarios.proxiedResponseHopByHop(verbose: verbose))
         out.append(try await AuditScenarios.socks5NonZeroRSV(verbose: verbose))
         out.append(try await AuditScenarios.expectContinueAndTrailers(verbose: verbose))
