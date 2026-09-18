@@ -569,7 +569,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         target: HTTPRequestTarget,
         context: ChannelHandlerContext
     ) {
-        guard let url = target.directURL, let originForm = target.originForm else {
+        guard let url = target.directURL, let directHead = target.directRequestHead(from: head) else {
             writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
             body?.cleanup()
             onConnectionClosed(infoID)
@@ -639,8 +639,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                     )
                     upstream.pipeline.addHandler(forwarder).whenSuccess {
-                        var reqHead = head
-                        reqHead.uri = originForm
+                        var reqHead = directHead
                         HTTPHopByHopHeaders.sanitizeForwardedRequestHeaders(&reqHead.headers)
                         upstream.write(HTTPClientRequestPart.head(reqHead), promise: nil)
                         let bodyFuture = body?.writeClientBody(channel: upstream)
@@ -696,7 +695,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         target: HTTPRequestTarget,
         context: ChannelHandlerContext
     ) {
-        guard let url = target.directURL, let originForm = target.originForm else {
+        guard let url = target.directURL, let directHead = target.directRequestHead(from: head) else {
             writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
             body?.cleanup()
             onConnectionClosed(infoID)
@@ -758,8 +757,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         onTunnelClosed: { onConnectionClosed(infoID) }
                     )
                     upstream.pipeline.addHandler(relay).whenSuccess {
-                        var reqHead = head
-                        reqHead.uri = originForm
+                        var reqHead = directHead
                         HTTPHopByHopHeaders.sanitizeForwardedUpgradeRequestHeaders(&reqHead.headers)
                         upstream.write(HTTPClientRequestPart.head(reqHead), promise: nil)
                         let bodyFuture = body?.writeClientBody(channel: upstream)

@@ -8,30 +8,35 @@ package struct HTTPRequestTarget: Sendable, Equatable {
     package var host: String
     package var port: Int
     package var directURL: URL?
+    /// The target's authority as the client wrote it: the Host a direct
+    /// forward sends, so the origin serves the host that routing matched.
+    package var authority: String
 
     package static func parse(_ head: HTTPRequestHead) -> HTTPRequestTarget? {
         guard isSafeHTTPRequestTarget(head.uri) else { return nil }
         if head.method == .CONNECT {
-            guard isSafeHTTPRequestTarget(head.uri),
-                  let parsed = NoProxyMatcher.parseHostPort(from: head.uri),
+            guard let parsed = NoProxyMatcher.parseHostPort(from: head.uri),
                   let port = parsed.port,
                   isValidPort(port) else {
                 return nil
             }
-            return HTTPRequestTarget(host: parsed.host, port: port, directURL: URL(string: "https://\(head.uri)/"))
+            return HTTPRequestTarget(
+                host: parsed.host, port: port, directURL: URL(string: "https://\(head.uri)/"), authority: head.uri
+            )
         }
 
         if let url = URL(string: head.uri), url.scheme != nil {
-            guard let host = url.host, !host.isEmpty else { return nil }
+            guard let host = url.host, !host.isEmpty,
+                  let authority = rawAuthority(ofAbsoluteTarget: head.uri),
+                  isSafeHTTPHostHeader(authority) else { return nil }
             let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
             guard components?.user == nil, components?.password == nil else { return nil }
             let port = url.port ?? defaultPort(for: url.scheme)
             guard isValidPort(port) else { return nil }
-            return HTTPRequestTarget(host: host, port: port, directURL: url)
+            return HTTPRequestTarget(host: host, port: port, directURL: url, authority: authority)
         }
 
-        guard isSafeHTTPRequestTarget(head.uri),
-              let hostHeader = singleHostHeader(from: head.headers),
+        guard let hostHeader = singleHostHeader(from: head.headers),
               isSafeHTTPHostHeader(hostHeader),
               let parsed = NoProxyMatcher.parseHostPort(from: hostHeader) else {
             return nil
@@ -40,7 +45,26 @@ package struct HTTPRequestTarget: Sendable, Equatable {
         guard isValidPort(port) else { return nil }
         let urlText = "http://\(hostHeader)\(head.uri)"
         guard let url = URL(string: urlText) else { return nil }
-        return HTTPRequestTarget(host: parsed.host, port: port, directURL: url)
+        return HTTPRequestTarget(host: parsed.host, port: port, directURL: url, authority: hostHeader)
+    }
+
+    /// RFC 9112 §3.2.2: a proxy replaces the Host of an absolute-form request
+    /// with the target's authority. Otherwise `GET http://a/` with `Host: b`
+    /// is routed by `a`'s rules and served as `b`.
+    package func directRequestHead(from head: HTTPRequestHead) -> HTTPRequestHead? {
+        guard let originForm else { return nil }
+        var forwarded = head
+        forwarded.uri = originForm
+        forwarded.headers.replaceOrAdd(name: "Host", value: authority)
+        return forwarded
+    }
+
+    /// The bytes between `scheme://` and the first `/`, `?` or `#`.
+    private static func rawAuthority(ofAbsoluteTarget uri: String) -> String? {
+        guard let schemeEnd = uri.range(of: "://") else { return nil }
+        let rest = uri[schemeEnd.upperBound...]
+        let end = rest.firstIndex { $0 == "/" || $0 == "?" || $0 == "#" } ?? rest.endIndex
+        return String(rest[..<end])
     }
 
     package var pacURL: URL? {

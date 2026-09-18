@@ -33,4 +33,26 @@ final class HTTPWireTargetTests: XCTestCase {
             }
         }
     }
+
+    func testDirectForwardReplacesHostWithTheAbsoluteTargetAuthority() throws {
+        let cases: [(uri: String, hosts: [String], expected: String)] = [
+            ("http://a.example/p", ["b.internal"], "a.example"),
+            ("http://a.example:8080/p?q", ["a.example", "b.internal"], "a.example:8080"),
+            ("http://[::1]:8080#f", [], "[::1]:8080"),
+            ("http://a.example?q", ["a.example"], "a.example"),
+            ("/p", ["origin.example:81"], "origin.example:81"),
+        ]
+        for (uri, hosts, expected) in cases {
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: uri)
+            for host in hosts { head.headers.add(name: "Host", value: host) }
+            let forwarded = try XCTUnwrap(HTTPRequestTarget.parse(head)?.directRequestHead(from: head), uri)
+            XCTAssertEqual(forwarded.headers["Host"], [expected], uri)
+        }
+    }
+
+    func testAbsoluteTargetWithUnsafeAuthorityIsRejected() {
+        for uri in ["http://a.example\\b/", "http://user@a.example/"] {
+            XCTAssertNil(HTTPRequestTarget.parse(HTTPRequestHead(version: .http1_1, method: .GET, uri: uri)), uri)
+        }
+    }
 }
