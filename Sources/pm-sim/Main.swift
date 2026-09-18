@@ -48,6 +48,8 @@ enum PMSim {
               websocket-upgrade       101 upgrade relayed, frames flow both ways
               connect-early-direct    CONNECT with early bytes through a direct tunnel
               connect-early-upstream  CONNECT with early bytes through an authenticated upstream
+              server-first-connect    CONNECT: upstream greeting coalesced with the 200 reaches the client
+              server-first-socks5     SOCKS5: upstream greeting coalesced with the 200 reaches the client
               audit-hop-response      Audit: proxied HTTP response hop-by-hop header leak
               audit-socks5-rsv        Audit: SOCKS5 CONNECT non-zero RSV handling
               audit-expect-trailers   Audit: Expect: 100-continue answered, trailers passed through
@@ -146,6 +148,10 @@ enum PMSim {
             return [try await UpgradeScenarios.connectEarlyData(direct: true, verbose: verbose)]
         case "connect-early-upstream":
             return [try await UpgradeScenarios.connectEarlyData(direct: false, verbose: verbose)]
+        case "server-first-connect":
+            return [try await ServerFirstScenarios.run(.httpConnect, verbose: verbose)]
+        case "server-first-socks5":
+            return [try await ServerFirstScenarios.run(.socks5, verbose: verbose)]
         case "audit-hop-response":
             return [try await AuditScenarios.proxiedResponseHopByHop(verbose: verbose)]
         case "audit-socks5-rsv":

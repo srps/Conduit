@@ -500,7 +500,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
-                    self.attachRelay(context: ctx, upstream: upstream)
+                    self.attachRelay(context: ctx, upstream: upstream, isUpstreamTunnel: false)
                 case .failure(let error):
                     // A blocked rebinding peer is a policy denial (0x02, not
                     // allowed by ruleset); every other connect failure is a
@@ -531,7 +531,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                     if let id = self.connectionID, let authMethod {
                         self.onConnectionActivity(ConnectionActivity(connectionID: id, authMethod: authMethod))
                     }
-                    self.attachRelay(context: ctx, upstream: upstream)
+                    self.attachRelay(context: ctx, upstream: upstream, isUpstreamTunnel: true)
                 case .failure(let error):
                     self.logger.log(failureLogLevel, "SOCKS5 upstream tunnel failed: \(error.displayDescription)", category: .proxy)
                     self.sendReply(context: ctx, rep: 0x05)
@@ -539,7 +539,10 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             }
     }
 
-    private func attachRelay(context: ChannelHandlerContext, upstream: Channel) {
+    /// `isUpstreamTunnel`: `upstream` came from `connectUpstreamTunnel` and
+    /// holds server-first bytes for `CONNECTCoordinator.attachRelay`; a
+    /// direct connection has no handshake handler to hand over from.
+    private func attachRelay(context: ChannelHandlerContext, upstream: Channel, isUpstreamTunnel: Bool) {
         // Reached from connect-completion callbacks; mutates `state`.
         context.eventLoop.assertInEventLoop()
         sendReply(context: context, rep: 0x00)
@@ -550,7 +553,9 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let clientRelay = SOCKSTunnelRelay(peer: upstream, connectionID: connID, onActivity: activityCallback, direction: .received)
         let upstreamRelay = SOCKSTunnelRelay(peer: clientChannel, connectionID: connID, onActivity: activityCallback, direction: .sent)
         context.pipeline.addHandler(clientRelay).flatMap {
-            upstream.pipeline.addHandler(upstreamRelay)
+            isUpstreamTunnel
+                ? CONNECTCoordinator.attachRelay(upstreamRelay, toUpstreamTunnel: upstream)
+                : upstream.pipeline.addHandler(upstreamRelay)
         }.whenComplete { result in
             switch result {
             case .success:

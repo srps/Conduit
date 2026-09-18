@@ -15,6 +15,10 @@ final class FakeUpstreamProxy: @unchecked Sendable {
     let originPort: Int
     let requireAuth: Bool
     let plainHTTPResponse: String?
+    /// Bytes the "server" sends before the client speaks: the first in the
+    /// same write as the `200`, each later one in a write of its own, all
+    /// before the relay to the origin starts.
+    let serverFirst: [[UInt8]]
     private(set) var channel: Channel?
     /// Accepted child channels. Closing the listener with NIO does NOT close
     /// already-accepted child channels — they keep serving requests off the
@@ -38,13 +42,15 @@ final class FakeUpstreamProxy: @unchecked Sendable {
         originHost: String,
         originPort: Int,
         requireAuth: Bool = true,
-        plainHTTPResponse: String? = nil
+        plainHTTPResponse: String? = nil,
+        serverFirst: [[UInt8]] = []
     ) {
         self.group = group
         self.originHost = originHost
         self.originPort = originPort
         self.requireAuth = requireAuth
         self.plainHTTPResponse = plainHTTPResponse
+        self.serverFirst = serverFirst
     }
 
     var port: Int { channel?.localAddress?.port ?? 0 }
@@ -61,6 +67,7 @@ final class FakeUpstreamProxy: @unchecked Sendable {
         let originPort = self.originPort
         let requireAuth = self.requireAuth
         let plainHTTPResponse = self.plainHTTPResponse
+        let serverFirst = self.serverFirst
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { [weak self] channel in
@@ -72,6 +79,7 @@ final class FakeUpstreamProxy: @unchecked Sendable {
                         originPort: originPort,
                         requireAuth: requireAuth,
                         plainHTTPResponse: plainHTTPResponse,
+                        serverFirst: serverFirst,
                         onConnect: { connectCountBox?.withLockedValue { $0 += 1 } }
                     )
                 )
@@ -114,6 +122,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
     private let originPort: Int
     private let requireAuth: Bool
     private let plainHTTPResponse: String?
+    private let serverFirst: [[UInt8]]
     private let onConnect: @Sendable () -> Void
     private var phase: Phase
     private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
@@ -124,8 +133,10 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
         originPort: Int,
         requireAuth: Bool,
         plainHTTPResponse: String?,
+        serverFirst: [[UInt8]] = [],
         onConnect: @escaping @Sendable () -> Void = {}
     ) {
+        self.serverFirst = serverFirst
         self.originHost = originHost
         self.originPort = originPort
         self.requireAuth = requireAuth
@@ -203,6 +214,13 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
                         "\r\n"
                     var out = clientChannel.allocator.buffer(capacity: response.utf8.count)
                     out.writeString(response)
+                    out.writeBytes(self.serverFirst.first ?? [])
+                    for later in self.serverFirst.dropFirst() {
+                        clientChannel.write(out, promise: nil)
+                        clientChannel.flush()
+                        out = clientChannel.allocator.buffer(capacity: later.count)
+                        out.writeBytes(later)
+                    }
                     clientChannel.writeAndFlush(out).whenComplete { [self] _ in
                         self.phase = .relaying
                         let clientToOriginBridge = OriginRelayToClient(peer: clientChannel)
