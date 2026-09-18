@@ -30,6 +30,8 @@ jobs:
         "$conduit_bin_dir/pm-sim" observable-target-redaction
         python3 scripts/test-observable-target-redaction.py "$conduit_bin_dir/pm-proxy"
         "$conduit_bin_dir/pm-sim" security-boundaries
+        "$conduit_bin_dir/pm-sim" connect-early-direct
+        "$conduit_bin_dir/pm-sim" connect-early-upstream
         python3 scripts/test-security-boundaries.py "$conduit_bin_dir/pm-proxy"
     - name: Perf gate
       run: bash ./scripts/perf-gate.sh

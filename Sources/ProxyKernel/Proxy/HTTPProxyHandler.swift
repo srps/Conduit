@@ -1055,13 +1055,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverExpectContinue)
             }
             .flatMap {
-                clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverDecoder)
+                clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverHandler)
             }
             .flatMap {
                 clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverEncoder)
-            }
-            .flatMap {
-                clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverHandler)
             }
             .flatMap { () -> EventLoopFuture<Void> in
                 let clientRelay = DirectTunnelRelay(peer: upstreamChannel, onClose: { onConnectionClosed(infoID) })
@@ -1069,6 +1066,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 return clientChannel.pipeline.addHandler(clientRelay).flatMap {
                     upstreamChannel.pipeline.addHandler(upstreamRelay)
                 }
+            }
+            .flatMap {
+                // Removal synchronously releases CONNECT's buffered raw bytes.
+                // Both relays must be ready and every typed handler gone first.
+                clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverDecoder)
             }
             .whenComplete { result in
                 switch result {
