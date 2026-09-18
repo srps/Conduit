@@ -35,6 +35,12 @@ jobs:
         python3 scripts/test-security-boundaries.py "$conduit_bin_dir/pm-proxy"
     - name: Perf gate
       run: bash ./scripts/perf-gate.sh
+    - name: HTTP request-target preservation
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      run: |
+        conduit_bin_dir="$(xcrun swift build --show-bin-path)"
+        python3 scripts/test-http-wire-target.py "$conduit_bin_dir/pm-proxy"
     - name: Forced routing regression
       env:
         DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer

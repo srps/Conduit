@@ -10,6 +10,7 @@ package struct HTTPRequestTarget: Sendable, Equatable {
     package var directURL: URL?
 
     package static func parse(_ head: HTTPRequestHead) -> HTTPRequestTarget? {
+        guard isSafeHTTPRequestTarget(head.uri) else { return nil }
         if head.method == .CONNECT {
             guard isSafeHTTPRequestTarget(head.uri),
                   let parsed = NoProxyMatcher.parseHostPort(from: head.uri),
@@ -46,6 +47,17 @@ package struct HTTPRequestTarget: Sendable, Equatable {
         directURL
     }
 
+    /// The HTTP wire target is encoded data, not a decoded filesystem path.
+    /// Using URL.path here would turn escaped CRLF into request/header syntax.
+    package var originForm: String? {
+        guard let directURL,
+              let components = URLComponents(url: directURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        let path = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+        return components.percentEncodedQuery.map { "\(path)?\($0)" } ?? path
+    }
+
     private static func singleHostHeader(from headers: HTTPHeaders) -> String? {
         let values = headers["Host"]
         guard values.count == 1 else { return nil }
@@ -64,7 +76,7 @@ package struct HTTPRequestTarget: Sendable, Equatable {
     }
 
     package static func isSafeHTTPRequestTarget(_ value: String) -> Bool {
-        !value.isEmpty && !containsHTTPControl(value)
+        !value.isEmpty && !containsHTTPControl(value) && !value.utf8.contains(0x20)
     }
 
     package static func isSafeHTTPHostHeader(_ value: String) -> Bool {
