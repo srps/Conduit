@@ -12,6 +12,13 @@ final class TrailingDebouncerTests: XCTestCase {
         var all: [Int] { lock.withLock { values } }
     }
 
+    private func waitUntil(timeout: Duration = .seconds(5), _ condition: @Sendable () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
     func testBurstCollapsesToOneDeliveryOfTheLastValue() async throws {
         let deliveries = Deliveries()
         let queue = DispatchQueue(label: "debouncer.test")
@@ -31,10 +38,12 @@ final class TrailingDebouncerTests: XCTestCase {
         let queue = DispatchQueue(label: "debouncer.test")
         let debouncer = TrailingDebouncer<Int>(interval: 0.05, queue: queue) { deliveries.append($0) }
 
+        // Wait for each delivery rather than a fixed sleep: a late timer on a
+        // loaded runner would otherwise let 2 arrive inside 1's interval.
         debouncer.signal(1)
-        try await Task.sleep(for: .milliseconds(150))
+        try await waitUntil { deliveries.all.count == 1 }
         debouncer.signal(2)
-        try await Task.sleep(for: .milliseconds(150))
+        try await waitUntil { deliveries.all.count == 2 }
 
         XCTAssertEqual(deliveries.all, [1, 2])
     }
