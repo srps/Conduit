@@ -57,8 +57,14 @@ def main():
                                 authority = f"127.0.0.1:{origin.getsockname()[1]}"
                                 target = suffix if origin_form else f"http://{authority}{suffix}"
                                 headers = "Connection: Upgrade\r\nUpgrade: websocket\r\n" if upgrade else "Connection: close\r\n"
+                                # An absolute target's Host is ignored and replaced (RFC 9112 §3.2.2),
+                                # whether the client sent a conflicting one or none.
+                                if origin_form:
+                                    host = f"Host: {authority}\r\n"
+                                else:
+                                    host = "" if len(suffix) % 2 else "Host: decoy.invalid\r\nHost: other.invalid\r\n"
                                 with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
-                                    client.sendall(f"GET {target} HTTP/1.1\r\nHost: {authority}\r\n{headers}\r\n".encode())
+                                    client.sendall(f"GET {target} HTTP/1.1\r\n{host}{headers}\r\n".encode())
                                     try:
                                         accepted, _ = origin.accept()
                                     except TimeoutError as error:
@@ -71,6 +77,8 @@ def main():
                                         received = read_headers(peer)
                                         assert received.split(b"\r\n", 1)[0] == f"GET {expected} HTTP/1.1".encode(), repr(received)
                                         assert b"\r\nX-Injected:" not in received, repr(received)
+                                        hosts = [line for line in received.split(b"\r\n") if line.lower().startswith(b"host:")]
+                                        assert hosts == [f"Host: {authority}".encode()], repr(received)
                                         assert received.count(b"\r\n\r\n") == 1, repr(received)
                                         # A refusal still exercises Upgrade request serialization.
                                         peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -83,7 +91,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-    print(f"PASS: {checked} exact wire targets across HTTP/Upgrade and absolute/origin forms")
+    print(f"PASS: {checked} exact wire targets and Host fields across HTTP/Upgrade and absolute/origin forms")
 
 
 if __name__ == "__main__":
