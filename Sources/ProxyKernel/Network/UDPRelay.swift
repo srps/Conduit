@@ -11,8 +11,30 @@ package final class UDPRelay: @unchecked Sendable {
     private var generation: UInt64 = 0
     private let lock = NSLock()
     private let staleTimeoutSeconds: TimeInterval = 10
+    private let willServiceDescriptors: @Sendable (Int32, Int32) -> Void
+    private let loopDidExit: @Sendable () -> Void
 
-    package init() {}
+    /// Hooks delimit the loop's poll-to-I/O window and its exit for
+    /// deterministic lifecycle tests. See `TCPRelay.init`.
+    package init(
+        willServiceDescriptors: @escaping @Sendable (Int32, Int32) -> Void = { _, _ in },
+        loopDidExit: @escaping @Sendable () -> Void = {}
+    ) {
+        self.willServiceDescriptors = willServiceDescriptors
+        self.loopDidExit = loopDidExit
+    }
+
+    package var listeningPort: Int? {
+        lock.withLock {
+            guard listenFD >= 0 else { return nil }
+            var address = sockaddr_in()
+            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let rc = withUnsafeMutablePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(listenFD, $0, &length) }
+            }
+            return rc == 0 ? Int(UInt16(bigEndian: address.sin_port)) : nil
+        }
+    }
 
     package var isRunning: Bool {
         lock.withLock { listenFD >= 0 }
@@ -53,8 +75,18 @@ package final class UDPRelay: @unchecked Sendable {
 
         let ffd = socket(AF_INET, SOCK_DGRAM, 0)
         guard ffd >= 0 else {
+            let message = errnoMessage
             close(lfd)
-            throw UDPRelayError.socketCreationFailed(errnoMessage)
+            throw UDPRelayError.socketCreationFailed(message)
+        }
+        // Datagram I/O is performed under the lifecycle lock, so it must
+        // never block. poll may race close/reuse, but its result is validated
+        // under that lock before either descriptor is used for actual I/O.
+        guard fcntl(lfd, F_SETFL, O_NONBLOCK) == 0, fcntl(ffd, F_SETFL, O_NONBLOCK) == 0 else {
+            let message = errnoMessage
+            close(lfd)
+            close(ffd)
+            throw UDPRelayError.socketCreationFailed(message)
         }
 
         let generation = lock.withLock { () -> UInt64 in
@@ -69,22 +101,27 @@ package final class UDPRelay: @unchecked Sendable {
         }
         thread.name = "udp-relay-\(listenPort)->\(targetPort)"
         thread.qualityOfService = .userInteractive
-        thread.start()
-        lock.withLock { relayThread = thread }
+        lock.withLock {
+            if self.generation == generation, listenFD == lfd { relayThread = thread }
+            thread.start()
+        }
     }
 
     package func stop() {
-        let (lfd, ffd, thread) = lock.withLock {
-            let lfd = listenFD
-            let ffd = forwardFD
+        let thread = lock.withLock { () -> Thread? in
             let thread = relayThread
+            // Serializes close with the generation check + nonblocking I/O in
+            // the loop. Closed outside the lock, these numbers could be handed
+            // to another socket while the loop is between poll and recvfrom,
+            // and the loop would then read or answer somebody else's datagram.
+            // The port is free when this returns; a restart binds it at once.
+            if listenFD >= 0 { close(listenFD) }
+            if forwardFD >= 0 { close(forwardFD) }
             listenFD = -1
             forwardFD = -1
             relayThread = nil
-            return (lfd, ffd, thread)
+            return thread
         }
-        if lfd >= 0 { close(lfd) }
-        if ffd >= 0 { close(ffd) }
         thread?.cancel()
     }
 
@@ -98,15 +135,21 @@ package final class UDPRelay: @unchecked Sendable {
     /// See `TCPRelay.markDead`: a loop that left on its own must not leave
     /// `isRunning` true behind it.
     private func markDead(generation: UInt64, listenFD lfd: Int32, forwardFD ffd: Int32) {
-        let owned = lock.withLock { () -> Bool in
-            guard self.generation == generation, listenFD == lfd else { return false }
-            listenFD = -1
-            forwardFD = -1
-            return true
-        }
-        if owned {
+        lock.withLock {
+            guard self.generation == generation, listenFD == lfd else { return }
             close(lfd)
             close(ffd)
+            listenFD = -1
+            forwardFD = -1
+        }
+    }
+
+    /// Runs `body` only while this loop still owns its descriptors, under the
+    /// lock `stop()` closes them with. Nil means the loop was evicted.
+    private func whileOwning<T>(generation: UInt64, _ lfd: Int32, _ body: () -> T) -> T? {
+        lock.withLock {
+            guard self.generation == generation, listenFD == lfd else { return nil }
+            return body()
         }
     }
 
@@ -137,51 +180,59 @@ package final class UDPRelay: @unchecked Sendable {
 
             let now = Date()
             pending = pending.filter { now.timeIntervalSince($0.value.sentAt) < staleTimeoutSeconds }
+            if ready > 0 { willServiceDescriptors(listenFD, forwardFD) }
 
-            if fds[0].revents & Int16(POLLIN) != 0 {
-                var clientAddr = sockaddr_in()
-                var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-                let n = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                        recvfrom(listenFD, &buf, buf.count, 0, sockPtr, &clientLen)
-                    }
-                }
-                if n >= 2 {
-                    let originalTXID = UInt16(buf[0]) << 8 | UInt16(buf[1])
-                    let relayTXID = nextAvailableRelayTXID(startingAt: &nextRelayTXID, pending: pending)
-                    buf[0] = UInt8(relayTXID >> 8)
-                    buf[1] = UInt8(relayTXID & 0xFF)
-                    pending[relayTXID] = PendingQuery(
-                        originalTXID: originalTXID,
-                        clientAddr: clientAddr,
-                        clientLen: clientLen,
-                        sentAt: now
-                    )
-                    withUnsafePointer(to: &targetAddr) { ptr in
+            // Readiness above may describe a descriptor `stop()` has since
+            // closed and another socket now holds. Nothing is read or sent
+            // until ownership is confirmed under the lock close runs under.
+            let stillOwned: Void? = whileOwning(generation: generation, listenFD) {
+                if fds[0].revents & Int16(POLLIN) != 0 {
+                    var clientAddr = sockaddr_in()
+                    var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+                    let n = withUnsafeMutablePointer(to: &clientAddr) { ptr in
                         ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                            _ = sendto(forwardFD, buf, n, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                            recvfrom(listenFD, &buf, buf.count, 0, sockPtr, &clientLen)
+                        }
+                    }
+                    if n >= 2 {
+                        let originalTXID = UInt16(buf[0]) << 8 | UInt16(buf[1])
+                        let relayTXID = nextAvailableRelayTXID(startingAt: &nextRelayTXID, pending: pending)
+                        buf[0] = UInt8(relayTXID >> 8)
+                        buf[1] = UInt8(relayTXID & 0xFF)
+                        pending[relayTXID] = PendingQuery(
+                            originalTXID: originalTXID,
+                            clientAddr: clientAddr,
+                            clientLen: clientLen,
+                            sentAt: now
+                        )
+                        withUnsafePointer(to: &targetAddr) { ptr in
+                            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                                _ = sendto(forwardFD, buf, n, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                            }
                         }
                     }
                 }
-            }
 
-            if fds[1].revents & Int16(POLLIN) != 0 {
-                let n = recv(forwardFD, &buf, buf.count, 0)
-                if n >= 2 {
-                    let relayTXID = UInt16(buf[0]) << 8 | UInt16(buf[1])
-                    if var query = pending.removeValue(forKey: relayTXID) {
-                        buf[0] = UInt8(query.originalTXID >> 8)
-                        buf[1] = UInt8(query.originalTXID & 0xFF)
-                        withUnsafePointer(to: &query.clientAddr) { ptr in
-                            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                                _ = sendto(listenFD, buf, n, 0, sockPtr, query.clientLen)
+                if fds[1].revents & Int16(POLLIN) != 0 {
+                    let n = recv(forwardFD, &buf, buf.count, 0)
+                    if n >= 2 {
+                        let relayTXID = UInt16(buf[0]) << 8 | UInt16(buf[1])
+                        if var query = pending.removeValue(forKey: relayTXID) {
+                            buf[0] = UInt8(query.originalTXID >> 8)
+                            buf[1] = UInt8(query.originalTXID & 0xFF)
+                            withUnsafePointer(to: &query.clientAddr) { ptr in
+                                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                                    _ = sendto(listenFD, buf, n, 0, sockPtr, query.clientLen)
+                                }
                             }
                         }
                     }
                 }
             }
+            if stillOwned == nil { break }
         }
         markDead(generation: generation, listenFD: listenFD, forwardFD: forwardFD)
+        loopDidExit()
     }
 
     private func nextAvailableRelayTXID(startingAt next: inout UInt16, pending: [UInt16: PendingQuery]) -> UInt16 {
