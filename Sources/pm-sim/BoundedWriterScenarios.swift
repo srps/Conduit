@@ -51,6 +51,7 @@ enum BoundedWriterScenarios {
             name: "bounded-writers", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 1024, durationSeconds: Date().timeIntervalSince(start),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [.init("storage bounds, loss reporting, recovery and append amplification", true)],
             notes: ["PASS: stalled storage retains at most 16 records/1024 bytes including in-flight writes",
                     "PASS: 9985 drops and flush deadline reported; event loop responsive; capacity recovered", appendNote])
     }

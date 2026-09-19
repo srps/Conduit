@@ -202,6 +202,7 @@ enum ForcedRoutingScenarios {
             name: "forced-proxy-precedence", clientCount: 9, clientsOpened: 9, clientsWithFirstByte: 9,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [.init("forced routing precedence and live policy changes", true)],
             notes: ["PASS: HTTP/CONNECT/SOCKS force precedence, IPv6 literal equivalence, live rule edits, PAC disable/cache, and intentional off-VPN direct behavior"]
         )
     }

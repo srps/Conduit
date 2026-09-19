@@ -48,8 +48,8 @@ enum NetworkTransitionScenarios {
         var notes: [String] = []
 
         let orchestrator = makeBareOrchestrator(verbose: verbose)
+        ScenarioCleanup.register { await orchestrator.stopProxy() }
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
 
         // Establish a stable .connected baseline before the cutoff so the
         // initial transition's `vpn.connected` event isn't counted in the
@@ -144,6 +144,12 @@ enum NetworkTransitionScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("one DNS reset per recovery hop", dnsResetEvents.count == expectedResetCount),
+                .init("recovery within budget", recoveryWithinBudget),
+                .init("settled final state", finalStateOk),
+                .init("wake retrigger resets once", idempotenceOk),
+            ],
             notes: notes
         )
     }

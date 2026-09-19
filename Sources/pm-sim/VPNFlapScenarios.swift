@@ -38,7 +38,6 @@ enum VPNFlapScenarios {
         var notes: [String] = []
 
         let harness = try await VPNFlapHarness.start(verbose: verbose, originBehavior: .silent)
-        defer { Task { @MainActor in await harness.stop() } }
 
         // Bring the orchestrator into a stable .connected state.
         await harness.orchestrator.handleVPNStateChange(.connected)
@@ -93,6 +92,11 @@ enum VPNFlapScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("one recovery event", recoveredCount == 1),
+                .init("established tunnel survived", tunnelAlive && metrics.connectEstablishedAt != nil),
+                .init("left direct mode", !causeNow.isDirect),
+            ],
             notes: notes
         )
     }
@@ -114,7 +118,6 @@ enum VPNFlapScenarios {
             verbose: verbose,
             originBehavior: .burstStream(intervalMs: 50, chunkSize: 4096, durationMs: 3000)
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         await harness.orchestrator.handleVPNStateChange(.connected)
 
@@ -160,6 +163,10 @@ enum VPNFlapScenarios {
             aggregateMBps: Double(metrics.bytesReceived) / Date().timeIntervalSince(start) / 1_000_000,
             minBytes: metrics.bytesReceived, maxBytes: metrics.bytesReceived, medianBytes: metrics.bytesReceived,
             earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("stream progressed across flap", pass),
+                .init("stream completed within deadline", metrics.closedAt != nil),
+            ],
             notes: notes
         )
     }
@@ -177,8 +184,8 @@ enum VPNFlapScenarios {
 
         // Orchestrator-only — no real upstream needed for this transition test.
         let orchestrator = makeBareOrchestrator(verbose: verbose)
+        ScenarioCleanup.register { await orchestrator.stopProxy() }
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
 
@@ -208,6 +215,7 @@ enum VPNFlapScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [.init("disconnect enters direct mode and reconnect recovers", pass)],
             notes: notes
         )
     }
@@ -224,8 +232,8 @@ enum VPNFlapScenarios {
         var notes: [String] = []
 
         let orchestrator = makeBareOrchestrator(verbose: verbose)
+        ScenarioCleanup.register { await orchestrator.stopProxy() }
         try await orchestrator.startProxy()
-        defer { Task { @MainActor in await orchestrator.stopProxy() } }
 
         await orchestrator.handleVPNStateChange(.connected)
         let cutoff = Date()
@@ -253,6 +261,7 @@ enum VPNFlapScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [.init("user disconnect is immediate and emits one event", pass)],
             notes: notes
         )
     }
@@ -357,6 +366,7 @@ enum VPNFlapScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [.init("six rapid flaps absorbed without state emissions", pass)],
             notes: notes
         )
     }
@@ -422,6 +432,7 @@ final class VPNFlapHarness {
         let group = MultiThreadedEventLoopGroup.singleton
 
         let origin = FakeOrigin(group: group, behavior: originBehavior)
+        ScenarioCleanup.register { await origin.stop() }
         try await origin.start()
 
         let upstream = FakeUpstreamProxy(
@@ -430,6 +441,7 @@ final class VPNFlapHarness {
             originPort: origin.port,
             requireAuth: false  // simpler — no auth handshake needed for the flap test
         )
+        ScenarioCleanup.register { await upstream.stop() }
         try await upstream.start()
 
         var config = ProxyConfig()
@@ -453,6 +465,7 @@ final class VPNFlapHarness {
             logger: logger,
             authenticatorProvider: { _ in MockAuthenticator() }
         )
+        ScenarioCleanup.register { await orchestrator.stopProxy() }
         try await orchestrator.startProxy()
 
         return VPNFlapHarness(orchestrator: orchestrator, logger: logger, origin: origin, upstream: upstream)

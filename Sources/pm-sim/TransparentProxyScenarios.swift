@@ -56,6 +56,7 @@ enum TransparentProxyScenarios {
         // listener relays raw bytes, so an echo of the exact ClientHello is a
         // complete proof that the relay reached the origin and is bidirectional.
         let origin = FakeOrigin(group: group, behavior: .echo)
+        ScenarioCleanup.register { await origin.stop() }
         try await origin.start()
 
         let upstream = FakeUpstreamProxy(
@@ -64,15 +65,10 @@ enum TransparentProxyScenarios {
             originPort: origin.port,
             requireAuth: false
         )
+        ScenarioCleanup.register { await upstream.stop() }
         try await upstream.start()
         let upstreamPort = upstream.port
 
-        defer {
-            Task { @MainActor in
-                await upstream.stop()
-                await origin.stop()
-            }
-        }
 
         // Stands in for `DoHOriginResolver`. The real one exists precisely so
         // this hostname does NOT resolve through the system resolver (which
@@ -168,6 +164,13 @@ enum TransparentProxyScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("healthy upstream selected", passA),
+                .init("VPN down relays direct", passB),
+                .init("strict mode blocks fallback", passC),
+                .init("non-strict mode permits fallback", passD),
+                .init("mid-dial VPN drop permits fallback", passE),
+            ],
             notes: notes
         )
     }
@@ -235,8 +238,8 @@ enum TransparentProxyScenarios {
             strictModeProvider: { strictMode },
             eventSink: { event in events.withLockedValue { $0.append(event.event) } }
         )
+        ScenarioCleanup.register { await proxy.stop() }
         try await proxy.start(host: "127.0.0.1", port: 0)
-        defer { Task { @MainActor in await proxy.stop() } }
 
         guard let port = proxy.listeningPort else {
             return ProbeOutcome(echoedHello: false, closedWithoutData: true, bytesRead: 0, eventNames: [])

@@ -159,6 +159,7 @@ enum AdmissionScenarios {
             clientsWithFirstByte: 1, clientsClosedEarly: 5, totalBytes: 0,
             durationSeconds: Date().timeIntervalSince(start), aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [.init("shared admission, handshake deadlines and recovery", true)],
             notes: ["PASS: combined admission, idle/drip deadlines, malformed greeting release, live limit reduction, tunnel survival and recovery"]
         )
     }

@@ -42,6 +42,7 @@ enum UpstreamFlapScenarios {
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
 
         let origin = FakeOrigin(group: group, behavior: .silent)
+        ScenarioCleanup.register { await origin.stop() }
         try await origin.start()
 
         // Single upstream so the breaker's state is the only thing
@@ -52,6 +53,7 @@ enum UpstreamFlapScenarios {
             originPort: origin.port,
             requireAuth: false
         )
+        ScenarioCleanup.register { [initialUpstream = upstream!] in await initialUpstream.stop() }
         try await upstream!.start()
         let upstreamPort = upstream!.port
 
@@ -97,14 +99,8 @@ enum UpstreamFlapScenarios {
             onRequestCompleted: { _, _ in },
             eventSink: { eventLog.append($0) }
         )
+        ScenarioCleanup.register { await server.stop() }
         try await server.start()
-        defer {
-            Task { @MainActor in
-                await server.stop()
-                if let upstream { await upstream.stop() }
-                await origin.stop()
-            }
-        }
 
         // Phase 1: healthy baseline. One successful health check warms the
         // pool and proves the upstream is reachable.
@@ -151,6 +147,10 @@ enum UpstreamFlapScenarios {
             originPort: origin.port,
             requireAuth: false
         )
+        ScenarioCleanup.register { [revivedUpstream = upstream!] in
+            await server.stop()
+            await revivedUpstream.stop()
+        }
         // Rebind to the original port so the connection pool — which still
         // points at `upstreamPort` from the config — can reach the revived
         // upstream. Without the explicit port, FakeUpstreamProxy's default
@@ -218,6 +218,7 @@ enum UpstreamFlapScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [.init("breaker transitions and recovery", pass)],
             notes: notes
         )
     }
@@ -234,7 +235,8 @@ enum UpstreamFlapScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
-            notes: notes + ["FAIL"]
+            assertions: [.init("breaker scenario prerequisites", false)],
+            notes: notes
         )
     }
 }

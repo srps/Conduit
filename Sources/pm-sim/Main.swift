@@ -60,6 +60,8 @@ enum PMSim {
             OPTIONS:
               --verbose               Stream per-handler debug logs to stderr
               --perf-baseline         Default to multi-100 and emit process CPU/RSS baseline NDJSON
+              --self-test-outcomes     Test-only fixtures: pass, fail, throw, missing, empty, mixed, timeout, cleanup
+              --inject-failed-assertion  Test-only: fail the first real scenario assertion
               --help, -h              Show this help
 
             Pipeline under test:
@@ -72,24 +74,119 @@ enum PMSim {
         let usageStart = ProcessResourceUsage.capture()
         let wallStart = Date()
 
-        do {
-            let results = try await Task { @MainActor in
-                try await runScenario(scenario, verbose: verbose)
-            }.value
-            let processUsage = ProcessResourceUsage.capture().delta(from: usageStart, wallSeconds: Date().timeIntervalSince(wallStart))
-            printResults(results, processUsage: perfBaseline ? processUsage : nil)
-        } catch {
-            FileHandle.standardError.write(Data("pm-sim failed: \(error)\n".utf8))
-            ConsoleLogSink().flush()
-            exit(1)
+        let names: [String]
+        if args.contains("--self-test-outcomes") {
+            // Deliberate isolated reporting fixtures, never selected by "all".
+            switch scenario {
+            case "mixed": names = ["fixture-pass", "fixture-fail", "fixture-throw", "fixture-pass"]
+            case "cleanup": names = ["fixture-setup-throw", "fixture-cleanup-witness"]
+            default: names = ["fixture-" + scenario]
+            }
+        } else {
+            guard scenario == "all" || scenarioNames.contains(scenario) else {
+                printResults([.failure(name: scenario, error: ScenarioExecutionError(message: "unknown scenario"))])
+                exit(2)
+            }
+            names = scenario == "all" ? scenarioNames : [scenario]
         }
+        let failed = await execute(names, args: args, verbose: verbose)
+        if perfBaseline {
+            let usage = ProcessResourceUsage.capture().delta(from: usageStart, wallSeconds: Date().timeIntervalSince(wallStart))
+            printResults([], processUsage: usage)
+        }
+        ConsoleLogSink().flush()
+        if failed { exit(1) }
     }
+
+    private static func execute(_ names: [String], args: [String], verbose: Bool) async -> Bool {
+        var failed = false
+        for name in names {
+            // A hung scenario or cleanup must fail CI, not wait forever. The
+            // longest intentional silence is 30 s; allow 120 s for the entire
+            // scenario including teardown, independently of the main actor.
+            let watchdog = DispatchSource.makeTimerSource(queue: .global())
+            let deadlineSeconds = args.contains("--self-test-outcomes") && name == "fixture-timeout" ? 0.05 : 120.0
+            watchdog.schedule(deadline: .now() + deadlineSeconds)
+            watchdog.setEventHandler { @Sendable in
+                printResults([.failure(name: name, error: ScenarioExecutionError(message: "scenario/cleanup deadline exceeded"))])
+                ConsoleLogSink().flush()
+                exit(1)
+            }
+            watchdog.resume()
+            var results = await Task { @MainActor in
+                let cleanup = ScenarioCleanup()
+                let results: [ScenarioResult]
+                do {
+                    results = try await ScenarioCleanup.$current.withValue(cleanup) {
+                        try await runScenario(name, verbose: verbose)
+                    }
+                } catch {
+                    results = [.failure(name: name, error: error)]
+                }
+                await cleanup.drain()
+                return results
+            }.value
+            watchdog.cancel()
+            if results.isEmpty {
+                results = [.failure(name: name, error: ScenarioExecutionError(message: "scenario produced no results"))]
+            }
+            if args.contains("--inject-failed-assertion") {
+                results = results.map { $0.injectingFailedAssertion() }
+            }
+            // Emit immediately: a later throw must not erase earlier diagnostics.
+            printResults(results)
+            fflush(nil)
+            failed = failed || results.contains { !$0.passed }
+        }
+        return failed
+    }
+
+    // Single list drives the complete suite; each entry is dispatched below.
+    static let scenarioNames = [
+        "baseline",
+        "silent-then-burst",
+        "multi",
+        "multi-small",
+        "high-throughput",
+        "multi-100",
+        "bounded-writers",
+        "pac-fetch-bounds",
+        "shared-inbound-budget",
+        "connection-flood",
+        "auth-storm",
+        "long-silent",
+        "keepalive",
+        "health-check",
+        "failover",
+        "flood-slow-drain",
+        "forced-proxy-precedence",
+        "direct-mode-silence",
+        "vpn-flap-idle",
+        "vpn-flap-stream",
+        "vpn-flap-long-outage",
+        "vpn-user-disconnect",
+        "vpn-rapid-flap-burst",
+        "transparent-direct",
+        "network-transition",
+        "upstream-flap",
+        "websocket-upgrade",
+        "connect-early-direct",
+        "connect-early-upstream",
+        "server-first-connect",
+        "server-first-socks5",
+        "audit-hop-response",
+        "audit-socks5-rsv",
+        "audit-expect-trailers",
+        "dns-doh-blocked",
+        "observable-target-redaction",
+        "security-boundaries",
+    ]
+
+    @MainActor private static var setupCleanupCompleted = false
 
     @MainActor
     static func runScenario(_ name: String, verbose: Bool) async throws -> [ScenarioResult] {
         switch name {
-        case "all":
-            return try await Scenarios.runAll(verbose: verbose)
         case "baseline":
             return [try await Scenarios.baselineBurst(verbose: verbose)]
         case "silent-then-burst":
@@ -164,9 +261,25 @@ enum PMSim {
             return [try await ObservableTargetScenarios.redaction()]
         case "security-boundaries":
             return [try await SecurityScenarios.boundaries(verbose: verbose)]
+        case "fixture-pass", "fixture-fail", "fixture-missing":
+            return [.reportingFixture(name: name)]
+        case "fixture-throw":
+            throw ScenarioExecutionError(message: "intentional fixture error")
+        case "fixture-empty":
+            return []
+        case "fixture-setup-throw":
+            setupCleanupCompleted = false
+            ScenarioCleanup.register { setupCleanupCompleted = true }
+            throw ScenarioExecutionError(message: "intentional partial setup failure")
+        case "fixture-cleanup-witness":
+            var result = ScenarioResult.reportingFixture(name: name)
+            result.assertions = [.init("partial setup cleaned before next scenario", setupCleanupCompleted)]
+            return [result]
+        case "fixture-timeout":
+            ScenarioCleanup.register { try? await Task.sleep(for: .seconds(10)) }
+            return [.reportingFixture(name: "fixture-pass")]
         default:
-            FileHandle.standardError.write(Data("unknown scenario: \(name)\n".utf8))
-            exit(2)
+            throw ScenarioExecutionError(message: "unknown scenario: \(name)")
         }
     }
 
@@ -177,6 +290,10 @@ enum PMSim {
             print("")
             print("▌ \(r.name)")
             print("  clients         : opened=\(r.clientsOpened)/\(r.clientCount) firstByte=\(r.clientsWithFirstByte) earlyClose=\(r.clientsClosedEarly)")
+            print("  outcome         : \(r.passed ? "PASS" : "FAIL")")
+            for assertion in r.assertions {
+                print("  [\(assertion.passed ? "pass" : "FAIL")] \(assertion.name)")
+            }
             let totalKB = Double(r.totalBytes) / 1024
             print("  bytes (total)   : \(String(format: "%.1f", totalKB)) KB")
             print("  bytes/stream    : min=\(r.minBytes) median=\(r.medianBytes) max=\(r.maxBytes)")
@@ -203,6 +320,9 @@ enum PMSim {
         for r in results {
             let dict: [String: Any] = [
                 "scenario": r.name,
+                "passed": r.passed,
+                "status": r.passed ? "passed" : "failed",
+                "assertions": r.assertions.map { ["name": $0.name, "passed": $0.passed] as [String: Any] },
                 "clients": r.clientCount,
                 "opened": r.clientsOpened,
                 "firstByte": r.clientsWithFirstByte,

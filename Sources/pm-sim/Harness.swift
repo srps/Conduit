@@ -44,8 +44,8 @@ final class SimHarness {
         authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator = { _ in MockAuthenticator() }
     ) async throws {
         let origin = FakeOrigin(group: group, behavior: originBehavior)
-        try await origin.start()
         self.origin = origin
+        try await origin.start()
 
         let upstream = FakeUpstreamProxy(
             group: group,
@@ -55,8 +55,8 @@ final class SimHarness {
             plainHTTPResponse: upstreamPlainHTTPResponse,
             serverFirst: upstreamServerFirst
         )
-        try await upstream.start()
         self.upstream = upstream
+        try await upstream.start()
 
         var config = ProxyConfig()
         config.proxy.host = "127.0.0.1"
@@ -106,8 +106,8 @@ final class SimHarness {
             onConnectionActivity: { _ in },
             onRequestCompleted: { _, _ in }
         )
-        try await server.start()
         self.server = server
+        try await server.start()
     }
 
     var localProxyHost: String { server?.listeningHost ?? "127.0.0.1" }

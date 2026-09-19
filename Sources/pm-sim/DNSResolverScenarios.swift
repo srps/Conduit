@@ -49,6 +49,7 @@ enum DNSResolverScenarios {
         let logger = RecordingConsoleLogSink(minLevel: verbose ? .debug : .warning)
 
         let blockingProvider = FakeBlockingDoHProvider(group: group)
+        ScenarioCleanup.register { await blockingProvider.stop() }
         try await blockingProvider.start()
         notes.append("fake DoH provider on 127.0.0.1:\(blockingProvider.port) answering 404 to every request")
 
@@ -67,14 +68,9 @@ enum DNSResolverScenarios {
             logger: logger,
             configProvider: { frozen }
         )
+        ScenarioCleanup.register { await forwarder.stop() }
         try await forwarder.start(host: "127.0.0.1", port: 0)
 
-        defer {
-            Task { @MainActor in
-                await forwarder.stop()
-                await blockingProvider.stop()
-            }
-        }
 
         let udpPort = forwarder.listeningPort ?? 0
         let tcpPort = forwarder.tcpListeningPort ?? 0
@@ -123,6 +119,11 @@ enum DNSResolverScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("UDP receives a matching answer", passA),
+                .init("blocked DoH diagnostic names HTTP status", passB),
+                .init("TCP receives a matching answer", passC),
+            ],
             notes: notes
         )
     }
