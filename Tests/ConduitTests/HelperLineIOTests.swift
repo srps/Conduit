@@ -28,6 +28,7 @@ final class HelperLineIOTests: XCTestCase {
     /// keeps sending is never timed out. The deadline is on the request.
     func testDripFedRequestIsCutOffAtTheDeadlineDespiteProgress() {
         let stop = DispatchSemaphore(value: 0)
+        let exited = DispatchSemaphore(value: 0)
         let peer = peerEnd
         let dripper = Thread {
             var byte = UInt8(ascii: "x")
@@ -35,9 +36,16 @@ final class HelperLineIOTests: XCTestCase {
             while stop.wait(timeout: .now() + .milliseconds(20)) == .timedOut {
                 if send(peer, &byte, 1, 0) != 1 { break }
             }
+            exited.signal()
         }
         dripper.start()
-        defer { stop.signal() }
+        // The thread must be gone before teardown closes its descriptor: the
+        // number is reused by the next test's socket pair, and a last send
+        // would land there.
+        defer {
+            stop.signal()
+            XCTAssertEqual(exited.wait(timeout: .now() + 5), .success)
+        }
 
         let start = HelperLineIO.now()
         let result = HelperLineIO.readLine(
@@ -64,13 +72,16 @@ final class HelperLineIOTests: XCTestCase {
 
     func testRequestSplitAcrossWritesIsReassembled() {
         let peer = peerEnd
+        let exited = DispatchSemaphore(value: 0)
         let writer = Thread {
             for part in ["{\"comm", "and\":\"pi", "ng\"}\nIGNORED"] {
                 _ = part.withCString { send(peer, $0, strlen($0), 0) }
                 Thread.sleep(forTimeInterval: 0.02)
             }
+            exited.signal()
         }
         writer.start()
+        defer { XCTAssertEqual(exited.wait(timeout: .now() + 5), .success) }
         let result = HelperLineIO.readLine(fd: helperEnd, deadline: HelperLineIO.deadline(afterMilliseconds: 2_000), maxBytes: 1024)
         XCTAssertEqual(result, .line(Data("{\"command\":\"ping\"}".utf8)))
     }
