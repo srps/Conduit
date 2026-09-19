@@ -57,31 +57,41 @@ package enum IPv6Availability {
     }
 }
 
-/// `getaddrinfo`-backed resolver that answers AAAA queries with nothing
-/// while the host has no routable IPv6 address, so happy-eyeballs only
-/// races addresses it can use. Attach with `ClientBootstrap.resolver(_:)`.
+/// IP literals resolve without entering the blocking lookup queue. Hostname
+/// lookups use `getaddrinfo`, suppressing AAAA while the host has no routable
+/// IPv6 address. Explicit IPv6 literals (including loopback) do not depend on
+/// global IPv6 availability. Attach with `ClientBootstrap.resolver(_:)`.
 package final class AddressFamilyAwareResolver: Resolver, Sendable {
     private let group: EventLoopGroup
     private let hasRoutableIPv6: @Sendable () -> Bool
+    private let lookupQueue: DispatchQueue
 
     package init(
         group: EventLoopGroup,
-        hasRoutableIPv6: @escaping @Sendable () -> Bool = { IPv6Availability.hasRoutableIPv6() }
+        hasRoutableIPv6: @escaping @Sendable () -> Bool = { IPv6Availability.hasRoutableIPv6() },
+        lookupQueue: DispatchQueue = .global(qos: .userInitiated)
     ) {
         self.group = group
         self.hasRoutableIPv6 = hasRoutableIPv6
+        self.lookupQueue = lookupQueue
     }
 
     package func initiateAQuery(host: String, port: Int) -> EventLoopFuture<[SocketAddress]> {
-        Self.resolve(host: host, port: port, family: AF_INET, on: group.any())
+        Self.resolve(host: host, port: port, family: AF_INET, on: group.any(), lookupQueue: lookupQueue)
     }
 
     package func initiateAAAAQuery(host: String, port: Int) -> EventLoopFuture<[SocketAddress]> {
         let loop = group.any()
+        guard (0...65535).contains(port) else {
+            return loop.makeFailedFuture(ResolutionError(host: host, rc: EAI_SERVICE))
+        }
+        if let addresses = Self.literalAddresses(host: host, port: port, family: AF_INET6) {
+            return loop.makeSucceededFuture(addresses)
+        }
         guard hasRoutableIPv6() else {
             return loop.makeSucceededFuture([])
         }
-        return Self.resolve(host: host, port: port, family: AF_INET6, on: loop)
+        return Self.resolve(host: host, port: port, family: AF_INET6, on: loop, lookupQueue: lookupQueue)
     }
 
     /// `getaddrinfo` cannot be cancelled; the connector drops the future.
@@ -99,16 +109,35 @@ package final class AddressFamilyAwareResolver: Resolver, Sendable {
         package var errorDescription: String? { description }
     }
 
-    /// Every address of `family` for `host`, in resolver order. Runs
-    /// `getaddrinfo` off the event loop.
+    /// Nil means a hostname, while an empty array means a literal of the other
+    /// family. Never send the latter to DNS. The caller validates the port
+    /// before NIO's UInt16 conversion. Scoped IPv6 parsing uses AI_NUMERICHOST.
+    private static func literalAddresses(host: String, port: Int, family: Int32) -> [SocketAddress]? {
+        guard let address = try? SocketAddress(ipAddress: host, port: port) else { return nil }
+        switch address {
+        case .v4 where family == AF_INET || family == AF_UNSPEC: return [address]
+        case .v6 where family == AF_INET6 || family == AF_UNSPEC: return [address]
+        default: return []
+        }
+    }
+
+    /// Every address of `family` for `host`, in resolver order. Only names need
+    /// the blocking lookup queue; numeric addresses complete on the event loop.
     package static func resolve(
         host: String,
         port: Int,
         family: Int32,
-        on eventLoop: EventLoop
+        on eventLoop: EventLoop,
+        lookupQueue: DispatchQueue = .global(qos: .userInitiated)
     ) -> EventLoopFuture<[SocketAddress]> {
+        guard (0...65535).contains(port) else {
+            return eventLoop.makeFailedFuture(ResolutionError(host: host, rc: EAI_SERVICE))
+        }
+        if let addresses = literalAddresses(host: host, port: port, family: family) {
+            return eventLoop.makeSucceededFuture(addresses)
+        }
         let promise = eventLoop.makePromise(of: [SocketAddress].self)
-        DispatchQueue.global(qos: .userInitiated).async {
+        lookupQueue.async {
             var hints = addrinfo()
             hints.ai_family = family
             #if canImport(Darwin)
