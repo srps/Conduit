@@ -94,35 +94,55 @@ enum HelperDaemon {
                 }
             }
             guard clientFD >= 0 else { continue }
-            // One accept loop, no threads: a peer that connects and never
-            // sends its newline would otherwise hold the helper for every
-            // other client. Bounded for everyone, not only the refused.
-            setReadTimeout(clientFD, seconds: 5)
-            // Read the request first: at the loginwindow the verdict depends
-            // on the command, and the reply must not race the client's write.
-            let request = readLine(fd: clientFD).flatMap { try? JSONDecoder().decode(HelperRequest.self, from: $0) }
-            if let refusal = peerRefusal(clientFD, command: request?.command, values: request?.values ?? []) {
+            // One accept loop, no threads: whatever a peer is given, every
+            // other client waits for. The bound is on the whole request, not
+            // on each read, so a peer that drips bytes gains nothing by it.
+            // A peer that will be refused whatever it asks gets a fraction.
+            let refusalBeforeReading = peerRefusalBeforeReading(clientFD)
+            let budget = refusalBeforeReading == nil ? TransactionBudget.admitted : TransactionBudget.refused
+            // Read the request first even then: at the loginwindow the verdict
+            // depends on the command, and the reply must not race the client's
+            // write — a client refused before it wrote sees a broken pipe,
+            // not the refusal it retries on.
+            let read = HelperLineIO.readLine(
+                fd: clientFD,
+                deadline: HelperLineIO.deadline(afterMilliseconds: budget.requestMilliseconds),
+                maxBytes: budget.requestBytes
+            )
+            if read == .deadlineExceeded {
+                HelperLog.warning("Request not received within \(budget.requestMilliseconds) ms; dropping it")
+            }
+            var request: HelperRequest?
+            if case .line(let data) = read, refusalBeforeReading == nil {
+                request = try? JSONDecoder().decode(HelperRequest.self, from: data)
+            }
+            let replyDeadline = HelperLineIO.deadline(afterMilliseconds: budget.replyMilliseconds)
+            // The early verdict stands: re-deciding after the wait could admit
+            // a peer whose request was deliberately never decoded.
+            let refusal = refusalBeforeReading
+                ?? peerRefusal(clientFD, command: request?.command, values: request?.values ?? [])
+            if let refusal {
                 switch refusal {
                 case .unauthorized:
                     HelperLog.warning("Rejected connection from unauthorized peer")
-                    writeLine(fd: clientFD, response: .refused(.unauthorized, "peer is not the console user"))
+                    writeLine(fd: clientFD, response: .refused(.unauthorized, "peer is not the console user"), deadline: replyDeadline)
                 case .noConsoleUser:
                     HelperLog.notice("Deferred connection: no console user is logged in yet")
-                    writeLine(fd: clientFD, response: .refused(.noConsoleUser, "no console user yet"))
+                    writeLine(fd: clientFD, response: .refused(.noConsoleUser, "no console user yet"), deadline: replyDeadline)
                 }
                 close(clientFD)
                 continue
             }
-            handleConnection(clientFD, request: request)
+            handleConnection(clientFD, request: request, replyDeadline: replyDeadline)
             close(clientFD)
         }
     }
 
     // MARK: - Connection Handling
 
-    private static func handleConnection(_ fd: Int32, request: HelperRequest?) {
+    private static func handleConnection(_ fd: Int32, request: HelperRequest?, replyDeadline: UInt64) {
         guard let request else {
-            writeLine(fd: fd, response: .error("Invalid request"))
+            writeLine(fd: fd, response: .error("Invalid request"), deadline: replyDeadline)
             return
         }
         // A range, not an exact match. The helper outlives the app that
@@ -136,13 +156,15 @@ enum HelperDaemon {
         guard let replyVersion = HelperProtocolVersion.replyVersion(forRequest: request.protocolVersion) else {
             writeLine(fd: fd, response: .error(
                 "Unsupported helper protocol version \(request.protocolVersion); this helper speaks \(HelperProtocolVersion.minimumSupported)–\(HelperProtocolVersion.current)"
-            ))
+            ), deadline: replyDeadline)
             return
         }
         var response = processRequest(request)
         // Answer in the dialect we were addressed in.
         response.protocolVersion = replyVersion
-        writeLine(fd: fd, response: response)
+        // The operation's own time is not the peer's: the reply gets a fresh
+        // window once there is something to send.
+        writeLine(fd: fd, response: response, deadline: HelperLineIO.deadline(afterMilliseconds: TransactionBudget.admitted.replyMilliseconds))
     }
 
     private static func processRequest(_ request: HelperRequest) -> HelperResponse {
@@ -187,22 +209,25 @@ enum HelperDaemon {
 
     // MARK: - Socket I/O
 
-    private static func readLine(fd: Int32) -> Data? {
-        var buffer = Data()
-        var byte: UInt8 = 0
-        while Darwin.read(fd, &byte, 1) == 1 {
-            if byte == UInt8(ascii: "\n") { return buffer }
-            buffer.append(byte)
-            if buffer.count > 1_048_576 { return nil }
-        }
-        return buffer.isEmpty ? nil : buffer
+    /// What one connection may cost every other client. Requests are a
+    /// command and a few values; the ceilings are far above any real one.
+    private struct TransactionBudget {
+        var requestMilliseconds: Int
+        var requestBytes: Int
+        var replyMilliseconds: Int
+
+        static let admitted = TransactionBudget(requestMilliseconds: 5_000, requestBytes: 1_048_576, replyMilliseconds: 5_000)
+        /// Long enough for a request already on its way to land, so the
+        /// refusal is what the peer reads. Its content is never decoded.
+        static let refused = TransactionBudget(requestMilliseconds: 1_000, requestBytes: 65_536, replyMilliseconds: 1_000)
     }
 
-    private static func writeLine(fd: Int32, response: HelperResponse) {
+    /// A peer that stops reading cannot hold the loop on the write either.
+    private static func writeLine(fd: Int32, response: HelperResponse, deadline: UInt64) {
         guard var data = try? JSONEncoder().encode(response) else { return }
         data.append(UInt8(ascii: "\n"))
-        data.withUnsafeBytes { ptr in
-            _ = Darwin.write(fd, ptr.baseAddress!, ptr.count)
+        if !HelperLineIO.writeAll(fd: fd, data, deadline: deadline) {
+            HelperLog.warning("Reply not accepted by the peer in time; dropping it")
         }
     }
 
@@ -242,13 +267,25 @@ enum HelperDaemon {
         )
     }
 
+    /// The refusal this peer gets whatever it sends, known before a byte of
+    /// the request is read. See `HelperAdmission.refusalBeforeReading`.
+    private static func peerRefusalBeforeReading(_ fd: Int32) -> HelperRefusal? {
+        var euid: uid_t = 0
+        var egid: gid_t = 0
+        guard getpeereid(fd, &euid, &egid) == 0 else { return .unauthorized }
+        let consoleUID = consoleUserUID()
+        if consoleUID != 0 {
+            lastConsoleUID = consoleUID
+        }
+        return HelperAdmission.refusalBeforeReading(
+            peerUID: euid,
+            consoleUID: consoleUID,
+            lastConsoleUID: lastConsoleUID
+        )
+    }
+
     /// Last non-zero console uid seen. Single accept loop, no threads.
     nonisolated(unsafe) private static var lastConsoleUID: uid_t?
-
-    private static func setReadTimeout(_ fd: Int32, seconds: Int) {
-        var tv = timeval(tv_sec: seconds, tv_usec: 0)
-        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-    }
 
     private static func consoleUserUID() -> uid_t {
         var uid: uid_t = 0

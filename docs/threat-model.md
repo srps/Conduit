@@ -104,7 +104,9 @@ Existing controls: helper commands are versioned and validated in `ConduitShared
 
 TCP relay shutdown preserves descriptor ownership: stop retires the session registry and shuts sockets down under its lock, but only session workers close their descriptors after their last I/O. Nonblocking listener accepts are guarded by the listener generation under the same lock as close. This prevents evicted workers from reading, writing, or accepting on descriptor numbers reused by another connection. The UDP relay follows the listener's model: its sockets are nonblocking, every datagram read or send happens under the lifecycle lock after a generation check, and stop closes under that lock, so the port is free when stop returns and an evicted loop cannot consume or answer a datagram on a reused descriptor number. Target-connect deadlines remain separate work.
 
-Current gaps: every `PrivilegeClient` call does not yet emit a dedicated `auth.privilege_request` event.
+The helper serves one connection at a time, so what one peer can make it wait is what every other client waits. A request must arrive within a monotonic deadline on the whole request (5 s, 1 MiB), not on each read, and a reply must be accepted within one too; the socket is nonblocking, so neither a peer that drips bytes nor one that stops reading holds the loop. A peer that will be refused whatever it sends (root, not the console user, or nobody remembered at the loginwindow) is given 1 s and 64 KiB, and its request is never decoded. It is still read, so the refusal reaches a client that was mid-write instead of a broken pipe.
+
+Current gaps: subprocess duration and output are not bounded, and the client side has no transaction deadline and still waits on the main actor (#47). A same-UID process is admitted like the app (#46). Connections are still served serially, so a peer that reconnects continuously can delay others by its allowance per queued connection. Every `PrivilegeClient` call does not yet emit a dedicated `auth.privilege_request` event.
 
 Planned work: privileged-action audit trail and eventual `SMAppService` signed helper.
 
