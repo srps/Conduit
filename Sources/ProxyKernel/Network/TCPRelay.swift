@@ -187,7 +187,10 @@ package final class TCPRelay: @unchecked Sendable {
         while !Thread.current.isCancelled {
             guard lock.withLock({ self.generation == generation && self.listenFD == listenFD }) else { break }
             var readiness = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
-            let ready = poll(&readiness, 1, 100)
+            // The timeout only bounds how long an evicted loop lingers after
+            // stop. Nothing waits for it, and it revalidates under the lock
+            // before accepting. One idle wakeup a second, as in `UDPRelay`.
+            let ready = poll(&readiness, 1, 1000)
             if ready == 0 { continue }
             if ready < 0 {
                 if errno == EINTR { continue }
