@@ -311,6 +311,52 @@ final class ConnectionPoolTests: XCTestCase {
         }
     }
 
+    // MARK: - Upstream closes cleanly mid-exchange
+
+    /// An upstream that reads a request and closes without answering raises
+    /// no error, only `channelInactive`. The exchange used to stay pending for
+    /// good, with its response timeout cancelled; `pm-sim upstream-flap` hung
+    /// on it about once in thirty runs under load. Both the first attempt and
+    /// the fresh-connection retry meet the same upstream here, so the check
+    /// must come back unhealthy rather than not come back.
+    @MainActor func testExchangeFailsWhenTheUpstreamClosesCleanlyWithoutAnswering() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let requestsSeen = NIOLockedValueBox(0)
+        let upstream = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(CloseAfterRequestHandler(requestsSeen: requestsSeen))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        addTeardownBlock { try? await upstream.close().get() }
+
+        var config = ProxyConfig.testFixture()
+        config.upstreams = [UpstreamProxy(name: "upstream", host: "127.0.0.1", port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)]
+        // Far beyond the test's patience: the response timeout must not be
+        // what ends the exchange.
+        config.upstreamResponseTimeoutSeconds = 600
+        let pool = ConnectionPool(
+            group: group,
+            logger: DiscardingLogSink(),
+            configProvider: { config },
+            authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "dGVzdA==") }
+        )
+        defer { pool.closeAll() }
+
+        let returned = expectation(description: "health check returns")
+        let result = NIOLockedValueBox<HealthCheckResult?>(nil)
+        Task {
+            let value = await pool.healthCheck(urlString: "http://origin.test/")
+            result.withLockedValue { $0 = value }
+            returned.fulfill()
+        }
+        await fulfillment(of: [returned], timeout: 10)
+
+        XCTAssertEqual(result.withLockedValue { $0?.healthy }, false)
+        XCTAssertGreaterThanOrEqual(requestsSeen.withLockedValue { $0 }, 1, "the upstream must have read a request before closing")
+    }
+
     // MARK: - Auth handshake local throttling
 
     @MainActor func testAuthHandshakeLimitDoesNotRecordBufferedUpstreamFailure() async throws {
@@ -769,5 +815,24 @@ final class ConnectionPoolTests: XCTestCase {
             XCTFail("unexpected rejection: \(rejection)")
             fatalError("unreachable")
         }
+    }
+}
+
+/// Reads until a request's blank line, then closes without a response: a FIN,
+/// not a reset.
+private final class CloseAfterRequestHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    private let requestsSeen: NIOLockedValueBox<Int>
+    private var received = ByteBuffer()
+
+    init(requestsSeen: NIOLockedValueBox<Int>) { self.requestsSeen = requestsSeen }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        received.writeBuffer(&buffer)
+        guard received.getString(at: received.readerIndex, length: received.readableBytes)?.contains("\r\n\r\n") == true else { return }
+        requestsSeen.withLockedValue { $0 += 1 }
+        context.close(promise: nil)
     }
 }
