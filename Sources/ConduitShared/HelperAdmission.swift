@@ -34,6 +34,24 @@ public enum HelperAdmission {
             && values[1].caseInsensitiveCompare(HelperInputValidator.emptyListSentinel) == .orderedSame
     }
 
+    /// The refusal that no command could change, or `nil` if the verdict needs
+    /// the request. The helper uses it to decide how long a peer may take to
+    /// send one: a peer it will refuse whatever it asks is given only long
+    /// enough for its write to land, so the refusal reaches it instead of a
+    /// broken pipe. Only the last console user at the loginwindow has a
+    /// verdict that depends on the command.
+    public static func refusalBeforeReading(
+        peerUID: uid_t,
+        consoleUID: uid_t,
+        lastConsoleUID: uid_t?
+    ) -> HelperRefusal? {
+        guard peerUID != 0 else { return .unauthorized }
+        if consoleUID != 0 {
+            return peerUID == consoleUID ? nil : .unauthorized
+        }
+        return peerUID == lastConsoleUID ? nil : .noConsoleUser
+    }
+
     /// `nil` admits the request. `consoleUID` 0 means nobody; `lastConsoleUID`
     /// is the most recent non-zero console uid this helper has seen; `command`
     /// is `nil` when the request did not parse; `values` are its arguments.

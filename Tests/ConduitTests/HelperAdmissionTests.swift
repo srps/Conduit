@@ -7,6 +7,33 @@ final class HelperAdmissionTests: XCTestCase {
     private let user: uid_t = 501
     private let other: uid_t = 502
 
+    /// The early verdict shortens what a peer is given to send its request,
+    /// and its request is then never decoded. It must therefore never differ
+    /// from what the full policy would say for any request at all, and must
+    /// stay undecided for every peer some request could admit.
+    func testRefusalBeforeReadingNeverDisagreesWithTheFullPolicy() {
+        let uids: [uid_t] = [0, user, other]
+        let requests: [(HelperCommand?, [String])] = [(nil, [])]
+            + HelperCommand.allCases.map { ($0, []) }
+            + [(.setDNSServers, ["Wi-Fi", "Empty"]), (.setDNSServers, ["Wi-Fi", "127.0.0.1"])]
+        for peer in uids {
+            for console in uids {
+                for last in [nil] + uids.map(Optional.some) {
+                    let early = HelperAdmission.refusalBeforeReading(peerUID: peer, consoleUID: console, lastConsoleUID: last)
+                    let verdicts = requests.map {
+                        HelperAdmission.refusal(peerUID: peer, consoleUID: console, lastConsoleUID: last, command: $0.0, values: $0.1)
+                    }
+                    let state = "peer=\(peer) console=\(console) last=\(String(describing: last))"
+                    if let early {
+                        XCTAssertTrue(verdicts.allSatisfy { $0 == early }, state)
+                    } else {
+                        XCTAssertTrue(verdicts.contains(nil), "undecided, yet nothing this peer sends is admitted: \(state)")
+                    }
+                }
+            }
+        }
+    }
+
     func testConsoleUserIsAdmittedForEverything() {
         for command in HelperCommand.allCases {
             XCTAssertNil(HelperAdmission.refusal(peerUID: user, consoleUID: user, lastConsoleUID: user, command: command), "\(command)")
