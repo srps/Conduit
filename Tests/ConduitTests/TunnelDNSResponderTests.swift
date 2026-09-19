@@ -26,7 +26,7 @@ final class TunnelDNSResponderTests: XCTestCase {
         let elg = group!
         let responder = TunnelDNSResponder(group: elg, logger: logger)
         try await responder.start(host: "127.0.0.1", port: 0)
-        defer { Task { await responder.stop() } }
+        addTeardownBlock { await responder.stop() }
 
         responder.updateHostnames(["cluster0.mongodb.net": "127.0.0.1"])
 
@@ -50,7 +50,7 @@ final class TunnelDNSResponderTests: XCTestCase {
         let elg = group!
         let responder = TunnelDNSResponder(group: elg, logger: logger)
         try await responder.start(host: "127.0.0.1", port: 0)
-        defer { Task { await responder.stop() } }
+        addTeardownBlock { await responder.stop() }
 
         responder.updateHostnames(["example.com": "127.0.0.1"])
 
@@ -71,7 +71,7 @@ final class TunnelDNSResponderTests: XCTestCase {
         let elg = group!
         let responder = TunnelDNSResponder(group: elg, logger: logger)
         try await responder.start(host: "127.0.0.1", port: 0)
-        defer { Task { await responder.stop() } }
+        addTeardownBlock { await responder.stop() }
 
         responder.updateHostnames(["known.host": "127.0.0.1"])
 
@@ -90,7 +90,7 @@ final class TunnelDNSResponderTests: XCTestCase {
         let elg = group!
         let responder = TunnelDNSResponder(group: elg, logger: logger)
         try await responder.start(host: "127.0.0.1", port: 0)
-        defer { Task { await responder.stop() } }
+        addTeardownBlock { await responder.stop() }
 
         responder.updateHostnames(["cluster0.mongodb.net": "127.0.0.1"])
 
@@ -109,7 +109,7 @@ final class TunnelDNSResponderTests: XCTestCase {
         let elg = group!
         let responder = TunnelDNSResponder(group: elg, logger: logger)
         try await responder.start(host: "127.0.0.1", port: 0)
-        defer { Task { await responder.stop() } }
+        addTeardownBlock { await responder.stop() }
 
         let port = try responderPort(responder)
 
@@ -304,62 +304,53 @@ final class TunnelDNSResponderTests: XCTestCase {
 
 private enum UDPTestHelper {
     static func send(query: [UInt8], to host: String, port: Int, group: EventLoopGroup) async throws -> [UInt8]? {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[UInt8]?, Error>) in
-            let handler = UDPTestCollector(continuation: continuation)
-            DatagramBootstrap(group: group)
-                .channelInitializer { channel in
-                    channel.pipeline.addHandler(handler)
-                }
-                .bind(host: "127.0.0.1", port: 0)
-                .whenComplete { result in
-                    switch result {
-                    case .success(let channel):
-                        guard let addr = try? SocketAddress(ipAddress: host, port: port) else {
-                            continuation.resume(returning: nil)
-                            return
-                        }
-                        var buf = channel.allocator.buffer(capacity: query.count)
-                        buf.writeBytes(query)
-                        let envelope = AddressedEnvelope(remoteAddress: addr, data: buf)
-                        channel.writeAndFlush(envelope, promise: nil)
-
-                        channel.eventLoop.scheduleTask(in: .seconds(2)) {
-                            handler.timeout()
-                            channel.close(promise: nil)
-                        }
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                }
+        let addr = try SocketAddress(ipAddress: host, port: port)
+        let response = group.next().makePromise(of: [UInt8]?.self)
+        let handler = UDPTestCollector(promise: response)
+        let channel = try await DatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(handler) }
+            .bind(host: "127.0.0.1", port: 0).get()
+        let timeout = channel.eventLoop.scheduleTask(in: .seconds(2)) { handler.timeout() }
+        do {
+            var buf = channel.allocator.buffer(capacity: query.count)
+            buf.writeBytes(query)
+            try await channel.writeAndFlush(AddressedEnvelope(remoteAddress: addr, data: buf)).get()
+            let bytes = try await response.futureResult.get()
+            timeout.cancel()
+            try await channel.close().get()
+            try await channel.closeFuture.get()
+            return bytes
+        } catch {
+            timeout.cancel()
+            // Finish a still-pending response on its handler's loop before
+            // tearing down that loop, including the write-error path.
+            try? await channel.eventLoop.submit { handler.timeout() }.get()
+            try? await channel.close().get()
+            throw error
         }
     }
 }
 
 private final class UDPTestCollector: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
-    private var continuation: CheckedContinuation<[UInt8]?, Error>?
-    private let lock = NSLock()
+    // Accessed only on the datagram channel's event loop.
+    private var promise: EventLoopPromise<[UInt8]?>?
 
-    init(continuation: CheckedContinuation<[UInt8]?, Error>) {
-        self.continuation = continuation
+    init(promise: EventLoopPromise<[UInt8]?>) {
+        self.promise = promise
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let envelope = unwrapInboundIn(data)
         var buf = envelope.data
         let bytes = buf.readBytes(length: buf.readableBytes) ?? []
-        lock.withLock {
-            continuation?.resume(returning: bytes)
-            continuation = nil
-        }
-        context.close(promise: nil)
+        promise?.succeed(bytes)
+        promise = nil
     }
 
     func timeout() {
-        lock.withLock {
-            continuation?.resume(returning: nil)
-            continuation = nil
-        }
+        promise?.succeed(nil)
+        promise = nil
     }
 }
 
