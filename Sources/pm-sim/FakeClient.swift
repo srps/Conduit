@@ -164,7 +164,9 @@ private final class FakeClientHandler: ChannelInboundHandler, @unchecked Sendabl
 
             // If the 200 response included any bytes after \r\n\r\n, those are tunnel payload.
             let headerEndRange = str.range(of: "\r\n\r\n")!
-            let consumed = str.distance(from: str.startIndex, to: headerEndRange.upperBound)
+            // ByteBuffer offsets are bytes; Swift counts CRLF as one Character.
+            // Counting graphemes wrongly adds four header bytes to every stream.
+            let consumed = str[..<headerEndRange.upperBound].utf8.count
             connectResponseAccum.moveReaderIndex(forwardBy: consumed)
             if connectResponseAccum.readableBytes > 0 {
                 recordBytesReceived(connectResponseAccum.readableBytes)

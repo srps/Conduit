@@ -63,6 +63,7 @@ enum ServerFirstScenarios {
                 totalBytes: tunnel.count, durationSeconds: Date().timeIntervalSince(start), aggregateMBps: 0,
                 minBytes: tunnel.count, maxBytes: tunnel.count, medianBytes: tunnel.count,
                 earliestClose: nil, latestClose: nil,
+                assertions: [.init("exact server-first transcript through upstream", true)],
                 notes: ["PASS: server-first greetings, then the client's echo, arrived exactly in order"]
             )
         } catch {

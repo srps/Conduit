@@ -43,6 +43,7 @@ enum ObservableTargetScenarios {
             name: "observable-target-redaction", clientCount: 1, clientsOpened: 1, clientsWithFirstByte: 1,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [.init("observations redact secrets without changing wire target", true)],
             notes: ["PASS: observed targets, logs, events, audit targets, and encoded connection records redact query/fragment secrets"]
         )
     }

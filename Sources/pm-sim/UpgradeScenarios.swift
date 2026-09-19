@@ -18,6 +18,7 @@ enum UpgradeScenarios {
     static func connectEarlyData(direct: Bool, verbose: Bool) async throws -> ScenarioResult {
         let start = Date()
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         let early = "EARLY\u{0}TUNNEL\r\nBYTES"
         let late = "AFTER-200"
         do {
@@ -45,6 +46,7 @@ enum UpgradeScenarios {
                 clientCount: 1, clientsOpened: 1, clientsWithFirstByte: 1, clientsClosedEarly: 0,
                 totalBytes: bytes, durationSeconds: Date().timeIntervalSince(start), aggregateMBps: 0,
                 minBytes: bytes, maxBytes: bytes, medianBytes: bytes, earliestClose: nil, latestClose: nil,
+                assertions: [.init("exact early and late bytes through expected route", true)],
                 notes: ["PASS: early binary bytes and post-200 bytes echoed exactly in order"]
             )
         } catch {
@@ -61,12 +63,12 @@ enum UpgradeScenarios {
         let clientFrame = "CLIENT-PING"
 
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .websocketUpgrade(earlyFrame: earlyFrame),
             directMode: true,
             directModeCause: .noUpstreamsConfigured
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let originPort = harness.origin?.port ?? 0
         let request =
@@ -107,6 +109,12 @@ enum UpgradeScenarios {
             medianBytes: transcript.utf8.count,
             earliestClose: nil,
             latestClose: nil,
+            assertions: [
+                .init("101 response received", got101),
+                .init("Upgrade header preserved", upgradeSurvived),
+                .init("early server frame delivered", gotEarlyFrame),
+                .init("client frame echoed", gotEcho),
+            ],
             notes: [
                 passed ? "ok: 101 relayed, Upgrade preserved, frames flowed both ways"
                        : "BUG: upgrade relay incomplete (101=\(got101) upgradeHeader=\(upgradeSurvived) earlyFrame=\(gotEarlyFrame) echo=\(gotEcho))",

@@ -17,7 +17,10 @@ struct ScenarioResult: Sendable {
     var medianBytes: Int
     var earliestClose: Double?
     var latestClose: Double?
+    var assertions: [ScenarioAssertion]
     var notes: [String]
+
+    var passed: Bool { !assertions.isEmpty && assertions.allSatisfy(\.passed) }
 }
 
 enum Scenarios {
@@ -27,10 +30,10 @@ enum Scenarios {
     static func baselineBurst(verbose: Bool) async throws -> ScenarioResult {
         let name = "baselineBurst"
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .burstStream(intervalMs: 50, chunkSize: 16_384, durationMs: 15_000)
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let start = Date()
         let client = FakeClient(
@@ -59,6 +62,11 @@ enum Scenarios {
             medianBytes: m.bytesReceived,
             earliestClose: m.closedAt?.timeIntervalSince(start),
             latestClose: m.closedAt?.timeIntervalSince(start),
+            assertions: [
+                .init("tunnel established", m.connectEstablishedAt != nil),
+                .init("bursty stream made progress", m.bytesReceived >= 100_000),
+                .init("stream closed within deadline", m.closedAt != nil),
+            ],
             notes: ["serverStreamedFor=15s", "interval=50ms", "chunk=16KB"]
         )
     }
@@ -69,6 +77,7 @@ enum Scenarios {
     static func multiConcurrent(clientCount: Int, durationSeconds: Int, verbose: Bool) async throws -> ScenarioResult {
         let name = "multiConcurrent(n=\(clientCount))"
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .burstStream(
                 intervalMs: 25,
@@ -77,7 +86,6 @@ enum Scenarios {
             ),
             maxConnections: max(clientCount * 4, 64)
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let start = Date()
         var clients: [FakeClient] = []
@@ -131,6 +139,11 @@ enum Scenarios {
             medianBytes: median,
             earliestClose: closedTimes.min(),
             latestClose: closedTimes.max(),
+            assertions: [
+                .init("all tunnels established", opened == clientCount),
+                .init("all streams made progress", firstByteCount == clientCount && earlyClose == 0),
+                .init("all streams closed within deadline", closedTimes.count == clientCount),
+            ],
             notes: [
                 "serverStreamedFor=\(durationSeconds)s",
                 "interval=25ms",
@@ -148,13 +161,13 @@ enum Scenarios {
         let inboundLimit = 8
         let clientCount = 40
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .silent,
             maxConnections: 64,
             inboundConnectionLimit: inboundLimit,
             inboundConnectionWarnThreshold: inboundLimit / 2
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let start = Date()
         let clients = (0..<clientCount).map { i in
@@ -231,6 +244,10 @@ enum Scenarios {
             medianBytes: 0,
             earliestClose: nil,
             latestClose: nil,
+            assertions: [
+                .init("flood rejected excess clients", rejectedDuringFlood > 0),
+                .init("post-drain connection succeeded", probeSucceeded),
+            ],
             notes: [
                 "inboundLimit=\(inboundLimit)",
                 "floodClients=\(clientCount)",
@@ -249,6 +266,7 @@ enum Scenarios {
         let clientCount = 24
         let perSourceLimit = 2
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .silent,
             maxConnections: 64,
@@ -256,7 +274,6 @@ enum Scenarios {
             pendingAuthHandshakesPerSource: perSourceLimit,
             authenticatorProvider: { _ in SlowMockAuthenticator(delayMs: 700) }
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let start = Date()
         let clients = (0..<clientCount).map { i in
@@ -315,6 +332,7 @@ enum Scenarios {
             medianBytes: 0,
             earliestClose: nil,
             latestClose: nil,
+            assertions: [.init("pending-auth limiter rejected excess clients", rejected > 0)],
             notes: [
                 "perSourceLimit=\(perSourceLimit)",
                 "clients=\(clientCount)",
@@ -330,10 +348,10 @@ enum Scenarios {
     static func silentThenBurst(silentForMs: Int, burstBytes: Int, verbose: Bool) async throws -> ScenarioResult {
         let name = "silentThenBurst(silent=\(silentForMs)ms)"
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .silentThenBurst(silentForMs: silentForMs, burstBytes: burstBytes)
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let start = Date()
         let client = FakeClient(
@@ -363,6 +381,11 @@ enum Scenarios {
             medianBytes: m.bytesReceived,
             earliestClose: m.closedAt?.timeIntervalSince(start),
             latestClose: m.closedAt?.timeIntervalSince(start),
+            assertions: [
+                .init("tunnel established", m.connectEstablishedAt != nil),
+                .init("entire burst delivered exactly once", m.bytesReceived == burstBytes),
+                .init("stream closed within deadline", m.closedAt != nil),
+            ],
             notes: [
                 "silentForMs=\(silentForMs)",
                 "expectedBurstBytes=\(burstBytes)",
@@ -377,11 +400,11 @@ enum Scenarios {
     static func floodSlowDrain(verbose: Bool) async throws -> ScenarioResult {
         let name = "floodSlowDrain(AE5F6815 repro)"
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         let floodBytes = 2_000_000
         try await harness.start(
             originBehavior: .floodThenClose(floodBytes: floodBytes)
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let start = Date()
         let client = FakeClient(
@@ -412,6 +435,10 @@ enum Scenarios {
             medianBytes: m.bytesReceived,
             earliestClose: m.closedAt?.timeIntervalSince(start),
             latestClose: m.closedAt?.timeIntervalSince(start),
+            assertions: [
+                .init("entire flood delivered exactly once", m.bytesReceived == floodBytes),
+                .init("stream closed within deadline", m.closedAt != nil),
+            ],
             notes: [
                 "originSent=\(floodBytes)",
                 "clientRcvBuf=4096",
@@ -428,6 +455,7 @@ enum Scenarios {
     static func highThroughput(durationSeconds: Int, verbose: Bool) async throws -> ScenarioResult {
         let name = "highThroughput(single)"
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .burstStream(
                 intervalMs: 1,
@@ -435,7 +463,6 @@ enum Scenarios {
                 durationMs: durationSeconds * 1000
             )
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let start = Date()
         let client = FakeClient(
@@ -464,56 +491,16 @@ enum Scenarios {
             medianBytes: m.bytesReceived,
             earliestClose: m.closedAt?.timeIntervalSince(start),
             latestClose: m.closedAt?.timeIntervalSince(start),
+            assertions: [
+                .init("tunnel established", m.connectEstablishedAt != nil),
+                .init("stream made progress", m.bytesReceived >= 64_000),
+                .init("stream closed within deadline", m.closedAt != nil),
+            ],
             notes: [
                 "serverStreamedFor=\(durationSeconds)s",
                 "interval=1ms",
                 "chunk=64KB"
             ]
         )
-    }
-}
-
-// Helper so we can run all scenarios sequentially and pretty-print.
-extension Scenarios {
-    @MainActor
-    static func runAll(verbose: Bool) async throws -> [ScenarioResult] {
-        var out: [ScenarioResult] = []
-        out.append(try await ObservableTargetScenarios.redaction())
-        out.append(try await SecurityScenarios.boundaries(verbose: verbose))
-        out.append(try await baselineBurst(verbose: verbose))
-        out.append(try await silentThenBurst(silentForMs: 8_000, burstBytes: 131_072, verbose: verbose))
-        out.append(try await multiConcurrent(clientCount: 10, durationSeconds: 10, verbose: verbose))
-        out.append(try await multiConcurrent(clientCount: 30, durationSeconds: 10, verbose: verbose))
-        out.append(try await highThroughput(durationSeconds: 5, verbose: verbose))
-        out.append(try await multiConcurrent(clientCount: 100, durationSeconds: 10, verbose: verbose))
-        out.append(try await BoundedWriterScenarios.slowStorage())
-        out.append(try await PACFetchScenarios.bounds())
-        out.append(try await AdmissionScenarios.sharedBudget(verbose: verbose))
-        out.append(try await connectionFlood(verbose: verbose))
-        out.append(try await authStorm(verbose: verbose))
-        out.append(try await silentThenBurst(silentForMs: 30_000, burstBytes: 262_144, verbose: verbose))
-        out.append(try await ForcedRoutingScenarios.forcedProxyPrecedence(verbose: verbose))
-        out.append(try await OrchestratorScenarios.keepaliveReadback(verbose: verbose))
-        out.append(try await OrchestratorScenarios.healthCheck(verbose: verbose))
-        out.append(try await OrchestratorScenarios.upstreamFailover(verbose: verbose))
-        out.append(try await floodSlowDrain(verbose: verbose))
-        out.append(try await OrchestratorScenarios.directModeSilence(verbose: verbose))
-        out.append(try await VPNFlapScenarios.vpnFlapShortIdleTunnel(verbose: verbose))
-        out.append(try await VPNFlapScenarios.vpnFlapShortActiveStream(verbose: verbose))
-        out.append(try await VPNFlapScenarios.vpnFlapLongOutage(verbose: verbose))
-        out.append(try await VPNFlapScenarios.vpnUserDisconnectFastPath(verbose: verbose))
-        out.append(try await VPNFlapScenarios.vpnRapidFlapBurst(verbose: verbose))
-        out.append(try await TransparentProxyScenarios.transparentDirectRouting(verbose: verbose))
-        out.append(try await NetworkTransitionScenarios.networkTransition(verbose: verbose))
-        out.append(try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose))
-        out.append(try await UpgradeScenarios.websocketUpgrade(verbose: verbose))
-        out.append(try await UpgradeScenarios.connectEarlyData(direct: true, verbose: verbose))
-        out.append(try await UpgradeScenarios.connectEarlyData(direct: false, verbose: verbose))
-        out.append(try await ServerFirstScenarios.run(.httpConnect, verbose: verbose))
-        out.append(try await ServerFirstScenarios.run(.socks5, verbose: verbose))
-        out.append(try await AuditScenarios.proxiedResponseHopByHop(verbose: verbose))
-        out.append(try await AuditScenarios.socks5NonZeroRSV(verbose: verbose))
-        out.append(try await AuditScenarios.expectContinueAndTrailers(verbose: verbose))
-        return out
     }
 }

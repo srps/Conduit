@@ -37,6 +37,14 @@ jobs:
         python3 scripts/test-security-boundaries.py "$conduit_bin_dir/pm-proxy"
     - name: Perf gate
       run: bash ./scripts/perf-gate.sh
+    - name: Simulator outcomes and full scenario suite
+      timeout-minutes: 10
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      run: |
+        conduit_bin_dir="$(xcrun swift build --show-bin-path)"
+        python3 scripts/test-sim-outcomes.py "$conduit_bin_dir/pm-sim"
+        "$conduit_bin_dir/pm-sim" all
     - name: HTTP request-target preservation
       env:
         DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer

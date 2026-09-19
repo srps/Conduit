@@ -26,6 +26,7 @@ enum PACFetchScenarios {
             clientsClosedEarly: 0, totalBytes: PACFetchLimits.maxScriptBytes,
             durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [.init("bounded downloads, cancellation and last-good route retention", true)],
             notes: ["PASS: HTTPS/file ceilings, HTTP status and active cancellation enforced; failed refresh retains the last working PAC route"]
         )
     }

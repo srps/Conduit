@@ -13,10 +13,10 @@ enum OrchestratorScenarios {
     static func healthCheck(verbose: Bool) async throws -> ScenarioResult {
         let name = "healthCheck(HEAD via upstream)"
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .silent  // Not used -- health check goes via plain HTTP, not CONNECT.
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let start = Date()
         var notes: [String] = []
@@ -45,9 +45,10 @@ enum OrchestratorScenarios {
             aggregateMBps: 0,
             minBytes: latencies.min() ?? 0,
             maxBytes: latencies.max() ?? 0,
-            medianBytes: latencies.sorted()[latencies.count / 2],
+            medianBytes: latencies.sorted().dropFirst(latencies.count / 2).first ?? 0,
             earliestClose: nil,
             latestClose: nil,
+            assertions: [.init("all five health checks succeeded", successes == 5)],
             notes: notes
         )
     }
@@ -61,12 +62,15 @@ enum OrchestratorScenarios {
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
 
         let origin = FakeOrigin(group: group, behavior: .burstStream(intervalMs: 50, chunkSize: 4096, durationMs: 8000))
+        ScenarioCleanup.register { await origin.stop() }
         try await origin.start()
 
         // Two upstream proxies, both routing to the same origin.
         let upstream1 = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: origin.port)
+        ScenarioCleanup.register { await upstream1.stop() }
         try await upstream1.start()
         let upstream2 = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: origin.port)
+        ScenarioCleanup.register { await upstream2.stop() }
         try await upstream2.start()
 
         var config = ProxyConfig()
@@ -96,15 +100,8 @@ enum OrchestratorScenarios {
             onConnectionActivity: { _ in },
             onRequestCompleted: { _, _ in }
         )
+        ScenarioCleanup.register { await server.stop() }
         try await server.start()
-        defer {
-            Task { @MainActor in
-                await server.stop()
-                await upstream1.stop()
-                await upstream2.stop()
-                await origin.stop()
-            }
-        }
 
         var notes: [String] = []
         let start = Date()
@@ -117,11 +114,13 @@ enum OrchestratorScenarios {
         await upstream1.stop()
         notes.append("upstream1.stopped at \(String(format: "%.2f", Date().timeIntervalSince(start)))s")
 
-        // 3. Force a health check. It should fail or indicate unhealthy.
+        // 3. The pool retries the failed first upstream through the surviving
+        // second upstream; a healthy result must name that surviving endpoint.
         let hc1 = await server.performHealthCheck()
         notes.append("hc1 healthy=\(hc1.healthy) summary=\(hc1.summary)")
 
-        // 4. Invoke switchToNextUpstream (simulating auto-recovery step).
+        // 4. Explicit rotation can now select the dead upstream again because
+        // the health check already failed over. The next request must recover.
         let switched = (try? await server.switchToNextUpstream()) ?? nil
         notes.append("switched to=\(switched ?? "-")")
 
@@ -142,6 +141,12 @@ enum OrchestratorScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("initially selects first upstream", before == capturedConfig.upstreams[0].endpoint),
+                .init("health check fails over to surviving upstream", hc1.healthy && hc1.activeUpstream == "127.0.0.1:\(upstream2.port)"),
+                .init("explicit rotation completes", switched != nil),
+                .init("next request recovers through surviving upstream", hc2.healthy && hc2.activeUpstream == "127.0.0.1:\(upstream2.port)")
+            ],
             notes: notes
         )
     }
@@ -230,6 +235,10 @@ enum OrchestratorScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("expected VPN-off failure stays quiet", expectedPass),
+                .init("unexpected upstream failure is observable", unexpectedPass),
+            ],
             notes: notes
         )
     }
@@ -264,8 +273,8 @@ enum OrchestratorScenarios {
             },
             eventSink: { events.append($0) }
         )
+        ScenarioCleanup.register { await server.stop() }
         try await server.start()
-        defer { Task { @MainActor in await server.stop() } }
 
         guard let port = server.listeningPort else {
             throw NSError(domain: "directModeSilence", code: 1)
@@ -316,8 +325,8 @@ enum OrchestratorScenarios {
         let group = MultiThreadedEventLoopGroup.singleton
 
         let origin = FakeOrigin(group: group, behavior: .silent)
+        ScenarioCleanup.register { await origin.stop() }
         try await origin.start()
-        defer { Task { @MainActor in await origin.stop() } }
 
         let keepalive = TCPKeepaliveConfig.default
 
@@ -356,6 +365,7 @@ enum OrchestratorScenarios {
             aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0,
             earliestClose: nil, latestClose: nil,
+            assertions: [.init("keepalive options accepted by OS", pass)],
             notes: [
                 "SO_KEEPALIVE=\(soKeep)",
                 "TCP_KEEPALIVE(idle)=\(idleVal)s (expected \(keepalive.keepIdleSeconds))",

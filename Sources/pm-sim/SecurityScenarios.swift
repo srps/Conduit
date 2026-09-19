@@ -107,6 +107,7 @@ enum SecurityScenarios {
             try require(config.validate().contains(where: \.blocksProxyStart), "Non-gateway bind accepted \(host)")
             let snapshot = config
             let forwarder = LocalDNSForwarder(group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(), configProvider: { snapshot })
+            ScenarioCleanup.register { await forwarder.stop() }
             do {
                 try await forwarder.start(host: host, port: 0)
                 await forwarder.stop()
@@ -130,6 +131,7 @@ enum SecurityScenarios {
         try require(config.validate().contains(where: \.blocksProxyStart), "Gateway opt-in exposed unfiltered DNS")
         let dnsConfig = GenericDefaults.shared.makeConfig()
         let forwarder = LocalDNSForwarder(group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(), configProvider: { dnsConfig })
+        ScenarioCleanup.register { await forwarder.stop() }
         try await forwarder.start(host: "localhost", port: 0)
         let listeningHost = forwarder.listeningHost
         let dnsPort = forwarder.listeningPort
@@ -141,6 +143,7 @@ enum SecurityScenarios {
         // of the actual connection, not collapse its identity to a hostname.
         let destinations = NIOLockedValueBox<(count: Int, last: UpstreamProxy?)>((0, nil))
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(originBehavior: .silent,
                                 upstreamPlainHTTPResponse: "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
                                 authenticatorProvider: { destination in
@@ -164,6 +167,7 @@ enum SecurityScenarios {
             throw error
         }
         let deniedHarness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await deniedHarness.stop() }
         try await deniedHarness.start(originBehavior: .silent, authenticatorProvider: factory)
         do {
             for request in [
@@ -185,6 +189,7 @@ enum SecurityScenarios {
         return ScenarioResult(name: "security-boundaries", clientCount: 2, clientsOpened: 2, clientsWithFirstByte: 2,
                               clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(start),
                               aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+                              assertions: [.init("credential destination, persistence and listener boundaries", true)],
                               notes: ["PASS: credential destination isolation, lazy NTLM, rejected config persistence, loopback-only listeners, HTTP and CONNECT endpoint propagation"])
     }
 

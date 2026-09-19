@@ -15,11 +15,11 @@ enum AuditScenarios {
             "Content-Length: 0\r\n" +
             "\r\n"
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .silent,
             upstreamPlainHTTPResponse: response
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let raw = try await RawHTTPAuditClient.request(
             group: harness.group,
@@ -45,6 +45,10 @@ enum AuditScenarios {
             medianBytes: raw.utf8.count,
             earliestClose: nil,
             latestClose: nil,
+            assertions: [
+                .init("successful HTTP response received", raw.hasPrefix("HTTP/1.1 200")),
+                .init("hop-by-hop header stripped", !leaked),
+            ],
             notes: [
                 leaked ? "BUG_REPRODUCED: proxied response leaked X-Hop" : "fixed: X-Hop stripped",
                 "containsConnectionHeader=\(raw.contains("\r\nConnection: X-Hop\r\n"))"
@@ -69,11 +73,11 @@ enum AuditScenarios {
             "X-Trailer-Test: shipped\r\n" +
             "\r\n"
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .silent,
             upstreamPlainHTTPResponse: chunkedWithTrailer
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         let transcript = try await ExpectContinueAuditClient.run(
             group: harness.group,
@@ -107,6 +111,11 @@ enum AuditScenarios {
             medianBytes: transcript.utf8.count,
             earliestClose: nil,
             latestClose: nil,
+            assertions: [
+                .init("100 Continue received", got100),
+                .init("final response received", gotFinal),
+                .init("response trailer preserved", gotTrailer),
+            ],
             notes: [
                 passed ? "ok: proxy answered 100-continue and trailers passed through"
                        : "BUG: expect/trailer hygiene incomplete (100=\(got100) final=\(gotFinal) trailer=\(gotTrailer))",
@@ -119,6 +128,7 @@ enum AuditScenarios {
         let name = "audit-socks5-nonzero-rsv"
         let start = Date()
         let harness = SimHarness(verbose: verbose)
+        ScenarioCleanup.register { await harness.stop() }
         try await harness.start(
             originBehavior: .silent,
             socksEnabled: true,
@@ -126,7 +136,6 @@ enum AuditScenarios {
             directMode: true,
             directModeCause: .noUpstreamsConfigured
         )
-        defer { Task { @MainActor in await harness.stop() } }
 
         guard let socksPort = harness.server?.socksListeningPort else {
             throw NSError(
@@ -165,6 +174,10 @@ enum AuditScenarios {
             medianBytes: responses.map(\.count).sorted().dropFirst(responses.count / 2).first ?? 0,
             earliestClose: nil,
             latestClose: nil,
+            assertions: [
+                .init("SOCKS greeting negotiated", responses.first == [5, 0]),
+                .init("nonzero reserved byte rejected", !accepted && responses.count == 2 && replyCode != nil),
+            ],
             notes: [
                 accepted ? "BUG_REPRODUCED: SOCKS5 accepted RSV=0x01" : "fixed: nonzero RSV rejected",
                 "replyCode=\(replyCode.map { String(format: "0x%02X", $0) } ?? "<none>")"
