@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import XCTest
 @testable import ProxyKernel
 
@@ -65,6 +66,94 @@ final class UDPRelayTests: XCTestCase {
         let payload: [UInt8] = [0x00, 0x01, 0xAB, 0xCD]
         let response = sendAndReceiveUDP(host: "127.0.0.1", port: portB, payload: payload, timeoutSec: 3)
         XCTAssertEqual(response, payload, "the second relay must still forward after the first loop has left")
+    }
+
+    /// stop used to close both descriptors while the loop could sit between
+    /// poll and recvfrom. The numbers go to the next socket opened, and the
+    /// loop then read that socket's datagram and forwarded it to its target.
+    /// Hold exactly that interleaving, without probabilistic FD churn.
+    func testEvictedLoopDoesNotReadADescriptorReusedAfterStop() throws {
+        let ready = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let exited = DispatchSemaphore(value: 0)
+        let serviced = NIOLockedValueBox<(Int32, Int32)?>(nil)
+        let relay = UDPRelay(willServiceDescriptors: { listen, forward in
+            let first = serviced.withLockedValue { value -> Bool in
+                defer { value = value ?? (listen, forward) }
+                return value == nil
+            }
+            guard first else { return }
+            ready.signal()
+            _ = release.wait(timeout: .now() + 5)
+        }, loopDidExit: { exited.signal() })
+        defer { release.signal(); relay.stop() }
+
+        let target = createUDPSocket(port: 0)
+        XCTAssertGreaterThanOrEqual(target, 0)
+        defer { if target >= 0 { close(target) } }
+        XCTAssertEqual(fcntl(target, F_SETFL, O_NONBLOCK), 0)
+        try relay.start(listenPort: 0, targetPort: try boundPort(target))
+        let sender = socket(AF_INET, SOCK_DGRAM, 0)
+        XCTAssertGreaterThanOrEqual(sender, 0)
+        defer { if sender >= 0 { close(sender) } }
+
+        send(from: sender, to: try XCTUnwrap(relay.listeningPort), [0x12, 0x34, 0xAA])
+        XCTAssertEqual(ready.wait(timeout: .now() + 2), .success, "loop must report readiness before any I/O")
+        let (evictedListenFD, _) = try XCTUnwrap(serviced.withLockedValue { $0 })
+
+        relay.stop()
+        XCTAssertFalse(relay.isRunning)
+
+        // The lowest free number is handed out first; keep anything else
+        // aside until the evicted loop's listen descriptor comes back.
+        var spares: [Int32] = []
+        defer { for fd in spares { close(fd) } }
+        var victim: Int32 = -1
+        while victim < 0, spares.count < 64 {
+            let fd = createUDPSocket(port: 0)
+            XCTAssertGreaterThanOrEqual(fd, 0)
+            if fd == evictedListenFD { victim = fd } else { spares.append(fd) }
+        }
+        XCTAssertEqual(victim, evictedListenFD, "stop must have released the listen descriptor's number")
+        defer { if victim >= 0 { close(victim) } }
+        XCTAssertEqual(fcntl(victim, F_SETFL, O_NONBLOCK), 0)
+
+        let payload: [UInt8] = [0xCA, 0xFE, 0xF0, 0x0D]
+        send(from: sender, to: try boundPort(victim), payload)
+        var readiness = pollfd(fd: victim, events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(poll(&readiness, 1, 2000), 1)
+
+        release.signal()
+        XCTAssertEqual(exited.wait(timeout: .now() + 3), .success, "an evicted loop must leave")
+
+        var buf = [UInt8](repeating: 0, count: 64)
+        let n = recv(victim, &buf, buf.count, 0)
+        XCTAssertEqual(n > 0 ? Array(buf[0..<n]) : nil, payload, "the evicted loop must not consume another socket's datagram")
+        XCTAssertEqual(recv(target, &buf, buf.count, 0), -1, "nothing may be forwarded after stop")
+    }
+
+    private func boundPort(_ fd: Int32) throws -> Int {
+        var address = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let rc = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        }
+        XCTAssertEqual(rc, 0)
+        return Int(UInt16(bigEndian: address.sin_port))
+    }
+
+    private func send(from fd: Int32, to port: Int, _ payload: [UInt8]) {
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let sent = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                sendto(fd, payload, payload.count, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        XCTAssertEqual(sent, payload.count)
     }
 
     func testRelayFailsOnPortConflict() throws {
