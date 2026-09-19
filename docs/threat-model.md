@@ -102,6 +102,8 @@ Boundary: app-to-helper Unix socket / IPC contract.
 
 Existing controls: helper commands are versioned and validated in `ConduitShared`; socket permissions and peer validation restrict access; port values are validated before relay startup; legacy unversioned requests are rejected.
 
+TCP relay shutdown preserves descriptor ownership: stop retires the session registry and shuts sockets down under its lock, but only session workers close their descriptors after their last I/O. Nonblocking listener accepts are guarded by the listener generation under the same lock as close. This prevents evicted workers from reading, writing, or accepting on descriptor numbers reused by another connection. Target-connect deadlines and the UDP relay's independent lifetime model remain separate work.
+
 Current gaps: every `PrivilegeClient` call does not yet emit a dedicated `auth.privilege_request` event.
 
 Planned work: privileged-action audit trail and eventual `SMAppService` signed helper.

@@ -6,7 +6,9 @@ private final class TCPRelaySessionFDTracker: @unchecked Sendable {
     private var activeFDs: Set<Int32> = []
     private var retired = false
 
-    /// False once `takeAll()` has run: an accept that completed after the
+    var isRetired: Bool { lock.withLock { retired } }
+
+    /// False once `retire()` has run: an accept that completed after the
     /// relay was stopped must not start a session nobody will stop.
     func insert(_ fd1: Int32, _ fd2: Int32) -> Bool {
         lock.withLock {
@@ -25,12 +27,14 @@ private final class TCPRelaySessionFDTracker: @unchecked Sendable {
         }
     }
 
-    func takeAll() -> Set<Int32> {
+    func retire() {
         lock.withLock {
             retired = true
-            let sessionFDs = activeFDs
-            activeFDs.removeAll()
-            return sessionFDs
+            // Wake blocked I/O, but leave close ownership with the worker.
+            // Closing here permits descriptor reuse while a worker is between
+            // poll and recv/send (or has not even started yet). Shutdown runs
+            // under the same lock as removal, so it cannot hit a reused FD.
+            for fd in activeFDs { shutdown(fd, SHUT_RDWR) }
         }
     }
 }
@@ -46,9 +50,30 @@ package final class TCPRelay: @unchecked Sendable {
     /// tracker shared across starts it would find the next relay's sessions
     /// registered under the same numbers and close them.
     private var sessionFDTracker = TCPRelaySessionFDTracker()
-    private var clientThreads: [Thread] = []
+    private let sessionWillStart: @Sendable (Int32, Int32) -> Void
+    private let sessionDidStop: @Sendable () -> Void
 
-    package init() {}
+    /// Hooks delimit worker ownership for deterministic lifecycle tests. They
+    /// are called once per session, never from the per-byte forwarding loop.
+    package init(
+        sessionWillStart: @escaping @Sendable (Int32, Int32) -> Void = { _, _ in },
+        sessionDidStop: @escaping @Sendable () -> Void = {}
+    ) {
+        self.sessionWillStart = sessionWillStart
+        self.sessionDidStop = sessionDidStop
+    }
+
+    package var listeningPort: Int? {
+        lock.withLock {
+            guard listenFD >= 0 else { return nil }
+            var address = sockaddr_in()
+            var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let rc = withUnsafeMutablePointer(to: &address) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(listenFD, $0, &length) }
+            }
+            return rc == 0 ? Int(UInt16(bigEndian: address.sin_port)) : nil
+        }
+    }
 
     package var isRunning: Bool {
         lock.withLock { listenFD >= 0 }
@@ -94,6 +119,14 @@ package final class TCPRelay: @unchecked Sendable {
             close(lfd)
             throw TCPRelayError.listenFailed(errnoMessage)
         }
+        // accept is performed under the lifecycle lock, so it must never
+        // block. poll may race close/reuse, but its result is validated under
+        // that lock before the descriptor is used for any actual I/O.
+        guard fcntl(lfd, F_SETFL, O_NONBLOCK) == 0 else {
+            let message = errnoMessage
+            close(lfd)
+            throw TCPRelayError.listenFailed(message)
+        }
 
         let tracker = TCPRelaySessionFDTracker()
         let generation = lock.withLock { () -> UInt64 in
@@ -108,29 +141,25 @@ package final class TCPRelay: @unchecked Sendable {
         }
         thread.name = "tcp-relay-\(listenPort)->\(targetPort)"
         thread.qualityOfService = .userInteractive
-        thread.start()
-        lock.withLock { acceptThread = thread }
+        lock.withLock {
+            if self.generation == generation, listenFD == lfd { acceptThread = thread }
+            thread.start()
+        }
     }
 
     package func stop() {
-        let (lfd, thread, threads, tracker) = lock.withLock {
+        let (thread, tracker) = lock.withLock {
             let lfd = listenFD
             let thread = acceptThread
-            let threads = clientThreads
             let tracker = sessionFDTracker
             listenFD = -1
             acceptThread = nil
-            clientThreads.removeAll()
-            return (lfd, thread, threads, tracker)
+            // Serializes close with the generation check + nonblocking accept.
+            if lfd >= 0 { close(lfd) }
+            return (thread, tracker)
         }
-        let sessionFDs = tracker.takeAll()
-        if lfd >= 0 { close(lfd) }
         thread?.cancel()
-        for t in threads { t.cancel() }
-        for fd in sessionFDs {
-            shutdown(fd, SHUT_RDWR)
-            close(fd)
-        }
+        tracker.retire()
     }
 
     /// The accept loop has left on its own. Close the listener so
@@ -156,16 +185,28 @@ package final class TCPRelay: @unchecked Sendable {
         targetHost: String
     ) {
         while !Thread.current.isCancelled {
+            guard lock.withLock({ self.generation == generation && self.listenFD == listenFD }) else { break }
+            var readiness = pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&readiness, 1, 100)
+            if ready == 0 { continue }
+            if ready < 0 {
+                if errno == EINTR { continue }
+                break
+            }
             var clientAddr = sockaddr_in()
             var clientLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-            let clientFD = withUnsafeMutablePointer(to: &clientAddr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                    accept(listenFD, sockPtr, &clientLen)
+            let (clientFD, acceptError) = lock.withLock { () -> (Int32, Int32) in
+                guard self.generation == generation, self.listenFD == listenFD else { return (-1, EBADF) }
+                let fd = withUnsafeMutablePointer(to: &clientAddr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                        accept(listenFD, sockPtr, &clientLen)
+                    }
                 }
+                return (fd, errno)
             }
             guard clientFD >= 0 else {
-                let err = errno
-                if err == EINTR || err == ECONNABORTED { continue }
+                let err = acceptError
+                if err == EINTR || err == ECONNABORTED || err == EAGAIN { continue }
                 if err == EMFILE || err == ENFILE || err == ENOBUFS || err == ENOMEM {
                     // Exhaustion is a moment, not the end: sessions close
                     // and descriptors come back. Leaving on it left a bound
@@ -175,6 +216,12 @@ package final class TCPRelay: @unchecked Sendable {
                     continue
                 }
                 break
+            }
+            // Darwin may inherit O_NONBLOCK from the listener. Session I/O
+            // remains blocking and is interrupted with shutdown, not close.
+            guard fcntl(clientFD, F_SETFL, 0) == 0 else {
+                close(clientFD)
+                continue
             }
 
             let targetFD = socket(AF_INET, SOCK_STREAM, 0)
@@ -210,25 +257,36 @@ package final class TCPRelay: @unchecked Sendable {
             Self.setNoDelay(targetFD)
 
             guard tracker.insert(clientFD, targetFD) else {
-                // stop() drained this tracker while the accept or the target
+                // stop() retired this tracker while the accept or the target
                 // connect was in flight.
                 close(clientFD)
                 close(targetFD)
                 break
             }
 
-            let thread = Thread { [tracker] in
-                Self.relayBidirectional(fd1: clientFD, fd2: targetFD)
-                let (relayOwnsClient, relayOwnsTarget) = tracker.takeOwnership(of: clientFD, targetFD)
-                if relayOwnsClient { close(clientFD) }
-                if relayOwnsTarget { close(targetFD) }
-            }
-            thread.name = "tcp-relay-session"
-            thread.qualityOfService = .userInteractive
-            thread.start()
-            lock.withLock { clientThreads.append(thread) }
+            startSession(clientFD: clientFD, targetFD: targetFD, tracker: tracker)
         }
         markDead(generation: generation, listenFD)
+    }
+
+    private func startSession(clientFD: Int32, targetFD: Int32, tracker: TCPRelaySessionFDTracker) {
+        let onStop = sessionDidStop
+        let thread = Thread {
+            if !tracker.isRetired {
+                Self.relayBidirectional(fd1: clientFD, fd2: targetFD)
+            }
+            let (relayOwnsClient, relayOwnsTarget) = tracker.takeOwnership(of: clientFD, targetFD)
+            if relayOwnsClient { close(clientFD) }
+            if relayOwnsTarget { close(targetFD) }
+            onStop()
+        }
+        thread.name = "tcp-relay-session"
+        thread.qualityOfService = .userInteractive
+        sessionWillStart(clientFD, targetFD)
+        // Always start the owner, even after stop: it must close its FDs.
+        // Shutdown (not Thread.cancel) wakes live session I/O, and retired
+        // trackers prevent late-started sessions from forwarding anything.
+        thread.start()
     }
 
     private static func relayBidirectional(fd1: Int32, fd2: Int32) {

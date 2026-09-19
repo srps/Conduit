@@ -1,11 +1,87 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import XCTest
 @testable import ProxyKernel
 
 /// Twin of `UDPRelayTests.testRelayStartTwiceStopsFirst` for the TCP relay,
 /// which had the same descriptor-identified `markDead` (#37).
 final class TCPRelayRestartTests: XCTestCase {
+    /// stop used to close descriptors between registration and thread.start.
+    /// The late-started worker could then read sockets assigned to somebody
+    /// else. Hold exactly that interleaving, without probabilistic FD churn.
+    func testStopRetainsDescriptorsUntilLateStartingWorkerExits() throws {
+        let registered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        let descriptors = NIOLockedValueBox<(Int32, Int32)?>(nil)
+        let relay = TCPRelay(sessionWillStart: { client, target in
+            descriptors.withLockedValue { $0 = (client, target) }
+            registered.signal()
+            _ = release.wait(timeout: .now() + 5)
+        }, sessionDidStop: { finished.signal() })
+        defer { release.signal(); relay.stop() }
+        let target = listen(on: 0)
+        XCTAssertGreaterThanOrEqual(target, 0)
+        defer { if target >= 0 { close(target) } }
+        try relay.start(listenPort: 0, targetPort: try boundPort(target), host: "127.0.0.1")
+        let client = connect(to: try XCTUnwrap(relay.listeningPort))
+        XCTAssertGreaterThanOrEqual(client, 0)
+        defer { if client >= 0 { close(client) } }
+        XCTAssertEqual(registered.wait(timeout: .now() + 2), .success)
+        let (ownedClient, ownedTarget) = try XCTUnwrap(descriptors.withLockedValue { $0 })
+
+        relay.stop()
+        XCTAssertFalse(relay.isRunning)
+        XCTAssertNotEqual(fcntl(ownedClient, F_GETFD), -1, "stop must not recycle a worker's client FD")
+        XCTAssertNotEqual(fcntl(ownedTarget, F_GETFD), -1, "stop must not recycle a worker's target FD")
+        release.signal()
+        XCTAssertEqual(finished.wait(timeout: .now() + 2), .success, "late-started worker must release both descriptors")
+        // Completion is emitted after both closes. Do not inspect their old
+        // numbers now: another thread is allowed to reuse them at this point.
+    }
+
+    func testStopWakesAnIdleSessionAndItsOwnerClosesIt() throws {
+        let finished = DispatchSemaphore(value: 0)
+        let relay = TCPRelay(sessionDidStop: { finished.signal() })
+        defer { relay.stop() }
+        let target = listen(on: 0)
+        XCTAssertGreaterThanOrEqual(target, 0)
+        defer { if target >= 0 { close(target) } }
+        try relay.start(listenPort: 0, targetPort: try boundPort(target), host: "127.0.0.1")
+        let client = connect(to: try XCTUnwrap(relay.listeningPort))
+        XCTAssertGreaterThanOrEqual(client, 0)
+        defer { if client >= 0 { close(client) } }
+        var readiness = pollfd(fd: target, events: Int16(POLLIN), revents: 0)
+        XCTAssertEqual(poll(&readiness, 1, 2000), 1)
+        let accepted = accept(target, nil, nil)
+        XCTAssertGreaterThanOrEqual(accepted, 0)
+        defer { if accepted >= 0 { close(accepted) } }
+        var timeout = timeval(tv_sec: 2, tv_usec: 0)
+        setsockopt(accepted, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+        let payload: [UInt8] = [1, 2, 3, 4, 5]
+        XCTAssertEqual(payload.withUnsafeBytes { send(client, $0.baseAddress, $0.count, 0) }, payload.count)
+        // Prove the worker actually forwarded before stopping it; a signal
+        // before thread.start would only retest the late-start case above.
+        for expected in payload {
+            var byte: UInt8 = 0
+            XCTAssertEqual(recv(accepted, &byte, 1, 0), 1)
+            XCTAssertEqual(byte, expected)
+        }
+        relay.stop()
+        XCTAssertEqual(finished.wait(timeout: .now() + 2), .success, "stop must wake idle I/O, not wait for the client")
+    }
+
+    private func boundPort(_ fd: Int32) throws -> Int {
+        var address = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let rc = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+        }
+        XCTAssertEqual(rc, 0)
+        return Int(UInt16(bigEndian: address.sin_port))
+    }
+
     func testASecondStartSurvivesTheEvictedAcceptLoop() throws {
         let relay = TCPRelay()
         let portA = Int.random(in: 19000..<20000)
