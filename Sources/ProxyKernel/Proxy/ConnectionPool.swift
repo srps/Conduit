@@ -1536,6 +1536,25 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
+        interrupt(error)
+        context.close(promise: nil)
+    }
+
+    /// A peer that closes cleanly raises no error, only this. Without it an
+    /// upstream that closed a kept-alive connection just as a request was
+    /// written to it left the exchange pending for good: `handlerRemoved`
+    /// cancels the response timeout, and nothing else completes the promise,
+    /// so the caller never returned and the pool slot was never released.
+    /// A response delimited by the close has already ended by the time this
+    /// arrives, because the decoder sits ahead of this handler. `.eof` is what
+    /// the pool retries an idempotent request on.
+    func channelInactive(context: ChannelHandlerContext) {
+        interrupt(ChannelError.eof)
+        context.fireChannelInactive()
+    }
+
+    private func interrupt(_ error: Error) {
+        guard !completed else { return }
         if isStreaming {
             backpressure?.complete()
             eventSink?(ConnectionPool.streamingResponseInterruptedEvent(
@@ -1548,7 +1567,6 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
         } else {
             failPromises(error)
         }
-        context.close(promise: nil)
     }
 
     private func failPromises(_ error: Error) {
