@@ -152,7 +152,12 @@ private final class OriginSessionHandler: ChannelInboundHandler, @unchecked Send
         var buf = channel.allocator.buffer(capacity: bytes)
         buf.writeRepeatingByte(UInt8.random(in: 32...126), count: bytes)
         channel.writeAndFlush(buf).whenComplete { _ in
-            channel.close(promise: nil)
+            // FIN, not a full close. The client's request bytes can still be
+            // on their way; arriving at a closed socket they are answered
+            // with RST, and the fake upstream loses whatever of the burst it
+            // had not yet read. The scenario then reported a truncation the
+            // proxy never caused. The channel closes when the peer does.
+            channel.close(mode: .output, promise: nil)
         }
     }
 }
