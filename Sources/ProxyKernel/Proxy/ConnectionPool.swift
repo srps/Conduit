@@ -1343,6 +1343,10 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     private var challengeHeaders: [String] = []
     private var ctx: ChannelHandlerContext?
     private var isStreaming = false
+    /// Set once a streamed response's `.end` has gone to the client. From
+    /// there the client's write decides the exchange, and the upstream
+    /// closing, which is how a response with no length ends, no longer can.
+    private var streamedResponseEnded = false
     private var authenticator: ProxyAuthenticator?
     private var lastAuthMethod: String?
     private var authPermit: AuthHandshakePermit?
@@ -1500,6 +1504,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
             }
         case .end(let trailers):
             if isStreaming, let clientChannel {
+                streamedResponseEnded = true
                 nonisolated(unsafe) let ctx = context
                 // The client write completes on the client channel's loop.
                 // Handler state is confined to this loop, so hop back before
@@ -1546,7 +1551,9 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     /// cancels the response timeout, and nothing else completes the promise,
     /// so the caller never returned and the pool slot was never released.
     /// A response delimited by the close has already ended by the time this
-    /// arrives, because the decoder sits ahead of this handler. `.eof` is what
+    /// arrives, because the decoder sits ahead of this handler, but a streamed
+    /// one is not `completed` yet: its `.end` is still being written on the
+    /// client's loop. `streamedResponseEnded` covers that gap. `.eof` is what
     /// the pool retries an idempotent request on.
     func channelInactive(context: ChannelHandlerContext) {
         interrupt(ChannelError.eof)
@@ -1554,7 +1561,7 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
     }
 
     private func interrupt(_ error: Error) {
-        guard !completed else { return }
+        guard !completed, !streamedResponseEnded else { return }
         if isStreaming {
             backpressure?.complete()
             eventSink?(ConnectionPool.streamingResponseInterruptedEvent(
