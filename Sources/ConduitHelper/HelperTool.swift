@@ -15,7 +15,14 @@ enum HelperToolError: Error, LocalizedError {
 }
 
 enum HelperTool {
-    static func run(arguments: HelperArguments) throws {
+    /// - Parameter deadline: when the command's children must be done, all of
+    ///   them together (`HelperLineIO.deadline`). A command is a sequence of
+    ///   absolute sets, so one that runs out of time stops where it is and
+    ///   fails; the caller runs the sequence again.
+    static func run(
+        arguments: HelperArguments,
+        deadline: UInt64 = HelperLineIO.deadline(afterMilliseconds: HelperSubprocess.operationMilliseconds)
+    ) throws {
         switch arguments.command {
         case .ping, .startDNSRelay, .stopDNSRelay, .startTCPRelay, .stopTCPRelay:
             return
@@ -56,17 +63,17 @@ enum HelperTool {
             let host = arguments.values[1]
             let port = arguments.values[2]
             try validateServiceHostPort(service: service, host: host, port: port)
-            _ = try run("/usr/sbin/networksetup", ["-setwebproxy", service, host, port])
-            _ = try run("/usr/sbin/networksetup", ["-setsecurewebproxy", service, host, port])
-            _ = try run("/usr/sbin/networksetup", ["-setwebproxystate", service, "on"])
-            _ = try run("/usr/sbin/networksetup", ["-setsecurewebproxystate", service, "on"])
+            try run("/usr/sbin/networksetup", ["-setwebproxy", service, host, port], deadline: deadline)
+            try run("/usr/sbin/networksetup", ["-setsecurewebproxy", service, host, port], deadline: deadline)
+            try run("/usr/sbin/networksetup", ["-setwebproxystate", service, "on"], deadline: deadline)
+            try run("/usr/sbin/networksetup", ["-setsecurewebproxystate", service, "on"], deadline: deadline)
 
         case .clearSystemProxy:
             guard let service = arguments.values.first else { return }
             try validateService(service)
-            _ = try run("/usr/sbin/networksetup", ["-setwebproxystate", service, "off"])
-            _ = try run("/usr/sbin/networksetup", ["-setsecurewebproxystate", service, "off"])
-            _ = try run("/usr/sbin/networksetup", ["-setautoproxystate", service, "off"])
+            try run("/usr/sbin/networksetup", ["-setwebproxystate", service, "off"], deadline: deadline)
+            try run("/usr/sbin/networksetup", ["-setsecurewebproxystate", service, "off"], deadline: deadline)
+            try run("/usr/sbin/networksetup", ["-setautoproxystate", service, "off"], deadline: deadline)
 
         case .setProxyBypass:
             guard arguments.values.count >= 2 else {
@@ -99,7 +106,7 @@ enum HelperTool {
                     }
                 }
             }
-            _ = try run("/usr/sbin/networksetup", ["-setproxybypassdomains", service] + domains)
+            try run("/usr/sbin/networksetup", ["-setproxybypassdomains", service] + domains, deadline: deadline)
 
         case .setWebProxyEndpoint:
             guard arguments.values.count >= 5 else {
@@ -128,9 +135,9 @@ enum HelperTool {
                 // before us must not be left holding ours in its disabled
                 // `Server` field, where re-enabling by hand would hand the user
                 // a dead local address.
-                try runChecked("/usr/sbin/networksetup", [setter, service, "", "0"])
+                try runChecked("/usr/sbin/networksetup", [setter, service, "", "0"], deadline: deadline)
             } else if !host.isEmpty {
-                try runChecked("/usr/sbin/networksetup", [setter, service, host, port])
+                try runChecked("/usr/sbin/networksetup", [setter, service, host, port], deadline: deadline)
             }
             // State last: see `HelperCommand.setWebProxyEndpoint`. `-setwebproxy`
             // switches the proxy on as a side effect just as `-setautoproxyurl`
@@ -143,7 +150,7 @@ enum HelperTool {
             // configuration no caller asked for — the old address wearing the
             // new state — and reports it as the restore having succeeded, after
             // which `forgetAll` drops the only copy of the user's real setting.
-            try runChecked("/usr/sbin/networksetup", [stateSetter, service, state])
+            try runChecked("/usr/sbin/networksetup", [stateSetter, service, state], deadline: deadline)
 
         case .setAutoproxy:
             guard arguments.values.count >= 3 else {
@@ -160,7 +167,7 @@ enum HelperTool {
                 throw HelperToolError.invalidInput("invalid proxy state: \(state)")
             }
             if !url.isEmpty {
-                try runChecked("/usr/sbin/networksetup", ["-setautoproxyurl", service, url])
+                try runChecked("/usr/sbin/networksetup", ["-setautoproxyurl", service, url], deadline: deadline)
             }
             // State last, and this one is not stylistic: `-setautoproxyurl`
             // leaves autoproxy reporting `Enabled: Yes` whatever it was before.
@@ -168,7 +175,7 @@ enum HelperTool {
             // by a state write that succeeded is a service holding *our* PAC URL
             // under the user's recorded on/off state, reported as a completed
             // restore.
-            try runChecked("/usr/sbin/networksetup", ["-setautoproxystate", service, state])
+            try runChecked("/usr/sbin/networksetup", ["-setautoproxystate", service, state], deadline: deadline)
 
         case .setAutoproxyURL:
             guard arguments.values.count >= 2 else {
@@ -178,13 +185,13 @@ enum HelperTool {
             let url = arguments.values[1]
             try validateService(service)
             try validateAutoproxyURL(url)
-            _ = try run("/usr/sbin/networksetup", ["-setautoproxyurl", service, url])
-            _ = try run("/usr/sbin/networksetup", ["-setautoproxystate", service, "on"])
+            try run("/usr/sbin/networksetup", ["-setautoproxyurl", service, url], deadline: deadline)
+            try run("/usr/sbin/networksetup", ["-setautoproxystate", service, "on"], deadline: deadline)
 
         case .disableAutoproxy:
             guard let service = arguments.values.first else { return }
             try validateService(service)
-            _ = try run("/usr/sbin/networksetup", ["-setautoproxystate", service, "off"])
+            try run("/usr/sbin/networksetup", ["-setautoproxystate", service, "off"], deadline: deadline)
 
         case .setDNSServers:
             guard arguments.values.count >= 2 else {
@@ -205,7 +212,7 @@ enum HelperTool {
                     }
                 }
             }
-            _ = try run("/usr/sbin/networksetup", ["-setdnsservers", service] + servers)
+            try run("/usr/sbin/networksetup", ["-setdnsservers", service] + servers, deadline: deadline)
         }
     }
 
@@ -231,14 +238,21 @@ enum HelperTool {
         }
     }
 
-    @discardableResult
-    private static func run(_ executable: String, _ arguments: [String]) throws -> Int32 {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        try process.run()
-        process.waitUntilExit()
-        return process.terminationStatus
+    /// Runs one write and ignores how it exited; see `runChecked` for which
+    /// commands stay lenient and why. A child that cannot be launched, or
+    /// that outlives the deadline, still fails the operation: neither is a
+    /// verdict from `networksetup` that an older client learned to live with.
+    private static func run(_ executable: String, _ arguments: [String], deadline: UInt64) throws {
+        _ = try bounded(executable, arguments, deadline: deadline)
+    }
+
+    private static func bounded(_ executable: String, _ arguments: [String], deadline: UInt64) throws -> HelperSubprocess.Result {
+        do {
+            return try HelperSubprocess.run(executable, arguments, deadline: deadline)
+        } catch let failure as HelperSubprocess.Failure {
+            HelperLog.error("\(failure.localizedDescription) (\(arguments.first ?? ""))")
+            throw HelperToolError.commandFailed(failure.localizedDescription)
+        }
     }
 
     /// Runs one write and fails the whole operation if it did not land.
@@ -261,30 +275,18 @@ enum HelperTool {
     /// real machine — which is why the rest stays on issue #59. The two here
     /// are reached only by restore, where a wrongly-reported failure costs a
     /// retained journal record and a warning, not a lost setting.
-    private static func runChecked(_ executable: String, _ arguments: [String]) throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
+    private static func runChecked(_ executable: String, _ arguments: [String], deadline: UInt64) throws {
         // Both streams, because `networksetup` is not consistent about which
         // one it complains on — `SystemProxyManager.requiresAdmin` reads both
         // for the same reason.
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
-        try process.run()
-        // Drained before `waitUntilExit`: a process that fills a pipe buffer
-        // while we wait for it to exit never exits.
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus != 0 else { return }
-        let message = [errorData, outputData]
+        let result = try bounded(executable, arguments, deadline: deadline)
+        guard result.exitCode != 0 else { return }
+        let message = [result.errorOutput, result.output]
             .compactMap { String(data: $0, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
             .joined(separator: " | ")
         throw HelperToolError.commandFailed(
-            "\(executable) \(arguments.first ?? "") exited \(process.terminationStatus)"
+            "\(executable) \(arguments.first ?? "") exited \(result.exitCode)"
                 + (message.isEmpty ? "" : ": \(message)")
         )
     }
