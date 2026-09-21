@@ -4,17 +4,88 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.3.2
+
+A maintenance release from the September 17–19 source review: two ways a client or an
+upstream could crash the proxy, request-line and CONNECT-framing hardening, lost
+server-first tunnel bytes, an exchange that could hang for good, and descriptor-lifetime
+fixes in both of the helper's relays. It also carries the soak-race and relay fixes that
+followed the 0.3.1 triage.
+
+**Upgrading:** reinstall the helper (`sudo ./install-helper.sh`). Both relays and the
+helper's request handling changed, and the installed helper keeps the old code until it is
+replaced. Nothing in the helper protocol changed, so the 0.3.2 app works with a 0.3.1
+helper in the meantime.
+
+### Security
+
+- A CONNECT whose client sent tunnel bytes before the `200` could terminate the proxy:
+  removing the HTTP decoder forwarded its leftover raw bytes into a typed handler that was
+  still installed. Direct and upstream paths now remove the typed handlers and install both
+  relays before the decoder releases anything. (#43)
+- A malformed upstream CONNECT response could reach a trapping buffer operation, and the
+  parser mixed character counts with byte offsets. The handshake now uses bounded,
+  byte-oriented framing with checked lengths. It rejects malformed status lines and
+  headers, signed or oversized lengths, duplicate or conflicting framing and unsupported
+  transfer codings, emits `connection.upstream_invalid_response`, and fails the attempt
+  with the pool slot released. Any `2xx` establishes the tunnel, and bytes after it are
+  tunnel bytes, never parsed as a response.
+- Direct HTTP and Upgrade forwarding decoded escaped path characters before writing the
+  request line, so an encoded delimiter could become HTTP syntax at the origin. Both paths
+  now write the encoded origin-form target as the client sent it; literal controls and
+  spaces are refused before URL parsing. Query order, duplicates and empty delimiters are
+  preserved.
+- A direct forward of an absolute-form request sends the target's authority as `Host`
+  (RFC 9112 §3.2.2). It used to keep the client's `Host`, so `GET http://a/` with `Host: b`
+  was routed by `a`'s rules and served by the origin as `b`. Requests to an upstream proxy
+  are unchanged, because that proxy applies the same rule.
+- The helper bounds a whole request and a whole reply with a monotonic deadline, 5 s and
+  1 MiB, over a nonblocking descriptor. The old 5 s receive timeout restarted with every
+  byte, so a staff-group peer sending a byte every few seconds could hold the helper's
+  single accept loop, and with it every other client. A peer whose refusal no command could
+  change (root, not the console user, nobody remembered at the loginwindow) gets 1 s and
+  64 KiB, and its request is never decoded. Requires a helper reinstall. (#47, helper side)
+- The helper's UDP relay closed its sockets outside the lock while its loop could sit
+  between `poll` and `recvfrom`/`sendto`. Descriptor numbers go to the next socket opened,
+  so an evicted loop, running as root and relaying DNS, could read another socket's
+  datagram and forward it to its own target. Every read and send now happens under the
+  lifecycle lock after a generation check, and `stop()` closes under the same lock.
+  Requires a helper reinstall.
+- The TCP relay had the same defect: `stop()` closed registered sockets before the owning
+  worker's last read or write, including a worker that had not started yet. Descriptors
+  stay owned until their worker finishes. Requires a helper reinstall.
 
 ### Fixed
 
+- An upstream that closed a kept-alive connection just as a request was written to it left
+  the exchange pending for good. A clean close raises no error, the response timeout had
+  already been cancelled, and nothing else completed the promise, so the caller never
+  returned and the pool slot was never released. The exchange now fails with `.eof`, which
+  the pool retries on a fresh connection for an idempotent request. A streamed response
+  that ends with the upstream's close, which is how a response with no length ends, still
+  completes normally.
+- Bytes an origin sent first through an upstream CONNECT could be lost: those in the same
+  read as the `2xx` were discarded with the handshake handler, and those arriving before
+  the consumer's relay was installed fell off the pipeline. SSH banners and SMTP or FTP
+  greetings through an upstream proxy were lost and the client hung, on HTTP CONNECT,
+  SOCKS5, proxied port tunnels and the transparent proxy alike. A `2xx` now pauses upstream
+  reads, and every consumer installs its relay through `CONNECTCoordinator.attachRelay`,
+  which hands the held bytes over once and in order.
+- Numeric IP addresses resolve without entering the blocking hostname-lookup queue, so a
+  tunnel to a literal no longer waits behind slow DNS. An explicit IPv6 literal bypasses
+  the global IPv6-availability check, which keeps loopback and scoped addresses usable
+  without a routable IPv6 interface. An out-of-range port fails before the `UInt16`
+  conversion.
 - A streamed HTTP response through the upstream finished on the client channel's event
   loop while the upstream loop was removing the same handler; ThreadSanitizer reported the
   race in the scheduled soak. The finish now hops to the handler's loop.
 - The helper's DNS and port-443 relays identified a loop that exited on its own by its
   descriptor numbers. `stop()` closes those and the next `start()` gets the same numbers
   back, so the evicted loop could close the fresh relay's sockets a moment after a restart.
-  Each start now has a generation.
+  Each start now has a generation, the TCP relay's session tracker belongs to one start,
+  and an accept that completes after `stop()` starts no session.
+- The TCP relay's accept loop polls once a second instead of ten times, like the UDP
+  relay. The interval only bounds how long an evicted loop lingers.
 - `install-helper.sh --source` takes exactly one of `installed|local|release|debug`, refuses
   a missing or repeated value, and checks its arguments before the root check. The bare-word
   form is gone.
@@ -29,11 +100,26 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   `direct.connect_failed`, before the error line. Expected failures (VPN off, a memo repeat,
   a transient path change) stay info lines with no event. `docs/events.md` catalogues these
   and the events 0.3.1 added without documenting.
+- A request the pool refused locally reports `connection.pool_exhausted` and gets no
+  upstream failure event, whatever the network cause around it.
 
 ### Development
 
+- `pm-sim` results carry named assertions, and a failed or missing assertion, an empty
+  result or a thrown setup error fails the process. `pm-sim all` runs every scenario from
+  one list, 37 of them including the DNS scenario it used to omit, each under a watchdog,
+  and is a CI step. Notes and early-close metrics no longer decide anything. (#51)
+- New scenarios: `connect-early-direct`, `connect-early-upstream`, `server-first-connect`
+  and `server-first-socks5`, each checking exact bytes and the selected route.
+  `scripts/test-http-wire-target.py` checks request targets and `Host` on the wire.
+- The `flood-slow-drain` fake origin half-closes after its burst. It used to close fully,
+  the client's late request bytes drew a reset, and the fake upstream lost the unread part
+  of the burst. The proxy delivered every byte it was given; the gate's first run on `main`
+  caught the fixture.
 - `pm-sim direct-mode-silence` asserts on the request outcome, the failure event and the
   log level instead of matching log text.
+- Timing tests wait for observed events instead of fixed sleeps, and the DNS fixtures await
+  teardown before their event loops shut down.
 
 ## 0.3.1
 
