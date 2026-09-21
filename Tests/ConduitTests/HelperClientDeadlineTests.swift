@@ -92,24 +92,54 @@ final class HelperClientDeadlineTests: XCTestCase {
 
     /// The helper serves one connection at a time. Two requests from this
     /// process sent together would leave the second in the backlog with its
-    /// deadline running: here each takes 200 ms of a 300 ms budget, so the
-    /// second would run out at 400 having done nothing wrong, and fall back
-    /// while its request was still queued.
-    func testConcurrentRequestsFromOneProcessDoNotSpendEachOthersDeadline() throws {
-        let helper = try HeldHelper(.answersAfter(milliseconds: 200))
+    /// deadline running, to run out having done nothing wrong and fall back
+    /// while its request was still queued. Counted at the helper rather than
+    /// timed: it never sees a second connection of ours while it has one.
+    func testRequestsFromOneProcessReachTheHelperOneAtATime() throws {
+        let helper = try HeldHelper(.answersAfter(milliseconds: 100))
         defer { helper.stop() }
-        let client = client(helper)
-        let results = FlagCounter()
+        let client = HelperToolPrivilegeClient(socketPath: helper.path, transactionMilliseconds: 20_000)
+        let answered = FlagCounter()
         let finished = DispatchGroup()
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             finished.enter()
             Thread {
-                if client.ping() { results.increment() }
+                if client.ping() { answered.increment() }
                 finished.leave()
             }.start()
         }
-        XCTAssertEqual(finished.wait(timeout: .now() + 10), .success)
-        XCTAssertEqual(results.count, 3)
+        XCTAssertEqual(finished.wait(timeout: .now() + 30), .success)
+        XCTAssertEqual(answered.count, 4)
+        XCTAssertEqual(helper.mostConnectionsAtOnce, 1)
+    }
+
+    /// Some callers are still on the main actor, and behind a held helper
+    /// every turn ahead of them is a whole budget. The wait for a turn has
+    /// the same budget, so a caller is held for two at most, and one that
+    /// never got its turn says so rather than "timed out waiting for the
+    /// reply": it sent nothing.
+    func testTheWaitForATurnIsBounded() throws {
+        let helper = try HeldHelper(.readsAndHolds)
+        defer { helper.stop() }
+        let events = EventBox()
+        let client = client(helper, events: events, fallbackRan: FlagBox())
+        let finished = DispatchGroup()
+        let start = HelperLineIO.now()
+        for _ in 0..<4 {
+            finished.enter()
+            Thread {
+                try? client.execute(.disableAutoproxy, values: ["Wi-Fi"])
+                finished.leave()
+            }.start()
+        }
+        XCTAssertEqual(finished.wait(timeout: .now() + 30), .success)
+        let elapsed = Int((HelperLineIO.now() - start) / 1_000_000)
+
+        let reasons = events.all.filter { $0.event == "auth.privilege_helper_degraded" }.compactMap(\.detail)
+        XCTAssertEqual(reasons.count, 4)
+        XCTAssertTrue(reasons.contains { $0.contains("waiting for a turn") }, "\(reasons)")
+        // Four held turns back to back would be four budgets.
+        XCTAssertLessThan(elapsed, 2 * budget + 2_000)
     }
 }
 
@@ -130,6 +160,8 @@ private final class HeldHelper: @unchecked Sendable {
     private let lock = NSLock()
     private var held: [Int32] = []
     private var stopped = false
+    private var open = 0
+    private var mostOpen = 0
     private let workerDone = DispatchSemaphore(value: 0)
 
     init(_ behaviour: Behaviour) throws {
@@ -140,14 +172,52 @@ private final class HeldHelper: @unchecked Sendable {
         guard serverFD >= 0, HelperLineIOTestSupport.bind(serverFD, to: path), listen(serverFD, 1) == 0 else {
             throw CancellationError()
         }
-        if case .neverAccepts = behaviour {
+        switch behaviour {
+        case .neverAccepts:
             workerDone.signal()
-        } else {
+        case .answersAfter(let milliseconds):
+            Thread { [self] in
+                acceptAndCount(answeringAfter: milliseconds)
+                workerDone.signal()
+            }.start()
+        default:
             Thread { [self] in
                 serve()
                 workerDone.signal()
             }.start()
         }
+    }
+
+    /// The most connections this helper had at once, accepted and not yet
+    /// answered. Only `.answersAfter` counts.
+    var mostConnectionsAtOnce: Int { lock.withLock { mostOpen } }
+
+    /// Accepts at once and answers on a thread per connection, one at a time
+    /// like the real helper, so a second connection made while the first is
+    /// being served is seen and counted rather than left in the backlog.
+    private func acceptAndCount(answeringAfter milliseconds: Int) {
+        let serving = NSLock()
+        let answers = DispatchGroup()
+        while true {
+            let peer = accept(serverFD, nil, nil)
+            guard peer >= 0 else { break }
+            lock.withLock {
+                open += 1
+                mostOpen = max(mostOpen, open)
+            }
+            answers.enter()
+            Thread { [self] in
+                serving.withLock {
+                    var byte: UInt8 = 0
+                    while Darwin.read(peer, &byte, 1) == 1, byte != UInt8(ascii: "\n") {}
+                    usleep(useconds_t(milliseconds) * 1_000)
+                    lock.withLock { open -= 1 }
+                    answer(peer)
+                }
+                answers.leave()
+            }.start()
+        }
+        answers.wait()
     }
 
     /// Connections that sit in the backlog until `stop()`. Nonblocking, so
@@ -183,9 +253,9 @@ private final class HeldHelper: @unchecked Sendable {
                 } else {
                     answer(peer)
                 }
-            case .answersAfter(let milliseconds):
-                usleep(useconds_t(milliseconds) * 1_000)
-                answer(peer)
+            case .answersAfter:
+                // Served by `acceptAndCount`.
+                close(peer)
             case .dripsReply:
                 var filler = UInt8(ascii: " ")
                 while !lock.withLock({ stopped }), Darwin.write(peer, &filler, 1) == 1 {

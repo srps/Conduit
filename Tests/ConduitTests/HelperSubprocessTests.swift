@@ -50,16 +50,20 @@ final class HelperSubprocessTests: XCTestCase {
         let start = HelperLineIO.now()
         // The shell ignores SIGTERM and waits on a `sleep` that was not
         // signalled at all, which also leaves a writer on both pipes after
-        // the shell is killed: the drain must give up on it too.
-        XCTAssertThrowsError(try run("trap '' TERM; sleep 8", milliseconds: 200)) { error in
+        // the shell is killed: the drain must give up on it too. Two seconds
+        // before the deadline, because a shell signalled before it has run
+        // its `trap` dies on the SIGTERM, and on a loaded runner 200 ms was
+        // not always enough for it to get there.
+        let budget = 2_000
+        XCTAssertThrowsError(try run("trap '' TERM; sleep 12", milliseconds: budget)) { error in
             XCTAssertEqual(
                 error as? HelperSubprocess.Failure,
                 .deadlineExceeded(executable: "/bin/sh", reaped: true)
             )
         }
         let elapsed = elapsedMilliseconds(since: start)
-        XCTAssertGreaterThanOrEqual(elapsed, 200 + HelperSubprocess.terminationGraceMilliseconds)
-        XCTAssertLessThan(elapsed, 200 + HelperSubprocess.overrunMilliseconds + 1_000)
+        XCTAssertGreaterThanOrEqual(elapsed, budget + HelperSubprocess.terminationGraceMilliseconds)
+        XCTAssertLessThan(elapsed, budget + HelperSubprocess.overrunMilliseconds + 3_000)
     }
 
     /// A child that writes more than a pipe holds blocks until someone reads.

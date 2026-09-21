@@ -440,7 +440,11 @@ package final class SystemDNSManager: @unchecked Sendable {
         if let started { return started }
         // Outside the lock: the probe waits up to two seconds, and a stop on
         // the main actor should not wait that out.
-        guard relayIsLive() else { return .unresponsive }
+        guard relayIsLive() else {
+            // A stop that ran during the probe took the relay down on
+            // purpose. That is not a pipeline to report as unresponsive.
+            return operations.withLock { hasSavedInterfaces() } ? .unresponsive : .notManaged
+        }
         logger?.log(.notice, "DNS relay restarted successfully.", category: .system)
         return .restarted
     }
