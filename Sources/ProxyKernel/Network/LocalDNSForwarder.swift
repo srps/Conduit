@@ -120,7 +120,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     /// bound again on a fresh port, up to `ephemeralPairAttempts` times, and
     /// `start` throws if none was free on both: a caller that asked for any
     /// port has no reason to settle for half a listener, and `tcpListeningPort`
-    /// used to come back nil about once in a few hundred starts.
+    /// used to come back nil about once in a few hundred starts. A UDP port
+    /// that cannot be released ends the start too, with the channel kept for
+    /// `stop()`, rather than binding a second resolver beside it.
     ///
     /// On a configured port a TCP bind failure is not fatal. UDP-only is what
     /// this forwarder shipped as, and a resolver serving UDP is far more useful
@@ -194,7 +196,27 @@ package final class LocalDNSForwarder: @unchecked Sendable {
                     tcpConnections = nil
                     return
                 }
-                _ = try? await udp.close().get()
+                do {
+                    try await udp.close().get()
+                } catch ChannelError.alreadyClosed {
+                    // Closed under us; the port is released either way.
+                } catch let closeError {
+                    // The port may still be bound and answering, and a second
+                    // pair beside it would be two resolvers with two caches.
+                    // `stop()` keeps the channel and closes it again.
+                    channel = udp
+                    eventSink?(RuntimeEvent(
+                        kind: .health,
+                        event: "dns.listener_port_release_failed",
+                        detail: "port=\(actualPort) attempt=\(attempt) error=\(closeError.displayDescription)"
+                    ))
+                    logger.log(
+                        .error,
+                        "DNS forwarder could not release UDP port \(actualPort) after its TCP port turned out to be held: \(closeError.displayDescription). Not binding another pair beside it.",
+                        category: .network
+                    )
+                    throw closeError
+                }
                 let last = attempt == attempts
                 eventSink?(RuntimeEvent(
                     kind: .health,
