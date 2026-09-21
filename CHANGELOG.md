@@ -20,6 +20,9 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 - `dns.listener_port_retry` reports each port-0 pair that was given up, and
   `dns.tcp_listener_unavailable` reports a forwarder left without a TCP listener, whether it
   serves UDP only or failed to start. Until now the only trace was a warning line.
+- `dns.listener_port_release_failed` reports a port-0 rebind that stopped because the UDP
+  port it was giving up could not be closed. The start fails with that error rather than
+  binding a second pair beside a socket that may still be answering.
 
 ### Development
 
