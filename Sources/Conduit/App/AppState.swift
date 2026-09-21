@@ -901,7 +901,11 @@ final class AppState: ObservableObject {
     /// Waits for launch-time crash recovery before this session touches a
     /// platform surface. Free after the first call; see `LaunchRecovery` for
     /// what goes wrong without it.
-    private func awaitLaunchRecovery() async {
+    ///
+    /// Internal so the harness can join recovery too. Recovery restores the
+    /// machine and then releases the journal, and a scenario that polled for
+    /// the first could assert on the second before it happened (#19).
+    func awaitLaunchRecovery() async {
         await launchRecovery?.join()
         launchRecovery = nil
     }

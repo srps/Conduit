@@ -79,6 +79,14 @@ final class AppStateHarness {
         }
     }
 
+    /// Joins launch-time crash recovery. Recovery restores the machine and
+    /// then releases the journal, off the main actor; a scenario that polled
+    /// for the first asserted on the second before it happened, four runs in
+    /// twenty (#19).
+    func launchRecovery() async {
+        await appState?.awaitLaunchRecovery()
+    }
+
     /// Polls until `condition` holds. The app's observers deliver through
     /// `Task { @MainActor }` hops, so a scenario that drives one waits here.
     func settle(
@@ -160,9 +168,9 @@ final class AppStateHarnessTests: XCTestCase {
         let corrupt = Data("{".utf8)
         try corrupt.write(to: harness.environment.configFile)
         let state = harness.launch()
-        await harness.settle("journal recovery proceeds despite invalid configuration") {
-            self.wifi.webProxy.host == "prior.example.test" && self.harness.journal.knowsSurfaceIsIdle(.systemProxy)
-        }
+        await harness.launchRecovery()
+        XCTAssertEqual(wifi.webProxy.host, "prior.example.test", "journal recovery proceeds despite invalid configuration")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
         XCTAssertEqual(wifi.bypassDomains, ["*.local"])
         do {
             try await state.startProxy()
@@ -518,9 +526,12 @@ final class AppStateHarnessTests: XCTestCase {
         }
 
         let appState = harness.launch()
-        await harness.settle("recovery restores the corporate proxy") {
-            self.wifi.webProxy == FakeMachine.ProxyEndpoint(enabled: true, host: "proxy.corp.example", port: "8080")
-        }
+        await harness.launchRecovery()
+        XCTAssertEqual(
+            wifi.webProxy,
+            FakeMachine.ProxyEndpoint(enabled: true, host: "proxy.corp.example", port: "8080"),
+            "recovery restores the corporate proxy"
+        )
         XCTAssertEqual(wifi.bypassDomains, ["*.local"])
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy), "restored, so released")
 
