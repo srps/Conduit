@@ -254,6 +254,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let environment: RuntimeEnvironment
         let machine: FakeMachine
         let vpn = FakeVPNStatusObserver()
+        /// Holds the machine's `networksetup` listings when armed, so a
+        /// scenario can keep one system DNS reconcile out while more arrive.
+        let listings = HeldListings()
         private let stateDirectory: URL
 
         init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
@@ -279,13 +282,17 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         func makeHost() throws -> DaemonRuntimeHost {
             let machine = self.machine
+            let listings = self.listings
             return DaemonRuntimeHost(
                 environment: environment,
                 logger: DiscardingLogSink(),
                 loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
                 vpnStatusMonitor: vpn,
                 privilegeClient: machine,
-                commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                commandRunner: { launchPath, arguments in
+                    if arguments.first == "-listallnetworkservices" { listings.passThrough() }
+                    return try machine.run(launchPath, arguments)
+                },
                 homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
                 resolverDirectory: machine.resolverDirectory.path
             )
@@ -300,6 +307,36 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         func tearDown() {
             try? FileManager.default.removeItem(at: stateDirectory)
+        }
+    }
+
+    /// A gate on the `networksetup` service listing, which every system DNS
+    /// reconcile begins with. Armed, the first listing waits for `release()`
+    /// and every listing is counted.
+    private final class HeldListings: @unchecked Sendable {
+        private let lock = NSLock()
+        private var armed = false
+        private var counted = 0
+        private var waiting = false
+        private let gate = DispatchSemaphore(value: 0)
+
+        var count: Int { lock.withLock { counted } }
+        var isHoldingOne: Bool { lock.withLock { waiting } }
+
+        func arm() { lock.withLock { armed = true; counted = 0 } }
+
+        /// Opens the hold. Listings go on being counted.
+        func release() { gate.signal() }
+
+        func passThrough() {
+            let holds = lock.withLock { () -> Bool in
+                guard armed else { return false }
+                counted += 1
+                guard !waiting else { return false }
+                waiting = true
+                return true
+            }
+            if holds { gate.wait() }
         }
     }
 
@@ -440,5 +477,39 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         XCTAssertEqual(privilege.commands(matching: .startDNSRelay).count, startsBefore)
         XCTAssertFalse(harness.machine.dnsRelayRunning)
+    }
+
+    /// Every VPN and path notification is its own delivery, and each used to
+    /// put a reconcile on the platform work queue. While a helper is held
+    /// they would pile up there and drain later as so many stale passes.
+    func testSystemDNSReconcilesCoalesceWhileOneIsOut() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
+        try await host.startRuntime()
+
+        harness.listings.arm()
+        harness.vpn.emit(.connected)
+        for _ in 0..<2_000 where !harness.listings.isHoldingOne {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(harness.listings.isHoldingOne, "the first reconcile is out, reading the machine")
+        for state in [VPNObservedState.reasserting, .connected, .reasserting, .connected] {
+            harness.vpn.emit(state)
+        }
+        // The four handlers reach the gate behind the pass that is out and
+        // return, which leaves that pass's delivery as the only one in flight.
+        for _ in 0..<5_000 where host.deliveries.inFlightCount != 1 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(host.deliveries.inFlightCount, 1)
+        let listingsPerPass = 2
+        harness.listings.release()
+        await host.deliveries.drain()
+
+        XCTAssertEqual(
+            harness.listings.count,
+            2 * listingsPerPass,
+            "the pass that was out and one more for the four that arrived meanwhile"
+        )
+        await host.stopRuntime()
     }
 }

@@ -89,6 +89,28 @@ final class HelperClientDeadlineTests: XCTestCase {
         XCTAssertFalse(client.ping())
         XCTAssertTrue(client.ping())
     }
+
+    /// The helper serves one connection at a time. Two requests from this
+    /// process sent together would leave the second in the backlog with its
+    /// deadline running: here each takes 200 ms of a 300 ms budget, so the
+    /// second would run out at 400 having done nothing wrong, and fall back
+    /// while its request was still queued.
+    func testConcurrentRequestsFromOneProcessDoNotSpendEachOthersDeadline() throws {
+        let helper = try HeldHelper(.answersAfter(milliseconds: 200))
+        defer { helper.stop() }
+        let client = client(helper)
+        let results = FlagCounter()
+        let finished = DispatchGroup()
+        for _ in 0..<3 {
+            finished.enter()
+            Thread {
+                if client.ping() { results.increment() }
+                finished.leave()
+            }.start()
+        }
+        XCTAssertEqual(finished.wait(timeout: .now() + 10), .success)
+        XCTAssertEqual(results.count, 3)
+    }
 }
 
 // MARK: - Stand-in helper that is held
@@ -99,6 +121,7 @@ private final class HeldHelper: @unchecked Sendable {
         case readsAndHolds
         case dripsReply
         case holdsFirstThenAnswers
+        case answersAfter(milliseconds: Int)
     }
 
     let path: String
@@ -117,7 +140,7 @@ private final class HeldHelper: @unchecked Sendable {
         guard serverFD >= 0, HelperLineIOTestSupport.bind(serverFD, to: path), listen(serverFD, 1) == 0 else {
             throw CancellationError()
         }
-        if behaviour == .neverAccepts {
+        if case .neverAccepts = behaviour {
             workerDone.signal()
         } else {
             Thread { [self] in
@@ -158,11 +181,11 @@ private final class HeldHelper: @unchecked Sendable {
                 if served == 1 {
                     hold(peer)
                 } else {
-                    var reply = (try? JSONEncoder().encode(HelperResponse.ok())) ?? Data()
-                    reply.append(UInt8(ascii: "\n"))
-                    reply.withUnsafeBytes { _ = Darwin.write(peer, $0.baseAddress!, $0.count) }
-                    close(peer)
+                    answer(peer)
                 }
+            case .answersAfter(let milliseconds):
+                usleep(useconds_t(milliseconds) * 1_000)
+                answer(peer)
             case .dripsReply:
                 var filler = UInt8(ascii: " ")
                 while !lock.withLock({ stopped }), Darwin.write(peer, &filler, 1) == 1 {
@@ -171,6 +194,13 @@ private final class HeldHelper: @unchecked Sendable {
                 close(peer)
             }
         }
+    }
+
+    private func answer(_ peer: Int32) {
+        var reply = (try? JSONEncoder().encode(HelperResponse.ok())) ?? Data()
+        reply.append(UInt8(ascii: "\n"))
+        reply.withUnsafeBytes { _ = Darwin.write(peer, $0.baseAddress!, $0.count) }
+        close(peer)
     }
 
     private func hold(_ fd: Int32) {
@@ -212,6 +242,13 @@ private final class EventBox: @unchecked Sendable {
     private var events: [RuntimeEvent] = []
     var all: [RuntimeEvent] { lock.withLock { events } }
     func append(_ event: RuntimeEvent) { lock.withLock { events.append(event) } }
+}
+
+private final class FlagCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var count: Int { lock.withLock { value } }
+    func increment() { lock.withLock { value += 1 } }
 }
 
 private final class FlagBox: @unchecked Sendable {
