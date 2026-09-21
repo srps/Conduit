@@ -219,7 +219,11 @@ enum HelperDaemon {
         var requestBytes: Int
         var replyMilliseconds: Int
 
-        static let admitted = TransactionBudget(requestMilliseconds: 5_000, requestBytes: 1_048_576, replyMilliseconds: 5_000)
+        static let admitted = TransactionBudget(
+            requestMilliseconds: HelperTransactionBudget.requestMilliseconds,
+            requestBytes: 1_048_576,
+            replyMilliseconds: HelperTransactionBudget.replyMilliseconds
+        )
         /// Long enough for a request already on its way to land, so the
         /// refusal is what the peer reads. Its content is never decoded.
         static let refused = TransactionBudget(requestMilliseconds: 1_000, requestBytes: 65_536, replyMilliseconds: 1_000)

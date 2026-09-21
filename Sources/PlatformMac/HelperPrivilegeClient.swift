@@ -213,6 +213,7 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     private let fallback: AppleScriptPrivilegeClient
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let socketPath: String
+    private let transactionMilliseconds: Int
 
     // A refusal — either kind — returns on the first reply. There is no
     // sleep-and-retry for `noConsoleUser` in here, on purpose: every caller
@@ -237,14 +238,18 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     ///     on a temporary socket; production uses `HelperConstants.socketPath`.
     ///   - fallback: the AppleScript client used when the helper is
     ///     unreachable; injectable so a test can prove it was *not* used.
+    ///   - transactionMilliseconds: injectable so a test of a helper that
+    ///     never answers does not take the production forty seconds.
     package init(
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         socketPath: String = HelperConstants.socketPath,
-        fallback: AppleScriptPrivilegeClient = AppleScriptPrivilegeClient()
+        fallback: AppleScriptPrivilegeClient = AppleScriptPrivilegeClient(),
+        transactionMilliseconds: Int = HelperTransactionBudget.clientMilliseconds
     ) {
         self.eventSink = eventSink
         self.socketPath = socketPath
         self.fallback = fallback
+        self.transactionMilliseconds = transactionMilliseconds
     }
 
     package enum Status: Sendable, Equatable {
@@ -531,57 +536,48 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
 
     // MARK: - Socket Communication
 
+    /// One transaction, connect to reply, under one monotonic deadline. Every
+    /// step used to block without one: a helper held by another peer, or by a
+    /// child that never returned, held this thread for as long.
     private func sendRequest(_ request: HelperRequest) throws -> HelperResponse {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw PrivilegeClientError.communicationFailed("Failed to create socket")
         }
         defer { close(fd) }
+        // A helper that went away mid-write is an error to report, not a
+        // signal; a test runner does not ignore SIGPIPE as the executables do.
+        var noSignal: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
 
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let maxLen = MemoryLayout.size(ofValue: addr.sun_path)
-        socketPath.withCString { cstr in
-            withUnsafeMutableBytes(of: &addr.sun_path) { buf in
-                let dst = buf.baseAddress!.assumingMemoryBound(to: CChar.self)
-                _ = strlcpy(dst, cstr, maxLen)
-            }
-        }
-
-        let connectResult = withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                Darwin.connect(fd, sockPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard connectResult == 0 else {
-            throw PrivilegeClientError.helperNotInstalled
+        let deadline = HelperLineIO.deadline(afterMilliseconds: transactionMilliseconds)
+        if let code = HelperLineIO.connect(fd: fd, path: socketPath, deadline: deadline) {
+            guard code == ETIMEDOUT else { throw PrivilegeClientError.helperNotInstalled }
+            throw PrivilegeClientError.communicationFailed(Self.timedOut("connecting", transactionMilliseconds))
         }
 
         var requestData = try JSONEncoder().encode(request)
         requestData.append(UInt8(ascii: "\n"))
-        let written = requestData.withUnsafeBytes { ptr in
-            Darwin.write(fd, ptr.baseAddress!, ptr.count)
-        }
-        guard written == requestData.count else {
+        guard HelperLineIO.writeAll(fd: fd, requestData, deadline: deadline) else {
             throw PrivilegeClientError.communicationFailed("Write failed")
         }
 
-        var responseData = Data()
-        var byte: UInt8 = 0
-        while Darwin.read(fd, &byte, 1) == 1 {
-            if byte == UInt8(ascii: "\n") { break }
-            responseData.append(byte)
-            if responseData.count > 1_048_576 {
-                throw PrivilegeClientError.communicationFailed(
-                    "Response too large: exceeded 1,048,576 byte limit"
-                )
-            }
-        }
-
-        guard !responseData.isEmpty else {
+        switch HelperLineIO.readLine(fd: fd, deadline: deadline, maxBytes: 1_048_576) {
+        case .line(let responseData):
+            return try JSONDecoder().decode(HelperResponse.self, from: responseData)
+        case .empty:
             throw PrivilegeClientError.communicationFailed("Empty response")
+        case .tooLarge:
+            throw PrivilegeClientError.communicationFailed("Response too large: exceeded 1,048,576 byte limit")
+        case .deadlineExceeded:
+            throw PrivilegeClientError.communicationFailed(Self.timedOut("waiting for the reply", transactionMilliseconds))
+        case .failed(let code):
+            throw PrivilegeClientError.communicationFailed("Read failed: \(String(cString: strerror(code)))")
         }
-        return try JSONDecoder().decode(HelperResponse.self, from: responseData)
+    }
+
+    private static func timedOut(_ step: String, _ milliseconds: Int) -> String {
+        "Timed out \(step) after \(milliseconds) ms; the helper is held by another request or a command that does not return"
     }
 }
 

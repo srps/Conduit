@@ -2,7 +2,8 @@
 import Foundation
 
 /// Line I/O for the helper's one-request-per-connection socket, bounded by a
-/// deadline on the whole transfer rather than on each read.
+/// deadline on the whole transfer rather than on each read. Both ends use
+/// it: the helper for a peer, the app for the helper.
 ///
 /// The helper serves one connection at a time. A receive timeout alone let a
 /// peer that sent one byte every few seconds hold it for as long as the size
@@ -71,6 +72,39 @@ public enum HelperLineIO {
             return false
         }
         return true
+    }
+
+    /// Connects a Unix stream socket, giving up at the deadline. Nil on
+    /// success, otherwise the `errno`, with `ETIMEDOUT` for the deadline. A
+    /// blocking `connect` waits for room in the listener's backlog, which a
+    /// helper held by another peer never makes.
+    package static func connect(fd: Int32, path: String, deadline: UInt64) -> Int32? {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let capacity = MemoryLayout.size(ofValue: address.sun_path)
+        guard path.utf8.count < capacity else { return ENAMETOOLONG }
+        path.withCString { source in
+            withUnsafeMutableBytes(of: &address.sun_path) { buffer in
+                _ = strlcpy(buffer.baseAddress!.assumingMemoryBound(to: CChar.self), source, capacity)
+            }
+        }
+        guard makeNonblocking(fd) else { return errno }
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if result == 0 { return nil }
+        guard errno == EINPROGRESS || errno == EINTR else { return errno }
+        switch waitUntilReady(fd, for: Int16(POLLOUT), deadline: deadline) {
+        case .deadlineExceeded: return ETIMEDOUT
+        case .failed(let code): return code
+        default: break
+        }
+        var pending: Int32 = 0
+        var length = socklen_t(MemoryLayout<Int32>.size)
+        guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &pending, &length) == 0 else { return errno }
+        return pending == 0 ? nil : pending
     }
 
     private static func makeNonblocking(_ fd: Int32) -> Bool {
