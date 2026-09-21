@@ -115,6 +115,17 @@ final class AppState: ObservableObject {
     private var preflightRefreshID = UUID()
     private var dnsReconcileWork: DispatchWorkItem?
     private var dnsHealthTimer: Timer?
+    /// Blocking platform work that needs no answer on the spot: the system
+    /// DNS reconcile and the relay restart. One of each in flight at most,
+    /// which is what keeps the queue short while a helper is held.
+    private let platformWork = PlatformWork(label: "io.github.srps.Conduit.app.platform-work")
+    private var dnsRelayRestartInFlight = false
+    private var dnsReconcileInFlight = false
+    private var dnsReconcileWanted = false
+    /// Its own queue: an install waits on a password dialog for as long as
+    /// the user takes, and DNS repair must not wait behind that.
+    private let helperLifecycleWork = PlatformWork(label: "io.github.srps.Conduit.app.helper-lifecycle")
+    private var helperChangeInFlight = false
     private var wakeObserver: NSObjectProtocol?
     /// Pushes each save into the running subsystems and the platform
     /// surfaces, one serialised pass per save, and owns the two "last
@@ -1277,7 +1288,9 @@ final class AppState: ObservableObject {
         dnsHealthTimer = nil
     }
 
-    private func handleDNSHealthResult(alive: Bool) {
+    /// Internal so the harness can report a failed probe; the probe itself
+    /// asks the real port 53.
+    func handleDNSHealthResult(alive: Bool) {
         if alive {
             if runtime.dnsRunState == .failed {
                 runtime.applyDNSHealthOverride(runState: .running, error: nil)
@@ -1286,17 +1299,26 @@ final class AppState: ObservableObject {
             return
         }
 
+        // The restart is a helper round trip and then a probe of up to two
+        // seconds, so it runs off the main actor. A tick that finds the last
+        // one still out adds nothing: that one is already doing this.
+        guard !dnsRelayRestartInFlight else { return }
+        dnsRelayRestartInFlight = true
         logStore.log(.warning, "DNS liveness probe failed. Attempting relay restart.", category: .system)
-        do {
-            try systemDNSManager.startRelay(forwarderPort: effectiveDNSForwarderPort, logger: logStore)
-            if systemDNSManager.probeLiveness() {
-                logStore.log(.notice, "DNS relay restarted successfully.", category: .system)
-                return
+        let manager = systemDNSManager
+        let forwarderPort = effectiveDNSForwarderPort
+        deliveries.deliver { [weak self, platformWork, logStore] in
+            let outcome = await platformWork.run {
+                manager.restartRelayIfManaged(forwarderPort: forwarderPort, logger: logStore)
             }
-        } catch {
-            logStore.log(.warning, "DNS relay restart failed: \(error.localizedDescription)", category: .system)
+            self?.finishDNSRelayRestart(outcome)
         }
+    }
 
+    private func finishDNSRelayRestart(_ outcome: SystemDNSManager.RelayRestart) {
+        dnsRelayRestartInFlight = false
+        // `notManaged` is a stop that finished while the restart was out.
+        guard outcome == .unresponsive else { return }
         runtime.applyDNSHealthOverride(runState: nil, error: "DNS pipeline unresponsive")
         notificationManager.post(title: "DNS Forwarder Degraded", body: "The DNS relay is not responding. DNS resolution may fail.")
     }
@@ -1383,26 +1405,55 @@ final class AppState: ObservableObject {
             logStore.log(.error, "Cannot install helper: binary not found in bundle.", category: .system)
             return
         }
-        do {
-            try helperLifecycle.installHelper(from: source)
-            logStore.log(.notice, "Privileged helper installed successfully.", category: .system)
-            Task {
-                try? await Task.sleep(for: .seconds(1))
-                refreshPreflight()
-            }
-        } catch {
-            lastErrorMessage = error.localizedDescription
-            logStore.log(.error, "Failed to install helper: \(error.localizedDescription)", category: .system)
-        }
+        changeHelper(
+            succeeded: "Privileged helper installed successfully.",
+            failed: "Failed to install helper",
+            // The LaunchDaemon takes a moment to bind its socket.
+            refreshAfter: .seconds(1)
+        ) { lifecycle in try lifecycle.installHelper(from: source) }
     }
 
     func uninstallHelper() {
-        do {
-            try helperLifecycle.uninstallHelper()
-            logStore.log(.notice, "Privileged helper uninstalled.", category: .system)
-            refreshPreflight()
-        } catch {
-            lastErrorMessage = error.localizedDescription
+        changeHelper(
+            succeeded: "Privileged helper uninstalled.",
+            failed: "Failed to uninstall helper",
+            refreshAfter: .zero
+        ) { lifecycle in try lifecycle.uninstallHelper() }
+    }
+
+    /// An install or uninstall, off the main actor: it waits on an admin
+    /// password dialog and then on `launchctl`, and run inline the window
+    /// that asked for it stopped drawing until both were done. One at a
+    /// time; a second click while the dialog is up is dropped.
+    private func changeHelper(
+        succeeded: String,
+        failed: String,
+        refreshAfter delay: Duration,
+        _ change: @escaping @Sendable (any HelperLifecycleManaging) throws -> Void
+    ) {
+        guard !helperChangeInFlight else { return }
+        helperChangeInFlight = true
+        deliveries.deliver { [weak self, helperLifecycleWork, helperLifecycle] in
+            let failure: String? = await helperLifecycleWork.run {
+                do {
+                    try change(helperLifecycle)
+                    return nil
+                } catch {
+                    return error.localizedDescription
+                }
+            }
+            guard let self else { return }
+            self.helperChangeInFlight = false
+            if let failure {
+                self.lastErrorMessage = failure
+                self.logStore.log(.error, "\(failed): \(failure)", category: .system)
+                return
+            }
+            self.logStore.log(.notice, succeeded, category: .system)
+            if delay > .zero {
+                try? await Task.sleep(for: delay)
+            }
+            self.refreshPreflight()
         }
     }
 
@@ -1569,29 +1620,46 @@ final class AppState: ObservableObject {
     private func scheduleDNSReconcile() {
         dnsReconcileWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.systemDNSManager.reconcile(logger: self.logStore)
-            // Follow up with an immediate liveness probe (off-main; it can
-            // block up to 2 s) so a relay that died across sleep/VPN churn is
-            // restarted now rather than at the next 30 s health tick.
-            let manager = self.systemDNSManager
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                let alive = manager.probeLiveness()
-                Task { @MainActor [weak self] in
-                    // Authoritative "is the forwarder up?"; the mirror's
-                    // dnsRunState may be a UI-only `.failed` health override,
-                    // which `handleDNSHealthResult` itself inspects.
-                    guard let self, self.orchestrator.snapshot.dnsRunState == .running else { return }
-                    self.handleDNSHealthResult(alive: alive)
-                }
-            }
+            self?.runDNSReconcile()
         }
         dnsReconcileWork = work
-        // Must run on the main queue: `AppState` and `logStore` are `@MainActor`.
-        // Dispatching to a utility queue and touching them there traps at runtime
-        // (Swift 6 executor check) — observed when DNS apply triggers a network
-        // change and this debounced reconcile fires ~1s later.
+        // The debounce fires on the main queue because it touches `AppState`;
+        // the reconcile itself does not run here.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    /// Off the main actor: one `networksetup` read per interface, and a
+    /// helper round trip for each that drifted. It fires on every wake,
+    /// network change and VPN transition. A trigger that finds a reconcile
+    /// still out asks for one more after it, since that one may have read
+    /// the machine before the change that caused this trigger.
+    private func runDNSReconcile() {
+        guard !dnsReconcileInFlight else {
+            dnsReconcileWanted = true
+            return
+        }
+        dnsReconcileInFlight = true
+        let manager = systemDNSManager
+        deliveries.deliver { [weak self, platformWork, logStore] in
+            // Followed at once by a liveness probe, so a relay that died
+            // across sleep or VPN churn is restarted now rather than at the
+            // next 30 s health tick.
+            let alive = await platformWork.run {
+                manager.reconcile(logger: logStore)
+                return manager.probeLiveness()
+            }
+            guard let self else { return }
+            self.dnsReconcileInFlight = false
+            if self.dnsReconcileWanted {
+                self.dnsReconcileWanted = false
+                self.scheduleDNSReconcile()
+            }
+            // Authoritative "is the forwarder up?"; the mirror's
+            // dnsRunState may be a UI-only `.failed` health override,
+            // which `handleDNSHealthResult` itself inspects.
+            guard self.orchestrator.snapshot.dnsRunState == .running else { return }
+            self.handleDNSHealthResult(alive: alive)
+        }
     }
 }
 

@@ -126,6 +126,43 @@ final class SystemDNSManagerTests: XCTestCase {
 
 
 
+    // MARK: - Relay restart for a failed probe
+
+    func testRelayRestartStartsTheRelayAndReportsWhatTheProbeSaw() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["10.0.0.2"]])
+        try makeManager(machine: machine, relayIsLive: true).saveCurrentDNS(logger: nil)
+
+        XCTAssertEqual(makeManager(machine: machine, relayIsLive: true).restartRelayIfManaged(forwarderPort: 5353, logger: nil), .restarted)
+        XCTAssertEqual(makeManager(machine: machine, relayIsLive: false).restartRelayIfManaged(forwarderPort: 5353, logger: nil), .unresponsive)
+        XCTAssertEqual(recording.commands(matching: .startDNSRelay), [["5353"], ["5353"]])
+    }
+
+    func testRelayRestartThatTheHelperRefusesIsUnresponsive() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["10.0.0.2"]])
+        let manager = makeManager(machine: machine, relayIsLive: true)
+        try manager.saveCurrentDNS(logger: nil)
+        recording.failing = [.startDNSRelay]
+
+        XCTAssertEqual(manager.restartRelayIfManaged(forwarderPort: 5353, logger: nil), .unresponsive)
+    }
+
+    /// The restart runs off the main actor, after a probe that is already a
+    /// moment old. With nothing recorded for the surface a stop has released
+    /// it since, and a relay started now would outlive the forwarder.
+    func testRelayRestartStartsNothingOnceTheSurfaceIsReleased() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["10.0.0.2"]])
+        let manager = makeManager(machine: machine, relayIsLive: true)
+        XCTAssertEqual(manager.restartRelayIfManaged(forwarderPort: 5353, logger: nil), .notManaged)
+
+        try manager.saveCurrentDNS(logger: nil)
+        try manager.apply(forwarderPort: 5353, logger: nil)
+        try manager.clear(logger: nil)
+        recording.reset()
+
+        XCTAssertEqual(manager.restartRelayIfManaged(forwarderPort: 5353, logger: nil), .notManaged)
+        XCTAssertTrue(recording.commands(matching: .startDNSRelay).isEmpty)
+    }
+
     // MARK: - Staleness detection
 
     func testStalenessThresholdDetectsOldState() {

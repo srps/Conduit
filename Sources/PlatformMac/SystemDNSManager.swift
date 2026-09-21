@@ -32,6 +32,16 @@ package final class SystemDNSManager: @unchecked Sendable {
         return false
     }
 
+    /// One operation at a time. The manager keeps no state of its own, but
+    /// each operation reads the journal and then acts on what it read, and
+    /// the hosts now run `reconcile` and the relay restart off the main
+    /// actor while the start and stop paths still call in from it. Without
+    /// this a reconcile that read the journal before a stop's `clear` would
+    /// pin an interface to 127.0.0.1 after the clear had restored it, with
+    /// no record left to restore it from. Recursive because the operations
+    /// call one another (`restoreIfNeeded` ends in `clear`).
+    private let operations = NSRecursiveLock()
+
     private let privilegeClient: PrivilegeClient
     /// Prior per-service DNS servers. Shared with every other platform surface
     /// so there is one answer to "what was here before us" rather than the
@@ -96,6 +106,8 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Apply / Clear
 
     package func apply(forwarderPort: Int, logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         // Nothing captured, nothing redirected. Every host calls
         // `saveCurrentDNS` first and treats its failure as non-fatal, so
         // without this guard a listing that failed once left the interfaces
@@ -128,6 +140,8 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func clear(logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         guard hasSavedInterfaces() else {
             // A previous teardown restored this surface. Probing the machine
             // now would flag a user's own 127.0.0.1 resolver — just restored —
@@ -250,6 +264,8 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Save / Restore
 
     package func saveCurrentDNS(logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         // The daemon's first act is this save; without the import first it
         // would record a stranded 127.0.0.1 as the prior value and make the
         // snapshot unimportable for good.
@@ -283,6 +299,8 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func restoreIfNeeded(logger: (any LogSink)?) {
+        operations.lock()
+        defer { operations.unlock() }
         importLegacySnapshotIfPresent(logger: logger)
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else { return }
 
@@ -388,6 +406,45 @@ package final class SystemDNSManager: @unchecked Sendable {
         }
     }
 
+    /// What a health check's relay restart came to.
+    package enum RelayRestart: Sendable, Equatable {
+        /// Nothing is recorded for this surface, so a stop has released it
+        /// since the probe that asked for the restart. Nothing was started.
+        case notManaged
+        case restarted
+        case unresponsive
+    }
+
+    /// Restarts the relay for a failed liveness probe and probes again. Meant
+    /// to run off the main actor: the restart is a helper round trip and the
+    /// probe waits up to two seconds.
+    ///
+    /// Checked against the journal under the operation lock, because the
+    /// probe that asked for this ran a moment ago and a stop may have
+    /// finished in between. A relay started after that stop would hold :53
+    /// and forward to a port nothing listens on.
+    package func restartRelayIfManaged(forwarderPort: Int, logger: (any LogSink)?) -> RelayRestart {
+        let started: RelayRestart? = operations.withLock {
+            guard hasSavedInterfaces() else {
+                logger?.log(.debug, "DNS relay restart skipped: system DNS is no longer managed.", category: .system)
+                return .notManaged
+            }
+            do {
+                try startRelay(forwarderPort: forwarderPort, logger: logger)
+                return nil
+            } catch {
+                logger?.log(.warning, "DNS relay restart failed: \(error.localizedDescription)", category: .system)
+                return .unresponsive
+            }
+        }
+        if let started { return started }
+        // Outside the lock: the probe waits up to two seconds, and a stop on
+        // the main actor should not wait that out.
+        guard relayIsLive() else { return .unresponsive }
+        logger?.log(.notice, "DNS relay restarted successfully.", category: .system)
+        return .restarted
+    }
+
     package func stopRelay(logger: (any LogSink)?) {
         try? privilegeClient.execute(.stopDNSRelay, values: [])
         logger?.log(.notice, "DNS relay on :53 stopped.", category: .system)
@@ -465,6 +522,8 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Reconcile (VPN transitions)
 
     package func reconcile(logger: (any LogSink)?) {
+        operations.lock()
+        defer { operations.unlock() }
         guard hasSavedInterfaces() else { return }
         guard let currentServices = try? connectedNetworkServices(logger: nil) else { return }
 

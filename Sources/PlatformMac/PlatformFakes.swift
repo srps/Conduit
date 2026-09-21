@@ -30,6 +30,7 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
     private let lock = NSLock()
     private var _commands: [(command: PrivilegedOperation, values: [String])] = []
     private var _batches: [[PrivilegedBatchStep]] = []
+    private var _mainThreadOperations: [PrivilegedOperation] = []
     private var _failing: Set<PrivilegedOperation> = []
     private var _failingDomains: Set<String> = []
     private let error: Error?
@@ -49,6 +50,13 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
     /// would be prompted rather than only what was run.
     package var batches: [[PrivilegedBatchStep]] {
         lock.withLock { _batches }
+    }
+
+    /// The operations that were asked for on the main thread, where a real
+    /// client's wait on the helper is a window that does not draw. A host
+    /// that moved a path off the main actor pins it by finding none here.
+    package var mainThreadOperations: [PrivilegedOperation] {
+        lock.withLock { _mainThreadOperations }
     }
 
     /// Operations that fail whatever their values.
@@ -79,7 +87,7 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
     }
 
     package func reset() {
-        lock.withLock { _commands.removeAll(); _batches.removeAll() }
+        lock.withLock { _commands.removeAll(); _batches.removeAll(); _mainThreadOperations.removeAll() }
     }
 
     package func execute(_ operation: PrivilegedOperation, values: [String]) throws {
@@ -87,8 +95,10 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
     }
 
     package func execute(batch: [PrivilegedBatchStep]) throws {
+        let onMainThread = Thread.isMainThread
         let refusal: Error? = lock.withLock {
             _batches.append(batch)
+            if onMainThread { _mainThreadOperations.append(contentsOf: batch.map(\.operation)) }
             _commands.append(contentsOf: batch.map { ($0.operation, $0.values) })
             if let error { return error }
             for step in batch {

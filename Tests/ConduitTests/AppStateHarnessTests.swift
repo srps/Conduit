@@ -314,6 +314,67 @@ final class AppStateHarnessTests: XCTestCase {
         )
     }
 
+    // MARK: Off the main actor
+
+    /// The relay restart is a helper round trip and then a probe of up to
+    /// two seconds, every thirty seconds while the pipeline is down. It ran
+    /// on the main actor (#47).
+    func testAFailedLivenessProbeRestartsTheRelayOffTheMainThread() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        await appState.startDNS()
+        XCTAssertTrue(machine.dnsRelayRunning, "system DNS came up through the relay")
+        let startsBefore = machine.privilege.commands(matching: .startDNSRelay).count
+        let onMainBefore = machine.privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count
+        XCTAssertEqual(onMainBefore, 1, "the fake sees the main thread: `startDNS` still asks from it")
+
+        appState.handleDNSHealthResult(alive: false)
+        // A second tick while the first restart is out adds nothing.
+        appState.handleDNSHealthResult(alive: false)
+        await harness.deliveries()
+
+        XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore + 1, "one restart for the two ticks")
+        XCTAssertEqual(
+            machine.privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count,
+            onMainBefore,
+            "and the main thread did not wait on the helper for it"
+        )
+    }
+
+    /// The probe that asks for a restart ran a moment ago. A stop that
+    /// finished since has released the surface, and a relay started after it
+    /// would hold :53 and forward to a port nothing listens on.
+    func testARelayRestartThatFindsSystemDNSReleasedStartsNothing() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        await appState.startDNS()
+        await appState.stopDNS()
+        XCTAssertFalse(machine.dnsRelayRunning)
+        let startsBefore = machine.privilege.commands(matching: .startDNSRelay).count
+
+        appState.handleDNSHealthResult(alive: false)
+        await harness.deliveries()
+
+        XCTAssertEqual(machine.privilege.commands(matching: .startDNSRelay).count, startsBefore)
+        XCTAssertFalse(machine.dnsRelayRunning)
+    }
+
+    /// An uninstall waits on an admin password dialog. The window that asked
+    /// for it keeps drawing, and a failure still reaches the user.
+    func testHelperUninstallRunsOffTheMainActorAndReportsFailure() async throws {
+        let appState = try launch()
+
+        appState.uninstallHelper()
+        // Dropped: the first is still out.
+        appState.uninstallHelper()
+        await harness.deliveries()
+        XCTAssertEqual(harness.helper.uninstalls, 1)
+        XCTAssertNil(appState.lastErrorMessage)
+
+        harness.helper.fails = true
+        appState.uninstallHelper()
+        await harness.deliveries()
+        XCTAssertNotNil(appState.lastErrorMessage, "the refusal is shown, not dropped")
+    }
+
     // MARK: Flags and the machine
 
     /// The login item needs no runtime and must not wait for the pass: a

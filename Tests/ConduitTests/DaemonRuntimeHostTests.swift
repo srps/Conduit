@@ -314,10 +314,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Ephemeral ports, one split-DNS entry: the same config the app
     /// scenarios run on.
-    private func launch(platform: PlatformIntegrationConfig) throws -> DaemonRuntimeHost {
+    private func launch(platform: PlatformIntegrationConfig, dnsForwarderEnabled: Bool = false) throws -> DaemonRuntimeHost {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = dnsForwarderEnabled
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
         harness = try DaemonHarness(config: config, platformConfig: platform)
         return try harness.makeHost()
@@ -406,5 +407,38 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         XCTAssertFalse(harness.wifi.routesThroughAProxy, "stop cleared by ownership, not by the switch")
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+    }
+
+    /// Twin of `AppStateHarnessTests.testAFailedLivenessProbeRestartsTheRelayOffTheMainThread`.
+    func testAFailedLivenessProbeRestartsTheRelayOffTheMainThread() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
+        try await host.startRuntime()
+        let privilege = harness.machine.privilege
+        XCTAssertTrue(harness.machine.dnsRelayRunning, "system DNS came up through the relay")
+        let startsBefore = privilege.commands(matching: .startDNSRelay).count
+        let onMainBefore = privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count
+
+        host.handleDNSHealthResult(alive: false, forwarderPort: 5353)
+        host.handleDNSHealthResult(alive: false, forwarderPort: 5353)
+        await host.deliveries.drain()
+
+        XCTAssertEqual(privilege.commands(matching: .startDNSRelay).count, startsBefore + 1, "one restart for the two ticks")
+        XCTAssertEqual(privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count, onMainBefore)
+        await host.stopRuntime()
+    }
+
+    /// Twin of `AppStateHarnessTests.testARelayRestartThatFindsSystemDNSReleasedStartsNothing`.
+    func testARelayRestartThatFindsSystemDNSReleasedStartsNothing() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)
+        try await host.startRuntime()
+        await host.stopRuntime()
+        let privilege = harness.machine.privilege
+        let startsBefore = privilege.commands(matching: .startDNSRelay).count
+
+        host.handleDNSHealthResult(alive: false, forwarderPort: 5353)
+        await host.deliveries.drain()
+
+        XCTAssertEqual(privilege.commands(matching: .startDNSRelay).count, startsBefore)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
     }
 }
