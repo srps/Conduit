@@ -4,11 +4,17 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.3.3
+
+A maintenance release that finishes the bounds on the privileged helper: the child
+processes it runs, and the app's wait for its reply. It also moves the first of the app's
+helper work off the main thread, makes the port-0 DNS forwarder bind its UDP and TCP pair
+together, and gives the app window its title bar back.
 
 **Upgrading:** reinstall the helper (`sudo ./install-helper.sh`) to get the bound on its
-child processes. The helper protocol did not change, so this app works with a 0.3.2 helper
-in the meantime, and gives up on one that is held after 40 s instead of waiting for good.
+child processes. The helper protocol did not change, so the 0.3.3 app works with a 0.3.2 or
+0.3.1 helper in the meantime, and gives up on one that is held after 40 s instead of
+waiting for good.
 
 ### Security
 
