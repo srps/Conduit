@@ -4,6 +4,23 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+### Fixed
+
+- The DNS forwarder started on port 0 (`pm-proxy --dns-port 0`, `pm-sim`, the tests) binds
+  UDP first and puts TCP on the number UDP got. An ephemeral UDP port does not reserve its
+  TCP twin, so another socket could already hold it, and the forwarder warned and served UDP
+  only, with `tcpListeningPort` nil. It now releases the UDP port and binds the pair again
+  on a fresh one, up to eight times, and the start fails if none is free on both. A
+  configured port keeps serving UDP only when its TCP side is taken. (#57)
+
+### Logging
+
+- `dns.listener_port_retry` reports each port-0 pair that was given up, and
+  `dns.tcp_listener_unavailable` reports a forwarder left without a TCP listener, whether it
+  serves UDP only or failed to start. Until now the only trace was a warning line.
+
 ## 0.3.2
 
 A maintenance release from the September 17–19 source review: two ways a client or an

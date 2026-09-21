@@ -1013,7 +1013,8 @@ package final class ProxyOrchestrator {
                 s.snapshot.dnsCacheHitCount = cacheHits
                 s.emitSnapshotCoalesced()
             }
-        }
+        },
+        eventSink: { [eventLog] event in eventLog.append(event) }
     )
 
     private lazy var localProxyServer = LocalProxyServer(
