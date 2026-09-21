@@ -14,6 +14,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   only, with `tcpListeningPort` nil. It now releases the UDP port and binds the pair again
   on a fresh one, up to eight times, and the start fails if none is free on both. A
   configured port keeps serving UDP only when its TCP side is taken. (#57)
+- The app window's title sat on top of scrolled rows in Overview, Shell Environment, General
+  and Advanced, the sections whose scroll view reaches the top of the pane. The window helper
+  behind "Keep window on top" also made the title bar transparent and hid the title, which the
+  0.1 dashboard needed and the single app window does not. The title bar is now the
+  system's, with an opaque edge that rows scroll under.
 
 ### Logging
 

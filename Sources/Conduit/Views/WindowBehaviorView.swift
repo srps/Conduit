@@ -70,9 +70,12 @@ struct WindowBehaviorView: NSViewRepresentable {
                       let window = nsView.window else {
                     return
                 }
+                // The level and nothing else. This used to hide the title and
+                // make the title bar transparent as well, for the dashboard
+                // that drew its own header. The app window has a navigation
+                // title and scroll views that reach the top of the pane, so
+                // a transparent bar left the title sitting on scrolled rows.
                 window.level = toApply ? .floating : .normal
-                window.titleVisibility = .hidden
-                window.titlebarAppearsTransparent = true
                 coord.lastApplied = toApply
             }
         }
