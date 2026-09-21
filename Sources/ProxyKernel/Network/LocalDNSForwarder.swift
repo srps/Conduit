@@ -4,7 +4,25 @@ import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 
+/// `start(host:port:)` was asked for any port and could not find one that was
+/// free on both UDP and TCP.
+package enum DNSForwarderStartError: Error, LocalizedError, Equatable {
+    case noEphemeralPortPair(host: String, attempts: Int)
+
+    package var errorDescription: String? {
+        switch self {
+        case .noEphemeralPortPair(let host, let attempts):
+            return "DNS forwarder could not find a port on \(host) that was free on both UDP and TCP in \(attempts) attempts."
+        }
+    }
+}
+
 package final class LocalDNSForwarder: @unchecked Sendable {
+    /// How many ephemeral ports `start` tries before giving up. A collision
+    /// needs another process to hold, on TCP, the one number the kernel just
+    /// picked for UDP, so a second in a row is already unlikely.
+    package static let ephemeralPairAttempts = 8
+
     private let group: EventLoopGroup
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
@@ -12,6 +30,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let onMetrics: (@Sendable (Int, Int, Int) -> Void)?
     private let tcpIdleTimeoutSeconds: Int64
     private let tcpMaximumConnections: Int
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    private let willBindTCP: @Sendable (Int) async -> Void
     private var channel: Channel?
     private var tcpChannel: Channel?
     private var tcpConnections: DNSTCPConnectionRegistry?
@@ -41,7 +61,11 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         // must not be cut off" rule without a ten-second wait.
         tcpIdleTimeoutSeconds: Int64 = DNSTCPHandler.defaultIdleTimeoutSeconds,
         // Exposed only so tests can reach the cap without opening 64 sockets.
-        tcpMaximumConnections: Int = DNSTCPConnectionRegistry.defaultMaximumConnections
+        tcpMaximumConnections: Int = DNSTCPConnectionRegistry.defaultMaximumConnections,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        // Runs between the UDP bind and the TCP bind with the port UDP got, so
+        // a test can take that TCP port first and meet a real `EADDRINUSE`.
+        willBindTCP: @escaping @Sendable (Int) async -> Void = { _ in }
     ) {
         self.group = group
         self.logger = logger
@@ -50,6 +74,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.onMetrics = onMetrics
         self.tcpIdleTimeoutSeconds = tcpIdleTimeoutSeconds
         self.tcpMaximumConnections = tcpMaximumConnections
+        self.eventSink = eventSink
+        self.willBindTCP = willBindTCP
     }
 
     /// A UDP handler wired to a fresh resolution core, plus readers for that
@@ -89,9 +115,17 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     /// ephemeral ports, and a resolver client that retried over TCP would find
     /// nothing there.
     ///
-    /// A TCP bind failure is not fatal. UDP-only is what this forwarder shipped
-    /// as, and a resolver serving UDP is far more useful than one that refused
-    /// to start; the failure is logged rather than thrown.
+    /// An ephemeral UDP port does not reserve the TCP port of the same number,
+    /// so with `port: 0` another process may already hold it. The pair is then
+    /// bound again on a fresh port, up to `ephemeralPairAttempts` times, and
+    /// `start` throws if none was free on both: a caller that asked for any
+    /// port has no reason to settle for half a listener, and `tcpListeningPort`
+    /// used to come back nil about once in a few hundred starts.
+    ///
+    /// On a configured port a TCP bind failure is not fatal. UDP-only is what
+    /// this forwarder shipped as, and a resolver serving UDP is far more useful
+    /// than one that refused to start; the failure is an event and a warning
+    /// rather than thrown.
     package func start(host: String, port: Int) async throws {
         guard let host = ProxyConfig.loopbackBindHost(host) else {
             throw ConfigValidationError.conflict(description: "DNS requires a loopback bind address because it has no client allowlist.")
@@ -110,10 +144,6 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             .channelInitializer { channel in
                 channel.pipeline.addHandler(DNSUDPHandler(core: core))
             }
-        channel = try await bootstrap.bind(host: host, port: port).get()
-        let actualHost = channel?.localAddress?.ipAddress ?? host
-        let actualPort = channel?.localAddress?.port ?? port
-
         let log = logger
         let idleTimeout = tcpIdleTimeoutSeconds
         let connections = DNSTCPConnectionRegistry(
@@ -134,17 +164,56 @@ package final class LocalDNSForwarder: @unchecked Sendable {
                     DNSTCPHandler(core: core, logger: log, idleTimeoutSeconds: idleTimeout)
                 )
             }
-        do {
-            tcpChannel = try await tcpBootstrap.bind(host: host, port: actualPort).get()
-            logger.log(.notice, "DNS forwarder listening on \(actualHost):\(actualPort) (UDP and TCP).", category: .network)
-        } catch {
-            logger.log(
-                .warning,
-                "DNS forwarder listening on \(actualHost):\(actualPort) (UDP only) — TCP bind failed: \(error.displayDescription). Clients that retry over TCP after a truncated answer will not reach it.",
-                category: .network
-            )
-            tcpConnections = nil
+        let attempts = port == 0 ? Self.ephemeralPairAttempts : 1
+        for attempt in 1...attempts {
+            let udp = try await bootstrap.bind(host: host, port: port).get()
+            let actualHost = udp.localAddress?.ipAddress ?? host
+            let actualPort = udp.localAddress?.port ?? port
+            await willBindTCP(actualPort)
+            do {
+                tcpChannel = try await tcpBootstrap.bind(host: host, port: actualPort).get()
+                channel = udp
+                logger.log(.notice, "DNS forwarder listening on \(actualHost):\(actualPort) (UDP and TCP).", category: .network)
+                return
+            } catch {
+                let inUse = (error as? IOError)?.errnoCode == EADDRINUSE
+                guard port == 0, inUse else {
+                    // A configured port, or a failure another port would not
+                    // cure: serve UDP.
+                    eventSink?(RuntimeEvent(
+                        kind: .health,
+                        event: "dns.tcp_listener_unavailable",
+                        detail: "port=\(actualPort) outcome=udp_only error=\(error.displayDescription)"
+                    ))
+                    logger.log(
+                        .warning,
+                        "DNS forwarder listening on \(actualHost):\(actualPort) (UDP only) — TCP bind failed: \(error.displayDescription). Clients that retry over TCP after a truncated answer will not reach it.",
+                        category: .network
+                    )
+                    channel = udp
+                    tcpConnections = nil
+                    return
+                }
+                _ = try? await udp.close().get()
+                let last = attempt == attempts
+                eventSink?(RuntimeEvent(
+                    kind: .health,
+                    event: last ? "dns.tcp_listener_unavailable" : "dns.listener_port_retry",
+                    detail: last
+                        ? "port=\(actualPort) outcome=start_failed attempts=\(attempts)"
+                        : "port=\(actualPort) attempt=\(attempt) of=\(attempts) reason=tcp_port_in_use"
+                ))
+                logger.log(
+                    last ? .error : .info,
+                    "DNS forwarder got UDP port \(actualPort) but its TCP port is held by another socket (attempt \(attempt) of \(attempts)).",
+                    category: .network
+                )
+            }
         }
+        tcpConnections = nil
+        self.core = nil
+        core.invalidateSessions()
+        throw DNSForwarderStartError.noEphemeralPortPair(host: host, attempts: attempts)
     }
 
     package func stop() async {
