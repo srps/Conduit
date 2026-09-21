@@ -75,9 +75,9 @@ public enum HelperLineIO {
     }
 
     /// Connects a Unix stream socket, giving up at the deadline. Nil on
-    /// success, otherwise the `errno`, with `ETIMEDOUT` for the deadline. A
-    /// blocking `connect` waits for room in the listener's backlog, which a
-    /// helper held by another peer never makes.
+    /// success, otherwise the `errno`, with `ETIMEDOUT` for the deadline.
+    /// Nonblocking, so a helper that is held and accepts nobody cannot hold
+    /// the caller in `connect`, whatever the kernel does with a full backlog.
     package static func connect(fd: Int32, path: String, deadline: UInt64) -> Int32? {
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
