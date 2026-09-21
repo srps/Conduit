@@ -536,10 +536,26 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
 
     // MARK: - Socket Communication
 
+    /// One transaction at a time from this process. The helper serves one
+    /// connection at a time, and the hosts now reach it from more than one
+    /// thread: the main actor, the platform work queue, the tunnel forwarder.
+    /// A second request sent while the first was being served would sit in
+    /// the helper's backlog with its deadline running, and could run out of
+    /// time having done nothing wrong. Its fallback would then write the
+    /// machine while the request it gave up on was still queued to do the
+    /// same. Waiting here instead starts the clock when the helper is ours.
+    /// Another process's request can still be ahead of ours; the budget does
+    /// not cover that.
+    private static let transactions = NSLock()
+
     /// One transaction, connect to reply, under one monotonic deadline. Every
     /// step used to block without one: a helper held by another peer, or by a
     /// child that never returned, held this thread for as long.
     private func sendRequest(_ request: HelperRequest) throws -> HelperResponse {
+        try Self.transactions.withLock { try transact(request) }
+    }
+
+    private func transact(_ request: HelperRequest) throws -> HelperResponse {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else {
             throw PrivilegeClientError.communicationFailed("Failed to create socket")

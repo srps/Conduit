@@ -110,6 +110,8 @@ final class DaemonRuntimeHost {
     /// `AppState.platformWork`.
     private let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
     private var dnsRelayRestartInFlight = false
+    private var dnsReconcileInFlight = false
+    private var dnsReconcileWanted = false
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<DaemonVPNFlapWindowConfig>
     private var dnsHealthTimer: DispatchSourceTimer?
@@ -555,10 +557,30 @@ final class DaemonRuntimeHost {
     /// helper round trip for each that drifted. Nothing follows it in either
     /// caller, so the suspension lets nothing in that was not already let in
     /// by the orchestrator call before it.
+    ///
+    /// One in flight, one wanted. Every path and VPN notification is its own
+    /// delivery, and while a helper is held each would otherwise add a pass
+    /// to the queue, to drain later as so many stale ones. A trigger that
+    /// finds a pass out asks for one more after it, since that pass may have
+    /// read the machine before the change behind this trigger.
     private func reconcileSystemDNSIfRunning() async {
-        guard platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running else { return }
+        guard systemDNSReconcileIsDue else { return }
+        guard !dnsReconcileInFlight else {
+            dnsReconcileWanted = true
+            return
+        }
+        dnsReconcileInFlight = true
+        defer { dnsReconcileInFlight = false }
         let manager = systemDNSManager
-        await platformWork.run { [logger] in manager.reconcile(logger: logger) }
+        repeat {
+            dnsReconcileWanted = false
+            await platformWork.run { [logger] in manager.reconcile(logger: logger) }
+        } while dnsReconcileWanted && systemDNSReconcileIsDue
+        dnsReconcileWanted = false
+    }
+
+    private var systemDNSReconcileIsDue: Bool {
+        platformConfig.manageSystemDNS && orchestrator.snapshot.dnsRunState == .running
     }
 
     private func startDNSHealthTimer(forwarderPort: Int) {

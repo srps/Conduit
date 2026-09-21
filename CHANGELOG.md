@@ -24,7 +24,8 @@ in the meantime, and gives up on one that is held after 40 s instead of waiting 
   used to block unbounded on the calling thread, which for most callers is the main one. A
   transaction that runs out is unreachability: the command degrades to the admin-prompt
   fallback with `auth.privilege_helper_degraded` naming the timeout, and the helper's
-  status reads "not responding". (#47)
+  status reads "not responding". The app sends the helper one request at a time, so a
+  request of its own never waits in the helper's backlog with its deadline running. (#47)
 
 ### Fixed
 

@@ -219,6 +219,10 @@ package enum HelperTransactionBudget {
     /// command that goes on after a child ran out of time, to undo its alias,
     /// so the overrun is counted twice. Past this the helper is not slow, it
     /// is held, and the client reports it unreachable rather than wait on.
+    ///
+    /// It is one transaction's worth, with no allowance for waiting in the
+    /// helper's backlog behind another. `HelperToolPrivilegeClient` sends one
+    /// request at a time per process so that its own never wait there.
     package static var clientMilliseconds: Int {
         requestMilliseconds
             + HelperSubprocess.operationMilliseconds
