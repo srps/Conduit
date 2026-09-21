@@ -6,6 +6,26 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+**Upgrading:** reinstall the helper (`sudo ./install-helper.sh`) to get the bound on its
+child processes. The helper protocol did not change, so this app works with a 0.3.2 helper
+in the meantime, and gives up on one that is held after 40 s instead of waiting for good.
+
+### Security
+
+- The helper bounds the children a command runs (`networksetup`, `ifconfig`) with one
+  monotonic deadline, 20 s for all of them together. It used `waitUntilExit`, so a child
+  that never returned held the helper's single accept loop, and with it every later client,
+  including the teardown that restores proxy settings at logout. Both pipes are read while
+  the child runs, output past 64 KiB is dropped rather than left unread, and a child still
+  there at the deadline gets `SIGTERM`, then `SIGKILL`, each wait bounded. A deadline fails
+  the command, the lenient pre-protocol-4 ones included. Requires a helper reinstall. (#47)
+- The app's side of a helper transaction has a deadline too: connect, request and reply
+  run against one monotonic 40 s budget built from the helper's own worst case. Every step
+  used to block unbounded on the calling thread, which for most callers is the main one. A
+  transaction that runs out is unreachability: the command degrades to the admin-prompt
+  fallback with `auth.privilege_helper_degraded` naming the timeout, and the helper's
+  status reads "not responding". (#47)
+
 ### Fixed
 
 - The DNS forwarder started on port 0 (`pm-proxy --dns-port 0`, `pm-sim`, the tests) binds
@@ -19,6 +39,14 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   behind "Keep window on top" also made the title bar transparent and hid the title, which the
   0.1 dashboard needed and the single app window does not. The title bar is now the
   system's, with an opaque edge that rows scroll under.
+- The DNS relay restart after a failed liveness probe, the system DNS reconcile that
+  follows every wake, network change and VPN transition, and the helper install and
+  uninstall ran on the main actor, so the window stopped drawing for as long as the helper,
+  `networksetup` or the password dialog took. They run on a platform work queue now, one
+  of each in flight. `SystemDNSManager` serialises its operations, and a relay restart that
+  finds the surface released by a stop in the meantime starts nothing. The start and stop
+  paths, the reconciler's flag actions, the VPN entry-file gate and quit cleanup still wait
+  on the main actor, bounded by the deadlines above. (#47)
 
 ### Logging
 

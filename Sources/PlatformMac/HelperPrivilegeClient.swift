@@ -216,11 +216,11 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     private let transactionMilliseconds: Int
 
     // A refusal — either kind — returns on the first reply. There is no
-    // sleep-and-retry for `noConsoleUser` in here, on purpose: every caller
-    // of `execute` is synchronous on the MainActor (`ProxyOrchestrator`,
-    // `SystemDNSManager` from `AppState`), so a wait here is a frozen UI
-    // that cannot even draw the "waiting for a login session" state it is
-    // waiting for. And the moment is rarer than it looks: the app and the
+    // sleep-and-retry for `noConsoleUser` in here, on purpose: most callers
+    // of `execute` are still synchronous on the MainActor (the hosts' start
+    // and stop paths, `ProxyOrchestrator`'s relay calls; #47 lists them), so
+    // a wait here is a frozen UI that cannot even draw the "waiting for a
+    // login session" state it is waiting for. And the moment is rarer than it looks: the app and the
     // daemon both run as the user and start after the session exists, so
     // `SCDynamicStoreCopyConsoleUser` already names them. The refusal is
     // surfaced as state (`Status.waitingForConsoleUser`) and the hosts'

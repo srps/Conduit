@@ -106,6 +106,10 @@ final class DaemonRuntimeHost {
     /// main actor. Internal so the tests can `drain()` them instead of
     /// sleeping. Same shape as `AppState`.
     let deliveries = ObserverDeliveries()
+    /// Blocking platform work that needs no answer on the spot. See
+    /// `AppState.platformWork`.
+    private let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
+    private var dnsRelayRestartInFlight = false
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<DaemonVPNFlapWindowConfig>
     private var dnsHealthTimer: DispatchSourceTimer?
@@ -519,9 +523,7 @@ final class DaemonRuntimeHost {
 
     private func handleNetworkChange(_ change: NetworkMonitor.PathChange) async {
         await orchestrator.handleNetworkChange(description: change.description, pathSatisfied: change.satisfied)
-        if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
-            systemDNSManager.reconcile(logger: logger)
-        }
+        await reconcileSystemDNSIfRunning()
     }
 
     private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?) async {
@@ -545,9 +547,18 @@ final class DaemonRuntimeHost {
         }
 
         await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
-        if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
-            systemDNSManager.reconcile(logger: logger)
-        }
+        await reconcileSystemDNSIfRunning()
+    }
+
+    /// Twin of `AppState.runDNSReconcile`, without the debounce: off the main
+    /// actor, because it is one `networksetup` read per interface and a
+    /// helper round trip for each that drifted. Nothing follows it in either
+    /// caller, so the suspension lets nothing in that was not already let in
+    /// by the orchestrator call before it.
+    private func reconcileSystemDNSIfRunning() async {
+        guard platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running else { return }
+        let manager = systemDNSManager
+        await platformWork.run { [logger] in manager.reconcile(logger: logger) }
     }
 
     private func startDNSHealthTimer(forwarderPort: Int) {
@@ -570,23 +581,36 @@ final class DaemonRuntimeHost {
         dnsHealthTimer = nil
     }
 
-    private func handleDNSHealthResult(alive: Bool, forwarderPort: Int) {
-        // Twin of `AppState.handleDNSHealthResult`.
+    /// Internal so the host's tests can report a failed probe; the probe
+    /// itself asks the real port 53.
+    func handleDNSHealthResult(alive: Bool, forwarderPort: Int) {
+        // Twin of `AppState.handleDNSHealthResult`: the restart and the probe
+        // after it run off the main actor, one at a time.
         if alive { return }
+        guard !dnsRelayRestartInFlight else { return }
+        dnsRelayRestartInFlight = true
 
         logger.log(.warning, "DNS liveness probe failed. Attempting relay restart.", category: .system)
-        do {
-            try systemDNSManager.startRelay(forwarderPort: forwarderPort, logger: logger)
-            if systemDNSManager.probeLiveness() {
-                logger.log(.notice, "DNS relay restarted successfully.", category: .system)
-                orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.relay_restarted", detail: "source=daemon_health_timer"))
-                return
+        let manager = systemDNSManager
+        deliveries.deliver { [weak self, platformWork, logger] in
+            let outcome = await platformWork.run {
+                manager.restartRelayIfManaged(forwarderPort: forwarderPort, logger: logger)
             }
-        } catch {
-            logger.log(.warning, "DNS relay restart failed: \(error.localizedDescription)", category: .system)
+            self?.finishDNSRelayRestart(outcome)
         }
+    }
 
-        orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.pipeline_unresponsive", detail: "source=daemon_health_timer"))
+    private func finishDNSRelayRestart(_ outcome: SystemDNSManager.RelayRestart) {
+        dnsRelayRestartInFlight = false
+        switch outcome {
+        case .notManaged:
+            // A stop finished while the restart was out.
+            break
+        case .restarted:
+            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.relay_restarted", detail: "source=daemon_health_timer"))
+        case .unresponsive:
+            orchestrator.eventLog.append(RuntimeEvent(kind: .health, event: "dns.pipeline_unresponsive", detail: "source=daemon_health_timer"))
+        }
     }
 
     private func writeReadyFile() {
