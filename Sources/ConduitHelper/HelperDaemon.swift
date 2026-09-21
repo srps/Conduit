@@ -168,6 +168,9 @@ enum HelperDaemon {
     }
 
     private static func processRequest(_ request: HelperRequest) -> HelperResponse {
+        // One budget for every child the command runs, `networksetup` and
+        // `ifconfig` alike. The client's deadline is built from the same number.
+        let deadline = HelperLineIO.deadline(afterMilliseconds: HelperSubprocess.operationMilliseconds)
         switch request.command {
         case .ping:
             return .ok()
@@ -190,16 +193,16 @@ enum HelperDaemon {
             guard HelperInputValidator.validateRelayBindHost(host) else {
                 return .error("Invalid relay bind host")
             }
-            return startTCPRelay(listenPort: listenPort, targetPort: targetPort, host: host)
+            return startTCPRelay(listenPort: listenPort, targetPort: targetPort, host: host, deadline: deadline)
         case .stopTCPRelay:
-            stopTCPRelay()
+            stopTCPRelay(deadline: deadline)
             return .ok()
         case .applyDNS, .removeDNS, .applySystemProxy, .clearSystemProxy,
              .setProxyBypass, .setAutoproxyURL, .disableAutoproxy,
              .setWebProxyEndpoint, .setAutoproxy, .setDNSServers:
             let args = HelperArguments(command: request.command, values: request.values)
             do {
-                try HelperTool.run(arguments: args)
+                try HelperTool.run(arguments: args, deadline: deadline)
                 return .ok()
             } catch {
                 return .error(error.localizedDescription)
@@ -343,7 +346,7 @@ enum HelperDaemon {
     nonisolated(unsafe) private static var currentRelayHost: String?
     nonisolated(unsafe) private static var currentTCPRelay: TCPRelayParameters?
 
-    private static func startTCPRelay(listenPort: Int, targetPort: Int, host: String) -> HelperResponse {
+    private static func startTCPRelay(listenPort: Int, targetPort: Int, host: String, deadline: UInt64) -> HelperResponse {
         let requested = TCPRelayParameters(listenPort: listenPort, targetPort: targetPort, host: host)
         if let dead = tcpRelay, !dead.isRunning {
             // The accept loop left on its own. Forget the listener, keep the
@@ -369,7 +372,7 @@ enum HelperDaemon {
             // listener, a failed re-point — keeps the alias the app's
             // listener is bound to.
             if let previous = currentRelayHost, previous != host {
-                stopTCPRelay()
+                stopTCPRelay(deadline: deadline)
             } else {
                 tcpRelay?.stop()
                 tcpRelay = nil
@@ -385,7 +388,7 @@ enum HelperDaemon {
         // host that has none.
         let addsAlias = host != "127.0.0.1" && currentRelayHost != host
         if addsAlias {
-            let status = runIfconfig(["lo0", "alias", host, "netmask", "255.255.255.255"])
+            let status = runIfconfig(["lo0", "alias", host, "netmask", "255.255.255.255"], deadline: deadline)
             if status != 0 {
                 // Non-zero also fires when the alias already exists — the
                 // bind below is the authoritative test, so log and continue.
@@ -406,42 +409,41 @@ enum HelperDaemon {
             // belongs to a listener that is still bound to it; removing it
             // on a failed re-point stranded that listener until the next
             // reassert put the alias back.
-            if addsAlias { removeRelayAliasIfNeeded() }
+            if addsAlias { removeRelayAliasIfNeeded(deadline: deadline) }
             return .error("TCP relay bind on \(host):\(listenPort) failed: \(error.localizedDescription)")
         }
     }
 
-    private static func stopTCPRelay() {
+    private static func stopTCPRelay(deadline: UInt64) {
         // 42 of the field log's `stop-tcp-relay` commands arrived with no
         // relay running; a no-op should not claim to have stopped one.
         guard tcpRelay != nil || currentRelayHost != nil else { return }
         tcpRelay?.stop()
         tcpRelay = nil
         currentTCPRelay = nil
-        removeRelayAliasIfNeeded()
+        removeRelayAliasIfNeeded(deadline: deadline)
         HelperLog.notice("TCP relay stopped")
     }
 
-    private static func removeRelayAliasIfNeeded() {
+    private static func removeRelayAliasIfNeeded(deadline: UInt64) {
         guard let host = currentRelayHost else { return }
-        let status = runIfconfig(["lo0", "-alias", host])
+        let status = runIfconfig(["lo0", "-alias", host], deadline: deadline)
         if status != 0 {
             HelperLog.warning("ifconfig lo0 -alias \(host) exited \(status)")
         }
         currentRelayHost = nil
     }
 
-    private static func runIfconfig(_ arguments: [String]) -> Int32 {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/sbin/ifconfig")
-        task.arguments = arguments
+    /// -1 for an `ifconfig` that could not be launched or outlived the
+    /// command's deadline. Both callers log the status and go on: the bind
+    /// that follows an `alias` is the test of it, and a `-alias` that did not
+    /// land leaves an address on `lo0` that the next start reuses.
+    private static func runIfconfig(_ arguments: [String], deadline: UInt64) -> Int32 {
         do {
-            try task.run()
+            return try HelperSubprocess.run("/sbin/ifconfig", arguments, deadline: deadline).exitCode
         } catch {
-            HelperLog.error("failed to launch ifconfig: \(error.localizedDescription)")
+            HelperLog.error("ifconfig \(arguments.joined(separator: " ")) did not run: \(error.localizedDescription)")
             return -1
         }
-        task.waitUntilExit()
-        return task.terminationStatus
     }
 }
