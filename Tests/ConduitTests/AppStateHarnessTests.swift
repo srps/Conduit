@@ -70,13 +70,19 @@ final class AppStateHarness {
     }
 
     /// Reports `state` from the VPN observer and waits for the app to take it
-    /// in. The handler updates the split-DNS gate synchronously before it
-    /// hands the state to the orchestrator, so the snapshot is the signal.
+    /// in: the hop onto the main actor, the handler, the orchestrator work it
+    /// starts and the snapshot that comes back. The observer calls its
+    /// handler from inside `emit`, so the delivery is counted by the time
+    /// `emit` returns and the drain cannot slip past it.
     func setVPN(_ state: VPNObservedState, file: StaticString = #filePath, line: UInt = #line) async {
         vpn.emit(state)
-        await settle("the app sees the VPN \(state)", file: file, line: line) {
-            self.appState?.runtimeSnapshot.vpnState == state
-        }
+        await deliveries()
+        XCTAssertEqual(appState?.runtimeSnapshot.vpnState, state, "the app sees the VPN \(state)", file: file, line: line)
+    }
+
+    /// Waits for every observer delivery in flight, and what each started.
+    func deliveries() async {
+        await appState?.deliveries.drain()
     }
 
     /// Joins launch-time crash recovery. Recovery restores the machine and
@@ -87,8 +93,10 @@ final class AppStateHarness {
         await appState?.awaitLaunchRecovery()
     }
 
-    /// Polls until `condition` holds. The app's observers deliver through
-    /// `Task { @MainActor }` hops, so a scenario that drives one waits here.
+    /// Polls until `condition` holds. For the edges that still have no
+    /// handle, which today is the listener shutdown `tearDown` waits for;
+    /// observer deliveries have `deliveries()` and recovery has
+    /// `launchRecovery()`.
     func settle(
         _ what: String,
         timeoutMilliseconds: Int = 3000,
@@ -479,11 +487,11 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53")
 
         await harness.setVPN(.disconnected(reason: .userInitiated))
-        await harness.settle("the entry file is removed") { self.machine.resolverFile(for: "corp.example") == nil }
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the entry file is removed")
         XCTAssertTrue(isRunning(appState), "the proxy itself stays up")
 
         await harness.setVPN(.connected)
-        await harness.settle("the entry file is back") { self.machine.resolverFile(for: "corp.example") != nil }
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the entry file is back")
     }
 
     /// The interface name belongs to the delivery it came with, read on the
@@ -493,8 +501,9 @@ final class AppStateHarnessTests: XCTestCase {
         harness.vpn.connectedInterfaceName = "utun4"
         harness.vpn.emit(.connected)
         harness.vpn.connectedInterfaceName = "utun9"
-        await harness.settle("the app sees the VPN connected") { appState.runtimeSnapshot.vpnState == .connected }
+        await harness.deliveries()
 
+        XCTAssertEqual(appState.runtimeSnapshot.vpnState, .connected)
         XCTAssertEqual(appState.runtimeSnapshot.vpnInterfaceName, "utun4")
     }
 

@@ -26,6 +26,12 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 - `pm-sim dns-ephemeral-pair-rebind` takes the TCP port in the gap between the two binds
   with a real listener and checks that the pair moves together, that one retry event names
   the port given up, and that both transports of the new pair answer.
+- The app and the daemon host count their observer hops onto the main actor, and the
+  orchestrator work those handlers start, in `ObserverDeliveries`, so a test awaits
+  `deliveries.drain()` instead of polling the snapshot or sleeping 50 ms. Launch recovery's
+  join is open to the harness as well: recovery restores the machine and then releases the
+  journal, and `testLaunchRestoresTheProxyACrashedRunLeftBehind` polled for the first and
+  asserted on the second, failing four runs in twenty. (#19)
 
 ## 0.3.2
 

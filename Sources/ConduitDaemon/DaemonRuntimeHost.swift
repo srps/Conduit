@@ -102,6 +102,10 @@ final class DaemonRuntimeHost {
         commandRunner: commandRunner
     )
     private let networkMonitor = NetworkMonitor()
+    /// The hops from the observers and the orchestrator's callbacks onto the
+    /// main actor. Internal so the tests can `drain()` them instead of
+    /// sleeping. Same shape as `AppState`.
+    let deliveries = ObserverDeliveries()
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<DaemonVPNFlapWindowConfig>
     private var dnsHealthTimer: DispatchSourceTimer?
@@ -195,23 +199,23 @@ final class DaemonRuntimeHost {
         orchestrator.eventLog.setSink { [eventWriter] event in eventWriter.record(event) }
         privilegeAuditSink.set { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
 
-        orchestrator.onSnapshotChange = { [weak self] snapshot in
-            Task { @MainActor in
+        orchestrator.onSnapshotChange = { [weak self, deliveries] snapshot in
+            deliveries.deliver {
                 self?.writeSnapshotFile(snapshot: snapshot)
             }
         }
-        orchestrator.onConfigChange = { [weak self] updatedConfig in
-            Task { @MainActor in
+        orchestrator.onConfigChange = { [weak self, deliveries] updatedConfig in
+            deliveries.deliver {
                 self?.config = updatedConfig
             }
         }
-        orchestrator.onEvent = { [weak self] event in
-            Task { @MainActor in
+        orchestrator.onEvent = { [weak self, deliveries] event in
+            deliveries.deliver {
                 self?.handle(orchestratorEvent: event)
             }
         }
-        networkMonitor.onChange = { [weak self] change in
-            Task { @MainActor in
+        networkMonitor.onChange = { [weak self, deliveries] change in
+            deliveries.deliver {
                 await self?.handleNetworkChange(change)
             }
         }
@@ -220,9 +224,9 @@ final class DaemonRuntimeHost {
         // name to the one delivered before it. Same shape as `AppState`.
         // Weak on both: the monitor stores this closure, so a strong capture
         // of the monitor would keep a stopped host's observer alive forever.
-        self.vpnStatusMonitor.setOnChange { [weak self, weak monitor = self.vpnStatusMonitor] state in
+        self.vpnStatusMonitor.setOnChange { [weak self, deliveries, weak monitor = self.vpnStatusMonitor] state in
             let interfaceName = monitor?.connectedInterfaceName
-            Task { @MainActor in
+            deliveries.deliver {
                 await self?.handleVPNStateChange(state, interfaceName: interfaceName)
             }
         }

@@ -129,6 +129,10 @@ final class AppState: ObservableObject {
     /// Started by `init` and joined by `awaitLaunchRecovery()` — see
     /// `LaunchRecovery` for why it is neither inline nor unordered.
     private var launchRecovery: LaunchRecovery?
+    /// The hops from the observers and the orchestrator's callbacks onto the
+    /// main actor, and the orchestrator work those handlers start. Internal so
+    /// the harness can `drain()` them instead of polling the snapshot.
+    let deliveries = ObserverDeliveries()
     private let configurationLoadError: ConfigurationLoadError?
 
     /// Every parameter defaults to the production collaborator; the test
@@ -320,8 +324,8 @@ final class AppState: ObservableObject {
         reconciler.markReconciled(platformConfig: platformConfig)
         reconciler.host = self
         orchestrator.config = config
-        orchestrator.onSnapshotChange = { [weak self] snapshot in
-            Task { @MainActor in
+        orchestrator.onSnapshotChange = { [weak self, deliveries] snapshot in
+            deliveries.deliver {
                 self?.runtime.apply(snapshot: snapshot)
             }
         }
@@ -335,15 +339,15 @@ final class AppState: ObservableObject {
         // box, and wiring that echo back into `config` replaced the newer
         // edits with the older save. The daemon keeps the callback: it has
         // no editor to protect and reads its config back from the runtime.
-        orchestrator.onEvent = { [weak self] event in
-            Task { @MainActor in
+        orchestrator.onEvent = { [weak self, deliveries] event in
+            deliveries.deliver {
                 self?.handle(orchestratorEvent: event)
             }
         }
         runtime.apply(snapshot: orchestrator.snapshot)
 
-        networkMonitor.onChange = { [weak self] change in
-            Task { @MainActor in
+        networkMonitor.onChange = { [weak self, deliveries] change in
+            deliveries.deliver {
                 self?.handleNetworkChange(change)
             }
         }
@@ -353,9 +357,9 @@ final class AppState: ObservableObject {
         // tasks run, and a connected state could carry a later tunnel's name.
         // Weak on both: the monitor stores this closure, so a strong capture
         // of the monitor would keep a stopped host's observer alive forever.
-        self.vpnStatusMonitor.setOnChange { [weak self, weak monitor = self.vpnStatusMonitor] state in
+        self.vpnStatusMonitor.setOnChange { [weak self, deliveries, weak monitor = self.vpnStatusMonitor] state in
             let interfaceName = monitor?.connectedInterfaceName
-            Task { @MainActor in
+            deliveries.deliver {
                 self?.handleVPNStateChange(state, interfaceName: interfaceName)
             }
         }
@@ -392,8 +396,8 @@ final class AppState: ObservableObject {
         self.vpnStatusMonitor.start()
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.handleSystemWake() }
+        ) { [weak self, deliveries] _ in
+            deliveries.deliver { self?.handleSystemWake() }
         }
         // Crash recovery for both platform surfaces: a run that was `SIGKILL`ed
         // never got to tear down, and launch is when the recorded prior state is
@@ -1488,7 +1492,7 @@ final class AppState: ObservableObject {
 
     private func handleSystemWake() {
         guard !rejectUnavailableConfiguration() else { return }
-        Task { @MainActor in
+        deliveries.deliver { [orchestrator] in
             await orchestrator.handleSystemWake()
         }
         // Sleep is when the VPN client (Cisco Secure Client) most often
@@ -1505,7 +1509,7 @@ final class AppState: ObservableObject {
 
     private func handleNetworkChange(_ change: NetworkMonitor.PathChange) {
         guard !rejectUnavailableConfiguration() else { return }
-        Task { @MainActor in
+        deliveries.deliver { [orchestrator] in
             await orchestrator.handleNetworkChange(description: change.description, pathSatisfied: change.satisfied)
         }
 
@@ -1526,7 +1530,7 @@ final class AppState: ObservableObject {
         guard !rejectUnavailableConfiguration() else { return }
         let entriesWantedChanged = splitDNSGate.update(state)
 
-        Task { @MainActor in
+        deliveries.deliver { [orchestrator] in
             await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
         }
 
