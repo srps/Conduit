@@ -17,6 +17,12 @@ struct AppWindow: View {
         } detail: {
             detail
                 .navigationTitle(appState.selectedSection.title)
+                // Overview and the Configure sections without a live strip
+                // put their scroll view against the top of the pane, so rows
+                // scroll under the title bar. The default soft edge fades
+                // them and leaves ghost text behind the title; the hard edge
+                // is an opaque bar they disappear under.
+                .scrollEdgeEffectStyle(.hard, for: .top)
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 760, minHeight: 520)
