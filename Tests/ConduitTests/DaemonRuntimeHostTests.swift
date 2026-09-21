@@ -138,7 +138,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         defer { observer.stop() }
 
         observer.emit(.connected)
-        try? await Task.sleep(for: .milliseconds(50))
+        await host.deliveries.drain()
 
         XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected)
     }
@@ -175,14 +175,14 @@ final class DaemonRuntimeHostTests: XCTestCase {
         observer.emit(.connected)
         // A later transition's refresh, before the queued task has run.
         observer.connectedInterfaceName = "utun9"
-        try? await Task.sleep(for: .milliseconds(50))
+        await host.deliveries.drain()
 
         XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected)
         XCTAssertEqual(host.orchestrator.snapshot.vpnInterfaceName, "utun4")
 
         // The same verdict delivered again with the new name follows it.
         observer.emit(.connected)
-        try? await Task.sleep(for: .milliseconds(50))
+        await host.deliveries.drain()
         XCTAssertEqual(host.orchestrator.snapshot.vpnInterfaceName, "utun9")
     }
 
