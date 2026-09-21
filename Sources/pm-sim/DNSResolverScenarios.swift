@@ -39,6 +39,111 @@ enum DNSResolverScenarios {
     /// tunnel is down.
     private static let unreachableInternalDNS = "192.0.2.53"
 
+    /// `pm-sim dns-ephemeral-pair-rebind`. With `port: 0` the forwarder binds
+    /// UDP first and puts TCP on the number UDP got, but an ephemeral UDP port
+    /// does not reserve its TCP twin. This takes the TCP port in that gap with
+    /// a real listener, so the forwarder meets a real `EADDRINUSE`:
+    ///
+    /// | # | expected                                                        |
+    /// |---|-----------------------------------------------------------------|
+    /// | A | UDP and TCP end up on one port, and not the one that was taken  |
+    /// | B | one `dns.listener_port_retry` event names the port given up     |
+    /// | C | a query is answered on both transports of the new pair          |
+    ///
+    /// It used to keep the UDP port, warn, and serve UDP only, which a client
+    /// retrying over TCP after a truncated answer reads as a dead resolver.
+    @MainActor
+    static func ephemeralPairRebind(verbose: Bool) async throws -> ScenarioResult {
+        let name = "dnsEphemeralPairRebind"
+        let start = Date()
+        var notes: [String] = []
+
+        let group = MultiThreadedEventLoopGroup.singleton
+        let logger = RecordingConsoleLogSink(minLevel: verbose ? .debug : .warning)
+
+        var config = ProxyConfig.testFixture()
+        // An intercept rule is answered by the forwarder itself, so the probe
+        // needs no reachable nameserver.
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.pair.test", interceptIP: "127.44.3.1", enabled: true)]
+        config.upstreams = []
+        let frozen = config
+
+        let takenPort = NIOLockedValueBox<Int?>(nil)
+        let squatter = NIOLockedValueBox<Channel?>(nil)
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        ScenarioCleanup.register { _ = try? await squatter.withLockedValue { $0 }?.close().get() }
+
+        let forwarder = LocalDNSForwarder(
+            group: group,
+            logger: logger,
+            configProvider: { frozen },
+            eventSink: { event in events.withLockedValue { $0.append(event) } },
+            willBindTCP: { port in
+                guard takenPort.withLockedValue({ $0 }) == nil else { return }
+                takenPort.withLockedValue { $0 = port }
+                // `SO_REUSEADDR` so a connection in `TIME_WAIT` on this port
+                // does not stop the squatter where it would not stop the
+                // forwarder. Once this socket listens, the option no longer
+                // helps the forwarder.
+                let channel = try? await ServerBootstrap(group: group)
+                    .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+                    .bind(host: "127.0.0.1", port: port)
+                    .get()
+                squatter.withLockedValue { $0 = channel }
+            }
+        )
+        ScenarioCleanup.register { await forwarder.stop() }
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+
+        let taken = takenPort.withLockedValue { $0 } ?? 0
+        let udpPort = forwarder.listeningPort ?? 0
+        let tcpPort = forwarder.tcpListeningPort ?? 0
+        notes.append("took tcp=\(taken) in the gap; forwarder bound udp=\(udpPort) tcp=\(tcpPort)")
+
+        // ── Case A: the pair moved, together ──
+        let passA = udpPort != 0 && udpPort == tcpPort && udpPort != taken
+
+        // ── Case B: the retry is an event, naming the port given up ──
+        let seen = events.withLockedValue { $0 }
+        notes.append("B events: \(seen.map { "\($0.event)[\($0.detail ?? "")]" })")
+        let passB = seen.map(\.event) == ["dns.listener_port_retry"]
+            && seen.first?.detail?.hasPrefix("port=\(taken) attempt=1 ") == true
+
+        // ── Case C: both transports of the new pair answer ──
+        let query = DNSWireFormat.buildQuery(domain: "host.pair.test", txID: 0x5157, qtype: 1)
+        let udpAnswer = try await DNSProbe.overUDP(query: query, port: udpPort, timeout: 5)
+        let tcpAnswer = tcpPort == 0 ? nil : try await DNSProbe.overTCP(query: query, port: tcpPort, timeout: 5)
+        let answeredUDP = udpAnswer.map { DNSWireFormat.responseQuestionMatches(query: query, response: $0) } ?? false
+        let answeredTCP = tcpAnswer.map { DNSWireFormat.responseQuestionMatches(query: query, response: $0) } ?? false
+        notes.append("C answered: udp=\(answeredUDP) tcp=\(answeredTCP)")
+        let passC = answeredUDP && answeredTCP
+
+        let pass = passA && passB && passC
+        notes.append("A=\(verdict(passA)) B=\(verdict(passB)) C=\(verdict(passC))")
+        notes.append(pass
+            ? "PASS — a taken TCP twin moves the pair to a fresh port, with one event, and both transports answer"
+            : "FAIL — see per-case lines above")
+
+        return ScenarioResult(
+            name: name,
+            clientCount: 2,
+            clientsOpened: 2,
+            clientsWithFirstByte: [answeredUDP, answeredTCP].filter { $0 }.count,
+            clientsClosedEarly: [answeredUDP, answeredTCP].filter { !$0 }.count,
+            totalBytes: (udpAnswer?.count ?? 0) + (tcpAnswer?.count ?? 0),
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("UDP and TCP share a fresh port", passA),
+                .init("one retry event names the port given up", passB),
+                .init("both transports of the new pair answer", passC),
+            ],
+            notes: notes
+        )
+    }
+
     @MainActor
     static func dohBlockedStillAnswers(verbose: Bool) async throws -> ScenarioResult {
         let name = "dnsDoHBlockedStillAnswers"
