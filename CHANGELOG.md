@@ -21,6 +21,12 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   `dns.tcp_listener_unavailable` reports a forwarder left without a TCP listener, whether it
   serves UDP only or failed to start. Until now the only trace was a warning line.
 
+### Development
+
+- `pm-sim dns-ephemeral-pair-rebind` takes the TCP port in the gap between the two binds
+  with a real listener and checks that the pair moves together, that one retry event names
+  the port given up, and that both transports of the new pair answer.
+
 ## 0.3.2
 
 A maintenance release from the September 17–19 source review: two ways a client or an
