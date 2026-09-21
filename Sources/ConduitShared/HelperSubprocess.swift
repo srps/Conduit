@@ -57,7 +57,7 @@ package enum HelperSubprocess {
     package static let defaultMaxOutputBytes = 65_536
 
     /// The longest `run` can take past its deadline: both kill waits and the
-    /// drain. The client's own deadline is built from this.
+    /// drain. `HelperTransactionBudget` builds the client's deadline from it.
     package static var overrunMilliseconds: Int {
         2 * terminationGraceMilliseconds + drainGraceMilliseconds
     }
@@ -204,5 +204,26 @@ package enum HelperSubprocess {
             Darwin.kill(process.processIdentifier, SIGKILL)
         }
         return exited.wait(timeout: .now() + grace) == .success
+    }
+}
+
+/// What one helper transaction may take, as both ends count it.
+package enum HelperTransactionBudget {
+    /// The helper's bound on receiving an admitted peer's request, and on
+    /// the peer accepting the reply.
+    package static let requestMilliseconds = 5_000
+    package static let replyMilliseconds = 5_000
+
+    /// How long a client waits for one transaction, connect to reply: the
+    /// helper's own worst case and a little over. The relay start is the one
+    /// command that goes on after a child ran out of time, to undo its alias,
+    /// so the overrun is counted twice. Past this the helper is not slow, it
+    /// is held, and the client reports it unreachable rather than wait on.
+    package static var clientMilliseconds: Int {
+        requestMilliseconds
+            + HelperSubprocess.operationMilliseconds
+            + 2 * HelperSubprocess.overrunMilliseconds
+            + replyMilliseconds
+            + 1_000
     }
 }
