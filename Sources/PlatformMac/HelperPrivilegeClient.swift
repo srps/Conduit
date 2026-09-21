@@ -546,13 +546,28 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     /// same. Waiting here instead starts the clock when the helper is ours.
     /// Another process's request can still be ahead of ours; the budget does
     /// not cover that.
-    private static let transactions = NSLock()
+    ///
+    /// A semaphore rather than a lock because the wait for a turn needs a
+    /// bound of its own, on the monotonic clock: some callers are still on
+    /// the main actor, and behind a held helper the turns ahead of them are
+    /// forty seconds each.
+    private static let turn = DispatchSemaphore(value: 1)
 
     /// One transaction, connect to reply, under one monotonic deadline. Every
     /// step used to block without one: a helper held by another peer, or by a
     /// child that never returned, held this thread for as long.
+    ///
+    /// The wait for a turn gets the same budget again, so a caller is held
+    /// for two budgets at most. One that never got its turn has written
+    /// nothing, so its fallback cannot race a request of its own.
     private func sendRequest(_ request: HelperRequest) throws -> HelperResponse {
-        try Self.transactions.withLock { try transact(request) }
+        guard Self.turn.wait(timeout: .now() + .milliseconds(transactionMilliseconds)) == .success else {
+            throw PrivilegeClientError.communicationFailed(
+                "Timed out waiting for a turn after \(transactionMilliseconds) ms; this process's earlier requests are still with the helper"
+            )
+        }
+        defer { Self.turn.signal() }
+        return try transact(request)
     }
 
     private func transact(_ request: HelperRequest) throws -> HelperResponse {

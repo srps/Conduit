@@ -8,6 +8,14 @@ import XCTest
 
 /// The `networksetup` reads the DNS surface makes, answered from a described
 /// machine instead of this host. Only the three the recovery path uses.
+/// Work to run from inside a manager's liveness probe.
+private final class ProbeHook: @unchecked Sendable {
+    private let lock = NSLock()
+    private var work: (() -> Void)?
+    func set(_ work: @escaping () -> Void) { lock.withLock { self.work = work } }
+    func run() { lock.withLock { work }?() }
+}
+
 private final class FakeDNSNetworksetupRunner: @unchecked Sendable {
     /// Service name → the DNS servers the machine reports for it.
     var dnsServers: [String: [String]]
@@ -161,6 +169,25 @@ final class SystemDNSManagerTests: XCTestCase {
 
         XCTAssertEqual(manager.restartRelayIfManaged(forwarderPort: 5353, logger: nil), .notManaged)
         XCTAssertTrue(recording.commands(matching: .startDNSRelay).isEmpty)
+    }
+
+    /// The probe after the restart takes up to two seconds, outside the
+    /// operation lock. A stop in that window takes the relay down on purpose,
+    /// and the dead probe that follows is not a degraded pipeline.
+    func testAStopDuringThePostRestartProbeIsNotReportedAsUnresponsive() throws {
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": ["10.0.0.2"]])
+        let stopDuringProbe = ProbeHook()
+        let manager = SystemDNSManager(
+            privilegeClient: recording,
+            journal: journal,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            relayIsLive: { stopDuringProbe.run(); return false }
+        )
+        try manager.saveCurrentDNS(logger: nil)
+        try manager.apply(forwarderPort: 5353, logger: nil)
+        stopDuringProbe.set { try? manager.clear(logger: nil) }
+
+        XCTAssertEqual(manager.restartRelayIfManaged(forwarderPort: 5353, logger: nil), .notManaged)
     }
 
     // MARK: - Staleness detection
