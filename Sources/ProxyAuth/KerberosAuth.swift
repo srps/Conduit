@@ -28,14 +28,55 @@ private let kGSSContextFlags: OM_uint32 = OM_uint32(GSS_C_MUTUAL_FLAG | GSS_C_RE
 private let spnegoOIDBytes: [UInt8] = [0x2b, 0x06, 0x01, 0x05, 0x05, 0x02]
 /// GSS_C_NT_HOSTBASED_SERVICE: 1.2.840.113554.1.2.1.4
 private let hostbasedServiceOIDBytes: [UInt8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x01, 0x04]
+/// Kerberos 5 mechanism: 1.2.840.113554.1.2.2
+private let krb5OIDBytes: [UInt8] = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x12, 0x01, 0x02, 0x02]
 
 package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendable {
     private var gssContext: gss_ctx_id_t?
     private let lock = NSLock()
     private let gate: GSSInitiatorGate
+    private let hasInitiatorCredential: @Sendable () -> Bool
 
-    package init(gate: GSSInitiatorGate = .shared) {
+    /// `hasInitiatorCredential` is asked only after an ambiguous failure; see
+    /// `KerberosAuthError.initiatorFailure`. Tests inject it.
+    package init(
+        gate: GSSInitiatorGate = .shared,
+        hasInitiatorCredential: @escaping @Sendable () -> Bool = SystemGSSTokenProvider.hasDefaultInitiatorCredential
+    ) {
         self.gate = gate
+        self.hasInitiatorCredential = hasInitiatorCredential
+    }
+
+    /// Whether the default credential cache holds an unexpired Kerberos
+    /// initiator credential (a TGT). Reads the cache only; it never asks the
+    /// KDC. A failure to acquire answers `false`, which keeps the caller's
+    /// original "credential unavailable" classification and its message.
+    package static func hasDefaultInitiatorCredential() -> Bool {
+        var minor: OM_uint32 = 0
+        var credential: gss_cred_id_t?
+        var lifetime: OM_uint32 = 0
+        var mechOIDBytes = krb5OIDBytes
+        let major: OM_uint32 = mechOIDBytes.withUnsafeMutableBufferPointer { oidPtr in
+            var mechOID = gss_OID_desc(length: OM_uint32(oidPtr.count), elements: oidPtr.baseAddress)
+            return withUnsafeMutablePointer(to: &mechOID) { mechPtr in
+                var mechs = gss_OID_set_desc(count: 1, elements: mechPtr)
+                return gss_acquire_cred(
+                    &minor,
+                    nil,
+                    OM_uint32.max,  // GSS_C_INDEFINITE
+                    &mechs,
+                    gss_cred_usage_t(GSS_C_INITIATE),
+                    &credential,
+                    nil,
+                    &lifetime
+                )
+            }
+        }
+        if credential != nil {
+            var releaseMinor: OM_uint32 = 0
+            gss_release_cred(&releaseMinor, &credential)
+        }
+        return major & kGSSErrorMask == 0 && lifetime > 0
     }
 
     package func generateToken(host: String, inputToken: Data?) throws -> Data? {
@@ -129,7 +170,10 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
 
         guard major & kGSSErrorMask == 0 else {
             deleteContext()
-            throw KerberosAuthError.initSecContextFailed(major, minor)
+            throw KerberosAuthError.initiatorFailure(
+                major: major, minor: minor, host: host,
+                hasInitiatorCredential: hasInitiatorCredential
+            )
         }
 
         guard outputToken.length > 0, let value = outputToken.value else {
@@ -191,8 +235,36 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
 package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassifying {
     case importNameFailed(OM_uint32, OM_uint32)
     case initSecContextFailed(OM_uint32, OM_uint32)
+    /// A ticket-granting ticket is present, but no service ticket for `host`
+    /// could be obtained: the KDC is unreachable, or the SPN is not registered.
+    /// See `initiatorFailure(major:minor:host:hasInitiatorCredential:)`.
+    case serviceTicketUnavailable(host: String, major: OM_uint32, minor: OM_uint32)
     case emptyToken
     case noTicket
+
+    /// Classify a failed `gss_init_sec_context`.
+    ///
+    /// SPNEGO answers `GSS_S_BAD_MECH` (or `GSS_S_FAILURE` with minor 0) for
+    /// any failure of the Kerberos mech to produce a token, so the code alone
+    /// cannot tell "no TGT" from "a TGT, but the TGS request failed". Only
+    /// for those ambiguous codes, `hasInitiatorCredential` asks whether a
+    /// default Kerberos credential exists; if it does, the failure is the
+    /// service ticket's, which is a network-class failure and not a missing
+    /// credential. Issue #73.
+    package static func initiatorFailure(
+        major: OM_uint32,
+        minor: OM_uint32,
+        host: String,
+        hasInitiatorCredential: () -> Bool
+    ) -> KerberosAuthError {
+        let routine = major & kGSSRoutineErrorMask
+        let ambiguous = routine == UInt32(GSS_S_BAD_MECH)
+            || (routine == UInt32(GSS_S_FAILURE) && minor == 0)
+        if ambiguous, hasInitiatorCredential() {
+            return .serviceTicketUnavailable(host: host, major: major, minor: minor)
+        }
+        return .initSecContextFailed(major, minor)
+    }
 
     package var errorDescription: String? {
         switch self {
@@ -200,6 +272,8 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
             return "Kerberos: service name import failed — check the proxy hostname (GSS major=\(major), minor=\(minor))."
         case .initSecContextFailed(let major, let minor):
             return "Kerberos: \(Self.gssRoutineDescription(major)) (GSS major=\(major), minor=\(minor))."
+        case .serviceTicketUnavailable(let host, let major, let minor):
+            return "Kerberos: a Kerberos ticket is present, but no service ticket for HTTP/\(host) could be obtained — the KDC may be unreachable (check the VPN and DNS), or the proxy has no registered service principal (GSS major=\(major), minor=\(minor))."
         case .emptyToken:
             return "Kerberos: the initial authentication step produced no token."
         case .noTicket:
@@ -214,8 +288,10 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
         case .initSecContextFailed(let major, let minor):
             let routine = major & kGSSRoutineErrorMask
             // GSS_S_NO_CRED / GSS_S_CREDENTIALS_EXPIRED: explicit credential absence.
-            // GSS_S_BAD_MECH: Apple's Heimdal returns this when no TGT exists for SPNEGO.
-            // GSS_S_FAILURE with minor==0: generic "no credential" on some Heimdal paths.
+            // GSS_S_BAD_MECH / GSS_S_FAILURE with minor==0: SPNEGO's answer to any
+            //   Kerberos-mech failure. `initiatorFailure` has already turned the
+            //   ones with a TGT present into `.serviceTicketUnavailable`, so what
+            //   reaches here had no usable credential.
             //   Non-zero minor indicates a specific sub-error (KDC unreachable, clock skew,
             //   etc.) which should not silently downgrade to NTLM.
             return routine == UInt32(GSS_S_NO_CRED)
@@ -224,9 +300,19 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
                 || (routine == UInt32(GSS_S_FAILURE) && minor == 0)
         case .noTicket:
             return true
-        case .importNameFailed, .emptyToken:
+        case .importNameFailed, .emptyToken, .serviceTicketUnavailable:
             return false
         }
+    }
+
+    /// Whether `NegotiateAuthenticator` may answer this failure with NTLM.
+    /// Besides a missing credential, that includes a service ticket that
+    /// cannot be had: a proxy without a registered SPN is exactly where
+    /// browsers fall back to NTLM, and an NTLM exchange needs no KDC on this
+    /// side.
+    package var permitsNTLMFallback: Bool {
+        if case .serviceTicketUnavailable = self { return true }
+        return isCredentialUnavailable
     }
 
     /// Short, machine-consumable reason code for the credential-unavailable
@@ -245,6 +331,7 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
             default: return "routine_\(routine)"
             }
         case .noTicket: return "no_ticket"
+        case .serviceTicketUnavailable: return "service_ticket_unavailable"
         case .importNameFailed, .emptyToken: return "other"
         }
     }
@@ -280,6 +367,10 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
             //      Fix: ask IT to add `io.github.srps.Conduit` to the
             //      `credentialBundleIDACL` array in the SSO Extension
             //      configuration profile (payload `com.apple.extensiblesso`).
+            //
+            // A third case, a TGT whose service-ticket request fails, is
+            // also BAD_MECH; `initiatorFailure` separates it out as
+            // `.serviceTicketUnavailable` because the TGT is visible to us.
             //
             // We can't distinguish (1) from (2) from the GSS routine code
             // alone — both manifest as BAD_MECH. The message names both so
@@ -362,7 +453,8 @@ package final class KerberosAuthenticator: ProxyAuthenticator, @unchecked Sendab
 
 /// Composite authenticator: tries Kerberos (Negotiate) first, falls back to NTLM
 /// if Kerberos fails and NTLM credentials are available.
-/// Only falls back on credential-class errors (missing/expired ticket).
+/// Only falls back on credential-class errors (missing/expired ticket) and on
+/// a service ticket that cannot be obtained (`permitsNTLMFallback`).
 /// Configuration and integrity errors propagate without downgrading.
 package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unchecked Sendable {
     package let scheme = "Negotiate"
@@ -450,8 +542,12 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
             usingFallback = false
             onKerberosSuccess?(host)
             return (token, false)
-        } catch let kerberosError as KerberosAuthError where kerberosError.isCredentialUnavailable {
-            if allowFallback, let fallback = resolvedFallback() {
+        } catch let kerberosError as KerberosAuthError where kerberosError.permitsNTLMFallback {
+            // Deferring the fallback gives a credential that may come back a
+            // moment to do so. A failure that is not retryable, such as a
+            // service ticket the KDC would not issue, gains nothing from the
+            // wait, and the caller will not retry it to reach the last attempt.
+            if allowFallback || !kerberosError.isCredentialRetryable, let fallback = resolvedFallback() {
                 usingFallback = true
                 onKerberosFallback?(host, kerberosError.fallbackReasonCode)
                 return (try fallback.initialToken(for: host), true)

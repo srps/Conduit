@@ -4,6 +4,21 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+### Fixed
+
+- A Kerberos ticket that is present, with no service ticket to be had for the upstream
+  proxy (the KDC unreachable over a degraded VPN, or no registered SPN), is no longer
+  reported as a missing credential. macOS SPNEGO answers `GSS_S_BAD_MECH`, minor 0, for
+  both, and Conduit took it for "no TGT": it told the user to run `kinit` or ask IT for
+  the SSO profile, skipped automatic recovery, and let every queued handshake re-run the
+  failing ticket request past the GSS gate's cooldown. On that code Conduit now asks GSS
+  whether a default Kerberos credential exists. When one does, the failure names the
+  service ticket and the likely causes, counts as unreachable so recovery runs, and cools
+  the gate down; an NTLM fallback with a saved password answers at once instead of after
+  the retry waits meant for a returning credential. (#73)
+
 ## 0.3.3
 
 A maintenance release that finishes the bounds on the privileged helper: the child

@@ -57,6 +57,7 @@ enum PMSim {
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
               observable-target-redaction  Query/fragment privacy across observations
               security-boundaries     Auth destinations, config rejection, and loopback listeners
+              kerberos-service-ticket A TGT without a service ticket is unreachable, not a missing credential
 
             OPTIONS:
               --verbose               Stream per-handler debug logs to stderr
@@ -182,6 +183,7 @@ enum PMSim {
         "dns-ephemeral-pair-rebind",
         "observable-target-redaction",
         "security-boundaries",
+        "kerberos-service-ticket",
     ]
 
     @MainActor private static var setupCleanupCompleted = false
@@ -265,6 +267,8 @@ enum PMSim {
             return [try await ObservableTargetScenarios.redaction()]
         case "security-boundaries":
             return [try await SecurityScenarios.boundaries(verbose: verbose)]
+        case "kerberos-service-ticket":
+            return [try await KerberosScenarios.serviceTicketUnavailable(verbose: verbose)]
         case "fixture-pass", "fixture-fail", "fixture-missing":
             return [.reportingFixture(name: name)]
         case "fixture-throw":

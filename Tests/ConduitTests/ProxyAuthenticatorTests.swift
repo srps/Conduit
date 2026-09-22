@@ -243,12 +243,18 @@ final class ProxyAuthenticatorTests: XCTestCase {
 
     /// The kernel's retry withholds the fallback while it retries Kerberos,
     /// then allows it; the authenticator reports which scheme answered.
+    /// Scripted rather than live GSS: on a machine holding a TGT, live GSS
+    /// reports a service-ticket failure, which does not defer (#73).
     func testNegotiateAuthenticatorWithholdsNTLMWhenFallbackIsNotAllowed() throws {
         let creds = ProxyCredentials(
             username: "user", domain: "DOMAIN", workstation: "WS",
             ntHash: SecretBytes.repeating(0xAA, count: 16)
         )
-        let auth = NegotiateAuthenticator(ntlmFallback: NTLMAuthenticator(credentials: creds))
+        let noTGT = RecordingGSSTokenProvider(errorToThrow: KerberosAuthError.initSecContextFailed(0x0001_0000, 0))
+        let auth = NegotiateAuthenticator(
+            kerberos: KerberosAuthenticator(tokenProvider: noTGT),
+            ntlmFallback: NTLMAuthenticator(credentials: creds)
+        )
 
         XCTAssertThrowsError(try auth.initialToken(for: "proxy.example.com", allowFallback: false)) { error in
             XCTAssertTrue(error.isCredentialUnavailable, "the Kerberos failure surfaces so the retry can wait on it: \(error)")
