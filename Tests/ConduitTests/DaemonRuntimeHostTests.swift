@@ -7,6 +7,38 @@ import XCTest
 @MainActor
 final class DaemonRuntimeHostTests: XCTestCase {
 
+    /// The daemon's credentials come from the injected store, not the login
+    /// Keychain. Without the seam a host over a fake machine read and wrote
+    /// the installed app's Keychain entries, the gap #24's review closed in
+    /// `AppState`.
+    func testCredentialsComeFromTheInjectedStore() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-credential-store-\(UUID().uuidString)")
+        let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let upstream = UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)
+        var config = GenericDefaults.shared.makeConfig()
+        config.profileName = "Seam \(UUID().uuidString)"
+        config.username = "user"
+        config.domain = "DOMAIN"
+        config.authMode = .ntlmv2
+        config.upstreams = [upstream]
+        try ProxyConfigPersistence.save(config, in: environment)
+        let secrets = InMemorySecretStore()
+        let profileName = config.profileName
+        try CredentialManager(identityProvider: { (domain: "DOMAIN", username: "user", profileName: profileName) }, store: secrets)
+            .saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
+
+        let host = DaemonRuntimeHost(
+            environment: environment, logger: DiscardingLogSink(),
+            loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: RecordingPrivilegeClient(),
+            credentialStore: secrets
+        )
+
+        let authenticator = try host.orchestrator.lateBoundAuthenticatorProvider(upstream)
+        XCTAssertEqual(authenticator.scheme, "NTLM")
+    }
+
     func testMalformedSidecarsRejectReloadWithoutReplacingAnyConfiguration() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-sidecar-reload-\(UUID().uuidString)")
         let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
@@ -23,7 +55,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = DaemonRuntimeHost(
             environment: environment, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
-            vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
+            vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(),
             commandRunner: { path, arguments in try machine.run(path, arguments) },
             homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
         )
@@ -60,6 +92,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = DaemonRuntimeHost(environment: environment, logger: DiscardingLogSink(),
                                      loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
                                      vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
+                                     credentialStore: InMemorySecretStore(),
                                      commandRunner: { path, arguments in try machine.run(path, arguments) },
                                      homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path)
         let originalPlatform = try Data(contentsOf: environment.platformConfigFile)
@@ -96,7 +129,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            vpnStatusMonitor: FakeVPNStatusObserver()
+            vpnStatusMonitor: FakeVPNStatusObserver(),
+            credentialStore: InMemorySecretStore()
         )
 
         XCTAssertEqual(host.status().configGeneration, 0)
@@ -128,7 +162,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            vpnStatusMonitor: observer
+            vpnStatusMonitor: observer,
+            credentialStore: InMemorySecretStore()
         )
 
         // The host wires the observer callback during init. Drive the fake
@@ -166,7 +201,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            vpnStatusMonitor: observer
+            vpnStatusMonitor: observer,
+            credentialStore: InMemorySecretStore()
         )
         observer.start()
         defer { observer.stop() }
@@ -226,7 +262,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 warnings: []
             ),
             vpnStatusMonitor: FakeVPNStatusObserver(),
-            privilegeClient: recording
+            privilegeClient: recording,
+            credentialStore: InMemorySecretStore()
         )
 
         do {
@@ -289,6 +326,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
                 vpnStatusMonitor: vpn,
                 privilegeClient: machine,
+                credentialStore: InMemorySecretStore(),
                 commandRunner: { launchPath, arguments in
                     if arguments.first == "-listallnetworkservices" { listings.passThrough() }
                     return try machine.run(launchPath, arguments)
