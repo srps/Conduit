@@ -13,6 +13,7 @@ The portable product library: proxy, PAC routing engine, DNS forwarding, tunnels
 - Don't block the NIO event loop with auth, DNS, Keychain, file I/O or other system work. Hop off the loop; a handler does no synchronous work over 1 ms.
 - Validate every port to 0–65535 before the `UInt16` cast in `TCPRelay` and `UDPRelay`.
 - Keep `SNIParser` hostname validation per label (RFC 952), never a whole-string check. `SNIParserTests` backs this with a property test.
+- Reuse the one `ProxyAuthenticator` that `CONNECTHandler` and `ConnectionPool` cache for every challenge round of a handshake; never call the provider again on a later 407. Upstream proxy auth is stateful per connection, and a new instance breaks multi-leg SPNEGO and NTLM.
 - Preserve the real hostname on proxied TLS tunnels for SNI and certificate validation. Don't design flows that make clients use `localhost`.
 - Close active upstream channels (in-use pooled connections, dedicated CONNECT tunnels) only on explicit shutdown. Control-plane transitions (listener recycle, config restart, direct-mode flip, VPN flap) use `ConnectionPool.closeAll(scope: .allButDedicated)` or `.idleOnly`; only process exit or a user toggle-off passes `.all`. macOS keeps TCP state across a VPN transition, and closing the channel destroys a stream the kernel would have resumed. See `docs/design-vpn-flap-resilience.md`.
 
