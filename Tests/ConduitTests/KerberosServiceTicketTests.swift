@@ -241,6 +241,9 @@ final class KerberosServiceTicketTests: XCTestCase {
         XCTAssertTrue(gate.shouldEmit(host: "special", reason: "service_ticket_unavailable"))
         XCTAssertTrue(gate.shouldEmit(host: "de", reason: "bad_mech"), "a new reason is a new failure")
 
+        XCTAssertFalse(gate.shouldEmit(host: "de", reason: "service_ticket_unavailable"),
+                       "alternating reasons each keep their own cooldown")
+
         clock.withLockedValue { $0.addTimeInterval(59) }
         XCTAssertFalse(gate.shouldEmit(host: "de", reason: "bad_mech"))
         clock.withLockedValue { $0.addTimeInterval(1) }
@@ -250,12 +253,12 @@ final class KerberosServiceTicketTests: XCTestCase {
     func testFailureEventGateIsBounded() {
         let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
         let gate = KerberosFailureEventGate(now: { clock.withLockedValue { $0 } })
-        for index in 0...KerberosFailureEventGate.maximumHosts {
+        for index in 0...KerberosFailureEventGate.maximumEntries {
             clock.withLockedValue { $0.addTimeInterval(1) }
             XCTAssertTrue(gate.shouldEmit(host: "host-\(index)", reason: "failure"))
         }
-        XCTAssertTrue(gate.shouldEmit(host: "host-0", reason: "failure"), "the oldest host was evicted")
-        XCTAssertFalse(gate.shouldEmit(host: "host-\(KerberosFailureEventGate.maximumHosts)", reason: "failure"))
+        XCTAssertTrue(gate.shouldEmit(host: "host-0", reason: "failure"), "the oldest entry was evicted")
+        XCTAssertFalse(gate.shouldEmit(host: "host-\(KerberosFailureEventGate.maximumEntries)", reason: "failure"))
     }
 
     // MARK: - Live GSS

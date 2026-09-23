@@ -93,19 +93,26 @@ package func credentialBasedAuthenticatorProvider(
 }
 
 /// Limits `auth.kerberos_failed` to one event per host and reason per
-/// `repeatInterval`, and at once when the reason changes. Time rather than
-/// success re-arms it: a continuation leg can fail on every request right
-/// after an initial leg that succeeded, so a success says nothing about
-/// whether the failure is over. Bounded at `maximumHosts`; past that the
-/// oldest entry goes, which at worst repeats an event.
+/// `repeatInterval`. Each pair has its own cooldown, so a proxy that
+/// alternates between two reasons still reports each at most once per
+/// interval. Time rather than success re-arms it: a continuation leg can
+/// fail on every request right after an initial leg that succeeded, so a
+/// success says nothing about whether the failure is over. Bounded at
+/// `maximumEntries` pairs; past that the oldest goes, which at worst repeats
+/// an event.
 package final class KerberosFailureEventGate: @unchecked Sendable {
-    package static let maximumHosts = 32
+    package static let maximumEntries = 64
+
+    private struct Key: Hashable {
+        let host: String
+        let reason: String
+    }
 
     private let repeatInterval: TimeInterval
     private let now: @Sendable () -> Date
     private let lock = NSLock()
-    /// Host to the reason last reported and when.
-    private var entries: [String: (reason: String, at: Date)] = [:]
+    /// When each host and reason was last reported.
+    private var lastReported: [Key: Date] = [:]
 
     package init(repeatInterval: TimeInterval = 60, now: @escaping @Sendable () -> Date = { Date() }) {
         self.repeatInterval = repeatInterval
@@ -113,18 +120,18 @@ package final class KerberosFailureEventGate: @unchecked Sendable {
     }
 
     package func shouldEmit(host: String, reason: String) -> Bool {
+        let key = Key(host: host, reason: reason)
         let current = now()
         lock.lock()
         defer { lock.unlock() }
-        if let entry = entries[host], entry.reason == reason,
-           current.timeIntervalSince(entry.at) < repeatInterval {
+        if let at = lastReported[key], current.timeIntervalSince(at) < repeatInterval {
             return false
         }
-        if entries[host] == nil, entries.count >= Self.maximumHosts,
-           let oldest = entries.min(by: { $0.value.at < $1.value.at })?.key {
-            entries.removeValue(forKey: oldest)
+        if lastReported[key] == nil, lastReported.count >= Self.maximumEntries,
+           let oldest = lastReported.min(by: { $0.value < $1.value })?.key {
+            lastReported.removeValue(forKey: oldest)
         }
-        entries[host] = (reason, current)
+        lastReported[key] = current
         return true
     }
 }
