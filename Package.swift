@@ -32,7 +32,8 @@ let package = Package(
     targets: [
         .target(
             name: "ConduitShared",
-            path: "Sources/ConduitShared"
+            path: "Sources/ConduitShared",
+            exclude: ["AGENTS.md"]
         ),
         // `ProxyKernel` is the portable, Apple-framework-free core; per-pillar
         // code lives in `ProxyAuth` / `ProxyPAC` / `PlatformMac`, and
@@ -51,6 +52,7 @@ let package = Package(
             name: "ProxyKernel",
             dependencies: nioProducts + ["ConduitShared"],
             path: "Sources/ProxyKernel",
+            exclude: ["AGENTS.md"],
             resources: [.process("Resources")]
         ),
         .target(
@@ -61,7 +63,8 @@ let package = Package(
         .target(
             name: "ProxyAuth",
             dependencies: ["ProxyKernel"],
-            path: "Sources/ProxyAuth"
+            path: "Sources/ProxyAuth",
+            exclude: ["AGENTS.md"]
         ),
         .target(
             name: "ProxyPAC",
@@ -71,12 +74,14 @@ let package = Package(
         .target(
             name: "PlatformMac",
             dependencies: ["ProxyKernel", "ConduitShared"],
-            path: "Sources/PlatformMac"
+            path: "Sources/PlatformMac",
+            exclude: ["AGENTS.md"]
         ),
         .executableTarget(
             name: "Conduit",
             dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared"],
-            path: "Sources/Conduit"
+            path: "Sources/Conduit",
+            exclude: ["AGENTS.md"]
         ),
         .executableTarget(
             name: "pm-dns",
@@ -91,7 +96,8 @@ let package = Package(
         .executableTarget(
             name: "ConduitDaemon",
             dependencies: ["ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", .product(name: "NIOConcurrencyHelpers", package: "swift-nio")],
-            path: "Sources/ConduitDaemon"
+            path: "Sources/ConduitDaemon",
+            exclude: ["AGENTS.md"]
         ),
         .executableTarget(
             name: "pm-sim",
@@ -130,7 +136,8 @@ let package = Package(
         .executableTarget(
             name: "ConduitHelper",
             dependencies: ["ConduitShared", "ProxyKernel"],
-            path: "Sources/ConduitHelper"
+            path: "Sources/ConduitHelper",
+            exclude: ["AGENTS.md"]
         ),
         .testTarget(
             name: "ConduitTests",
