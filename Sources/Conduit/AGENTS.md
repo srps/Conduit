@@ -1,0 +1,8 @@
+# Conduit (app)
+
+The SwiftUI/AppKit app and its `AppState` orchestrator. Views stay thin and mirror `ProxyOrchestratorSnapshot`; they do not keep state of their own.
+
+- A change to lifecycle composition in `AppState` (start/stop, ownership guards, quit, VPN handling) adds a scenario to `Tests/ConduitTests/AppStateHarnessTests.swift`, which runs a real orchestrator over `FakeMachine` and asserts on the machine and the journal. The same rule lands in `ConduitDaemon`; see its `AGENTS.md`.
+- A new `AppState` collaborator that touches the machine gets a seam and a fake. The seam is an `init` parameter with the production default, next to `runtimeEnvironment`, `privilegeClient`, `helperLifecycle`, `credentialStore`, `commandRunner`, `homeDirectory`, `resolverDirectory`, `loginItemManager` and `vpnStatusMonitor`. The fake goes in `Sources/PlatformMac/PlatformFakes.swift`, and both `AppStateHarness.launch()` and `DevLaunch.makeAppState` inject it. Without one, a `--dev` instance can reach the real machine: review of #24 found it could replace the installed helper and delete the installed app's credentials. Notification and network-path collaborators still lack seams; see `docs/refactor-notes-2026-09-09.md`.
+- Prefer extending an existing strategy or manager over another mode flag or `if` branch in `AppState` or a view.
+- `App/DevLaunch.swift` builds the `--dev` composition (debug builds only). Its windows are presented from AppKit on purpose: a `Window` scene with `defaultLaunchBehavior(.presented)` never came up for an instance launched from a terminal or `open -n`, `SceneBuilder` takes only `if #available` conditionals, and a `MenuBarExtra` label wider than its glyph is dropped beside a notch. The comments there say what was tried.
