@@ -471,8 +471,8 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
     /// so the silent downgrade to NTLM is no longer invisible.
     package typealias KerberosFallbackHandler = @Sendable (_ host: String, _ reason: String) -> Void
     /// Callback invoked when a Kerberos failure is raised to the caller with
-    /// no NTLM answer: no saved password to fall back to, or a failure that
-    /// permits no fallback. Not invoked for a failure withheld so the
+    /// no NTLM answer: no saved password to fall back to, a failure that
+    /// permits no fallback, or a continuation leg GSS rejects. Not invoked for a failure withheld so the
     /// kernel's retry can wait for the ticket; that retry has its own event.
     /// Receives the target host and `KerberosAuthError.fallbackReasonCode`.
     package typealias KerberosFailureHandler = @Sendable (_ host: String, _ reason: String) -> Void
@@ -584,7 +584,12 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
         if fallback, let ntlm = resolvedFallback() {
             return try ntlm.processChallenge(headerValues: headerValues, host: host)
         }
-        return try kerberos.processChallenge(headerValues: headerValues, host: host)
+        do {
+            return try kerberos.processChallenge(headerValues: headerValues, host: host)
+        } catch let kerberosError as KerberosAuthError {
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
+            throw kerberosError
+        }
     }
 
     package func canHandle(scheme: String) -> Bool {

@@ -38,9 +38,10 @@ import ProxyKernel
 /// health / config decision."
 ///
 /// A Kerberos failure with no NTLM answer goes to `eventSink` as
-/// `auth.kerberos_failed`, once per host and reason: a failing proxy fails
-/// every request, and one event per request would push everything else out
-/// of the bounded `RuntimeEventLog`. See `KerberosFailureEventGate`.
+/// `auth.kerberos_failed`, at most once a minute per host and reason: a
+/// failing proxy fails every request, and one event per request would push
+/// everything else out of the bounded `RuntimeEventLog`. See
+/// `KerberosFailureEventGate`.
 package func credentialBasedAuthenticatorProvider(
     configProvider: @escaping @Sendable () -> ProxyConfig,
     credentialProvider: any CredentialProvider,
@@ -70,11 +71,9 @@ package func credentialBasedAuthenticatorProvider(
                     return NTLMAuthenticator(credentials: credentials)
                 },
                 onKerberosSuccess: { successHost in
-                    failureGate.clear(host: successHost)
                     outcomeHandler?(.kerberos, successHost, nil)
                 },
                 onKerberosFallback: { fallbackHost, reason in
-                    failureGate.clear(host: fallbackHost)
                     outcomeHandler?(.ntlmFallback, fallbackHost, reason)
                 },
                 onKerberosFailure: { failedHost, reason in
@@ -93,39 +92,40 @@ package func credentialBasedAuthenticatorProvider(
     }
 }
 
-/// Remembers, per host, the reason of the last `auth.kerberos_failed` event,
-/// so the event marks the start of a failure (or a change in its reason)
-/// rather than every request that meets it. A Kerberos success or an NTLM
-/// fallback for the host ends the failure, and the next one is reported
-/// again. Bounded at `maximumHosts`; past that the oldest entry goes, which
-/// at worst repeats an event.
+/// Limits `auth.kerberos_failed` to one event per host and reason per
+/// `repeatInterval`, and at once when the reason changes. Time rather than
+/// success re-arms it: a continuation leg can fail on every request right
+/// after an initial leg that succeeded, so a success says nothing about
+/// whether the failure is over. Bounded at `maximumHosts`; past that the
+/// oldest entry goes, which at worst repeats an event.
 package final class KerberosFailureEventGate: @unchecked Sendable {
     package static let maximumHosts = 32
 
+    private let repeatInterval: TimeInterval
+    private let now: @Sendable () -> Date
     private let lock = NSLock()
-    /// Host to the reason last reported and the order it was recorded in.
-    private var entries: [String: (reason: String, sequence: UInt64)] = [:]
-    private var nextSequence: UInt64 = 0
+    /// Host to the reason last reported and when.
+    private var entries: [String: (reason: String, at: Date)] = [:]
 
-    package init() {}
-
-    package func shouldEmit(host: String, reason: String) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if entries[host]?.reason == reason { return false }
-        if entries[host] == nil, entries.count >= Self.maximumHosts,
-           let oldest = entries.min(by: { $0.value.sequence < $1.value.sequence })?.key {
-            entries.removeValue(forKey: oldest)
-        }
-        entries[host] = (reason, nextSequence)
-        nextSequence += 1
-        return true
+    package init(repeatInterval: TimeInterval = 60, now: @escaping @Sendable () -> Date = { Date() }) {
+        self.repeatInterval = repeatInterval
+        self.now = now
     }
 
-    package func clear(host: String) {
+    package func shouldEmit(host: String, reason: String) -> Bool {
+        let current = now()
         lock.lock()
-        entries.removeValue(forKey: host)
-        lock.unlock()
+        defer { lock.unlock() }
+        if let entry = entries[host], entry.reason == reason,
+           current.timeIntervalSince(entry.at) < repeatInterval {
+            return false
+        }
+        if entries[host] == nil, entries.count >= Self.maximumHosts,
+           let oldest = entries.min(by: { $0.value.at < $1.value.at })?.key {
+            entries.removeValue(forKey: oldest)
+        }
+        entries[host] = (reason, current)
+        return true
     }
 }
 

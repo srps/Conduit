@@ -205,23 +205,53 @@ final class KerberosServiceTicketTests: XCTestCase {
         XCTAssertEqual(failures.withLockedValue { $0 }, 0)
     }
 
+    /// Codex review of #75: GSS can also reject the proxy's continuation
+    /// token after an initial leg that succeeded.
+    func testContinuationLegFailureIsReported() throws {
+        final class RejectsContinuation: GSSTokenProvider, @unchecked Sendable {
+            let failure: KerberosAuthError
+            init(failure: KerberosAuthError) { self.failure = failure }
+            func generateToken(host: String, inputToken: Data?) throws -> Data? {
+                if inputToken == nil { return Data([1, 2, 3]) }
+                throw failure
+            }
+            func resetContext() {}
+        }
+        let failures = NIOLockedValueBox<[String]>([])
+        let auth = NegotiateAuthenticator(
+            kerberos: KerberosAuthenticator(tokenProvider: RejectsContinuation(failure: .initSecContextFailed(failure, 5))),
+            onKerberosFailure: { host, reason in failures.withLockedValue { $0.append("\(host) \(reason)") } }
+        )
+
+        _ = try auth.initialToken(for: "proxy.corp.example", allowFallback: false)
+        XCTAssertThrowsError(try auth.processChallenge(headerValues: ["Negotiate AAAA"], host: "proxy.corp.example"))
+        XCTAssertEqual(failures.withLockedValue { $0 }, ["proxy.corp.example failure"])
+    }
+
     /// Every request through a failing proxy fails; the event marks the
-    /// failure's start and any change in its reason, not each request.
-    func testFailureEventGateReportsOncePerHostAndReasonUntilCleared() {
-        let gate = KerberosFailureEventGate()
+    /// failure's start, a change in its reason, and then at most one repeat
+    /// per interval. A success does not re-arm it: the initial leg can
+    /// succeed on every request whose continuation leg then fails.
+    func testFailureEventGateReportsOncePerHostAndReasonPerInterval() {
+        let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
+        let gate = KerberosFailureEventGate(repeatInterval: 60, now: { clock.withLockedValue { $0 } })
 
         XCTAssertTrue(gate.shouldEmit(host: "de", reason: "service_ticket_unavailable"))
         XCTAssertFalse(gate.shouldEmit(host: "de", reason: "service_ticket_unavailable"))
         XCTAssertTrue(gate.shouldEmit(host: "special", reason: "service_ticket_unavailable"))
         XCTAssertTrue(gate.shouldEmit(host: "de", reason: "bad_mech"), "a new reason is a new failure")
 
-        gate.clear(host: "de")
-        XCTAssertTrue(gate.shouldEmit(host: "de", reason: "bad_mech"), "a success ends the failure")
+        clock.withLockedValue { $0.addTimeInterval(59) }
+        XCTAssertFalse(gate.shouldEmit(host: "de", reason: "bad_mech"))
+        clock.withLockedValue { $0.addTimeInterval(1) }
+        XCTAssertTrue(gate.shouldEmit(host: "de", reason: "bad_mech"), "a failure that lasts is reported again")
     }
 
     func testFailureEventGateIsBounded() {
-        let gate = KerberosFailureEventGate()
+        let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
+        let gate = KerberosFailureEventGate(now: { clock.withLockedValue { $0 } })
         for index in 0...KerberosFailureEventGate.maximumHosts {
+            clock.withLockedValue { $0.addTimeInterval(1) }
             XCTAssertTrue(gate.shouldEmit(host: "host-\(index)", reason: "failure"))
         }
         XCTAssertTrue(gate.shouldEmit(host: "host-0", reason: "failure"), "the oldest host was evicted")
