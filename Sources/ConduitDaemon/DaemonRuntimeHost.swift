@@ -131,6 +131,7 @@ final class DaemonRuntimeHost {
         loadedConfiguration: RuntimeConfigurationLoadResult,
         vpnStatusMonitor: VPNStatusObserving? = nil,
         privilegeClient: (any PrivilegeClient)? = nil,
+        credentialStore: (any SecretStore)? = nil,
         commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil
@@ -185,11 +186,15 @@ final class DaemonRuntimeHost {
         )
         self.orchestrator = orchestrator
 
+        // The login Keychain in production. A host over a fake machine
+        // injects an in-memory store, or it would read and write the
+        // installed app's credentials. Same seam as `AppState`.
         let credentialManager = CredentialManager(
             identityProvider: { [snapshotProvider = orchestrator.configSnapshotProvider] in
                 let c = snapshotProvider()
                 return (domain: c.domain, username: c.username, profileName: c.profileName)
-            }
+            },
+            store: credentialStore ?? KeychainStore()
         )
         self.credentialManager = credentialManager
 
