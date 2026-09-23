@@ -77,7 +77,8 @@ exactly these semantics; do not repurpose them.
 | Event | Emitted when |
 | --- | --- |
 | `auth.kerberos_succeeded` | Initial Kerberos leg produced a token (`host=`). |
-| `auth.kerberos_fallback_ntlm` | Credential-class Kerberos failure downgraded to NTLM (`host=`, `reason=` one of `no_credential`, `credentials_expired`, `bad_mech`, `failure`, `no_ticket`, `routine_<n>`). |
+| `auth.kerberos_fallback_ntlm` | Credential-class Kerberos failure downgraded to NTLM (`host=`, `reason=` one of `no_credential`, `credentials_expired`, `bad_mech`, `failure`, `no_ticket`, `service_ticket_unavailable`, `routine_<n>`). |
+| `auth.kerberos_failed` | A Kerberos failure reached the request with no NTLM answer: no saved password, or a failure that permits no fallback (`host=`, `reason=` as above, plus `other`). Once per host and reason; a Kerberos success or NTLM fallback for the host re-arms it. Not emitted while a missing credential is being retried; `auth.credential_retry` covers that. |
 | `auth.ntlm_configured` | NTLM credentials became available to the authenticator stack. |
 | `auth.handshake_rejected` | Pending-handshake bound (global or per-source) rejected a new upstream 407 handshake. |
 | `auth.credential_retry` | The initial Kerberos token was unavailable and is being retried (`host=`, `attempt=`, `delayMs=`). |

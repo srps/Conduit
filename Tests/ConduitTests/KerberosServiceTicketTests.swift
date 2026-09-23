@@ -153,6 +153,81 @@ final class KerberosServiceTicketTests: XCTestCase {
         XCTAssertEqual(sleeps.withLockedValue { $0 }, 0)
     }
 
+    // MARK: - Failure event
+
+    /// Codex review of #74: a service-ticket failure with no NTLM to fall
+    /// back to reached the caller without any `RuntimeEvent`.
+    func testServiceTicketFailureWithoutNTLMReportsTheFailure() {
+        let provider = RecordingGSSTokenProvider(
+            errorToThrow: KerberosAuthError.serviceTicketUnavailable(host: "proxy.corp.example", major: badMech, minor: 0)
+        )
+        let failures = NIOLockedValueBox<[String]>([])
+        let auth = NegotiateAuthenticator(
+            kerberos: KerberosAuthenticator(tokenProvider: provider),
+            onKerberosFailure: { host, reason in failures.withLockedValue { $0.append("\(host) \(reason)") } }
+        )
+
+        XCTAssertThrowsError(try auth.initialToken(for: "proxy.corp.example", allowFallback: false))
+        XCTAssertEqual(failures.withLockedValue { $0 }, ["proxy.corp.example service_ticket_unavailable"])
+    }
+
+    /// A missing credential withheld for the kernel's retry is not yet a
+    /// failure; `auth.credential_retry` covers the wait. The last attempt,
+    /// still without NTLM, is.
+    func testDeferredCredentialFailureIsReportedOnlyOnTheLastAttempt() {
+        let provider = RecordingGSSTokenProvider(
+            errorToThrow: KerberosAuthError.initSecContextFailed(badMech, 0)
+        )
+        let failures = NIOLockedValueBox<[String]>([])
+        let auth = NegotiateAuthenticator(
+            kerberos: KerberosAuthenticator(tokenProvider: provider),
+            onKerberosFailure: { _, reason in failures.withLockedValue { $0.append(reason) } }
+        )
+
+        XCTAssertThrowsError(try auth.initialToken(for: "proxy.corp.example", allowFallback: false))
+        XCTAssertEqual(failures.withLockedValue { $0 }, [])
+        XCTAssertThrowsError(try auth.initialToken(for: "proxy.corp.example", allowFallback: true))
+        XCTAssertEqual(failures.withLockedValue { $0 }, ["bad_mech"])
+    }
+
+    func testFallbackToNTLMIsNotReportedAsAFailure() throws {
+        let provider = RecordingGSSTokenProvider(
+            errorToThrow: KerberosAuthError.serviceTicketUnavailable(host: "proxy.corp.example", major: badMech, minor: 0)
+        )
+        let failures = NIOLockedValueBox(0)
+        let auth = NegotiateAuthenticator(
+            kerberos: KerberosAuthenticator(tokenProvider: provider),
+            ntlmFallback: ntlm(),
+            onKerberosFailure: { _, _ in failures.withLockedValue { $0 += 1 } }
+        )
+
+        _ = try auth.initialToken(for: "proxy.corp.example", allowFallback: false)
+        XCTAssertEqual(failures.withLockedValue { $0 }, 0)
+    }
+
+    /// Every request through a failing proxy fails; the event marks the
+    /// failure's start and any change in its reason, not each request.
+    func testFailureEventGateReportsOncePerHostAndReasonUntilCleared() {
+        let gate = KerberosFailureEventGate()
+
+        XCTAssertTrue(gate.shouldEmit(host: "de", reason: "service_ticket_unavailable"))
+        XCTAssertFalse(gate.shouldEmit(host: "de", reason: "service_ticket_unavailable"))
+        XCTAssertTrue(gate.shouldEmit(host: "special", reason: "service_ticket_unavailable"))
+        XCTAssertTrue(gate.shouldEmit(host: "de", reason: "bad_mech"), "a new reason is a new failure")
+
+        gate.clear(host: "de")
+        XCTAssertTrue(gate.shouldEmit(host: "de", reason: "bad_mech"), "a success ends the failure")
+    }
+
+    func testFailureEventGateIsBounded() {
+        let gate = KerberosFailureEventGate()
+        for index in 0...KerberosFailureEventGate.maximumHosts {
+            XCTAssertTrue(gate.shouldEmit(host: "host-\(index)", reason: "failure"))
+        }
+        XCTAssertTrue(gate.shouldEmit(host: "host-0", reason: "failure"), "the oldest host was evicted")
+        XCTAssertFalse(gate.shouldEmit(host: "host-\(KerberosFailureEventGate.maximumHosts)", reason: "failure"))
+    }
+
     // MARK: - Live GSS
 
     /// Real GSS against a name no KDC will ticket. With a credential reported

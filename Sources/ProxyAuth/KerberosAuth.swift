@@ -470,50 +470,63 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
     /// auth factory to fire an `auth.kerberos_fallback_ntlm` `RuntimeEvent`
     /// so the silent downgrade to NTLM is no longer invisible.
     package typealias KerberosFallbackHandler = @Sendable (_ host: String, _ reason: String) -> Void
+    /// Callback invoked when a Kerberos failure is raised to the caller with
+    /// no NTLM answer: no saved password to fall back to, or a failure that
+    /// permits no fallback. Not invoked for a failure withheld so the
+    /// kernel's retry can wait for the ticket; that retry has its own event.
+    /// Receives the target host and `KerberosAuthError.fallbackReasonCode`.
+    package typealias KerberosFailureHandler = @Sendable (_ host: String, _ reason: String) -> Void
 
     private let kerberos: KerberosAuthenticator
     private var ntlmFallback: NTLMAuthenticator?
     private let ntlmFallbackProvider: (@Sendable () -> NTLMAuthenticator?)?
     private let onKerberosSuccess: KerberosSuccessHandler?
     private let onKerberosFallback: KerberosFallbackHandler?
+    private let onKerberosFailure: KerberosFailureHandler?
     private let lock = NSLock()
     private var usingFallback = false
 
     package init(
         ntlmFallback: NTLMAuthenticator? = nil,
         onKerberosSuccess: KerberosSuccessHandler? = nil,
-        onKerberosFallback: KerberosFallbackHandler? = nil
+        onKerberosFallback: KerberosFallbackHandler? = nil,
+        onKerberosFailure: KerberosFailureHandler? = nil
     ) {
         self.kerberos = KerberosAuthenticator()
         self.ntlmFallback = ntlmFallback
         self.ntlmFallbackProvider = nil
         self.onKerberosSuccess = onKerberosSuccess
         self.onKerberosFallback = onKerberosFallback
+        self.onKerberosFailure = onKerberosFailure
     }
 
     package init(
         ntlmFallbackProvider: @Sendable @escaping () -> NTLMAuthenticator?,
         onKerberosSuccess: KerberosSuccessHandler? = nil,
-        onKerberosFallback: KerberosFallbackHandler? = nil
+        onKerberosFallback: KerberosFallbackHandler? = nil,
+        onKerberosFailure: KerberosFailureHandler? = nil
     ) {
         self.kerberos = KerberosAuthenticator()
         self.ntlmFallback = nil
         self.ntlmFallbackProvider = ntlmFallbackProvider
         self.onKerberosSuccess = onKerberosSuccess
         self.onKerberosFallback = onKerberosFallback
+        self.onKerberosFailure = onKerberosFailure
     }
 
     package init(
         kerberos: KerberosAuthenticator,
         ntlmFallback: NTLMAuthenticator? = nil,
         onKerberosSuccess: KerberosSuccessHandler? = nil,
-        onKerberosFallback: KerberosFallbackHandler? = nil
+        onKerberosFallback: KerberosFallbackHandler? = nil,
+        onKerberosFailure: KerberosFailureHandler? = nil
     ) {
         self.kerberos = kerberos
         self.ntlmFallback = ntlmFallback
         self.ntlmFallbackProvider = nil
         self.onKerberosSuccess = onKerberosSuccess
         self.onKerberosFallback = onKerberosFallback
+        self.onKerberosFailure = onKerberosFailure
     }
 
     private func resolvedFallback() -> NTLMAuthenticator? {
@@ -547,11 +560,18 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
             // moment to do so. A failure that is not retryable, such as a
             // service ticket the KDC would not issue, gains nothing from the
             // wait, and the caller will not retry it to reach the last attempt.
-            if allowFallback || !kerberosError.isCredentialRetryable, let fallback = resolvedFallback() {
+            guard allowFallback || !kerberosError.isCredentialRetryable else {
+                throw kerberosError
+            }
+            if let fallback = resolvedFallback() {
                 usingFallback = true
                 onKerberosFallback?(host, kerberosError.fallbackReasonCode)
                 return (try fallback.initialToken(for: host), true)
             }
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
+            throw kerberosError
+        } catch let kerberosError as KerberosAuthError {
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
             throw kerberosError
         }
     }

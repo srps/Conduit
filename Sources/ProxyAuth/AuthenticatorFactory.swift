@@ -36,13 +36,19 @@ import ProxyKernel
 /// snapshots observe the same runtime auth state. AGENTS.md:
 /// "Always emit a RuntimeEvent first for any routing / auth / failover /
 /// health / config decision."
+///
+/// A Kerberos failure with no NTLM answer goes to `eventSink` as
+/// `auth.kerberos_failed`, once per host and reason: a failing proxy fails
+/// every request, and one event per request would push everything else out
+/// of the bounded `RuntimeEventLog`. See `KerberosFailureEventGate`.
 package func credentialBasedAuthenticatorProvider(
     configProvider: @escaping @Sendable () -> ProxyConfig,
     credentialProvider: any CredentialProvider,
     outcomeHandler: (@Sendable (RuntimeAuthOutcome, String, String?) -> Void)? = nil,
     eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
 ) -> @Sendable (UpstreamProxy) throws -> ProxyAuthenticator {
-    { destination in
+    let failureGate = KerberosFailureEventGate()
+    return { destination in
         let config = configProvider()
         guard let upstream = config.enabledUpstreams.first(where: {
             $0.host.caseInsensitiveCompare(destination.host) == .orderedSame
@@ -64,10 +70,17 @@ package func credentialBasedAuthenticatorProvider(
                     return NTLMAuthenticator(credentials: credentials)
                 },
                 onKerberosSuccess: { successHost in
+                    failureGate.clear(host: successHost)
                     outcomeHandler?(.kerberos, successHost, nil)
                 },
                 onKerberosFallback: { fallbackHost, reason in
+                    failureGate.clear(host: fallbackHost)
                     outcomeHandler?(.ntlmFallback, fallbackHost, reason)
+                },
+                onKerberosFailure: { failedHost, reason in
+                    guard failureGate.shouldEmit(host: failedHost, reason: reason) else { return }
+                    eventSink?(RuntimeEvent(kind: .auth, event: "auth.kerberos_failed",
+                                            detail: "host=\(failedHost) reason=\(reason)"))
                 }
             )
         case .ntlmv2:
@@ -77,6 +90,42 @@ package func credentialBasedAuthenticatorProvider(
             outcomeHandler?(.ntlmDirect, host, nil)
             return NTLMAuthenticator(credentials: credentials)
         }
+    }
+}
+
+/// Remembers, per host, the reason of the last `auth.kerberos_failed` event,
+/// so the event marks the start of a failure (or a change in its reason)
+/// rather than every request that meets it. A Kerberos success or an NTLM
+/// fallback for the host ends the failure, and the next one is reported
+/// again. Bounded at `maximumHosts`; past that the oldest entry goes, which
+/// at worst repeats an event.
+package final class KerberosFailureEventGate: @unchecked Sendable {
+    package static let maximumHosts = 32
+
+    private let lock = NSLock()
+    /// Host to the reason last reported and the order it was recorded in.
+    private var entries: [String: (reason: String, sequence: UInt64)] = [:]
+    private var nextSequence: UInt64 = 0
+
+    package init() {}
+
+    package func shouldEmit(host: String, reason: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if entries[host]?.reason == reason { return false }
+        if entries[host] == nil, entries.count >= Self.maximumHosts,
+           let oldest = entries.min(by: { $0.value.sequence < $1.value.sequence })?.key {
+            entries.removeValue(forKey: oldest)
+        }
+        entries[host] = (reason, nextSequence)
+        nextSequence += 1
+        return true
+    }
+
+    package func clear(host: String) {
+        lock.lock()
+        entries.removeValue(forKey: host)
+        lock.unlock()
     }
 }
 
