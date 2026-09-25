@@ -36,6 +36,8 @@ enum PMSim {
               failover                Stop upstream1, verify switchToNextUpstream recovers via upstream2
               flood-slow-drain        AE5F6815 repro: fast origin flood + slow client, verify no truncation
               forced-proxy-precedence Routing: force rules override PAC DIRECT across proxy protocols
+              pac-unsupported-only    Routing: a PAC with no usable answer goes via the upstream, never direct
+              strict-direct-reachable Routing: strict mode never goes direct to a reachable origin; hint on 502
               direct-mode-silence     Phase 2: prove expected-direct causes log .info, not .error
               vpn-flap-idle           idle CONNECT tunnel survives a brief VPN flap
               vpn-flap-stream         streaming HTTP response survives a brief VPN flap
@@ -163,6 +165,8 @@ enum PMSim {
         "failover",
         "flood-slow-drain",
         "forced-proxy-precedence",
+        "pac-unsupported-only",
+        "strict-direct-reachable",
         "direct-mode-silence",
         "vpn-flap-idle",
         "vpn-flap-stream",
@@ -230,6 +234,10 @@ enum PMSim {
             return [try await Scenarios.floodSlowDrain(verbose: verbose)]
         case "forced-proxy-precedence":
             return [try await ForcedRoutingScenarios.forcedProxyPrecedence(verbose: verbose)]
+        case "pac-unsupported-only":
+            return [try await PACRoutingScenarios.unsupportedOnly(verbose: verbose)]
+        case "strict-direct-reachable":
+            return [try await PACRoutingScenarios.strictDirectReachable(verbose: verbose)]
         case "direct-mode-silence":
             return [try await OrchestratorScenarios.directModeSilence(verbose: verbose)]
         case "vpn-flap-idle":
