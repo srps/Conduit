@@ -2,7 +2,19 @@
 import Foundation
 import ProxyKernel
 
-package final class EnvironmentManager {
+package final class EnvironmentManager: @unchecked Sendable {
+    /// One operation at a time. `apply` reads each shell profile and writes
+    /// it back with our block, then records the launchd variables' prior
+    /// values and publishes ours; `clear` strips the block and restores what
+    /// the journal holds. The hosts run the start and stop surface work on
+    /// their `PlatformWork` queue while the reconciler's flag actions still
+    /// call in from the main actor, and two of these interleaved can write a
+    /// profile back from a stale read or restore the launchd variables between
+    /// an `apply`'s capture and its publish. Recursive for `serialized`.
+    /// Every other stored property is immutable, which is what makes the
+    /// `@unchecked Sendable` sound.
+    private let operations = NSRecursiveLock()
+
     /// Prior values of the launchd variables we publish, so teardown restores
     /// rather than unsetting whatever was there.
     ///
@@ -45,6 +57,8 @@ package final class EnvironmentManager {
     }
 
     package func apply(config: ProxyConfig, logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let block = renderBlock(config: config)
         for file in targetFiles {
             try ensureParentDirectory(for: file)
@@ -72,7 +86,16 @@ package final class EnvironmentManager {
         return shellBlockPresent || !journal.knowsSurfaceIsIdle(.launchdEnvironment)
     }
 
+    /// Runs `body` as one operation: nothing else this manager does can land
+    /// inside it. For a host's check-then-act ("ours? then clear"), whose
+    /// check would otherwise be stale by the time it acted.
+    package func serialized<T>(_ body: () throws -> T) rethrows -> T {
+        try operations.withLock(body)
+    }
+
     package func clear(logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         for file in targetFiles where FileManager.default.fileExists(atPath: file.path) {
             let existing = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
             let cleaned = stripManagedBlock(from: existing)

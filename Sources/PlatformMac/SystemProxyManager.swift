@@ -20,6 +20,18 @@ enum SystemProxyManagerError: Error, LocalizedError {
 }
 
 package final class SystemProxyManager: @unchecked Sendable {
+    /// One operation at a time, as `SystemDNSManager` has had since #72. The
+    /// manager keeps no state of its own, but `apply` records the prior state
+    /// in the journal and then writes, and `clear` reads the journal and then
+    /// restores and forgets. The hosts run the start and stop surface work on
+    /// their `PlatformWork` queue while the reconciler's flag actions still
+    /// call in from the main actor, so without this a `clear` could restore
+    /// and release the surface between an `apply`'s capture and its writes,
+    /// leaving the machine on our proxy with nothing recorded to restore.
+    /// Recursive because the operations call one another (`restoreIfNeeded`
+    /// ends in `clear`) and because `serialized` wraps them.
+    private let operations = NSRecursiveLock()
+
     private let privilegeClient: PrivilegeClient
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
     /// Records what each service's proxy configuration was before we changed
@@ -101,6 +113,16 @@ package final class SystemProxyManager: @unchecked Sendable {
         !journal.knowsSurfaceIsIdle(.systemProxy)
     }
 
+    /// Runs `body` as one operation: nothing else this manager does can land
+    /// inside it. For a host's check-then-act ("already applied, skip",
+    /// "already cleared, skip"), whose check would otherwise be stale by the
+    /// time it acted. The reads (`isApplied`, `isCleared`, `hasManagedState`)
+    /// take no lock on their own: the activation preflight reads them from a
+    /// background queue and must not wait out a helper round trip.
+    package func serialized<T>(_ body: () throws -> T) rethrows -> T {
+        try operations.withLock(body)
+    }
+
     // MARK: - Apply / Clear
 
     /// Journal value recorded for a service `apply` did not touch because its
@@ -110,6 +132,8 @@ package final class SystemProxyManager: @unchecked Sendable {
     static let untouchedMarkerKey = "\u{0}untouched"
 
     package func apply(config: ProxyConfig, mode: SystemProxyMode, logger: (any LogSink)?, localPACURL: String? = nil) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let candidates = try connectedNetworkServices(logger: logger)
         guard !candidates.isEmpty else {
             throw SystemProxyManagerError.noNetworkServices
@@ -219,6 +243,8 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// networking for every client on the machine. Over-clearing costs the user
     /// a visible setting they can restore; stranding does not announce itself.
     package func clear(logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         // A teardown that already ran must not run its fallback again. `clear`
         // restores the recorded prior state and then forgets it, so a second
         // call finds `.notRecorded` — and the unconditional fallback would
@@ -481,6 +507,8 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// host can emit the `platform.launch_recovery_*` event first and derive
     /// the log line from that (`LaunchRecovery.report`).
     package func restoreIfNeeded(logger: (any LogSink)?) -> LaunchRecoveryOutcome {
+        operations.lock()
+        defer { operations.unlock() }
         guard journal.isMarkedApplied(surface: .systemProxy)
                 || journal.hasRecords(for: .systemProxy),
               let appliedAt = journal.oldestRecordDate(for: .systemProxy) else {

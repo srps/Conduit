@@ -51,6 +51,18 @@ package struct DNSRemovalError: Error, LocalizedError {
 }
 
 package final class DNSManager: @unchecked Sendable {
+    /// One operation at a time, as `SystemDNSManager` has had since #72. The
+    /// writers record a domain in the journal and then write its file; the
+    /// removers remove and then forget, and release the surface once nothing
+    /// is recorded. The hosts run the start and stop surface work on their
+    /// `PlatformWork` queue while the reconciler and the VPN gate still call
+    /// in from the main actor, so without this a `clear` could forget a
+    /// domain between an `apply`'s record and its write, leaving a file on
+    /// disk that nothing names. Recursive because the operations call one
+    /// another (`reconcile` ends in `apply`, `apply` may `clearEntryFiles`)
+    /// and because `serialized` wraps them.
+    private let operations = NSRecursiveLock()
+
     private let privilegeClient: PrivilegeClient
     /// Where resolver files live. Injectable so tests can exercise the
     /// disk-state paths (`isApplied`, `isCleared`, `entryFilesPresent`, and the
@@ -90,6 +102,16 @@ package final class DNSManager: @unchecked Sendable {
         return journal.fileState == .unreadable || journal.hasRecords(for: .resolverFile)
     }
 
+    /// Runs `body` as one operation: nothing else this manager does can land
+    /// inside it. For a host's check-then-act ("already applied, skip",
+    /// "already cleared, skip"), whose check would otherwise be stale by the
+    /// time it acted. The reads (`isApplied`, `isCleared`, `hasManagedState`,
+    /// `entryFilesPresent`) take no lock on their own: the activation
+    /// preflight reads them from a background queue.
+    package func serialized<T>(_ body: () throws -> T) rethrows -> T {
+        try operations.withLock(body)
+    }
+
     /// Records one domain as ours, immediately before its own write. Not
     /// after: a crash between the write and the record would strand a file
     /// with nothing naming it. Not for the whole batch up front either: the
@@ -120,6 +142,8 @@ package final class DNSManager: @unchecked Sendable {
     /// evidence of ours, and the switch having been on is not either — it can
     /// be flipped with every runtime stopped and no writer run.
     package func clearRecorded(configs: [ProxyConfig], logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         guard let journal else { return }
         if journal.fileState == .unreadable {
             if let adoption = adoptFilesWeWrote(configs: configs, unambiguousOnly: false, because: "the resolver journal is unreadable") {
@@ -143,6 +167,8 @@ package final class DNSManager: @unchecked Sendable {
     /// regardless — so recording them here only changes what a later
     /// switch-off does, and for the better.
     package func adoptAppliedFiles(config: ProxyConfig, vpnConnected: Bool) {
+        operations.lock()
+        defer { operations.unlock() }
         guard journal != nil else { return }
         for entry in getEntries(from: config, vpnConnected: vpnConnected)
         where FileManager.default.fileExists(atPath: resolverFilePath(for: entry.domain)) {
@@ -184,6 +210,8 @@ package final class DNSManager: @unchecked Sendable {
         resolversManaged: Bool,
         logger: (any LogSink)?
     ) -> LaunchRecoveryOutcome {
+        operations.lock()
+        defer { operations.unlock() }
         guard let journal else { return .nothingToDo(.noJournal) }
         guard journal.fileState != .unreadable else { return .skipped(.journalUnreadable) }
         guard journal.ownership(of: .resolverFile) == .unknown,
@@ -453,6 +481,8 @@ package final class DNSManager: @unchecked Sendable {
     /// runs once the forwarder they point at is actually listening. See
     /// `getInterceptDomains`.
     package func apply(config: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let enabledEntries = getEntries(from: config, vpnConnected: vpnConnected)
 
         if !vpnConnected, !config.dnsEntries.filter(\.enabled).isEmpty {
@@ -502,6 +532,8 @@ package final class DNSManager: @unchecked Sendable {
     }
 
     package func clear(config: ProxyConfig, logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let enabledEntries = config.dnsEntries.filter(\.enabled)
         let interceptDomains = getInterceptDomains(from: config, forCleanup: true)
         // The config names what we *would* write today; the journal names
@@ -536,6 +568,8 @@ package final class DNSManager: @unchecked Sendable {
     /// `dnsInterceptReady` branch in `AppState.applyConfigChange` /
     /// `DaemonRuntimeHost`.
     package func reconcile(old: ProxyConfig, new: ProxyConfig, logger: (any LogSink)?, vpnConnected: Bool) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let oldDomains = Set(
             old.dnsEntries.filter(\.enabled).map(\.domain)
                 + getInterceptDomains(from: old, forCleanup: true)
@@ -613,6 +647,8 @@ package final class DNSManager: @unchecked Sendable {
     /// transitions to connected while the proxy is running: `apply` deferred
     /// them while the tunnel (and thus their servers) was unreachable.
     package func applyEntryFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let entries = getEntries(from: config, vpnConnected: true)
         guard !entries.isEmpty else { return }
         for entry in entries {
@@ -634,6 +670,8 @@ package final class DNSManager: @unchecked Sendable {
     /// including the VPN gateway's own public hostname when it falls under a
     /// managed domain, which deadlocks reconnection (see `getEntries`).
     package func clearEntryFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let entries = config.dnsEntries.filter(\.enabled)
         guard !entries.isEmpty else { return }
         try removeAll(entries.map(\.domain), logger: logger)
@@ -652,6 +690,8 @@ package final class DNSManager: @unchecked Sendable {
     /// and survives the process that wrote it. `stopDNS` pairs this with
     /// `clearInterceptFiles`.
     package func applyInterceptFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let interceptDomains = getInterceptDomains(from: config)
         guard !interceptDomains.isEmpty else { return }
         for domain in interceptDomains {
@@ -674,6 +714,8 @@ package final class DNSManager: @unchecked Sendable {
     /// Removal is idempotent (the helper unlinks with `try?`), so this makes
     /// no claim that a file was there — hence "cleared", not "removed".
     package func clearInterceptFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
         let interceptDomains = getInterceptDomains(from: config, forCleanup: true)
         guard !interceptDomains.isEmpty else { return }
         try removeAll(interceptDomains, logger: logger)
