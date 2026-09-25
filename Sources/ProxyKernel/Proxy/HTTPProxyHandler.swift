@@ -363,7 +363,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let port = target.port
         let eventSink = self.eventSink
         let logger = self.logger
-        directConnectDetector.probeForStrictModeHint(host: host, port: port) {
+        directConnectDetector.probeForStrictModeHint(host: host, port: port, gatewayMode: gatewayMode) {
             let event = RuntimeEvent(
                 kind: .routing,
                 event: "routing.strict_direct_reachable",
@@ -940,9 +940,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 // metadata/loopback blocklist. The pre-connect host check can't
                 // see a hostname that resolves to a blocked literal. Direct path
                 // only — upstream-proxy connections are operator-configured.
-                if gatewayMode,
-                   let ip = channel.remoteAddress?.ipAddress,
-                   MetadataBlocklist.isBlockedResolvedAddress(ip, gatewayMode: gatewayMode) {
+                if let ip = MetadataBlocklist.blockedResolvedAddress(channel.remoteAddress, gatewayMode: gatewayMode) {
                     logger.log(.warning, "Blocked direct connection to \(host):\(port): resolved to \(ip) (metadata/loopback protection).", category: .proxy)
                     channel.close(promise: nil)
                     throw MetadataBlocklist.BlockedAddressError(host: host, resolvedIP: ip)

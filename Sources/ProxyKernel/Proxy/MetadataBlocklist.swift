@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOCore
 #if canImport(Darwin)
 import Darwin
 #else
@@ -38,6 +39,16 @@ package enum MetadataBlocklist {
     /// loopback (e.g. a local SASE client's proxy listener).
     package static func isBlockedResolvedAddress(_ ip: String, gatewayMode: Bool) -> Bool {
         isBlocked(host: ip, gatewayMode: gatewayMode)
+    }
+
+    /// The direct path's resolved-peer check, for a socket address: the
+    /// blocked IP literal, or nil when the address may be connected to (or
+    /// kept). Shared by the direct connect path and the strict-mode hint
+    /// probe so both apply one policy.
+    package static func blockedResolvedAddress(_ address: SocketAddress?, gatewayMode: Bool) -> String? {
+        guard gatewayMode, let ip = address?.ipAddress,
+              isBlockedResolvedAddress(ip, gatewayMode: gatewayMode) else { return nil }
+        return ip
     }
 
     /// Thrown on the direct connect path when a resolved peer is blocked, so
