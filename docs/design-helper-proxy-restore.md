@@ -151,8 +151,15 @@ shutdown: the app's `performTerminationCleanup` does not join, because
 `applicationWillTerminate` is synchronous and waiting would block the main
 thread at quit; the daemon's `SIGTERM` path is an async `stopRuntime`, so it
 joins, and the stop's clears never overlap recovery's
-([#17](https://github.com/srps/Conduit/issues/17)). `pm-proxy` touches no
-platform surface, so it has nothing to recover.
+([#17](https://github.com/srps/Conduit/issues/17)). The daemon also joins before
+`daemon.ready`, so readiness never precedes recovery. A config that fails to
+load does not stop the journal restores in either host: they need only the
+journal, and only the legacy resolver scan, which reads the configured domains,
+is skipped. The daemon, which exits on a failed load, runs them first
+(`DaemonRuntimeHost.recoverWithoutConfiguration`). Every step's decision is a
+`platform.launch_recovery_*` event, emitted before its log line
+([#88](https://github.com/srps/Conduit/issues/88); see `docs/events.md`).
+`pm-proxy` touches no platform surface, so it has nothing to recover.
 
 ### 4. One description, two renderers
 
