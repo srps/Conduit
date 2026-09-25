@@ -58,6 +58,7 @@ enum PMSim {
               observable-target-redaction  Query/fragment privacy across observations
               security-boundaries     Auth destinations, config rejection, and loopback listeners
               kerberos-service-ticket A TGT without a service ticket is unreachable, not a missing credential
+              lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
 
             OPTIONS:
               --verbose               Stream per-handler debug logs to stderr
@@ -185,6 +186,7 @@ enum PMSim {
         "security-boundaries",
         "kerberos-service-ticket",
         "helper-caller-identity",
+        "lifecycle-stop-overtakes-start",
     ]
 
     @MainActor private static var setupCleanupCompleted = false
@@ -272,6 +274,8 @@ enum PMSim {
             return [try await SecurityScenarios.boundaries(verbose: verbose)]
         case "kerberos-service-ticket":
             return [try await KerberosScenarios.serviceTicketUnavailable(verbose: verbose)]
+        case "lifecycle-stop-overtakes-start":
+            return [try await LifecycleScenarios.stopOvertakesStart()]
         case "fixture-pass", "fixture-fail", "fixture-missing":
             return [.reportingFixture(name: name)]
         case "fixture-throw":
