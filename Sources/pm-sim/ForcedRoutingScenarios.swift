@@ -22,7 +22,7 @@ enum ForcedRoutingScenarios {
             evaluations.withLockedValue { $0 += 1 }
             return ["DIRECT"]
         }
-        func routeChain(for entries: [String]) -> [PACRoute] { [.direct] }
+        func routeChain(for entries: [String]) -> PACChain { PACChain(routes: [.direct]) }
     }
 
     @MainActor

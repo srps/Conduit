@@ -8,7 +8,7 @@
 //   1. fetch a PAC script string (async I/O)
 //   2. construct a stateful evaluator over the script (sync, CFNetwork-backed)
 //   3. reuse the evaluator across many route lookups (kernel-side caching)
-//   4. parse raw `PROXY host:port; DIRECT` directives into `PACRoute`
+//   4. classify raw `PROXY host:port; DIRECT` directives into a `PACChain`
 //
 // Collapsing (1)+(2)+(3) into a single `routeChain(for:)` would defeat the
 // `PACRoutingEngine`'s evaluator cache and re-fetch+re-parse on every HTTP
@@ -34,8 +34,10 @@ package enum PACFetchLimits {
 package protocol PacScriptEvaluating: Sendable {
     /// Evaluate `FindProxyForURL(url, host)` against the bound PAC script.
     /// Returns the raw directive strings (e.g. `["PROXY host:port", "DIRECT"]`)
-    /// in the order the script produced them. Use `PacEvaluator.routeChain`
-    /// to parse the list into `[PACRoute]`.
+    /// in the order the script produced them, including entries the kernel
+    /// will reject (bad port, missing host, unsupported type). Never
+    /// synthesizes an entry: an empty answer is an empty array. Use
+    /// `PacEvaluator.routeChain` to classify the list.
     func resolveProxyChain(for url: URL) throws -> [String]
 }
 
@@ -59,11 +61,10 @@ package protocol PacEvaluator: Sendable {
     /// a dedicated serial queue and gates on a timeout semaphore.
     func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating
 
-    /// Parse raw PAC directive strings into typed routes. Unparsable
-    /// entries are silently dropped (matches today's `compactMap(parseRoute)`
-    /// behaviour — PAC scripts regularly emit vendor-specific directives
-    /// the kernel doesn't understand).
-    func routeChain(for entries: [String]) -> [PACRoute]
+    /// Classify raw PAC directive strings: usable routes in script order,
+    /// plus every entry that could not be used, reported rather than dropped
+    /// (see `PACChain.classify`).
+    func routeChain(for entries: [String]) -> PACChain
 }
 
 extension PacEvaluator {

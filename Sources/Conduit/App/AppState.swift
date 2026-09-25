@@ -1808,7 +1808,8 @@ final class AppState: ObservableObject {
             do {
                 let script = try await pacEvaluator.fetchPAC(from: config.pacURL)
                 let result = try pacEvaluator.resolveProxyChain(for: URL(string: appPreferences.preferredBrowserTestURL)!, pacScript: script)
-                logStore.log(.info, "PAC preview for \(appPreferences.preferredBrowserTestURL): \(result.joined(separator: "; "))", category: .pac)
+                let answer = result.isEmpty ? "no entries (routed through the configured upstreams)" : result.joined(separator: "; ")
+                logStore.log(.info, "PAC preview for \(appPreferences.preferredBrowserTestURL): \(answer)", category: .pac)
             } catch {
                 lastErrorMessage = error.localizedDescription
             }

@@ -165,7 +165,7 @@ package final class CFPacScriptEvaluator: PacScriptEvaluating, @unchecked Sendab
                 // Callback fired — `resultBox` is populated.
                 return try resultBox.value()
             case .timedOut:
-                throw PACResolverError.evaluationFailed(
+                throw PACResolverError.evaluationTimedOut(
                     "CFNetwork PAC evaluation timed out after \(Int(Self.evaluationTimeout))s"
                 )
             case .stopped, .finished:
@@ -223,8 +223,20 @@ private typealias ResultBox = CFPACResultBox
 /// CFNetwork returns proxy decisions as a `CFArray` of `CFDictionary`
 /// entries keyed by `kCFProxyTypeKey` / `kCFProxyHostNameKey` /
 /// `kCFProxyPortNumberKey`. Convert to the `["PROXY host:port", "DIRECT"]`
-/// directive form that `PACRoutingEngine` already knows how to parse via
-/// `PacEvaluator.routeChain(for:)`.
+/// directive form that `PacEvaluator.routeChain(for:)` classifies.
+///
+/// What CFNetwork returns (macOS 26, pinned by `CFPACEvaluatorTests`, #49):
+/// a `PROXY` entry is `kCFProxyTypeHTTP` for an http URL and
+/// `kCFProxyTypeHTTPS` for an https one (a plain proxy sent CONNECT, so both
+/// map to `PROXY`); a missing port becomes 80; ports are not range-checked;
+/// `SOCKS` is `kCFProxyTypeSOCKS`; `DIRECT` is `kCFProxyTypeNone`. Chrome-style
+/// `HTTPS`/`HTTP`/`SOCKS5`/`QUIC` directives, unknown words and `""` are
+/// dropped by CFNetwork before this function sees them.
+///
+/// Every entry is passed on, including ones the kernel will reject (a port
+/// outside 1–65535, a missing host, an unknown type), so the rejection is
+/// reported rather than silent. Nothing is synthesized: an empty list stays
+/// empty and the kernel routes it as "no usable answer" (#50).
 private func parseProxyList(_ list: CFArray) -> [String] {
     let count = CFArrayGetCount(list)
 
@@ -242,13 +254,19 @@ private func parseProxyList(_ list: CFArray) -> [String] {
     entries.reserveCapacity(count)
 
     for i in 0..<count {
-        guard let dictPtr = CFArrayGetValueAtIndex(list, i) else { continue }
+        guard let dictPtr = CFArrayGetValueAtIndex(list, i) else {
+            entries.append("UNTYPED")
+            continue
+        }
         let dict = unsafeBitCast(dictPtr, to: CFDictionary.self)
 
         guard let typePtr = CFDictionaryGetValue(
             dict,
             Unmanaged.passUnretained(kCFProxyTypeKey).toOpaque()
         ) else {
+            // A dictionary without a type: pass it on so it is rejected
+            // (and reported) as an unknown type.
+            entries.append("UNTYPED")
             continue
         }
         let type = unsafeBitCast(typePtr, to: CFString.self) as String
@@ -257,61 +275,47 @@ private func parseProxyList(_ list: CFArray) -> [String] {
         case noneType:
             entries.append("DIRECT")
         case httpType, httpsType:
-            if let hostPort = extractHostPort(from: dict) {
-                entries.append("PROXY \(hostPort)")
-            }
+            entries.append(directive("PROXY", endpoint: rawEndpoint(from: dict)))
         case socksType:
-            if let hostPort = extractHostPort(from: dict) {
-                entries.append("SOCKS \(hostPort)")
-            }
+            entries.append(directive("SOCKS", endpoint: rawEndpoint(from: dict)))
         default:
-            // Unknown proxy type — skip. PACRoutingEngine's `routeChain`
-            // already silently drops unparsable directives, so vendor-
-            // specific tokens are ignored rather than failing evaluation.
-            //
-            // The `kCFProxyTypeAutoConfiguration*` and `kCFProxyTypeFTP`
-            // constants exist but are returned by `CFNetworkCopySystem
-            // ProxySettings`, not by PAC-script `FindProxyForURL` results
-            // — so they're not worth special-casing here.
-            continue
+            // `kCFProxyTypeAutoConfiguration*`, `kCFProxyTypeFTP` and anything
+            // newer. The kernel rejects it as unsupported; keep the type name
+            // (without the constant prefix) so the event says what it was.
+            let name = type.hasPrefix("kCFProxyType") ? String(type.dropFirst("kCFProxyType".count)) : type
+            entries.append(name.isEmpty ? "UNKNOWN" : name)
         }
-    }
-
-    // Two paths land here with `entries.isEmpty == true`: (a) the CFArray
-    // was already empty (no proxy decision at all), and (b) the CFArray
-    // had entries but every one was filtered out — unknown proxy type, or
-    // an HTTP/HTTPS/SOCKS dictionary whose host/port failed `extractHost
-    // Port` (out-of-range port, missing keys). Both must default to
-    // "DIRECT" so the kernel sees a usable chain instead of `[]`. An empty
-    // chain in `PACRoutingEngine.routeChain(for:host:)` becomes an empty
-    // `[PACRoute]`, `HTTPProxyHandler.route` is `nil`, and the request is
-    // routed through the configured upstream — the OPPOSITE of what an
-    // unparsable PAC decision should do. Defaulting to DIRECT keeps the
-    // failure mode safe-by-default.
-    if entries.isEmpty {
-        return ["DIRECT"]
     }
     return entries
 }
 
-private func extractHostPort(from dict: CFDictionary) -> String? {
-    guard
-        let hostPtr = CFDictionaryGetValue(
-            dict,
-            Unmanaged.passUnretained(kCFProxyHostNameKey).toOpaque()
-        ),
-        let portPtr = CFDictionaryGetValue(
-            dict,
-            Unmanaged.passUnretained(kCFProxyPortNumberKey).toOpaque()
-        )
-    else {
+private func directive(_ keyword: String, endpoint: String?) -> String {
+    guard let endpoint else { return keyword }
+    return "\(keyword) \(endpoint)"
+}
+
+/// `host:port` exactly as CFNetwork reported it, with no range check: the
+/// kernel's `parseRoute` validates, so a bad port is rejected visibly. A
+/// missing host yields `nil` (an endpoint-less directive, rejected as
+/// invalid); a missing port yields `host` alone, likewise invalid.
+private func rawEndpoint(from dict: CFDictionary) -> String? {
+    guard let hostPtr = CFDictionaryGetValue(
+        dict,
+        Unmanaged.passUnretained(kCFProxyHostNameKey).toOpaque()
+    ) else {
         return nil
     }
     let host = unsafeBitCast(hostPtr, to: CFString.self) as String
+    guard !host.isEmpty else { return nil }
+    guard let portPtr = CFDictionaryGetValue(
+        dict,
+        Unmanaged.passUnretained(kCFProxyPortNumberKey).toOpaque()
+    ) else {
+        return host
+    }
     let portNumber = unsafeBitCast(portPtr, to: CFNumber.self)
     var port: Int = 0
-    CFNumberGetValue(portNumber, .intType, &port)
-    guard port > 0, port <= 65535 else { return nil }
+    guard CFNumberGetValue(portNumber, .intType, &port) else { return host }
     return "\(host):\(port)"
 }
 
@@ -453,10 +457,15 @@ package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
         return evaluator
     }
 
-    package func routeChain(for entries: [String]) -> [PACRoute] {
-        entries.compactMap(parseRoute)
+    package func routeChain(for entries: [String]) -> PACChain {
+        PACChain.classify(entries, parse: parseRoute)
     }
 
+    /// Parse one directive in the forms `parseProxyList` produces: `DIRECT`,
+    /// `PROXY host:port` and `SOCKS host:port`, with a non-empty host and a
+    /// port in 1–65535. Chrome-style `HTTP`/`HTTPS`/`SOCKS4`/`SOCKS5` are not
+    /// accepted: CFNetwork never produces them, and mapping them to a plain
+    /// proxy or SOCKS would change what the script asked for (#49).
     package func parseRoute(_ entry: String) -> PACRoute? {
         let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -465,20 +474,21 @@ package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
         guard let kind = parts.first?.uppercased() else { return nil }
 
         if kind == "DIRECT" {
-            return .direct
+            return parts.count == 1 ? .direct : nil
         }
 
-        guard parts.count >= 2 else { return nil }
+        guard parts.count == 2 else { return nil }
         let endpoint = String(parts[1])
-        let hostPort = endpoint.split(separator: ":", maxSplits: 1).map(String.init)
-        guard hostPort.count == 2, let port = Int(hostPort[1]), !hostPort[0].isEmpty else {
+        let hostPort = endpoint.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
+        guard hostPort.count == 2, !hostPort[0].isEmpty,
+              let port = Int(hostPort[1]), (1...65_535).contains(port) else {
             return nil
         }
 
         switch kind {
-        case "PROXY", "HTTP", "HTTPS":
+        case "PROXY":
             return .proxy(host: hostPort[0], port: port)
-        case "SOCKS", "SOCKS4", "SOCKS5":
+        case "SOCKS":
             return .socks(host: hostPort[0], port: port)
         default:
             return nil
