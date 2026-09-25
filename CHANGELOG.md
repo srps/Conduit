@@ -6,10 +6,25 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-**Upgrading:** to turn on caller identity, run `scripts/create-signing-identity.sh` once,
-rebuild and install the app with `./bundle-app.sh`, then `sudo ./install-helper.sh`. Until
-then the new helper behaves as before and logs that identity is unenforced. The helper
-protocol did not change.
+**Upgrading:** this release changes the helper, so reinstall it. To also turn on caller
+identity, in this order:
+
+1. Run `scripts/create-signing-identity.sh` once, as yourself. It asks for a one-time
+   transfer passphrase, and macOS asks for it again in its import dialog.
+2. Rebuild and install the app with `./bundle-app.sh --release --install`. Answer
+   "Allow", not "Always Allow", when `codesign` asks to use the key.
+3. Run `sudo ./install-helper.sh`; its summary says `Callers: ENFORCED`.
+
+Without the identity, the app is signed ad-hoc as before, and the new helper keeps the
+console-user rule and logs that identity is unenforced. The helper protocol did not
+change, so an older app still works with the new helper, and a new app with an older one.
+
+Routing changed in two ways worth watching after the upgrade (see Changed). With strict
+mode on, the default, a host that used to go direct because it answered a direct probe
+now goes through the upstream. A `routing.strict_direct_reachable` event names each host
+that failed through the upstream but answers directly; add it to No-proxy hosts if it
+should not use the proxy. A frequent `pac.no_usable_route` means the PAC answers in a
+form Conduit cannot route by.
 
 ### Security
 
@@ -80,6 +95,33 @@ protocol did not change.
   (`lifecycle.termination_drain_expired`). A restart that a stop overtakes no longer
   reports "Proxy Restarted". The proxy, resolver and environment managers serialise their
   own operations, as the system DNS manager already did. (#47)
+- The daemon host now runs the app's launch crash recovery. A daemon killed with the
+  system proxy or system DNS applied used to leave the machine pointed at its dead
+  listeners, with the helper's `:53` relay forwarding to a dead forwarder, until its next
+  start or stop, which in runtime-host mode might never come. Now it restores both from
+  the journal at launch, off the main actor, before it touches any surface or reports
+  ready, and adopts or removes resolver files an earlier release wrote. A daemon whose
+  config fails to load still runs the journal restores before it exits, as the app does.
+  (#17, #88)
+
+### Logging
+
+- Launch recovery reports what it decided for each surface (system DNS, system proxy,
+  legacy resolver files): `platform.launch_recovery_restored`, `_nothing_to_do`,
+  `_declined` (a live listener still serves the recorded settings), `_discarded`,
+  `_adopted`, `_skipped` and `_failed`, in both the app and the daemon. Until now the
+  managers only logged. (#88)
+- `auth.kerberos_failed` reports a Kerberos failure that has no NTLM answer to fall back
+  on, on the initial handshake leg or a continuation GSS rejects, at most once a minute
+  per upstream host and reason. (#75)
+
+### Development
+
+- The daemon host takes its credential store as an argument, as the app already did, so a
+  daemon over `FakeMachine` in tests no longer reads or writes the login Keychain. (#83)
+- `pm-sim` gains `lifecycle-stop-overtakes-start`, `helper-caller-identity`,
+  `pac-unsupported-only` (a PAC with no usable answer routes through the upstream and
+  never reaches the origin directly) and `strict-direct-reachable`.
 
 ## 0.3.3
 
