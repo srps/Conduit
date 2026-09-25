@@ -60,7 +60,7 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `init` | Ring-buffer placeholder; never meaningful, filter it out. |
 | `proxy.starting` / `proxy.stopping` | Orchestrator lifecycle transitions. |
-| `daemon.ready` | Daemon runtime host finished startup (`detail: mode=…`). |
+| `daemon.ready` | Daemon runtime host finished startup (`detail: mode=…`). Emitted after launch recovery has finished, so a consumer never sees readiness while a crashed run's settings are still being handed back. |
 | `platform.launch_recovery_restored` | Launch-time crash recovery found a surface a run that never tore down left applied, restored the journal's recorded prior values and released it (`surface=systemDNS` or `surface=systemProxy`, `stale=true` when the records were over 7 days old and were restored without a liveness probe). One event per surface per launch from both hosts, in the order system DNS, system proxy, resolver files. Emitted before the log line. |
 | `platform.launch_recovery_nothing_to_do` | Recovery had nothing to act on for a surface (`surface=`, `reason=` one of `nothing_recorded`, `already_settled`, `fresh_install`, `no_journal`). |
 | `platform.launch_recovery_declined` | Recorded state exists, but a local listener is still serving it, so another session owns the machine and it was left alone (`surface=`, `reason=live_listener`). |

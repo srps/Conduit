@@ -86,7 +86,8 @@ enum ConduitDaemon {
             retainedSources.append(source)
         }
 
-        host.markReady(mode: args.contains("--start-runtime") ? "runtime-started" : "runtime-host")
+        // Joins launch recovery before it publishes anything; see `markReady`.
+        await host.markReady(mode: args.contains("--start-runtime") ? "runtime-started" : "runtime-host")
 
         if args.contains("--print-status") {
             printStatus(host.status())
@@ -97,10 +98,6 @@ enum ConduitDaemon {
         if args.contains("--exit-after-ready") {
             if args.contains("--start-runtime") {
                 await host.stopRuntime()
-            } else {
-                // Nothing else joins it on this path, and returning would end
-                // the process with a restore possibly half done.
-                await host.awaitLaunchRecovery()
             }
             logger.flush()
             return

@@ -308,7 +308,13 @@ final class DaemonRuntimeHost {
         launchRecovery = nil
     }
 
-    func markReady(mode: String) {
+    /// Publishes readiness: `daemon.ready`, `daemon-ready.json` and a
+    /// snapshot. Joins launch recovery first, so readiness never precedes it:
+    /// a consumer that acts on `daemon.ready` must not find the machine still
+    /// pointed at a crashed run's dead listeners. An await, so the main actor
+    /// stays free while recovery runs.
+    func markReady(mode: String) async {
+        await awaitLaunchRecovery()
         orchestrator.eventLog.append(RuntimeEvent(kind: .lifecycle, event: "daemon.ready", detail: "mode=\(mode)"))
         writeReadyFile()
         writeSnapshotFile(snapshot: orchestrator.snapshot)

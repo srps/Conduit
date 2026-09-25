@@ -571,6 +571,37 @@ final class DaemonRuntimeHostTests: XCTestCase {
         )
     }
 
+    /// Readiness never precedes recovery. `daemon.ready` and
+    /// `daemon-ready.json` tell a consumer startup is over; published while
+    /// recovery was still out, they announced a machine that could still be
+    /// pointed at a crashed run's dead proxy port.
+    func testReadinessIsPublishedOnlyAfterLaunchRecovery() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        let prior = ProxyServiceState(
+            webHost: "prior.example.test", webPort: "8080", webEnabled: true,
+            secureHost: "prior.example.test", securePort: "8080", secureEnabled: true,
+            autoURL: "", autoEnabled: false, bypassDomains: ["*.local"]
+        )
+        let seeded = harness.journal
+        seeded.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: prior.journalValues)
+        seeded.markApplied(surface: .systemProxy)
+        harness.machine.describe("Wi-Fi") { service in
+            service.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
+            service.secureWebProxy = service.webProxy
+        }
+
+        let host = try harness.makeHost()
+        await host.markReady(mode: "runtime-host")
+
+        XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "restored by the time readiness is published")
+        let names = host.orchestrator.eventLog.events.map(\.event)
+        let ready = try XCTUnwrap(names.firstIndex(of: "daemon.ready"))
+        let restored = try XCTUnwrap(names.firstIndex(of: "platform.launch_recovery_restored"))
+        XCTAssertLessThan(restored, ready, "recovery's events come first: \(names)")
+    }
+
     /// Twin of `AppStateHarnessTests.testCorruptConfigStillRestoresJournaledProxyOnLaunch`.
     /// The daemon builds no host from a failed load, so `ConduitDaemon.main`
     /// runs the journal restores through `recoverWithoutConfiguration` before
