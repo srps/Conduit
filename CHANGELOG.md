@@ -17,7 +17,11 @@ identity, in this order:
 
 Without the identity, the app is signed ad-hoc as before, and the new helper keeps the
 console-user rule and logs that identity is unenforced. The helper protocol did not
-change, so an older app still works with the new helper, and a new app with an older one.
+change: a new app works with an older helper, and an older app works with the new helper
+while identity is unenforced. Once the pin is installed, the helper refuses any build not
+signed with the pinned identity, including every earlier release, which was signed
+ad-hoc; to roll back past this release, reinstall the older release's helper too, which
+drops enforcement.
 
 Routing changed in two ways worth watching after the upgrade (see Changed). With strict
 mode on, the default, a host that used to go direct because it answered a direct probe
