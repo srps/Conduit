@@ -141,11 +141,14 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 // async exchange/tunnel setup; async PAC only makes the routing step
                 // visibly async too. Modern clients do not pipeline, and supporting it
                 // correctly would require a per-client response serializer.
-                engine.routeChainFuture(for: pacURL.absoluteString, host: targetHost, on: ctx.eventLoop)
+                engine.decisionFuture(for: pacURL.absoluteString, host: targetHost, on: ctx.eventLoop)
                     .whenComplete { result in
                         guard ctx.channel.isActive else { return }
-                        let routes = (try? result.get()) ?? []
-                        let pacResult = Self.pacResult(from: routes, config: currentConfig)
+                        let pacPlan = Self.pacPlan(
+                            for: result, config: currentConfig,
+                            directFallbackAllowed: self.directFallbackAllowedByCurrentMode(),
+                            host: targetHost, engine: engine
+                        )
                         self.routeCompletedRequest(
                             head: head,
                             body: completedBody.body,
@@ -156,12 +159,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             forceProxy: forceProxy,
                             directModeBypass: directModeBypass,
                             directCause: directCause,
-                            pacResult: pacResult
+                            pacPlan: pacPlan
                         )
                     }
                 return
             }
-            let pacResult = PACResult(route: nil, hasDirectFallback: false)
             self.routeCompletedRequest(
                 head: head,
                 body: completedBody.body,
@@ -172,7 +174,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 forceProxy: forceProxy,
                 directModeBypass: directModeBypass,
                 directCause: directCause,
-                pacResult: pacResult
+                pacPlan: .noOpinion
             )
             }
         }
@@ -188,21 +190,23 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         forceProxy: Bool,
         directModeBypass: Bool,
         directCause: DirectModeCause,
-        pacResult: PACResult
+        pacPlan: PACRoutePlan
     ) {
         let targetHost = target.host
-        let pacBypass = pacResult.route == .direct
-        let pacSaysProxy: Bool
-        if case .proxy = pacResult.route { pacSaysProxy = true } else { pacSaysProxy = false }
+        // The reachability shortcut applies only where PAC has no say and
+        // strict mode is off; it never overrides a PAC answer, usable or
+        // not (#50), and strict mode never probes proactively (#87).
+        let reachabilityShortcut = !forceProxy
+            && pacPlan.allowsReachabilityShortcut(strictMode: currentConfig.strictMode)
         let bypass = directModeBypass
             || NoProxyMatcher.shouldBypass(
                 host: targetHost,
                 patterns: currentConfig.noProxyHosts + currentConfig.implicitBypassHosts,
                 forceProxy: forceProxyPatterns
             )
-            || pacBypass
-            || (!forceProxy && !pacSaysProxy && cachedDirectReachable(target: target))
-        let selectedUpstream = pacResult.proxyChain.first?.endpoint ?? pool.activeUpstream() ?? "pending"
+            || pacPlan == .direct
+            || (reachabilityShortcut && cachedDirectReachable(target: target))
+        let selectedUpstream = pacPlan.proxyChain.first?.endpoint ?? pool.activeUpstream() ?? "pending"
         let info = ActiveConnectionInfo(
             destination: head.uri,
             upstream: bypass ? "DIRECT" : selectedUpstream,
@@ -218,7 +222,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             context: context,
             bypass: bypass,
             directCause: directCause,
-            pacResult: pacResult
+            pacPlan: pacPlan
         )
     }
 
@@ -346,6 +350,35 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         }
     }
 
+    /// Strict mode sent this request to the upstream, and the upstream path
+    /// failed with a 502. Probe the target directly once (per host, per
+    /// cooldown) and, if it answers, say that a No-proxy entry would reach it
+    /// (#87). The request is not retried directly. Failures the pool refused
+    /// locally never reached the upstream and get no hint.
+    private func hintIfStrictModeTargetIsDirectlyReachable(target: HTTPRequestTarget, error: Error) {
+        guard configProvider().strictMode,
+              !ConnectionPoolError.isPoolExhausted(error),
+              !ConnectionPoolError.isAuthHandshakeLimitExceeded(error) else { return }
+        let host = target.host
+        let port = target.port
+        let eventSink = self.eventSink
+        let logger = self.logger
+        directConnectDetector.probeForStrictModeHint(host: host, port: port, gatewayMode: gatewayMode) {
+            let event = RuntimeEvent(
+                kind: .routing,
+                event: "routing.strict_direct_reachable",
+                detail: "host=\(host) port=\(port) hint=add_to_no_proxy_hosts"
+            )
+            eventSink?(event)
+            logger.log(
+                .notice,
+                "\(host):\(port) failed through the upstream in strict mode but answers directly. " +
+                    "If it should not use the proxy, add it to No-proxy hosts. (\(event.event): \(event.detail ?? ""))",
+                category: .proxy
+            )
+        }
+    }
+
     private func cachedDirectReachable(target: HTTPRequestTarget) -> Bool {
         if let cached = directConnectDetector.cachedReachability(host: target.host, port: target.port) {
             return cached
@@ -371,35 +404,39 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         hasDirectFallback && !ConnectionPoolError.isStreamingResponseInterrupted(error)
     }
 
-    private struct PACResult {
-        var route: PACRoute?
-        var hasDirectFallback: Bool
-        var proxyChain: [UpstreamProxy] = []
-    }
-
-    private static func pacResult(from chain: [PACRoute], config: ProxyConfig) -> PACResult {
-        return PACResult(
-            route: chain.first,
-            hasDirectFallback: chain.count > 1 && chain.contains(.direct),
-            proxyChain: Self.pacProxyChain(from: chain, config: config)
-        )
+    /// The routing plan for a PAC decision, shared with the SOCKS5 listener.
+    /// A chain the engine answered as usable can still leave nothing to route
+    /// by here (a promoted DIRECT without direct fallback); that request is
+    /// reported as `pac.no_usable_route` like any other.
+    package static func pacPlan(
+        for result: Result<PACDecision, any Error>,
+        config: ProxyConfig,
+        directFallbackAllowed: Bool,
+        host: String,
+        engine: PACRoutingEngine
+    ) -> PACRoutePlan {
+        let decision: PACDecision
+        let engineReported: Bool
+        switch result {
+        case .success(let answer):
+            decision = answer
+            // The engine reports every `.noUsableAnswer` it returns.
+            if case .noUsableAnswer = answer { engineReported = true } else { engineReported = false }
+        case .failure:
+            // `decisionFuture` only ever succeeds; if that changes, a failed
+            // future is an evaluation failure and fails closed like one.
+            decision = .noUsableAnswer(.evaluationFailed, rejected: [])
+            engineReported = false
+        }
+        let plan = PACRoutePlan(decision: decision, config: config, directFallbackAllowed: directFallbackAllowed)
+        if case .upstreamsOnly(let reason, let rejected) = plan, !engineReported {
+            engine.reportNoUsableRoute(reason, rejected: rejected, host: host)
+        }
+        return plan
     }
 
     package static func pacProxyChain(from routes: [PACRoute], config: ProxyConfig) -> [UpstreamProxy] {
-        routes.enumerated().compactMap { index, route in
-            guard case .proxy(let host, let port) = route else { return nil }
-            if let configured = config.enabledUpstreams.first(where: {
-                $0.host.caseInsensitiveCompare(host) == .orderedSame && $0.port == port
-            }) {
-                return configured
-            }
-            return UpstreamProxy(
-                name: "PAC \(host):\(port)",
-                host: host,
-                port: port,
-                priority: index
-            )
-        }
+        PACRoutePlan.proxyChain(from: routes, config: config)
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
@@ -415,7 +452,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         context: ChannelHandlerContext,
         bypass: Bool,
         directCause: DirectModeCause = .none,
-        pacResult: PACResult = PACResult(route: nil, hasDirectFallback: false)
+        pacPlan: PACRoutePlan = .noOpinion
     ) {
         if MetadataBlocklist.isBlocked(host: target.host, gatewayMode: gatewayMode) {
             logger.log(.warning, "Blocked request to \(SensitiveValueSanitizer.observableTarget(head.uri)) (metadata/loopback protection).", category: .proxy)
@@ -431,14 +468,14 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             if bypass {
                 handleDirectConnect(head: head, target: target, infoID: infoID, context: context)
             } else {
-                let hasDirectFallback = pacResult.hasDirectFallback && directFallbackAllowedByCurrentMode()
+                let hasDirectFallback = pacPlan.hasDirectFallback
                 let upstreamFailureLevel = Self.upstreamFailureLogLevel(for: directCause)
                 let onConnectionClosed = self.onConnectionClosed
                 nonisolated(unsafe) let ctx = context
                 connectCoordinator.establishTunnel(
                     requestHead: head,
                     clientContext: ctx,
-                    proxyChain: pacResult.proxyChain,
+                    proxyChain: pacPlan.proxyChain,
                     onTunnelClosed: { onConnectionClosed(infoID) }
                 )
                 .hop(to: ctx.eventLoop)
@@ -479,6 +516,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             self.onRequestCompleted(false, nil)
                             self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                             self.onConnectionClosed(infoID)
+                            self.hintIfStrictModeTargetIsDirectlyReachable(target: target, error: error)
                         }
                     }
                 }
@@ -515,7 +553,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             return
         }
 
-        let hasDirectFallback = pacResult.hasDirectFallback && directFallbackAllowedByCurrentMode()
+        let hasDirectFallback = pacPlan.hasDirectFallback
         let upstreamFailureLevel = Self.upstreamFailureLogLevel(for: directCause)
         nonisolated(unsafe) let ctx = context
         let clientEL = ctx.eventLoop
@@ -524,7 +562,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             requestBody: body,
             clientChannel: ctx.channel,
             authSource: authSource,
-            forcedProxy: pacResult.proxyChain.first
+            forcedProxy: pacPlan.proxyChain.first
         )
             .hop(to: clientEL)
             .whenComplete { result in
@@ -557,6 +595,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                         self.onConnectionClosed(infoID)
                         body?.cleanup()
+                        if !ConnectionPoolError.isStreamingResponseInterrupted(error) {
+                            self.hintIfStrictModeTargetIsDirectlyReachable(target: target, error: error)
+                        }
                     }
                 }
             }
@@ -899,9 +940,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 // metadata/loopback blocklist. The pre-connect host check can't
                 // see a hostname that resolves to a blocked literal. Direct path
                 // only — upstream-proxy connections are operator-configured.
-                if gatewayMode,
-                   let ip = channel.remoteAddress?.ipAddress,
-                   MetadataBlocklist.isBlockedResolvedAddress(ip, gatewayMode: gatewayMode) {
+                if let ip = MetadataBlocklist.blockedResolvedAddress(channel.remoteAddress, gatewayMode: gatewayMode) {
                     logger.log(.warning, "Blocked direct connection to \(host):\(port): resolved to \(ip) (metadata/loopback protection).", category: .proxy)
                     channel.close(promise: nil)
                     throw MetadataBlocklist.BlockedAddressError(host: host, resolvedIP: ip)

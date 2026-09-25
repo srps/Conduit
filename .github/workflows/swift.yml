@@ -59,6 +59,8 @@ jobs:
       run: |
         conduit_bin_dir="$(xcrun swift build --show-bin-path)"
         "$conduit_bin_dir/pm-sim" forced-proxy-precedence
+        "$conduit_bin_dir/pm-sim" pac-unsupported-only
+        "$conduit_bin_dir/pm-sim" strict-direct-reachable
     - name: Resource bounds and standalone shutdown regressions
       env:
         DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer

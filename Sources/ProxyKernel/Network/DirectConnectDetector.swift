@@ -14,20 +14,54 @@ package final class DirectConnectDetector: @unchecked Sendable {
     private var cache: [String: CacheEntry] = [:]
     private var hostTimeouts: [String: Int64] = [:]
     private var pendingProbes: Set<String> = []
+    /// Host → when a strict-mode hint probe last ran; see `probeForStrictModeHint`.
+    private var strictHintProbedAt: [String: Date] = [:]
+    private var strictHintInFlight = 0
+    private var strictHintSkipped = 0
+    private var probesStarted = 0
+    private let now: @Sendable () -> Date
+    private let resolveForHint: @Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>
     private let lock = NSLock()
+
+    /// Per-host cooldown between strict-mode hint probes (#87).
+    package static let strictHintCooldown: TimeInterval = 600
+    /// Hosts the strict-mode hint remembers at once. Past it, entries whose
+    /// cooldown ran out go first, then the oldest.
+    package static let strictHintCapacity = 256
+    /// Strict-mode hint probes in flight at once. Past it a hint is skipped
+    /// (and counted), so a burst of failing hosts cannot fan out into an
+    /// unbounded number of direct connection attempts.
+    package static let strictHintMaxInFlight = 4
+
+    /// Why `probeForStrictModeHint` did or did not start a probe.
+    package enum StrictHintProbe: Equatable, Sendable {
+        case started
+        /// The host was probed within `strictHintCooldown`.
+        case coolingDown
+        /// `strictHintMaxInFlight` probes are already running.
+        case busy
+        /// The host is on the metadata/loopback blocklist (gateway mode).
+        case blocked
+    }
 
     package struct CacheEntry {
         let reachable: Bool
         let checkedAt: Date
     }
 
+    /// - Parameter hintResolver: how the strict-mode hint resolves a host
+    ///   before it connects, so every resolved address can be checked against
+    ///   the blocklist first. Tests inject one; the default asks
+    ///   `AddressFamilyAwareResolver` for A, then AAAA, records.
     package init(
         group: EventLoopGroup,
         logger: any LogSink,
         ttlSeconds: TimeInterval = 300,
         baseTimeoutMS: Int64 = 500,
         maxCacheSize: Int = 512,
-        maxConcurrentProbes: Int = 16
+        maxConcurrentProbes: Int = 16,
+        now: @escaping @Sendable () -> Date = { Date() },
+        hintResolver: (@Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>)? = nil
     ) {
         self.group = group
         self.logger = logger
@@ -36,6 +70,124 @@ package final class DirectConnectDetector: @unchecked Sendable {
         self.maxTimeoutMS = baseTimeoutMS * 8
         self.maxCacheSize = maxCacheSize
         self.maxConcurrentProbes = maxConcurrentProbes
+        self.now = now
+        self.resolveForHint = hintResolver ?? { host, port, loop in
+            let resolver = AddressFamilyAwareResolver(group: group)
+            // A lookup that fails for one family leaves the other; if both
+            // fail the host has no address to probe, which is the answer.
+            let v4 = resolver.initiateAQuery(host: host, port: port).hop(to: loop)
+                .flatMapError { _ in loop.makeSucceededFuture([]) }
+            let v6 = resolver.initiateAAAAQuery(host: host, port: port).hop(to: loop)
+                .flatMapError { _ in loop.makeSucceededFuture([]) }
+            return v4.and(v6).map { $0 + $1 }
+        }
+    }
+
+    /// Direct probes started so far, of every kind. Lets tests prove that a
+    /// path made none (strict mode makes no proactive probes, #87).
+    package var probeCount: Int {
+        lock.withLock { probesStarted }
+    }
+
+    /// Strict-mode hint probes running now (at most `strictHintMaxInFlight`).
+    package var strictHintInFlightCount: Int {
+        lock.withLock { strictHintInFlight }
+    }
+
+    /// Strict-mode hints skipped because `strictHintMaxInFlight` probes were running.
+    package var strictHintSkippedCount: Int {
+        lock.withLock { strictHintSkipped }
+    }
+
+    /// After a strict-mode request failed through the upstream: probe
+    /// `host:port` directly once, and call `onReachable` if it answers, so
+    /// the caller can suggest a No-proxy entry. The request itself is never
+    /// retried directly. At most one probe per host per `strictHintCooldown`,
+    /// in a table of at most `strictHintCapacity` hosts, and at most
+    /// `strictHintMaxInFlight` probes at once.
+    ///
+    /// The probe follows the direct path's metadata/loopback policy: a
+    /// blocked host name is never probed, and a host is resolved first and
+    /// not connected to at all if any address is blocked. The connected peer
+    /// is checked again, the same way the direct path checks it, before it
+    /// counts as reachable.
+    @discardableResult
+    package func probeForStrictModeHint(
+        host: String,
+        port: Int,
+        gatewayMode: Bool,
+        onReachable: @escaping @Sendable () -> Void
+    ) -> StrictHintProbe {
+        guard !MetadataBlocklist.isBlocked(host: host, gatewayMode: gatewayMode) else { return .blocked }
+        let key = host.lowercased()
+        let current = now()
+        let cooldown = Self.strictHintCooldown
+        let admission = lock.withLock { () -> StrictHintProbe in
+            if let last = strictHintProbedAt[key], current.timeIntervalSince(last) < cooldown {
+                return .coolingDown
+            }
+            guard strictHintInFlight < Self.strictHintMaxInFlight else {
+                strictHintSkipped += 1
+                return .busy
+            }
+            if strictHintProbedAt[key] == nil, strictHintProbedAt.count >= Self.strictHintCapacity {
+                strictHintProbedAt = strictHintProbedAt.filter { current.timeIntervalSince($0.value) < cooldown }
+                if strictHintProbedAt.count >= Self.strictHintCapacity,
+                   let oldest = strictHintProbedAt.min(by: { $0.value < $1.value }) {
+                    strictHintProbedAt.removeValue(forKey: oldest.key)
+                }
+            }
+            strictHintProbedAt[key] = current
+            strictHintInFlight += 1
+            probesStarted += 1
+            return .started
+        }
+        guard admission == .started else { return admission }
+        hintProbe(host: host, port: port, gatewayMode: gatewayMode).whenComplete { result in
+            self.lock.withLock { self.strictHintInFlight -= 1 }
+            if case .success(true) = result { onReachable() }
+        }
+        return .started
+    }
+
+    /// Whether `host:port` answers a direct TCP connect under the blocklist
+    /// policy. Never fails: an unreachable or blocked target is `false`.
+    private func hintProbe(host: String, port: Int, gatewayMode: Bool) -> EventLoopFuture<Bool> {
+        let loop = group.next()
+        let group = self.group
+        let logger = self.logger
+        let timeout = maxTimeoutMS
+        return resolveForHint(host, port, loop).hop(to: loop).flatMap { addresses -> EventLoopFuture<Bool> in
+            if let blocked = addresses.lazy.compactMap({
+                MetadataBlocklist.blockedResolvedAddress($0, gatewayMode: gatewayMode)
+            }).first {
+                logger.log(.info, "Strict-mode hint for \(host):\(port) skipped: it resolves to \(blocked) (metadata/loopback protection).", category: .network)
+                return loop.makeSucceededFuture(false)
+            }
+            guard let address = addresses.first else { return loop.makeSucceededFuture(false) }
+            return ClientBootstrap(group: group)
+                .connectTimeout(.milliseconds(timeout))
+                .connect(to: address)
+                .hop(to: loop)
+                .flatMapThrowing { channel in
+                    defer { channel.close(mode: .all, promise: nil) }
+                    // The direct path's resolved-peer check.
+                    if let ip = MetadataBlocklist.blockedResolvedAddress(channel.remoteAddress, gatewayMode: gatewayMode) {
+                        throw MetadataBlocklist.BlockedAddressError(host: host, resolvedIP: ip)
+                    }
+                    return true
+                }
+        }
+        .flatMapError { error in
+            // Unreachable is the probe's answer, not a failure to report.
+            logger.log(.debug, "Strict-mode hint probe of \(host):\(port): \(error.displayDescription)", category: .network)
+            return loop.makeSucceededFuture(false)
+        }
+    }
+
+    /// Hosts in the strict-mode hint table (bounded by `strictHintCapacity`).
+    package var strictHintTableCount: Int {
+        lock.withLock { strictHintProbedAt.count }
     }
 
     /// Synchronous cache-only check. Returns the cached reachability result
@@ -60,6 +212,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
             if pendingProbes.contains(key) { return false }
             if pendingProbes.count >= maxConcurrentProbes { return false }
             pendingProbes.insert(key)
+            probesStarted += 1
             return true
         }
         guard shouldProbe else { return }
@@ -94,7 +247,10 @@ package final class DirectConnectDetector: @unchecked Sendable {
         }
 
         let key = "\(host):\(port)"
-        let timeout = lock.withLock { hostTimeouts[key] ?? baseTimeoutMS }
+        let timeout = lock.withLock { () -> Int64 in
+            probesStarted += 1
+            return hostTimeouts[key] ?? baseTimeoutMS
+        }
         let reachable = await probe(host: host, port: port, timeoutMS: timeout)
 
         lock.withLock {
@@ -118,6 +274,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
         lock.withLock {
             cache.removeAll()
             hostTimeouts.removeAll()
+            strictHintProbedAt.removeAll()
         }
     }
 

@@ -189,43 +189,121 @@ final class CFPACEvaluatorTests: XCTestCase {
                        "non-empty result indicates the helper is wired.")
     }
 
-    // MARK: - Empty / fallback / error paths
+    // MARK: - Native directive table (#49)
+    //
+    // Pins what `CFNetworkExecuteProxyAutoConfigurationScript` hands the
+    // adapter on this macOS, so a change in the mapping fails here instead of
+    // silently changing routing. Each row runs the real CFNetwork evaluator.
 
-    func testEmptyFindProxyReturnsDirect() throws {
-        // CFNetwork normalizes empty / whitespace-only PAC results into the
-        // `kCFProxyTypeNone` entry, which our parser maps to "DIRECT".
-        // Empty or whitespace-only decisions must still produce a usable
-        // route chain.
-        let evaluator = try makeEvaluator("""
-        function FindProxyForURL(url, host) { return ""; }
-        """)
-        let result = try evaluator.resolveProxyChain(for: URL(string: "http://example.com/")!)
-        XCTAssertEqual(result, ["DIRECT"])
+    private struct NativeRow {
+        let returns: String
+        let http: [String]
+        let https: [String]
     }
 
-    /// Regression guard: when CFNetwork
-    /// returns a non-empty proxy list whose entries all fail extraction
-    /// (unknown type, missing host/port keys, port out of range), the
-    /// pre-fix `parseProxyList` returned `[]` — `PACRoutingEngine` then
-    /// produced an empty `[PACRoute]`, `HTTPProxyHandler.route` was `nil`,
-    /// and the request was routed through the configured upstream rather
-    /// than going DIRECT (the OPPOSITE of what an unparsable PAC decision
-    /// should do).
-    ///
-    /// `PROXY foo:99999` exercises the all-filtered path: port 99999 is a
-    /// valid CFNumber but `extractHostPort` rejects it (out of 1..65535).
-    /// Either CFNetwork accepts the script and produces a CFDictionary
-    /// that fails extraction (count > 0, all filtered → fallback fires)
-    /// OR CFNetwork rejects at parse time and the result is empty
-    /// (count == 0 → same fallback). Both paths must end at "DIRECT".
-    func testEvaluationFallsBackToDirectWhenAllProxyEntriesAreUnusable() throws {
+    func testNativeDirectiveTableMatchesCFNetwork() throws {
+        let rows: [NativeRow] = [
+            // `kCFProxyTypeHTTP` for http, `kCFProxyTypeHTTPS` for https: both
+            // are a plain proxy (sent CONNECT for https), so both are PROXY.
+            NativeRow(returns: "PROXY p.example:8080", http: ["PROXY p.example:8080"], https: ["PROXY p.example:8080"]),
+            // A missing port becomes 80.
+            NativeRow(returns: "PROXY p.example", http: ["PROXY p.example:80"], https: ["PROXY p.example:80"]),
+            // CFNetwork does not range-check ports; the adapter passes the
+            // entry on and the kernel rejects it (see the classification test).
+            NativeRow(returns: "PROXY p.example:99999", http: ["PROXY p.example:99999"], https: ["PROXY p.example:99999"]),
+            NativeRow(returns: "SOCKS s.example:1080", http: ["SOCKS s.example:1080"], https: ["SOCKS s.example:1080"]),
+            // Dropped by CFNetwork before the adapter sees them.
+            NativeRow(returns: "HTTPS p.example:8443", http: [], https: []),
+            NativeRow(returns: "HTTP p.example:8080", http: [], https: []),
+            NativeRow(returns: "SOCKS5 s.example:1080", http: [], https: []),
+            NativeRow(returns: "QUIC q.example:443", http: [], https: []),
+            NativeRow(returns: "BOGUS x.example:1", http: [], https: []),
+            NativeRow(returns: "", http: [], https: []),
+            // A dropped entry shifts the chain; nothing reports it.
+            NativeRow(returns: "HTTPS p.example:8443; PROXY q.example:8080; DIRECT",
+                      http: ["PROXY q.example:8080", "DIRECT"], https: ["PROXY q.example:8080", "DIRECT"]),
+            NativeRow(returns: "DIRECT", http: ["DIRECT"], https: ["DIRECT"]),
+            NativeRow(returns: "SOCKS s.example:1080; DIRECT", http: ["SOCKS s.example:1080", "DIRECT"],
+                      https: ["SOCKS s.example:1080", "DIRECT"]),
+        ]
+        for row in rows {
+            let evaluator = try makeEvaluator("function FindProxyForURL(url, host) { return \"\(row.returns)\"; }")
+            XCTAssertEqual(try evaluator.resolveProxyChain(for: URL(string: "http://example.com/")!), row.http,
+                           "http: \(row.returns)")
+            XCTAssertEqual(try evaluator.resolveProxyChain(for: URL(string: "https://example.com/")!), row.https,
+                           "https: \(row.returns)")
+        }
+    }
+
+    /// The adapter never synthesizes DIRECT: an answer CFNetwork emptied is
+    /// routed as "no usable answer", not as a bypass (#50).
+    func testNativeUnusableAnswersAreNoUsableAnswerNotDirect() throws {
+        let resolver = CFPACEvaluator()
+        let cases: [(returns: String, decision: PACDecision)] = [
+            ("", .noUsableAnswer(.empty, rejected: [])),
+            ("HTTPS p.example:8443", .noUsableAnswer(.empty, rejected: [])),
+            ("SOCKS5 s.example:1080; QUIC q.example:443", .noUsableAnswer(.empty, rejected: [])),
+            ("SOCKS s.example:1080", .noUsableAnswer(
+                .unsupported, rejected: [PACRejectedEntry(type: "SOCKS", reason: .unsupported)])),
+            ("PROXY p.example:99999", .noUsableAnswer(
+                .invalid, rejected: [PACRejectedEntry(type: "PROXY", reason: .invalid)])),
+            ("PROXY p.example:0; SOCKS s.example:1080", .noUsableAnswer(
+                .unsupported, rejected: [
+                    PACRejectedEntry(type: "PROXY", reason: .invalid),
+                    PACRejectedEntry(type: "SOCKS", reason: .unsupported),
+                ])),
+        ]
+        for testCase in cases {
+            let evaluator = try makeEvaluator("function FindProxyForURL(url, host) { return \"\(testCase.returns)\"; }")
+            for url in ["http://example.com/", "https://example.com/"] {
+                let raw = try evaluator.resolveProxyChain(for: URL(string: url)!)
+                XCTAssertFalse(raw.contains("DIRECT"), "\(testCase.returns) for \(url) produced DIRECT: \(raw)")
+                XCTAssertEqual(PACDecision(chain: resolver.routeChain(for: raw)), testCase.decision,
+                               "\(testCase.returns) for \(url)")
+            }
+        }
+    }
+
+    func testNativeMixedChainKeepsOrderAndReportsRejections() throws {
+        let resolver = CFPACEvaluator()
         let evaluator = try makeEvaluator("""
-        function FindProxyForURL(url, host) { return "PROXY foo.example.com:99999"; }
+        function FindProxyForURL(url, host) {
+            return "PROXY bad.example:99999; SOCKS s.example:1080; PROXY good.example:8080; DIRECT";
+        }
         """)
-        let result = try evaluator.resolveProxyChain(for: URL(string: "http://example.com/")!)
-        XCTAssertEqual(result, ["DIRECT"],
-                       "All-filtered CFNetwork proxy list must default to DIRECT, not empty " +
-                       "— empty chains route through the configured upstream instead of safely going direct.")
+        let chain = resolver.routeChain(for: try evaluator.resolveProxyChain(for: URL(string: "https://example.com/")!))
+        XCTAssertEqual(chain.routes, [.proxy(host: "good.example", port: 8080), .direct])
+        XCTAssertEqual(chain.rejected, [
+            PACRejectedEntry(type: "PROXY", reason: .invalid),
+            PACRejectedEntry(type: "SOCKS", reason: .unsupported),
+        ])
+        XCTAssertFalse(chain.leadingDirectPromoted)
+    }
+
+    /// A DIRECT that follows only rejected entries is promoted, not explicit.
+    func testNativeDirectAfterRejectedProxyIsPromoted() throws {
+        let resolver = CFPACEvaluator()
+        let promoted = try makeEvaluator("function FindProxyForURL(url, host) { return \"SOCKS s.example:1080; DIRECT\"; }")
+        let chain = resolver.routeChain(for: try promoted.resolveProxyChain(for: URL(string: "http://example.com/")!))
+        XCTAssertEqual(chain.routes, [.direct])
+        XCTAssertTrue(chain.leadingDirectPromoted)
+
+        let explicit = try makeEvaluator("function FindProxyForURL(url, host) { return \"DIRECT; SOCKS s.example:1080\"; }")
+        let explicitChain = resolver.routeChain(for: try explicit.resolveProxyChain(for: URL(string: "http://example.com/")!))
+        XCTAssertEqual(explicitChain.routes, [.direct])
+        XCTAssertFalse(explicitChain.leadingDirectPromoted)
+    }
+
+    /// `42`, `null` and `throw` are CFError 308: an evaluation error, never a route.
+    func testNativeNonStringResultsAreEvaluationErrors() throws {
+        for body in ["return 42;", "return null;", "throw new Error(\"boom\");"] {
+            let evaluator = try makeEvaluator("function FindProxyForURL(url, host) { \(body) }")
+            XCTAssertThrowsError(try evaluator.resolveProxyChain(for: URL(string: "http://example.com/")!), body) { error in
+                guard case PACResolverError.evaluationFailed = error else {
+                    return XCTFail("\(body): expected evaluationFailed, got \(error)")
+                }
+            }
+        }
     }
 
     func testInvalidScriptThrowsEvaluationFailed() {
@@ -248,47 +326,86 @@ final class CFPACEvaluatorTests: XCTestCase {
         }
     }
 
-    // MARK: - routeChain (PacEvaluator protocol method, parses raw entries)
+    // MARK: - parseRoute / routeChain (the forms the adapter produces)
 
-    func testRouteChainParsesProxyAndDirect() {
+    func testParseRouteAcceptsOnlyAdapterForms() {
         let evaluator = CFPACEvaluator()
-        let routes = evaluator.routeChain(for: ["PROXY corp.example.com:3128", "DIRECT"])
-        XCTAssertEqual(routes.count, 2)
-        XCTAssertEqual(routes[0], .proxy(host: "corp.example.com", port: 3128))
-        XCTAssertEqual(routes[1], .direct)
+        XCTAssertEqual(evaluator.parseRoute("DIRECT"), .direct)
+        XCTAssertEqual(evaluator.parseRoute("PROXY corp.example.com:3128"), .proxy(host: "corp.example.com", port: 3128))
+        XCTAssertEqual(evaluator.parseRoute("SOCKS tunnel.example.com:1080"), .socks(host: "tunnel.example.com", port: 1080))
+        XCTAssertEqual(evaluator.parseRoute("PROXY p.example.com:1"), .proxy(host: "p.example.com", port: 1))
+        XCTAssertEqual(evaluator.parseRoute("PROXY p.example.com:65535"), .proxy(host: "p.example.com", port: 65535))
     }
 
-    func testRouteChainHandlesSocksAndHTTP() {
+    /// Chrome-style keywords are not the adapter's forms; mapping them to a
+    /// plain proxy or SOCKS would change what the script asked for (#49).
+    func testParseRouteRejectsChromeStyleKeywords() {
         let evaluator = CFPACEvaluator()
-        let routes = evaluator.routeChain(for: [
-            "HTTP fast.example.com:80",
+        for entry in ["HTTP fast.example.com:80", "HTTPS secure.example.com:443",
+                      "SOCKS4 tunnel.example.com:1080", "SOCKS5 tunnel.example.com:1080"] {
+            XCTAssertNil(evaluator.parseRoute(entry), entry)
+        }
+    }
+
+    func testParseRouteRejectsBadEndpoints() {
+        let evaluator = CFPACEvaluator()
+        for entry in ["PROXY p.example.com:0", "PROXY p.example.com:65536", "PROXY p.example.com:99999",
+                      "PROXY p.example.com:-1", "PROXY :8080", "PROXY p.example.com", "PROXY p.example.com:",
+                      "PROXY", "SOCKS s.example.com:0", "PROXY a:1 extra", "DIRECT now", ""] {
+            XCTAssertNil(evaluator.parseRoute(entry), entry)
+        }
+    }
+
+    func testRouteChainReportsEveryRejectedEntryInOrder() {
+        let chain = CFPACEvaluator().routeChain(for: [
+            "VENDOR_SPECIFIC something",
+            "PROXY",
+            "PROXY missing-port-host",
             "HTTPS secure.example.com:443",
-            "SOCKS5 tunnel.example.com:1080",
-            "DIRECT"
+            "SOCKS tunnel.example.com:1080",
+            "PROXY good.example.com:8080",
+            "DIRECT",
         ])
-        XCTAssertEqual(routes.count, 4)
-        XCTAssertEqual(routes[0], .proxy(host: "fast.example.com", port: 80))
-        XCTAssertEqual(routes[1], .proxy(host: "secure.example.com", port: 443))
-        XCTAssertEqual(routes[2], .socks(host: "tunnel.example.com", port: 1080))
-        XCTAssertEqual(routes[3], .direct)
+        XCTAssertEqual(chain.routes, [.proxy(host: "good.example.com", port: 8080), .direct])
+        XCTAssertEqual(chain.rejected, [
+            PACRejectedEntry(type: "VENDOR_SPECIFIC", reason: .unsupported),
+            PACRejectedEntry(type: "PROXY", reason: .invalid),
+            PACRejectedEntry(type: "PROXY", reason: .invalid),
+            PACRejectedEntry(type: "HTTPS", reason: .unsupported),
+            PACRejectedEntry(type: "SOCKS", reason: .unsupported),
+        ])
+        XCTAssertFalse(chain.leadingDirectPromoted)
     }
 
-    func testRouteChainSilentlySkipsUnparsableEntries() {
-        // Unknown directive types and malformed entries are dropped rather
-        // than failing the chain.
-        // (Note: `parseRoute` accepts port 0 as a valid Int; rejecting
-        // unusual ports is `extractHostPort`'s job — that path runs only
-        // when CFNetwork constructs the proxy dictionary, not in the
-        // string-parsing path tested here.)
-        let evaluator = CFPACEvaluator()
-        let routes = evaluator.routeChain(for: [
-            "VENDOR_SPECIFIC something",     // unknown kind → dropped
-            "PROXY",                          // missing endpoint → dropped
-            "PROXY missing-port-host",        // no colon → dropped
-            "PROXY good.example.com:8080",    // valid
-        ])
-        XCTAssertEqual(routes.count, 1)
-        XCTAssertEqual(routes[0], .proxy(host: "good.example.com", port: 8080))
+    /// A PAC answer of thousands of unusable entries, through the real
+    /// CFNetwork evaluator, keeps a bounded rejected list and exact counts.
+    func testThousandsOfRejectedEntriesStayBounded() throws {
+        let evaluator = try makeEvaluator("""
+        function FindProxyForURL(url, host) {
+            var entries = [];
+            for (var i = 0; i < 3000; i++) { entries.push("SOCKS s" + i + ".example:1080"); }
+            entries.push("PROXY bad.example:99999");
+            return entries.join("; ");
+        }
+        """)
+        let raw = try evaluator.resolveProxyChain(for: URL(string: "http://example.com/")!)
+        XCTAssertEqual(raw.count, 3001)
+        let chain = CFPACEvaluator().routeChain(for: raw)
+        XCTAssertEqual(chain.routes, [])
+        XCTAssertEqual(chain.rejected.count, PACRejections.retainedLimit)
+        XCTAssertEqual(chain.rejected.total, 3001)
+        XCTAssertEqual(chain.rejected.unsupported, 3000)
+        XCTAssertTrue(chain.rejected.truncated)
+        guard case .noUsableAnswer(.unsupported, let rejected) = PACDecision(chain: chain) else {
+            return XCTFail("expected an unsupported no-usable answer")
+        }
+        XCTAssertEqual(rejected.count, PACRejections.retainedLimit)
+    }
+
+    func testRejectedEntryTypeNeverCarriesHostOrURL() {
+        let chain = CFPACEvaluator().routeChain(for: ["https://secret.example.com/path?token=x 1", "very-long-directive-keyword-here x"])
+        XCTAssertEqual(chain.rejected.map(\.type), ["OTHER", "OTHER"])
+        XCTAssertTrue(chain.rejected.allSatisfy { $0.type.count <= 16 })
     }
 
     // MARK: - Resource lifetime
@@ -323,7 +440,7 @@ final class CFPACEvaluatorTests: XCTestCase {
             let url = urls[i % urls.count]
             let result = try evaluator.resolveProxyChain(for: url)
             XCTAssertFalse(result.isEmpty,
-                           "Iteration \(i) (url=\(url)) returned empty chain — fallback to DIRECT should always produce at least one entry.")
+                           "Iteration \(i) (url=\(url)) returned an empty chain; the script always returns an entry.")
         }
     }
 

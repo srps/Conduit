@@ -447,8 +447,8 @@ private final class AuditPacEvaluator: PacEvaluator, @unchecked Sendable {
         scriptEvaluator
     }
 
-    func routeChain(for entries: [String]) -> [PACRoute] {
-        entries.compactMap { entry in
+    func routeChain(for entries: [String]) -> PACChain {
+        PACChain.classify(entries) { entry in
             let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.caseInsensitiveCompare("DIRECT") == .orderedSame {
                 return .direct

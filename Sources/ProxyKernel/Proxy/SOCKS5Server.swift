@@ -365,10 +365,19 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             state = .routing
             context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
             nonisolated(unsafe) let ctx = context
-            pacRoutingEngine.routeChainFuture(for: "https://\(pacHost):\(port)/", host: host, on: ctx.eventLoop)
+            pacRoutingEngine.decisionFuture(for: "https://\(pacHost):\(port)/", host: host, on: ctx.eventLoop)
                 .whenComplete { result in
                     guard ctx.channel.isActive else { return }
-                    let routes = (try? result.get()) ?? []
+                    // The SOCKS listener has no direct fallback after an
+                    // upstream failure; the flag only decides whether a
+                    // promoted DIRECT may be used (#50).
+                    let pacPlan = HTTPProxyHandler.pacPlan(
+                        for: result, config: currentConfig,
+                        directFallbackAllowed: HTTPProxyHandler.directFallbackAllowed(
+                            strictMode: currentConfig.strictMode, cause: directCause
+                        ),
+                        host: host, engine: pacRoutingEngine
+                    )
                     self.finishRequestRouting(
                         host: host,
                         port: port,
@@ -376,7 +385,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                         currentConfig: currentConfig,
                         directModeBypass: directModeBypass,
                         directCause: directCause,
-                        pacRoutes: routes
+                        pacPlan: pacPlan
                     )
                 }
             return false
@@ -389,7 +398,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             currentConfig: currentConfig,
             directModeBypass: directModeBypass,
             directCause: directCause,
-            pacRoutes: []
+            pacPlan: .noOpinion
         )
         return false
     }
@@ -401,14 +410,14 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         currentConfig: ProxyConfig,
         directModeBypass: Bool,
         directCause: DirectModeCause,
-        pacRoutes: [PACRoute]
+        pacPlan: PACRoutePlan
     ) {
         // Reached from future callbacks (PAC routing, connect attempts) — the
         // handler's state machine is loop-confined by convention, so verify
         // it in debug builds (STYLE: assert invariants).
         context.eventLoop.assertInEventLoop()
-        let pacBypass = pacRoutes.first == .direct
-        let pacProxyChain = HTTPProxyHandler.pacProxyChain(from: pacRoutes, config: currentConfig)
+        let pacBypass = pacPlan == .direct
+        let pacProxyChain = pacPlan.proxyChain
         // Read pattern lists fresh per request so config-reload changes to
         // `noProxyHosts` / `forceProxyHosts` apply without restarting the SOCKS listener
         // (mirrors the HTTP proxy handler — see HTTPProxyHandler.channelRead).

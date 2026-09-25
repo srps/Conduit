@@ -3,8 +3,11 @@ import Foundation
 import NIOCore
 
 package final class PACRoutingEngine: @unchecked Sendable {
+    /// A parsed answer, including one with no usable routes: the script's
+    /// answer is deterministic for the key, so it is cached like any other.
+    /// Failures (timeout, error, refusal) are not cached.
     private struct RouteCacheEntry {
-        let routes: [PACRoute]
+        let chain: PACChain
         let expiresAt: Date
     }
 
@@ -46,10 +49,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// lines with the same millisecond timestamp: a burst of connections
     /// to one host each ran the script, serially on `jsQueue`, when one
     /// result would have served all of them.
-    private var pendingEvaluations: [String: [EventLoopPromise<[PACRoute]>]] = [:]
+    private var pendingEvaluations: [String: [EventLoopPromise<PACDecision>]] = [:]
     /// Waiters a single evaluation may hold. Past it, a request is answered
-    /// with no routes at once — the same answer a timed-out evaluation gives —
-    /// rather than letting one stalled script queue promises without bound.
+    /// at once with no usable answer (`refused`) rather than letting one
+    /// stalled script queue promises without bound.
     package static let pendingWaiterLimit = 256
     /// Evaluations that may be queued on the serial evaluator at once, across
     /// all keys. A stalled script otherwise lets a stream of unique URLs queue
@@ -58,6 +61,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     private let queuedEvaluationLimit: Int
     private var queuedEvaluations = 0
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    private let noUsableRouteReporter: PACNoUsableRouteReporter
 
     // The pre-split concrete resolver default was
     // removed — the kernel can no longer construct the concrete resolver.
@@ -78,6 +82,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         self.logger = logger
         self.queuedEvaluationLimit = queuedEvaluationLimit
         self.eventSink = eventSink
+        self.noUsableRouteReporter = PACNoUsableRouteReporter(eventSink: eventSink, logger: logger)
         self.refreshInterval = refreshInterval
         self.evalTimeoutSeconds = evalTimeoutSeconds
         self.pacLoader = pacLoader ?? { url in
@@ -214,68 +219,111 @@ package final class PACRoutingEngine: @unchecked Sendable {
         lock.withLock { backoffRemainingLocked(now: now) }
     }
 
-    package func routeChain(for url: String, host: String) -> [PACRoute] {
+    /// Synchronous decision (tests and tools; the proxy uses `decisionFuture`).
+    /// Blocks the caller for up to 2 s while the script runs.
+    package func decision(for url: String, host: String) -> PACDecision {
         let config = configProvider()
-        guard config.pacRoutingEnabled, !config.pacURL.isEmpty, let requestURL = URL(string: url) else {
-            return []
+        guard config.pacRoutingEnabled, !config.pacURL.isEmpty else { return .notConsulted }
+        guard let requestURL = URL(string: url) else {
+            return answer(.noUsableAnswer(.evaluationFailed, rejected: []), host: host)
         }
 
         refreshInBackgroundIfNeeded(for: config)
 
         let cacheKey = Self.routeCacheKey(for: requestURL, host: host)
-        if let cached = cachedRoutes(forKey: cacheKey) {
-            return cached
+        if let cached = cachedChain(forKey: cacheKey) {
+            return answer(PACDecision(chain: cached), host: host)
         }
 
         let (evaluator, evaluatedURL) = lock.withLock { (jsEvaluator, cachedPACURL) }
-        guard let evaluator else { return [] }
+        guard let evaluator else { return answer(.noUsableAnswer(.notLoaded, rejected: []), host: host) }
 
         let start = CFAbsoluteTimeGetCurrent()
-        nonisolated(unsafe) var rawChain: [String]?
+        nonisolated(unsafe) var result: Result<[String], any Error>?
         let evalTimeout: DispatchTime = .now() + 2.0
         let semaphore = DispatchSemaphore(value: 0)
         jsQueue.async {
-            rawChain = try? evaluator.resolveProxyChain(for: requestURL)
+            result = Result { try evaluator.resolveProxyChain(for: requestURL) }
             semaphore.signal()
         }
         if semaphore.wait(timeout: evalTimeout) == .timedOut {
             logger?.log(.warning, "PAC evaluation timed out (2s) for \(host)", category: .pac)
-            return []
+            return answer(.noUsableAnswer(.timeout, rejected: []), host: host)
         }
         let elapsed = CFAbsoluteTimeGetCurrent() - start
         if elapsed > slowEvalThresholdSeconds {
             logger?.log(.warning, "PAC evaluation took \(Int(elapsed * 1000))ms for \(host)", category: .pac)
         }
 
-        guard let rawChain else { return [] }
-
-        let routes = resolver.routeChain(for: rawChain)
-        guard storeCachedRoutes(routes, forKey: cacheKey, evaluatedWith: evaluatedURL) else { return [] }
-        if let first = routes.first {
-            logger?.log(.debug, "PAC route for \(host): \(first) (chain entries: \(rawChain.count))", category: .pac)
+        switch result {
+        case .success(let rawChain):
+            let chain = resolver.routeChain(for: rawChain)
+            guard storeCachedChain(chain, forKey: cacheKey, evaluatedWith: evaluatedURL) else {
+                return answer(.noUsableAnswer(.superseded, rejected: []), host: host)
+            }
+            if let first = chain.routes.first {
+                logger?.log(.debug, "PAC route for \(host): \(first) (chain entries: \(rawChain.count))", category: .pac)
+            }
+            return answer(PACDecision(chain: chain), host: host)
+        case .failure(let error):
+            return answer(.noUsableAnswer(Self.noUsableReason(for: error), rejected: []), host: host, error: error)
+        case nil:
+            // The semaphore is signalled only after `result` is set.
+            assertionFailure("PAC evaluation signalled without a result")
+            return answer(.noUsableAnswer(.evaluationFailed, rejected: []), host: host)
         }
-        return routes
     }
 
-    package func routeChainFuture(for url: String, host: String, on eventLoop: EventLoop) -> EventLoopFuture<[PACRoute]> {
+    /// Usable routes for a request, or none (tests and tools).
+    package func routeChain(for url: String, host: String) -> [PACRoute] {
+        decision(for: url, host: host).routes
+    }
+
+    /// Record a request that is routed as "no usable answer" by a decision
+    /// the engine itself returned as usable: a chain whose only usable
+    /// entry is a promoted `DIRECT` in a mode without direct fallback.
+    package func reportNoUsableRoute(_ reason: PACNoUsableReason, rejected: PACRejections, host: String) {
+        noUsableRouteReporter.report(reason, rejected: rejected, host: host)
+    }
+
+    /// Report a decision with no usable answer (rate-limited) and pass it on.
+    private func answer(_ decision: PACDecision, host: String, error: (any Error)? = nil) -> PACDecision {
+        if case .noUsableAnswer(let reason, let rejected) = decision {
+            if let error {
+                logger?.log(.debug, "PAC evaluation for \(host) failed: \(error.displayDescription)", category: .pac)
+            }
+            noUsableRouteReporter.report(reason, rejected: rejected, host: host)
+        }
+        return decision
+    }
+
+    private static func noUsableReason(for error: any Error) -> PACNoUsableReason {
+        if case PACResolverError.evaluationTimedOut = error { return .timeout }
+        return .evaluationFailed
+    }
+
+    package func decisionFuture(for url: String, host: String, on eventLoop: EventLoop) -> EventLoopFuture<PACDecision> {
         let config = configProvider()
-        guard config.pacRoutingEnabled, !config.pacURL.isEmpty, let requestURL = URL(string: url) else {
-            return eventLoop.makeSucceededFuture([])
+        guard config.pacRoutingEnabled, !config.pacURL.isEmpty else {
+            return eventLoop.makeSucceededFuture(.notConsulted)
+        }
+        guard let requestURL = URL(string: url) else {
+            return eventLoop.makeSucceededFuture(answer(.noUsableAnswer(.evaluationFailed, rejected: []), host: host))
         }
 
         refreshInBackgroundIfNeeded(for: config)
 
         let cacheKey = Self.routeCacheKey(for: requestURL, host: host)
-        if let cached = cachedRoutes(forKey: cacheKey) {
-            return eventLoop.makeSucceededFuture(cached)
+        if let cached = cachedChain(forKey: cacheKey) {
+            return eventLoop.makeSucceededFuture(answer(PACDecision(chain: cached), host: host))
         }
 
         let (evaluator, evaluatedURL) = lock.withLock { (jsEvaluator, cachedPACURL) }
         guard let evaluator else {
-            return eventLoop.makeSucceededFuture([])
+            return eventLoop.makeSucceededFuture(answer(.noUsableAnswer(.notLoaded, rejected: []), host: host))
         }
 
-        let promise = eventLoop.makePromise(of: [PACRoute].self)
+        let promise = eventLoop.makePromise(of: PACDecision.self)
         enum Admission { case leader, waiter, refused(reason: String, limit: Int) }
         let admission = lock.withLock { () -> Admission in
             guard let waiters = pendingEvaluations[cacheKey] else {
@@ -304,7 +352,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 detail: "host=\(host) reason=\(reason) limit=\(limit)"
             ))
             logger?.log(.warning, "PAC evaluation for \(host) refused (\(reason), limit \(limit)); answering without routes.", category: .pac)
-            promise.succeed([])
+            promise.succeed(answer(.noUsableAnswer(.refused, rejected: []), host: host))
             return promise.futureResult
         case .leader:
             break
@@ -319,11 +367,13 @@ package final class PACRoutingEngine: @unchecked Sendable {
         let requestURLForEval = requestURL
 
         // Leader's result (or timeout) settles every request that queued
-        // behind it. Promises are fulfilled on their own loops.
-        let finish: @Sendable ([PACRoute]) -> Void = { routes in
+        // behind it. Promises are fulfilled on their own loops. A decision
+        // without a usable answer is reported once for the whole group.
+        let finish: @Sendable (PACDecision, (any Error)?) -> Void = { decision, error in
+            let decision = self.answer(decision, host: host, error: error)
             let waiters = self.lock.withLock { self.pendingEvaluations.removeValue(forKey: cacheKey) ?? [] }
             for waiter in [promise] + waiters {
-                waiter.futureResult.eventLoop.execute { waiter.succeed(routes) }
+                waiter.futureResult.eventLoop.execute { waiter.succeed(decision) }
             }
         }
 
@@ -334,19 +384,22 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 switch result {
                 case .success(let rawChain):
                     let elapsed = CFAbsoluteTimeGetCurrent() - start
-                    let evaluated = resolver.routeChain(for: rawChain)
-                    // A result from a PAC the configuration no longer names
-                    // is neither cached nor handed to the waiters.
-                    let routes = self.storeCachedRoutes(evaluated, forKey: cacheKey, evaluatedWith: evaluatedURL) ? evaluated : []
+                    let chain = resolver.routeChain(for: rawChain)
                     if elapsed > slowEvalThresholdSeconds {
                         logger?.log(.warning, "PAC evaluation took \(Int(elapsed * 1000))ms for \(host)", category: .pac)
                     }
-                    if let first = routes.first {
+                    // A result from a PAC the configuration no longer names
+                    // is neither cached nor handed to the waiters.
+                    guard self.storeCachedChain(chain, forKey: cacheKey, evaluatedWith: evaluatedURL) else {
+                        finish(.noUsableAnswer(.superseded, rejected: []), nil)
+                        return
+                    }
+                    if let first = chain.routes.first {
                         logger?.log(.debug, "PAC route for \(host): \(first) (chain entries: \(rawChain.count))", category: .pac)
                     }
-                    finish(routes)
-                case .failure:
-                    finish([])
+                    finish(PACDecision(chain: chain), nil)
+                case .failure(let error):
+                    finish(.noUsableAnswer(Self.noUsableReason(for: error), rejected: []), error)
                 }
             }
         }
@@ -354,7 +407,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
             completion.complete {
                 logger?.log(.warning, "PAC evaluation timed out (\(Int(timeout))s) for \(host)", category: .pac)
-                finish([])
+                finish(.noUsableAnswer(.timeout, rejected: []), nil)
             }
         }
 
@@ -365,11 +418,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
         routeChain(for: url, host: host).first
     }
 
+    /// Whether the script chose DIRECT for this request. A `DIRECT` promoted
+    /// by removing rejected entries is a fallback, not a bypass.
     package func shouldBypass(url: String, host: String) -> Bool {
-        if case .direct = route(for: url, host: host) {
-            return true
-        }
-        return false
+        guard case .routes(let chain) = decision(for: url, host: host) else { return false }
+        return chain.routes.first == .direct && !chain.leadingDirectPromoted
     }
 
     private func refreshInBackgroundIfNeeded(for config: ProxyConfig) {
@@ -422,7 +475,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
     }
 
-    private func cachedRoutes(forKey key: String) -> [PACRoute]? {
+    private func cachedChain(forKey key: String) -> PACChain? {
         lock.withLock {
             purgeExpiredRouteCacheEntriesLocked(now: .now)
             guard let entry = routeCache[key], entry.expiresAt > .now else {
@@ -431,19 +484,18 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 return nil
             }
             touchRouteCacheKeyLocked(key)
-            return entry.routes
+            return entry.chain
         }
     }
 
-    /// Caches `routes` if the PAC they came from is still the loaded one.
+    /// Caches `chain` if the PAC it came from is still the loaded one.
     /// Returns whether it did; a `false` means the result is superseded and
     /// must not be used either.
-    @discardableResult
-    private func storeCachedRoutes(_ routes: [PACRoute], forKey key: String, evaluatedWith pacURL: String) -> Bool {
+    private func storeCachedChain(_ chain: PACChain, forKey key: String, evaluatedWith pacURL: String) -> Bool {
         lock.withLock {
             guard cachedPACURL == pacURL, jsEvaluator != nil else { return false }
             routeCache[key] = RouteCacheEntry(
-                routes: routes,
+                chain: chain,
                 expiresAt: Date().addingTimeInterval(Self.routeCacheTTL)
             )
             touchRouteCacheKeyLocked(key)
