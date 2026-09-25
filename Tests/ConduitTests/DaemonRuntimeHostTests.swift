@@ -571,6 +571,48 @@ final class DaemonRuntimeHostTests: XCTestCase {
         )
     }
 
+    /// Twin of `AppStateHarnessTests.testCorruptConfigStillRestoresJournaledProxyOnLaunch`.
+    /// The daemon builds no host from a failed load, so `ConduitDaemon.main`
+    /// runs the journal restores through `recoverWithoutConfiguration` before
+    /// it exits; this drives that function over the same crashed-run seed.
+    /// Only the resolver scan needs the config, so it alone is skipped.
+    func testABrokenConfigStillRestoresTheJournaledProxyBeforeExiting() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        let prior = ProxyServiceState(
+            webHost: "prior.example.test", webPort: "8080", webEnabled: true,
+            secureHost: "prior.example.test", securePort: "8080", secureEnabled: true,
+            autoURL: "", autoEnabled: false, bypassDomains: ["*.local"]
+        )
+        let seeded = harness.journal
+        seeded.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: prior.journalValues)
+        seeded.markApplied(surface: .systemProxy)
+        harness.machine.describe("Wi-Fi") { service in
+            service.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
+            service.secureWebProxy = service.webProxy
+        }
+        try Data("{".utf8).write(to: harness.environment.configFile)
+        XCTAssertThrowsError(try ProxyConfigPersistence.loadAllMigrating(in: harness.environment), "the load main rejects")
+
+        let machine = harness.machine
+        let events = await DaemonRuntimeHost.recoverWithoutConfiguration(
+            environment: harness.environment,
+            logger: DiscardingLogSink(),
+            privilegeClient: machine,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) }
+        )
+
+        XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "journal recovery proceeds despite the broken file")
+        XCTAssertEqual(harness.wifi.bypassDomains, ["*.local"])
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+        let expected = ["surface=systemDNS reason=nothing_recorded", "surface=systemProxy stale=false", "surface=resolverFile reason=config_unavailable"]
+        XCTAssertEqual(events.filter { $0.event.hasPrefix("platform.launch_recovery_") }.map(\.detail), expected)
+        let written = try String(contentsOf: harness.environment.eventsFile, encoding: .utf8)
+        XCTAssertTrue(written.contains("platform.launch_recovery_restored"), "the events reach events.ndjson: \(written)")
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), Data("{".utf8), "the broken file is left for the user")
+    }
+
     /// Twin of `AppStateHarnessTests.testAFailedLivenessProbeRestartsTheRelayOffTheMainThread`.
     func testAFailedLivenessProbeRestartsTheRelayOffTheMainThread() async throws {
         let host = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true), dnsForwarderEnabled: true)

@@ -267,7 +267,8 @@ final class DaemonRuntimeHost {
         //
         // The app skips only the resolver-file ownership inference when its
         // config failed to load; this host is never built from a failed load
-        // (`ConduitDaemon.main` exits first), so the scan always has a config.
+        // (`ConduitDaemon.main` runs the journal restores itself and exits,
+        // see `recoverWithoutConfiguration`), so the scan always has a config.
         let dnsRecovery = systemDNSManager
         let proxyRecovery = systemConduit
         let resolverRecovery = dnsManager
@@ -738,6 +739,65 @@ final class DaemonRuntimeHost {
     }
 
     nonisolated static let prettyEncoder: JSONEncoder = CanonicalJSON.encoder(prettyPrinted: true)
+}
+
+// MARK: - Recovery without a configuration
+
+extension DaemonRuntimeHost {
+    /// The journal restores for a launch whose config failed to load, run by
+    /// `ConduitDaemon.main` before it exits. No host is built from a failed
+    /// load, so without this a daemon killed with the system proxy or system
+    /// DNS applied, and relaunched over a broken file, left the machine on
+    /// the dead run's listeners. The app restores in that case too
+    /// (`AppStateHarnessTests.testCorruptConfigStillRestoresJournaledProxyOnLaunch`):
+    /// both restores work from the journal's recorded prior values, and only
+    /// the legacy resolver scan needs the config, so that one is reported
+    /// skipped.
+    ///
+    /// Events go to `events.ndjson` as a host's would, and are returned for
+    /// the tests. The seams are `init`'s.
+    @discardableResult
+    static func recoverWithoutConfiguration(
+        environment: RuntimeEnvironment,
+        logger: any LogSink,
+        privilegeClient: (any PrivilegeClient)? = nil,
+        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil
+    ) async -> [RuntimeEvent] {
+        let writer = RuntimeEventFileWriter(fileURL: environment.eventsFile, logger: logger)
+        let emitted = NIOLockedValueBox<[RuntimeEvent]>([])
+        let emit: @Sendable (RuntimeEvent) -> Void = { event in
+            emitted.withLockedValue { $0.append(event) }
+            writer.record(event)
+        }
+        let base = privilegeClient ?? HelperToolPrivilegeClient(eventSink: emit)
+        let audited = AuditingPrivilegeClient(base: base, eventSink: emit)
+        let runner = commandRunner ?? { launchPath, arguments in
+            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
+        }
+        let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
+        let systemDNS = SystemDNSManager(
+            privilegeClient: audited,
+            journal: journal,
+            legacySnapshotFile: environment.legacySavedDNSFile,
+            commandRunner: runner
+        )
+        let systemProxy = SystemProxyManager(privilegeClient: audited, journal: journal, commandRunner: runner)
+        let recovery = LaunchRecovery {
+            LaunchRecovery.recoverPlatformSurfaces(
+                systemDNS: systemDNS,
+                systemProxy: systemProxy,
+                resolvers: nil,
+                legacyResolvers: nil,
+                emit: emit,
+                logger: logger
+            )
+        }
+        await recovery.join()
+        if !writer.flush() {
+            logger.log(.warning, "Launch recovery events were not all written to \(environment.eventsFile.path) before the deadline.", category: .general)
+        }
+        return emitted.withLockedValue { $0 }
+    }
 }
 
 // MARK: - RuntimeReconcilerHost

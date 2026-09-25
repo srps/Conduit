@@ -41,6 +41,10 @@ enum ConduitDaemon {
         } catch {
             let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
             failure.report(to: logger)
+            // The journal restores need no config; see
+            // `DaemonRuntimeHost.recoverWithoutConfiguration`. The exit status
+            // is still the load failure's.
+            await DaemonRuntimeHost.recoverWithoutConfiguration(environment: environment, logger: logger)
             logger.flush()
             exit(1)
         }
