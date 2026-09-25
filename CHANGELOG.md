@@ -32,6 +32,10 @@ protocol did not change.
 - Settings tells a build the helper's pin refuses apart from a user it refuses: it shows
   the helper's message and how to fix it, and no longer offers a "Reinstall Helper" that
   cannot change the pin.
+- In gateway mode, outside strict mode, a request for a blocked metadata or loopback target
+  no longer triggers a background direct probe of it before being refused. The probe now
+  resolves first and connects to nothing when any address is blocked, as the strict-mode
+  hint does. (#93)
 
 ### Changed
 

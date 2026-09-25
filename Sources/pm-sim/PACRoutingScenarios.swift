@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOConcurrencyHelpers
+import NIOCore
 import NIOPosix
 import ProxyKernel
 import ProxyPAC
@@ -93,7 +94,7 @@ enum PACRoutingScenarios {
         /// wait for the target to count that probe. Returns the count after it.
         func seedTargetReachable() async throws -> Int {
             let before = target.connectionCount
-            let reachable = await detector?.isDirectlyReachable(host: "127.0.0.1", port: target.port) ?? false
+            let reachable = await detector?.isDirectlyReachable(host: "127.0.0.1", port: target.port, gatewayMode: false) ?? false
             try require(reachable, "the target origin is not directly reachable")
             try await waitForTargetConnections(before + 1)
             return target.connectionCount
@@ -244,5 +245,81 @@ enum PACRoutingScenarios {
             assertions: [.init("strict mode never routes a reachable target direct; one hint on upstream failure", true)],
             notes: ["PASS: 2/2 via upstream with no probe; upstream down → 502, 1 probe, 1 hint, no retry"]
         )
+    }
+
+    /// Gateway mode, outside strict mode (#93): the reachability probe never
+    /// probes a blocked literal or metadata name, and never connects to a
+    /// name that resolves to a blocked address; it caches that as
+    /// unreachable. The same name outside gateway mode is probed and
+    /// connected to, so the target's connection count would show a probe.
+    /// Gateway listeners bind 0.0.0.0, so this drives the detector the HTTP
+    /// listener uses rather than a gateway listener.
+    @MainActor
+    static func gatewayProbeBlocklist(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date()
+        let group = MultiThreadedEventLoopGroup.singleton
+        let target = FakeOrigin(group: group, behavior: .silent)
+        try await target.start()
+        do {
+            try await checkGatewayProbeBlocklist(target: target, verbose: verbose)
+        } catch {
+            await target.stop()
+            throw error
+        }
+        await target.stop()
+        return ScenarioResult(
+            name: "gateway-probe-blocklist", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
+            clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
+            aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [.init("gateway mode never probes or connects to a blocked target", true)],
+            notes: ["PASS: 3 blocked targets, 0 probes; rebinding name resolved, 0 connections, cached unreachable; control 1 connection"]
+        )
+    }
+
+    @MainActor
+    private static func checkGatewayProbeBlocklist(target: FakeOrigin, verbose: Bool) async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
+        let port = target.port
+        let loopback = try SocketAddress(ipAddress: "127.0.0.1", port: port)
+        let lookups = NIOLockedValueBox<[String]>([])
+        let makeDetector = {
+            DirectConnectDetector(
+                group: group, logger: logger, ttlSeconds: 300, baseTimeoutMS: 500,
+                resolver: { host, _, loop in
+                    lookups.withLockedValue { $0.append(host) }
+                    return loop.makeSucceededFuture([loopback])
+                }
+            )
+        }
+        func settled(_ detector: DirectConnectDetector, _ host: String) async throws -> Bool {
+            for _ in 0..<200 where detector.cachedReachability(host: host, port: port, gatewayMode: false) == nil {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            guard let cached = detector.cachedReachability(host: host, port: port, gatewayMode: false) else {
+                throw Failure(description: "the probe of \(host) never finished")
+            }
+            return cached
+        }
+
+        let gateway = makeDetector()
+        for blocked in ["127.0.0.1", "169.254.169.254", "metadata.google.internal"] {
+            gateway.probeInBackground(host: blocked, port: port, gatewayMode: true)
+        }
+        try require(gateway.probeCount == 0, "a blocked target was probed (\(gateway.probeCount)x)")
+        try require(lookups.withLockedValue { $0 }.isEmpty, "a blocked target was resolved")
+
+        gateway.probeInBackground(host: "rebind.example", port: port, gatewayMode: true)
+        let rebound = try await settled(gateway, "rebind.example")
+        try require(!rebound, "a name resolving to loopback cached as reachable")
+        try require(target.connectionCount == 0, "the probe connected to a blocked address")
+
+        let open = makeDetector()
+        open.probeInBackground(host: "rebind.example", port: port, gatewayMode: false)
+        let control = try await settled(open, "rebind.example")
+        for _ in 0..<200 where target.connectionCount == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try require(control && target.connectionCount == 1, "control: outside gateway mode the probe did not connect")
     }
 }

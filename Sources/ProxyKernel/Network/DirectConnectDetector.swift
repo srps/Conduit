@@ -20,7 +20,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
     private var strictHintSkipped = 0
     private var probesStarted = 0
     private let now: @Sendable () -> Date
-    private let resolveForHint: @Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>
+    private let resolveForProbe: @Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>
     private let lock = NSLock()
 
     /// Per-host cooldown between strict-mode hint probes (#87).
@@ -49,9 +49,9 @@ package final class DirectConnectDetector: @unchecked Sendable {
         let checkedAt: Date
     }
 
-    /// - Parameter hintResolver: how the strict-mode hint resolves a host
-    ///   before it connects, so every resolved address can be checked against
-    ///   the blocklist first. Tests inject one; the default asks
+    /// - Parameter resolver: how every probe resolves a host before it
+    ///   connects, so each resolved address can be checked against the
+    ///   blocklist first. Tests inject one; the default asks
     ///   `AddressFamilyAwareResolver` for A, then AAAA, records.
     package init(
         group: EventLoopGroup,
@@ -61,7 +61,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
         maxCacheSize: Int = 512,
         maxConcurrentProbes: Int = 16,
         now: @escaping @Sendable () -> Date = { Date() },
-        hintResolver: (@Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>)? = nil
+        resolver: (@Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>)? = nil
     ) {
         self.group = group
         self.logger = logger
@@ -71,7 +71,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
         self.maxCacheSize = maxCacheSize
         self.maxConcurrentProbes = maxConcurrentProbes
         self.now = now
-        self.resolveForHint = hintResolver ?? { host, port, loop in
+        self.resolveForProbe = resolver ?? { host, port, loop in
             let resolver = AddressFamilyAwareResolver(group: group)
             // A lookup that fails for one family leaves the other; if both
             // fail the host has no address to probe, which is the answer.
@@ -143,30 +143,63 @@ package final class DirectConnectDetector: @unchecked Sendable {
             return .started
         }
         guard admission == .started else { return admission }
-        hintProbe(host: host, port: port, gatewayMode: gatewayMode).whenComplete { result in
+        blocklistAwareProbe(
+            host: host, port: port, timeoutMS: maxTimeoutMS, gatewayMode: gatewayMode, purpose: .strictHint
+        ).whenComplete { result in
             self.lock.withLock { self.strictHintInFlight -= 1 }
             if case .success(true) = result { onReachable() }
         }
         return .started
     }
 
-    /// Whether `host:port` answers a direct TCP connect under the blocklist
-    /// policy. Never fails: an unreachable or blocked target is `false`.
-    private func hintProbe(host: String, port: Int, gatewayMode: Bool) -> EventLoopFuture<Bool> {
+    /// Which caller a probe runs for; it names the probe in the log.
+    private enum ProbePurpose {
+        case strictHint
+        case reachability
+
+        var label: String {
+            switch self {
+            case .strictHint: "Strict-mode hint probe"
+            case .reachability: "Direct-connect probe"
+            }
+        }
+
+        /// A hint the user would have seen is worth noting when skipped; a
+        /// background reachability probe is silent either way.
+        var blockedLogLevel: LogLevel {
+            switch self {
+            case .strictHint: .info
+            case .reachability: .debug
+            }
+        }
+    }
+
+    /// Whether `host:port` answers a direct TCP connect under the direct
+    /// path's metadata/loopback policy, shared by every probe: resolve
+    /// first, connect to nothing if any resolved address is blocked, connect
+    /// to the resolved address without a second lookup, and check the
+    /// connected peer again. Never fails: an unreachable or blocked target
+    /// is `false`.
+    private func blocklistAwareProbe(
+        host: String,
+        port: Int,
+        timeoutMS: Int64,
+        gatewayMode: Bool,
+        purpose: ProbePurpose
+    ) -> EventLoopFuture<Bool> {
         let loop = group.next()
         let group = self.group
         let logger = self.logger
-        let timeout = maxTimeoutMS
-        return resolveForHint(host, port, loop).hop(to: loop).flatMap { addresses -> EventLoopFuture<Bool> in
+        return resolveForProbe(host, port, loop).hop(to: loop).flatMap { addresses -> EventLoopFuture<Bool> in
             if let blocked = addresses.lazy.compactMap({
                 MetadataBlocklist.blockedResolvedAddress($0, gatewayMode: gatewayMode)
             }).first {
-                logger.log(.info, "Strict-mode hint for \(host):\(port) skipped: it resolves to \(blocked) (metadata/loopback protection).", category: .network)
+                logger.log(purpose.blockedLogLevel, "\(purpose.label) of \(host):\(port) skipped: it resolves to \(blocked) (metadata/loopback protection).", category: .network)
                 return loop.makeSucceededFuture(false)
             }
             guard let address = addresses.first else { return loop.makeSucceededFuture(false) }
             return ClientBootstrap(group: group)
-                .connectTimeout(.milliseconds(timeout))
+                .connectTimeout(.milliseconds(timeoutMS))
                 .connect(to: address)
                 .hop(to: loop)
                 .flatMapThrowing { channel in
@@ -180,7 +213,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
         }
         .flatMapError { error in
             // Unreachable is the probe's answer, not a failure to report.
-            logger.log(.debug, "Strict-mode hint probe of \(host):\(port): \(error.displayDescription)", category: .network)
+            logger.log(.debug, "\(purpose.label) of \(host):\(port): \(error.displayDescription)", category: .network)
             return loop.makeSucceededFuture(false)
         }
     }
@@ -193,7 +226,10 @@ package final class DirectConnectDetector: @unchecked Sendable {
     /// Synchronous cache-only check. Returns the cached reachability result
     /// if a valid (non-expired) entry exists, otherwise returns nil.
     /// When nil, call `probeInBackground` to populate the cache for next time.
-    package func cachedReachability(host: String, port: Int) -> Bool? {
+    /// A host the gateway blocklist refuses is never reachable, whatever a
+    /// probe made before gateway mode was on cached for it.
+    package func cachedReachability(host: String, port: Int, gatewayMode: Bool) -> Bool? {
+        if MetadataBlocklist.isBlocked(host: host, gatewayMode: gatewayMode) { return false }
         let key = "\(host):\(port)"
         return lock.withLock {
             guard let entry = cache[key],
@@ -206,43 +242,45 @@ package final class DirectConnectDetector: @unchecked Sendable {
 
     /// Fire-and-forget: kicks off a TCP probe in the background to populate
     /// the cache. Deduplicates concurrent probes for the same host:port.
-    package func probeInBackground(host: String, port: Int) {
+    ///
+    /// Follows the strict-mode hint's policy (#93): a host the gateway
+    /// blocklist refuses is never probed, and a host that resolves to a
+    /// blocked address is not connected to and caches as unreachable.
+    package func probeInBackground(host: String, port: Int, gatewayMode: Bool) {
         let key = "\(host):\(port)"
-        let shouldProbe = lock.withLock {
-            if pendingProbes.contains(key) { return false }
-            if pendingProbes.count >= maxConcurrentProbes { return false }
+        guard !MetadataBlocklist.isBlocked(host: host, gatewayMode: gatewayMode) else {
+            logger.log(.debug, "Direct-connect probe of \(key) skipped: blocked target (metadata/loopback protection).", category: .network)
+            return
+        }
+        let admitted = lock.withLock { () -> Int64? in
+            if pendingProbes.contains(key) { return nil }
+            if pendingProbes.count >= maxConcurrentProbes { return nil }
             pendingProbes.insert(key)
             probesStarted += 1
-            return true
+            return hostTimeouts[key] ?? baseTimeoutMS
         }
-        guard shouldProbe else { return }
+        guard let timeout = admitted else { return }
 
-        Task {
-            let timeout = lock.withLock { hostTimeouts[key] ?? baseTimeoutMS }
-            let reachable = await probe(host: host, port: port, timeoutMS: timeout)
-
-            lock.withLock {
-                cache[key] = CacheEntry(reachable: reachable, checkedAt: .now)
-                pendingProbes.remove(key)
-                if reachable {
-                    hostTimeouts[key] = baseTimeoutMS
-                } else {
-                    let next = min((hostTimeouts[key] ?? baseTimeoutMS) * 2, maxTimeoutMS)
-                    hostTimeouts[key] = next
-                }
-                evictIfNeeded()
+        blocklistAwareProbe(
+            host: host, port: port, timeoutMS: timeout, gatewayMode: gatewayMode, purpose: .reachability
+        ).whenComplete { result in
+            let reachable: Bool
+            if case .success(true) = result { reachable = true } else { reachable = false }
+            self.lock.withLock {
+                self.pendingProbes.remove(key)
+                self.record(reachable: reachable, key: key)
             }
-
             if reachable {
-                logger.log(.debug, "Direct-connect: \(key) reachable (timeout \(timeout)ms), will bypass on next request.", category: .network)
+                self.logger.log(.debug, "Direct-connect: \(key) reachable (timeout \(timeout)ms), will bypass on next request.", category: .network)
             }
         }
     }
 
     /// Async probe -- blocks until the result is known. Used by background
-    /// warm-up or non-hot-path callers.
-    package func isDirectlyReachable(host: String, port: Int) async -> Bool {
-        if let cached = cachedReachability(host: host, port: port) {
+    /// warm-up or non-hot-path callers. Same blocklist policy as
+    /// `probeInBackground`.
+    package func isDirectlyReachable(host: String, port: Int, gatewayMode: Bool) async -> Bool {
+        if let cached = cachedReachability(host: host, port: port, gatewayMode: gatewayMode) {
             return cached
         }
 
@@ -251,23 +289,36 @@ package final class DirectConnectDetector: @unchecked Sendable {
             probesStarted += 1
             return hostTimeouts[key] ?? baseTimeoutMS
         }
-        let reachable = await probe(host: host, port: port, timeoutMS: timeout)
-
-        lock.withLock {
-            cache[key] = CacheEntry(reachable: reachable, checkedAt: .now)
-            if reachable {
-                hostTimeouts[key] = baseTimeoutMS
-            } else {
-                let next = min((hostTimeouts[key] ?? baseTimeoutMS) * 2, maxTimeoutMS)
-                hostTimeouts[key] = next
-            }
-            evictIfNeeded()
+        let reachable: Bool
+        do {
+            reachable = try await blocklistAwareProbe(
+                host: host, port: port, timeoutMS: timeout, gatewayMode: gatewayMode, purpose: .reachability
+            ).get()
+        } catch {
+            // `blocklistAwareProbe` answers every failure with `false`; this
+            // is reached only if that ever changes.
+            logger.log(.debug, "Direct-connect probe of \(key) failed: \(error.displayDescription)", category: .network)
+            reachable = false
         }
+
+        lock.withLock { record(reachable: reachable, key: key) }
 
         if reachable {
             logger.log(.debug, "Direct-connect: \(key) reachable (timeout \(timeout)ms), bypassing upstream.", category: .network)
         }
         return reachable
+    }
+
+    /// Caches a probe result and adapts the host's timeout. Must be called
+    /// while holding `lock`.
+    private func record(reachable: Bool, key: String) {
+        cache[key] = CacheEntry(reachable: reachable, checkedAt: .now)
+        if reachable {
+            hostTimeouts[key] = baseTimeoutMS
+        } else {
+            hostTimeouts[key] = min((hostTimeouts[key] ?? baseTimeoutMS) * 2, maxTimeoutMS)
+        }
+        evictIfNeeded()
     }
 
     package func clearCache() {
@@ -291,20 +342,6 @@ package final class DirectConnectDetector: @unchecked Sendable {
             guard let oldest = cache.min(by: { $0.value.checkedAt < $1.value.checkedAt }) else { break }
             cache.removeValue(forKey: oldest.key)
             hostTimeouts.removeValue(forKey: oldest.key)
-        }
-    }
-
-    private func probe(host: String, port: Int, timeoutMS: Int64) async -> Bool {
-        do {
-            let channel = try await ClientBootstrap(group: group)
-                .resolver(AddressFamilyAwareResolver(group: group))
-                .connectTimeout(.milliseconds(timeoutMS))
-                .connect(host: host, port: port)
-                .get()
-            channel.close(mode: .all, promise: nil)
-            return true
-        } catch {
-            return false
         }
     }
 }

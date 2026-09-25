@@ -76,13 +76,13 @@ final class SleepRecoveryTests: XCTestCase {
             baseTimeoutMS: 50
         )
 
-        _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 443)
-        XCTAssertNotNil(detector.cachedReachability(host: "192.0.2.1", port: 443),
+        _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 443, gatewayMode: false)
+        XCTAssertNotNil(detector.cachedReachability(host: "192.0.2.1", port: 443, gatewayMode: false),
                         "Should have a cached entry before clear")
 
         detector.clearCache()
 
-        XCTAssertNil(detector.cachedReachability(host: "192.0.2.1", port: 443),
+        XCTAssertNil(detector.cachedReachability(host: "192.0.2.1", port: 443, gatewayMode: false),
                      "clearCache (called on wake) should remove all stale entries")
     }
 

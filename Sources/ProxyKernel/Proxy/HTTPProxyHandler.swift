@@ -379,11 +379,17 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         }
     }
 
+    /// Runs before `handleRequest` applies the gateway blocklist, so a
+    /// blocked target is refused here too: never probed, never counted as
+    /// reachable (#93).
     private func cachedDirectReachable(target: HTTPRequestTarget) -> Bool {
-        if let cached = directConnectDetector.cachedReachability(host: target.host, port: target.port) {
+        guard !MetadataBlocklist.isBlocked(host: target.host, gatewayMode: gatewayMode) else { return false }
+        if let cached = directConnectDetector.cachedReachability(
+            host: target.host, port: target.port, gatewayMode: gatewayMode
+        ) {
             return cached
         }
-        directConnectDetector.probeInBackground(host: target.host, port: target.port)
+        directConnectDetector.probeInBackground(host: target.host, port: target.port, gatewayMode: gatewayMode)
         return false
     }
 

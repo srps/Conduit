@@ -195,12 +195,12 @@ final class PACDecisionTests: XCTestCase {
 
     private func hintDetector(
         clock: NIOLockedValueBox<Date> = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000)),
-        resolver: HintResolver
+        resolver: ProbeResolver
     ) -> DirectConnectDetector {
         DirectConnectDetector(
             group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(),
             now: { clock.withLockedValue { $0 } },
-            hintResolver: { host, port, loop in resolver.resolve(host: host, port: port, on: loop) }
+            resolver: { host, port, loop in resolver.resolve(host: host, port: port, on: loop) }
         )
     }
 
@@ -214,7 +214,7 @@ final class PACDecisionTests: XCTestCase {
 
     func testStrictHintProbesOncePerHostPerCooldown() {
         let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
-        let resolver = HintResolver(.held)
+        let resolver = ProbeResolver(.held)
         let detector = hintDetector(clock: clock, resolver: resolver)
         XCTAssertEqual(detector.probeForStrictModeHint(host: "App.Invalid", port: 9, gatewayMode: false) {}, .started)
         XCTAssertEqual(detector.probeForStrictModeHint(host: "app.invalid", port: 9, gatewayMode: false) {}, .coolingDown,
@@ -232,7 +232,7 @@ final class PACDecisionTests: XCTestCase {
 
     func testStrictHintTableIsBounded() async throws {
         let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
-        let detector = hintDetector(clock: clock, resolver: HintResolver(.noAddresses))
+        let detector = hintDetector(clock: clock, resolver: ProbeResolver(.noAddresses))
         for index in 0..<(DirectConnectDetector.strictHintCapacity + 10) {
             clock.withLockedValue { $0 += 1 }
             XCTAssertEqual(detector.probeForStrictModeHint(host: "h\(index).invalid", port: 9, gatewayMode: false) {}, .started)
@@ -249,7 +249,7 @@ final class PACDecisionTests: XCTestCase {
     /// Many distinct hosts failing at once start at most
     /// `strictHintMaxInFlight` probes; the rest are skipped and counted.
     func testStrictHintProbesInFlightAreBounded() async throws {
-        let resolver = HintResolver(.held)
+        let resolver = ProbeResolver(.held)
         let detector = hintDetector(resolver: resolver)
         let hosts = 10 + DirectConnectDetector.strictHintMaxInFlight
         let results = (0..<hosts).map {
@@ -279,14 +279,14 @@ final class PACDecisionTests: XCTestCase {
         let blocked = try SocketAddress(ipAddress: "127.0.0.1", port: listener.port)
 
         // Named directly: refused before anything is resolved.
-        let direct = hintDetector(resolver: HintResolver(.addresses([blocked])))
+        let direct = hintDetector(resolver: ProbeResolver(.addresses([blocked])))
         XCTAssertEqual(direct.probeForStrictModeHint(host: "169.254.169.254", port: 80, gatewayMode: true) {}, .blocked)
         XCTAssertEqual(direct.probeForStrictModeHint(host: "metadata.google.internal", port: 80, gatewayMode: true) {}, .blocked)
         XCTAssertEqual(direct.probeCount, 0)
 
         // A name that resolves to loopback: resolved, then never connected.
         let hinted = NIOLockedValueBox(0)
-        let rebinding = hintDetector(resolver: HintResolver(.addresses([blocked])))
+        let rebinding = hintDetector(resolver: ProbeResolver(.addresses([blocked])))
         XCTAssertEqual(rebinding.probeForStrictModeHint(host: "rebind.example", port: listener.port, gatewayMode: true) {
             hinted.withLockedValue { $0 += 1 }
         }, .started)
@@ -296,7 +296,7 @@ final class PACDecisionTests: XCTestCase {
 
         // Control: the same target outside gateway mode is probed and hinted,
         // so the counts above would have seen a connection.
-        let open = hintDetector(resolver: HintResolver(.addresses([blocked])))
+        let open = hintDetector(resolver: ProbeResolver(.addresses([blocked])))
         XCTAssertEqual(open.probeForStrictModeHint(host: "rebind.example", port: listener.port, gatewayMode: false) {
             hinted.withLockedValue { $0 += 1 }
         }, .started)
@@ -307,77 +307,6 @@ final class PACDecisionTests: XCTestCase {
         }
         XCTAssertEqual(listener.accepted, 1)
     }
-}
-
-/// A scripted resolver for the strict-mode hint probe.
-private final class HintResolver: @unchecked Sendable {
-    enum Mode {
-        case noAddresses
-        case addresses([SocketAddress])
-        /// Lookups stay pending until `release()`.
-        case held
-    }
-
-    private let mode: Mode
-    private let state = NIOLockedValueBox<(lookups: Int, held: [EventLoopPromise<[SocketAddress]>])>((0, []))
-
-    init(_ mode: Mode) { self.mode = mode }
-
-    var lookups: Int { state.withLockedValue { $0.lookups } }
-
-    func resolve(host _: String, port _: Int, on loop: EventLoop) -> EventLoopFuture<[SocketAddress]> {
-        switch mode {
-        case .noAddresses:
-            state.withLockedValue { $0.lookups += 1 }
-            return loop.makeSucceededFuture([])
-        case .addresses(let addresses):
-            state.withLockedValue { $0.lookups += 1 }
-            return loop.makeSucceededFuture(addresses)
-        case .held:
-            let promise = loop.makePromise(of: [SocketAddress].self)
-            state.withLockedValue {
-                $0.lookups += 1
-                $0.held.append(promise)
-            }
-            return promise.futureResult
-        }
-    }
-
-    /// Answer every held lookup with no addresses.
-    func release() {
-        let held = state.withLockedValue { state -> [EventLoopPromise<[SocketAddress]>] in
-            defer { state.held.removeAll() }
-            return state.held
-        }
-        for promise in held { promise.succeed([]) }
-    }
-}
-
-/// A loopback listener that counts the connections it accepts.
-private final class CountingListener: @unchecked Sendable {
-    private let channel: Channel
-    private let count: NIOLockedValueBox<Int>
-
-    private init(channel: Channel, count: NIOLockedValueBox<Int>) {
-        self.channel = channel
-        self.count = count
-    }
-
-    static func start() async throws -> CountingListener {
-        let count = NIOLockedValueBox(0)
-        let channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
-            .childChannelInitializer { child in
-                count.withLockedValue { $0 += 1 }
-                return child.eventLoop.makeSucceededVoidFuture()
-            }
-            .bind(host: "127.0.0.1", port: 0)
-            .get()
-        return CountingListener(channel: channel, count: count)
-    }
-
-    var port: Int { channel.localAddress?.port ?? 0 }
-    var accepted: Int { count.withLockedValue { $0 } }
-    func stop() { channel.close(promise: nil) }
 }
 
 private struct FixedPAC: PacEvaluator, PacScriptEvaluating {

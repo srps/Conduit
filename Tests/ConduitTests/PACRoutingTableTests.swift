@@ -502,7 +502,7 @@ private final class ProxyFixture: @unchecked Sendable {
     /// connection, so the probe is not counted against a request.
     func seedReachability(port: Int, expected: Bool, origin: TaggedServer? = nil) async throws {
         let before = origin?.accepted ?? 0
-        let reachable = await detector.isDirectlyReachable(host: "127.0.0.1", port: port)
+        let reachable = await detector.isDirectlyReachable(host: "127.0.0.1", port: port, gatewayMode: false)
         XCTAssertEqual(reachable, expected, "seeding 127.0.0.1:\(port)")
         guard let origin, expected else { return }
         for _ in 0..<500 where origin.accepted == before {
