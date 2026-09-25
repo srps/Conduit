@@ -184,6 +184,7 @@ enum PMSim {
         "observable-target-redaction",
         "security-boundaries",
         "kerberos-service-ticket",
+        "helper-caller-identity",
     ]
 
     @MainActor private static var setupCleanupCompleted = false
@@ -207,6 +208,8 @@ enum PMSim {
             return [try await BoundedWriterScenarios.slowStorage()]
         case "pac-fetch-bounds":
             return [try await PACFetchScenarios.bounds()]
+        case "helper-caller-identity":
+            return [try HelperCallerIdentityScenarios.run()]
         case "shared-inbound-budget":
             return [try await AdmissionScenarios.sharedBudget(verbose: verbose)]
         case "connection-flood":
