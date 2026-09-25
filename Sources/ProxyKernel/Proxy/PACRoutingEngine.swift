@@ -282,7 +282,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// Record a request that is routed as "no usable answer" by a decision
     /// the engine itself returned as usable: a chain whose only usable
     /// entry is a promoted `DIRECT` in a mode without direct fallback.
-    package func reportNoUsableRoute(_ reason: PACNoUsableReason, rejected: [PACRejectedEntry], host: String) {
+    package func reportNoUsableRoute(_ reason: PACNoUsableReason, rejected: PACRejections, host: String) {
         noUsableRouteReporter.report(reason, rejected: rejected, host: host)
     }
 

@@ -25,7 +25,7 @@ package enum PACRoutePlan: Equatable {
     case proxies([UpstreamProxy], directFallback: Bool)
     /// PAC is in force but gave nothing to route by: the configured upstream
     /// pool only. Never DIRECT, never the reachability shortcut.
-    case upstreamsOnly(PACNoUsableReason, rejected: [PACRejectedEntry])
+    case upstreamsOnly(PACNoUsableReason, rejected: PACRejections)
 
     /// - Parameter directFallbackAllowed: `HTTPProxyHandler.directFallbackAllowed`
     ///   for the current mode: outside strict mode, or in an unconditional

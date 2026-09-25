@@ -65,18 +65,53 @@ package struct PACRejectedEntry: Equatable, Sendable {
     }
 }
 
+/// The entries a chain rejected: the first `retainedLimit` in script order,
+/// plus counts over all of them. A PAC answer is untrusted input and a chain
+/// is cached per URL, so what is kept is bounded however long the answer
+/// was; the counts keep classification and the event correct.
+package struct PACRejections: Equatable, Sendable, RandomAccessCollection, ExpressibleByArrayLiteral {
+    /// Entries kept per chain. Matches the event's cap on rejected types.
+    package static let retainedLimit = 8
+
+    /// The first `retainedLimit` rejected entries, in script order.
+    package private(set) var entries: [PACRejectedEntry] = []
+    /// Every rejected entry, including those not retained.
+    package private(set) var total = 0
+    /// Rejected entries of an unsupported type, including those not retained.
+    package private(set) var unsupported = 0
+
+    package init() {}
+
+    package init(arrayLiteral elements: PACRejectedEntry...) {
+        for element in elements { append(element) }
+    }
+
+    package mutating func append(_ entry: PACRejectedEntry) {
+        total += 1
+        if entry.reason == .unsupported { unsupported += 1 }
+        if entries.count < Self.retainedLimit { entries.append(entry) }
+    }
+
+    /// Some rejected entries were counted but not retained.
+    package var truncated: Bool { total > entries.count }
+
+    package var startIndex: Int { entries.startIndex }
+    package var endIndex: Int { entries.endIndex }
+    package subscript(position: Int) -> PACRejectedEntry { entries[position] }
+}
+
 /// One evaluation's answer as the script wrote it, minus what could not be used.
 package struct PACChain: Equatable, Sendable {
     /// Usable routes in script order: only `.direct` and `.proxy`.
     package var routes: [PACRoute]
-    /// Entries removed from the chain, in script order.
-    package var rejected: [PACRejectedEntry]
+    /// Entries removed from the chain, in script order (bounded; see `PACRejections`).
+    package var rejected: PACRejections
     /// The first usable route is `DIRECT` only because rejected entries were
     /// removed ahead of it. Such a `DIRECT` is a fallback, not the script's
     /// explicit choice: it is used only where direct fallback is allowed.
     package var leadingDirectPromoted: Bool
 
-    package init(routes: [PACRoute], rejected: [PACRejectedEntry] = [], leadingDirectPromoted: Bool = false) {
+    package init(routes: [PACRoute], rejected: PACRejections = [], leadingDirectPromoted: Bool = false) {
         self.routes = routes
         self.rejected = rejected
         self.leadingDirectPromoted = leadingDirectPromoted
@@ -145,10 +180,11 @@ package enum PACNoUsableReason: String, Sendable, CaseIterable {
     /// The answer came from a PAC the configuration no longer names.
     case superseded
 
-    /// The reason for a chain left without usable routes.
-    package static func forRejected(_ rejected: [PACRejectedEntry]) -> PACNoUsableReason {
-        if rejected.isEmpty { return .empty }
-        return rejected.contains { $0.reason == .unsupported } ? .unsupported : .invalid
+    /// The reason for a chain left without usable routes. Uses the counts, so
+    /// an unsupported entry past the retained ones still counts.
+    package static func forRejected(_ rejected: PACRejections) -> PACNoUsableReason {
+        if rejected.total == 0 { return .empty }
+        return rejected.unsupported > 0 ? .unsupported : .invalid
     }
 }
 
@@ -161,7 +197,7 @@ package enum PACDecision: Equatable, Sendable {
     /// PAC routing is on but produced nothing to route by. Routing proceeds
     /// through the configured upstreams only: no DIRECT, no reachability
     /// shortcut and no PAC direct fallback (#50).
-    case noUsableAnswer(PACNoUsableReason, rejected: [PACRejectedEntry])
+    case noUsableAnswer(PACNoUsableReason, rejected: PACRejections)
 
     /// The decision a parsed chain stands for.
     package init(chain: PACChain) {

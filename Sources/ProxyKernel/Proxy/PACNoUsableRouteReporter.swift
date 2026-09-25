@@ -37,7 +37,7 @@ package final class PACNoUsableRouteReporter: @unchecked Sendable {
     /// Report one request that got no usable PAC answer. Returns whether an
     /// event was emitted (`false` when rate-limited).
     @discardableResult
-    package func report(_ reason: PACNoUsableReason, rejected: [PACRejectedEntry], host: String) -> Bool {
+    package func report(_ reason: PACNoUsableReason, rejected: PACRejections, host: String) -> Bool {
         let current = now()
         let suppressed: Int? = lock.withLock {
             if var slot = slots[reason], current.timeIntervalSince(slot.lastEmitted) < Self.window {
@@ -56,6 +56,10 @@ package final class PACNoUsableRouteReporter: @unchecked Sendable {
         if !types.isEmpty {
             detail += " rejected=\(types.joined(separator: ","))"
         }
+        if rejected.truncated {
+            // Only the first entries are kept; say how many there were.
+            detail += " rejectedTotal=\(rejected.total)"
+        }
         detail += " suppressed=\(suppressed)"
         let event = RuntimeEvent(kind: .routing, event: "pac.no_usable_route", detail: detail)
         eventSink?(event)
@@ -68,7 +72,7 @@ package final class PACNoUsableRouteReporter: @unchecked Sendable {
     }
 
     /// Distinct rejected types in script order, at most `maxRejectedTypes`.
-    package static func rejectedTypes(_ rejected: [PACRejectedEntry]) -> [String] {
+    package static func rejectedTypes(_ rejected: PACRejections) -> [String] {
         var seen: [String] = []
         for entry in rejected where !seen.contains(entry.type) {
             guard seen.count < maxRejectedTypes else { break }

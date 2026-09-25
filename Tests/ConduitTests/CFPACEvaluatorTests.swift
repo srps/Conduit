@@ -377,6 +377,31 @@ final class CFPACEvaluatorTests: XCTestCase {
         XCTAssertFalse(chain.leadingDirectPromoted)
     }
 
+    /// A PAC answer of thousands of unusable entries, through the real
+    /// CFNetwork evaluator, keeps a bounded rejected list and exact counts.
+    func testThousandsOfRejectedEntriesStayBounded() throws {
+        let evaluator = try makeEvaluator("""
+        function FindProxyForURL(url, host) {
+            var entries = [];
+            for (var i = 0; i < 3000; i++) { entries.push("SOCKS s" + i + ".example:1080"); }
+            entries.push("PROXY bad.example:99999");
+            return entries.join("; ");
+        }
+        """)
+        let raw = try evaluator.resolveProxyChain(for: URL(string: "http://example.com/")!)
+        XCTAssertEqual(raw.count, 3001)
+        let chain = CFPACEvaluator().routeChain(for: raw)
+        XCTAssertEqual(chain.routes, [])
+        XCTAssertEqual(chain.rejected.count, PACRejections.retainedLimit)
+        XCTAssertEqual(chain.rejected.total, 3001)
+        XCTAssertEqual(chain.rejected.unsupported, 3000)
+        XCTAssertTrue(chain.rejected.truncated)
+        guard case .noUsableAnswer(.unsupported, let rejected) = PACDecision(chain: chain) else {
+            return XCTFail("expected an unsupported no-usable answer")
+        }
+        XCTAssertEqual(rejected.count, PACRejections.retainedLimit)
+    }
+
     func testRejectedEntryTypeNeverCarriesHostOrURL() {
         let chain = CFPACEvaluator().routeChain(for: ["https://secret.example.com/path?token=x 1", "very-long-directive-keyword-here x"])
         XCTAssertEqual(chain.rejected.map(\.type), ["OTHER", "OTHER"])

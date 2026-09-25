@@ -137,8 +137,37 @@ final class PACDecisionTests: XCTestCase {
         ])
     }
 
+    /// A PAC answer is untrusted and chains are cached per URL: thousands of
+    /// rejected entries keep only `retainedLimit` of them, while the counts
+    /// keep classification and the event correct.
+    func testThousandsOfRejectedEntriesAreBoundedAndStillClassified() {
+        let parse: (String) -> PACRoute? = { $0.hasPrefix("SOCKS") ? .socks(host: "s.example", port: 1) : nil }
+        // 4,999 invalid entries, then one unsupported one past the retained few.
+        let entries = Array(repeating: "PROXY bogus.example:99999", count: 4_999) + ["SOCKS s.example:1"]
+        let chain = PACChain.classify(entries, parse: parse)
+        XCTAssertEqual(chain.rejected.count, PACRejections.retainedLimit)
+        XCTAssertEqual(chain.rejected.total, 5_000)
+        XCTAssertEqual(chain.rejected.unsupported, 1)
+        XCTAssertTrue(chain.rejected.truncated)
+
+        let decision = PACDecision(chain: chain)
+        guard case .noUsableAnswer(let reason, let rejected) = decision else {
+            return XCTFail("expected no usable answer, got \(decision)")
+        }
+        XCTAssertEqual(reason, .unsupported, "the unsupported entry past the retained ones still counts")
+
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let reporter = PACNoUsableRouteReporter(
+            eventSink: { event in events.withLockedValue { $0.append(event) } }, logger: nil
+        )
+        reporter.report(reason, rejected: rejected, host: "a.example")
+        XCTAssertEqual(events.withLockedValue { $0 }.map(\.detail),
+                       ["reason=unsupported host=a.example rejected=PROXY rejectedTotal=5000 suppressed=0"])
+    }
+
     func testRejectedTypesInAnEventAreBounded() {
-        let many = (0..<40).map { PACRejectedEntry(type: "T\($0)", reason: .unsupported) }
+        var many = PACRejections()
+        for index in 0..<40 { many.append(PACRejectedEntry(type: "T\(index)", reason: .unsupported)) }
         XCTAssertEqual(PACNoUsableRouteReporter.rejectedTypes(many).count, PACNoUsableRouteReporter.maxRejectedTypes)
     }
 
