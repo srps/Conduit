@@ -11,7 +11,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// Keychain. Without the seam a host over a fake machine read and wrote
     /// the installed app's Keychain entries, the gap #24's review closed in
     /// `AppState`.
-    func testCredentialsComeFromTheInjectedStore() throws {
+    func testCredentialsComeFromTheInjectedStore() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-credential-store-\(UUID().uuidString)")
         let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -31,9 +31,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = DaemonRuntimeHost(
             environment: environment, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            configFilePredatesLaunch: true,
             vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: RecordingPrivilegeClient(),
             credentialStore: secrets
         )
+        // Recovery writes the journal under `directory`; let it land before
+        // the `defer` removes it.
+        await host.awaitLaunchRecovery()
 
         let authenticator = try host.orchestrator.lateBoundAuthenticatorProvider(upstream)
         XCTAssertEqual(authenticator.scheme, "NTLM")
@@ -55,6 +59,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = DaemonRuntimeHost(
             environment: environment, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            configFilePredatesLaunch: true,
             vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(),
             commandRunner: { path, arguments in try machine.run(path, arguments) },
             homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
@@ -91,6 +96,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
         let host = DaemonRuntimeHost(environment: environment, logger: DiscardingLogSink(),
                                      loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+                                     configFilePredatesLaunch: true,
                                      vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
                                      credentialStore: InMemorySecretStore(),
                                      commandRunner: { path, arguments in try machine.run(path, arguments) },
@@ -129,6 +135,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
+            configFilePredatesLaunch: true,
             vpnStatusMonitor: FakeVPNStatusObserver(),
             credentialStore: InMemorySecretStore()
         )
@@ -162,9 +169,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
+            configFilePredatesLaunch: false,
             vpnStatusMonitor: observer,
             credentialStore: InMemorySecretStore()
         )
+        // Recovery writes the journal under the state directory; let it land
+        // before the `defer` removes it.
+        await host.awaitLaunchRecovery()
 
         // The host wires the observer callback during init. Drive the fake
         // observer directly rather than starting the full runtime (which may
@@ -201,9 +212,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
+            configFilePredatesLaunch: false,
             vpnStatusMonitor: observer,
             credentialStore: InMemorySecretStore()
         )
+        // Recovery writes the journal under the state directory; let it land
+        // before the `defer` removes it.
+        await host.awaitLaunchRecovery()
         observer.start()
         defer { observer.stop() }
 
@@ -261,6 +276,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 migrated: false,
                 warnings: []
             ),
+            configFilePredatesLaunch: false,
             vpnStatusMonitor: FakeVPNStatusObserver(),
             privilegeClient: recording,
             credentialStore: InMemorySecretStore()
@@ -324,6 +340,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 environment: environment,
                 logger: DiscardingLogSink(),
                 loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+                // The harness writes the config file before the host exists,
+                // the way an established install has one.
+                configFilePredatesLaunch: true,
                 vpnStatusMonitor: vpn,
                 privilegeClient: machine,
                 credentialStore: InMemorySecretStore(),
@@ -482,6 +501,66 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         XCTAssertFalse(harness.wifi.routesThroughAProxy, "stop cleared by ownership, not by the switch")
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+    }
+
+    /// Twin of `AppStateHarnessTests.testLaunchRestoresTheProxyACrashedRunLeftBehind`,
+    /// seeded the same way: the journal holds the corporate proxy a run
+    /// recorded before it applied its own, and the machine still points at
+    /// that run's port, 47113, which nothing serves. That is what a `SIGKILL`
+    /// with the system proxy applied leaves.
+    ///
+    /// Without launch recovery the host left Wi-Fi on the dead port until its
+    /// next start or stop, and in runtime-host mode it starts nothing. The
+    /// start's capture is not where it went wrong: `recordPrior` is
+    /// first-write-wins, so the crashed run's record survives a start either
+    /// way, and the last assertion holds with or without recovery.
+    func testLaunchRestoresTheProxyACrashedRunLeftBehind() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+
+        let corporate = ProxyServiceState(
+            webHost: "proxy.corp.example", webPort: "8080", webEnabled: true,
+            secureHost: "proxy.corp.example", securePort: "8080", secureEnabled: true,
+            autoURL: "", autoEnabled: false,
+            bypassDomains: ["*.local"]
+        )
+        let seeded = harness.journal
+        seeded.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: corporate.journalValues)
+        seeded.markApplied(surface: .systemProxy)
+        harness.machine.describe("Wi-Fi") { service in
+            service.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
+            service.secureWebProxy = service.webProxy
+            service.bypassDomains = ["localhost"]
+        }
+
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        XCTAssertEqual(
+            harness.wifi.webProxy,
+            FakeMachine.ProxyEndpoint(enabled: true, host: "proxy.corp.example", port: "8080"),
+            "recovery restores the corporate proxy"
+        )
+        XCTAssertEqual(harness.wifi.bypassDomains, ["*.local"])
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy), "restored, so released")
+
+        try await host.startRuntime()
+        XCTAssertEqual(harness.wifi.webProxy, FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "0"))
+        guard case .wasPresent(let prior) = harness.journal.prior(surface: .systemProxy, scope: "Wi-Fi") else {
+            return XCTFail("the start recorded a prior for Wi-Fi")
+        }
+        XCTAssertEqual(
+            ProxyServiceState(journalValues: prior).webHost,
+            "proxy.corp.example",
+            "the prior the start captured is the user's proxy, not the crashed run's port"
+        )
+
+        await host.stopRuntime()
+        XCTAssertEqual(
+            harness.wifi.webProxy,
+            FakeMachine.ProxyEndpoint(enabled: true, host: "proxy.corp.example", port: "8080"),
+            "and the stop hands it back"
+        )
     }
 
     /// Twin of `AppStateHarnessTests.testAFailedLivenessProbeRestartsTheRelayOffTheMainThread`.

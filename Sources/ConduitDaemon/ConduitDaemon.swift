@@ -32,6 +32,9 @@ enum ConduitDaemon {
 
         let logger = ConsoleLogSink(minLevel: args.contains("--verbose") ? .debug : .notice)
         let environment = runtimeEnvironment(from: args)
+        // Read before the load, which writes a migrated file back. See
+        // `DaemonRuntimeHost.init`.
+        let configFilePredatesLaunch = FileManager.default.fileExists(atPath: environment.configFile.path)
         let loaded: RuntimeConfigurationLoadResult
         do {
             loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: !args.contains("--config"))
@@ -51,7 +54,8 @@ enum ConduitDaemon {
         let host = DaemonRuntimeHost(
             environment: environment,
             logger: logger,
-            loadedConfiguration: loaded
+            loadedConfiguration: loaded,
+            configFilePredatesLaunch: configFilePredatesLaunch
         )
 
         if args.contains("--start-runtime") {
@@ -89,6 +93,10 @@ enum ConduitDaemon {
         if args.contains("--exit-after-ready") {
             if args.contains("--start-runtime") {
                 await host.stopRuntime()
+            } else {
+                // Nothing else joins it on this path, and returning would end
+                // the process with a restore possibly half done.
+                await host.awaitLaunchRecovery()
             }
             logger.flush()
             return
