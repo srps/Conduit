@@ -14,7 +14,7 @@ final class DirectConnectDetectorTests: XCTestCase {
             ttlSeconds: 60,
             baseTimeoutMS: 100
         )
-        XCTAssertNil(detector.cachedReachability(host: "example.com", port: 443))
+        XCTAssertNil(detector.cachedReachability(host: "example.com", port: 443, gatewayMode: false))
     }
 
     @MainActor
@@ -27,10 +27,10 @@ final class DirectConnectDetectorTests: XCTestCase {
         )
 
         let unreachablePort = 1
-        let result = await detector.isDirectlyReachable(host: "127.0.0.1", port: unreachablePort)
+        let result = await detector.isDirectlyReachable(host: "127.0.0.1", port: unreachablePort, gatewayMode: false)
         XCTAssertFalse(result)
 
-        let cached = detector.cachedReachability(host: "127.0.0.1", port: unreachablePort)
+        let cached = detector.cachedReachability(host: "127.0.0.1", port: unreachablePort, gatewayMode: false)
         XCTAssertNotNil(cached)
         XCTAssertFalse(cached!)
     }
@@ -44,11 +44,11 @@ final class DirectConnectDetectorTests: XCTestCase {
             baseTimeoutMS: 200
         )
 
-        _ = await detector.isDirectlyReachable(host: "127.0.0.1", port: 1)
-        XCTAssertNotNil(detector.cachedReachability(host: "127.0.0.1", port: 1))
+        _ = await detector.isDirectlyReachable(host: "127.0.0.1", port: 1, gatewayMode: false)
+        XCTAssertNotNil(detector.cachedReachability(host: "127.0.0.1", port: 1, gatewayMode: false))
 
         try? await Task.sleep(for: .milliseconds(150))
-        XCTAssertNil(detector.cachedReachability(host: "127.0.0.1", port: 1),
+        XCTAssertNil(detector.cachedReachability(host: "127.0.0.1", port: 1, gatewayMode: false),
                      "Cache entry should expire after TTL")
     }
 
@@ -61,11 +61,11 @@ final class DirectConnectDetectorTests: XCTestCase {
             baseTimeoutMS: 200
         )
 
-        _ = await detector.isDirectlyReachable(host: "127.0.0.1", port: 1)
-        XCTAssertNotNil(detector.cachedReachability(host: "127.0.0.1", port: 1))
+        _ = await detector.isDirectlyReachable(host: "127.0.0.1", port: 1, gatewayMode: false)
+        XCTAssertNotNil(detector.cachedReachability(host: "127.0.0.1", port: 1, gatewayMode: false))
 
         detector.clearCache()
-        XCTAssertNil(detector.cachedReachability(host: "127.0.0.1", port: 1))
+        XCTAssertNil(detector.cachedReachability(host: "127.0.0.1", port: 1, gatewayMode: false))
     }
 
     @MainActor
@@ -77,13 +77,13 @@ final class DirectConnectDetectorTests: XCTestCase {
             baseTimeoutMS: 200
         )
 
-        detector.probeInBackground(host: "192.0.2.1", port: 9999)
-        detector.probeInBackground(host: "192.0.2.1", port: 9999)
-        detector.probeInBackground(host: "192.0.2.1", port: 9999)
+        detector.probeInBackground(host: "192.0.2.1", port: 9999, gatewayMode: false)
+        detector.probeInBackground(host: "192.0.2.1", port: 9999, gatewayMode: false)
+        detector.probeInBackground(host: "192.0.2.1", port: 9999, gatewayMode: false)
 
         try? await Task.sleep(for: .milliseconds(500))
 
-        let cached = detector.cachedReachability(host: "192.0.2.1", port: 9999)
+        let cached = detector.cachedReachability(host: "192.0.2.1", port: 9999, gatewayMode: false)
         XCTAssertNotNil(cached, "Background probe should have populated cache")
         XCTAssertFalse(cached!, "Unreachable host should be cached as false")
     }
@@ -97,13 +97,13 @@ final class DirectConnectDetectorTests: XCTestCase {
             baseTimeoutMS: 200
         )
 
-        _ = await detector.isDirectlyReachable(host: "127.0.0.1", port: 1)
-        _ = await detector.isDirectlyReachable(host: "127.0.0.1", port: 2)
+        _ = await detector.isDirectlyReachable(host: "127.0.0.1", port: 1, gatewayMode: false)
+        _ = await detector.isDirectlyReachable(host: "127.0.0.1", port: 2, gatewayMode: false)
 
-        XCTAssertNotNil(detector.cachedReachability(host: "127.0.0.1", port: 1))
-        XCTAssertNotNil(detector.cachedReachability(host: "127.0.0.1", port: 2))
+        XCTAssertNotNil(detector.cachedReachability(host: "127.0.0.1", port: 1, gatewayMode: false))
+        XCTAssertNotNil(detector.cachedReachability(host: "127.0.0.1", port: 2, gatewayMode: false))
 
-        XCTAssertNil(detector.cachedReachability(host: "127.0.0.1", port: 3),
+        XCTAssertNil(detector.cachedReachability(host: "127.0.0.1", port: 3, gatewayMode: false),
                      "Unchecked port should not have a cache entry")
     }
 
@@ -117,11 +117,11 @@ final class DirectConnectDetectorTests: XCTestCase {
         )
 
         for _ in 0..<5 {
-            _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 1)
+            _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 1, gatewayMode: false)
             try? await Task.sleep(for: .milliseconds(60))
         }
 
-        let cached = detector.cachedReachability(host: "192.0.2.1", port: 1)
+        let cached = detector.cachedReachability(host: "192.0.2.1", port: 1, gatewayMode: false)
         XCTAssertNil(cached, "Cache should have expired after TTL")
     }
 
@@ -134,12 +134,12 @@ final class DirectConnectDetectorTests: XCTestCase {
             baseTimeoutMS: 50
         )
 
-        _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 1)
-        _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 1)
+        _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 1, gatewayMode: false)
+        _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 1, gatewayMode: false)
 
         detector.clearCache()
 
-        XCTAssertNil(detector.cachedReachability(host: "192.0.2.1", port: 1))
+        XCTAssertNil(detector.cachedReachability(host: "192.0.2.1", port: 1, gatewayMode: false))
     }
 
     @MainActor
@@ -153,14 +153,14 @@ final class DirectConnectDetectorTests: XCTestCase {
         )
 
         for port in 1...5 {
-            detector.probeInBackground(host: "192.0.2.1", port: port)
+            detector.probeInBackground(host: "192.0.2.1", port: port, gatewayMode: false)
         }
 
         try? await Task.sleep(for: .milliseconds(100))
 
         var cachedCount = 0
         for port in 1...5 {
-            if detector.cachedReachability(host: "192.0.2.1", port: port) != nil {
+            if detector.cachedReachability(host: "192.0.2.1", port: port, gatewayMode: false) != nil {
                 cachedCount += 1
             }
         }
@@ -182,12 +182,12 @@ final class DirectConnectDetectorTests: XCTestCase {
         )
 
         for port in 1...5 {
-            _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: port)
+            _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: port, gatewayMode: false)
         }
 
         var cachedCount = 0
         for port in 1...5 {
-            if detector.cachedReachability(host: "192.0.2.1", port: port) != nil {
+            if detector.cachedReachability(host: "192.0.2.1", port: port, gatewayMode: false) != nil {
                 cachedCount += 1
             }
         }
@@ -223,18 +223,18 @@ final class DirectConnectDetectorTests: XCTestCase {
             baseTimeoutMS: 50
         )
 
-        detector.probeInBackground(host: "192.0.2.1", port: 9998)
+        detector.probeInBackground(host: "192.0.2.1", port: 9998, gatewayMode: false)
         try? await Task.sleep(for: .milliseconds(300))
-        let firstResult = detector.cachedReachability(host: "192.0.2.1", port: 9998)
+        let firstResult = detector.cachedReachability(host: "192.0.2.1", port: 9998, gatewayMode: false)
         XCTAssertNotNil(firstResult, "First background probe should populate cache")
         XCTAssertFalse(firstResult!, "Unreachable host should be cached as false")
 
         detector.clearCache()
-        XCTAssertNil(detector.cachedReachability(host: "192.0.2.1", port: 9998))
+        XCTAssertNil(detector.cachedReachability(host: "192.0.2.1", port: 9998, gatewayMode: false))
 
-        detector.probeInBackground(host: "192.0.2.1", port: 9998)
+        detector.probeInBackground(host: "192.0.2.1", port: 9998, gatewayMode: false)
         try? await Task.sleep(for: .milliseconds(300))
-        let secondResult = detector.cachedReachability(host: "192.0.2.1", port: 9998)
+        let secondResult = detector.cachedReachability(host: "192.0.2.1", port: 9998, gatewayMode: false)
         XCTAssertNotNil(secondResult, "Second background probe should repopulate cache after clear")
     }
 }

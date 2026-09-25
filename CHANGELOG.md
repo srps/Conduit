@@ -51,6 +51,12 @@ form Conduit cannot route by.
 - Settings tells a build the helper's pin refuses apart from a user it refuses: it shows
   the helper's message and how to fix it, and no longer offers a "Reinstall Helper" that
   cannot change the pin.
+- In gateway mode, outside strict mode, a request for a blocked metadata or loopback target
+  no longer triggers a background direct probe of it before being refused. Every direct
+  probe now resolves first, connects to nothing when any address is blocked, and emits
+  `routing.probe_blocked`. A result found outside gateway mode is never reused in it, each
+  resolved address is tried in turn, and one deadline covers the lookup and every connect.
+  (#93)
 
 ### Changed
 

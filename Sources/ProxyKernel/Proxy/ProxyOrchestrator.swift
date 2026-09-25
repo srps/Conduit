@@ -984,7 +984,8 @@ package final class ProxyOrchestrator {
             group: MultiThreadedEventLoopGroup.singleton,
             logger: logStore,
             ttlSeconds: TimeInterval(configBox.current.directConnectTTLMinutes * 60),
-            baseTimeoutMS: Int64(configBox.current.connectionCheckTimeoutMS)
+            baseTimeoutMS: Int64(configBox.current.connectionCheckTimeoutMS),
+            eventSink: { [eventLog] event in eventLog.append(event) }
         )
     }()
 
