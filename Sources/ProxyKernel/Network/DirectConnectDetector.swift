@@ -14,6 +14,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
     private var cache: [String: CacheEntry] = [:]
     private var hostTimeouts: [String: Int64] = [:]
     private var pendingProbes: Set<String> = []
+    private var probesStarted = 0
     private let lock = NSLock()
 
     package struct CacheEntry {
@@ -38,6 +39,12 @@ package final class DirectConnectDetector: @unchecked Sendable {
         self.maxConcurrentProbes = maxConcurrentProbes
     }
 
+    /// Direct probes started so far, of every kind. Lets tests prove that a
+    /// path made none (a PAC answer never triggers a probe, #50).
+    package var probeCount: Int {
+        lock.withLock { probesStarted }
+    }
+
     /// Synchronous cache-only check. Returns the cached reachability result
     /// if a valid (non-expired) entry exists, otherwise returns nil.
     /// When nil, call `probeInBackground` to populate the cache for next time.
@@ -60,6 +67,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
             if pendingProbes.contains(key) { return false }
             if pendingProbes.count >= maxConcurrentProbes { return false }
             pendingProbes.insert(key)
+            probesStarted += 1
             return true
         }
         guard shouldProbe else { return }
@@ -94,7 +102,10 @@ package final class DirectConnectDetector: @unchecked Sendable {
         }
 
         let key = "\(host):\(port)"
-        let timeout = lock.withLock { hostTimeouts[key] ?? baseTimeoutMS }
+        let timeout = lock.withLock { () -> Int64 in
+            probesStarted += 1
+            return hostTimeouts[key] ?? baseTimeoutMS
+        }
         let reachable = await probe(host: host, port: port, timeoutMS: timeout)
 
         lock.withLock {

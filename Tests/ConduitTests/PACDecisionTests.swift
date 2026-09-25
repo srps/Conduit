@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: Apache-2.0
+// The PAC decision → routing plan table (#50) and the rate limit on
+// `pac.no_usable_route`.
+
+import Foundation
+import NIOConcurrencyHelpers
+import NIOPosix
+import XCTest
+@testable import ProxyKernel
+
+final class PACDecisionTests: XCTestCase {
+
+    private let socks = PACRejectedEntry(type: "SOCKS", reason: .unsupported)
+    private let badPort = PACRejectedEntry(type: "PROXY", reason: .invalid)
+
+    private func config() -> ProxyConfig {
+        var config = ProxyConfig.testFixture()
+        config.upstreams = [UpstreamProxy(name: "Corp", host: "corp.example", port: 8080, priority: 0)]
+        return config
+    }
+
+    private func plan(_ decision: PACDecision, fallback: Bool) -> PACRoutePlan {
+        PACRoutePlan(decision: decision, config: config(), directFallbackAllowed: fallback)
+    }
+
+    // MARK: - Decision from a chain
+
+    func testChainWithoutUsableRoutesIsNoUsableAnswer() {
+        XCTAssertEqual(PACDecision(chain: PACChain(routes: [])), .noUsableAnswer(.empty, rejected: []))
+        XCTAssertEqual(PACDecision(chain: PACChain(routes: [], rejected: [socks])),
+                       .noUsableAnswer(.unsupported, rejected: [socks]))
+        XCTAssertEqual(PACDecision(chain: PACChain(routes: [], rejected: [badPort])),
+                       .noUsableAnswer(.invalid, rejected: [badPort]))
+        XCTAssertEqual(PACDecision(chain: PACChain(routes: [], rejected: [badPort, socks])),
+                       .noUsableAnswer(.unsupported, rejected: [badPort, socks]))
+    }
+
+    func testClassifyMarksOnlyADirectAfterRejectedEntriesAsPromoted() {
+        let parse: (String) -> PACRoute? = { entry in
+            switch entry {
+            case "DIRECT": .direct
+            case "PROXY": .proxy(host: "p.example", port: 1)
+            case "SOCKS": .socks(host: "s.example", port: 1)
+            default: nil
+            }
+        }
+        XCTAssertFalse(PACChain.classify(["DIRECT", "SOCKS"], parse: parse).leadingDirectPromoted)
+        XCTAssertTrue(PACChain.classify(["SOCKS", "DIRECT"], parse: parse).leadingDirectPromoted)
+        XCTAssertTrue(PACChain.classify(["BOGUS x:1", "DIRECT"], parse: parse).leadingDirectPromoted)
+        XCTAssertFalse(PACChain.classify(["SOCKS", "PROXY", "DIRECT"], parse: parse).leadingDirectPromoted)
+    }
+
+    // MARK: - Plan
+
+    func testExplicitDirectRoutesDirectInEveryMode() {
+        for fallback in [true, false] {
+            XCTAssertEqual(plan(.routes(PACChain(routes: [.direct, .proxy(host: "corp.example", port: 8080)])),
+                                fallback: fallback), .direct)
+        }
+    }
+
+    func testPromotedDirectIsUsedOnlyWhereDirectFallbackIsAllowed() {
+        let promoted = PACChain(routes: [.direct], rejected: [socks], leadingDirectPromoted: true)
+        XCTAssertEqual(plan(.routes(promoted), fallback: true), .direct)
+        XCTAssertEqual(plan(.routes(promoted), fallback: false), .upstreamsOnly(.unsupported, rejected: [socks]))
+
+        // Without fallback a promoted DIRECT is dropped and the rest of the
+        // chain still counts.
+        let promotedThenProxy = PACChain(
+            routes: [.direct, .proxy(host: "other.example", port: 3128)],
+            rejected: [badPort], leadingDirectPromoted: true
+        )
+        let strict = plan(.routes(promotedThenProxy), fallback: false)
+        XCTAssertEqual(strict.proxyChain.map(\.endpoint), ["other.example:3128"])
+        XCTAssertFalse(strict.hasDirectFallback)
+        XCTAssertEqual(plan(.routes(promotedThenProxy), fallback: true), .direct)
+    }
+
+    func testProxyChainKeepsOrderAndALaterDirectIsAFallbackOnlyWhenAllowed() {
+        let chain = PACChain(routes: [.proxy(host: "corp.example", port: 8080), .proxy(host: "b.example", port: 1), .direct])
+        let relaxed = plan(.routes(chain), fallback: true)
+        XCTAssertEqual(relaxed.proxyChain.map(\.endpoint), ["corp.example:8080", "b.example:1"])
+        XCTAssertEqual(relaxed.proxyChain.first?.name, "Corp", "a configured upstream keeps its identity")
+        XCTAssertTrue(relaxed.hasDirectFallback)
+        XCTAssertFalse(plan(.routes(chain), fallback: false).hasDirectFallback)
+        XCTAssertFalse(plan(.routes(PACChain(routes: [.proxy(host: "a.example", port: 1)])), fallback: true).hasDirectFallback)
+    }
+
+    func testNoUsableAnswerIsUpstreamsOnlyWithoutShortcutOrFallback() {
+        for reason in PACNoUsableReason.allCases {
+            for fallback in [true, false] {
+                let result = plan(.noUsableAnswer(reason, rejected: []), fallback: fallback)
+                XCTAssertEqual(result, .upstreamsOnly(reason, rejected: []))
+                XCTAssertEqual(result.proxyChain, [])
+                XCTAssertFalse(result.hasDirectFallback)
+                XCTAssertFalse(result.allowsReachabilityShortcut, "\(reason)")
+            }
+        }
+    }
+
+    func testReachabilityShortcutOnlyWithoutPACOpinion() {
+        XCTAssertTrue(PACRoutePlan.noOpinion.allowsReachabilityShortcut)
+        XCTAssertFalse(PACRoutePlan.direct.allowsReachabilityShortcut)
+        XCTAssertFalse(PACRoutePlan.proxies([], directFallback: true).allowsReachabilityShortcut)
+        XCTAssertEqual(plan(.notConsulted, fallback: true), .noOpinion)
+    }
+
+    // MARK: - pac.no_usable_route rate limit
+
+    func testNoUsableRouteIsRateLimitedPerReasonAndCountsSuppressed() {
+        let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let reporter = PACNoUsableRouteReporter(
+            eventSink: { event in events.withLockedValue { $0.append(event) } },
+            logger: nil,
+            now: { clock.withLockedValue { $0 } }
+        )
+        XCTAssertTrue(reporter.report(.unsupported, rejected: [socks], host: "a.example"))
+        for _ in 0..<5 {
+            XCTAssertFalse(reporter.report(.unsupported, rejected: [socks], host: "b.example"))
+        }
+        // Another reason has its own slot.
+        XCTAssertTrue(reporter.report(.timeout, rejected: [], host: "c.example"))
+        clock.withLockedValue { $0 += PACNoUsableRouteReporter.window - 1 }
+        XCTAssertFalse(reporter.report(.unsupported, rejected: [], host: "d.example"))
+        clock.withLockedValue { $0 += 1 }
+        XCTAssertTrue(reporter.report(.unsupported, rejected: [socks, badPort, socks], host: "e.example"))
+
+        let details = events.withLockedValue { $0 }.map { "\($0.event) \($0.detail ?? "")" }
+        XCTAssertEqual(details, [
+            "pac.no_usable_route reason=unsupported host=a.example rejected=SOCKS suppressed=0",
+            "pac.no_usable_route reason=timeout host=c.example suppressed=0",
+            "pac.no_usable_route reason=unsupported host=e.example rejected=SOCKS,PROXY suppressed=6",
+        ])
+    }
+
+    func testRejectedTypesInAnEventAreBounded() {
+        let many = (0..<40).map { PACRejectedEntry(type: "T\($0)", reason: .unsupported) }
+        XCTAssertEqual(PACNoUsableRouteReporter.rejectedTypes(many).count, PACNoUsableRouteReporter.maxRejectedTypes)
+    }
+
+    func testEngineReportsEveryNoUsableReasonItReturns() async throws {
+        var config = ProxyConfig.testFixture()
+        config.pacRoutingEnabled = true
+        config.pacURL = "https://pac.example/proxy.pac"
+        let fixed = config
+        let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        let engine = PACRoutingEngine(
+            configProvider: { fixed },
+            resolver: FixedPAC(entries: ["SOCKS s.example:1080"]),
+            refreshInterval: 300,
+            pacLoader: { _ in throw PACResolverError.fetchFailed("not yet") },
+            eventSink: { event in events.withLockedValue { $0.append(event) } }
+        )
+        // Not loaded yet.
+        XCTAssertEqual(engine.decision(for: "https://a.example/", host: "a.example"), .noUsableAnswer(.notLoaded, rejected: []))
+        let reasons = events.withLockedValue { $0 }.filter { $0.event == "pac.no_usable_route" }.map(\.detail)
+        XCTAssertEqual(reasons, ["reason=not_loaded host=a.example suppressed=0"])
+    }
+}
+
+private struct FixedPAC: PacEvaluator, PacScriptEvaluating {
+    let entries: [String]
+    func fetchPAC(from _: String) async throws -> String { "" }
+    func makeEvaluator(pacScript _: String) throws -> any PacScriptEvaluating { self }
+    func resolveProxyChain(for _: URL) throws -> [String] { entries }
+    func routeChain(for entries: [String]) -> PACChain {
+        PACChain.classify(entries) { entry in
+            entry.hasPrefix("SOCKS") ? .socks(host: "s.example", port: 1080) : nil
+        }
+    }
+}

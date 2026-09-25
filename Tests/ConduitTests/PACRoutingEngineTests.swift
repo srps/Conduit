@@ -170,12 +170,12 @@ final class PACRoutingEngineTests: XCTestCase {
         try await engine.refresh(force: true)
 
         let eventLoop = MultiThreadedEventLoopGroup.singleton.next()
-        let routesPromise = eventLoop.makePromise(of: [PACRoute].self)
+        let routesPromise = eventLoop.makePromise(of: PACDecision.self)
         let markerPromise = eventLoop.makePromise(of: TimeInterval.self)
         let start = Date()
 
         eventLoop.execute {
-            engine.routeChainFuture(for: "https://slow.example/resource", host: "slow.example", on: eventLoop)
+            engine.decisionFuture(for: "https://slow.example/resource", host: "slow.example", on: eventLoop)
                 .cascade(to: routesPromise)
             eventLoop.execute {
                 markerPromise.succeed(Date().timeIntervalSince(start))
@@ -185,7 +185,7 @@ final class PACRoutingEngineTests: XCTestCase {
         let markerDelay = try await markerPromise.futureResult.get()
         XCTAssertLessThan(markerDelay, 0.1, "Slow PAC evaluation must not block the request event loop")
         let routes = try await routesPromise.futureResult.get()
-        XCTAssertEqual(routes, [PACRoute.direct])
+        XCTAssertEqual(routes, .routes(PACChain(routes: [.direct])))
     }
 
     func testRouteChainFutureTimesOutWhenEvaluatorQueueIsBlocked() async throws {
@@ -204,13 +204,13 @@ final class PACRoutingEngineTests: XCTestCase {
 
         let eventLoop = MultiThreadedEventLoopGroup.singleton.next()
         let start = Date()
-        let routes = try await engine.routeChainFuture(
+        let routes = try await engine.decisionFuture(
             for: "https://blocked.example/resource",
             host: "blocked.example",
             on: eventLoop
         ).get()
 
-        XCTAssertEqual(routes, [], "Timed-out PAC evaluations should fail closed to the default route chain")
+        XCTAssertEqual(routes, .noUsableAnswer(.timeout, rejected: []), "Timed-out PAC evaluations should fail closed to the default route chain")
         XCTAssertLessThan(Date().timeIntervalSince(start), 1.0, "Timeout must not wait for the blocked evaluator queue")
     }
 
@@ -229,18 +229,18 @@ final class PACRoutingEngineTests: XCTestCase {
 
         let group = MultiThreadedEventLoopGroup.singleton
         let futures = (0..<6).map { _ in
-            engine.routeChainFuture(for: "https://burst.example.com/", host: "burst.example.com", on: group.next())
+            engine.decisionFuture(for: "https://burst.example.com/", host: "burst.example.com", on: group.next())
         }
         let results = try await EventLoopFuture.whenAllSucceed(futures, on: group.next()).get()
 
         XCTAssertEqual(scriptEvaluator.callCount(), 1, "one evaluation serves the whole burst")
         XCTAssertEqual(results.count, 6)
         for routes in results {
-            XCTAssertEqual(routes, [.proxy(host: "cached.proxy.example.com", port: 8080)])
+            XCTAssertEqual(routes.routes, [.proxy(host: "cached.proxy.example.com", port: 8080)])
         }
 
         // After the burst the entry is served from the route cache.
-        _ = try await engine.routeChainFuture(for: "https://burst.example.com/", host: "burst.example.com", on: group.next()).get()
+        _ = try await engine.decisionFuture(for: "https://burst.example.com/", host: "burst.example.com", on: group.next()).get()
         XCTAssertEqual(scriptEvaluator.callCount(), 1)
     }
 
@@ -262,14 +262,14 @@ final class PACRoutingEngineTests: XCTestCase {
         // Issue every request from one loop so admission order is the issue order.
         let futures = try await loop.submit {
             (0..<(1 + PACRoutingEngine.pendingWaiterLimit + extra)).map { _ in
-                engine.routeChainFuture(for: "https://flood.example.com/", host: "flood.example.com", on: loop)
+                engine.decisionFuture(for: "https://flood.example.com/", host: "flood.example.com", on: loop)
             }
         }.get()
         let results = try await EventLoopFuture.whenAllSucceed(futures, on: loop).get()
 
         let served = results.prefix(1 + PACRoutingEngine.pendingWaiterLimit)
-        XCTAssertTrue(served.allSatisfy { $0 == [.proxy(host: "cached.proxy.example.com", port: 8080)] })
-        XCTAssertTrue(results.suffix(extra).allSatisfy { $0.isEmpty }, "requests past the limit get no routes at once")
+        XCTAssertTrue(served.allSatisfy { $0.routes == [.proxy(host: "cached.proxy.example.com", port: 8080)] })
+        XCTAssertTrue(results.suffix(extra).allSatisfy { $0 == .noUsableAnswer(.refused, rejected: []) }, "requests past the limit get no routes at once")
     }
 
     func testQueuedEvaluationsAreBoundedAcrossKeysAndRefusalIsAnEvent() async throws {
@@ -290,20 +290,20 @@ final class PACRoutingEngineTests: XCTestCase {
         let loop = MultiThreadedEventLoopGroup.singleton.next()
         let futures = try await loop.submit {
             (0..<5).map { i in
-                engine.routeChainFuture(for: "https://h\(i).example.com/", host: "h\(i).example.com", on: loop)
+                engine.decisionFuture(for: "https://h\(i).example.com/", host: "h\(i).example.com", on: loop)
             }
         }.get()
         let results = try await EventLoopFuture.whenAllSucceed(futures, on: loop).get()
 
-        XCTAssertTrue(results.prefix(3).allSatisfy { !$0.isEmpty })
-        XCTAssertTrue(results.suffix(2).allSatisfy { $0.isEmpty }, "the 4th and 5th distinct keys are refused")
+        XCTAssertTrue(results.prefix(3).allSatisfy { !$0.routes.isEmpty })
+        XCTAssertTrue(results.suffix(2).allSatisfy { $0 == .noUsableAnswer(.refused, rejected: []) }, "the 4th and 5th distinct keys are refused")
         let refused = events.withLockedValue { $0 }.filter { $0.event == "pac.evaluation_refused" }
         XCTAssertEqual(refused.count, 2)
         XCTAssertTrue(refused.allSatisfy { $0.detail?.contains("reason=queue_full") == true }, "\(refused)")
 
         // Once the queue drains, admission resumes.
-        let later = try await engine.routeChainFuture(for: "https://h9.example.com/", host: "h9.example.com", on: loop).get()
-        XCTAssertFalse(later.isEmpty)
+        let later = try await engine.decisionFuture(for: "https://h9.example.com/", host: "h9.example.com", on: loop).get()
+        XCTAssertFalse(later.routes.isEmpty)
     }
 
     func testRouteCacheSeparatesDifferentPathsOnSameHostAndPort() async throws {
@@ -438,7 +438,7 @@ private final class StaticPacEvaluator: PacEvaluator, @unchecked Sendable {
         scriptEvaluator
     }
 
-    func routeChain(for entries: [String]) -> [PACRoute] {
+    func routeChain(for entries: [String]) -> PACChain {
         CFPACEvaluator().routeChain(for: entries)
     }
 }
@@ -500,8 +500,8 @@ private final class HangingPacEvaluator: PacEvaluator, @unchecked Sendable {
         return DirectPacScriptEvaluator()
     }
 
-    func routeChain(for _: [String]) -> [PACRoute] {
-        []
+    func routeChain(for _: [String]) -> PACChain {
+        PACChain(routes: [])
     }
 }
 

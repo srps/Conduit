@@ -177,8 +177,8 @@ final class PACRefreshBackoffTests: XCTestCase {
                 let count = made.withLockedValue { $0 += 1; return $0 }
                 return count == 1 ? evaluator : ImmediateEvaluator(answer: ["PROXY new.example.com:8080"])
             }
-            func routeChain(for entries: [String]) -> [PACRoute] {
-                entries.compactMap { entry in
+            func routeChain(for entries: [String]) -> PACChain {
+                PACChain.classify(entries) { entry in
                     let parts = entry.split(separator: " ")
                     guard parts.count == 2, parts[0] == "PROXY" else { return nil }
                     let hostPort = parts[1].split(separator: ":")
@@ -199,16 +199,18 @@ final class PACRefreshBackoffTests: XCTestCase {
 
         // Leader evaluation blocks on the gate with the old PAC.
         let loop = MultiThreadedEventLoopGroup.singleton.next()
-        let pending = engine.routeChainFuture(for: "https://github.com/", host: "github.com", on: loop)
+        let pending = engine.decisionFuture(for: "https://github.com/", host: "github.com", on: loop)
         try await Task.sleep(for: .milliseconds(100))
 
         // The URL changes; a request observes it and drops the old evaluator.
         config.setPACURL("http://pac.example.com/other.pac")
-        XCTAssertNil(engine.route(for: "https://example.org/", host: "example.org"))
+        XCTAssertEqual(engine.decision(for: "https://example.org/", host: "example.org"),
+                       .noUsableAnswer(.notLoaded, rejected: []))
 
         resolver.evaluator.gate.signal()
-        let routes = try await pending.get()
-        XCTAssertEqual(routes, [PACRoute](), "the superseded PAC's answer does not reach the waiter")
+        let decision = try await pending.get()
+        XCTAssertEqual(decision, .noUsableAnswer(.superseded, rejected: []),
+                       "the superseded PAC's answer does not reach the waiter")
 
         // The old answer was not cached: once the new PAC is in, the same
         // request is evaluated afresh and answers with the new route.
