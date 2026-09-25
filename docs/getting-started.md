@@ -107,7 +107,17 @@ System proxy changes, DNS management, and the port 53 relay require admin. By de
 sudo ./install-helper.sh
 ```
 
-This installs a LaunchDaemon that handles privileged operations. Remove it with:
+This installs a LaunchDaemon that handles privileged operations.
+
+To have the helper admit only Conduit itself, not any program running as you, sign the app with a local identity before installing the helper. Once, as yourself:
+
+```bash
+scripts/create-signing-identity.sh
+```
+
+Then rebuild and reinstall the app (`./bundle-app.sh --install` signs with that identity and the hardened runtime) and rerun `sudo ./install-helper.sh`: it pins the app's signing certificate. App updates signed with the same identity keep working without reinstalling the helper. An ad-hoc signed app leaves the helper unenforced and the install says so.
+
+Remove it with:
 
 ```bash
 sudo ./uninstall-helper.sh

@@ -102,7 +102,7 @@ graph TD
 | `ProxyPAC`           | ✓           | —         | —        | —           | —      | —    |
 | `PlatformMac`        | ✓           | —         | —        | —           | ✓      | —    |
 | `pm-proxy`           | ✓           | ✓         | ✓        | —           | —      | —    |
-| `pm-sim`             | ✓           | ✓         | —        | —           | —      | ✓    |
+| `pm-sim`             | ✓           | ✓         | —        | —           | ✓      | ✓    |
 | `pm-tunnel`          | ✓           | ✓         | —        | —           | —      | —    |
 | `pm-dns`             | ✓           | —         | —        | —           | —      | —    |
 | `pm-vpn-check`       | ✓           | —         | —        | ✓           | —      | ✓    |
@@ -339,6 +339,7 @@ The one surviving match is the orchestrator's internal box. `VPNStatusMonitor`'s
 `ConduitHelper` is a LaunchDaemon installed at `/Library/PrivilegedHelperTools/io.github.srps.Conduit.Helper` that runs as root.
 
 - **IPC**: Unix domain socket at `/var/run/io.github.srps.Conduit.Helper.sock`, permissions `root:staff 0660`; peer connections restricted to the console-user UID via `getpeereid` + `SCDynamicStoreCopyConsoleUser`.
+- **Caller identity** (#46): when `/Library/Application Support/io.github.srps.Conduit/helper-callers.req` exists (root-owned, written by `install-helper.sh`), a peer must also satisfy that code-signing requirement — the leaf certificate of the local signing identity and the app/daemon identifiers — and be signed with the hardened runtime. The helper reads the peer's audit token with `LOCAL_PEERTOKEN` and checks it with `SecCodeCopyGuestWithAttributes` + `SecCodeCheckValidity`. No file: identity is logged but not required ("unenforced"). An unsafe file: every caller is refused. See `HelperCallerIdentity.swift`.
 - **Commands** (defined in `Sources/ConduitShared/HelperContract.swift`): apply / clear system proxy, apply / clear DNS resolvers, set DNS servers, start / stop DNS relay (port 53), start / stop TCP relay (port 443), set autoproxy URL.
 - **Input validation** happens in `ConduitShared` so both the app and the helper agree on the accepted shape; port values validated to 1–65535 at both the IPC and the relay layers.
 - **Relays**: `UDPRelay` (port 53 → forwarder) and `TCPRelay` (port 443 → transparent proxy high port) run inside the helper process. The relay primitives themselves live in `Sources/ProxyKernel/Network/` so the helper can link them without pulling in the full `PlatformMac` glue.
