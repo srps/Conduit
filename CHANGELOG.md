@@ -33,6 +33,27 @@ protocol did not change.
   the helper's message and how to fix it, and no longer offers a "Reinstall Helper" that
   cannot change the pin.
 
+### Changed
+
+- Routing now fails closed to the upstream when PAC gives no usable answer. A PAC answer
+  that is empty, holds only entries Conduit cannot use, fails, times out, is refused under
+  load, comes from a PAC that has not loaded yet or was replaced mid-evaluation, now
+  routes through the configured upstreams: no DIRECT, no direct-reachability shortcut and
+  no PAC direct fallback. Before, the CFNetwork adapter turned an answer it had emptied
+  into DIRECT, and the other failures let the reachability shortcut send the request
+  DIRECT. CFNetwork silently drops Chrome-style `HTTPS`, `HTTP`, `SOCKS5` and `QUIC`
+  directives, so a PAC returning only those used to bypass the proxy. The new
+  `pac.no_usable_route` event says why, once a minute per reason. `SOCKS` entries are
+  rejected as unsupported on every listener, a `DIRECT` left first only by removing
+  rejected entries is used only where direct fallback is allowed, and `HTTP`, `HTTPS`,
+  `SOCKS4` and `SOCKS5` directive strings are no longer mapped to a plain proxy or SOCKS.
+  Explicit `DIRECT`, force-proxy and No-proxy rules route as before. (#49, #50)
+- Strict mode no longer takes the direct-reachability shortcut: a host that answers a
+  direct probe is no longer sent DIRECT, and strict mode makes no background probes. When
+  a strict-mode request fails through the upstream, Conduit probes the host once and, if
+  it answers, emits `routing.strict_direct_reachable` suggesting a No-proxy entry; the
+  request is not retried directly. Outside strict mode the shortcut is unchanged. (#87)
+
 ### Fixed
 
 - A Kerberos ticket that is present, with no service ticket to be had for the upstream
