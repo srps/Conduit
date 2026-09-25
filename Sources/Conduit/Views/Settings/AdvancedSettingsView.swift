@@ -131,7 +131,7 @@ struct AdvancedSettingsView: View {
 
             Section {
                 Toggle("Strict mode", isOn: $appState.config.strictMode)
-                    .help("Never route proxied traffic DIRECT as a fallback when upstreams fail (PAC DIRECT fallback and protocol-upgrade direct relay are refused unless the network state itself is unconditionally direct). Will also gate inbound gateway auth once that feature is implemented.")
+                    .help("Never route proxied traffic DIRECT as a fallback when upstreams fail (PAC DIRECT fallback and protocol-upgrade direct relay are refused unless the network state itself is unconditionally direct), and never send a request DIRECT just because its host answered a direct probe; hosts that should bypass the proxy belong in No-proxy hosts. When a request fails through the upstream, Conduit probes its host directly once and, if it answers, suggests adding it to No-proxy hosts; the request is not retried directly. Will also gate inbound gateway auth once that feature is implemented.")
             } header: {
                 Text("Security")
             }

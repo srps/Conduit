@@ -14,8 +14,17 @@ package final class DirectConnectDetector: @unchecked Sendable {
     private var cache: [String: CacheEntry] = [:]
     private var hostTimeouts: [String: Int64] = [:]
     private var pendingProbes: Set<String> = []
+    /// Host → when a strict-mode hint probe last ran; see `probeForStrictModeHint`.
+    private var strictHintProbedAt: [String: Date] = [:]
     private var probesStarted = 0
+    private let now: @Sendable () -> Date
     private let lock = NSLock()
+
+    /// Per-host cooldown between strict-mode hint probes (#87).
+    package static let strictHintCooldown: TimeInterval = 600
+    /// Hosts the strict-mode hint remembers at once. Past it, entries whose
+    /// cooldown ran out go first, then the oldest.
+    package static let strictHintCapacity = 256
 
     package struct CacheEntry {
         let reachable: Bool
@@ -28,7 +37,8 @@ package final class DirectConnectDetector: @unchecked Sendable {
         ttlSeconds: TimeInterval = 300,
         baseTimeoutMS: Int64 = 500,
         maxCacheSize: Int = 512,
-        maxConcurrentProbes: Int = 16
+        maxConcurrentProbes: Int = 16,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.group = group
         self.logger = logger
@@ -37,12 +47,59 @@ package final class DirectConnectDetector: @unchecked Sendable {
         self.maxTimeoutMS = baseTimeoutMS * 8
         self.maxCacheSize = maxCacheSize
         self.maxConcurrentProbes = maxConcurrentProbes
+        self.now = now
     }
 
     /// Direct probes started so far, of every kind. Lets tests prove that a
-    /// path made none (a PAC answer never triggers a probe, #50).
+    /// path made none (strict mode makes no proactive probes, #87).
     package var probeCount: Int {
         lock.withLock { probesStarted }
+    }
+
+    /// After a strict-mode request failed through the upstream: probe
+    /// `host:port` directly once, and call `onReachable` if it answers, so
+    /// the caller can suggest a No-proxy entry. The request itself is never
+    /// retried directly. At most one probe per host per `strictHintCooldown`,
+    /// in a table of at most `strictHintCapacity` hosts.
+    ///
+    /// Returns whether a probe was started.
+    @discardableResult
+    package func probeForStrictModeHint(
+        host: String,
+        port: Int,
+        onReachable: @escaping @Sendable () -> Void
+    ) -> Bool {
+        let key = host.lowercased()
+        let current = now()
+        let cooldown = Self.strictHintCooldown
+        let admitted = lock.withLock { () -> Bool in
+            if let last = strictHintProbedAt[key], current.timeIntervalSince(last) < cooldown {
+                return false
+            }
+            if strictHintProbedAt[key] == nil, strictHintProbedAt.count >= Self.strictHintCapacity {
+                strictHintProbedAt = strictHintProbedAt.filter { current.timeIntervalSince($0.value) < cooldown }
+                if strictHintProbedAt.count >= Self.strictHintCapacity,
+                   let oldest = strictHintProbedAt.min(by: { $0.value < $1.value }) {
+                    strictHintProbedAt.removeValue(forKey: oldest.key)
+                }
+            }
+            strictHintProbedAt[key] = current
+            probesStarted += 1
+            return true
+        }
+        guard admitted else { return false }
+        let timeout = maxTimeoutMS
+        Task {
+            if await probe(host: host, port: port, timeoutMS: timeout) {
+                onReachable()
+            }
+        }
+        return true
+    }
+
+    /// Hosts in the strict-mode hint table (bounded by `strictHintCapacity`).
+    package var strictHintTableCount: Int {
+        lock.withLock { strictHintProbedAt.count }
     }
 
     /// Synchronous cache-only check. Returns the cached reachability result
@@ -129,6 +186,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
         lock.withLock {
             cache.removeAll()
             hostTimeouts.removeAll()
+            strictHintProbedAt.removeAll()
         }
     }
 

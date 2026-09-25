@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// The PAC decision → routing plan table (#50) and the rate limit on
-// `pac.no_usable_route`.
+// The PAC decision → routing plan table (#50), the rate limit on
+// `pac.no_usable_route`, and the strict-mode hint's cooldown (#87).
 
 import Foundation
 import NIOConcurrencyHelpers
@@ -93,15 +93,18 @@ final class PACDecisionTests: XCTestCase {
                 XCTAssertEqual(result, .upstreamsOnly(reason, rejected: []))
                 XCTAssertEqual(result.proxyChain, [])
                 XCTAssertFalse(result.hasDirectFallback)
-                XCTAssertFalse(result.allowsReachabilityShortcut, "\(reason)")
+                for strictMode in [true, false] {
+                    XCTAssertFalse(result.allowsReachabilityShortcut(strictMode: strictMode), "\(reason)")
+                }
             }
         }
     }
 
-    func testReachabilityShortcutOnlyWithoutPACOpinion() {
-        XCTAssertTrue(PACRoutePlan.noOpinion.allowsReachabilityShortcut)
-        XCTAssertFalse(PACRoutePlan.direct.allowsReachabilityShortcut)
-        XCTAssertFalse(PACRoutePlan.proxies([], directFallback: true).allowsReachabilityShortcut)
+    func testReachabilityShortcutOnlyWithoutPACOpinionOutsideStrictMode() {
+        XCTAssertTrue(PACRoutePlan.noOpinion.allowsReachabilityShortcut(strictMode: false))
+        XCTAssertFalse(PACRoutePlan.noOpinion.allowsReachabilityShortcut(strictMode: true))
+        XCTAssertFalse(PACRoutePlan.direct.allowsReachabilityShortcut(strictMode: false))
+        XCTAssertFalse(PACRoutePlan.proxies([], directFallback: true).allowsReachabilityShortcut(strictMode: false))
         XCTAssertEqual(plan(.notConsulted, fallback: true), .noOpinion)
     }
 
@@ -156,6 +159,43 @@ final class PACDecisionTests: XCTestCase {
         XCTAssertEqual(engine.decision(for: "https://a.example/", host: "a.example"), .noUsableAnswer(.notLoaded, rejected: []))
         let reasons = events.withLockedValue { $0 }.filter { $0.event == "pac.no_usable_route" }.map(\.detail)
         XCTAssertEqual(reasons, ["reason=not_loaded host=a.example suppressed=0"])
+    }
+
+    // MARK: - Strict-mode hint cooldown (#87)
+
+    func testStrictHintProbesOncePerHostPerCooldown() {
+        let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
+        let detector = DirectConnectDetector(
+            group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(),
+            now: { clock.withLockedValue { $0 } }
+        )
+        // `.invalid` names never resolve, so no probe reaches anything.
+        XCTAssertTrue(detector.probeForStrictModeHint(host: "App.Invalid", port: 9) {})
+        XCTAssertFalse(detector.probeForStrictModeHint(host: "app.invalid", port: 9) {}, "same host, any case")
+        XCTAssertFalse(detector.probeForStrictModeHint(host: "app.invalid", port: 443) {}, "per host, not per port")
+        XCTAssertTrue(detector.probeForStrictModeHint(host: "other.invalid", port: 9) {})
+        clock.withLockedValue { $0 += DirectConnectDetector.strictHintCooldown - 1 }
+        XCTAssertFalse(detector.probeForStrictModeHint(host: "app.invalid", port: 9) {})
+        clock.withLockedValue { $0 += 1 }
+        XCTAssertTrue(detector.probeForStrictModeHint(host: "app.invalid", port: 9) {})
+        XCTAssertEqual(detector.probeCount, 3)
+    }
+
+    func testStrictHintTableIsBounded() {
+        let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
+        let detector = DirectConnectDetector(
+            group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(),
+            now: { clock.withLockedValue { $0 } }
+        )
+        for index in 0..<(DirectConnectDetector.strictHintCapacity + 10) {
+            clock.withLockedValue { $0 += 1 }
+            XCTAssertTrue(detector.probeForStrictModeHint(host: "h\(index).invalid", port: 9) {})
+        }
+        XCTAssertEqual(detector.strictHintTableCount, DirectConnectDetector.strictHintCapacity)
+        // The oldest were evicted; the newest are still cooling down.
+        XCTAssertTrue(detector.probeForStrictModeHint(host: "h0.invalid", port: 9) {})
+        XCTAssertFalse(detector.probeForStrictModeHint(
+            host: "h\(DirectConnectDetector.strictHintCapacity + 9).invalid", port: 9) {})
     }
 }
 

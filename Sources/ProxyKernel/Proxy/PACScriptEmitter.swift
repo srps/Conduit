@@ -24,6 +24,7 @@ import Foundation
 /// makes at request time (see `NoProxyMatcher.shouldBypass`), except the
 /// direct-routing / `cachedDirectReachable` branches aren't modeled — those are
 /// runtime probe outcomes that PAC (a pure function of url+host) can't know.
+/// (The reachability shortcut applies outside strict mode only.)
 /// Normal mode routes through the local proxy first. Only unconditional
 /// direct-routing states (VPN off, no upstreams configured) emit a `DIRECT`-only
 /// PAC. On VPN reassertion or probe failures, PAC-honoring clients keep sending

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-// Routing table for PAC outcomes (#50), through the real HTTP, CONNECT and
-// SOCKS5 listeners.
+// Routing table for PAC outcomes (#50) and strict mode's reachability
+// shortcut (#87), through the real HTTP, CONNECT and SOCKS5 listeners.
 //
 // The origin and the upstream are separate servers that answer with their own
 // name, so the response says which path a request took. The origin counts
@@ -120,6 +120,113 @@ final class PACRoutingTableTests: XCTestCase {
             }
             await bypassed.stop()
         }
+    }
+
+    // MARK: - #87: strict mode and the direct-reachability shortcut
+
+    private enum PACSetting: CaseIterable { case off, noUsableAnswer, explicitDirect }
+    private enum Reachability: CaseIterable { case reachable, unreachable }
+
+    func testStrictModeNeverTakesTheReachabilityShortcut() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let closedPort = try Servers.closedPort()
+        for strict in [true, false] {
+            for setting in PACSetting.allCases {
+                for reachability in Reachability.allCases {
+                    let label = "strict=\(strict) pac=\(setting) \(reachability)"
+                    let pac: ScriptedPAC? = switch setting {
+                    case .off: nil
+                    case .noUsableAnswer: ScriptedPAC(.entries([]))
+                    case .explicitDirect: ScriptedPAC(.entries(["DIRECT"]))
+                    }
+                    let fixture = try await ProxyFixture.start(servers: servers, strict: strict, pac: pac)
+                    let target = reachability == .reachable ? servers.origin.port : closedPort
+                    try await fixture.seedReachability(
+                        port: target, expected: reachability == .reachable, origin: servers.origin
+                    )
+                    let acceptedBefore = servers.origin.accepted
+                    let probesBefore = fixture.detector.probeCount
+
+                    let expected: Path = switch (setting, reachability) {
+                    case (.explicitDirect, .reachable): .origin
+                    case (.explicitDirect, .unreachable): .badGateway
+                    case (.off, .reachable): strict ? .upstream : .origin
+                    case (.off, .unreachable), (.noUsableAnswer, _): .upstream
+                    }
+                    for listener in [Listener.http, .connect] {
+                        XCTAssertEqual(try fixture.request(listener, target: target), expected, "\(label) \(listener)")
+                    }
+                    if expected != .origin {
+                        XCTAssertEqual(servers.origin.accepted - acceptedBefore, 0, "\(label): origin contacted directly")
+                    }
+                    XCTAssertEqual(fixture.detector.probeCount, probesBefore, "\(label): cached host was re-probed")
+                    await fixture.stop()
+                }
+            }
+        }
+    }
+
+    /// Strict mode makes no proactive direct probe; non-strict still does.
+    func testStrictModeMakesNoProactiveProbe() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let strict = try await ProxyFixture.start(servers: servers, strict: true, pac: nil)
+        XCTAssertEqual(try strict.request(.http, target: servers.origin.port), .upstream)
+        XCTAssertEqual(try strict.request(.connect, target: servers.origin.port), .upstream)
+        XCTAssertEqual(strict.detector.probeCount, 0, "strict mode probed proactively")
+        XCTAssertEqual(servers.origin.accepted, 0)
+        await strict.stop()
+
+        // Non-strict keeps the shortcut: a cold cache routes via the upstream
+        // and starts a background probe for next time.
+        let relaxed = try await ProxyFixture.start(servers: servers, strict: false, pac: nil)
+        XCTAssertEqual(try relaxed.request(.http, target: servers.origin.port), .upstream)
+        XCTAssertEqual(relaxed.detector.probeCount, 1)
+        await relaxed.stop()
+    }
+
+    /// A strict-mode request that fails through the upstream probes the
+    /// target once; a reachable target gets one hint per cooldown, and the
+    /// request is never retried directly.
+    func testStrictUpstreamFailureHintsOncePerHostAndNeverGoesDirect() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let hinted = expectation(description: "routing.strict_direct_reachable")
+        let fixture = try await ProxyFixture.start(
+            servers: servers, strict: true, pac: nil,
+            upstreamPort: try Servers.closedPort(),
+            onEvent: { if $0.event == "routing.strict_direct_reachable" { hinted.fulfill() } }
+        )
+        XCTAssertEqual(try fixture.request(.http, target: servers.origin.port), .badGateway)
+        await fulfillment(of: [hinted], timeout: 10)
+        let event = try XCTUnwrap(fixture.events(named: "routing.strict_direct_reachable").first)
+        XCTAssertEqual(event.detail, "host=127.0.0.1 port=\(servers.origin.port) hint=add_to_no_proxy_hosts")
+        XCTAssertEqual(fixture.detector.probeCount, 1)
+
+        // Within the cooldown: the same host fails again on both paths, and
+        // nothing probes it again.
+        XCTAssertEqual(try fixture.request(.connect, target: servers.origin.port), .badGateway)
+        XCTAssertEqual(try fixture.request(.http, target: servers.origin.port), .badGateway)
+        XCTAssertEqual(fixture.detector.probeCount, 1, "hint probed twice within the cooldown")
+        XCTAssertEqual(fixture.events(named: "routing.strict_direct_reachable").count, 1)
+        // The probe connects and closes; no request byte reached the origin.
+        XCTAssertEqual(servers.origin.requests, 0, "a failed strict request was retried directly")
+        await fixture.stop()
+    }
+
+    func testNonStrictUpstreamFailureDoesNotProbeForAHint() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let fixture = try await ProxyFixture.start(
+            servers: servers, strict: false, pac: ScriptedPAC(.entries([])),
+            upstreamPort: try Servers.closedPort()
+        )
+        XCTAssertEqual(try fixture.request(.http, target: servers.origin.port), .badGateway)
+        XCTAssertEqual(try fixture.request(.connect, target: servers.origin.port), .badGateway)
+        XCTAssertEqual(fixture.detector.probeCount, 0)
+        XCTAssertEqual(servers.origin.accepted, 0)
+        await fixture.stop()
     }
 }
 

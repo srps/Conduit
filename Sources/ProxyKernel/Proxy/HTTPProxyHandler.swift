@@ -193,9 +193,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         pacPlan: PACRoutePlan
     ) {
         let targetHost = target.host
-        // The reachability shortcut applies only where PAC has no say; it
-        // never overrides a PAC answer, usable or not (#50).
-        let reachabilityShortcut = !forceProxy && pacPlan.allowsReachabilityShortcut
+        // The reachability shortcut applies only where PAC has no say and
+        // strict mode is off; it never overrides a PAC answer, usable or
+        // not (#50), and strict mode never probes proactively (#87).
+        let reachabilityShortcut = !forceProxy
+            && pacPlan.allowsReachabilityShortcut(strictMode: currentConfig.strictMode)
         let bypass = directModeBypass
             || NoProxyMatcher.shouldBypass(
                 host: targetHost,
@@ -348,6 +350,35 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         }
     }
 
+    /// Strict mode sent this request to the upstream, and the upstream path
+    /// failed with a 502. Probe the target directly once (per host, per
+    /// cooldown) and, if it answers, say that a No-proxy entry would reach it
+    /// (#87). The request is not retried directly. Failures the pool refused
+    /// locally never reached the upstream and get no hint.
+    private func hintIfStrictModeTargetIsDirectlyReachable(target: HTTPRequestTarget, error: Error) {
+        guard configProvider().strictMode,
+              !ConnectionPoolError.isPoolExhausted(error),
+              !ConnectionPoolError.isAuthHandshakeLimitExceeded(error) else { return }
+        let host = target.host
+        let port = target.port
+        let eventSink = self.eventSink
+        let logger = self.logger
+        directConnectDetector.probeForStrictModeHint(host: host, port: port) {
+            let event = RuntimeEvent(
+                kind: .routing,
+                event: "routing.strict_direct_reachable",
+                detail: "host=\(host) port=\(port) hint=add_to_no_proxy_hosts"
+            )
+            eventSink?(event)
+            logger.log(
+                .notice,
+                "\(host):\(port) failed through the upstream in strict mode but answers directly. " +
+                    "If it should not use the proxy, add it to No-proxy hosts. (\(event.event): \(event.detail ?? ""))",
+                category: .proxy
+            )
+        }
+    }
+
     private func cachedDirectReachable(target: HTTPRequestTarget) -> Bool {
         if let cached = directConnectDetector.cachedReachability(host: target.host, port: target.port) {
             return cached
@@ -485,6 +516,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             self.onRequestCompleted(false, nil)
                             self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
                             self.onConnectionClosed(infoID)
+                            self.hintIfStrictModeTargetIsDirectlyReachable(target: target, error: error)
                         }
                     }
                 }
@@ -563,6 +595,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                         self.onConnectionClosed(infoID)
                         body?.cleanup()
+                        if !ConnectionPoolError.isStreamingResponseInterrupted(error) {
+                            self.hintIfStrictModeTargetIsDirectlyReachable(target: target, error: error)
+                        }
                     }
                 }
             }

@@ -69,10 +69,10 @@ package enum PACRoutePlan: Equatable {
     }
 
     /// Whether the HTTP listener's direct-reachability shortcut may route
-    /// this request DIRECT: only when PAC has no say. Never for a PAC
-    /// answer, usable or not (#50).
-    package var allowsReachabilityShortcut: Bool {
-        self == .noOpinion
+    /// this request DIRECT: only when PAC has no say and strict mode is off
+    /// (#87). Never for a PAC answer, usable or not (#50).
+    package func allowsReachabilityShortcut(strictMode: Bool) -> Bool {
+        self == .noOpinion && !strictMode
     }
 
     /// PAC `PROXY` entries as upstreams. An entry that names a configured
