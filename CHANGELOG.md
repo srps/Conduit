@@ -33,9 +33,11 @@ protocol did not change.
   the helper's message and how to fix it, and no longer offers a "Reinstall Helper" that
   cannot change the pin.
 - In gateway mode, outside strict mode, a request for a blocked metadata or loopback target
-  no longer triggers a background direct probe of it before being refused. The probe now
-  resolves first and connects to nothing when any address is blocked, as the strict-mode
-  hint does. (#93)
+  no longer triggers a background direct probe of it before being refused. Every direct
+  probe now resolves first, connects to nothing when any address is blocked, and emits
+  `routing.probe_blocked`. A result found outside gateway mode is never reused in it, each
+  resolved address is tried in turn, and one deadline covers the lookup and every connect.
+  (#93)
 
 ### Changed
 

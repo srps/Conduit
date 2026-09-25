@@ -42,14 +42,17 @@ final class ProbeResolver: @unchecked Sendable {
         }
     }
 
-    /// Answer every held lookup with no addresses.
-    func release() {
+    /// Answer every held lookup with `addresses` (none by default).
+    func release(with addresses: [SocketAddress] = []) {
         let held = state.withLockedValue { state -> [EventLoopPromise<[SocketAddress]>] in
             defer { state.held.removeAll() }
             return state.held
         }
-        for promise in held { promise.succeed([]) }
+        for promise in held { promise.succeed(addresses) }
     }
+
+    /// Lookups waiting for `release`.
+    var heldCount: Int { state.withLockedValue { $0.held.count } }
 }
 
 /// A loopback listener that counts the connections it accepts.

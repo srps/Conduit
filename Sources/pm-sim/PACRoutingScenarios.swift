@@ -272,7 +272,7 @@ enum PACRoutingScenarios {
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: [.init("gateway mode never probes or connects to a blocked target", true)],
-            notes: ["PASS: 3 blocked targets, 0 probes; rebinding name resolved, 0 connections, cached unreachable; control 1 connection"]
+            notes: ["PASS: 3 blocked targets, 0 probes; rebinding name resolved, 0 connections, cached unreachable; 4 routing.probe_blocked; control 1 connection, not reused after gateway mode comes on"]
         )
     }
 
@@ -283,20 +283,27 @@ enum PACRoutingScenarios {
         let port = target.port
         let loopback = try SocketAddress(ipAddress: "127.0.0.1", port: port)
         let lookups = NIOLockedValueBox<[String]>([])
+        let events = RuntimeEventLog(capacity: 64)
         let makeDetector = {
             DirectConnectDetector(
                 group: group, logger: logger, ttlSeconds: 300, baseTimeoutMS: 500,
                 resolver: { host, _, loop in
                     lookups.withLockedValue { $0.append(host) }
                     return loop.makeSucceededFuture([loopback])
-                }
+                },
+                eventSink: { events.append($0) }
             )
         }
-        func settled(_ detector: DirectConnectDetector, _ host: String) async throws -> Bool {
-            for _ in 0..<200 where detector.cachedReachability(host: host, port: port, gatewayMode: false) == nil {
+        func blockedReasons() -> [String] {
+            events.events.filter { $0.event == "routing.probe_blocked" }.compactMap { event in
+                event.detail?.split(separator: " ").first { $0.hasPrefix("reason=") }.map(String.init)
+            }
+        }
+        func settled(_ detector: DirectConnectDetector, _ host: String, gatewayMode: Bool) async throws -> Bool {
+            for _ in 0..<200 where detector.cachedReachability(host: host, port: port, gatewayMode: gatewayMode) == nil {
                 try await Task.sleep(for: .milliseconds(10))
             }
-            guard let cached = detector.cachedReachability(host: host, port: port, gatewayMode: false) else {
+            guard let cached = detector.cachedReachability(host: host, port: port, gatewayMode: gatewayMode) else {
                 throw Failure(description: "the probe of \(host) never finished")
             }
             return cached
@@ -310,16 +317,25 @@ enum PACRoutingScenarios {
         try require(lookups.withLockedValue { $0 }.isEmpty, "a blocked target was resolved")
 
         gateway.probeInBackground(host: "rebind.example", port: port, gatewayMode: true)
-        let rebound = try await settled(gateway, "rebind.example")
+        let rebound = try await settled(gateway, "rebind.example", gatewayMode: true)
         try require(!rebound, "a name resolving to loopback cached as reachable")
         try require(target.connectionCount == 0, "the probe connected to a blocked address")
+        let reasons = blockedReasons()
+        try require(reasons == Array(repeating: "reason=blocked_name", count: 3) + ["reason=blocked_address"],
+                    "routing.probe_blocked reasons: \(reasons)")
 
         let open = makeDetector()
         open.probeInBackground(host: "rebind.example", port: port, gatewayMode: false)
-        let control = try await settled(open, "rebind.example")
+        let control = try await settled(open, "rebind.example", gatewayMode: false)
         for _ in 0..<200 where target.connectionCount == 0 {
             try await Task.sleep(for: .milliseconds(10))
         }
         try require(control && target.connectionCount == 1, "control: outside gateway mode the probe did not connect")
+
+        // Gateway mode comes on: the answer found outside it is not reused.
+        try require(!open.shortcutReachable(host: "rebind.example", port: port, gatewayMode: true),
+                    "a reachability found outside gateway mode was used in gateway mode")
+        let switched = try await settled(open, "rebind.example", gatewayMode: true)
+        try require(!switched && target.connectionCount == 1, "after the switch the probe connected to a blocked address")
     }
 }
