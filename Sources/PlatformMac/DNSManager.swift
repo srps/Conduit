@@ -704,6 +704,49 @@ package final class DNSManager: @unchecked Sendable {
         logger?.log(.notice, "Applied \(interceptDomains.count) intercept resolver file(s) for the DNS forwarder.", category: .system)
     }
 
+    /// The single place that decides whether intercept resolver files may
+    /// exist: they do exactly while the DNS forwarder and the transparent
+    /// proxy are both listening. A file that outlives its listeners turns
+    /// every intercepted domain into ENOTFOUND (forwarder down) or a refused
+    /// connection (transparent proxy down) for every process on the machine,
+    /// and `/etc/resolver` survives the process — so err toward removing them.
+    ///
+    /// Both hosts used to carry this as a twin reading the orchestrator's
+    /// snapshot. It takes the two readings as values now, because the hosts
+    /// run it on their `PlatformWork` queue, off the actor that owns the
+    /// snapshot: they read it before queueing (never the lagging presentation
+    /// mirror, which at the instant `startDNS` returns still shows the
+    /// transparent proxy unbound and would withhold the files from a healthy
+    /// stack).
+    ///
+    /// - Parameters:
+    ///   - interceptReady: `ProxyOrchestratorBindings.dnsInterceptReady`.
+    ///   - forwarderRunning: whether the forwarder claims to be up, which is
+    ///     the only case where "not ready" is a surprise worth a warning; at
+    ///     proxy start it has not been asked to bind yet, and this call is
+    ///     there purely to sweep files a killed instance stranded.
+    package func refreshInterceptFiles(
+        config: ProxyConfig,
+        interceptReady: Bool,
+        forwarderRunning: Bool,
+        logger: (any LogSink)?
+    ) throws {
+        operations.lock()
+        defer { operations.unlock() }
+        guard interceptReady else {
+            if forwarderRunning, !config.enabledInterceptRules.isEmpty {
+                logger?.log(
+                    .warning,
+                    "DNS forwarder is running but the transparent proxy is not listening — intercept resolver files withheld rather than blackhole \(config.enabledInterceptRules.count) domain(s).",
+                    category: .system
+                )
+            }
+            try clearInterceptFiles(config: config, logger: logger)
+            return
+        }
+        try applyInterceptFiles(config: config, logger: logger)
+    }
+
     /// Removes only the intercept-rule resolver files (all rules, enabled or
     /// not). Called from the DNS stop path so `*.cursor.sh`-style domains
     /// never keep pointing at a forwarder that is no longer listening, while

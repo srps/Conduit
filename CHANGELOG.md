@@ -45,6 +45,15 @@ protocol did not change.
   service ticket and the likely causes, counts as unreachable so recovery runs, and cools
   the gate down; an NTLM fallback with a saved password answers at once instead of after
   the retry waits meant for a returning credential. (#73)
+- Starting and stopping the proxy and the DNS forwarder no longer hold the main thread
+  while the system proxy, environment variables, resolver files and system DNS are applied
+  or cleared: 15 to 30 helper round trips and `networksetup` reads on a machine with
+  several services, during which the menu and the window stopped drawing. The work runs on
+  the host's serial platform queue in both the app and the daemon, in the same order as
+  before. A stop issued while a start is applying lands after it, and the start then goes
+  no further (no DNS forwarder, health timer, save or notification), recorded as a
+  `lifecycle.superseded` event. The proxy, resolver and environment managers serialise
+  their own operations, as the system DNS manager already did. (#47)
 
 ## 0.3.3
 

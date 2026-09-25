@@ -14,6 +14,7 @@ import ProxyKernel
 final class HeldCall: @unchecked Sendable {
     private let lock = NSLock()
     private var matcher: (@Sendable (_ name: String, _ values: [String]) -> Bool)?
+    private var queueSuffix: String?
     private var reached = false
     private var onMainThread = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
@@ -22,9 +23,19 @@ final class HeldCall: @unchecked Sendable {
 
     /// Holds the next call `matcher` accepts. `name` is the launch path for a
     /// subprocess and the operation's raw value for a privileged write.
-    func arm(_ matcher: @escaping @Sendable (_ name: String, _ values: [String]) -> Bool) {
+    ///
+    /// - Parameter queueSuffix: only a call made on a dispatch queue whose
+    ///   label ends with this counts, or one made on the main thread (the
+    ///   inline case this exists to catch). A host's activation preflight
+    ///   reads the same services from a global queue at moments a scenario
+    ///   does not control, and must not be the call that gets held.
+    func arm(
+        onQueueLabeled queueSuffix: String? = nil,
+        _ matcher: @escaping @Sendable (_ name: String, _ values: [String]) -> Bool
+    ) {
         lock.withLock {
             self.matcher = matcher
+            self.queueSuffix = queueSuffix
             reached = false
             onMainThread = false
         }
@@ -37,8 +48,10 @@ final class HeldCall: @unchecked Sendable {
     /// Called by the fakes on every machine call.
     func pass(_ name: String, _ values: [String]) {
         let isMain = Thread.isMainThread
+        let queueLabel = String(cString: __dispatch_queue_get_label(nil))
         let resumed: [CheckedContinuation<Void, Never>]? = lock.withLock {
             guard let matcher, matcher(name, values) else { return nil }
+            if let queueSuffix, !isMain, !queueLabel.hasSuffix(queueSuffix) { return nil }
             self.matcher = nil
             reached = true
             onMainThread = isMain
@@ -96,5 +109,17 @@ final class HoldingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
             hold.pass(step.operation.rawValue, step.values)
         }
         try base.execute(batch: batch)
+    }
+}
+
+/// A count one thread writes and another reads after joining it.
+final class LockedCount: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = -1
+
+    var value: Int { lock.withLock { stored } }
+
+    func set(_ value: Int) {
+        lock.withLock { stored = value }
     }
 }
