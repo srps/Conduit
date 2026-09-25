@@ -129,6 +129,9 @@ final class DaemonRuntimeHost {
     /// a stop to have begun rather than time it: the stop's first visible
     /// effect is queued behind the work the test is holding.
     var lifecycleGeneration: Int { runtimeLane.current }
+    /// Reload passes waiting for a start or stop to finish. Internal for the
+    /// tests, for the same reason.
+    var passesWaitingForLifecycle: Int { runtimeLane.idleWaiterCount }
     /// VPN-gating policy for split-DNS entry files (single source of truth
     /// shared with `AppState`). Fed by `handleVPNStateChange`; every
     /// resolver-file apply path consults `entriesWanted`.
@@ -956,6 +959,12 @@ extension DaemonRuntimeHost {
 extension DaemonRuntimeHost: RuntimeReconcilerHost {
     func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
         await orchestrator.applyConfigChange(new, from: old)
+    }
+
+    /// A reload's pass waits for any start or stop in flight, so it acts on
+    /// the surfaces after the lifecycle's platform work rather than beside it.
+    func awaitLifecycleIdle() async {
+        await runtimeLane.waitUntilIdle()
     }
 
     func runtimeState() -> RuntimeReconciler.RuntimeState {

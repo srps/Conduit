@@ -786,6 +786,40 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertNotEqual(host.orchestrator.snapshot.vpnState, .connected)
     }
 
+    /// Twin of `AppStateHarnessTests.testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt`:
+    /// a reload's pass waits for the start's platform work, and the machine
+    /// ends as the reloaded config says.
+    func testAReloadWhileTheStartAppliesIsReconciledAfterIt() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        await host.awaitLaunchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+
+        let reloaded = LockedCount()
+        let harness = self.harness!
+        let reload = Task {
+            try await harness.flip(PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false), on: host)
+            reloaded.set(1)
+        }
+        for _ in 0..<5_000 where host.passesWaitingForLifecycle == 0 && reloaded.value != 1 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(host.passesWaitingForLifecycle, 1, "the reload's pass waits for the start's platform work")
+        harness.hold.release()
+        try await start.value
+        try await reload.value
+
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertTrue(harness.wifi.routesThroughAProxy)
+        XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"], "the environment follows the reloaded switch")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
+        await host.stopRuntime()
+    }
+
     /// Twin of `AppStateHarnessTests.testRepeatedDNSStopsWhileTheFirstIsHeldRunOneTeardown`:
     /// stops while a stop is held join it instead of queueing teardowns.
     func testRepeatedStopsWhileTheFirstIsHeldRunOneTeardown() async throws {

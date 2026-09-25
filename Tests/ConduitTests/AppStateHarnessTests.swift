@@ -451,6 +451,41 @@ final class AppStateHarnessTests: XCTestCase {
     /// sequence, so a quit that cleared in between could clear a surface the
     /// apply then wrote. Termination waits for the platform queue before its
     /// first clear.
+    /// A settings change reconciled while a start's platform block is still
+    /// out. The block acts on the flags it read when it began; a pass that
+    /// cleared the environment in the middle of it had the block publish the
+    /// variables again afterwards, with the switch off. The pass waits for
+    /// the start and runs after it.
+    func testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        await harness.launchRecovery()
+        // The system proxy step, before the environment one.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await appState.startProxy() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+
+        appState.platformConfig.manageEnvironmentVariables = false
+        appState.saveConfig()
+        // Either the pass is waiting for the start, or it has run.
+        await harness.settle("the pass is waiting for the start, or done") {
+            appState.passesWaitingForLifecycle > 0 || !appState.reconciler.hasPassInFlight
+        }
+        XCTAssertEqual(appState.passesWaitingForLifecycle, 1, "the pass waits for the start's platform work")
+        harness.hold.release()
+        try await start.value
+        await appState.reconciler.drain()
+
+        XCTAssertTrue(isRunning(appState))
+        XCTAssertTrue(wifi.routesThroughAProxy, "the system proxy switch is still on")
+        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "the environment follows the switch the user turned off")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
+        let zshrc = (try? String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)) ?? ""
+        XCTAssertFalse(zshrc.contains("Conduit"), "and no shell block is left behind")
+    }
+
     /// Repeated DNS stops while the first is held on a slow helper. Each
     /// used to queue its own teardown behind the first, unbounded; now they
     /// join the one in flight, and one teardown runs.

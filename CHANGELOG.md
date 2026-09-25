@@ -50,10 +50,15 @@ protocol did not change.
   or cleared: 15 to 30 helper round trips and `networksetup` reads on a machine with
   several services, during which the menu and the window stopped drawing. The work runs on
   the host's serial platform queue in both the app and the daemon, in the same order as
-  before. A stop issued while a start is applying lands after it, and the start then goes
-  no further (no DNS forwarder, health timer, save or notification), recorded as a
-  `lifecycle.superseded` event. The proxy, resolver and environment managers serialise
-  their own operations, as the system DNS manager already did. (#47)
+  before. A stop issued while a start is applying lands after it, and the start stops at
+  its next step and goes no further (no DNS forwarder, health timer, save or
+  notification), recorded as `lifecycle.superseded`. A repeated start or stop while the
+  same one is out joins it (`lifecycle.coalesced`) instead of queueing another teardown. A
+  settings change or reload waits for a start or stop in flight and is reconciled after
+  it. Quit waits at most 5 s for that work before it clears
+  (`lifecycle.termination_drain_expired`). A restart that a stop overtakes no longer
+  reports "Proxy Restarted". The proxy, resolver and environment managers serialise their
+  own operations, as the system DNS manager already did. (#47)
 
 ## 0.3.3
 

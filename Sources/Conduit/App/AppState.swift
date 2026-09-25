@@ -130,6 +130,9 @@ final class AppState: ObservableObject {
     /// harness can wait for a stop to have begun rather than time it: its
     /// first visible effect is queued behind the work a scenario is holding.
     var lifecycleGenerations: (proxy: Int, dns: Int) { (proxyLane.current, dnsLane.current) }
+    /// Reconcile passes waiting for a start or stop to finish. Internal for
+    /// the harness, for the same reason.
+    var passesWaitingForLifecycle: Int { proxyLane.idleWaiterCount + dnsLane.idleWaiterCount }
     /// How long quit waits for the platform queue before it clears anyway.
     /// Five seconds: long enough for a start's remaining step on a healthy
     /// helper, short against the helper's 40 s transaction budget, which is
@@ -1124,6 +1127,14 @@ final class AppState: ObservableObject {
         logStore.log(level, "Lifecycle: \(event.event) \(event.detail ?? "")", category: .system)
     }
 
+    /// For the reconciler: returns once no proxy or DNS start or stop is in
+    /// flight, so a pass never lands between a start's platform steps.
+    func awaitLifecycleIdle() async {
+        while !proxyLane.isIdle || !dnsLane.isIdle {
+            await proxyLane.waitUntilIdle()
+            await dnsLane.waitUntilIdle()
+        }
+    }
 
     /// Everything a proxy start applies to the machine once its listeners
     /// are up, as one piece of work on `platformWork`: 15 to 30 helper round
