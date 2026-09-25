@@ -6,6 +6,33 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+**Upgrading:** to turn on caller identity, run `scripts/create-signing-identity.sh` once,
+rebuild and install the app with `./bundle-app.sh`, then `sudo ./install-helper.sh`. Until
+then the new helper behaves as before and logs that identity is unenforced. The helper
+protocol did not change.
+
+### Security
+
+- The privileged helper can now require its callers to be Conduit, not merely a process
+  of the console user. `install-helper.sh` pins the leaf certificate that signed
+  `/Applications/Conduit.app`, with the app's and `ConduitDaemon`'s identifiers, in a
+  root-owned `/Library/Application Support/io.github.srps.Conduit/helper-callers.req`. The
+  helper reads each peer's audit token from the socket, checks its code against the pin
+  with the Security framework before reading the request, and requires the hardened
+  runtime so the genuine app cannot be injected into. A refused caller gets the existing
+  `unauthorized` refusal with a message naming the fix, so older apps handle it too. A
+  pin that is not root-owned or is writable by others refuses every caller rather than
+  falling back to the uid rule. Every connection leaves one unified-log line with the
+  caller's signing identifier, cdhash prefix, pid, command and outcome. The console-user
+  rule, logout teardown and fast user switching are unchanged. (#46)
+- `bundle-app.sh` signs with the "Conduit Local Signing" identity and the hardened
+  runtime when that identity is in the keychain, and warns loudly when it falls back to
+  ad-hoc. `scripts/create-signing-identity.sh` creates the identity without the private
+  key or its passphrase ever touching disk or a command line unencrypted.
+- Settings tells a build the helper's pin refuses apart from a user it refuses: it shows
+  the helper's message and how to fix it, and no longer offers a "Reinstall Helper" that
+  cannot change the pin.
+
 ### Fixed
 
 - A Kerberos ticket that is present, with no service ticket to be had for the upstream

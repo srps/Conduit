@@ -109,11 +109,20 @@ struct GeneralSettingsView: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Privileged helper status: \(HelperStatusPresentation.label(for: appState.helperStatus))")
                 }
+                if let remediation = HelperStatusPresentation.remediation(for: appState.helperStatus) {
+                    Text(remediation)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 HStack(spacing: 8) {
-                    Button(HelperStatusPresentation.primaryActionTitle(for: appState.helperStatus)) {
-                        appState.installHelper()
+                    if let title = HelperStatusPresentation.primaryActionTitle(for: appState.helperStatus) {
+                        Button(title) {
+                            appState.installHelper()
+                        }
+                        .help("Install or update the privileged helper.")
                     }
-                    .help("Install or update the privileged helper.")
 
                     if appState.helperStatus != .notInstalled {
                         Button("Uninstall Helper") {

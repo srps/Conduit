@@ -291,6 +291,16 @@ The install script finds the helper binary from the installed app bundle in `/Ap
 
 You can also install/uninstall the helper from within the app: **Conduit > General > Privileged Helper**.
 
+**Caller identity.** The helper admits any process of the console user unless it is told which program to trust. To pin it to Conduit, create a local signing identity once, then build, install, and install the helper:
+
+```bash
+scripts/create-signing-identity.sh      # once; self-signed "Conduit Local Signing" in your login keychain
+./bundle-app.sh --release --install     # signs with it and the hardened runtime
+sudo ./install-helper.sh                # pins that certificate for the helper's callers
+```
+
+The pin is the certificate, so later app builds signed with the same identity need no helper reinstall. `./install-helper.sh --print-caller-requirement /Applications/Conduit.app` shows the pin without installing anything. An app signed ad-hoc is refused by a pinned helper with a message pointing here; reinstalling the helper from an ad-hoc app removes the pin. `ConduitDaemon` is not bundled; to run it against a pinned helper, sign it as the pin expects: `codesign -f -o runtime -s "Conduit Local Signing" -i io.github.srps.Conduit.Daemon <path to ConduitDaemon>`.
+
 **Important**: after updating the app, reinstall the helper to pick up new helper commands:
 
 ```bash

@@ -319,8 +319,15 @@ public struct HelperRequest: Codable, Sendable, Equatable {
 /// typed a password and the relay still did not start.
 ///
 /// Two reasons, because they want opposite handling. `unauthorized` is a
-/// verdict: the peer's uid is not the console user's, and asking again
-/// changes nothing. `noConsoleUser` is a moment: `SCDynamicStoreCopyConsoleUser`
+/// verdict: the peer's uid is not the console user's, or its code signature
+/// fails the caller pin (#46), and asking again changes nothing.
+///
+/// The pin reuses `unauthorized` rather than adding a case, on purpose. A
+/// new case decodes as `nil` in every client already installed (see
+/// `HelperResponse.init(from:)`), which turns the refusal back into an
+/// ordinary failed command: the status probe would read "not responding"
+/// and offer to repair the helper, an admin prompt that fixes nothing. `unauthorized` is already handled everywhere as "stop,
+/// no prompt, show it", and the `errorMessage` says which rule refused. `noConsoleUser` is a moment: `SCDynamicStoreCopyConsoleUser`
 /// reports uid 0 at the loginwindow and during a fast-user switch, and an app
 /// launched at login can reach the helper before the console user is
 /// published. That one is state to show and reconcile past, not to wait on.
@@ -425,4 +432,9 @@ public enum HelperConstants {
     /// root-owned rotation rule for a file nothing writes.
     public static let legacyLogPath = "/var/log/io.github.srps.Conduit.Helper.log"
     public static let legacyNewsyslogConfPath = "/etc/newsyslog.d/io.github.srps.Conduit.Helper.conf"
+    /// The code-signing requirement a caller must satisfy (#46), written by
+    /// `install-helper.sh` from the app bundle it installs against. Absent
+    /// means identity is not enforced. See `HelperCallerPolicyFile`.
+    package static let callerRequirementDirectory = "/Library/Application Support/io.github.srps.Conduit"
+    package static let callerRequirementPath = callerRequirementDirectory + "/helper-callers.req"
 }

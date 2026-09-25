@@ -15,6 +15,9 @@ echo "Uninstalling privileged helper..."
 
 launchctl bootout system "$PLIST_DST" 2>/dev/null || true
 rm -f "$HELPER_DST" "$PLIST_DST" "$SOCKET_PATH"
+# The caller pin install-helper.sh wrote (HelperConstants.callerRequirementPath).
+rm -f "/Library/Application Support/io.github.srps.Conduit/helper-callers.req"
+rmdir "/Library/Application Support/io.github.srps.Conduit" 2>/dev/null || true
 # Leftovers from the release that logged to a file (HelperConstants.legacy*).
 # (N) = zsh null glob: no archives is not an error under set -e.
 rm -f "/etc/newsyslog.d/io.github.srps.Conduit.Helper.conf" \
