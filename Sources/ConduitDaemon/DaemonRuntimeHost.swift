@@ -121,13 +121,14 @@ final class DaemonRuntimeHost {
     /// that window, so VPN transitions and config reloads must not touch
     /// them outside it.
     private var runtimeStarted = false
-    /// Which `startRuntime` / `stopRuntime` is the latest. See
-    /// `RuntimeGeneration`. Twin of `AppState.proxyGeneration`.
-    private var runtimeGeneration = RuntimeGeneration()
+    /// `startRuntime` / `stopRuntime`: which is the latest, and a repeat of
+    /// the one in flight joins it. See `LifecycleLane`. Twin of
+    /// `AppState.proxyLane`.
+    private let runtimeLane = LifecycleLane(name: "runtime")
     /// How many starts and stops have begun. Internal so a test can wait for
     /// a stop to have begun rather than time it: the stop's first visible
     /// effect is queued behind the work the test is holding.
-    var lifecycleGeneration: Int { runtimeGeneration.current }
+    var lifecycleGeneration: Int { runtimeLane.current }
     /// VPN-gating policy for split-DNS entry files (single source of truth
     /// shared with `AppState`). Fed by `handleVPNStateChange`; every
     /// resolver-file apply path consults `entriesWanted`.
@@ -344,12 +345,14 @@ final class DaemonRuntimeHost {
     /// surfaces and the capture of the prior DNS servers, then the forwarder,
     /// then the interfaces pointed at it and the intercept files. Off the
     /// main actor because it is 15 to 30 helper round trips and `networksetup`
-    /// reads on a machine with several services (#47). `runtimeGeneration` is
-    /// checked after every suspension; see `RuntimeGeneration`.
+    /// reads on a machine with several services (#47). The `runtimeLane` token
+    /// is checked after every suspension and, under each manager's lock,
+    /// before every manager step; see `LifecycleLane`.
     func startRuntime() async throws {
         await awaitLaunchRecovery()
         logNonBlockingConfigProblems()
-        let generation = runtimeGeneration.advance()
+        guard let token = await admit(.start, "runtime_start") else { return }
+        defer { runtimeLane.end(token) }
         do {
             try await orchestrator.startProxy()
         } catch {
@@ -371,7 +374,7 @@ final class DaemonRuntimeHost {
         }
         // A stop issued while the listeners came up has already queued its
         // clears; applying now would put the surfaces back after them.
-        guard runtimeOperationIsCurrent(generation, "runtime_start") else { return }
+        guard isCurrent(token, "runtime_start") else { return }
 
         let config = self.config
         let platform = platformConfig
@@ -386,82 +389,111 @@ final class DaemonRuntimeHost {
         let forwarderRunningAtStart = orchestrator.snapshot.dnsRunState == .running
         await platformWork.run {
             if platform.manageSystemProxy {
-                do {
-                    try systemProxy.apply(config: config, mode: platform.systemProxyMode, logger: logger, localPACURL: localPACURL)
-                } catch {
-                    logger.log(.warning, "Could not apply system proxy settings (non-fatal): \(error.localizedDescription)", category: .system)
+                systemProxy.serialized {
+                    guard !token.isSuperseded else { return }
+                    do {
+                        try systemProxy.apply(config: config, mode: platform.systemProxyMode, logger: logger, localPACURL: localPACURL)
+                    } catch {
+                        logger.log(.warning, "Could not apply system proxy settings (non-fatal): \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
             if platform.manageEnvironmentVariables {
-                do {
-                    try environment.apply(config: config, logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not apply environment variables (non-fatal): \(error.localizedDescription)", category: .system)
+                environment.serialized {
+                    guard !token.isSuperseded else { return }
+                    do {
+                        try environment.apply(config: config, logger: logger)
+                    } catch {
+                        logger.log(.warning, "Could not apply environment variables (non-fatal): \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
             if platform.manageDNSResolvers {
-                do {
-                    try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
-                } catch {
-                    logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
-                }
-                // The forwarder cannot be running yet, so no intercept resolver
-                // file may exist — sweep any a killed instance stranded. Only a
-                // start can repair that; a SIGKILL never runs cleanup.
-                do {
-                    try resolvers.refreshInterceptFiles(
-                        config: config,
-                        interceptReady: interceptReadyAtStart,
-                        forwarderRunning: forwarderRunningAtStart,
-                        logger: logger
-                    )
-                } catch {
-                    logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                resolvers.serialized {
+                    guard !token.isSuperseded else { return }
+                    do {
+                        try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
+                    } catch {
+                        logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
+                    }
+                    // The forwarder cannot be running yet, so no intercept resolver
+                    // file may exist — sweep any a killed instance stranded. Only a
+                    // start can repair that; a SIGKILL never runs cleanup.
+                    do {
+                        try resolvers.refreshInterceptFiles(
+                            config: config,
+                            interceptReady: interceptReadyAtStart,
+                            forwarderRunning: forwarderRunningAtStart,
+                            logger: logger
+                        )
+                    } catch {
+                        logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
             if config.dnsForwarderEnabled, platform.manageSystemDNS {
-                do {
-                    try systemDNS.saveCurrentDNS(logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not save current DNS state (non-fatal): \(error.localizedDescription)", category: .system)
+                systemDNS.serialized {
+                    guard !token.isSuperseded else { return }
+                    do {
+                        try systemDNS.saveCurrentDNS(logger: logger)
+                    } catch {
+                        logger.log(.warning, "Could not save current DNS state (non-fatal): \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
         }
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
         // rest of a start for a runtime that is down.
-        guard runtimeOperationIsCurrent(generation, "runtime_start") else { return }
+        guard isCurrent(token, "runtime_start") else { return }
+        // A VPN transition handled while the apply was out reconciled the
+        // entry files then, possibly before the apply wrote them from the
+        // gate it was queued with. Twin of the check in `AppState.startProxy`.
+        if platform.manageDNSResolvers, splitDNSGate.entriesWanted != vpnConnected {
+            splitDNSGate.reconcileEntryFiles(
+                config: config,
+                dnsManager: dnsManager,
+                logger: logger,
+                runtimeStarted: true
+            )
+        }
 
         if config.dnsForwarderEnabled {
             await orchestrator.startDNS()
-            guard runtimeOperationIsCurrent(generation, "runtime_start") else { return }
+            guard isCurrent(token, "runtime_start") else { return }
             let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
             let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             await platformWork.run {
                 if platform.manageSystemDNS, forwarderRunning {
-                    do {
-                        try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
+                    systemDNS.serialized {
+                        guard !token.isSuperseded else { return }
+                        do {
+                            try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
+                        } catch {
+                            logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
+                        }
                     }
                 }
                 // `apply` above wrote the split-DNS entry files only; the intercept
                 // files are written here, once the forwarder and the transparent
                 // proxy they point clients at are both listening.
                 guard platform.manageDNSResolvers else { return }
-                do {
-                    try resolvers.refreshInterceptFiles(
-                        config: config,
-                        interceptReady: interceptReady,
-                        forwarderRunning: forwarderRunning,
-                        logger: logger
-                    )
-                } catch {
-                    logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                resolvers.serialized {
+                    guard !token.isSuperseded else { return }
+                    do {
+                        try resolvers.refreshInterceptFiles(
+                            config: config,
+                            interceptReady: interceptReady,
+                            forwarderRunning: forwarderRunning,
+                            logger: logger
+                        )
+                    } catch {
+                        logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
-            guard runtimeOperationIsCurrent(generation, "runtime_start") else { return }
+            guard isCurrent(token, "runtime_start") else { return }
             if platform.manageSystemDNS, forwarderRunning {
                 // Whether or not `apply` succeeded — see `AppState.startDNS`.
                 startDNSHealthTimer(forwarderPort: forwarderPort)
@@ -470,7 +502,7 @@ final class DaemonRuntimeHost {
 
         if config.tunnelDefinitions.contains(where: \.enabled) {
             await orchestrator.startTunnels()
-            guard runtimeOperationIsCurrent(generation, "runtime_start") else { return }
+            guard isCurrent(token, "runtime_start") else { return }
         }
 
         networkMonitor.start()
@@ -495,9 +527,13 @@ final class DaemonRuntimeHost {
     /// it overtook. A stop overtaken in turn by a later start does nothing
     /// more once it notices, since that start owns the surfaces; except a stop
     /// on the way to `exit`, which always finishes: nothing after it runs.
+    /// A stop while a stop is out joins it rather than queueing another
+    /// teardown, except, again, the one on the way to `exit`, which must reach
+    /// it: it supersedes the one in flight, which then stops at its next step.
     func stopRuntime(exitAfterStop: Bool = false) async {
         await awaitLaunchRecovery()
-        let generation = runtimeGeneration.advance()
+        guard let token = await admit(.stop, "runtime_stop", coalescing: !exitAfterStop) else { return }
+        defer { runtimeLane.end(token) }
         let terminal = exitAfterStop
         runtimeStarted = false
         stopDNSHealthTimer()
@@ -512,18 +548,21 @@ final class DaemonRuntimeHost {
         let systemDNS = systemDNSManager
         let logger = self.logger
         await platformWork.run {
-            guard platform.manageSystemDNS || systemDNS.hasSavedState() else { return }
-            do {
-                try systemDNS.clear(logger: logger)
-            } catch {
-                logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
+            systemDNS.serialized {
+                guard terminal || !token.isSuperseded else { return }
+                guard platform.manageSystemDNS || systemDNS.hasSavedState() else { return }
+                do {
+                    try systemDNS.clear(logger: logger)
+                } catch {
+                    logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
+                }
             }
         }
-        guard terminal || runtimeOperationIsCurrent(generation, "runtime_stop") else { return }
+        guard terminal || isCurrent(token, "runtime_stop") else { return }
         await orchestrator.stopTunnels()
         await orchestrator.stopDNS()
         await orchestrator.stopProxy()
-        guard terminal || runtimeOperationIsCurrent(generation, "runtime_stop") else { return }
+        guard terminal || isCurrent(token, "runtime_stop") else { return }
 
         // Each surface is cleared when its flag is on *or* when the journal
         // says the surface is ours, as in `AppState.stopProxy`. The flag alone
@@ -535,6 +574,7 @@ final class DaemonRuntimeHost {
         // whatever was queued ahead of it has landed.
         await platformWork.run {
             systemProxy.serialized {
+                guard terminal || !token.isSuperseded else { return }
                 guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return }
                 do {
                     try systemProxy.clear(logger: logger)
@@ -543,6 +583,7 @@ final class DaemonRuntimeHost {
                 }
             }
             environment.serialized {
+                guard terminal || !token.isSuperseded else { return }
                 guard platform.manageEnvironmentVariables || environment.hasManagedState() else { return }
                 do {
                     try environment.clear(logger: logger)
@@ -551,6 +592,7 @@ final class DaemonRuntimeHost {
                 }
             }
             resolvers.serialized {
+                guard terminal || !token.isSuperseded else { return }
                 if platform.manageDNSResolvers {
                     do {
                         try resolvers.clear(config: config, logger: logger)
@@ -568,7 +610,7 @@ final class DaemonRuntimeHost {
                 }
             }
         }
-        guard terminal || runtimeOperationIsCurrent(generation, "runtime_stop") else { return }
+        guard terminal || isCurrent(token, "runtime_stop") else { return }
 
         logger.log(.notice, "Daemon runtime stopped.", category: .general)
         writeSnapshotFile(snapshot: orchestrator.snapshot)
@@ -637,17 +679,37 @@ final class DaemonRuntimeHost {
         )
     }
 
-    /// Whether the start or stop holding `generation` may go on. When not,
-    /// says so with a `lifecycle.superseded` event, and the log line is
-    /// derived from it. Twin of `AppState.proxyOperationIsCurrent`.
-    private func runtimeOperationIsCurrent(_ generation: Int, _ operation: String) -> Bool {
-        guard runtimeGeneration.isCurrent(generation) else {
-            let event = runtimeGeneration.supersededEvent(operation: operation, generation: generation)
-            orchestrator.eventLog.append(event)
-            logger.log(.notice, "Lifecycle step not taken: \(event.detail ?? event.event).", category: .general)
+    /// Admits a start or stop, or joins the identical one in flight and
+    /// returns `nil`. Twin of `AppState.admit`.
+    private func admit(
+        _ kind: LifecycleLane.Kind,
+        _ operation: String,
+        coalescing: Bool = true
+    ) async -> LifecycleLane.Token? {
+        switch runtimeLane.begin(kind, coalescing: coalescing) {
+        case .run(let token):
+            return token
+        case .coalesced(let generation):
+            recordLifecycle(runtimeLane.coalescedEvent(operation: operation, joining: generation))
+            await runtimeLane.join(generation)
+            return nil
+        }
+    }
+
+    /// Whether the start or stop holding `token` may go on. When not, says
+    /// so with a `lifecycle.superseded` event. Twin of `AppState.isCurrent`.
+    private func isCurrent(_ token: LifecycleLane.Token, _ operation: String) -> Bool {
+        guard !token.isSuperseded else {
+            recordLifecycle(runtimeLane.supersededEvent(operation: operation, token: token))
             return false
         }
         return true
+    }
+
+    /// Event first, log line derived from it.
+    private func recordLifecycle(_ event: RuntimeEvent) {
+        orchestrator.eventLog.append(event)
+        logger.log(.notice, "Lifecycle: \(event.event) \(event.detail ?? "")", category: .general)
     }
 
     func testUpstream(named name: String) async -> ProbeResult? {

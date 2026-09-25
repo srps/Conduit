@@ -120,15 +120,24 @@ final class AppState: ObservableObject {
     /// proxy and DNS starts and stops, one block per step. Serial, so a stop's
     /// clear lands after the apply of a start it overtook.
     private let platformWork = PlatformWork(label: "io.github.srps.Conduit.app.platform-work")
-    /// Which `startProxy` / `stopProxy` is the latest. See `RuntimeGeneration`.
-    private var proxyGeneration = RuntimeGeneration()
-    /// Which `startDNS` / `stopDNS` is the latest. Its own count, because a
-    /// proxy start runs a DNS start inside it and must not supersede itself.
-    private var dnsGeneration = RuntimeGeneration()
+    /// `startProxy` / `stopProxy`: which is the latest, and a repeat of the
+    /// one in flight joins it. See `LifecycleLane`.
+    private let proxyLane = LifecycleLane(name: "proxy")
+    /// `startDNS` / `stopDNS`. A lane of its own, because a proxy start runs
+    /// a DNS start inside it and must not supersede itself.
+    private let dnsLane = LifecycleLane(name: "dns")
     /// How many proxy and DNS starts and stops have begun. Internal so the
     /// harness can wait for a stop to have begun rather than time it: its
     /// first visible effect is queued behind the work a scenario is holding.
-    var lifecycleGenerations: (proxy: Int, dns: Int) { (proxyGeneration.current, dnsGeneration.current) }
+    var lifecycleGenerations: (proxy: Int, dns: Int) { (proxyLane.current, dnsLane.current) }
+    /// How long quit waits for the platform queue before it clears anyway.
+    /// Five seconds: long enough for a start's remaining step on a healthy
+    /// helper, short against the helper's 40 s transaction budget, which is
+    /// what a quit must not wait out. A step still running past it is
+    /// serialised with quit's own clears by the managers' operation locks.
+    static let terminationDrainDeadlineMilliseconds = 5_000
+    /// Internal so the harness can shorten it.
+    var terminationDrainDeadlineMilliseconds = AppState.terminationDrainDeadlineMilliseconds
     /// Whether the 30 s relay probe is scheduled. Internal for the harness.
     var hasDNSHealthTimer: Bool { dnsHealthTimer != nil }
     private var dnsRelayRestartInFlight = false
@@ -911,7 +920,17 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func restartProxyLifecycle() async {
+    /// What a restart came to, for the notification and the harness.
+    enum RestartOutcome: Equatable {
+        case restarted
+        case failed
+        /// The start did not complete as the latest operation: already
+        /// running or starting, or overtaken by a stop. No "Proxy Restarted".
+        case notStarted
+    }
+
+    @discardableResult
+    func restartProxyLifecycle() async -> RestartOutcome {
         lastErrorMessage = nil
         let shouldStopFirst = MenuBarPresentation.shouldStopBeforeRestart(for: orchestrator.snapshot.runtimeStatus.state)
 
@@ -921,11 +940,13 @@ final class AppState: ObservableObject {
         }
 
         do {
-            try await startProxy(postNotification: false)
+            guard try await startProxy(postNotification: false) else { return .notStarted }
             notificationManager.post(title: "Proxy Restarted", body: runtime.runtimeStatus.activeUpstream ?? "Local proxy is running.")
+            return .restarted
         } catch {
             lastErrorMessage = error.localizedDescription
             notificationManager.post(title: "Proxy Restart Failed", body: error.localizedDescription)
+            return .failed
         }
     }
 
@@ -945,26 +966,30 @@ final class AppState: ObservableObject {
         try await startProxy(postNotification: true)
     }
 
-    private func startProxy(postNotification: Bool) async throws {
+    /// Returns whether the start completed as the latest operation, which
+    /// is what a restart's notification hangs on.
+    @discardableResult
+    private func startProxy(postNotification: Bool) async throws -> Bool {
         if let configurationLoadError {
             _ = rejectUnavailableConfiguration()
             throw configurationLoadError
         }
         await awaitLaunchRecovery()
-        guard orchestrator.snapshot.runtimeStatus.state != .starting && orchestrator.snapshot.runtimeStatus.state != .running else { return }
-        let generation = proxyGeneration.advance()
+        guard orchestrator.snapshot.runtimeStatus.state != .starting && orchestrator.snapshot.runtimeStatus.state != .running else { return false }
+        guard let token = await admit(proxyLane, .start, "proxy_start") else { return false }
+        defer { proxyLane.end(token) }
 
         do {
             try await orchestrator.startProxy()
             // A stop issued while the listeners came up has already queued
             // its clear; applying now would put the surfaces back after it.
-            guard proxyStartIsCurrent(generation) else { return }
+            guard proxyStartIsCurrent(token) else { return false }
 
-            let entriesWantedAtApply = await applyProxyStartSurfaces()
+            let entriesWantedAtApply = await applyProxyStartSurfaces(token)
             // A stop issued while the apply was out queued its clear behind
             // it, so the machine ends cleared; what must not happen now is
             // the rest of a start for a runtime that is down.
-            guard proxyStartIsCurrent(generation) else { return }
+            guard proxyStartIsCurrent(token) else { return false }
             // A VPN transition handled while the apply was out reconciled the
             // entry files then, possibly before the apply wrote them with the
             // gate as it was when it was queued: entry files for servers only
@@ -992,7 +1017,7 @@ final class AppState: ObservableObject {
                orchestrator.snapshot.dnsRunState != .running,
                orchestrator.snapshot.dnsRunState != .starting {
                 await startDNS()
-                guard proxyStartIsCurrent(generation) else { return }
+                guard proxyStartIsCurrent(token) else { return false }
             }
 
             // The switch itself is handled by the platform reconcile in
@@ -1005,6 +1030,7 @@ final class AppState: ObservableObject {
             if postNotification {
                 notificationManager.post(title: "Proxy Enabled", body: runtime.runtimeStatus.activeUpstream ?? "Local proxy is running.")
             }
+            return true
         } catch {
             // A failed start must not leave the machine pointing at listeners
             // that are not there. The side effects outlive us and are not
@@ -1039,53 +1065,65 @@ final class AppState: ObservableObject {
 
     private func stopProxy(postNotification: Bool) async {
         await awaitLaunchRecovery()
-        let generation = proxyGeneration.advance()
+        guard let token = await admit(proxyLane, .stop, "proxy_stop") else { return }
+        defer { proxyLane.end(token) }
         await orchestrator.stopProxy()
         // A start issued since owns the surfaces now; clearing them here
         // would take them from a runtime that is coming up.
-        guard proxyOperationIsCurrent(generation, "proxy_stop") else { return }
+        guard isCurrent(token, on: proxyLane, "proxy_stop") else { return }
 
-        await clearProxyStopSurfaces()
-        guard proxyOperationIsCurrent(generation, "proxy_stop") else { return }
+        await clearProxyStopSurfaces(token)
+        guard isCurrent(token, on: proxyLane, "proxy_stop") else { return }
 
         if postNotification {
             notificationManager.post(title: "Proxy Disabled", body: "System proxy settings have been cleared.")
         }
     }
 
-    /// Whether the proxy start holding `generation` may go on: no stop or
-    /// later start has overtaken it, and the listeners it started are still
-    /// up. When not, says so with a `lifecycle.superseded` event.
-    private func proxyStartIsCurrent(_ generation: Int) -> Bool {
-        guard proxyOperationIsCurrent(generation, "proxy_start") else { return false }
+    /// Admits a start or stop onto `lane`, or, when the identical operation
+    /// is already the latest and running, joins it and returns `nil`: a
+    /// second copy of its work on the queue would only repeat it.
+    private func admit(
+        _ lane: LifecycleLane,
+        _ kind: LifecycleLane.Kind,
+        _ operation: String
+    ) async -> LifecycleLane.Token? {
+        switch lane.begin(kind) {
+        case .run(let token):
+            return token
+        case .coalesced(let generation):
+            recordLifecycle(lane.coalescedEvent(operation: operation, joining: generation))
+            await lane.join(generation)
+            return nil
+        }
+    }
+
+    /// Whether the proxy start holding `token` may go on: no stop or later
+    /// start has overtaken it, and the listeners it started are still up.
+    /// When not, says so with a `lifecycle.superseded` event.
+    private func proxyStartIsCurrent(_ token: LifecycleLane.Token) -> Bool {
+        guard isCurrent(token, on: proxyLane, "proxy_start") else { return false }
         guard runtimeState().proxyIsUp else {
-            recordSuperseded(proxyGeneration.supersededEvent(operation: "proxy_start", generation: generation, reason: "runtime_down"))
+            recordLifecycle(proxyLane.supersededEvent(operation: "proxy_start", token: token, reason: "runtime_down"))
             return false
         }
         return true
     }
 
-    private func proxyOperationIsCurrent(_ generation: Int, _ operation: String) -> Bool {
-        guard proxyGeneration.isCurrent(generation) else {
-            recordSuperseded(proxyGeneration.supersededEvent(operation: operation, generation: generation))
-            return false
-        }
-        return true
-    }
-
-    private func dnsOperationIsCurrent(_ generation: Int, _ operation: String) -> Bool {
-        guard dnsGeneration.isCurrent(generation) else {
-            recordSuperseded(dnsGeneration.supersededEvent(operation: operation, generation: generation))
+    private func isCurrent(_ token: LifecycleLane.Token, on lane: LifecycleLane, _ operation: String) -> Bool {
+        guard !token.isSuperseded else {
+            recordLifecycle(lane.supersededEvent(operation: operation, token: token))
             return false
         }
         return true
     }
 
     /// Event first, log line derived from it.
-    private func recordSuperseded(_ event: RuntimeEvent) {
+    private func recordLifecycle(_ event: RuntimeEvent, level: LogLevel = .notice) {
         orchestrator.eventLog.append(event)
-        logStore.log(.notice, "Lifecycle step not taken: \(event.detail ?? event.event).", category: .system)
+        logStore.log(level, "Lifecycle: \(event.event) \(event.detail ?? "")", category: .system)
     }
+
 
     /// Everything a proxy start applies to the machine once its listeners
     /// are up, as one piece of work on `platformWork`: 15 to 30 helper round
@@ -1097,9 +1135,14 @@ final class AppState: ObservableObject {
     /// The block itself touches only the managers, which serialise their own
     /// operations, and each check-then-act runs as one of them.
     ///
+    /// Each manager step checks `token` under that manager's lock before it
+    /// acts, so a start overtaken by a stop or a quit stops at its next step,
+    /// and a quit's clear of a manager lands either before the step (which
+    /// then sees itself superseded) or after it.
+    ///
     /// Returns the VPN gate's `entriesWanted` the entry files were applied
     /// for, so the caller can tell whether a transition landed meanwhile.
-    private func applyProxyStartSurfaces() async -> Bool {
+    private func applyProxyStartSurfaces(_ token: LifecycleLane.Token) async -> Bool {
         let config = self.config
         let platform = platformConfig
         let localPACURL = orchestrator.snapshot.bindings.localPACURL
@@ -1114,6 +1157,7 @@ final class AppState: ObservableObject {
         await platformWork.run {
             if platform.manageSystemProxy {
                 systemProxy.serialized {
+                    guard !token.isSuperseded else { return }
                     if systemProxy.isApplied(config: config, mode: platform.systemProxyMode, localPACURL: localPACURL) {
                         logger.log(.debug, "System proxy already configured correctly, skipped.", category: .system)
                         return
@@ -1126,43 +1170,47 @@ final class AppState: ObservableObject {
                 }
             }
             if platform.manageEnvironmentVariables {
-                do {
-                    try environment.apply(config: config, logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not apply environment variables (non-fatal): \(error.localizedDescription)", category: .system)
+                environment.serialized {
+                    guard !token.isSuperseded else { return }
+                    do {
+                        try environment.apply(config: config, logger: logger)
+                    } catch {
+                        logger.log(.warning, "Could not apply environment variables (non-fatal): \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
             if platform.manageDNSResolvers {
                 resolvers.serialized {
+                    guard !token.isSuperseded else { return }
                     if resolvers.isApplied(config: config, vpnConnected: vpnConnected) {
                         // The write is skipped; the record must not be. See `adoptAppliedFiles`.
                         resolvers.adoptAppliedFiles(config: config, vpnConnected: vpnConnected)
                         logger.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
-                        return
+                    } else {
+                        do {
+                            try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
+                        } catch {
+                            logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
+                        }
                     }
+                    // The DNS forwarder cannot be running yet, so no intercept
+                    // resolver file may exist — sweep any that a previous instance
+                    // left behind. Termination cleanup removes them on a clean
+                    // quit, but a `SIGKILL` (an installer replacing the app, a
+                    // crash) never runs it, and the files it strands blackhole
+                    // their domains for every process on the machine until
+                    // someone deletes them by hand. Only a *start* can be trusted
+                    // to repair that, so repair it here.
                     do {
-                        try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
+                        try resolvers.refreshInterceptFiles(
+                            config: config,
+                            interceptReady: interceptReady,
+                            forwarderRunning: forwarderRunning,
+                            logger: logger
+                        )
                     } catch {
-                        logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
+                        logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
                     }
-                }
-                // The DNS forwarder cannot be running yet, so no intercept
-                // resolver file may exist — sweep any that a previous instance
-                // left behind. Termination cleanup removes them on a clean
-                // quit, but a `SIGKILL` (an installer replacing the app, a
-                // crash) never runs it, and the files it strands blackhole
-                // their domains for every process on the machine until
-                // someone deletes them by hand. Only a *start* can be trusted
-                // to repair that, so repair it here.
-                do {
-                    try resolvers.refreshInterceptFiles(
-                        config: config,
-                        interceptReady: interceptReady,
-                        forwarderRunning: forwarderRunning,
-                        logger: logger
-                    )
-                } catch {
-                    logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
                 }
             }
         }
@@ -1181,7 +1229,7 @@ final class AppState: ObservableObject {
     /// still pointing at the listener that is about to stop (#13). The
     /// ownership reads happen inside the block, after whatever was queued
     /// ahead of it has landed.
-    private func clearProxyStopSurfaces() async {
+    private func clearProxyStopSurfaces(_ token: LifecycleLane.Token) async {
         let config = self.config
         let platform = platformConfig
         let systemProxy = systemConduit
@@ -1191,6 +1239,7 @@ final class AppState: ObservableObject {
 
         await platformWork.run {
             systemProxy.serialized {
+                guard !token.isSuperseded else { return }
                 guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return }
                 if systemProxy.isCleared() {
                     logger.log(.debug, "System proxy already cleared, skipped.", category: .system)
@@ -1203,6 +1252,7 @@ final class AppState: ObservableObject {
                 }
             }
             environment.serialized {
+                guard !token.isSuperseded else { return }
                 guard platform.manageEnvironmentVariables || environment.hasManagedState() else { return }
                 do {
                     try environment.clear(logger: logger)
@@ -1211,6 +1261,7 @@ final class AppState: ObservableObject {
                 }
             }
             resolvers.serialized {
+                guard !token.isSuperseded else { return }
                 if platform.manageDNSResolvers {
                     if resolvers.isCleared(config: config) {
                         logger.log(.debug, "DNS resolvers already cleared, skipped.", category: .system)
@@ -1271,27 +1322,32 @@ final class AppState: ObservableObject {
     /// The surface work runs on `platformWork` in two blocks, one on each
     /// side of the forwarder start, because the prior DNS servers are
     /// captured before the forwarder binds and the interfaces are pointed at
-    /// it only after. `dnsGeneration` is checked after every suspension.
+    /// it only after. The `dnsLane` token is checked after every suspension
+    /// and before every manager step.
     func startDNS() async {
         guard !rejectUnavailableConfiguration() else { return }
         await awaitLaunchRecovery()
-        let generation = dnsGeneration.advance()
+        guard let token = await admit(dnsLane, .start, "dns_start") else { return }
+        defer { dnsLane.end(token) }
         let manageSystemDNS = platformConfig.manageSystemDNS
         let systemDNS = systemDNSManager
         let logger = logStore
         if manageSystemDNS {
             await platformWork.run {
-                do {
-                    try systemDNS.saveCurrentDNS(logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not save current DNS state (non-fatal): \(error.localizedDescription)", category: .system)
+                systemDNS.serialized {
+                    guard !token.isSuperseded else { return }
+                    do {
+                        try systemDNS.saveCurrentDNS(logger: logger)
+                    } catch {
+                        logger.log(.warning, "Could not save current DNS state (non-fatal): \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
-            guard dnsOperationIsCurrent(generation, "dns_start") else { return }
+            guard isCurrent(token, on: dnsLane, "dns_start") else { return }
         }
 
         await orchestrator.startDNS()
-        guard dnsOperationIsCurrent(generation, "dns_start") else { return }
+        guard isCurrent(token, on: dnsLane, "dns_start") else { return }
 
         // Read the orchestrator, not `runtime`: the mirror is one async hop
         // behind and still reports `.starting` here when no `await` inside
@@ -1305,32 +1361,38 @@ final class AppState: ObservableObject {
             let resolvers = dnsManager
             await platformWork.run {
                 if manageSystemDNS {
-                    do {
-                        try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
+                    systemDNS.serialized {
+                        guard !token.isSuperseded else { return }
+                        do {
+                            try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
+                        } catch {
+                            logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
+                        }
                     }
                 }
                 // Intercept resolver files are written only from here — `apply` at
                 // proxy start deliberately skips them, because at that point the
                 // forwarder they name has not bound.
                 if manageResolvers {
-                    do {
-                        try resolvers.refreshInterceptFiles(
-                            config: startConfig,
-                            interceptReady: interceptReady,
-                            forwarderRunning: true,
-                            logger: logger
-                        )
-                    } catch {
-                        logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                    resolvers.serialized {
+                        guard !token.isSuperseded else { return }
+                        do {
+                            try resolvers.refreshInterceptFiles(
+                                config: startConfig,
+                                interceptReady: interceptReady,
+                                forwarderRunning: true,
+                                logger: logger
+                            )
+                        } catch {
+                            logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                        }
                     }
                 }
             }
             // A stop issued while the apply was out queued its restore
             // behind it; a health timer or a persisted "DNS on" now would
             // outlive it.
-            guard dnsOperationIsCurrent(generation, "dns_start") else { return }
+            guard isCurrent(token, on: dnsLane, "dns_start") else { return }
             config.dnsForwarderEnabled = true
             if manageSystemDNS {
                 // Whether or not `apply` succeeded: a refused or failed apply
@@ -1348,10 +1410,13 @@ final class AppState: ObservableObject {
             notificationManager.post(title: "DNS Forwarder Failed", body: err)
             if manageSystemDNS {
                 await platformWork.run {
-                    do {
-                        try systemDNS.clear(logger: logger)
-                    } catch {
-                        logger.log(.warning, "Could not restore system DNS after the forwarder failed to start: \(error.localizedDescription)", category: .system)
+                    systemDNS.serialized {
+                        guard !token.isSuperseded else { return }
+                        do {
+                            try systemDNS.clear(logger: logger)
+                        } catch {
+                            logger.log(.warning, "Could not restore system DNS after the forwarder failed to start: \(error.localizedDescription)", category: .system)
+                        }
                     }
                 }
             }
@@ -1364,24 +1429,30 @@ final class AppState: ObservableObject {
     /// removed once it has.
     func stopDNS() async {
         await awaitLaunchRecovery()
-        let generation = dnsGeneration.advance()
+        // A stop already out is joined, not repeated: while a helper is slow
+        // every toggle used to queue another teardown behind the first.
+        guard let token = await admit(dnsLane, .stop, "dns_stop") else { return }
+        defer { dnsLane.end(token) }
         stopDNSHealthTimer()
 
         let manageSystemDNS = platformConfig.manageSystemDNS
         let systemDNS = systemDNSManager
         let logger = logStore
         await platformWork.run {
-            guard manageSystemDNS || systemDNS.hasSavedState() else { return }
-            do {
-                try systemDNS.clear(logger: logger)
-            } catch {
-                logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
+            systemDNS.serialized {
+                guard !token.isSuperseded else { return }
+                guard manageSystemDNS || systemDNS.hasSavedState() else { return }
+                do {
+                    try systemDNS.clear(logger: logger)
+                } catch {
+                    logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
+                }
             }
         }
-        guard dnsOperationIsCurrent(generation, "dns_stop") else { return }
+        guard isCurrent(token, on: dnsLane, "dns_stop") else { return }
 
         await orchestrator.stopDNS()
-        guard dnsOperationIsCurrent(generation, "dns_stop") else { return }
+        guard isCurrent(token, on: dnsLane, "dns_stop") else { return }
 
         // Remove intercept resolver files while we still can compute their
         // set — leaving them behind strands e.g. `*.cursor.sh` pointing at a
@@ -1391,13 +1462,16 @@ final class AppState: ObservableObject {
             let config = self.config
             let resolvers = dnsManager
             await platformWork.run {
-                do {
-                    try resolvers.clearInterceptFiles(config: config, logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not remove intercept resolver files: \(error.localizedDescription)", category: .system)
+                resolvers.serialized {
+                    guard !token.isSuperseded else { return }
+                    do {
+                        try resolvers.clearInterceptFiles(config: config, logger: logger)
+                    } catch {
+                        logger.log(.warning, "Could not remove intercept resolver files: \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
-            guard dnsOperationIsCurrent(generation, "dns_stop") else { return }
+            guard isCurrent(token, on: dnsLane, "dns_stop") else { return }
         }
 
         config.dnsForwarderEnabled = false
@@ -1640,19 +1714,28 @@ final class AppState: ObservableObject {
     /// every write both paths make is an absolute set, and whichever finishes
     /// first leaves the surface marked `.released` so the other skips.
     ///
-    /// It does wait for `platformWork`, though, before its first clear. A
-    /// start's apply runs there now, one manager after another, and a quit
-    /// that landed in the middle of it would clear a surface the apply had
-    /// not reached yet, which the apply would then write after the quit's
-    /// clear: settings pointing at a proxy that exits with us. The managers'
-    /// locks order one operation, not the sequence. Starts and stops in
-    /// flight are superseded first, so none of them queues anything after
-    /// the work it already has out. This is the wait the move off the main
-    /// actor trades for; a bounded drain for quit is its own stage of #47.
+    /// It does wait for `platformWork`, though, before its first clear, and
+    /// only so long. A start's apply runs there, one manager after another.
+    /// Every start and stop in flight is superseded first, so each block stops
+    /// at its next manager step and queues nothing more, and the queue drains
+    /// within one step. The wait is bounded by
+    /// `terminationDrainDeadlineMilliseconds` all the same, because one step
+    /// can be a helper round trip held for its whole 40 s budget. Past the
+    /// deadline the clears go ahead: a step still running holds its manager's
+    /// operation lock, so the clear of that manager lands after it, and every
+    /// step checks the supersession under the same lock before it acts, so no
+    /// step lands after the clear of the manager it belongs to. The expiry is
+    /// recorded as `lifecycle.termination_drain_expired`.
     func performTerminationCleanup() {
-        _ = proxyGeneration.advance()
-        _ = dnsGeneration.advance()
-        platformWork.waitUntilIdle()
+        proxyLane.supersedeAll()
+        dnsLane.supersedeAll()
+        let deadline = terminationDrainDeadlineMilliseconds
+        if !platformWork.waitUntilIdle(timeout: .milliseconds(deadline)) {
+            recordLifecycle(
+                RuntimeEvent(kind: .lifecycle, event: "lifecycle.termination_drain_expired", detail: "deadline_ms=\(deadline)"),
+                level: .warning
+            )
+        }
         runtime.stop()
         stopDNSHealthTimer()
         networkMonitor.stop()

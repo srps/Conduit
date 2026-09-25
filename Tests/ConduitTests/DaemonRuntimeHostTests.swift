@@ -785,4 +785,62 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.deliveries.drain()
         XCTAssertNotEqual(host.orchestrator.snapshot.vpnState, .connected)
     }
+
+    /// Twin of `AppStateHarnessTests.testRepeatedDNSStopsWhileTheFirstIsHeldRunOneTeardown`:
+    /// stops while a stop is held join it instead of queueing teardowns.
+    func testRepeatedStopsWhileTheFirstIsHeldRunOneTeardown() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        try await host.startRuntime()
+        XCTAssertTrue(harness.wifi.routesThroughAProxy)
+        // The system proxy clear, the stop's second block.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let first = Task { await host.stopRuntime() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        let more = (0..<4).map { _ in Task { await host.stopRuntime() } }
+        let events = host.orchestrator.eventLog
+        for _ in 0..<5_000 where events.events.filter({ $0.event == "lifecycle.coalesced" }).count < 4 && host.lifecycleGeneration < 6 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        harness.hold.release()
+        await first.value
+        for task in more { await task.value }
+
+        XCTAssertEqual(host.lifecycleGeneration, 2, "the start and one stop")
+        XCTAssertEqual(
+            events.events.filter { $0.event == "lifecycle.coalesced" }.map(\.detail),
+            Array(repeating: "operation=runtime_stop joined=2", count: 4)
+        )
+        XCTAssertFalse(harness.wifi.routesThroughAProxy)
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+    }
+
+    /// Codex review of #90: a VPN drop handled while the start's apply is
+    /// out finds no entry files yet, and the apply then writes them from the
+    /// gate it was queued with. The monitor this host starts is not running
+    /// during its first start, so the drop here is emitted through a fake
+    /// the test starts itself, standing in for a delivery already queued.
+    /// Twin of `AppStateHarnessTests.testAVPNDropWhileTheStartAppliesLeavesNoEntryFile`.
+    func testAVPNDropWhileTheStartAppliesLeavesNoEntryFile() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true))
+        await host.awaitLaunchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        harness.vpn.start()
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        await host.deliveries.drain()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the drop found nothing to remove yet")
+        harness.hold.release()
+        try await start.value
+
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
+        XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
+        await host.stopRuntime()
+    }
 }
