@@ -42,6 +42,13 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// call one another (`restoreIfNeeded` ends in `clear`).
     private let operations = NSRecursiveLock()
 
+    /// Runs `body` as one operation, as the other managers' `serialized`: for
+    /// a host's platform block that checks whether it has been superseded and
+    /// then acts, with nothing landing in between.
+    package func serialized<T>(_ body: () throws -> T) rethrows -> T {
+        try operations.withLock(body)
+    }
+
     private let privilegeClient: PrivilegeClient
     /// Prior per-service DNS servers. Shared with every other platform surface
     /// so there is one answer to "what was here before us" rather than the

@@ -151,7 +151,7 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         var dnsServers: [String] = []
 
         /// Whether anything on the service routes traffic through a proxy.
-        var routesThroughAProxy: Bool {
+        package var routesThroughAProxy: Bool {
             webProxy.enabled || secureWebProxy.enabled || autoproxyEnabled
         }
     }

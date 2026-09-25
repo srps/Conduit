@@ -13,6 +13,10 @@ package protocol RuntimeReconcilerHost: AnyObject {
     /// snapshot rather than the presentation mirror: the mirror is an async
     /// hop behind.
     func runtimeState() -> RuntimeReconciler.RuntimeState
+    /// Returns once no start or stop is in flight, so the pass that follows
+    /// reads the runtime and acts on the surfaces after the lifecycle's
+    /// platform work has landed rather than beside it.
+    func awaitLifecycleIdle() async
     /// Re-applies the surfaces whose *contents* the config edit changed —
     /// resolver files, the system proxy, the environment block — using
     /// nothing but what the pass carries. Called only when the config
@@ -171,9 +175,18 @@ package final class RuntimeReconciler {
         let generation = generation
         task = Task { @MainActor in
             await previous?.value
+            // After the lifecycle's work, never beside it: a start's platform
+            // block still out on the host's queue acts on the config and
+            // flags it read when it began, and a pass landing in the middle
+            // would clear a surface the block then applies again. Twice,
+            // because a start can begin while this pass waits on the
+            // orchestrator; after the second wait nothing suspends until the
+            // pass is done.
+            await self.host?.awaitLifecycleIdle()
             guard let host else { return }
             if old != new {
                 await host.applyConfigChange(new, from: old)
+                await host.awaitLifecycleIdle()
             }
 
             let runtime = host.runtimeState()

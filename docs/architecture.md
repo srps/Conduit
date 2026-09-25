@@ -73,6 +73,7 @@ graph TD
 
     PMSim --> Kernel
     PMSim --> Auth
+    PMSim --> Platform
     PMSim --> SwiftNIO
 
     PMTunnel --> Kernel
@@ -102,7 +103,7 @@ graph TD
 | `ProxyPAC`           | ✓           | —         | —        | —           | —      | —    |
 | `PlatformMac`        | ✓           | —         | —        | —           | ✓      | —    |
 | `pm-proxy`           | ✓           | ✓         | ✓        | —           | —      | —    |
-| `pm-sim`             | ✓           | ✓         | —        | —           | ✓      | ✓    |
+| `pm-sim`             | ✓           | ✓         | ✓        | ✓           | ✓      | ✓    |
 | `pm-tunnel`          | ✓           | ✓         | —        | —           | —      | —    |
 | `pm-dns`             | ✓           | —         | —        | —           | —      | —    |
 | `pm-vpn-check`       | ✓           | —         | —        | ✓           | —      | ✓    |

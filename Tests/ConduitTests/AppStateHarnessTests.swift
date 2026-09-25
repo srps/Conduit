@@ -27,6 +27,8 @@ final class AppStateHarness {
     let loginItems = FakeLoginItems()
     let helper = FakeHelperLifecycle()
     let secrets = InMemorySecretStore()
+    /// Holds one machine call, subprocess or privileged, when armed.
+    let hold = HeldCall()
     private(set) var appState: AppState?
 
     init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
@@ -54,12 +56,16 @@ final class AppStateHarness {
     @discardableResult
     func launch() -> AppState {
         let machine = self.machine
+        let hold = self.hold
         let state = AppState(
             runtimeEnvironment: environment,
-            privilegeClient: machine,
+            privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
             helperLifecycle: helper,
             credentialStore: secrets,
-            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            commandRunner: { launchPath, arguments in
+                hold.pass(launchPath, arguments)
+                return try machine.run(launchPath, arguments)
+            },
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
@@ -330,7 +336,7 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(machine.dnsRelayRunning, "system DNS came up through the relay")
         let startsBefore = machine.privilege.commands(matching: .startDNSRelay).count
         let onMainBefore = machine.privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count
-        XCTAssertEqual(onMainBefore, 1, "the fake sees the main thread: `startDNS` still asks from it")
+        XCTAssertEqual(onMainBefore, 0, "`startDNS` asks from the platform work queue too")
 
         appState.handleDNSHealthResult(alive: false)
         // A second tick while the first restart is out adds nothing.
@@ -343,6 +349,303 @@ final class AppStateHarnessTests: XCTestCase {
             onMainBefore,
             "and the main thread did not wait on the helper for it"
         )
+    }
+
+    /// The start and stop surface work: 15 to 30 helper round trips and
+    /// `networksetup` reads on a machine with several services, which held
+    /// the main thread for as long as they took (#47). Every privileged
+    /// write the four paths make is asked for from the platform work queue.
+    func testProxyAndDNSStartAndStopWaitOnTheHelperOffTheMainThread() async throws {
+        let appState = try launch(
+            platform: PlatformIntegrationConfig(
+                manageSystemProxy: true,
+                manageEnvironmentVariables: true,
+                manageDNSResolvers: true,
+                manageSystemDNS: true
+            )
+        )
+        await harness.setVPN(.connected)
+
+        try await appState.startProxy()
+        await appState.startDNS()
+        XCTAssertTrue(wifi.routesThroughAProxy)
+        XCTAssertTrue(machine.dnsRelayRunning)
+        XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53")
+        await appState.stopDNS()
+        await appState.stopProxy()
+        XCTAssertFalse(wifi.routesThroughAProxy)
+        XCTAssertFalse(machine.dnsRelayRunning)
+        XCTAssertNil(machine.resolverFile(for: "corp.example"))
+
+        let asked = Set(machine.privilege.commands.map(\.command))
+        XCTAssertTrue(
+            asked.isSuperset(of: [.applySystemProxy, .applyDNS, .removeDNS, .setDNSServers, .startDNSRelay, .stopDNSRelay, .setWebProxyEndpoint]),
+            "the starts and the stops reached the helper: \(asked)"
+        )
+        XCTAssertEqual(machine.privilege.mainThreadOperations, [], "and none of it from the main thread")
+    }
+
+    /// The start's surface work is held on the queue, and a stop is issued
+    /// then. The stop's clear is queued behind the start's apply, so the
+    /// machine ends cleared; and the start, overtaken, goes no further — no
+    /// login-item repair, no save, no "Proxy Enabled" for a proxy that is
+    /// down.
+    func testAStopIssuedWhileTheStartAppliesLandsLastAndTheStartGoesNoFurther() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        await harness.launchRecovery()
+        // The start's first read of the machine, once its listeners are up.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+
+        let start = Task { try await appState.startProxy() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
+        let stop = Task { await appState.stopProxy() }
+        // The stop takes the listeners down and then queues its clear, which
+        // waits behind the held apply.
+        await harness.settle("the stop has taken the listeners down") {
+            appState.runtimeSnapshot.runtimeStatus.state == .stopped
+        }
+        harness.hold.release()
+        try await start.value
+        await stop.value
+
+        XCTAssertFalse(wifi.routesThroughAProxy, "the stop's clear landed after the start's apply")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+        XCTAssertEqual(harness.loginItems.registrations, [], "the overtaken start did nothing after its apply")
+        let superseded = appState.eventLog.events.filter { $0.event == "lifecycle.superseded" }
+        XCTAssertEqual(superseded.map(\.detail), ["operation=proxy_start generation=1 current=2 reason=superseded"])
+    }
+
+    /// A VPN drop handled while the start's apply is out reconciles the
+    /// entry files before the apply has written them, and the apply then
+    /// writes them for the tunnel as it was when it was queued. The start
+    /// puts them where the gate is once its apply returns: a split-DNS file
+    /// left with the tunnel down sends its domain, the VPN gateway's own
+    /// name included, to servers only the tunnel reaches.
+    func testAVPNDropWhileTheStartAppliesLeavesNoEntryFile() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true))
+        await harness.setVPN(.connected)
+        await harness.launchRecovery()
+        // The start's first read of the machine: the entry files come after.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+
+        let start = Task { try await appState.startProxy() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
+        await harness.setVPN(.disconnected(reason: .userInitiated))
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the drop found nothing to remove yet")
+        harness.hold.release()
+        try await start.value
+
+        XCTAssertTrue(isRunning(appState))
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
+        XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
+    }
+
+    /// Quit while a start's apply is out. The apply goes one manager after
+    /// another, and the managers' locks order one operation, not the
+    /// sequence, so a quit that cleared in between could clear a surface the
+    /// apply then wrote. Termination waits for the platform queue before its
+    /// first clear.
+    /// A settings change reconciled while a start's platform block is still
+    /// out. The block acts on the flags it read when it began; a pass that
+    /// cleared the environment in the middle of it had the block publish the
+    /// variables again afterwards, with the switch off. The pass waits for
+    /// the start and runs after it.
+    func testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        await harness.launchRecovery()
+        // The system proxy step, before the environment one.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await appState.startProxy() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+
+        appState.platformConfig.manageEnvironmentVariables = false
+        appState.saveConfig()
+        // Either the pass is waiting for the start, or it has run.
+        await harness.settle("the pass is waiting for the start, or done") {
+            appState.passesWaitingForLifecycle > 0 || !appState.reconciler.hasPassInFlight
+        }
+        XCTAssertEqual(appState.passesWaitingForLifecycle, 1, "the pass waits for the start's platform work")
+        harness.hold.release()
+        try await start.value
+        await appState.reconciler.drain()
+
+        XCTAssertTrue(isRunning(appState))
+        XCTAssertTrue(wifi.routesThroughAProxy, "the system proxy switch is still on")
+        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "the environment follows the switch the user turned off")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
+        let zshrc = (try? String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)) ?? ""
+        XCTAssertFalse(zshrc.contains("Conduit"), "and no shell block is left behind")
+    }
+
+    /// Repeated DNS stops while the first is held on a slow helper. Each
+    /// used to queue its own teardown behind the first, unbounded; now they
+    /// join the one in flight, and one teardown runs.
+    func testRepeatedDNSStopsWhileTheFirstIsHeldRunOneTeardown() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        await appState.startDNS()
+        XCTAssertTrue(machine.dnsRelayRunning)
+        let relayStopsBefore = machine.privilege.commands(matching: .stopDNSRelay).count
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
+
+        let first = Task { await appState.stopDNS() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        let more = (0..<4).map { _ in Task { await appState.stopDNS() } }
+        await harness.settle("the four later stops have arrived") {
+            appState.eventLog.events.filter { $0.event == "lifecycle.coalesced" }.count == 4
+                || appState.lifecycleGenerations.dns >= 6
+        }
+        harness.hold.release()
+        await first.value
+        for task in more { await task.value }
+
+        XCTAssertEqual(machine.privilege.commands(matching: .stopDNSRelay).count - relayStopsBefore, 1, "one teardown for five stops")
+        XCTAssertEqual(appState.lifecycleGenerations.dns, 2, "the start and one stop")
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "lifecycle.coalesced" }.map(\.detail), Array(repeating: "operation=dns_stop joined=2", count: 4))
+        XCTAssertFalse(machine.dnsRelayRunning)
+        XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .stopped)
+    }
+
+    /// Quit while a start's platform step is held on a slow helper. Quit
+    /// waits for the queue only so long, then clears; the held step's own
+    /// manager is cleared after the step, by that manager's lock, and the
+    /// start stops at its next step.
+    func testQuitWhileAStartIsHeldProceedsAfterTheDeadline() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true, manageDNSResolvers: true))
+        appState.terminationDrainDeadlineMilliseconds = 200
+        await harness.setVPN(.connected)
+        await harness.launchRecovery()
+        // The environment step: the system proxy is already applied.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/bin/launchctl" && arguments.first == "setenv"
+        }
+        let start = Task { try await appState.startProxy() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        XCTAssertTrue(wifi.routesThroughAProxy, "the system proxy step landed before the hold")
+
+        // Quit blocks the main thread, so the hold is watched and let go from
+        // another. It releases as soon as quit has cleared the system proxy
+        // with the start still held; the cap only ends a quit that never does.
+        let machine = self.machine
+        let hold = harness.hold
+        let clearedWhileHeld = LockedCount()
+        DispatchQueue.global().async {
+            var cleared = 0
+            for _ in 0..<10_000 {
+                if !machine.service("Wi-Fi").routesThroughAProxy { cleared = 1; break }
+                usleep(1_000)
+            }
+            clearedWhileHeld.set(cleared)
+            hold.release()
+        }
+        appState.performTerminationCleanup()
+        try await start.value
+
+        XCTAssertEqual(clearedWhileHeld.value, 1, "quit cleared the system proxy while the start was still held")
+        XCTAssertTrue(
+            appState.eventLog.events.contains { $0.event == "lifecycle.termination_drain_expired" && $0.detail == "deadline_ms=200" },
+            "and said it stopped waiting"
+        )
+        XCTAssertFalse(wifi.routesThroughAProxy)
+        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "the held environment step was cleared after it landed")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
+        XCTAssertEqual(machine.privilege.commands(matching: .applyDNS), [], "the step after the held one never ran")
+        XCTAssertNil(machine.resolverFile(for: "corp.example"))
+    }
+
+    /// A restart whose start a stop overtakes did not restart anything, and
+    /// must not say it did.
+    func testARestartOvertakenByAStopDoesNotReportARestart() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        await harness.launchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let restart = Task { await appState.restartProxyLifecycle() }
+        await harness.hold.waitUntilReached()
+        let stop = Task { await appState.stopProxy() }
+        await harness.settle("the stop has begun") { appState.lifecycleGenerations.proxy == 2 }
+        harness.hold.release()
+        let outcome = await restart.value
+        await stop.value
+
+        XCTAssertEqual(outcome, .notStarted, "no \"Proxy Restarted\" for a proxy the stop took down")
+        XCTAssertFalse(wifi.routesThroughAProxy)
+    }
+
+    func testQuittingWhileAStartAppliesClearsAfterTheApply() async throws {
+        let appState = try launch(
+            platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true, manageSystemDNS: true)
+        )
+        await harness.launchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await appState.startProxy() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
+
+        // Termination blocks the main thread, so the hold is let go from
+        // another. What it finds is counted: with the wait, termination has
+        // asked the helper for nothing while the apply is still held. The
+        // pause only gives a termination that does not wait the time to
+        // show it; one that waits passes whatever it is.
+        let machine = self.machine
+        let hold = harness.hold
+        let commandsBefore = machine.privilege.commands.count
+        let commandsAtRelease = LockedCount()
+        DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(300)) {
+            commandsAtRelease.set(machine.privilege.commands.count)
+            hold.release()
+        }
+        appState.performTerminationCleanup()
+        try await start.value
+
+        XCTAssertEqual(commandsAtRelease.value, commandsBefore, "termination asked for nothing while the apply was out")
+        XCTAssertFalse(wifi.routesThroughAProxy, "termination's clear landed after the start's apply")
+        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"])
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
+        XCTAssertEqual(harness.loginItems.registrations, [], "and the start went no further")
+    }
+
+    /// The same for the DNS forwarder: a stop issued while the start points
+    /// the interfaces at the relay restores them after it, and the start
+    /// neither persists "DNS on" nor leaves a health timer that would
+    /// restart the relay the stop took down.
+    func testADNSStopIssuedWhileTheStartAppliesLandsLast() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemDNS: true))
+        machine.describe("Wi-Fi") { $0.dnsServers = ["192.0.2.53"] }
+        await harness.launchRecovery()
+        // The relay start inside `SystemDNSManager.apply`, after the capture.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.startDNSRelay.rawValue }
+
+        let start = Task { await appState.startDNS() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
+        let stop = Task { await appState.stopDNS() }
+        await harness.settle("the stop has begun") { appState.lifecycleGenerations.dns == 2 }
+        harness.hold.release()
+        await start.value
+        await stop.value
+
+        XCTAssertFalse(machine.dnsRelayRunning, "the stop's restore landed after the start's apply")
+        XCTAssertEqual(wifi.dnsServers, ["192.0.2.53"])
+        XCTAssertFalse(appState.config.dnsForwarderEnabled, "the overtaken start did not persist DNS as on")
+        XCTAssertFalse(appState.hasDNSHealthTimer, "nor start a health timer")
+        XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .stopped)
+        let superseded = appState.eventLog.events.filter { $0.event == "lifecycle.superseded" }
+        XCTAssertEqual(superseded.map(\.detail), ["operation=dns_start generation=1 current=2 reason=superseded"])
     }
 
     /// The probe that asks for a restart ran a moment ago. A stop that

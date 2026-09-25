@@ -310,6 +310,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         /// Holds the machine's `networksetup` listings when armed, so a
         /// scenario can keep one system DNS reconcile out while more arrive.
         let listings = HeldListings()
+        /// Holds one machine call, subprocess or privileged, when armed.
+        let hold = HeldCall()
         private let stateDirectory: URL
 
         init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
@@ -336,6 +338,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         func makeHost() throws -> DaemonRuntimeHost {
             let machine = self.machine
             let listings = self.listings
+            let hold = self.hold
             return DaemonRuntimeHost(
                 environment: environment,
                 logger: DiscardingLogSink(),
@@ -344,10 +347,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 // the way an established install has one.
                 configFilePredatesLaunch: true,
                 vpnStatusMonitor: vpn,
-                privilegeClient: machine,
+                privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
                 credentialStore: InMemorySecretStore(),
                 commandRunner: { launchPath, arguments in
                     if arguments.first == "-listallnetworkservices" { listings.passThrough() }
+                    hold.pass(launchPath, arguments)
                     return try machine.run(launchPath, arguments)
                 },
                 homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
@@ -708,6 +712,169 @@ final class DaemonRuntimeHostTests: XCTestCase {
             2 * listingsPerPass,
             "the pass that was out and one more for the four that arrived meanwhile"
         )
+        await host.stopRuntime()
+    }
+
+    // MARK: - Start and stop off the main actor (#47)
+
+    /// Twin of `AppStateHarnessTests.testProxyAndDNSStartAndStopWaitOnTheHelperOffTheMainThread`:
+    /// every privileged write a start and a stop make, system DNS included,
+    /// is asked for from the platform work queue.
+    func testStartAndStopWaitOnTheHelperOffTheMainThread() async throws {
+        let host = try launch(
+            platform: PlatformIntegrationConfig(
+                manageSystemProxy: true,
+                manageEnvironmentVariables: true,
+                manageDNSResolvers: true,
+                manageSystemDNS: true
+            ),
+            dnsForwarderEnabled: true
+        )
+        let privilege = harness.machine.privilege
+
+        try await host.startRuntime()
+        XCTAssertTrue(harness.wifi.routesThroughAProxy)
+        XCTAssertTrue(harness.machine.dnsRelayRunning)
+        await host.stopRuntime()
+        XCTAssertFalse(harness.wifi.routesThroughAProxy)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+
+        let asked = Set(privilege.commands.map(\.command))
+        XCTAssertTrue(
+            asked.isSuperset(of: [.applySystemProxy, .setDNSServers, .startDNSRelay, .stopDNSRelay, .setWebProxyEndpoint]),
+            "the start and the stop reached the helper: \(asked)"
+        )
+        XCTAssertEqual(privilege.mainThreadOperations, [], "and none of it from the main thread")
+    }
+
+    /// Twin of `AppStateHarnessTests.testAStopIssuedWhileTheStartAppliesLandsLastAndTheStartGoesNoFurther`.
+    /// The start's surface work is held on the queue; a stop issued then
+    /// queues its clears behind it. Released, the apply lands and the clear
+    /// lands after it, and the start, overtaken, starts nothing more: the
+    /// monitors it would start are what put resolver files back on the next
+    /// VPN transition.
+    func testAStopIssuedWhileTheStartAppliesLandsLastAndTheStartGoesNoFurther() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        await host.awaitLaunchRecovery()
+        // The start's first read of the machine, once its listeners are up.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+
+        let start = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
+        let stop = Task { await host.stopRuntime() }
+        for _ in 0..<5_000 where host.lifecycleGeneration < 2 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(host.lifecycleGeneration, 2, "the stop has begun")
+        harness.hold.release()
+        try await start.value
+        await stop.value
+
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "the stop's clear landed after the start's apply")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .stopped)
+        let superseded = host.orchestrator.eventLog.events.filter { $0.event == "lifecycle.superseded" }
+        XCTAssertEqual(superseded.map(\.detail), ["operation=runtime_start generation=1 current=2 reason=superseded"])
+
+        // The overtaken start never started the VPN monitor, so a transition
+        // now reaches nothing.
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertNotEqual(host.orchestrator.snapshot.vpnState, .connected)
+    }
+
+    /// Twin of `AppStateHarnessTests.testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt`:
+    /// a reload's pass waits for the start's platform work, and the machine
+    /// ends as the reloaded config says.
+    func testAReloadWhileTheStartAppliesIsReconciledAfterIt() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        await host.awaitLaunchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+
+        let reloaded = LockedCount()
+        let harness = self.harness!
+        let reload = Task {
+            try await harness.flip(PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false), on: host)
+            reloaded.set(1)
+        }
+        for _ in 0..<5_000 where host.passesWaitingForLifecycle == 0 && reloaded.value != 1 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(host.passesWaitingForLifecycle, 1, "the reload's pass waits for the start's platform work")
+        harness.hold.release()
+        try await start.value
+        try await reload.value
+
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertTrue(harness.wifi.routesThroughAProxy)
+        XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"], "the environment follows the reloaded switch")
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
+        await host.stopRuntime()
+    }
+
+    /// Twin of `AppStateHarnessTests.testRepeatedDNSStopsWhileTheFirstIsHeldRunOneTeardown`:
+    /// stops while a stop is held join it instead of queueing teardowns.
+    func testRepeatedStopsWhileTheFirstIsHeldRunOneTeardown() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        try await host.startRuntime()
+        XCTAssertTrue(harness.wifi.routesThroughAProxy)
+        // The system proxy clear, the stop's second block.
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let first = Task { await host.stopRuntime() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        let more = (0..<4).map { _ in Task { await host.stopRuntime() } }
+        let events = host.orchestrator.eventLog
+        for _ in 0..<5_000 where events.events.filter({ $0.event == "lifecycle.coalesced" }).count < 4 && host.lifecycleGeneration < 6 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        harness.hold.release()
+        await first.value
+        for task in more { await task.value }
+
+        XCTAssertEqual(host.lifecycleGeneration, 2, "the start and one stop")
+        XCTAssertEqual(
+            events.events.filter { $0.event == "lifecycle.coalesced" }.map(\.detail),
+            Array(repeating: "operation=runtime_stop joined=2", count: 4)
+        )
+        XCTAssertFalse(harness.wifi.routesThroughAProxy)
+        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+    }
+
+    /// Codex review of #90: a VPN drop handled while the start's apply is
+    /// out finds no entry files yet, and the apply then writes them from the
+    /// gate it was queued with. The monitor this host starts is not running
+    /// during its first start, so the drop here is emitted through a fake
+    /// the test starts itself, standing in for a delivery already queued.
+    /// Twin of `AppStateHarnessTests.testAVPNDropWhileTheStartAppliesLeavesNoEntryFile`.
+    func testAVPNDropWhileTheStartAppliesLeavesNoEntryFile() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true))
+        await host.awaitLaunchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        harness.vpn.start()
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        await host.deliveries.drain()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the drop found nothing to remove yet")
+        harness.hold.release()
+        try await start.value
+
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
+        XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
         await host.stopRuntime()
     }
 }

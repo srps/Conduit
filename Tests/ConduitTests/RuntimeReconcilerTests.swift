@@ -29,6 +29,9 @@ private final class RecordingHost: RuntimeReconcilerHost {
         calls.compactMap { if case .perform(let action, _) = $0 { action } else { nil } }
     }
 
+    /// No lifecycle here; the hosts' harness scenarios cover the wait.
+    func awaitLifecycleIdle() async {}
+
     func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
         calls.append(.applyConfigChange(port: new.localPort))
         if holdNextApply {
