@@ -24,9 +24,13 @@ final class HelperCallerIdentityTests: XCTestCase {
         var stranger = pinned
         stranger.signingIdentifier = "a.out"
         stranger.satisfiesRequirement = false
-        guard case .refused(let message) = HelperAdmission.callerVerdict(policy: .enforced(requirement: "x"), identity: stranger) else {
+        guard case .refused(let why) = HelperAdmission.callerVerdict(policy: .enforced(requirement: "x"), identity: stranger) else {
             return XCTFail("a program outside the pin was admitted")
         }
+        XCTAssertEqual(why, .notPinned(identifier: "a.out"))
+        XCTAssertEqual(why.auditOutcome, .refusedNotPinned)
+        let message = why.message
+        XCTAssertTrue(message.hasPrefix(HelperCallerRefusal.messagePrefix), message)
         XCTAssertTrue(message.contains("'a.out'"), message)
         XCTAssertTrue(message.contains("install-helper.sh"), "the refusal must say how to fix it: \(message)")
     }
@@ -34,10 +38,11 @@ final class HelperCallerIdentityTests: XCTestCase {
     func testEnforcedRefusesAPinnedProgramWithoutTheHardenedRuntime() {
         var injectable = pinned
         injectable.hardenedRuntime = false
-        guard case .refused(let message) = HelperAdmission.callerVerdict(policy: .enforced(requirement: "x"), identity: injectable) else {
+        guard case .refused(let why) = HelperAdmission.callerVerdict(policy: .enforced(requirement: "x"), identity: injectable) else {
             return XCTFail("a program open to DYLD_INSERT_LIBRARIES was admitted")
         }
-        XCTAssertTrue(message.contains("hardened runtime"), message)
+        XCTAssertEqual(why.auditOutcome, .refusedNoHardenedRuntime)
+        XCTAssertTrue(why.message.contains("hardened runtime"), why.message)
     }
 
     func testEnforcedRefusesWhenTheIdentityCannotBeRead() {
@@ -63,10 +68,58 @@ final class HelperCallerIdentityTests: XCTestCase {
     }
 
     func testAnUntrustedPinRefusesEvenThePinnedProgram() {
-        guard case .refused(let message) = HelperAdmission.callerVerdict(policy: .untrusted(reason: "mode 666"), identity: pinned) else {
+        guard case .refused(let why) = HelperAdmission.callerVerdict(policy: .untrusted(reason: "mode 666"), identity: pinned) else {
             return XCTFail("a tampered pin must not admit anyone")
         }
-        XCTAssertTrue(message.contains("mode 666") && message.contains("install-helper.sh"), message)
+        XCTAssertEqual(why.auditOutcome, .refusedPolicyUntrusted)
+        XCTAssertTrue(why.message.contains("mode 666") && why.message.contains("install-helper.sh"), why.message)
+    }
+
+    // MARK: - The audit line (Codex review on #89)
+
+    /// A signing identifier is whatever the peer's signer typed. It must not
+    /// be able to end the line, fake a field, or run on.
+    func testAPeerChosenIdentifierCannotForgeAuditFields() {
+        let forged = HelperCallerIdentity(
+            pid: 7, uid: 501,
+            signingIdentifier: "evil\nConduitHelper peer id=io.github.srps.Conduit outcome=ok \u{1b}[2J",
+            cdhashPrefix: "abcdef012345"
+        )
+        let line = HelperAudit.line(identity: forged, verdict: .refused(.notPinned(identifier: forged.signingIdentifier)),
+                                    command: .applySystemProxy, outcome: .refusedNotPinned)
+        XCTAssertFalse(line.contains("\n"), line)
+        XCTAssertFalse(line.contains("\u{1b}"), line)
+        XCTAssertEqual(line.components(separatedBy: "outcome=").count, 2, "a second outcome field was forged: \(line)")
+        XCTAssertEqual(line.components(separatedBy: " id=").count, 2, "a second id field was forged: \(line)")
+        XCTAssertTrue(line.hasSuffix("command=apply-system-proxy outcome=refused-not-pinned"), line)
+        XCTAssertTrue(HelperCallerRefusal.notPinned(identifier: forged.signingIdentifier).message.contains("'evil?ConduitHelper?peer?id?io.github.srps.Conduit"))
+    }
+
+    func testTheIdentifierFieldIsBounded() {
+        let long = String(repeating: "a", count: 10_000)
+        let safe = HelperAudit.safe(long)
+        XCTAssertLessThanOrEqual(safe.count, HelperAudit.maxFieldLength + 1)
+        XCTAssertEqual(HelperAudit.safe("io.github.srps.Conduit"), "io.github.srps.Conduit")
+    }
+
+    /// The outcome is a closed set of fixed words, so no request value or
+    /// error text (which echoes request values) can reach the log through it.
+    func testEveryAuditOutcomeIsAFixedWord() {
+        for outcome in HelperAuditOutcome.allCases {
+            XCTAssertNotNil(outcome.rawValue.range(of: "^[a-z-]+$", options: .regularExpression), outcome.rawValue)
+        }
+    }
+
+    func testEveryIdentityRefusalCarriesThePrefixTheAppReads() {
+        let all: [HelperCallerRefusal] = [
+            .policyUntrusted(reason: "x"), .identityUnreadable,
+            .notPinned(identifier: "a"), .notPinned(identifier: nil),
+            .noHardenedRuntime(identifier: "a"), .noHardenedRuntime(identifier: nil),
+        ]
+        for refusal in all {
+            XCTAssertTrue(refusal.message.hasPrefix(HelperCallerRefusal.messagePrefix), refusal.message)
+        }
+        XCTAssertFalse("peer is not the console user".hasPrefix(HelperCallerRefusal.messagePrefix))
     }
 
     // MARK: - The requirement file

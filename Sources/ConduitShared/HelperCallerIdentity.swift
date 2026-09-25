@@ -80,11 +80,12 @@ package struct HelperCallerIdentity: Equatable, Sendable {
         var parts = [
             "pid=\(pid.map(String.init) ?? "?")",
             "uid=\(uid.map(String.init) ?? "?")",
-            "id=\(signingIdentifier ?? "?")",
+            "id=\(signingIdentifier.map(HelperAudit.safe) ?? "?")",
             "cdhash=\(cdhashPrefix ?? "?")",
             "runtime=\(hardenedRuntime ? "yes" : "no")",
         ]
-        if let readFailure { parts.append("identity-error=\"\(readFailure)\"") }
+        // The helper's own words (`strerror`, an OSStatus message), bounded all the same.
+        if let readFailure { parts.append("identity-error=\"\(HelperAudit.bounded(readFailure))\"") }
         return parts.joined(separator: " ")
     }
 }
@@ -102,9 +103,61 @@ package enum HelperCallerVerdict: Equatable, Sendable {
     case verified
     /// No pin installed: identity is recorded, not required.
     case unenforced
-    /// Refused whatever it asks. The message goes to the peer as the
-    /// `errorMessage` of an `.unauthorized` refusal.
-    case refused(String)
+    /// Refused whatever it asks.
+    case refused(HelperCallerRefusal)
+}
+
+/// Why identity refused a peer. Sent to the peer as the `errorMessage` of an
+/// `.unauthorized` refusal, and logged as `auditOutcome` only.
+package enum HelperCallerRefusal: Equatable, Sendable {
+    /// The pin exists but cannot be vouched for. `reason` is the helper's own
+    /// text (a path, a mode, `strerror`), never the peer's.
+    case policyUntrusted(reason: String)
+    /// The Security framework could not say what the peer is.
+    case identityUnreadable
+    /// The peer's code fails the pin. The identifier is the peer's own
+    /// choice of name, so it only ever appears through `auditSafe`.
+    case notPinned(identifier: String?)
+    /// Pinned, but open to `DYLD_INSERT_LIBRARIES`.
+    case noHardenedRuntime(identifier: String?)
+
+    /// Every identity refusal's `errorMessage` starts with this, and nothing
+    /// else the helper sends does. The app reads it to tell "this build is
+    /// not the pinned one" (rebuild, rerun `install-helper.sh`) from "you are
+    /// not the console user", without a new wire field: an older app just
+    /// shows the message. Part of the helper contract; do not reword it.
+    package static let messagePrefix = "caller identity: "
+
+    package var message: String {
+        switch self {
+        case .policyUntrusted(let reason):
+            return Self.messagePrefix
+                + "the helper's caller pin is not trustworthy (\(reason)); an administrator must rerun sudo ./install-helper.sh"
+        case .identityUnreadable:
+            return Self.messagePrefix + "the helper could not read this program's code signature"
+        case .notPinned(let identifier):
+            return Self.messagePrefix
+                + "\(Self.who(identifier)) is not signed by the identity this helper was installed for; "
+                + "build the app with ./bundle-app.sh after scripts/create-signing-identity.sh, "
+                + "then rerun sudo ./install-helper.sh"
+        case .noHardenedRuntime(let identifier):
+            return Self.messagePrefix
+                + "\(Self.who(identifier)) is not signed with the hardened runtime; rebuild it with ./bundle-app.sh"
+        }
+    }
+
+    package var auditOutcome: HelperAuditOutcome {
+        switch self {
+        case .policyUntrusted: return .refusedPolicyUntrusted
+        case .identityUnreadable: return .refusedIdentityUnreadable
+        case .notPinned: return .refusedNotPinned
+        case .noHardenedRuntime: return .refusedNoHardenedRuntime
+        }
+    }
+
+    private static func who(_ identifier: String?) -> String {
+        identifier.map { "'\(HelperAudit.safe($0))'" } ?? "this program"
+    }
 }
 
 extension HelperAdmission {
@@ -118,24 +171,88 @@ extension HelperAdmission {
         case .unenforced:
             return .unenforced
         case .untrusted(let reason):
-            return .refused("helper caller policy is not trustworthy (\(reason)); an administrator must rerun sudo ./install-helper.sh")
+            return .refused(.policyUntrusted(reason: reason))
         case .enforced:
-            let who = identity.signingIdentifier.map { "'\($0)'" } ?? "this process"
-            if let failure = identity.readFailure {
-                return .refused("could not read the caller's code signature (\(failure))")
+            if identity.readFailure != nil {
+                return .refused(.identityUnreadable)
             }
             guard identity.satisfiesRequirement == true else {
-                return .refused(
-                    "\(who) is not signed by the identity this helper was installed for; "
-                    + "build the app with ./bundle-app.sh after scripts/create-signing-identity.sh, "
-                    + "then rerun sudo ./install-helper.sh"
-                )
+                return .refused(.notPinned(identifier: identity.signingIdentifier))
             }
             guard identity.hardenedRuntime else {
-                return .refused("\(who) is not signed with the hardened runtime; rebuild it with ./bundle-app.sh")
+                return .refused(.noHardenedRuntime(identifier: identity.signingIdentifier))
             }
             return .verified
         }
+    }
+}
+
+// MARK: - Audit
+
+/// How a connection ended, as the audit line records it: a closed set, so
+/// nothing a peer sends — a domain, a service name, a URL echoed back in an
+/// error — can reach the log through it. The peer still gets the full error
+/// text in its reply; the log gets the category.
+package enum HelperAuditOutcome: String, CaseIterable, Sendable {
+    case ok
+    case invalidRequest = "invalid-request"
+    case unsupportedVersion = "unsupported-version"
+    case invalidArguments = "invalid-arguments"
+    case commandFailed = "command-failed"
+    case relayFailed = "relay-failed"
+    case refusedNotConsoleUser = "refused-not-console-user"
+    case deferredNoConsoleUser = "deferred-no-console-user"
+    case refusedPolicyUntrusted = "refused-policy-untrusted"
+    case refusedIdentityUnreadable = "refused-identity-unreadable"
+    case refusedNotPinned = "refused-not-pinned"
+    case refusedNoHardenedRuntime = "refused-no-hardened-runtime"
+}
+
+package enum HelperAudit {
+    /// The most of a peer-chosen string a log line will carry.
+    package static let maxFieldLength = 128
+
+    /// A peer-chosen string (its signing identifier) made fit for one log
+    /// line: bundle-identifier characters only, everything else `?`, bounded.
+    /// A code signature's identifier is whatever its signer typed, and the
+    /// peer being logged is the one under suspicion.
+    package static func safe(_ value: String) -> String {
+        var out = ""
+        for scalar in value.unicodeScalars.prefix(maxFieldLength) {
+            let ok = ("a"..."z").contains(scalar) || ("A"..."Z").contains(scalar)
+                || ("0"..."9").contains(scalar) || scalar == "." || scalar == "-" || scalar == "_"
+            out.unicodeScalars.append(ok ? scalar : "?")
+        }
+        if value.unicodeScalars.count > maxFieldLength { out += "…" }
+        return out
+    }
+
+    /// The helper's own text for one quoted field: printable ASCII, no quote,
+    /// bounded. For words the helper chose, not the peer.
+    package static func bounded(_ value: String) -> String {
+        var out = ""
+        for scalar in value.unicodeScalars.prefix(maxFieldLength) {
+            let printable = scalar.value >= 0x20 && scalar.value < 0x7f && scalar != "\""
+            out.unicodeScalars.append(printable ? scalar : "?")
+        }
+        return out
+    }
+
+    /// The one line per connection. Takes no request values and no error
+    /// text: only what the helper itself measured or decided.
+    package static func line(
+        identity: HelperCallerIdentity,
+        verdict: HelperCallerVerdict,
+        command: HelperCommand?,
+        outcome: HelperAuditOutcome
+    ) -> String {
+        let word: String
+        switch verdict {
+        case .verified: word = "verified"
+        case .unenforced: word = "unenforced"
+        case .refused: word = "refused"
+        }
+        return "peer \(identity.auditSummary) identity=\(word) command=\(command?.rawValue ?? "?") outcome=\(outcome.rawValue)"
     }
 }
 

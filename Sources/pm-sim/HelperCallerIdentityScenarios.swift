@@ -72,11 +72,13 @@ enum HelperCallerIdentityScenarios {
             let verdict = HelperAdmission.callerVerdict(policy: policy, identity: identity)
             if identity.hardenedRuntime {
                 check("enforced: the pinned program under the hardened runtime is verified", verdict == .verified)
-            } else if case .refused(let message) = verdict {
-                check("enforced: the pinned program without the hardened runtime is refused", message.contains("hardened runtime"))
             } else {
-                check("enforced: the pinned program without the hardened runtime is refused", false)
+                check("enforced: the pinned program without the hardened runtime is refused",
+                      verdict == .refused(.noHardenedRuntime(identifier: identity.signingIdentifier)))
             }
+            // Whatever was refused, the audit line carries a category, not text.
+            let line = HelperAudit.line(identity: identity, verdict: verdict, command: nil, outcome: .refusedNoHardenedRuntime)
+            check("the audit line is one line of bounded fields", !line.contains("\n") && line.hasSuffix("outcome=refused-no-hardened-runtime"))
         }
 
         // Tampered: a pin anyone could have rewritten refuses even the pinned program.

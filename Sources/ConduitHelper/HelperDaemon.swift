@@ -106,8 +106,8 @@ enum HelperDaemon {
             // on each read, so a peer that drips bytes gains nothing by it.
             // A peer that will be refused whatever it asks gets a fraction.
             let refusalBeforeReading: PeerRefusal?
-            if case .refused(let message) = callerVerdict {
-                refusalBeforeReading = PeerRefusal(reason: .unauthorized, message: message)
+            if case .refused(let why) = callerVerdict {
+                refusalBeforeReading = PeerRefusal(reason: .unauthorized, message: why.message, outcome: why.auditOutcome)
             } else {
                 refusalBeforeReading = peerRefusalBeforeReading(clientFD).map(PeerRefusal.init(uidRefusal:))
             }
@@ -133,41 +133,40 @@ enum HelperDaemon {
             // a peer whose request was deliberately never decoded.
             let refusal = refusalBeforeReading
                 ?? peerRefusal(clientFD, command: request?.command, values: request?.values ?? []).map(PeerRefusal.init(uidRefusal:))
-            // A peer refused early has no command in its line: its request is
-            // deliberately never decoded.
-            let audit = "peer \(identity.auditSummary) identity=\(callerVerdict.auditWord) command=\(request?.command.rawValue ?? "?")"
+            // The audit line is built from what the helper measured and
+            // decided, never from the request's values or an error's text:
+            // those carry whatever the peer sent. A peer refused early has
+            // no command in its line, since its request is never decoded.
             if let refusal {
+                let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request?.command, outcome: refusal.outcome)
                 switch refusal.reason {
-                case .unauthorized:
-                    HelperLog.warning("\(audit) outcome=refused(unauthorized): \(refusal.message)")
-                case .noConsoleUser:
-                    HelperLog.notice("\(audit) outcome=deferred(noConsoleUser): \(refusal.message)")
+                case .unauthorized: HelperLog.warning(line)
+                case .noConsoleUser: HelperLog.notice(line)
                 }
                 writeLine(fd: clientFD, response: .refused(refusal.reason, refusal.message), deadline: replyDeadline)
                 close(clientFD)
                 continue
             }
-            let response = handleConnection(clientFD, request: request, replyDeadline: replyDeadline)
+            let outcome = handleConnection(clientFD, request: request, replyDeadline: replyDeadline)
             close(clientFD)
-            let outcome = response.success ? "ok" : "error: \(response.errorMessage ?? "unknown")"
+            let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request?.command, outcome: outcome)
             // A ping changes nothing and arrives every health tick; it is
             // logged where it can be read live without filling the store.
-            if request?.command == .ping, response.success {
-                HelperLog.info("\(audit) outcome=\(outcome)")
+            if request?.command == .ping, outcome == .ok {
+                HelperLog.info(line)
             } else {
-                HelperLog.notice("\(audit) outcome=\(outcome)")
+                HelperLog.notice(line)
             }
         }
     }
 
     // MARK: - Connection Handling
 
-    /// Returns what was answered, for the audit line.
-    private static func handleConnection(_ fd: Int32, request: HelperRequest?, replyDeadline: UInt64) -> HelperResponse {
+    /// Returns how it ended, for the audit line.
+    private static func handleConnection(_ fd: Int32, request: HelperRequest?, replyDeadline: UInt64) -> HelperAuditOutcome {
         guard let request else {
-            let response = HelperResponse.error("Invalid request")
-            writeLine(fd: fd, response: response, deadline: replyDeadline)
-            return response
+            writeLine(fd: fd, response: .error("Invalid request"), deadline: replyDeadline)
+            return .invalidRequest
         }
         // A range, not an exact match. The helper outlives the app that
         // installed it, so an older client can legitimately be on the other end
@@ -178,62 +177,69 @@ enum HelperDaemon {
         // Unversioned frames still fail: they decode as 0, which is outside the
         // range, and the threat model requires the helper to reject them.
         guard let replyVersion = HelperProtocolVersion.replyVersion(forRequest: request.protocolVersion) else {
-            let response = HelperResponse.error(
+            writeLine(fd: fd, response: .error(
                 "Unsupported helper protocol version \(request.protocolVersion); this helper speaks \(HelperProtocolVersion.minimumSupported)–\(HelperProtocolVersion.current)"
-            )
-            writeLine(fd: fd, response: response, deadline: replyDeadline)
-            return response
+            ), deadline: replyDeadline)
+            return .unsupportedVersion
         }
-        var response = processRequest(request)
+        let (processed, outcome) = processRequest(request)
+        var response = processed
         // Answer in the dialect we were addressed in.
         response.protocolVersion = replyVersion
         // The operation's own time is not the peer's: the reply gets a fresh
         // window once there is something to send.
         writeLine(fd: fd, response: response, deadline: HelperLineIO.deadline(afterMilliseconds: TransactionBudget.admitted.replyMilliseconds))
-        return response
+        return outcome
     }
 
-    private static func processRequest(_ request: HelperRequest) -> HelperResponse {
+    /// The reply, and its category for the audit line.
+    private static func processRequest(_ request: HelperRequest) -> (HelperResponse, HelperAuditOutcome) {
         // One budget for every child the command runs, `networksetup` and
         // `ifconfig` alike. The client's deadline is built from the same number.
         let deadline = HelperLineIO.deadline(afterMilliseconds: HelperSubprocess.operationMilliseconds)
         switch request.command {
         case .ping:
-            return .ok()
+            return (.ok(), .ok)
         case .startDNSRelay:
             guard let portStr = request.values.first,
                   let port = Int(portStr), (1...65535).contains(port) else {
-                return .error("Invalid target port")
+                return (.error("Invalid target port"), .invalidArguments)
             }
-            return startDNSRelay(targetPort: port)
+            return relayOutcome(startDNSRelay(targetPort: port))
         case .stopDNSRelay:
             stopDNSRelay()
-            return .ok()
+            return (.ok(), .ok)
         case .startTCPRelay:
             guard request.values.count >= 2,
                   let listenPort = Int(request.values[0]), (1...65535).contains(listenPort),
                   let targetPort = Int(request.values[1]), (1...65535).contains(targetPort) else {
-                return .error("Invalid listen/target port")
+                return (.error("Invalid listen/target port"), .invalidArguments)
             }
             let host = request.values.count >= 3 ? request.values[2] : "127.44.3.0"
             guard HelperInputValidator.validateRelayBindHost(host) else {
-                return .error("Invalid relay bind host")
+                return (.error("Invalid relay bind host"), .invalidArguments)
             }
-            return startTCPRelay(listenPort: listenPort, targetPort: targetPort, host: host, deadline: deadline)
+            return relayOutcome(startTCPRelay(listenPort: listenPort, targetPort: targetPort, host: host, deadline: deadline))
         case .stopTCPRelay:
             stopTCPRelay(deadline: deadline)
-            return .ok()
+            return (.ok(), .ok)
         case .applyDNS, .removeDNS, .applySystemProxy, .clearSystemProxy,
              .setProxyBypass, .setAutoproxyURL, .disableAutoproxy,
              .setWebProxyEndpoint, .setAutoproxy, .setDNSServers:
             let args = HelperArguments(command: request.command, values: request.values)
             do {
                 try HelperTool.run(arguments: args, deadline: deadline)
-                return .ok()
+                return (.ok(), .ok)
             } catch {
-                return .error(error.localizedDescription)
+                let outcome: HelperAuditOutcome
+                if case HelperToolError.invalidInput = error { outcome = .invalidArguments } else { outcome = .commandFailed }
+                return (.error(error.localizedDescription), outcome)
             }
         }
+    }
+
+    private static func relayOutcome(_ response: HelperResponse) -> (HelperResponse, HelperAuditOutcome) {
+        (response, response.success ? .ok : .relayFailed)
     }
 
     // MARK: - Socket I/O
@@ -266,20 +272,25 @@ enum HelperDaemon {
 
     // MARK: - Caller identity (#46)
 
-    /// A refusal and the words the peer is given for it.
+    /// A refusal, the words the peer is given for it, and the category the
+    /// audit line records instead of those words.
     private struct PeerRefusal {
         var reason: HelperRefusal
         var message: String
+        var outcome: HelperAuditOutcome
 
-        init(reason: HelperRefusal, message: String) {
+        init(reason: HelperRefusal, message: String, outcome: HelperAuditOutcome) {
             self.reason = reason
             self.message = message
+            self.outcome = outcome
         }
 
         init(uidRefusal: HelperRefusal) {
             switch uidRefusal {
-            case .unauthorized: self.init(reason: .unauthorized, message: "peer is not the console user")
-            case .noConsoleUser: self.init(reason: .noConsoleUser, message: "no console user yet")
+            case .unauthorized:
+                self.init(reason: .unauthorized, message: "peer is not the console user", outcome: .refusedNotConsoleUser)
+            case .noConsoleUser:
+                self.init(reason: .noConsoleUser, message: "no console user yet", outcome: .deferredNoConsoleUser)
             }
         }
     }
@@ -546,16 +557,6 @@ enum HelperDaemon {
         } catch {
             HelperLog.error("ifconfig \(arguments.joined(separator: " ")) did not run: \(error.localizedDescription)")
             return -1
-        }
-    }
-}
-
-private extension HelperCallerVerdict {
-    var auditWord: String {
-        switch self {
-        case .verified: return "verified"
-        case .unenforced: return "unenforced"
-        case .refused: return "refused"
         }
     }
 }
