@@ -115,6 +115,8 @@ To have the helper admit only Conduit itself, not any program running as you, si
 scripts/create-signing-identity.sh
 ```
 
+It asks you for a one-time transfer passphrase, then macOS asks for it once more when importing the key into your login keychain.
+
 Then rebuild and reinstall the app (`./bundle-app.sh --install` signs with that identity and the hardened runtime) and rerun `sudo ./install-helper.sh`: it pins the app's signing certificate. App updates signed with the same identity keep working without reinstalling the helper. An ad-hoc signed app leaves the helper unenforced and the install says so.
 
 Remove it with:
