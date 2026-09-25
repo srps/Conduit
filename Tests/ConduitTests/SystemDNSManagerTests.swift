@@ -754,7 +754,7 @@ final class SystemDNSManagerTests: XCTestCase {
 
     func testRestoreIfNeededNoOpsWithoutFile() {
         let manager = makeManager()
-        manager.restoreIfNeeded(logger: nil)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .nothingToDo(.nothingRecorded))
         XCTAssertTrue(recording.commands.isEmpty)
     }
 
@@ -767,7 +767,7 @@ final class SystemDNSManagerTests: XCTestCase {
 
         writeSavedState(SavedDNS(interfaces: [service: ["8.8.8.8"]]))
 
-        manager.restoreIfNeeded(logger: nil)
+        _ = manager.restoreIfNeeded(logger: nil)
 
         if recording.commands.isEmpty {
             // Port 53 is in use on this machine (e.g., mDNSResponder), so restore was skipped.
@@ -792,7 +792,7 @@ final class SystemDNSManagerTests: XCTestCase {
         let eightDaysAgo = Date().addingTimeInterval(-8 * 24 * 3600)
         writeSavedState(SavedDNS(savedAt: eightDaysAgo, interfaces: [service: ["8.8.8.8"]]))
 
-        manager.restoreIfNeeded(logger: nil)
+        _ = manager.restoreIfNeeded(logger: nil)
 
         XCTAssertFalse(manager.hasSavedState(), "Stale state should always be cleaned up")
     }
@@ -818,7 +818,7 @@ final class SystemDNSManagerTests: XCTestCase {
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
             relayIsLive: { false }
         )
-        manager.restoreIfNeeded(logger: nil)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(stale: false))
 
         XCTAssertEqual(recording.commands(matching: .setDNSServers), [["Wi-Fi", "192.168.1.1", "1.1.1.1"]])
         XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path), "removed after a successful import")
@@ -893,7 +893,7 @@ final class SystemDNSManagerTests: XCTestCase {
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
 
         let manager = makeManager(machine: machine, relayIsLive: false)
-        manager.restoreIfNeeded(logger: nil)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .restored(stale: false))
 
         XCTAssertEqual(
             recording.commands(matching: .setDNSServers),
@@ -920,7 +920,7 @@ final class SystemDNSManagerTests: XCTestCase {
         ]))
 
         let manager = makeManager(machine: machine, relayIsLive: true)
-        manager.restoreIfNeeded(logger: nil)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener)
 
         XCTAssertTrue(
             manager.hasSavedState(),
@@ -940,7 +940,7 @@ final class SystemDNSManagerTests: XCTestCase {
         writeSavedState(SavedDNS(interfaces: ["Wi-Fi": ["192.168.1.1"]]))
 
         let manager = makeManager(machine: machine, relayIsLive: true)
-        manager.restoreIfNeeded(logger: nil)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .discardedStaleRecords)
 
         XCTAssertFalse(manager.hasSavedState())
         XCTAssertTrue(recording.commands(matching: .setDNSServers).isEmpty)

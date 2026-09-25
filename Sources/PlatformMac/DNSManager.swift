@@ -122,7 +122,9 @@ package final class DNSManager: @unchecked Sendable {
     package func clearRecorded(configs: [ProxyConfig], logger: (any LogSink)?) throws {
         guard let journal else { return }
         if journal.fileState == .unreadable {
-            adoptFilesWeWrote(configs: configs, unambiguousOnly: false, because: "the resolver journal is unreadable", logger: logger)
+            if let adoption = adoptFilesWeWrote(configs: configs, unambiguousOnly: false, because: "the resolver journal is unreadable") {
+                logger?.log(.warning, adoption.report, category: .system)
+            }
         }
         let recorded = journal.scopes(for: .resolverFile)
         guard !recorded.isEmpty else { return }
@@ -173,32 +175,37 @@ package final class DNSManager: @unchecked Sendable {
     /// in place (`adoptAppliedFiles`) and manages them from then on. With the
     /// switch off the adopted intercept files are removed now, rather than at
     /// a stop that may never come.
+    ///
+    /// Returns the decision rather than logging it, so the host can emit the
+    /// `platform.launch_recovery_*` event first (`LaunchRecovery.report`).
     package func recoverLegacyOwnership(
         configs: [ProxyConfig],
         configFilePredatesLaunch: Bool,
         resolversManaged: Bool,
         logger: (any LogSink)?
-    ) {
-        guard let journal, journal.fileState != .unreadable,
-              journal.ownership(of: .resolverFile) == .unknown,
-              !journal.hasRecords(for: .resolverFile) else { return }
+    ) -> LaunchRecoveryOutcome {
+        guard let journal else { return .nothingToDo(.noJournal) }
+        guard journal.fileState != .unreadable else { return .skipped(.journalUnreadable) }
+        guard journal.ownership(of: .resolverFile) == .unknown,
+              !journal.hasRecords(for: .resolverFile) else { return .nothingToDo(.alreadySettled) }
         guard configFilePredatesLaunch else {
             journal.markReleased(surface: .resolverFile)
-            return
+            return .nothingToDo(.freshInstall)
         }
-        adoptFilesWeWrote(
+        guard var adoption = adoptFilesWeWrote(
             configs: configs,
             unambiguousOnly: true,
             resolversManaged: resolversManaged,
-            because: "this is the first launch of a release that records resolver files",
-            logger: logger
-        )
-        guard !resolversManaged, journal.hasRecords(for: .resolverFile) else { return }
+            because: "this is the first launch of a release that records resolver files"
+        ) else { return .nothingToDo(.noJournal) }
+        guard !resolversManaged, journal.hasRecords(for: .resolverFile) else { return .adoptedLegacyFiles(adoption) }
         do {
             try clearRecorded(configs: configs, logger: logger)
+            adoption.removed = !journal.hasRecords(for: .resolverFile)
         } catch {
-            logger?.log(.warning, "Could not remove the resolver files an earlier release left: \(error.localizedDescription)", category: .system)
+            return .failed(reason: "could not remove the resolver files an earlier release left: \(error.displayDescription)")
         }
+        return .adoptedLegacyFiles(adoption)
     }
 
     /// Rebuilds the journal's list of our files from the files themselves.
@@ -219,14 +226,16 @@ package final class DNSManager: @unchecked Sendable {
     /// so a removal that fails below keeps its record and the next teardown
     /// retries it. Nothing matching settles the surface as released rather
     /// than leave it forever suspect.
+    ///
+    /// Returns what it found, with the log line for it, rather than logging:
+    /// at launch the host emits an event first. `nil` without a journal.
     private func adoptFilesWeWrote(
         configs: [ProxyConfig],
         unambiguousOnly: Bool,
         resolversManaged: Bool = false,
-        because reason: String,
-        logger: (any LogSink)?
-    ) {
-        guard let journal else { return }
+        because reason: String
+    ) -> LegacyResolverAdoption? {
+        guard let journal else { return nil }
         var adopted: [String] = []
         var foreign: [String] = []
         let expectedByDomain = expectedFileContents(configs: configs, includeEntries: !unambiguousOnly)
@@ -273,7 +282,9 @@ package final class DNSManager: @unchecked Sendable {
                 ? "The next proxy start takes over the ones that match its configuration."
                 : "If an earlier Conduit release wrote them, remove them from \(resolverDirectory) yourself."
         }
-        logger?.log(.warning, report, category: .system)
+        return LegacyResolverAdoption(
+            adopted: adopted.sorted(), foreign: foreign.sorted(), unjudged: unjudged.sorted(), removed: false, report: report
+        )
     }
 
     /// What this app would have written for each configured domain, across

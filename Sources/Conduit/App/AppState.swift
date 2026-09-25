@@ -422,20 +422,24 @@ final class AppState: ObservableObject {
         let dnsRecovery = systemDNSManager
         let proxyRecovery = systemConduit
         let resolverRecovery = dnsManager
-        let launchConfig = config
-        let resolversManaged = platformConfig.manageDNSResolvers
-        launchRecovery = LaunchRecovery {
-            dnsRecovery.restoreIfNeeded(logger: logStore)
-            proxyRecovery.restoreIfNeeded(logger: logStore)
-            // Journal restoration uses recorded prior state, not the failed
-            // runtime config. Only legacy ownership inference needs that config.
-            guard loadFailure == nil else { return }
-            // Once per install: files an earlier release wrote before
-            // resolver files were journaled. See `recoverLegacyOwnership`.
-            resolverRecovery.recoverLegacyOwnership(
-                configs: [launchConfig],
+        // Journal restoration uses recorded prior state, not the failed
+        // runtime config. Only legacy ownership inference needs that config:
+        // once per install, files an earlier release wrote before resolver
+        // files were journaled. See `recoverLegacyOwnership`.
+        let legacyResolvers = loadFailure == nil
+            ? LaunchRecovery.LegacyResolverInput(
+                configs: [config],
                 configFilePredatesLaunch: configFilePredatesLaunch,
-                resolversManaged: resolversManaged,
+                resolversManaged: platformConfig.manageDNSResolvers
+            )
+            : nil
+        launchRecovery = LaunchRecovery {
+            LaunchRecovery.recoverPlatformSurfaces(
+                systemDNS: dnsRecovery,
+                systemProxy: proxyRecovery,
+                resolvers: resolverRecovery,
+                legacyResolvers: legacyResolvers,
+                emit: { eventLog.append($0) },
                 logger: logStore
             )
         }

@@ -267,20 +267,23 @@ final class DaemonRuntimeHost {
         //
         // The app skips only the resolver-file ownership inference when its
         // config failed to load; this host is never built from a failed load
-        // (`ConduitDaemon.main` exits first), so that guard has nothing to
-        // hold here.
+        // (`ConduitDaemon.main` exits first), so the scan always has a config.
         let dnsRecovery = systemDNSManager
         let proxyRecovery = systemConduit
         let resolverRecovery = dnsManager
-        let launchConfig = loadedConfiguration.config
-        let resolversManaged = loadedConfiguration.platformConfig.manageDNSResolvers
+        let legacyResolvers = LaunchRecovery.LegacyResolverInput(
+            configs: [loadedConfiguration.config],
+            configFilePredatesLaunch: configFilePredatesLaunch,
+            resolversManaged: loadedConfiguration.platformConfig.manageDNSResolvers
+        )
+        let eventLog = orchestrator.eventLog
         launchRecovery = LaunchRecovery { [logger] in
-            dnsRecovery.restoreIfNeeded(logger: logger)
-            proxyRecovery.restoreIfNeeded(logger: logger)
-            resolverRecovery.recoverLegacyOwnership(
-                configs: [launchConfig],
-                configFilePredatesLaunch: configFilePredatesLaunch,
-                resolversManaged: resolversManaged,
+            LaunchRecovery.recoverPlatformSurfaces(
+                systemDNS: dnsRecovery,
+                systemProxy: proxyRecovery,
+                resolvers: resolverRecovery,
+                legacyResolvers: legacyResolvers,
+                emit: { eventLog.append($0) },
                 logger: logger
             )
         }
