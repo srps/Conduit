@@ -412,7 +412,8 @@ enum HelperStatusPresentation {
         case .notInstalled: return "Not installed"
         case .notResponding: return "Installed but not responding"
         case .waitingForConsoleUser: return "Installed, waiting for a login session"
-        case .unauthorized: return "Installed, but refusing this app"
+        case .unauthorized: return "Installed, but refusing this user"
+        case .callerNotAccepted: return "Installed, but not accepting this build"
         }
     }
 
@@ -423,12 +424,17 @@ enum HelperStatusPresentation {
         case .notInstalled: return Color(nsColor: .systemGray)
         case .notResponding: return Color(nsColor: .systemRed)
         case .waitingForConsoleUser: return Color(nsColor: .systemYellow)
-        case .unauthorized: return Color(nsColor: .systemOrange)
+        case .unauthorized, .callerNotAccepted: return Color(nsColor: .systemOrange)
         }
     }
 
-    static func primaryActionTitle(for status: HelperToolPrivilegeClient.Status) -> String {
+    /// `nil` when no button here would help. Reinstalling from the app
+    /// rewrites the binary and the LaunchDaemon, never the caller pin, so for
+    /// a build the pin refuses it would be an admin prompt that fixes nothing.
+    static func primaryActionTitle(for status: HelperToolPrivilegeClient.Status) -> String? {
         switch status {
+        case .callerNotAccepted:
+            return nil
         case .installed: return "Reinstall Helper"
         case .outdated: return "Update Helper"
         case .notInstalled: return "Install Helper"
@@ -436,6 +442,18 @@ enum HelperStatusPresentation {
         case .waitingForConsoleUser, .unauthorized:
             // Reinstalling changes nothing about who is at the console.
             return "Reinstall Helper"
+        }
+    }
+
+    /// What to do instead of a button, for a status the app cannot fix.
+    static func remediation(for status: HelperToolPrivilegeClient.Status) -> String? {
+        switch status {
+        case .callerNotAccepted(let message):
+            return "The helper only accepts Conduit builds signed with the identity it was installed for. "
+                + "Run scripts/create-signing-identity.sh once, rebuild with ./bundle-app.sh, "
+                + "then run sudo ./install-helper.sh in Terminal. The helper said: \(message)"
+        default:
+            return nil
         }
     }
 

@@ -27,7 +27,11 @@ protocol did not change.
   rule, logout teardown and fast user switching are unchanged. (#46)
 - `bundle-app.sh` signs with the "Conduit Local Signing" identity and the hardened
   runtime when that identity is in the keychain, and warns loudly when it falls back to
-  ad-hoc. `scripts/create-signing-identity.sh` creates the identity.
+  ad-hoc. `scripts/create-signing-identity.sh` creates the identity without the private
+  key or its passphrase ever touching disk or a command line unencrypted.
+- Settings tells a build the helper's pin refuses apart from a user it refuses: it shows
+  the helper's message and how to fix it, and no longer offers a "Reinstall Helper" that
+  cannot change the pin.
 
 ### Fixed
 

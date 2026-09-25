@@ -261,10 +261,14 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         /// console. Transient by nature — see `HelperRefusal.noConsoleUser`.
         case waitingForConsoleUser
         /// Reached and refusing this process for good: its uid is not the
-        /// console user's, or (#46) its code signature is not the one
-        /// `install-helper.sh` pinned. Not "repair the helper"; the helper
-        /// is fine. The refusal's message says which.
+        /// console user's. Not "repair the helper"; the helper is fine.
         case unauthorized
+        /// Reached and refusing this *build* (#46): its code signature is not
+        /// the one `install-helper.sh` pinned, or the pin is not trustworthy.
+        /// Reinstalling the helper from the app does not touch the pin, so
+        /// the remedy is a signed rebuild and `sudo ./install-helper.sh`;
+        /// `message` is the helper's own explanation.
+        case callerNotAccepted(message: String)
     }
 
     package var status: Status {
@@ -274,10 +278,23 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         guard let response = try? sendRequest(HelperRequest(command: .ping, values: [])) else {
             return .notResponding
         }
+        return Self.status(forPing: response)
+    }
+
+    /// What a ping's reply says about the helper. A caller-identity refusal
+    /// is told apart by `HelperCallerRefusal.messagePrefix`: the wire reason
+    /// stays `unauthorized` so apps that predate the pin still stop cleanly.
+    package static func status(forPing response: HelperResponse) -> Status {
         switch response.refusal {
-        case .noConsoleUser: return .waitingForConsoleUser
-        case .unauthorized: return .unauthorized
-        case nil: break
+        case .noConsoleUser:
+            return .waitingForConsoleUser
+        case .unauthorized:
+            if let message = response.errorMessage, message.hasPrefix(HelperCallerRefusal.messagePrefix) {
+                return .callerNotAccepted(message: message)
+            }
+            return .unauthorized
+        case nil:
+            break
         }
         guard response.protocolVersion == HelperProtocolVersion.current else {
             return .outdated
