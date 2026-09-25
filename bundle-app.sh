@@ -90,8 +90,29 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "Signing..."
-codesign --force --deep --sign - "$APP_DIR"
+# The privileged helper admits only callers signed by the certificate
+# install-helper.sh pinned (#46), so the app is signed with the local identity
+# scripts/create-signing-identity.sh makes, and with the hardened runtime:
+# without it, anyone running as you could start this signed app with
+# DYLD_INSERT_LIBRARIES and speak to the helper through its signature.
+# Ad-hoc remains the fallback so a fresh checkout still builds; such an app
+# is refused by a helper that enforces the pin.
+SIGNING_NAME="Conduit Local Signing"
+SIGNING_HASH="$(security find-identity -p codesigning 2>/dev/null \
+    | awk -v name="\"$SIGNING_NAME\"" 'index($0, name) { print $2; exit }' || true)"
+if [ -n "$SIGNING_HASH" ]; then
+    echo "Signing with \"$SIGNING_NAME\" ($SIGNING_HASH), hardened runtime..."
+    codesign --force --deep --options runtime --timestamp=none --sign "$SIGNING_HASH" "$APP_DIR"
+    codesign --verify --strict --deep "$APP_DIR"
+else
+    echo "Signing ad-hoc..."
+    codesign --force --deep --sign - "$APP_DIR"
+    echo "" >&2
+    echo "WARNING: \"$SIGNING_NAME\" is not in your keychain, so this app is signed ad-hoc." >&2
+    echo "WARNING: A helper installed with caller identity enforced will REFUSE it." >&2
+    echo "WARNING: Run scripts/create-signing-identity.sh once, then rerun this script." >&2
+    echo "" >&2
+fi
 
 echo ""
 echo "Built: $APP_DIR"
