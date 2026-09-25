@@ -29,6 +29,8 @@ enum HelperLog {
     static func error(_ message: String) { write(.error, message) }
     static func warning(_ message: String) { write(.default, message) }
     static func notice(_ message: String) { write(.default, message) }
+    /// Not persisted by default; for the lines only worth reading live.
+    static func info(_ message: String) { write(.info, message) }
 
     private static let logger = Logger(subsystem: HelperConstants.logSubsystem, category: "helper")
 
@@ -83,6 +85,7 @@ enum HelperDaemon {
         if consoleAtStart != 0 {
             lastConsoleUID = consoleAtStart
         }
+        callerIdentity = loadCallerIdentity()
         HelperLog.notice("ConduitHelper daemon listening on \(socketPath)")
 
         while true {
@@ -94,11 +97,20 @@ enum HelperDaemon {
                 }
             }
             guard clientFD >= 0 else { continue }
+            // Who is on the other end, read off the socket before a byte of
+            // the request: an identity refusal holds whatever the request says.
+            let identity = callerIdentity.identifier.identify(fd: clientFD)
+            let callerVerdict = HelperAdmission.callerVerdict(policy: callerIdentity.policy, identity: identity)
             // One accept loop, no threads: whatever a peer is given, every
             // other client waits for. The bound is on the whole request, not
             // on each read, so a peer that drips bytes gains nothing by it.
             // A peer that will be refused whatever it asks gets a fraction.
-            let refusalBeforeReading = peerRefusalBeforeReading(clientFD)
+            let refusalBeforeReading: PeerRefusal?
+            if case .refused(let message) = callerVerdict {
+                refusalBeforeReading = PeerRefusal(reason: .unauthorized, message: message)
+            } else {
+                refusalBeforeReading = peerRefusalBeforeReading(clientFD).map(PeerRefusal.init(uidRefusal:))
+            }
             let budget = refusalBeforeReading == nil ? TransactionBudget.admitted : TransactionBudget.refused
             // Read the request first even then: at the loginwindow the verdict
             // depends on the command, and the reply must not race the client's
@@ -120,30 +132,42 @@ enum HelperDaemon {
             // The early verdict stands: re-deciding after the wait could admit
             // a peer whose request was deliberately never decoded.
             let refusal = refusalBeforeReading
-                ?? peerRefusal(clientFD, command: request?.command, values: request?.values ?? [])
+                ?? peerRefusal(clientFD, command: request?.command, values: request?.values ?? []).map(PeerRefusal.init(uidRefusal:))
+            // A peer refused early has no command in its line: its request is
+            // deliberately never decoded.
+            let audit = "peer \(identity.auditSummary) identity=\(callerVerdict.auditWord) command=\(request?.command.rawValue ?? "?")"
             if let refusal {
-                switch refusal {
+                switch refusal.reason {
                 case .unauthorized:
-                    HelperLog.warning("Rejected connection from unauthorized peer")
-                    writeLine(fd: clientFD, response: .refused(.unauthorized, "peer is not the console user"), deadline: replyDeadline)
+                    HelperLog.warning("\(audit) outcome=refused(unauthorized): \(refusal.message)")
                 case .noConsoleUser:
-                    HelperLog.notice("Deferred connection: no console user is logged in yet")
-                    writeLine(fd: clientFD, response: .refused(.noConsoleUser, "no console user yet"), deadline: replyDeadline)
+                    HelperLog.notice("\(audit) outcome=deferred(noConsoleUser): \(refusal.message)")
                 }
+                writeLine(fd: clientFD, response: .refused(refusal.reason, refusal.message), deadline: replyDeadline)
                 close(clientFD)
                 continue
             }
-            handleConnection(clientFD, request: request, replyDeadline: replyDeadline)
+            let response = handleConnection(clientFD, request: request, replyDeadline: replyDeadline)
             close(clientFD)
+            let outcome = response.success ? "ok" : "error: \(response.errorMessage ?? "unknown")"
+            // A ping changes nothing and arrives every health tick; it is
+            // logged where it can be read live without filling the store.
+            if request?.command == .ping, response.success {
+                HelperLog.info("\(audit) outcome=\(outcome)")
+            } else {
+                HelperLog.notice("\(audit) outcome=\(outcome)")
+            }
         }
     }
 
     // MARK: - Connection Handling
 
-    private static func handleConnection(_ fd: Int32, request: HelperRequest?, replyDeadline: UInt64) {
+    /// Returns what was answered, for the audit line.
+    private static func handleConnection(_ fd: Int32, request: HelperRequest?, replyDeadline: UInt64) -> HelperResponse {
         guard let request else {
-            writeLine(fd: fd, response: .error("Invalid request"), deadline: replyDeadline)
-            return
+            let response = HelperResponse.error("Invalid request")
+            writeLine(fd: fd, response: response, deadline: replyDeadline)
+            return response
         }
         // A range, not an exact match. The helper outlives the app that
         // installed it, so an older client can legitimately be on the other end
@@ -154,10 +178,11 @@ enum HelperDaemon {
         // Unversioned frames still fail: they decode as 0, which is outside the
         // range, and the threat model requires the helper to reject them.
         guard let replyVersion = HelperProtocolVersion.replyVersion(forRequest: request.protocolVersion) else {
-            writeLine(fd: fd, response: .error(
+            let response = HelperResponse.error(
                 "Unsupported helper protocol version \(request.protocolVersion); this helper speaks \(HelperProtocolVersion.minimumSupported)–\(HelperProtocolVersion.current)"
-            ), deadline: replyDeadline)
-            return
+            )
+            writeLine(fd: fd, response: response, deadline: replyDeadline)
+            return response
         }
         var response = processRequest(request)
         // Answer in the dialect we were addressed in.
@@ -165,6 +190,7 @@ enum HelperDaemon {
         // The operation's own time is not the peer's: the reply gets a fresh
         // window once there is something to send.
         writeLine(fd: fd, response: response, deadline: HelperLineIO.deadline(afterMilliseconds: TransactionBudget.admitted.replyMilliseconds))
+        return response
     }
 
     private static func processRequest(_ request: HelperRequest) -> HelperResponse {
@@ -236,6 +262,78 @@ enum HelperDaemon {
         if !HelperLineIO.writeAll(fd: fd, data, deadline: deadline) {
             HelperLog.warning("Reply not accepted by the peer in time; dropping it")
         }
+    }
+
+    // MARK: - Caller identity (#46)
+
+    /// A refusal and the words the peer is given for it.
+    private struct PeerRefusal {
+        var reason: HelperRefusal
+        var message: String
+
+        init(reason: HelperRefusal, message: String) {
+            self.reason = reason
+            self.message = message
+        }
+
+        init(uidRefusal: HelperRefusal) {
+            switch uidRefusal {
+            case .unauthorized: self.init(reason: .unauthorized, message: "peer is not the console user")
+            case .noConsoleUser: self.init(reason: .noConsoleUser, message: "no console user yet")
+            }
+        }
+    }
+
+    private struct CallerIdentity {
+        var policy: HelperCallerPolicy
+        var identifier: any HelperCallerIdentifying
+    }
+
+    /// Read once, at start: `install-helper.sh` writes the pin before it
+    /// bootstraps the helper, so a new pin always arrives with a restart.
+    /// Until `run()` loads it, nobody is admitted.
+    nonisolated(unsafe) private static var callerIdentity = CallerIdentity(
+        policy: .untrusted(reason: "caller policy not loaded yet"),
+        identifier: UnreadableIdentifier(reason: "caller policy not loaded yet")
+    )
+
+    private struct UnreadableIdentifier: HelperCallerIdentifying {
+        var reason: String
+        func identify(fd: Int32) -> HelperCallerIdentity {
+            HelperCallerIdentity(readFailure: reason)
+        }
+    }
+
+    /// Logs the mode once per start — loudly unless it is enforced — so
+    /// "is identity checked on this machine" is one `log show` away.
+    private static func loadCallerIdentity() -> CallerIdentity {
+        let path = HelperConstants.callerRequirementPath
+        var policy = HelperCallerPolicyFile.load(path: path)
+        var identifier: any HelperCallerIdentifying
+        do {
+            if case .enforced(let text) = policy {
+                identifier = try SecCodeCallerIdentifier(requirementText: text)
+            } else {
+                identifier = try SecCodeCallerIdentifier(requirementText: nil)
+            }
+        } catch {
+            // Recovered by refusing everyone, not by dropping the pin: see
+            // `HelperCallerPolicy.untrusted`.
+            policy = .untrusted(reason: "\(path): \(error)")
+            identifier = UnreadableIdentifier(reason: "caller policy does not compile")
+        }
+        switch policy {
+        case .enforced(let text):
+            HelperLog.notice("Caller identity ENFORCED from \(path): \(text)")
+        case .unenforced:
+            HelperLog.warning(
+                "Caller identity UNENFORCED: no \(path). Any process of the console user may use this helper. "
+                + "Sign the app with scripts/create-signing-identity.sh and ./bundle-app.sh, then rerun sudo ./install-helper.sh."
+            )
+        case .untrusted(let reason):
+            HelperLog.error("Caller identity policy UNTRUSTED, refusing every caller until sudo ./install-helper.sh is rerun: \(reason)")
+        }
+        return CallerIdentity(policy: policy, identifier: identifier)
     }
 
     // MARK: - Helpers
@@ -448,6 +546,16 @@ enum HelperDaemon {
         } catch {
             HelperLog.error("ifconfig \(arguments.joined(separator: " ")) did not run: \(error.localizedDescription)")
             return -1
+        }
+    }
+}
+
+private extension HelperCallerVerdict {
+    var auditWord: String {
+        switch self {
+        case .verified: return "verified"
+        case .unenforced: return "unenforced"
+        case .refused: return "refused"
         }
     }
 }

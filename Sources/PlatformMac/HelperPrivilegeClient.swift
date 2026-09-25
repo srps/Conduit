@@ -261,7 +261,9 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         /// console. Transient by nature — see `HelperRefusal.noConsoleUser`.
         case waitingForConsoleUser
         /// Reached and refusing this process for good: its uid is not the
-        /// console user's. Not "repair the helper"; the helper is fine.
+        /// console user's, or (#46) its code signature is not the one
+        /// `install-helper.sh` pinned. Not "repair the helper"; the helper
+        /// is fine. The refusal's message says which.
         case unauthorized
     }
 
@@ -529,6 +531,8 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         let script = """
         launchctl bootout system \(HelperConstants.launchdPlistPath.shellQuoted) 2>/dev/null || true
         rm -f \(HelperConstants.binaryInstallPath.shellQuoted) \(HelperConstants.launchdPlistPath.shellQuoted) \(HelperConstants.socketPath.shellQuoted)
+        rm -f \(HelperConstants.callerRequirementPath.shellQuoted)
+        rmdir \(HelperConstants.callerRequirementDirectory.shellQuoted) 2>/dev/null || true
         rm -f \(HelperConstants.legacyNewsyslogConfPath.shellQuoted) \(HelperConstants.legacyLogPath.shellQuoted) \(HelperConstants.legacyLogPath.shellQuoted).*
         """
         try? fallback.runPrivilegedScript(script)

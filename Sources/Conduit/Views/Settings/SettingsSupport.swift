@@ -412,7 +412,7 @@ enum HelperStatusPresentation {
         case .notInstalled: return "Not installed"
         case .notResponding: return "Installed but not responding"
         case .waitingForConsoleUser: return "Installed, waiting for a login session"
-        case .unauthorized: return "Installed, but refusing this user"
+        case .unauthorized: return "Installed, but refusing this app"
         }
     }
 

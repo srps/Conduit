@@ -34,7 +34,8 @@ package enum PrivilegedOperation: String, Sendable, CaseIterable {
 /// the wire's `HelperRefusal`, translated in `PlatformMac`, so kernel
 /// consumers are not typed against the helper protocol.
 package enum PrivilegeRefusal: String, Sendable, Equatable {
-    /// A verdict: this process is not the console user's. Nothing to wait for.
+    /// A verdict: this process is not the console user's, or is not a
+    /// program the helper's caller pin admits (#46). Nothing to wait for.
     case unauthorized
     /// A moment: nobody is at the console yet. State to show and to
     /// reconcile past — never to sleep on. See `HelperToolPrivilegeClient`.
