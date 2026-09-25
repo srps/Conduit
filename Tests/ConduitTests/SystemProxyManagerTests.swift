@@ -1310,7 +1310,7 @@ extension SystemProxyManagerTests {
         )
         runner.invocations.removeAll()
 
-        freshManager.restoreIfNeeded(logger: nil)
+        XCTAssertEqual(freshManager.restoreIfNeeded(logger: nil), .restored(stale: false))
 
         let script = try XCTUnwrap(runner.shellScripts.last, "orphaned settings must be restored at launch")
         XCTAssertTrue(script.contains("-setautoproxyurl 'Wi-Fi' 'http://mdm.corp.example/managed.pac'"))
@@ -1336,7 +1336,7 @@ extension SystemProxyManagerTests {
         runner.autoProxyURL = "http://127.0.0.1:63145/proxy.pac"
         runner.invocations.removeAll()
 
-        manager.restoreIfNeeded(logger: nil)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .declinedLiveListener)
 
         XCTAssertTrue(
             runner.shellScripts.isEmpty,
@@ -1358,7 +1358,7 @@ extension SystemProxyManagerTests {
             portProbe: { _ in false }
         )
 
-        manager.restoreIfNeeded(logger: nil)
+        XCTAssertEqual(manager.restoreIfNeeded(logger: nil), .nothingToDo(.nothingRecorded))
 
         XCTAssertTrue(runner.shellScripts.isEmpty)
     }

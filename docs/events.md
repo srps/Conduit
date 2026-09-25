@@ -60,7 +60,14 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `init` | Ring-buffer placeholder; never meaningful, filter it out. |
 | `proxy.starting` / `proxy.stopping` | Orchestrator lifecycle transitions. |
-| `daemon.ready` | Daemon runtime host finished startup (`detail: mode=…`). |
+| `daemon.ready` | Daemon runtime host finished startup (`detail: mode=…`). Emitted after launch recovery has finished, so a consumer never sees readiness while a crashed run's settings are still being handed back. |
+| `platform.launch_recovery_restored` | Launch-time crash recovery found a surface a run that never tore down left applied, restored the journal's recorded prior values and released it (`surface=systemDNS` or `surface=systemProxy`, `stale=true` when the records were over 7 days old and were restored without a liveness probe). One event per surface per launch from both hosts, in the order system DNS, system proxy, resolver files. Emitted before the log line. |
+| `platform.launch_recovery_nothing_to_do` | Recovery had nothing to act on for a surface (`surface=`, `reason=` one of `nothing_recorded`, `already_settled`, `fresh_install`, `no_journal`). |
+| `platform.launch_recovery_declined` | Recorded state exists, but a local listener is still serving it, so another session owns the machine and it was left alone (`surface=`, `reason=live_listener`). |
+| `platform.launch_recovery_discarded` | System DNS: a resolver answers on `:53` but no interface points at loopback any more, so the records described nothing and were dropped without a write (`surface=systemDNS`, `reason=no_interface_points_at_loopback`). |
+| `platform.launch_recovery_adopted` | The one-time resolver-file scan on the first launch of a release that records resolver files (`surface=resolverFile`, `adopted=`, `removed=` whether adopted files were removed because the switch is off, `foreign=` files with other contents left alone, `unjudged=` entry files left in place). |
+| `platform.launch_recovery_skipped` | A recovery step was not attempted (`surface=`, `reason=config_unavailable` when the config failed to load, which only the resolver scan needs; `reason=journal_unreadable`). The daemon emits these to `events.ndjson` even when it then exits on a bad config. |
+| `platform.launch_recovery_failed` | A restore threw, or part of it did not land and the records were kept for the next launch to retry (`surface=`, `reason=` the error, or `records_kept`). |
 | `lifecycle.crash_restart` *(planned)* | First startup after an unclean exit; detail references prior exit evidence and the matching crash-report name. |
 | `lifecycle.update_restart` *(planned)* | Restart performed by the in-app updater. |
 

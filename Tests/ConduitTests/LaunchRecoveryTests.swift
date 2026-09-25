@@ -2,10 +2,10 @@
 import Foundation
 import NIOConcurrencyHelpers
 import XCTest
-@testable import Conduit
+import PlatformMac
 
-/// `AppState.init` is `@MainActor` and runs before the menu bar exists, and the
-/// two `restoreIfNeeded` calls it starts block on a 2 s DNS probe and on several
+/// `AppState.init` and `DaemonRuntimeHost.init` are `@MainActor`, and the two
+/// `restoreIfNeeded` calls each starts block on a 2 s DNS probe and on several
 /// `networksetup` subprocesses per network service. These pin the two halves of
 /// the seam that keeps that off the main actor without losing its ordering.
 final class LaunchRecoveryTests: XCTestCase {
@@ -48,9 +48,11 @@ final class LaunchRecoveryTests: XCTestCase {
         )
     }
 
-    /// `awaitLaunchRecovery()` sits at the head of `startProxy`, `stopProxy`,
-    /// `startDNS` and `stopDNS`, so it is called on every lifecycle transition
-    /// for the life of the process, not once.
+    /// `awaitLaunchRecovery()` sits at the head of the app's `startProxy`,
+    /// `stopProxy`, `startDNS` and `stopDNS` and of the daemon's
+    /// `startRuntime`, `stopRuntime` and `reloadConfiguration`, so it is
+    /// called on every lifecycle transition for the life of the process, not
+    /// once.
     @MainActor
     func testJoinIsIdempotentAndRunsTheWorkOnce() async {
         let runs = NIOLockedValueBox(0)

@@ -298,19 +298,24 @@ package final class SystemDNSManager: @unchecked Sendable {
         }
     }
 
-    package func restoreIfNeeded(logger: (any LogSink)?) {
+    /// Launch-time crash recovery for this surface. Decides and acts, but
+    /// does not log the decision: it returns it, so the host can emit the
+    /// `platform.launch_recovery_*` event first and derive the log line from
+    /// that (`LaunchRecovery.report`). The restore's own per-interface lines
+    /// are `clear`'s and still log.
+    package func restoreIfNeeded(logger: (any LogSink)?) -> LaunchRecoveryOutcome {
         operations.lock()
         defer { operations.unlock() }
         importLegacySnapshotIfPresent(logger: logger)
-        guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else { return }
+        guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else {
+            return .nothingToDo(.nothingRecorded)
+        }
 
         let stalenessThreshold: TimeInterval = 7 * 24 * 3600
         let isStale = Date().timeIntervalSince(savedAt) > stalenessThreshold
 
         if isStale {
-            logger?.log(.warning, "DNS saved state is older than 7 days. Forcing restore.", category: .system)
-            performRestore(logger: logger)
-            return
+            return performRestore(stale: true, logger: logger)
         }
 
         // "Is anything holding port 53?" was the wrong question, and repairing
@@ -335,28 +340,25 @@ package final class SystemDNSManager: @unchecked Sendable {
             // pinned. That branch was unreachable while the probe always said
             // "port free"; it is not any more.
             if loopbackResidueExists() {
-                logger?.log(
-                    .debug,
-                    "DNS saved state exists, a local resolver is answering on :53 and interfaces still point at it — a live session is serving this machine.",
-                    category: .system
-                )
-            } else {
-                logger?.log(.notice, "DNS saved state exists but no interface points at 127.0.0.1 any more. Cleaning up stale state.", category: .system)
-                deleteSavedState()
+                return .declinedLiveListener
             }
-            return
+            deleteSavedState()
+            return .discardedStaleRecords
         }
 
-        logger?.log(.warning, "Found orphaned DNS saved state (likely crashed). Restoring original DNS...", category: .system)
-        performRestore(logger: logger)
+        return performRestore(stale: false, logger: logger)
     }
 
-    private func performRestore(logger: (any LogSink)?) {
+    /// A restore that throws, or that keeps records because some interface
+    /// could not be put back, is a failure of recovery: the records are what
+    /// the next launch retries from.
+    private func performRestore(stale: Bool, logger: (any LogSink)?) -> LaunchRecoveryOutcome {
         do {
             try clear(logger: logger)
         } catch {
-            logger?.log(.error, "Failed to restore DNS after crash: \(error.localizedDescription)", category: .system)
+            return .failed(reason: error.displayDescription)
         }
+        return hasSavedInterfaces() ? .failed(reason: "records_kept") : .restored(stale: stale)
     }
 
     // MARK: - State Detection

@@ -269,14 +269,20 @@ final class DNSManagerOwnershipTests: XCTestCase {
         try writeResolverFile("corp.example", "nameserver 10.1.1.1")
         let manager = makeManager()
 
-        manager.recoverLegacyOwnership(configs: [config], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
+        let outcome = manager.recoverLegacyOwnership(configs: [config], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
 
         XCTAssertEqual(removedDomains(), ["cursor.sh"], "the entry file's contents are not evidence of ours")
+        guard case .adoptedLegacyFiles(let adoption) = outcome else { return XCTFail("adopted: \(outcome)") }
+        XCTAssertEqual(adoption.adopted, ["cursor.sh"])
+        XCTAssertTrue(adoption.removed)
         XCTAssertFalse(manager.hasManagedState(), "settled as released")
         XCTAssertTrue(journal.hasRecords(for: .systemProxy), "other surfaces untouched")
 
         try writeResolverFile("cursor.sh", "nameserver 127.0.0.1\nport \(config.dnsForwarderPort)")
-        manager.recoverLegacyOwnership(configs: [config], configFilePredatesLaunch: true, resolversManaged: false, logger: nil)
+        XCTAssertEqual(
+            manager.recoverLegacyOwnership(configs: [config], configFilePredatesLaunch: true, resolversManaged: false, logger: nil),
+            .nothingToDo(.alreadySettled)
+        )
         XCTAssertEqual(removedDomains(), ["cursor.sh"], "never a second time")
     }
 
@@ -289,12 +295,12 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = makeManager()
         let log = RecordingLogSink()
 
-        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: log)
+        let outcome = manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: log)
         try manager.clearRecorded(configs: [makeConfig()], logger: log)
 
         XCTAssertTrue(removedDomains().isEmpty)
         XCTAssertFalse(manager.hasManagedState())
-        let report = log.entries(at: .warning).map(\.message).first { $0.contains("Recovered resolver ownership") }
+        let report = Self.adoptionReport(outcome)
         XCTAssertNotNil(report, "the scan reports what it did")
         XCTAssertTrue(report?.contains("1 entry file(s) for configured domains left in place") == true, report ?? "")
         XCTAssertTrue(report?.contains("corp.example") == true, "names the file: \(report ?? "")")
@@ -308,9 +314,9 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = makeManager()
         let log = RecordingLogSink()
 
-        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: true, logger: log)
+        let outcome = manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: true, logger: log)
 
-        let report = log.entries(at: .warning).map(\.message).first { $0.contains("Recovered resolver ownership") }
+        let report = Self.adoptionReport(outcome)
         XCTAssertTrue(report?.contains("corp.example") == true, "still named: \(report ?? "")")
         XCTAssertTrue(report?.contains("next proxy start takes over") == true, report ?? "")
         XCTAssertFalse(report?.contains("remove them") == true, report ?? "")
@@ -322,9 +328,9 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let log = RecordingLogSink()
         let manager = makeManager()
 
-        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: log)
+        let outcome = manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: true, resolversManaged: false, logger: log)
 
-        let report = log.entries(at: .warning).map(\.message).first { $0.contains("Recovered resolver ownership") }
+        let report = Self.adoptionReport(outcome)
         XCTAssertNotNil(report)
         XCTAssertFalse(report?.contains("left in place") == true, report ?? "")
     }
@@ -336,7 +342,10 @@ final class DNSManagerOwnershipTests: XCTestCase {
         try writeResolverFile("cursor.sh", "nameserver 127.0.0.1\nport \(config.dnsForwarderPort)")
         let manager = makeManager()
 
-        manager.recoverLegacyOwnership(configs: [config], configFilePredatesLaunch: true, resolversManaged: true, logger: nil)
+        guard case .adoptedLegacyFiles(let adoption) = manager.recoverLegacyOwnership(
+            configs: [config], configFilePredatesLaunch: true, resolversManaged: true, logger: nil
+        ) else { return XCTFail("the legacy intercept file is adopted") }
+        XCTAssertFalse(adoption.removed)
 
         XCTAssertTrue(removedDomains().isEmpty)
         XCTAssertEqual(journal.scopes(for: .resolverFile), ["cursor.sh"])
@@ -351,7 +360,10 @@ final class DNSManagerOwnershipTests: XCTestCase {
         try writeResolverFile("corp.example", "nameserver 10.1.1.1")
         let manager = makeManager()
 
-        manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: false, resolversManaged: false, logger: nil)
+        XCTAssertEqual(
+            manager.recoverLegacyOwnership(configs: [makeConfig()], configFilePredatesLaunch: false, resolversManaged: false, logger: nil),
+            .nothingToDo(.freshInstall)
+        )
         XCTAssertFalse(manager.hasManagedState(), "the host would not even call")
 
         // The switch turned on and off again with every runtime stopped: no
@@ -382,5 +394,12 @@ final class DNSManagerOwnershipTests: XCTestCase {
         let manager = DNSManager(privilegeClient: recording, resolverDirectory: journalDirectory.path)
         try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true)
         XCTAssertFalse(manager.hasManagedState())
+    }
+
+    /// The scan's report travels in the outcome: the host emits the event
+    /// first and logs the report from it.
+    private static func adoptionReport(_ outcome: LaunchRecoveryOutcome) -> String? {
+        guard case .adoptedLegacyFiles(let adoption) = outcome else { return nil }
+        return adoption.report
     }
 }

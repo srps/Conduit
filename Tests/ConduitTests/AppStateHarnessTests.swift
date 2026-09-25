@@ -179,6 +179,11 @@ final class AppStateHarnessTests: XCTestCase {
         await harness.launchRecovery()
         XCTAssertEqual(wifi.webProxy.host, "prior.example.test", "journal recovery proceeds despite invalid configuration")
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
+        XCTAssertEqual(
+            state.eventLog.events.filter { $0.event.hasPrefix("platform.launch_recovery_") }.map(\.detail),
+            ["surface=systemDNS reason=nothing_recorded", "surface=systemProxy stale=false", "surface=resolverFile reason=config_unavailable"],
+            "the resolver scan needs the config, so it alone is skipped"
+        )
         XCTAssertEqual(wifi.bypassDomains, ["*.local"])
         do {
             try await state.startProxy()
@@ -604,6 +609,14 @@ final class AppStateHarnessTests: XCTestCase {
         )
         XCTAssertEqual(wifi.bypassDomains, ["*.local"])
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy), "restored, so released")
+        let recovery = appState.eventLog.events.filter { $0.event.hasPrefix("platform.launch_recovery_") }
+        XCTAssertEqual(
+            recovery.map(\.event),
+            ["platform.launch_recovery_nothing_to_do", "platform.launch_recovery_restored", "platform.launch_recovery_adopted"],
+            "one event per surface, in recovery's order"
+        )
+        XCTAssertEqual(recovery.map { $0.detail?.split(separator: " ").first }, ["surface=systemDNS", "surface=systemProxy", "surface=resolverFile"])
+        XCTAssertEqual(recovery.dropFirst().first?.detail, "surface=systemProxy stale=false")
 
         try await appState.startProxy()
         XCTAssertEqual(wifi.webProxy, FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "0"))

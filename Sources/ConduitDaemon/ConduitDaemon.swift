@@ -32,12 +32,19 @@ enum ConduitDaemon {
 
         let logger = ConsoleLogSink(minLevel: args.contains("--verbose") ? .debug : .notice)
         let environment = runtimeEnvironment(from: args)
+        // Read before the load, which writes a migrated file back. See
+        // `DaemonRuntimeHost.init`.
+        let configFilePredatesLaunch = FileManager.default.fileExists(atPath: environment.configFile.path)
         let loaded: RuntimeConfigurationLoadResult
         do {
             loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: !args.contains("--config"))
         } catch {
             let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
             failure.report(to: logger)
+            // The journal restores need no config; see
+            // `DaemonRuntimeHost.recoverWithoutConfiguration`. The exit status
+            // is still the load failure's.
+            await DaemonRuntimeHost.recoverWithoutConfiguration(environment: environment, logger: logger)
             logger.flush()
             exit(1)
         }
@@ -51,7 +58,8 @@ enum ConduitDaemon {
         let host = DaemonRuntimeHost(
             environment: environment,
             logger: logger,
-            loadedConfiguration: loaded
+            loadedConfiguration: loaded,
+            configFilePredatesLaunch: configFilePredatesLaunch
         )
 
         if args.contains("--start-runtime") {
@@ -78,7 +86,8 @@ enum ConduitDaemon {
             retainedSources.append(source)
         }
 
-        host.markReady(mode: args.contains("--start-runtime") ? "runtime-started" : "runtime-host")
+        // Joins launch recovery before it publishes anything; see `markReady`.
+        await host.markReady(mode: args.contains("--start-runtime") ? "runtime-started" : "runtime-host")
 
         if args.contains("--print-status") {
             printStatus(host.status())

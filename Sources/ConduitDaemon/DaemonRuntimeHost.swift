@@ -70,9 +70,10 @@ final class DaemonRuntimeHost {
     /// #13 rather than a twin of it.
     private let reconciler: RuntimeReconciler
 
-    // Platform side-effect coordinators. Default daemon
-    // startup does not apply side effects until `startRuntime()` is called
-    // (future control socket command).
+    // Platform side-effect coordinators. Default daemon startup applies
+    // nothing until `startRuntime()` is called (future control socket
+    // command); what `init` does start is launch recovery, which only hands
+    // back what a crashed run left applied.
     /// Prior values of the platform settings we change, so teardown restores
     /// rather than blanket-clearing. Shared by every side-effect manager.
     private lazy var platformStateJournal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
@@ -124,11 +125,24 @@ final class DaemonRuntimeHost {
     /// shared with `AppState`). Fed by `handleVPNStateChange`; every
     /// resolver-file apply path consults `entriesWanted`.
     private var splitDNSGate = SplitDNSVPNGate()
+    /// Launch-time crash recovery for the system-proxy, system-DNS and
+    /// resolver-file surfaces. Started by `init` and joined by
+    /// `awaitLaunchRecovery()` — see `LaunchRecovery` for why it is neither
+    /// inline nor unordered. Twin of `AppState.launchRecovery`.
+    private var launchRecovery: LaunchRecovery?
 
+    /// - Parameters:
+    ///   - configFilePredatesLaunch: whether the config file existed before
+    ///     `loadedConfiguration` was read. The load writes a migrated or
+    ///     default file back, so only the caller that loaded can know; it is
+    ///     what tells an upgrade from a fresh install to the resolver-file
+    ///     recovery (`DNSManager.recoverLegacyOwnership`). Same read as
+    ///     `AppState.init`.
     init(
         environment: RuntimeEnvironment,
         logger: any LogSink,
         loadedConfiguration: RuntimeConfigurationLoadResult,
+        configFilePredatesLaunch: Bool,
         vpnStatusMonitor: VPNStatusObserving? = nil,
         privilegeClient: (any PrivilegeClient)? = nil,
         credentialStore: (any SecretStore)? = nil,
@@ -242,9 +256,65 @@ final class DaemonRuntimeHost {
             }
         }
         reconciler.host = self
+
+        // Crash recovery, as in `AppState.init`: a run that was `SIGKILL`ed
+        // never tore down, so the machine can still point at its dead proxy
+        // port and the helper's relay at its dead forwarder, and launch is when
+        // the journal's record of what was there before is most likely still
+        // the truth. Without this the daemon leaves them until its next start
+        // or stop, and in runtime-host mode (no `--start-runtime`) that may be
+        // never. Same three calls in the same order, off the main actor.
+        //
+        // The app skips only the resolver-file ownership inference when its
+        // config failed to load; this host is never built from a failed load
+        // (`ConduitDaemon.main` runs the journal restores itself and exits,
+        // see `recoverWithoutConfiguration`), so the scan always has a config.
+        let dnsRecovery = systemDNSManager
+        let proxyRecovery = systemConduit
+        let resolverRecovery = dnsManager
+        let legacyResolvers = LaunchRecovery.LegacyResolverInput(
+            configs: [loadedConfiguration.config],
+            configFilePredatesLaunch: configFilePredatesLaunch,
+            resolversManaged: loadedConfiguration.platformConfig.manageDNSResolvers
+        )
+        let eventLog = orchestrator.eventLog
+        launchRecovery = LaunchRecovery { [logger] in
+            LaunchRecovery.recoverPlatformSurfaces(
+                systemDNS: dnsRecovery,
+                systemProxy: proxyRecovery,
+                resolvers: resolverRecovery,
+                legacyResolvers: legacyResolvers,
+                emit: { eventLog.append($0) },
+                logger: logger
+            )
+        }
     }
 
-    func markReady(mode: String) {
+    /// Waits for launch-time crash recovery before this host touches a
+    /// platform surface. Free after the first call. Twin of
+    /// `AppState.awaitLaunchRecovery`, and internal for the same reason: a
+    /// test that asserts on what recovery did joins it rather than polls.
+    ///
+    /// Joined at the head of `startRuntime`, `stopRuntime` and
+    /// `reloadConfiguration`. Every other path that touches a surface is
+    /// reachable only after one of those has run: the reconciler's passes
+    /// are queued by `reloadConfiguration` alone, the network and VPN
+    /// monitors and the DNS health timer are started by `startRuntime` (or
+    /// by a reload's `.applySystemDNS`), after its join. The VPN handler in
+    /// particular must not join: two transitions suspended on the join could
+    /// resume out of order, and `SplitDNSVPNGate` acts on the latest one.
+    func awaitLaunchRecovery() async {
+        await launchRecovery?.join()
+        launchRecovery = nil
+    }
+
+    /// Publishes readiness: `daemon.ready`, `daemon-ready.json` and a
+    /// snapshot. Joins launch recovery first, so readiness never precedes it:
+    /// a consumer that acts on `daemon.ready` must not find the machine still
+    /// pointed at a crashed run's dead listeners. An await, so the main actor
+    /// stays free while recovery runs.
+    func markReady(mode: String) async {
+        await awaitLaunchRecovery()
         orchestrator.eventLog.append(RuntimeEvent(kind: .lifecycle, event: "daemon.ready", detail: "mode=\(mode)"))
         writeReadyFile()
         writeSnapshotFile(snapshot: orchestrator.snapshot)
@@ -263,6 +333,7 @@ final class DaemonRuntimeHost {
     }
 
     func startRuntime() async throws {
+        await awaitLaunchRecovery()
         logNonBlockingConfigProblems()
         do {
             try await orchestrator.startProxy()
@@ -359,7 +430,17 @@ final class DaemonRuntimeHost {
         writeSnapshotFile(snapshot: orchestrator.snapshot)
     }
 
+    /// Joins launch recovery first, the shutdown path included, and this is
+    /// where the daemon parts from the app. `AppState.performTerminationCleanup`
+    /// does not join because `applicationWillTerminate` is synchronous: waiting
+    /// there would block the main thread at quit. Nothing here is synchronous —
+    /// `SIGTERM` reaches this through a `Task`, so the join is a suspension
+    /// that leaves the main actor free, bounded by recovery's own probe and
+    /// subprocesses, well inside launchd's exit timeout. Joining buys what the
+    /// app has to argue is safe without: the stop's clears never overlap
+    /// recovery's, and `exit(0)` never cuts a restore off half way.
     func stopRuntime(exitAfterStop: Bool = false) async {
+        await awaitLaunchRecovery()
         runtimeStarted = false
         stopDNSHealthTimer()
         vpnStatusMonitor.stop()
@@ -422,6 +503,7 @@ final class DaemonRuntimeHost {
     }
 
     func reloadConfiguration() async {
+        await awaitLaunchRecovery()
         let loaded: RuntimeConfigurationLoadResult
         do {
             loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: false) { candidate in
@@ -663,6 +745,65 @@ final class DaemonRuntimeHost {
     }
 
     nonisolated static let prettyEncoder: JSONEncoder = CanonicalJSON.encoder(prettyPrinted: true)
+}
+
+// MARK: - Recovery without a configuration
+
+extension DaemonRuntimeHost {
+    /// The journal restores for a launch whose config failed to load, run by
+    /// `ConduitDaemon.main` before it exits. No host is built from a failed
+    /// load, so without this a daemon killed with the system proxy or system
+    /// DNS applied, and relaunched over a broken file, left the machine on
+    /// the dead run's listeners. The app restores in that case too
+    /// (`AppStateHarnessTests.testCorruptConfigStillRestoresJournaledProxyOnLaunch`):
+    /// both restores work from the journal's recorded prior values, and only
+    /// the legacy resolver scan needs the config, so that one is reported
+    /// skipped.
+    ///
+    /// Events go to `events.ndjson` as a host's would, and are returned for
+    /// the tests. The seams are `init`'s.
+    @discardableResult
+    static func recoverWithoutConfiguration(
+        environment: RuntimeEnvironment,
+        logger: any LogSink,
+        privilegeClient: (any PrivilegeClient)? = nil,
+        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil
+    ) async -> [RuntimeEvent] {
+        let writer = RuntimeEventFileWriter(fileURL: environment.eventsFile, logger: logger)
+        let emitted = NIOLockedValueBox<[RuntimeEvent]>([])
+        let emit: @Sendable (RuntimeEvent) -> Void = { event in
+            emitted.withLockedValue { $0.append(event) }
+            writer.record(event)
+        }
+        let base = privilegeClient ?? HelperToolPrivilegeClient(eventSink: emit)
+        let audited = AuditingPrivilegeClient(base: base, eventSink: emit)
+        let runner = commandRunner ?? { launchPath, arguments in
+            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
+        }
+        let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
+        let systemDNS = SystemDNSManager(
+            privilegeClient: audited,
+            journal: journal,
+            legacySnapshotFile: environment.legacySavedDNSFile,
+            commandRunner: runner
+        )
+        let systemProxy = SystemProxyManager(privilegeClient: audited, journal: journal, commandRunner: runner)
+        let recovery = LaunchRecovery {
+            LaunchRecovery.recoverPlatformSurfaces(
+                systemDNS: systemDNS,
+                systemProxy: systemProxy,
+                resolvers: nil,
+                legacyResolvers: nil,
+                emit: emit,
+                logger: logger
+            )
+        }
+        await recovery.join()
+        if !writer.flush() {
+            logger.log(.warning, "Launch recovery events were not all written to \(environment.eventsFile.path) before the deadline.", category: .general)
+        }
+        return emitted.withLockedValue { $0 }
+    }
 }
 
 // MARK: - RuntimeReconcilerHost

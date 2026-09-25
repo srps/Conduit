@@ -123,7 +123,7 @@ implementation loops, so existing conformers are unchanged.
 ### 3. Restore also runs at launch
 
 `SystemProxyManager.restoreIfNeeded` mirrors `SystemDNSManager.restoreIfNeeded`,
-called from `AppState` at startup: a run that was `SIGKILL`ed never tore down,
+called from both runtime hosts (`AppState` and `DaemonRuntimeHost`) at startup: a run that was `SIGKILL`ed never tore down,
 and launch is when the recorded prior is most likely still the truth. Same
 7-day staleness rule. The "is this actually orphaned?" test is whether anything
 is *serving* the loopback port the machine points at — see
@@ -134,18 +134,32 @@ platform surface** (`LaunchRecovery`). Neither half of that is optional. They
 interrogate the machine before deciding anything — the DNS one waits up to two
 seconds for a resolver to answer and then reads every service's servers, the
 proxy one spawns roughly four `networksetup` subprocesses per service — and
-their caller is `AppState.init`, which is `@MainActor` and runs before the menu
-bar exists, so inline they are seconds during which the app is on screen
-nowhere. But recovery restores the *previous* session's settings, so it cannot
+their caller is a host's `@MainActor` initialiser — for the app, one that runs
+before the menu bar exists — so inline they are seconds during which the host
+is on screen nowhere and answering nothing. But recovery restores the *previous* session's settings, so it cannot
 simply be left to land whenever: a `clear()` arriving after a `startProxy()`
 puts the crashed session's settings back over the ones the user just asked for,
 and an `apply()` arriving first makes recovery's own probe find the new
 listener and conclude nothing is orphaned.
 
-**This is the GUI app only.** `DaemonRuntimeHost` calls neither
-`restoreIfNeeded`, so a headless `pm-proxy` that is killed leaves both surfaces
-stranded until something else tears them down. Tracked in
-[#57](https://github.com/srps/Conduit/issues/57).
+`LaunchRecovery` lives in `PlatformMac`, and both hosts start it in their
+initialiser with the same three calls in the same order (the third is
+`DNSManager.recoverLegacyOwnership`). The app joins it at the head of
+`startProxy`, `stopProxy`, `startDNS` and `stopDNS`; the daemon at the head of
+`startRuntime`, `stopRuntime` and `reloadConfiguration`. The one difference is
+shutdown: the app's `performTerminationCleanup` does not join, because
+`applicationWillTerminate` is synchronous and waiting would block the main
+thread at quit; the daemon's `SIGTERM` path is an async `stopRuntime`, so it
+joins, and the stop's clears never overlap recovery's
+([#17](https://github.com/srps/Conduit/issues/17)). The daemon also joins before
+`daemon.ready`, so readiness never precedes recovery. A config that fails to
+load does not stop the journal restores in either host: they need only the
+journal, and only the legacy resolver scan, which reads the configured domains,
+is skipped. The daemon, which exits on a failed load, runs them first
+(`DaemonRuntimeHost.recoverWithoutConfiguration`). Every step's decision is a
+`platform.launch_recovery_*` event, emitted before its log line
+([#88](https://github.com/srps/Conduit/issues/88); see `docs/events.md`).
+`pm-proxy` touches no platform surface, so it has nothing to recover.
 
 ### 4. One description, two renderers
 
@@ -424,6 +438,7 @@ to be recorded with its consequence for old clients, never inferred.
 |---|---|
 | Target state, write steps, both renderers | `Sources/PlatformMac/ProxyServiceState.swift` |
 | Capture / restore / teardown / launch recovery | `Sources/PlatformMac/SystemProxyManager.swift` |
+| Launch recovery off the main actor, joined by both hosts | `Sources/PlatformMac/LaunchRecovery.swift` |
 | Prior-state storage and surface ownership | `Sources/PlatformMac/PlatformStateJournal.swift` |
 | Port probe | `Sources/PlatformMac/LoopbackPortProbe.swift` |
 | Contract enum and validators | `Sources/ConduitShared/HelperContract.swift` |

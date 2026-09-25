@@ -476,52 +476,42 @@ package final class SystemProxyManager: @unchecked Sendable {
     /// is the moment that copy is most likely still the truth. This mirrors
     /// `SystemDNSManager.restoreIfNeeded`, which has covered the DNS surface
     /// the same way for the same reason.
-    package func restoreIfNeeded(logger: (any LogSink)?) {
+    ///
+    /// Decides and acts, but does not log the decision: it returns it, so the
+    /// host can emit the `platform.launch_recovery_*` event first and derive
+    /// the log line from that (`LaunchRecovery.report`).
+    package func restoreIfNeeded(logger: (any LogSink)?) -> LaunchRecoveryOutcome {
         guard journal.isMarkedApplied(surface: .systemProxy)
                 || journal.hasRecords(for: .systemProxy),
-              let appliedAt = journal.oldestRecordDate(for: .systemProxy) else { return }
+              let appliedAt = journal.oldestRecordDate(for: .systemProxy) else {
+            return .nothingToDo(.nothingRecorded)
+        }
 
         let stalenessThreshold: TimeInterval = 7 * 24 * 3600
         if Date().timeIntervalSince(appliedAt) > stalenessThreshold {
-            logger?.log(
-                .warning,
-                "Recorded system proxy state is older than 7 days. Restoring the previous settings.",
-                category: .system
-            )
-            performRestore(logger: logger)
-            return
+            return performRestore(stale: true, logger: logger)
         }
 
         // A live listener on the port the machine is pointed at means another
         // instance is serving it, and taking its settings away would break
         // every client on the machine. Absent one, the settings are orphaned.
         if localProxyListenerExists() {
-            logger?.log(
-                .debug,
-                "Recorded system proxy state exists and a local proxy is still listening; leaving it alone.",
-                category: .system
-            )
-            return
+            return .declinedLiveListener
         }
 
-        logger?.log(
-            .warning,
-            "Found system proxy settings recorded by a run that never tore down (likely a crash). Restoring the previous settings...",
-            category: .system
-        )
-        performRestore(logger: logger)
+        return performRestore(stale: false, logger: logger)
     }
 
-    private func performRestore(logger: (any LogSink)?) {
+    /// A restore that throws, or that keeps records because some service
+    /// could not be put back, is a failure of recovery: the records are what
+    /// the next launch retries from.
+    private func performRestore(stale: Bool, logger: (any LogSink)?) -> LaunchRecoveryOutcome {
         do {
             try clear(logger: logger)
         } catch {
-            logger?.log(
-                .error,
-                "Failed to restore the system proxy after a crash: \(error.displayDescription)",
-                category: .system
-            )
+            return .failed(reason: error.displayDescription)
         }
+        return hasManagedState() ? .failed(reason: "records_kept") : .restored(stale: stale)
     }
 
     /// Whether something is listening on the loopback port the machine's proxy
