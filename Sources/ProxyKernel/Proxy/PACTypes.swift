@@ -177,7 +177,8 @@ package enum PACNoUsableReason: String, Sendable, CaseIterable {
     case notLoaded = "not_loaded"
     /// The evaluation queue was full (`pac.evaluation_refused`).
     case refused
-    /// The answer came from a PAC the configuration no longer names.
+    /// The answer came from a PAC the configuration no longer names, or was
+    /// computed before `PACRoutingEngine.invalidateRoutes(reason:)`.
     case superseded
 
     /// The reason for a chain left without usable routes. Uses the counts, so
