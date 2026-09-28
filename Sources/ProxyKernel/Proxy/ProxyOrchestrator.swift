@@ -265,6 +265,11 @@ package final class ProxyOrchestrator {
 
     package let logStore: any LogSink
     package let eventLog = RuntimeEventLog()
+    /// Rate-limits `auth.kerberos_fallback_ntlm` and its log line per host
+    /// and reason: every handshake through a proxy Kerberos cannot ticket
+    /// falls back, and one line each flooded `proxy.log` and the bounded
+    /// `eventLog` (#99).
+    private let authFallbackEventGate: RuntimeEventRepeatGate
     /// Connection audit log sink. Defaults to
     /// `DiscardingConnectionAuditSink` (silent) so the orchestrator can
     /// be constructed without one in headless / test contexts. The
@@ -576,43 +581,34 @@ package final class ProxyOrchestrator {
     package nonisolated func reportAuthOutcome(
         _ outcome: RuntimeAuthOutcome,
         host: String,
-        reason: String? = nil
+        reason: String? = nil,
+        diagnostics: String? = nil
     ) {
-        let event: String
-        let detail: String
+        var fallbackLine: String?
         switch outcome {
         case .kerberos:
-            event = "auth.kerberos_succeeded"
-            detail = "host=\(host)"
+            eventLog.append(RuntimeEvent(kind: .auth, event: "auth.kerberos_succeeded", detail: "host=\(host)"))
         case .ntlmFallback:
-            event = "auth.kerberos_fallback_ntlm"
-            detail = reason.map { "host=\(host) reason=\($0)" } ?? "host=\(host)"
+            fallbackLine = reportKerberosFallback(host: host, reason: reason, diagnostics: diagnostics)
         case .ntlmDirect:
-            event = "auth.ntlm_configured"
-            detail = "host=\(host)"
+            eventLog.append(RuntimeEvent(kind: .auth, event: "auth.ntlm_configured", detail: "host=\(host)"))
         }
-        eventLog.append(RuntimeEvent(kind: .auth, event: event, detail: detail))
 
-        // Log line is derived from the event. Fallback always logs; the
-        // other outcomes log once per transition so the auth tab doesn't
-        // fill with per-request noise.
-        // `.notice` across all transitions so the Logs view (buffered
-        // threshold defaults to `.notice`) picks them up. Transition-
-        // gating on `prior` keeps the `.kerberos` / `.ntlmDirect` cases
-        // to one line per state change; `.ntlmFallback` always logs
-        // because every fallback is user-relevant (explains the
-        // Keychain prompt and the orange chip state).
+        // Log line is derived from the event. `.notice` across all
+        // transitions so the Logs view (buffered threshold defaults to
+        // `.notice`) picks them up. Transition-gating on `prior` keeps the
+        // `.kerberos` / `.ntlmDirect` cases to one line per state change;
+        // `.ntlmFallback` logs whenever its event was emitted: once per
+        // host and reason per minute (#99). The snapshot follows every
+        // outcome, reported or not, so the UI chip stays current.
         Task { @MainActor [weak self] in
             guard let self else { return }
             let prior = self.snapshot.lastAuthOutcome
             switch outcome {
             case .ntlmFallback:
-                let reasonSuffix = reason.map { " (\($0))" } ?? ""
-                self.logStore.log(
-                    .notice,
-                    "Kerberos unavailable for \(host)\(reasonSuffix); falling back to NTLMv2.",
-                    category: .auth
-                )
+                if let fallbackLine {
+                    self.logStore.log(.notice, fallbackLine, category: .auth)
+                }
             case .kerberos where prior != .kerberos:
                 self.logStore.log(.notice, "Using Kerberos for \(host).", category: .auth)
             case .ntlmDirect where prior != .ntlmDirect:
@@ -626,6 +622,28 @@ package final class ProxyOrchestrator {
                 snap.lastAuthFallbackReason = (outcome == .ntlmFallback) ? reason : nil
             }
         }
+    }
+
+    /// Emits `auth.kerberos_fallback_ntlm` unless `authFallbackEventGate`
+    /// holds it back, and returns the log line derived from it, or `nil`
+    /// when held back. `suppressed=` counts the fallbacks for this host and
+    /// reason held back since the previous event.
+    private nonisolated func reportKerberosFallback(host: String, reason: String?, diagnostics: String?) -> String? {
+        guard let suppressed = authFallbackEventGate.admit(host: host, reason: reason ?? "") else {
+            return nil
+        }
+        var detail = "host=\(host)"
+        if let reason { detail += " reason=\(reason)" }
+        if let diagnostics { detail += " \(diagnostics)" }
+        detail += " suppressed=\(suppressed)"
+        eventLog.append(RuntimeEvent(kind: .auth, event: "auth.kerberos_fallback_ntlm", detail: detail))
+
+        let cause = [reason, diagnostics].compactMap { $0 }.joined(separator: ", ")
+        var line = "Kerberos unavailable for \(host)\(cause.isEmpty ? "" : " (\(cause))"); falling back to NTLMv2."
+        if suppressed > 0 {
+            line += " \(suppressed) fallbacks for this host and reason were not logged since the last line."
+        }
+        return line
     }
 
     package var config: ProxyConfig {
@@ -1148,9 +1166,11 @@ package final class ProxyOrchestrator {
         portHolderProbe: (any ListenerPortHolderProbing)? = nil,
         relayAcceptProbe: @escaping @Sendable (String, Int) -> Bool = { host, port in
             TCPAcceptProbe.accepts(host: host, port: port)
-        }
+        },
+        authFallbackEventGate: RuntimeEventRepeatGate = RuntimeEventRepeatGate()
     ) {
         self.relayAcceptProbe = relayAcceptProbe
+        self.authFallbackEventGate = authFallbackEventGate
         self.portHolderProbe = portHolderProbe
         self.resolverManager = resolverManager
         self.auditSink = auditSink

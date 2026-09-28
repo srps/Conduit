@@ -226,8 +226,8 @@ final class DaemonRuntimeHost {
         let authenticatorProvider = credentialBasedAuthenticatorProvider(
             configProvider: orchestrator.configSnapshotProvider,
             credentialProvider: credentialManager,
-            outcomeHandler: { [weak orchestrator] outcome, host, reason in
-                orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason)
+            outcomeHandler: { [weak orchestrator] outcome, host, reason, diagnostics in
+                orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason, diagnostics: diagnostics)
             },
             eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
         )

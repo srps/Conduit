@@ -33,7 +33,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
         let factory: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator = credentialBasedAuthenticatorProvider(
             configProvider: { .testFixture() },
             credentialProvider: credProvider,
-            outcomeHandler: { _, _, _ in
+            outcomeHandler: { _, _, _, _ in
                 depthsRef.withLockedValue { $0.append(Thread.callStackSymbols.count) }
             }
         )
@@ -60,7 +60,7 @@ final class AuthProviderStackDepthTests: XCTestCase {
         let ntlmFactory: @Sendable (UpstreamProxy) throws -> ProxyAuthenticator = credentialBasedAuthenticatorProvider(
             configProvider: { ntlm },
             credentialProvider: credProvider,
-            outcomeHandler: { _, _, _ in
+            outcomeHandler: { _, _, _, _ in
                 depthsRef.withLockedValue { $0.append(Thread.callStackSymbols.count) }
             }
         )

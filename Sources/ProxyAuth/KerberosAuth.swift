@@ -336,6 +336,66 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
         }
     }
 
+    /// The failure's GSS codes for an event detail or log line:
+    /// `major=<n> minor=<n>`, plus `krb5_error=<name>` when the minor is a
+    /// Kerberos error `kerberosErrorName(minor:)` knows. The minor is
+    /// printed signed, the way Kerberos error codes are written. Codes only:
+    /// no principal, host or token. `nil` for a failure without GSS codes.
+    ///
+    /// SPNEGO often answers minor 0 for a Kerberos-mech failure (#73); then
+    /// there is no name to give.
+    package var diagnosticDetail: String? {
+        let major: OM_uint32
+        let minor: OM_uint32
+        switch self {
+        case .importNameFailed(let codeMajor, let codeMinor),
+             .initSecContextFailed(let codeMajor, let codeMinor):
+            (major, minor) = (codeMajor, codeMinor)
+        case .serviceTicketUnavailable(_, let ticketMajor, let ticketMinor):
+            (major, minor) = (ticketMajor, ticketMinor)
+        case .emptyToken, .noTicket:
+            return nil
+        }
+        var detail = "major=\(major) minor=\(Int32(bitPattern: minor))"
+        if let name = Self.kerberosErrorName(minor: minor) {
+            detail += " krb5_error=\(name)"
+        }
+        return detail
+    }
+
+    /// The symbolic name of a Kerberos error carried as a GSS minor status,
+    /// for the codes a proxy handshake is likely to meet. Values are from
+    /// `krb5.h` in the macOS SDK (`usr/include/krb5/krb5.h`); Heimdal's
+    /// `krb5_err` table uses the same ones. A table rather than
+    /// `gss_display_status(GSS_C_MECH_CODE)`: outside the failing call's
+    /// context GSS.framework answers "unknown mech-code" for all of them.
+    package static func kerberosErrorName(minor: OM_uint32) -> String? {
+        switch Int32(bitPattern: minor) {
+        case -1_765_328_378: return "KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN"
+        case -1_765_328_377: return "KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN"
+        case -1_765_328_373: return "KRB5KDC_ERR_NEVER_VALID"
+        case -1_765_328_372: return "KRB5KDC_ERR_POLICY"
+        case -1_765_328_370: return "KRB5KDC_ERR_ETYPE_NOSUPP"
+        case -1_765_328_364: return "KRB5KDC_ERR_TGT_REVOKED"
+        case -1_765_328_361: return "KRB5KDC_ERR_KEY_EXP"
+        case -1_765_328_360: return "KRB5KDC_ERR_PREAUTH_FAILED"
+        case -1_765_328_352: return "KRB5KRB_AP_ERR_TKT_EXPIRED"
+        case -1_765_328_351: return "KRB5KRB_AP_ERR_TKT_NYV"
+        case -1_765_328_347: return "KRB5KRB_AP_ERR_SKEW"
+        case -1_765_328_343: return "KRB5KRB_AP_ERR_MODIFIED"
+        case -1_765_328_332: return "KRB5KRB_ERR_RESPONSE_TOO_BIG"
+        case -1_765_328_316: return "KRB5KDC_ERR_WRONG_REALM"
+        case -1_765_328_243: return "KRB5_CC_NOTFOUND"
+        case -1_765_328_242: return "KRB5_CC_END"
+        case -1_765_328_241: return "KRB5_NO_TKT_SUPPLIED"
+        case -1_765_328_230: return "KRB5_REALM_UNKNOWN"
+        case -1_765_328_228: return "KRB5_KDC_UNREACH"
+        case -1_765_328_189: return "KRB5_FCC_NOFILE"
+        case -1_765_328_164: return "KRB5_REALM_CANT_RESOLVE"
+        default: return nil
+        }
+    }
+
     private static func gssRoutineDescription(_ major: OM_uint32) -> String {
         let routine = major & kGSSRoutineErrorMask
         switch routine {
@@ -466,16 +526,18 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
     package typealias KerberosSuccessHandler = @Sendable (_ host: String) -> Void
     /// Callback invoked on the credential-unavailable branch that triggers
     /// NTLM fallback. Receives the target host plus a short machine-readable
-    /// reason code (see `KerberosAuthError.fallbackReasonCode`). Used by the
+    /// reason code (see `KerberosAuthError.fallbackReasonCode`) and the GSS
+    /// codes (`KerberosAuthError.diagnosticDetail`). Used by the
     /// auth factory to fire an `auth.kerberos_fallback_ntlm` `RuntimeEvent`
     /// so the silent downgrade to NTLM is no longer invisible.
-    package typealias KerberosFallbackHandler = @Sendable (_ host: String, _ reason: String) -> Void
+    package typealias KerberosFallbackHandler = @Sendable (_ host: String, _ reason: String, _ diagnostics: String?) -> Void
     /// Callback invoked when a Kerberos failure is raised to the caller with
     /// no NTLM answer: no saved password to fall back to, a failure that
     /// permits no fallback, or a continuation leg GSS rejects. Not invoked for a failure withheld so the
     /// kernel's retry can wait for the ticket; that retry has its own event.
-    /// Receives the target host and `KerberosAuthError.fallbackReasonCode`.
-    package typealias KerberosFailureHandler = @Sendable (_ host: String, _ reason: String) -> Void
+    /// Receives the target host, `KerberosAuthError.fallbackReasonCode` and
+    /// `KerberosAuthError.diagnosticDetail`.
+    package typealias KerberosFailureHandler = @Sendable (_ host: String, _ reason: String, _ diagnostics: String?) -> Void
 
     private let kerberos: KerberosAuthenticator
     private var ntlmFallback: NTLMAuthenticator?
@@ -565,13 +627,13 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
             }
             if let fallback = resolvedFallback() {
                 usingFallback = true
-                onKerberosFallback?(host, kerberosError.fallbackReasonCode)
+                onKerberosFallback?(host, kerberosError.fallbackReasonCode, kerberosError.diagnosticDetail)
                 return (try fallback.initialToken(for: host), true)
             }
-            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode, kerberosError.diagnosticDetail)
             throw kerberosError
         } catch let kerberosError as KerberosAuthError {
-            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode, kerberosError.diagnosticDetail)
             throw kerberosError
         }
     }
@@ -587,7 +649,7 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
         do {
             return try kerberos.processChallenge(headerValues: headerValues, host: host)
         } catch let kerberosError as KerberosAuthError {
-            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode, kerberosError.diagnosticDetail)
             throw kerberosError
         }
     }
