@@ -2,6 +2,7 @@
 import Foundation
 import NIOConcurrencyHelpers
 import NIOCore
+import NIOEmbedded
 import NIOPosix
 import XCTest
 @testable import ProxyKernel
@@ -119,5 +120,83 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
         let failure = LinkLocalFailureMemo.RecentFailure(target: "169.254.169.254:80", secondsAgo: 3, retryAfterSeconds: 60)
         XCTAssertEqual(HTTPProxyHandler.directConnectFailureLevel(failure, default: .error), .info)
         XCTAssertEqual(HTTPProxyHandler.directConnectFailureLevel(ChannelError.connectTimeout(.seconds(2)), default: .error), .error)
+    }
+
+    /// #100: the real install logged 1,350 link-local timeouts and not one
+    /// of them started while the memo held a failure. More than half began
+    /// while another dial to the same target was still waiting out its two
+    /// seconds, before there was anything to remember. A dial in flight is
+    /// joined instead: one connect attempt, and the joiners fail with it.
+    func testConcurrentDialsToALinkLocalTargetShareOneConnectAttempt() async throws {
+        LinkLocalFailureMemo.shared.reset()
+        defer { LinkLocalFailureMemo.shared.reset() }
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let events = NIOLockedValueBox<[String]>([])
+        let sink: @Sendable (RuntimeEvent) -> Void = { event in events.withLockedValue { $0.append(event.event) } }
+        let attempts = NIOLockedValueBox(0)
+        let pending = loop.makePromise(of: Channel.self)
+
+        let dials = (0..<4).map { _ in
+            LinkLocalConnectPolicy.dial(host: "169.254.169.254", port: 80, on: loop, eventSink: sink) { _ in
+                attempts.withLockedValue { $0 += 1 }
+                return pending.futureResult
+            }
+        }
+        XCTAssertEqual(attempts.withLockedValue { $0 }, 1, "the later dials joined the first")
+
+        pending.fail(ChannelError.connectTimeout(LinkLocalConnectPolicy.connectTimeout))
+        var kinds: [String] = []
+        for dial in dials {
+            do {
+                _ = try await dial.get()
+                XCTFail("expected every dial to fail")
+            } catch let error as LinkLocalFailureMemo.RecentFailure {
+                XCTAssertEqual(error.target, "169.254.169.254:80")
+                kinds.append("recent")
+            } catch {
+                XCTAssertTrue(LinkLocalConnectPolicy.isConnectTimeout(error), "\(error)")
+                kinds.append("timeout")
+            }
+        }
+        XCTAssertEqual(kinds, ["timeout", "recent", "recent", "recent"])
+        XCTAssertEqual(attempts.withLockedValue { $0 }, 1, "a joiner never dialled")
+
+        // Repeats inside the memo window keep failing at once, and the
+        // refusal event is emitted once per window, not once per attempt.
+        for _ in 0..<5 {
+            _ = try? await LinkLocalConnectPolicy.dial(host: "169.254.169.254", port: 80, on: loop, eventSink: sink) { _ in
+                attempts.withLockedValue { $0 += 1 }
+                return loop.makeFailedFuture(ChannelError.connectTimeout(LinkLocalConnectPolicy.connectTimeout))
+            }.get()
+        }
+        XCTAssertEqual(attempts.withLockedValue { $0 }, 1)
+        XCTAssertEqual(events.withLockedValue { $0 }, ["direct.link_local_refused"])
+    }
+
+    /// A peer that answers (a Thunderbolt bridge, a self-assigned neighbour)
+    /// is not refused: when the dial a joiner waited on succeeds, the
+    /// joiner makes its own connection.
+    func testAJoinerDialsItselfWhenTheFirstDialSucceeds() async throws {
+        LinkLocalFailureMemo.shared.reset()
+        defer { LinkLocalFailureMemo.shared.reset() }
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let attempts = NIOLockedValueBox(0)
+        let first = loop.makePromise(of: Channel.self)
+        let connected = EmbeddedChannel()
+
+        let leader = LinkLocalConnectPolicy.dial(host: "169.254.10.1", port: 22, on: loop, eventSink: nil) { _ in
+            attempts.withLockedValue { $0 += 1 }
+            return first.futureResult
+        }
+        let joiner = LinkLocalConnectPolicy.dial(host: "169.254.10.1", port: 22, on: loop, eventSink: nil) { _ in
+            attempts.withLockedValue { $0 += 1 }
+            return loop.makeSucceededFuture(connected)
+        }
+        XCTAssertEqual(attempts.withLockedValue { $0 }, 1)
+        first.succeed(connected)
+        _ = try await leader.get()
+        _ = try await joiner.get()
+        XCTAssertEqual(attempts.withLockedValue { $0 }, 2)
+        XCTAssertEqual(LinkLocalFailureMemo.shared.count, 0)
     }
 }
