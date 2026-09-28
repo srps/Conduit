@@ -19,9 +19,18 @@ final class PACRouteRevalidationTests: XCTestCase {
     }
 
     /// Script evaluator and PAC source in one. An evaluation takes its answer
-    /// when it starts, may be held until `release` is signalled, and moves
-    /// the clock by `cost`, the way a slow script spends wall time.
+    /// when it starts (`answers[script]` for the script it was compiled
+    /// from, else `answer`), may be held until `release` is signalled, and
+    /// moves the clock by `cost`, the way a slow script spends wall time.
+    /// A compile may be held on `compileRelease` too, on the evaluator queue.
     private final class FakePAC: PacEvaluator, PacScriptEvaluating, @unchecked Sendable {
+        /// An evaluator bound to the script text it was compiled from.
+        struct Compiled: PacScriptEvaluating {
+            let pac: FakePAC
+            let script: String
+            func resolveProxyChain(for url: URL) throws -> [String] { try pac.evaluate(script: script) }
+        }
+
         struct State {
             var evaluations = 0
             var answer = "PROXY a.example:8080"
@@ -30,11 +39,15 @@ final class PACRouteRevalidationTests: XCTestCase {
             var failing = false
             var script = "script-1"
             var fetches = 0
+            var answers: [String: String] = [:]
+            var holdNextCompile = false
         }
 
         let state = NIOLockedValueBox(State())
         let held = DispatchSemaphore(value: 0)
         let release = DispatchSemaphore(value: 0)
+        let compileHeld = DispatchSemaphore(value: 0)
+        let compileRelease = DispatchSemaphore(value: 0)
         private let clock: Clock
 
         init(clock: Clock) { self.clock = clock }
@@ -50,13 +63,28 @@ final class PACRouteRevalidationTests: XCTestCase {
             }
         }
 
-        func makeEvaluator(pacScript _: String) throws -> any PacScriptEvaluating { self }
+        func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating {
+            let hold = state.withLockedValue { state in
+                defer { state.holdNextCompile = false }
+                return state.holdNextCompile
+            }
+            if hold {
+                compileHeld.signal()
+                compileRelease.wait()
+            }
+            return Compiled(pac: self, script: pacScript)
+        }
 
         func resolveProxyChain(for _: URL) throws -> [String] {
+            try evaluate(script: nil)
+        }
+
+        func evaluate(script: String?) throws -> [String] {
             let (answer, hold, cost, failing) = state.withLockedValue { state in
                 state.evaluations += 1
                 defer { state.holdNext = false }
-                return (state.answer, state.holdNext, state.cost, state.failing)
+                let answer = script.flatMap { state.answers[$0] } ?? state.answer
+                return (answer, state.holdNext, state.cost, state.failing)
             }
             if hold {
                 held.signal()
@@ -249,6 +277,78 @@ final class PACRouteRevalidationTests: XCTestCase {
         pac.set { $0.failing = false }
         try await assertRoutes(engine, [Self.a], "evaluated afresh once expired")
         XCTAssertEqual(pac.evaluations, 3)
+    }
+
+    /// A background re-evaluation that fails after an invalidation dropped
+    /// the answer it was checking has nothing to keep serving: no report.
+    func testAFailedReEvaluationOfADroppedAnswerIsNotReported() async throws {
+        let clock = Clock()
+        let pac = FakePAC(clock: clock)
+        let events = RuntimeEventLog(capacity: 64)
+        let logs = RecordingLogSink(minLevel: .warning)
+        let engine = makeEngine(pac: pac, clock: clock, events: events, logger: logs)
+        try await engine.refresh(force: true)
+        try await assertRoutes(engine, [Self.a])
+
+        clock.advance(2 * 60)
+        pac.set { $0.failing = true; $0.holdNext = true }
+        var released = false
+        defer { if !released { pac.release.signal() } }
+        try await assertRoutes(engine, [Self.a])
+        XCTAssertEqual(pac.held.wait(timeout: .now() + 2), .success)
+
+        engine.invalidateRoutes(reason: .networkChanged)
+        pac.release.signal()
+        released = true
+        try await waitForIdle(engine)
+
+        XCTAssertTrue(named("pac.revalidation_failed", in: events).isEmpty,
+                      "\(named("pac.revalidation_failed", in: events).map(\.detail))")
+        XCTAssertFalse(logs.containsMessage("serving its previous answer"))
+    }
+
+    /// A request that arrives after a different script was installed never
+    /// joins an evaluation the replaced script is still running for its key.
+    func testARequestAfterAChangedScriptDoesNotJoinAnOldScriptEvaluation() async throws {
+        let clock = Clock()
+        let pac = FakePAC(clock: clock)
+        let events = RuntimeEventLog(capacity: 64)
+        let engine = makeEngine(pac: pac, clock: clock, events: events)
+        pac.set { $0.answers = ["script-1": "PROXY a.example:8080", "script-2": "PROXY b.example:8080"] }
+        try await engine.refresh(force: true)
+        try await assertRoutes(engine, [Self.a])
+        clock.advance(2 * 60)
+
+        // The refresh's compile of script-2 holds the evaluator queue, so the
+        // stale answer's re-evaluation (by script-1) queues behind it and is
+        // still running when script-2 is installed.
+        pac.set { $0.script = "script-2"; $0.holdNextCompile = true }
+        var compileReleased = false
+        var evaluationReleased = false
+        defer {
+            if !compileReleased { pac.compileRelease.signal() }
+            if !evaluationReleased { pac.release.signal() }
+        }
+        let refresh = Task { try await engine.refresh(force: true) }
+        XCTAssertEqual(pac.compileHeld.wait(timeout: .now() + 2), .success)
+        pac.set { $0.holdNext = true }
+        try await assertRoutes(engine, [Self.a], "stale, served while its re-evaluation queues")
+        XCTAssertEqual(engine.pendingEvaluationCount(), 1)
+        pac.compileRelease.signal()
+        compileReleased = true
+        try await refresh.value
+        XCTAssertEqual(pac.held.wait(timeout: .now() + 2), .success, "the script-1 re-evaluation is running")
+
+        let group = MultiThreadedEventLoopGroup.singleton
+        let afterInstall = engine.decisionFuture(
+            for: "https://outlook.example.com/EWS/Exchange.asmx", host: "outlook.example.com", on: group.next()
+        )
+        pac.release.signal()
+        evaluationReleased = true
+        let routes = try await afterInstall.get().routes
+        XCTAssertEqual(routes, [Self.b], "answered by the script installed before the request came")
+        try await waitForIdle(engine)
+        try await assertRoutes(engine, [Self.b])
     }
 
     func testTheSlowEvaluationWarningIsAnEventOncePerHostPerTenMinutes() async throws {

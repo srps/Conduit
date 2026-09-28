@@ -539,8 +539,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
         enum Admission { case leader(EvaluationJob), waiter, notLoaded, refused(reason: String, limit: Int) }
         let admission = lock.withLock { () -> Admission in
             guard let evaluator = jsEvaluator else { return .notLoaded }
-            // Waiters join an evaluation of the same generation only, so a
-            // request after an invalidation never waits on a pre-transition answer.
+            // Waiters join an evaluation of the same generation and script
+            // only (`EvaluationJob.pendingKey`).
             let job = EvaluationJob(
                 requestURL: requestURL, host: host, cacheKey: cacheKey, generation: routeGeneration,
                 evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion
@@ -592,7 +592,10 @@ package final class PACRoutingEngine: @unchecked Sendable {
         let evaluatedURL: String
         let scriptVersion: UInt64
 
-        var pendingKey: String { "\(generation) \(cacheKey)" }
+        /// Requests join a running evaluation only under the same generation
+        /// and script: one admitted after an invalidation or a changed
+        /// script never waits on an answer from before it.
+        var pendingKey: String { "\(generation) \(scriptVersion) \(cacheKey)" }
     }
 
     /// Starts a background evaluation of a stale answer, unless one of this
@@ -684,17 +687,22 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// script dropped the stale answer too, and said so. Failed: the stale
     /// answer is kept, until it expires, and not tried again for
     /// `routeRevalidationAge`, so a failing host costs one evaluation a
-    /// minute, not one per request.
+    /// minute, not one per request. A failure whose answer an invalidation
+    /// or a different script has dropped meanwhile has nothing left to keep
+    /// serving, and is not reported: whatever now sits under the key was
+    /// computed afresh and is not this job's to touch.
     private func backgroundEvaluationFinished(_ decision: PACDecision, job: EvaluationJob, error: (any Error)?) {
         guard case .noUsableAnswer(let reason, _) = decision else { return }
-        guard reason != .superseded else {
-            logger?.log(.debug, "Background PAC re-evaluation for \(job.host) finished after its answer was dropped; discarded.", category: .pac)
-            return
-        }
         let retryAt = now().addingTimeInterval(Self.routeRevalidationAge)
-        lock.withLock {
-            guard routeGeneration == job.generation, routeCache[job.cacheKey] != nil else { return }
+        let kept = reason != .superseded && lock.withLock { () -> Bool in
+            guard routeGeneration == job.generation, scriptVersion == job.scriptVersion,
+                  routeCache[job.cacheKey] != nil else { return false }
             routeCache[job.cacheKey]?.revalidateAfter = retryAt
+            return true
+        }
+        guard kept else {
+            logger?.log(.debug, "Background PAC re-evaluation for \(job.host) finished (\(reason.rawValue)) after its answer was dropped; discarded.", category: .pac)
+            return
         }
         guard let suppressed = evaluationReportGate.admit(host: job.host.lowercased(), reason: "revalidation_failed") else { return }
         eventSink?(RuntimeEvent(
