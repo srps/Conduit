@@ -199,4 +199,58 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
         XCTAssertEqual(attempts.withLockedValue { $0 }, 2)
         XCTAssertEqual(LinkLocalFailureMemo.shared.count, 0)
     }
+
+    /// Codex on PR #106: joiners released by a leader that did not time out
+    /// must not queue behind whichever of them leads next. Every one dials
+    /// at once, whether the leader connected or failed another way.
+    func testReleasedJoinersDialIndependentlyAfterASuccess() async throws {
+        try await assertReleasedJoinersDialIndependently { $0.succeed(EmbeddedChannel()) }
+    }
+
+    func testReleasedJoinersDialIndependentlyAfterANonTimeoutFailure() async throws {
+        try await assertReleasedJoinersDialIndependently {
+            $0.fail(IOError(errnoCode: ECONNREFUSED, reason: "connect"))
+        }
+    }
+
+    private func assertReleasedJoinersDialIndependently(
+        finishLeader: (EventLoopPromise<Channel>) -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        LinkLocalFailureMemo.shared.reset()
+        defer { LinkLocalFailureMemo.shared.reset() }
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        // Every dial gets its own promise the test controls; none completes
+        // until the test says so.
+        let dials = NIOLockedValueBox<[EventLoopPromise<Channel>]>([])
+        let connect: @Sendable (TimeAmount) -> EventLoopFuture<Channel> = { _ in
+            let promise = loop.makePromise(of: Channel.self)
+            dials.withLockedValue { $0.append(promise) }
+            return promise.futureResult
+        }
+        let dial = { LinkLocalConnectPolicy.dial(host: "169.254.20.1", port: 22, on: loop, eventSink: nil, connect) }
+
+        let leader = dial()
+        let joiners = (0..<3).map { _ in dial() }
+        XCTAssertEqual(dials.withLockedValue { $0.count }, 1, "the joiners wait for the leader", file: file, line: line)
+
+        finishLeader(dials.withLockedValue { $0[0] })
+        // Completion callbacks run on `loop`; a task queued behind them runs
+        // after every released joiner has made its decision.
+        try await loop.submit {}.get()
+        XCTAssertEqual(dials.withLockedValue { $0.count }, 4, "every released joiner dialled at once", file: file, line: line)
+
+        // Complete every dial, including any a serialized joiner opens later,
+        // so a regression fails the assertion above instead of hanging here.
+        var completed = 1
+        for _ in 0..<joiners.count {
+            let open = dials.withLockedValue { Array($0.dropFirst(completed)) }
+            completed += open.count
+            for promise in open { promise.succeed(EmbeddedChannel()) }
+            try await loop.submit {}.get()
+        }
+        _ = try? await leader.get()
+        for joiner in joiners { _ = try await joiner.get() }
+    }
 }

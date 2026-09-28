@@ -34,7 +34,9 @@ package enum LinkLocalConnectPolicy {
     /// dial is still waiting on joins it rather than opening a second
     /// attempt: nothing is remembered until the first times out, and cloud
     /// SDKs send their metadata probes in pairs a second apart (#100). If the
-    /// first dial succeeds or fails some other way, the joiner dials itself.
+    /// first dial times out, its joiners fail with it; if it succeeds or fails
+    /// some other way, every joiner dials at once on its own, without queueing
+    /// behind another admission (Codex on #106).
     /// Shared by the HTTP and SOCKS direct paths so they cannot diverge.
     package static func dial(
         host: String,
@@ -56,21 +58,43 @@ package enum LinkLocalConnectPolicy {
                                         detail: "target=\(target) secondsAgo=\(recent.secondsAgo)"))
             }
             return eventLoop.makeFailedFuture(recent)
-        case .join(let inFlight):
-            return inFlight.hop(to: eventLoop).flatMap {
-                dial(host: host, port: port, on: eventLoop, defaultTimeout: defaultTimeout,
-                     eventSink: eventSink, connect)
+        case .join(let leader):
+            return leader.hop(to: eventLoop).flatMap { outcome in
+                switch outcome {
+                case .timedOut(let failure):
+                    return eventLoop.makeFailedFuture(failure)
+                case .finished:
+                    return dialAndRemember(target: target, memo: memo, connect)
+                }
             }
         case .lead(let done):
-            let attempt = connect(connectTimeout)
+            let attempt = dialAndRemember(target: target, memo: memo, connect)
             attempt.whenComplete { result in
-                if case .failure(let error) = result, isConnectTimeout(error) {
-                    memo.recordFailure(target: target)
-                }
                 memo.finishDial(target: target)
-                done.succeed(())
+                if case .failure(let error) = result, isConnectTimeout(error) {
+                    done.succeed(.timedOut(RecentFailure(target: target, secondsAgo: 0,
+                                                         retryAfterSeconds: Int(memo.ttl))))
+                } else {
+                    done.succeed(.finished)
+                }
             }
             return attempt
+        }
+    }
+
+    private typealias RecentFailure = LinkLocalFailureMemo.RecentFailure
+
+    /// One link-local connect; a timeout is remembered for the next attempt.
+    private static func dialAndRemember(
+        target: String,
+        memo: LinkLocalFailureMemo,
+        _ connect: (TimeAmount) -> EventLoopFuture<Channel>
+    ) -> EventLoopFuture<Channel> {
+        connect(connectTimeout).flatMapErrorThrowing { error in
+            if isConnectTimeout(error) {
+                memo.recordFailure(target: target)
+            }
+            throw error
         }
     }
 
@@ -122,15 +146,23 @@ package final class LinkLocalFailureMemo: @unchecked Sendable {
         package var errorDescription: String? { description }
     }
 
+    /// How the dial a joiner waited on ended.
+    package enum LeaderOutcome: Sendable {
+        /// It timed out; the joiner fails the same way at once.
+        case timedOut(RecentFailure)
+        /// It connected or failed another way; the joiner dials on its own.
+        case finished
+    }
+
     /// What `dial` does with an attempt.
     package enum Admission {
         /// Fail at once. `firstRefusal` is true for the first refusal of this
         /// remembered failure, the only one that emits an event.
         case refuse(RecentFailure, firstRefusal: Bool)
-        /// Wait for the dial in flight, then decide again.
-        case join(EventLoopFuture<Void>)
-        /// Dial; succeed `done` and call `finishDial` when it completes.
-        case lead(done: EventLoopPromise<Void>)
+        /// Wait for the dial in flight and follow its outcome.
+        case join(EventLoopFuture<LeaderOutcome>)
+        /// Dial; call `finishDial`, then succeed `done`, when it completes.
+        case lead(done: EventLoopPromise<LeaderOutcome>)
     }
 
     package static let shared = LinkLocalFailureMemo(ttl: 60, capacity: 256)
@@ -139,7 +171,7 @@ package final class LinkLocalFailureMemo: @unchecked Sendable {
     package let capacity: Int
     private let lock = NIOLock()
     private var failures: [String: (failedAt: Date, refused: Bool)] = [:]
-    private var inFlight: [String: EventLoopFuture<Void>] = [:]
+    private var inFlight: [String: EventLoopFuture<LeaderOutcome>] = [:]
 
     package init(ttl: TimeInterval, capacity: Int) {
         self.ttl = ttl
@@ -175,7 +207,7 @@ package final class LinkLocalFailureMemo: @unchecked Sendable {
             if let pending = inFlight[target] {
                 return .join(pending)
             }
-            let done = eventLoop.makePromise(of: Void.self)
+            let done = eventLoop.makePromise(of: LeaderOutcome.self)
             if inFlight.count < capacity {
                 inFlight[target] = done.futureResult
             }
