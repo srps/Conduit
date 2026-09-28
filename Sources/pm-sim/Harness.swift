@@ -41,6 +41,7 @@ final class SimHarness {
         directModeCause: DirectModeCause = .none,
         upstreamPlainHTTPResponse: String? = nil,
         upstreamServerFirst: [[UInt8]] = [],
+        upstreamChallenge: String = "Negotiate",
         authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator = { _ in MockAuthenticator() }
     ) async throws {
         let origin = FakeOrigin(group: group, behavior: originBehavior)
@@ -53,7 +54,8 @@ final class SimHarness {
             originPort: origin.port,
             requireAuth: true,
             plainHTTPResponse: upstreamPlainHTTPResponse,
-            serverFirst: upstreamServerFirst
+            serverFirst: upstreamServerFirst,
+            challenge: upstreamChallenge
         )
         self.upstream = upstream
         try await upstream.start()

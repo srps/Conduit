@@ -19,6 +19,9 @@ final class FakeUpstreamProxy: @unchecked Sendable {
     /// same write as the `200`, each later one in a write of its own, all
     /// before the relay to the origin starts.
     let serverFirst: [[UInt8]]
+    /// The `Proxy-Authenticate` value of the first 407. The default suits a
+    /// Negotiate mock; an NTLM handshake needs `NTLM <type-2 message>`.
+    let challenge: String
     private(set) var channel: Channel?
     /// Accepted child channels. Closing the listener with NIO does NOT close
     /// already-accepted child channels — they keep serving requests off the
@@ -43,9 +46,11 @@ final class FakeUpstreamProxy: @unchecked Sendable {
         originPort: Int,
         requireAuth: Bool = true,
         plainHTTPResponse: String? = nil,
-        serverFirst: [[UInt8]] = []
+        serverFirst: [[UInt8]] = [],
+        challenge: String = "Negotiate"
     ) {
         self.group = group
+        self.challenge = challenge
         self.originHost = originHost
         self.originPort = originPort
         self.requireAuth = requireAuth
@@ -68,6 +73,7 @@ final class FakeUpstreamProxy: @unchecked Sendable {
         let requireAuth = self.requireAuth
         let plainHTTPResponse = self.plainHTTPResponse
         let serverFirst = self.serverFirst
+        let challenge = self.challenge
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { [weak self] channel in
@@ -80,6 +86,7 @@ final class FakeUpstreamProxy: @unchecked Sendable {
                         requireAuth: requireAuth,
                         plainHTTPResponse: plainHTTPResponse,
                         serverFirst: serverFirst,
+                        challenge: challenge,
                         onConnect: { connectCountBox?.withLockedValue { $0 += 1 } }
                     )
                 )
@@ -123,6 +130,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
     private let requireAuth: Bool
     private let plainHTTPResponse: String?
     private let serverFirst: [[UInt8]]
+    private let challenge: String
     private let onConnect: @Sendable () -> Void
     private var phase: Phase
     private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
@@ -134,9 +142,11 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
         requireAuth: Bool,
         plainHTTPResponse: String?,
         serverFirst: [[UInt8]] = [],
+        challenge: String = "Negotiate",
         onConnect: @escaping @Sendable () -> Void = {}
     ) {
         self.serverFirst = serverFirst
+        self.challenge = challenge
         self.originHost = originHost
         self.originPort = originPort
         self.requireAuth = requireAuth
@@ -167,7 +177,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
         case .awaitingFirstConnect:
             let response =
                 "HTTP/1.1 407 Proxy Authentication Required\r\n" +
-                "Proxy-Authenticate: Negotiate\r\n" +
+                "Proxy-Authenticate: \(challenge)\r\n" +
                 "Content-Length: 0\r\n" +
                 "\r\n"
             var out = context.channel.allocator.buffer(capacity: response.utf8.count)
