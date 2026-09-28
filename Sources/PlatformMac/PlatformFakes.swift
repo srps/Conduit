@@ -493,21 +493,48 @@ package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sen
 // MARK: - InMemorySecretStore
 
 /// A `SecretStore` that forgets on exit, for a host whose credential
-/// controls must not reach the login Keychain.
+/// controls must not reach the login Keychain. Counts its reads, and can be
+/// told to fail or to take a while, so a test can see how often a caller
+/// goes to the store.
 package final class InMemorySecretStore: SecretStore, @unchecked Sendable {
     private let lock = NSLock()
     private var secrets: [String: SecretBytes] = [:]
+    private var _loads = 0
+    private var _loadFailure: (any Error)?
+    private var _loadDelay: TimeInterval = 0
 
     package init() {}
 
     package var accounts: [String] { lock.withLock { Array(secrets.keys) } }
+
+    /// How many times `load(account:)` has been called.
+    package var loads: Int { lock.withLock { _loads } }
+
+    /// Thrown by every `load(account:)` while set.
+    package var loadFailure: (any Error)? {
+        get { lock.withLock { _loadFailure } }
+        set { lock.withLock { _loadFailure = newValue } }
+    }
+
+    /// How long each `load(account:)` blocks before answering, as a Keychain
+    /// read showing an access prompt would.
+    package var loadDelay: TimeInterval {
+        get { lock.withLock { _loadDelay } }
+        set { lock.withLock { _loadDelay = newValue } }
+    }
 
     package func save(secret: SecretBytes, account: String) throws {
         lock.withLock { secrets[account] = secret }
     }
 
     package func load(account: String) throws -> SecretBytes? {
-        lock.withLock { secrets[account] }
+        let (failure, delay) = lock.withLock { () -> ((any Error)?, TimeInterval) in
+            _loads += 1
+            return (_loadFailure, _loadDelay)
+        }
+        if delay > 0 { Thread.sleep(forTimeInterval: delay) }
+        if let failure { throw failure }
+        return lock.withLock { secrets[account] }
     }
 
     package func exists(account: String) throws -> Bool {

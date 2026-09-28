@@ -626,12 +626,13 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
     }
 
     package init(
+        kerberos: KerberosAuthenticator = KerberosAuthenticator(),
         ntlmFallbackProvider: @Sendable @escaping () -> NTLMAuthenticator?,
         onKerberosSuccess: KerberosSuccessHandler? = nil,
         onKerberosFallback: KerberosFallbackHandler? = nil,
         onKerberosFailure: KerberosFailureHandler? = nil
     ) {
-        self.kerberos = KerberosAuthenticator()
+        self.kerberos = kerberos
         self.ntlmFallback = nil
         self.ntlmFallbackProvider = ntlmFallbackProvider
         self.onKerberosSuccess = onKerberosSuccess
@@ -733,5 +734,14 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
         lock.unlock()
         kerberos.reset()
         ntlmFallback?.reset()
+    }
+
+    /// Only the NTLM fallback's credentials come from a store; a rejected
+    /// Kerberos leg has nothing cached to drop.
+    package func credentialsRejected(host: String) {
+        lock.lock()
+        let fallback = usingFallback ? ntlmFallback : nil
+        lock.unlock()
+        fallback?.credentialsRejected(host: host)
     }
 }

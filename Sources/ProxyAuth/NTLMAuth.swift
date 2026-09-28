@@ -254,9 +254,17 @@ package final class NTLMAuthenticator: ProxyAuthenticator, @unchecked Sendable {
     package let scheme = "NTLM"
 
     private let credentials: ProxyCredentials
+    private let onCredentialsRejected: (@Sendable (_ host: String) -> Void)?
 
-    package init(credentials: ProxyCredentials) {
+    /// `onCredentialsRejected` runs when the upstream answers this
+    /// handshake's authenticate message with another 407; the auth factory
+    /// uses it to drop the cached credentials.
+    package init(
+        credentials: ProxyCredentials,
+        onCredentialsRejected: (@Sendable (_ host: String) -> Void)? = nil
+    ) {
         self.credentials = credentials
+        self.onCredentialsRejected = onCredentialsRejected
     }
 
     package func initialToken(for host: String) throws -> String {
@@ -276,6 +284,10 @@ package final class NTLMAuthenticator: ProxyAuthenticator, @unchecked Sendable {
     }
 
     package func reset() {}
+
+    package func credentialsRejected(host: String) {
+        onCredentialsRejected?(host)
+    }
 }
 
 extension Data {
