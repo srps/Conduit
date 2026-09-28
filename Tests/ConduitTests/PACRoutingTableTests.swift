@@ -215,6 +215,78 @@ final class PACRoutingTableTests: XCTestCase {
         await fixture.stop()
     }
 
+    /// #97: a strict-mode 502 inside the settle window after a VPN
+    /// transition is not probed and reports the suppression; the same
+    /// failure after the window is probed and hinted.
+    func testStrictUpstreamFailureInsideTheSettleWindowIsNotProbed() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let clock = NIOLockedValueBox(Date())
+        let now: @Sendable () -> Date = { clock.withLockedValue { $0 } }
+        let transitions = RoutingTransitionSignal(now: now)
+        let suppressed = expectation(description: "routing.strict_direct_reachable_suppressed")
+        let hinted = expectation(description: "routing.strict_direct_reachable")
+        let fixture = try await ProxyFixture.start(
+            servers: servers, strict: true, pac: nil,
+            upstreamPort: try Servers.closedPort(),
+            transitions: transitions, settleWindow: 30, now: now,
+            onEvent: {
+                if $0.event == "routing.strict_direct_reachable_suppressed" { suppressed.fulfill() }
+                if $0.event == "routing.strict_direct_reachable" { hinted.fulfill() }
+            }
+        )
+        transitions.mark()
+        clock.withLockedValue { $0 += 29 }
+        XCTAssertEqual(try fixture.request(.http, target: servers.origin.port), .badGateway)
+        await fulfillment(of: [suppressed], timeout: 10)
+        XCTAssertEqual(fixture.events(named: "routing.strict_direct_reachable_suppressed").map(\.detail),
+                       ["reason=vpn_transition host=127.0.0.1 port=\(servers.origin.port) suppressed=1"])
+        XCTAssertEqual(fixture.detector.probeCount, 0, "probed while the VPN transition was settling")
+        XCTAssertTrue(fixture.events(named: "routing.strict_direct_reachable").isEmpty)
+        XCTAssertEqual(servers.origin.accepted, 0)
+
+        clock.withLockedValue { $0 += 1 }
+        XCTAssertEqual(try fixture.request(.http, target: servers.origin.port), .badGateway)
+        await fulfillment(of: [hinted], timeout: 10)
+        XCTAssertEqual(fixture.detector.probeCount, 1)
+        XCTAssertEqual(servers.origin.requests, 0, "a failed strict request was retried directly")
+        await fixture.stop()
+    }
+
+    /// #97: during a flap hold and in direct mode the failure is not probed.
+    func testStrictUpstreamFailureDuringFlapOrDirectModeIsNotProbed() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let cause = NIOLockedValueBox(DirectModeCause.transientNetworkChange)
+        let flap = expectation(description: "suppressed, reason=flap")
+        let directMode = expectation(description: "suppressed, reason=direct_mode")
+        let fixture = try await ProxyFixture.start(
+            servers: servers, strict: true, pac: nil,
+            upstreamPort: try Servers.closedPort(),
+            directMode: cause, transitions: RoutingTransitionSignal(),
+            onEvent: { event in
+                guard event.event == "routing.strict_direct_reachable_suppressed" else { return }
+                if event.detail?.hasPrefix("reason=flap ") == true { flap.fulfill() }
+                if event.detail?.hasPrefix("reason=direct_mode ") == true { directMode.fulfill() }
+            }
+        )
+        // The handler reads the cause when it reports the failure, which is
+        // after the client has its 502: change the cause only once the flap
+        // failure has been decided.
+        XCTAssertEqual(try fixture.request(.connect, target: servers.origin.port), .badGateway)
+        await fulfillment(of: [flap], timeout: 10)
+        cause.withLockedValue { $0 = .upstreamsUnreachable }
+        XCTAssertEqual(try fixture.request(.http, target: servers.origin.port), .badGateway)
+        await fulfillment(of: [directMode], timeout: 10)
+        let reasons = fixture.events(named: "routing.strict_direct_reachable_suppressed").compactMap {
+            $0.detail?.split(separator: " ").first.map(String.init)
+        }
+        XCTAssertEqual(reasons, ["reason=flap", "reason=direct_mode"])
+        XCTAssertEqual(fixture.detector.probeCount, 0)
+        XCTAssertEqual(servers.origin.accepted, 0)
+        await fixture.stop()
+    }
+
     func testNonStrictUpstreamFailureDoesNotProbeForAHint() async throws {
         let servers = try await Servers.start()
         defer { servers.stop() }
@@ -422,6 +494,10 @@ private final class ProxyFixture: @unchecked Sendable {
         pac: ScriptedPAC?,
         upstreamPort: Int? = nil,
         configure: (inout ProxyConfig) -> Void = { _ in },
+        directMode: NIOLockedValueBox<DirectModeCause> = NIOLockedValueBox(.none),
+        transitions: RoutingTransitionSignal? = nil,
+        settleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow,
+        now: @escaping @Sendable () -> Date = { Date() },
         onEvent: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }
     ) async throws -> ProxyFixture {
         var config = ProxyConfig.testFixture()
@@ -465,12 +541,13 @@ private final class ProxyFixture: @unchecked Sendable {
             engine = created
         }
         let detector = DirectConnectDetector(
-            group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(), ttlSeconds: 300, baseTimeoutMS: 1_000
+            group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(), ttlSeconds: 300, baseTimeoutMS: 1_000,
+            now: now, routingTransitions: transitions, strictHintSettleWindow: settleWindow, eventSink: sink
         )
         let server = LocalProxyServer(
             logger: DiscardingLogSink(),
             configProvider: { fixed },
-            directModeProvider: { (false, .none) },
+            directModeProvider: { directMode.withLockedValue { ($0.isDirect, $0) } },
             authenticatorProvider: { _ in TableAuthenticator() },
             directConnectDetector: detector,
             pacRoutingEngine: engine,

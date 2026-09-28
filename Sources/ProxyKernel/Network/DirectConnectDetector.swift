@@ -21,10 +21,17 @@ package final class DirectConnectDetector: @unchecked Sendable {
     private var strictHintProbedAt: [String: Date] = [:]
     private var strictHintInFlight = 0
     private var strictHintSkipped = 0
+    /// The last `routing.strict_direct_reachable_suppressed` and the
+    /// failures suppressed for the same reason and transition since.
+    private var suppressionReport: SuppressionReport?
     /// Host → when `routing.probe_blocked` was last emitted for it.
     private var probeBlockedReportedAt: [String: Date] = [:]
     private var probesStarted = 0
     private let now: @Sendable () -> Date
+    /// When routing last changed; see `probeForStrictModeHint`. Nil (tests
+    /// and tools without an orchestrator) never settles anything.
+    private let routingTransitions: RoutingTransitionSignal?
+    private let strictHintSettleWindow: TimeInterval
     private let resolveForProbe: @Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>
     private let lock = NSLock()
 
@@ -42,6 +49,17 @@ package final class DirectConnectDetector: @unchecked Sendable {
     /// Hosts the `routing.probe_blocked` rate limit remembers at once;
     /// evicted like the strict-mode hint table.
     package static let probeBlockedCapacity = 256
+    /// How long after a VPN transition or direct-mode change a strict-mode
+    /// failure is not probed for a hint (#97). In three days of logs every
+    /// false hint came within about 5 s of a VPN connect or disconnect, and
+    /// at login the upstream failures lasted about 7 s; 15 s covers that
+    /// twice over. A late hint costs little: the host fails again after the
+    /// window and is probed then, because suppression starts no cooldown.
+    package static let strictHintSettleWindow: TimeInterval = 15
+    /// While suppression goes on for one reason and one transition,
+    /// `routing.strict_direct_reachable_suppressed` repeats at most this
+    /// often, carrying the count since the last one.
+    package static let strictHintSuppressedReportInterval: TimeInterval = 60
 
     /// Why `probeForStrictModeHint` did or did not start a probe.
     package enum StrictHintProbe: Equatable, Sendable {
@@ -52,6 +70,30 @@ package final class DirectConnectDetector: @unchecked Sendable {
         case busy
         /// The host is on the metadata/loopback blocklist (gateway mode).
         case blocked
+        /// Routing is changing under the proxy, so the failure says nothing
+        /// about the host (#97).
+        case suppressed(StrictHintSuppression)
+    }
+
+    /// Why a strict-mode hint was not probed: `reason=` in
+    /// `routing.strict_direct_reachable_suppressed`.
+    package enum StrictHintSuppression: String, Sendable {
+        /// Within `strictHintSettleWindow` of a VPN connect or disconnect or
+        /// a direct-mode change, or while one is being handled.
+        case vpnTransition = "vpn_transition"
+        /// During a VPN flap hold (`.reasserting`).
+        case flap
+        /// While in direct mode.
+        case directMode = "direct_mode"
+    }
+
+    private struct SuppressionReport {
+        let reason: StrictHintSuppression
+        /// `RoutingTransitionSignal.State.completed` when it was emitted.
+        let transition: Int
+        let at: Date
+        /// Suppressed since `at` for this reason and transition, not yet reported.
+        var pending: Int
     }
 
     package struct CacheEntry {
@@ -108,6 +150,8 @@ package final class DirectConnectDetector: @unchecked Sendable {
         maxCacheSize: Int = 512,
         maxConcurrentProbes: Int = 16,
         now: @escaping @Sendable () -> Date = { Date() },
+        routingTransitions: RoutingTransitionSignal? = nil,
+        strictHintSettleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow,
         resolver: (@Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>)? = nil,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
@@ -120,6 +164,8 @@ package final class DirectConnectDetector: @unchecked Sendable {
         self.maxCacheSize = maxCacheSize
         self.maxConcurrentProbes = maxConcurrentProbes
         self.now = now
+        self.routingTransitions = routingTransitions
+        self.strictHintSettleWindow = strictHintSettleWindow
         self.resolveForProbe = resolver ?? { host, port, loop in
             let resolver = AddressFamilyAwareResolver(group: group)
             // A lookup that fails for one family leaves the other; if both
@@ -167,19 +213,31 @@ package final class DirectConnectDetector: @unchecked Sendable {
     ///
     /// The probe follows the direct path's metadata/loopback policy; see
     /// `blocklistAwareProbe`.
+    ///
+    /// No probe runs while routing is changing under the proxy (#97): in a
+    /// flap hold, in direct mode (`directModeCause`), or while a transition
+    /// on `routingTransitions` is in flight or finished less than
+    /// `strictHintSettleWindow` ago. A failure then says nothing about the
+    /// host. The host is not put on cooldown, so its next failure after the
+    /// window is probed; see `reportSuppressed` for the event.
     @discardableResult
     package func probeForStrictModeHint(
         host: String,
         port: Int,
         gatewayMode: Bool,
+        directModeCause: DirectModeCause = .none,
         onReachable: @escaping @Sendable () -> Void
     ) -> StrictHintProbe {
+        let current = now()
+        if let reason = strictHintSuppression(directModeCause: directModeCause, at: current) {
+            reportSuppressed(reason, host: host, port: port, at: current)
+            return .suppressed(reason)
+        }
         guard !MetadataBlocklist.isBlocked(host: host, gatewayMode: gatewayMode) else {
             reportBlocked(host: host, port: port, kind: .strictHint, reason: .blockedName)
             return .blocked
         }
         let key = host.lowercased()
-        let current = now()
         let cooldown = Self.strictHintCooldown
         let admission = lock.withLock { () -> StrictHintProbe in
             if let last = strictHintProbedAt[key], current.timeIntervalSince(last) < cooldown {
@@ -203,6 +261,49 @@ package final class DirectConnectDetector: @unchecked Sendable {
             if case .success(true) = result { onReachable() }
         }
         return .started
+    }
+
+    private func strictHintSuppression(directModeCause: DirectModeCause, at date: Date) -> StrictHintSuppression? {
+        if directModeCause == .transientNetworkChange { return .flap }
+        if directModeCause.isDirect { return .directMode }
+        if routingTransitions?.isSettling(at: date, window: strictHintSettleWindow) == true { return .vpnTransition }
+        return nil
+    }
+
+    /// Emits `routing.strict_direct_reachable_suppressed` for the first
+    /// suppressed failure of each reason and transition, then at most once
+    /// per `strictHintSuppressedReportInterval` while the same suppression
+    /// lasts, with `suppressed=` counting the failures since the last event.
+    /// One report is kept, so this cannot grow. The log line is derived
+    /// from the event.
+    private func reportSuppressed(_ reason: StrictHintSuppression, host: String, port: Int, at date: Date) {
+        let transition = routingTransitions?.current.completed ?? 0
+        let interval = Self.strictHintSuppressedReportInterval
+        let count = lock.withLock { () -> Int? in
+            if var report = suppressionReport, report.reason == reason, report.transition == transition,
+               date.timeIntervalSince(report.at) < interval {
+                report.pending += 1
+                suppressionReport = report
+                return nil
+            }
+            let sameEpisode = suppressionReport.map { $0.reason == reason && $0.transition == transition } ?? false
+            let count = (sameEpisode ? suppressionReport?.pending ?? 0 : 0) + 1
+            suppressionReport = SuppressionReport(reason: reason, transition: transition, at: date, pending: 0)
+            return count
+        }
+        guard let count else { return }
+        let event = RuntimeEvent(
+            kind: .routing,
+            event: "routing.strict_direct_reachable_suppressed",
+            detail: "reason=\(reason.rawValue) host=\(host) port=\(port) suppressed=\(count)"
+        )
+        eventSink?(event)
+        logger.log(
+            .info,
+            "Strict-mode hint for \(host):\(port) not probed: routing is changing under the proxy, " +
+                "so the upstream failure says nothing about the host. (\(event.event): \(event.detail ?? ""))",
+            category: .network
+        )
     }
 
     /// Before inserting `key` into a bounded cooldown table: drop entries

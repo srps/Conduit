@@ -153,6 +153,12 @@ form Conduit cannot route by.
   (`not_found`, `denied`, `interaction_not_allowed`, `invalid_payload`, `read_pending`,
   `status=<n>`), once a minute; a refused prompt is not shown again until you re-save the
   password or restart the proxy. (#98)
+- Strict mode no longer suggests a No-proxy entry for a host that failed only because a
+  VPN transition was settling. Every `routing.strict_direct_reachable` in three days of
+  use came within seconds of a VPN connect or disconnect, and following them would have
+  routed Microsoft 365 around the proxy. No hint probe runs during a flap hold, in direct
+  mode, while a VPN change is being handled, or for 15 s after a VPN connect or
+  disconnect or a direct-mode change such as upstreams recovering. (#97)
 
 ### Logging
 
@@ -185,6 +191,10 @@ form Conduit cannot route by.
   `krb5_major=`, `krb5_minor=` and `krb5_error=`, for example
   `KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN` or `KRB5_KDC_UNREACH`. The extra request is diagnostic
   only and never changes whether the handshake uses Kerberos or NTLM. (#99)
+- `routing.strict_direct_reachable_suppressed` records a strict-mode hint that was not
+  probed because routing was changing (`reason=vpn_transition`, `flap` or `direct_mode`),
+  once per reason and transition and then at most once a minute, with `suppressed=N`.
+  (#97)
 
 ### Development
 
