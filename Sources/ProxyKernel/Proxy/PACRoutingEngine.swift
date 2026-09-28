@@ -37,7 +37,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
     private var lastAttemptedPACURL = ""
     private var jsEvaluator: (any PacScriptEvaluating)?
     private var lastRefreshAt: Date?
-    private var refreshInFlight = false
+    /// The refresh running now, if any: one at a time, and later callers
+    /// wait for it. It clears itself in the same critical section that
+    /// installs its script or records its failure, so an invalidation after
+    /// that point finds no refresh running and the next one fetches afresh.
+    private var runningRefresh: PACRefreshOperation?
     /// Failure backoff state; see `refresh(force:honorBackoff:)`.
     private var consecutiveFailures = 0
     private var lastFailureAt: Date?
@@ -45,9 +49,9 @@ package final class PACRoutingEngine: @unchecked Sendable {
     package static let backoffCap: TimeInterval = 600
 
     private enum RefreshDecision {
-        case run
+        case run(PACRefreshOperation)
         case fresh
-        case alreadyRunning
+        case alreadyRunning(PACRefreshOperation)
         case backingOff(remaining: TimeInterval, failures: Int)
     }
     private var routeCache: [String: RouteCacheEntry] = [:]
@@ -106,17 +110,39 @@ package final class PACRoutingEngine: @unchecked Sendable {
     ///
     /// `force` ignores the refresh interval. `honorBackoff` yields to the
     /// failure backoff (`backoffBase` doubling to `backoffCap`): network-path
-    /// updates pass it; wake, VPN connect and disconnect and user action do not. A changed
-    /// URL always fetches. One refresh runs at a time; a call during one returns.
+    /// updates pass it; wake, VPN connect and disconnect and user action do
+    /// not. A changed URL always fetches.
+    ///
+    /// One refresh runs at a time. A call that finds one running waits for it
+    /// and shares its outcome (#39): on return the evaluator reflects the
+    /// configured URL and the last `invalidateRoutes(reason:)`, or the failure
+    /// is thrown. A refresh that sees an invalidation fetches again before it
+    /// finishes, so no caller returns on a fetch from before one. A cancelled
+    /// caller stops waiting with `CancellationError`; the refresh itself runs
+    /// on for the others.
     package func refresh(force: Bool = false, honorBackoff: Bool = false) async throws {
+        guard let operation = startRefresh(force: force, honorBackoff: honorBackoff, joinRunning: true) else { return }
+        guard try await operation.wait() else {
+            // Event first: this caller goes on without the refresh's outcome.
+            eventSink?(RuntimeEvent(kind: .routing, event: "pac.refresh_wait_refused",
+                                    detail: "limit=\(PACRefreshOperation.waiterLimit)"))
+            logger?.log(.warning, "PAC refresh already has \(PACRefreshOperation.waiterLimit) callers waiting; not waiting for it.", category: .pac)
+            return
+        }
+    }
+
+    /// Starts a refresh, or finds the running one. Returns the operation to
+    /// wait for; `nil` when there is nothing to wait for, or `joinRunning`
+    /// is false and one was already running.
+    private func startRefresh(force: Bool, honorBackoff: Bool, joinRunning: Bool) -> PACRefreshOperation? {
         let config = configProvider()
         guard config.pacRoutingEnabled, !config.pacURL.isEmpty else {
             clearCachedEvaluator()
-            return
+            return nil
         }
 
         let decision: RefreshDecision = lock.withLock {
-            guard !refreshInFlight else { return .alreadyRunning }
+            if let runningRefresh { return .alreadyRunning(runningRefresh) }
             let needsRefresh = force || jsEvaluator == nil || cachedPACURL != config.pacURL || refreshExpired(at: lastRefreshAt)
             guard needsRefresh else { return .fresh }
             // Per attempted URL, so a URL that never loaded still backs off.
@@ -124,42 +150,60 @@ package final class PACRoutingEngine: @unchecked Sendable {
             if honorBackoff, !urlChanged, let remaining = backoffRemainingLocked(now: Date()) {
                 return .backingOff(remaining: remaining, failures: consecutiveFailures)
             }
-            refreshInFlight = true
+            let operation = PACRefreshOperation()
+            runningRefresh = operation
             if urlChanged {
                 lastAttemptedPACURL = config.pacURL
                 consecutiveFailures = 0
                 lastFailureAt = nil
             }
-            return .run
+            return .run(operation)
         }
 
         switch decision {
-        case .run:
-            break
-        case .alreadyRunning, .fresh:
-            return
+        case .run(let operation):
+            let url = config.pacURL
+            // Not the caller's task: a cancelled caller must not abandon a
+            // fetch that others wait for.
+            Task { await self.perform(operation, url: url) }
+            return operation
+        case .alreadyRunning(let operation):
+            return joinRunning ? operation : nil
+        case .fresh:
+            return nil
         case .backingOff(let remaining, let failures):
             let seconds = Int(remaining.rounded(.up))
             eventSink?(RuntimeEvent(kind: .routing, event: "pac.refresh_backoff",
                                     detail: "failures=\(failures) remainingSeconds=\(seconds)"))
             logger?.log(.info, "PAC refresh skipped after \(failures) failed fetch(es); next attempt in \(seconds)s.", category: .pac)
-            return
+            return nil
         }
+    }
 
-        defer { markRefreshInFlight(false) }
-
-        var url = config.pacURL
+    /// The body of one refresh. Ends by clearing `runningRefresh` in the same
+    /// critical section that installs the script or counts the failure, then
+    /// reports, then releases the callers.
+    private func perform(_ operation: PACRefreshOperation, url initialURL: String) async {
+        var url = initialURL
         while true {
             let generation = lock.withLock { routeGeneration }
+            let fetched: Result<any PacScriptEvaluating, any Error>
             do {
-                let newEvaluator = try await fetchAndCompile(url: url)
-                try Task.checkCancellation()
+                fetched = .success(try await fetchAndCompile(url: url))
+            } catch {
+                fetched = .failure(error)
+            }
+
+            switch fetched {
+            case .success(let newEvaluator):
                 // The URL may have changed while this fetch ran. An evaluator
                 // for the old URL is discarded, and the new URL fetched now,
                 // so no request routes by a PAC the configuration no longer names.
                 let current = configProvider()
                 guard current.pacRoutingEnabled, !current.pacURL.isEmpty else {
                     clearCachedEvaluator()
+                    lock.withLock { runningRefresh = nil }
+                    operation.finish(.success(()))
                     return
                 }
                 if current.pacURL != url {
@@ -171,8 +215,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     }
                     continue
                 }
-                // Routes were invalidated while this fetch ran: the script
-                // came from the network before the transition. Fetch again.
+                // Routes invalidated while this fetch ran: the script came
+                // from the network before the transition. Fetch again.
                 let installed = lock.withLock { () -> Bool in
                     guard routeGeneration == generation else { return false }
                     cachedPACURL = url
@@ -182,30 +226,37 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     lastFailureAt = nil
                     routeCache.removeAll()
                     routeCacheOrder.removeAll()
+                    runningRefresh = nil
                     return true
                 }
                 guard installed else { continue }
                 eventSink?(RuntimeEvent(kind: .routing, event: "pac.refreshed", detail: "url=\(Self.redactedURL(url))"))
                 logger?.log(.info, "Refreshed PAC routing rules from \(Self.redactedURL(url)).", category: .pac)
+                operation.finish(.success(()))
                 return
-            } catch {
+
+            case .failure(let error):
                 // A fetch that failed on the network before an invalidation
                 // says nothing about the new one: recorded, not counted
                 // towards the backoff, and retried on the new network.
-                if !Task.isCancelled, lock.withLock({ routeGeneration != generation }) {
+                let superseded = lock.withLock { () -> Bool in
+                    if routeGeneration != generation { return true }
+                    consecutiveFailures += 1
+                    lastFailureAt = Date()
+                    runningRefresh = nil
+                    return false
+                }
+                if superseded {
                     eventSink?(RuntimeEvent(kind: .routing, event: "pac.refresh_failed",
                                             detail: "\(error.displayDescription) superseded=refetching"))
                     logger?.log(.info, "PAC fetch from before the network change failed (\(error.displayDescription)); refetching.", category: .pac)
                     continue
                 }
-                lock.withLock {
-                    consecutiveFailures += 1
-                    lastFailureAt = Date()
-                }
                 // Event first, then the derived log line; callers add neither.
                 eventSink?(RuntimeEvent(kind: .routing, event: "pac.refresh_failed", detail: error.displayDescription))
                 logger?.log(.warning, "PAC refresh failed: \(error.displayDescription)", category: .pac)
-                throw error
+                operation.finish(.failure(error))
+                return
             }
         }
     }
@@ -258,7 +309,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         let config = configProvider()
         guard config.pacRoutingEnabled, !config.pacURL.isEmpty else { return }
         let (routes, hadScript, fetching) = lock.withLock { () -> (Int, Bool, Bool) in
-            let dropped = (routeCache.count, jsEvaluator != nil, refreshInFlight)
+            let dropped = (routeCache.count, jsEvaluator != nil, runningRefresh != nil)
             routeGeneration &+= 1
             jsEvaluator = nil
             routeCache.removeAll()
@@ -485,7 +536,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     }
 
     private func refreshInBackgroundIfNeeded(for config: ProxyConfig) {
-        // Pre-check only: `refresh` claims the in-flight slot. Silent, since
+        // Pre-check only: `startRefresh` claims the slot. Silent, since
         // this runs on every routing decision.
         let shouldKickOff = lock.withLock {
             // A superseded PAC must not keep routing while its replacement
@@ -495,17 +546,15 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 routeCache.removeAll()
                 routeCacheOrder.removeAll()
             }
-            guard !refreshInFlight else { return false }
+            guard runningRefresh == nil else { return false }
             let needsRefresh = jsEvaluator == nil || cachedPACURL != config.pacURL || refreshExpired(at: lastRefreshAt)
             guard needsRefresh else { return false }
             return lastAttemptedPACURL != config.pacURL || backoffRemainingLocked(now: Date()) == nil
         }
 
         guard shouldKickOff else { return }
-
-        Task {
-            try? await refresh(honorBackoff: true)
-        }
+        // Never waits: the request that noticed goes on without PAC routes.
+        _ = startRefresh(force: false, honorBackoff: true, joinRunning: false)
     }
 
     private func refreshExpired(at date: Date?) -> Bool {
@@ -519,18 +568,12 @@ package final class PACRoutingEngine: @unchecked Sendable {
             lastAttemptedPACURL = ""
             jsEvaluator = nil
             lastRefreshAt = nil
-            // `refreshInFlight` belongs to the refresh that claimed it; it
+            // `runningRefresh` belongs to the refresh that claimed it; it
             // releases the slot itself after re-reading the configuration.
             consecutiveFailures = 0
             lastFailureAt = nil
             routeCache.removeAll()
             routeCacheOrder.removeAll()
-        }
-    }
-
-    private func markRefreshInFlight(_ inFlight: Bool) {
-        lock.withLock {
-            refreshInFlight = inFlight
         }
     }
 
@@ -623,6 +666,58 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
         components.fragment = nil
         return components.string ?? "<redacted-url>"
+    }
+}
+
+/// One PAC refresh and the callers waiting for its outcome.
+private final class PACRefreshOperation: @unchecked Sendable {
+    /// Callers that may wait on one refresh. Only control-plane callers wait
+    /// (the per-request background refresh never does), so this is far above
+    /// what a run reaches; past it a caller goes on without waiting.
+    static let waiterLimit = 64
+
+    private let lock = NSLock()
+    private var outcome: Result<Void, any Error>?
+    private var waiters: [UInt64: CheckedContinuation<Void, any Error>] = [:]
+    private var nextWaiterID: UInt64 = 0
+
+    /// Waits for the outcome and rethrows its failure. Returns `false`, at
+    /// once, when `waiterLimit` callers are already waiting.
+    func wait() async throws -> Bool {
+        let id = lock.withLock { () -> UInt64 in
+            nextWaiterID &+= 1
+            return nextWaiterID
+        }
+        var admitted = true
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                let immediate = lock.withLock { () -> Result<Void, any Error>? in
+                    if let outcome { return outcome }
+                    // Cancelled before the handler could see this waiter.
+                    if Task.isCancelled { return .failure(CancellationError()) }
+                    guard waiters.count < Self.waiterLimit else {
+                        admitted = false
+                        return .success(())
+                    }
+                    waiters[id] = continuation
+                    return nil
+                }
+                if let immediate { continuation.resume(with: immediate) }
+            }
+        } onCancel: {
+            let waiter = lock.withLock { waiters.removeValue(forKey: id) }
+            waiter?.resume(throwing: CancellationError())
+        }
+        return admitted
+    }
+
+    func finish(_ result: Result<Void, any Error>) {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Void, any Error>] in
+            outcome = result
+            defer { waiters.removeAll() }
+            return Array(waiters.values)
+        }
+        for waiter in waiting { waiter.resume(with: result) }
     }
 }
 

@@ -128,9 +128,10 @@ final class PACRouteInvalidationTests: XCTestCase {
 
         server.setOnVPN(true)
         engine.invalidateRoutes(reason: .vpnConnected)
-        try await engine.refresh(force: true)  // returns at once: one is running
+        let transition = Task { try await engine.refresh(force: true) }  // joins the running one
         server.gate.signal()
         try await refresh.value
+        try await transition.value
 
         XCTAssertEqual(server.fetches, 2, "the off-VPN script was discarded and the PAC fetched again")
         XCTAssertEqual(engine.route(for: "https://github.com/", host: "github.com"), Self.on)
