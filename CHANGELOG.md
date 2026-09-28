@@ -135,7 +135,13 @@ form Conduit cannot route by.
   after an outage, and a VPN going down for good now drop the cached routes, the loaded
   script and any evaluation or fetch in flight (`pac.routes_invalidated`), then fetch the
   PAC again whatever its failure backoff. Until it loads, requests go through the
-  configured upstreams. A flap keeps the PAC as it is. (#96)
+  configured upstreams. A flap keeps the PAC as it is. Both the drop and the reload
+  (`Reloaded PAC routing rules … after vpn_connected`) are logged at notice. (#96)
+- A PAC refresh that finds another one running now waits for it to finish instead of
+  returning at once, so proxy start, a configuration reload, a wake or a VPN transition
+  continues with the new evaluator installed, or with its failure known. A cancelled
+  caller stops waiting without cancelling the fetch the others wait on; the per-request
+  background refresh still never waits. (#39)
 
 ### Logging
 
