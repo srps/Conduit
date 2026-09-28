@@ -17,6 +17,27 @@ package enum KeychainStoreError: Error, LocalizedError {
     }
 }
 
+extension KeychainStoreError: CredentialReadFailureDescribing {
+    /// `errSecUserCanceled` is the user dismissing the access prompt and
+    /// `errSecAuthFailed` the user refusing it (or a wrong keychain
+    /// password); both need the user, so both are `denied`.
+    /// `errSecInteractionNotAllowed` is a prompt that could not be shown:
+    /// a locked keychain, or a session with no UI.
+    package var credentialReadFailureReason: String {
+        switch self {
+        case .unexpectedStatus(let status):
+            switch status {
+            case errSecItemNotFound: return "not_found"
+            case errSecUserCanceled, errSecAuthFailed: return "denied"
+            case errSecInteractionNotAllowed: return "interaction_not_allowed"
+            default: return "status=\(status)"
+            }
+        case .invalidData:
+            return "invalid_payload"
+        }
+    }
+}
+
 package struct KeychainStore {
     private let service = "io.github.srps.Conduit"
 

@@ -114,6 +114,72 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
         try? await mockProxy.close().get()
     }
 
+    // MARK: - Rejected credentials (#98)
+
+    /// A 407 answering the authenticate leg rejects the credentials; the
+    /// authenticator hears of it once, so a cached password can be dropped.
+    @MainActor
+    func testCONNECTRejectionOfTheFinalLegIsReportedToTheAuthenticator() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        let mockProxy = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(MockAlways407Handler(keepAlive: false))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let port = mockProxy.localAddress!.port!
+        var config = ProxyConfig.testFixture()
+        config.connectionCheckTimeoutMS = 5000
+        config.upstreams = [UpstreamProxy(name: "Mock", host: "127.0.0.1", port: port, priority: 0)]
+        let spy = SpyAuthenticatorProvider()
+        let pool = ConnectionPool(group: group, logger: DiscardingLogSink(), configProvider: { config },
+                                  authenticatorProvider: spy.provide)
+        let coordinator = CONNECTCoordinator(pool: pool, authenticatorProvider: spy.provide, logger: DiscardingLogSink())
+
+        do {
+            _ = try await coordinator.connectUpstreamTunnel(target: "example.com:443").get()
+            XCTFail("a proxy that keeps answering 407 must fail the tunnel")
+        } catch {}
+
+        let instance = try XCTUnwrap(spy.latestInstance)
+        XCTAssertEqual(instance.processChallengeCallCount, 1)
+        XCTAssertEqual(instance.rejectionCount, 1)
+        pool.closeAll()
+        try? await mockProxy.close().get()
+    }
+
+    @MainActor
+    func testHTTPExchangeRejectionOfTheFinalLegIsReportedToTheAuthenticator() async throws {
+        let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
+        let mockProxy = try await ServerBootstrap(group: group)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(MockAlways407Handler(keepAlive: true))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        let port = mockProxy.localAddress!.port!
+        var config = ProxyConfig.testFixture()
+        config.connectionCheckTimeoutMS = 5000
+        config.upstreams = [UpstreamProxy(name: "Mock", host: "127.0.0.1", port: port, priority: 0)]
+        let spy = SpyAuthenticatorProvider()
+        let pool = ConnectionPool(group: group, logger: DiscardingLogSink(), configProvider: { config },
+                                  authenticatorProvider: spy.provide)
+
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://example.com/")
+        do {
+            _ = try await pool.exchange(head: head, body: nil).get()
+            XCTFail("a proxy that keeps answering 407 must fail the exchange")
+        } catch {}
+
+        let instance = try XCTUnwrap(spy.latestInstance)
+        XCTAssertEqual(instance.processChallengeCallCount, 1)
+        XCTAssertEqual(instance.rejectionCount, 1)
+        pool.closeAll()
+        try? await mockProxy.close().get()
+    }
+
     // MARK: - Stateful authenticator context preservation
 
     @MainActor
@@ -394,8 +460,15 @@ private final class TrackingMockAuthenticator: ProxyAuthenticator, @unchecked Se
     private var _initialTokenCalls = 0
     private var _processChallengeCalls = 0
 
+    private var _rejections = 0
+
     var initialTokenCallCount: Int { lock.withLock { _initialTokenCalls } }
     var processChallengeCallCount: Int { lock.withLock { _processChallengeCalls } }
+    var rejectionCount: Int { lock.withLock { _rejections } }
+
+    func credentialsRejected(host: String) {
+        lock.withLock { _rejections += 1 }
+    }
 
     func initialToken(for host: String) throws -> String {
         lock.withLock { _initialTokenCalls += 1 }
@@ -515,6 +588,37 @@ private final class MockHTTP407ThenOKHandler: ChannelInboundHandler, @unchecked 
                 "\r\n" + body
         }
 
+        var outBuf = context.channel.allocator.buffer(capacity: response.utf8.count)
+        outBuf.writeString(response)
+        context.writeAndFlush(NIOAny(outBuf), promise: nil)
+    }
+}
+
+/// A proxy that refuses every credential: 407 to each request, before and
+/// after the challenge-response.
+private final class MockAlways407Handler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    private let keepAlive: Bool
+    private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
+
+    init(keepAlive: Bool) {
+        self.keepAlive = keepAlive
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buf = unwrapInboundIn(data)
+        accumulated.writeBuffer(&buf)
+        guard let str = accumulated.getString(at: accumulated.readerIndex, length: accumulated.readableBytes),
+              str.contains("\r\n\r\n") else {
+            return
+        }
+        accumulated.clear()
+        let response = "HTTP/1.1 407 Proxy Authentication Required\r\n" +
+            "Proxy-Authenticate: Negotiate\r\n" +
+            "Content-Length: 0\r\n" +
+            (keepAlive ? "Connection: Keep-Alive\r\n" : "") +
+            "\r\n"
         var outBuf = context.channel.allocator.buffer(capacity: response.utf8.count)
         outBuf.writeString(response)
         context.writeAndFlush(NIOAny(outBuf), promise: nil)

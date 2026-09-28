@@ -44,13 +44,27 @@ import ProxyKernel
 /// `RuntimeEventRepeatGate`. A fallback reaches `outcomeHandler` every
 /// time, with the failure's GSS codes as the fourth argument; the
 /// orchestrator applies the same limit to the event and line it derives.
+///
+/// A credential read that fails (the Keychain refused, could not prompt,
+/// holds a corrupt entry, or is still waiting on a prompt) goes to
+/// `eventSink` as `auth.credentials_unavailable`, through a second
+/// `RuntimeEventRepeatGate`, and the handshake carries on as if no password
+/// were saved. How often the store is read is `credentialProvider`'s
+/// business: `CredentialManager` caches, so a burst of fallbacks makes one
+/// read. A 407 on the NTLM authenticate leg asks the provider to drop what
+/// it cached (`auth.credentials_dropped` when it did).
+///
+/// `kerberosTokenProvider` and `now` are test seams.
 package func credentialBasedAuthenticatorProvider(
     configProvider: @escaping @Sendable () -> ProxyConfig,
     credentialProvider: any CredentialProvider,
     outcomeHandler: (@Sendable (RuntimeAuthOutcome, String, String?, String?) -> Void)? = nil,
-    eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+    eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+    kerberosTokenProvider: @escaping @Sendable () -> any GSSTokenProvider = { SystemGSSTokenProvider() },
+    now: @escaping @Sendable () -> Date = { Date() }
 ) -> @Sendable (UpstreamProxy) throws -> ProxyAuthenticator {
-    let failureGate = RuntimeEventRepeatGate()
+    let failureGate = RuntimeEventRepeatGate(now: now)
+    let unavailableGate = RuntimeEventRepeatGate(now: now)
     return { destination in
         let config = configProvider()
         guard let upstream = config.enabledUpstreams.first(where: {
@@ -61,16 +75,31 @@ package func credentialBasedAuthenticatorProvider(
             throw UpstreamAuthenticationDenied(endpoint: destination.endpoint)
         }
         let host = upstream.endpoint
+        let reportUnavailable: @Sendable (String) -> Void = { reason in
+            guard let suppressed = unavailableGate.admit(host: host, reason: reason) else { return }
+            eventSink?(RuntimeEvent(kind: .auth, event: "auth.credentials_unavailable",
+                                    detail: "host=\(host) reason=\(reason) source=handshake suppressed=\(suppressed)"))
+        }
+        let dropRejected: @Sendable (String) -> Void = { _ in
+            guard credentialProvider.dropRejectedCredentials(for: upstream) else { return }
+            eventSink?(RuntimeEvent(kind: .auth, event: "auth.credentials_dropped",
+                                    detail: "host=\(host) reason=rejected"))
+        }
         switch config.authMode {
         case .systemNegotiated:
             return NegotiateAuthenticator(
+                kerberos: KerberosAuthenticator(tokenProvider: kerberosTokenProvider()),
                 ntlmFallbackProvider: {
-                    guard
-                        let credentials = try? credentialProvider.credentials(for: upstream)
-                    else {
+                    // A failed read is reported and answered like no saved
+                    // password: Kerberos' own failure goes to the request.
+                    let credentials: ProxyCredentials?
+                    do {
+                        credentials = try credentialProvider.credentials(for: upstream)
+                    } catch {
+                        reportUnavailable(error.credentialReadFailureReason)
                         return nil
                     }
-                    return NTLMAuthenticator(credentials: credentials)
+                    return credentials.map { NTLMAuthenticator(credentials: $0, onCredentialsRejected: dropRejected) }
                 },
                 onKerberosSuccess: { successHost in
                     outcomeHandler?(.kerberos, successHost, nil, nil)
@@ -86,11 +115,19 @@ package func credentialBasedAuthenticatorProvider(
                 }
             )
         case .ntlmv2:
-            guard let credentials = try credentialProvider.credentials(for: upstream) else {
+            let credentials: ProxyCredentials?
+            do {
+                credentials = try credentialProvider.credentials(for: upstream)
+            } catch {
+                reportUnavailable(error.credentialReadFailureReason)
+                throw error
+            }
+            guard let credentials else {
+                reportUnavailable(CredentialManagerError.missingCredentials.credentialReadFailureReason)
                 throw CredentialManagerError.missingCredentials
             }
             outcomeHandler?(.ntlmDirect, host, nil, nil)
-            return NTLMAuthenticator(credentials: credentials)
+            return NTLMAuthenticator(credentials: credentials, onCredentialsRejected: dropRejected)
         }
     }
 }

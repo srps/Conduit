@@ -50,7 +50,7 @@ Asset: saved NTLM credential material.
 
 Boundary: `PlatformMac.CredentialManager` and `KeychainStore` are the only Keychain-backed credential providers; headless tools use `InMemoryCredentialProvider`.
 
-Existing controls: plaintext passwords are not persisted; stored NT hash travels through `SecretBytes`; credentials cross module boundaries as `ProxyCredentials`, not arbitrary dictionaries or JSON; `pm-proxy` does not link `PlatformMac`.
+Existing controls: plaintext passwords are not persisted; stored NT hash travels through `SecretBytes`; credentials cross module boundaries as `ProxyCredentials`, not arbitrary dictionaries or JSON; `pm-proxy` does not link `PlatformMac`. `CredentialManager` keeps the last credential it read in memory (one entry, as `SecretBytes`) for the life of the process or until a save, clear, proxy start or rejecting 407, rather than reading the Keychain per handshake (#98); a failed read is reported as `auth.credentials_unavailable` with a reason, never the secret.
 
 Current gaps: Keychain ACL tightening is not complete; signed-caller restriction exists for the helper (#46) but not for Keychain items. The current helper installation model is LaunchDaemon-based rather than `SMAppService` signed-helper distribution.
 

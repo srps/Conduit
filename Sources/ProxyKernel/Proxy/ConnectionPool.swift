@@ -1662,6 +1662,9 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
             }
 
         case .awaitingFinal:
+            // Nil on an already-authenticated connection: no handshake of
+            // ours sent credentials, so none were rejected.
+            authenticator?.credentialsRejected(host: connection.proxy.host)
             failPromises(ConnectionPoolError.authenticationRejected)
             context.close(promise: nil)
         }

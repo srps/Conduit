@@ -88,7 +88,7 @@ package struct ProxyCredentials: Equatable {
     }
 }
 
-package enum CredentialManagerError: Error, LocalizedError, CredentialFailureClassifying {
+package enum CredentialManagerError: Error, LocalizedError, CredentialFailureClassifying, CredentialReadFailureDescribing {
     case missingCredentials
     case invalidPayload
 
@@ -112,4 +112,11 @@ package enum CredentialManagerError: Error, LocalizedError, CredentialFailureCla
 
     /// Nothing arrives by waiting; the store has no entry.
     package var isCredentialRetryable: Bool { false }
+
+    package var credentialReadFailureReason: String {
+        switch self {
+        case .missingCredentials: return "not_found"
+        case .invalidPayload: return "invalid_payload"
+        }
+    }
 }

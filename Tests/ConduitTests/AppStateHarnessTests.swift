@@ -152,6 +152,27 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: harness.environment.configFile.path))
     }
 
+    /// #98: the saved password is read once when the proxy comes up, so a
+    /// Keychain prompt lands then and not in the middle of a handshake burst.
+    func testProxyStartReadsASavedPasswordOnce() async throws {
+        let state = try launch()
+        try state.credentialManager.saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: state.config)
+        try await state.startProxy()
+        await state.credentialWarmup?.value
+        XCTAssertEqual(harness.secrets.loads, 1)
+        // The manager keys on the profile, not the upstream.
+        _ = try state.credentialManager.credentials(for: UpstreamProxy(name: "any", host: "proxy.example.test", port: 3128, priority: 0))
+        XCTAssertEqual(harness.secrets.loads, 1, "the handshake's read is answered from the start's")
+    }
+
+    func testProxyStartDoesNotReadWithoutASavedPassword() async throws {
+        let state = try launch()
+        try await state.startProxy()
+        await state.credentialWarmup?.value
+        XCTAssertNotNil(state.credentialWarmup)
+        XCTAssertEqual(harness.secrets.loads, 0)
+    }
+
     func testLocalhostIsPinnedInListenersAndAdvertisedClientSettings() async throws {
         let state = try launch(
             platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true),

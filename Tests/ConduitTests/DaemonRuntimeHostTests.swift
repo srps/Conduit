@@ -312,6 +312,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let listings = HeldListings()
         /// Holds one machine call, subprocess or privileged, when armed.
         let hold = HeldCall()
+        let secrets = InMemorySecretStore()
         private let stateDirectory: URL
 
         init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
@@ -348,7 +349,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 configFilePredatesLaunch: true,
                 vpnStatusMonitor: vpn,
                 privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
-                credentialStore: InMemorySecretStore(),
+                credentialStore: secrets,
                 commandRunner: { launchPath, arguments in
                     if arguments.first == "-listallnetworkservices" { listings.passThrough() }
                     hold.pass(launchPath, arguments)
@@ -420,6 +421,21 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
         harness = try DaemonHarness(config: config, platformConfig: platform)
         return try harness.makeHost()
+    }
+
+    /// #98, as in `AppState`: the runtime start reads the saved password
+    /// once, and the handshakes after it are answered from that read.
+    func testRuntimeStartReadsASavedPasswordOnce() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig())
+        let config = host.config
+        try CredentialManager(
+            identityProvider: { (domain: config.domain, username: config.username, profileName: config.profileName) },
+            store: harness.secrets
+        ).saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
+        try await host.startRuntime()
+        await host.credentialWarmup?.value
+        XCTAssertEqual(harness.secrets.loads, 1)
+        await host.stopRuntime()
     }
 
     /// The `AppState` scenario of the same name, against its twin. This
