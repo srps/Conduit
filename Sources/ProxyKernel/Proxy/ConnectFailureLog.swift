@@ -63,7 +63,8 @@ package enum ConnectFailureKind: String, Sendable {
 /// quiet expired entries, then evicts the oldest window, reporting any
 /// count it held back so no suppressed failure goes unaccounted.
 package final class ConnectFailureLog: @unchecked Sendable {
-    package typealias Scheduler = @Sendable (_ delay: TimeInterval, _ work: @escaping @Sendable () -> Void) -> Void
+    package typealias Cancel = @Sendable () -> Void
+    package typealias Scheduler = @Sendable (_ delay: TimeInterval, _ work: @escaping @Sendable () -> Void) -> Cancel
 
     package static let defaultInterval: TimeInterval = 60
     package static let defaultCapacity = 256
@@ -98,6 +99,10 @@ package final class ConnectFailureLog: @unchecked Sendable {
     private let scheduleFlush: Scheduler?
     private let lock = NIOLock()
     private var entries: [Key: Entry] = [:]
+    /// The one pending flush: armed for the earliest window that holds a
+    /// count, re-armed after each flush. Never more than one task, however
+    /// many keys there are (Codex on #106).
+    private var armed: (deadline: Date, cancel: Cancel)?
 
     package init(
         logger: any LogSink,
@@ -116,12 +121,17 @@ package final class ConnectFailureLog: @unchecked Sendable {
         self.scheduleFlush = scheduleFlush
     }
 
+    deinit {
+        armed?.cancel()
+    }
+
     /// A flush scheduler on `group`: summaries come out when their interval
     /// closes even if the failures stopped.
     package static func eventLoopScheduler(_ group: EventLoopGroup) -> Scheduler {
         { delay, work in
             let nanoseconds = Int64(max(0, delay) * 1_000_000_000)
-            group.next().scheduleTask(in: .nanoseconds(nanoseconds)) { work() }
+            let task = group.next().scheduleTask(in: .nanoseconds(nanoseconds)) { work() }
+            return { task.cancel() }
         }
     }
 
@@ -129,7 +139,6 @@ package final class ConnectFailureLog: @unchecked Sendable {
         let key = Key(event: event, target: target, kind: ConnectFailureKind(error))
         let at = now()
         var reports: [Report] = []
-        var flushDelay: TimeInterval?
         lock.withLock {
             if var entry = entries[key] {
                 let age = at.timeIntervalSince(entry.windowStart)
@@ -138,8 +147,8 @@ package final class ConnectFailureLog: @unchecked Sendable {
                     entry.level = max(entry.level, level)
                     entry.error = error
                     entry.message = message
-                    if entry.suppressed == 1 { flushDelay = interval - age }
                     entries[key] = entry
+                    if entry.suppressed == 1 { arm(for: entry.windowStart.addingTimeInterval(interval), at: at) }
                     return
                 }
                 // The window closed without a flush: this failure carries
@@ -156,10 +165,6 @@ package final class ConnectFailureLog: @unchecked Sendable {
             reports.append(Report(key: key, level: level, error: error, message: message, suppressed: 0))
         }
         emit(reports)
-        if let flushDelay, let scheduleFlush {
-            // A small margin so the flush lands after the window has closed.
-            scheduleFlush(flushDelay + 0.05) { [weak self] in self?.flushDue() }
-        }
     }
 
     /// Reports every window that has closed with a count held back and
@@ -179,12 +184,27 @@ package final class ConnectFailureLog: @unchecked Sendable {
                     entries.removeValue(forKey: key)
                 }
             }
+            armed?.cancel()
+            armed = nil
+            let next = entries.values.lazy.filter { $0.suppressed > 0 }.map(\.windowStart).min()
+            if let next { arm(for: next.addingTimeInterval(interval), at: at) }
             return due
         }
         emit(reports)
     }
 
     package var count: Int { lock.withLock { entries.count } }
+
+    /// Called with the lock held. Moves the one pending flush earlier if
+    /// `deadline` comes first; a later deadline waits for the re-arm.
+    private func arm(for deadline: Date, at: Date) {
+        guard let scheduleFlush else { return }
+        if let armed, armed.deadline <= deadline { return }
+        armed?.cancel()
+        // A small margin so the flush lands after the window has closed.
+        let cancel = scheduleFlush(max(0, deadline.timeIntervalSince(at)) + 0.05) { [weak self] in self?.flushDue() }
+        armed = (deadline, cancel)
+    }
 
     /// Called with the lock held on a full map.
     private func makeRoom(at: Date) -> [Report] {

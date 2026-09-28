@@ -15,7 +15,15 @@ final class ConnectFailureLogTests: XCTestCase {
         let logger = RecordingLogSink(minLevel: .info)
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
         let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000_000))
-        let scheduled = NIOLockedValueBox<[(delay: TimeInterval, work: @Sendable () -> Void)]>([])
+        /// A scheduled flush as the fake event loop holds it: pending until
+        /// it runs or is cancelled.
+        struct ScheduledFlush {
+            let delay: TimeInterval
+            let work: @Sendable () -> Void
+            var cancelled = false
+        }
+
+        let scheduled = NIOLockedValueBox<[ScheduledFlush]>([])
         let log: ConnectFailureLog
 
         init(interval: TimeInterval = 60, capacity: Int = 256) {
@@ -28,7 +36,13 @@ final class ConnectFailureLogTests: XCTestCase {
                 interval: interval,
                 capacity: capacity,
                 now: { clock.withLockedValue { $0 } },
-                scheduleFlush: { delay, work in scheduled.withLockedValue { $0.append((delay, work)) } }
+                scheduleFlush: { delay, work in
+                    let index = scheduled.withLockedValue { tasks in
+                        tasks.append(ScheduledFlush(delay: delay, work: work))
+                        return tasks.count - 1
+                    }
+                    return { scheduled.withLockedValue { $0[index].cancelled = true } }
+                }
             )
         }
 
@@ -36,12 +50,16 @@ final class ConnectFailureLogTests: XCTestCase {
             clock.withLockedValue { $0 = $0.addingTimeInterval(seconds) }
         }
 
-        /// Runs every flush scheduled so far, as the event loop would once
-        /// its delay has passed.
+        /// Flushes scheduled and neither run nor cancelled.
+        var pendingFlushes: Int { scheduled.withLockedValue { $0.filter { !$0.cancelled }.count } }
+
+        /// Runs the flushes pending now, as the event loop would once their
+        /// delay has passed; one a flush schedules stays pending.
         func runScheduled() {
-            let work = scheduled.withLockedValue { pending in
-                defer { pending.removeAll() }
-                return pending.map(\.work)
+            let work = scheduled.withLockedValue { tasks in
+                let due = tasks.filter { !$0.cancelled }.map(\.work)
+                for index in tasks.indices { tasks[index].cancelled = true }
+                return due
             }
             work.forEach { $0() }
         }
@@ -67,7 +85,7 @@ final class ConnectFailureLogTests: XCTestCase {
         }
         XCTAssertEqual(fixture.proxyLines().count, 1, "only the first failure is logged inside the interval")
         XCTAssertEqual(fixture.emitted().count, 1, "the event keeps the same bound")
-        XCTAssertEqual(fixture.scheduled.withLockedValue { $0.count }, 1, "one flush per window, not one per failure")
+        XCTAssertEqual(fixture.pendingFlushes, 1, "one flush per window, not one per failure")
 
         fixture.advance(60)
         fixture.runScheduled()
@@ -106,7 +124,7 @@ final class ConnectFailureLogTests: XCTestCase {
         let lines = fixture.proxyLines()
         XCTAssertEqual(lines.count, 2)
         XCTAssertFalse(lines[1].message.contains("suppressed="), lines[1].message)
-        XCTAssertTrue(fixture.scheduled.withLockedValue { $0.isEmpty }, "nothing was suppressed, so nothing to flush")
+        XCTAssertEqual(fixture.pendingFlushes, 0, "nothing was suppressed, so nothing to flush")
     }
 
     /// Without a scheduler the summary still comes out, on the first repeat
@@ -133,6 +151,56 @@ final class ConnectFailureLogTests: XCTestCase {
         XCTAssertLessThanOrEqual(fixture.log.count, 4)
         let summaries = fixture.proxyLines().filter { $0.message.contains("suppressed=1") }
         XCTAssertEqual(summaries.count, 6, "each evicted target reported the repeat it had held back")
+    }
+
+    /// Codex on PR #106: one flush task per suppressed key, never cancelled
+    /// on eviction, piles up timers under a high-cardinality failure
+    /// stream. One reschedulable flush serves every window.
+    func testAHighCardinalityStormKeepsAtMostOneFlushPending() {
+        let fixture = Fixture()
+        var mostPending = 0
+        for i in 0..<1000 {
+            reportNXDOMAIN(fixture, target: "h\(i).example.test:443")
+            reportNXDOMAIN(fixture, target: "h\(i).example.test:443")
+            mostPending = max(mostPending, fixture.pendingFlushes)
+            fixture.advance(0.01)
+        }
+        XCTAssertEqual(mostPending, 1, "never more than one flush pending")
+        XCTAssertLessThanOrEqual(fixture.log.count, 256)
+        XCTAssertEqual(fixture.pendingFlushes, 1)
+
+        fixture.advance(60)
+        fixture.runScheduled()
+        XCTAssertEqual(fixture.pendingFlushes, 0, "every window was flushed; nothing left to arm")
+        XCTAssertEqual(fixture.proxyLines().filter { $0.message.contains("suppressed=1 ") }.count, 1000,
+                       "each key's held-back repeat was reported, by eviction or by the flush")
+    }
+
+    /// The flush is armed for the earliest window that holds a count and
+    /// re-armed for the next one after it runs.
+    func testTheFlushFollowsTheEarliestOpenWindow() {
+        let fixture = Fixture()
+        reportNXDOMAIN(fixture, target: "a.example.test:443")
+        fixture.advance(10)
+        reportNXDOMAIN(fixture, target: "b.example.test:443")
+        reportNXDOMAIN(fixture, target: "b.example.test:443")
+        fixture.advance(10)
+        reportNXDOMAIN(fixture, target: "a.example.test:443")
+        XCTAssertEqual(fixture.pendingFlushes, 1)
+        let armed = fixture.scheduled.withLockedValue { $0.last { !$0.cancelled }?.delay } ?? 0
+        XCTAssertEqual(armed, 40, accuracy: 0.1, "a's window closes first, at 60 s")
+
+        fixture.advance(40)
+        fixture.runScheduled()
+        XCTAssertEqual(fixture.proxyLines().filter { $0.message.contains("suppressed=") }.count, 1, "only a's window closed")
+        XCTAssertEqual(fixture.pendingFlushes, 1, "re-armed for b")
+        let rearmed = fixture.scheduled.withLockedValue { $0.last { !$0.cancelled }?.delay } ?? 0
+        XCTAssertEqual(rearmed, 10, accuracy: 0.1, "b's window closes at 70 s")
+
+        fixture.advance(10)
+        fixture.runScheduled()
+        XCTAssertEqual(fixture.proxyLines().filter { $0.message.contains("suppressed=") }.count, 2)
+        XCTAssertEqual(fixture.pendingFlushes, 0)
     }
 
     func testAQuietFailureStaysOutOfTheEventStream() {
