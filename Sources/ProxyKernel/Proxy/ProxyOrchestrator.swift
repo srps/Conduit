@@ -2429,18 +2429,29 @@ package final class ProxyOrchestrator {
     /// from the cause via `cause.isDirect` everywhere it's needed; there is no
     /// duplicate stored field.
     private func setDirectMode(_ cause: DirectModeCause) {
-        let prior = directModeBox.withLockedValue { state in
-            let prior = state.cause
-            state = (cause.isDirect, cause)
-            return prior
-        }
+        let prior = Self.publishDirectMode(cause, to: directModeBox, stamping: routingTransitions)
         if prior != cause {
-            // Entering direct mode, or upstreams recovering out of it (#97).
-            routingTransitions.mark()
             refreshLocalPACForDirectModeChange(cause)
             logDirectModeEntry(from: prior, to: cause)
         }
         mutateSnapshot { $0.directModeCause = cause }
+    }
+
+    /// Publishes `cause` to the box NIO handlers read, and returns the
+    /// cause it replaced. A change (entering direct mode, or upstreams
+    /// recovering out of it) stamps `signal` first (#97): a handler reads
+    /// the cause, then the signal, so a new cause it can see always comes
+    /// with the stamp. The read and the write are separate because the
+    /// orchestrator is the only writer and calls this on the main actor.
+    package static func publishDirectMode(
+        _ cause: DirectModeCause,
+        to box: NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>,
+        stamping signal: RoutingTransitionSignal
+    ) -> DirectModeCause {
+        let prior = box.withLockedValue { $0.cause }
+        if prior != cause { signal.mark() }
+        box.withLockedValue { $0 = (cause.isDirect, cause) }
+        return prior
     }
 
     private func logDirectModeEntry(from prior: DirectModeCause, to cause: DirectModeCause) {

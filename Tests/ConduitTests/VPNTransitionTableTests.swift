@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 import XCTest
@@ -91,6 +92,25 @@ final class VPNTransitionTableTests: XCTestCase {
         XCTAssertEqual(signal.current.completed, last + 2, "upstreams recovering did not stamp the signal")
         orchestrator.setDirectModeForTesting(.none)
         XCTAssertEqual(signal.current.completed, last + 2, "an unchanged cause is not a transition")
+    }
+
+    /// A handler reads the direct-mode cause, then the signal. It must never
+    /// see a new cause while the signal still says settled: the signal is
+    /// stamped before the cause is published, entering or leaving (#97).
+    func testDirectModeChangeStampsTheSignalBeforePublishingTheCause() {
+        let box = NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>((true, .upstreamsUnreachable))
+        let seenAtStamp = NIOLockedValueBox<[DirectModeCause]>([])
+        let signal = RoutingTransitionSignal(now: {
+            seenAtStamp.withLockedValue { $0.append(box.withLockedValue { $0.cause }) }
+            return Date()
+        })
+        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.none, to: box, stamping: signal), .upstreamsUnreachable)
+        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.vpnDisconnected, to: box, stamping: signal), .none)
+        XCTAssertEqual(ProxyOrchestrator.publishDirectMode(.vpnDisconnected, to: box, stamping: signal), .vpnDisconnected)
+        XCTAssertEqual(seenAtStamp.withLockedValue { $0 }, [.upstreamsUnreachable, .none],
+                       "the new cause was visible before the signal was stamped")
+        XCTAssertEqual(box.withLockedValue { $0.cause }, .vpnDisconnected)
+        XCTAssertEqual(signal.current.completed, 2, "an unchanged cause is not a transition")
     }
 
     // MARK: - Interface name
