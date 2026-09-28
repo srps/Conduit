@@ -24,6 +24,10 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let authHandshakeLimiter = AuthHandshakeLimiter()
     private let group = MultiThreadedEventLoopGroup.singleton
     private let inboundBudget = InboundConnectionBudget()
+    /// One per listener: every HTTP handler reports connect failures through
+    /// it, so a host that fails a thousand times is one line and a summary
+    /// per interval (#100). Bounded by `ConnectFailureLog.defaultCapacity`.
+    private let connectFailureLog: ConnectFailureLog
     private let socksHandshakeTimeout: TimeAmount
     /// Count of accept sockets this server has successfully bound. Lets callers
     /// (and tests) distinguish "the listener was preserved" from "the listener
@@ -150,6 +154,10 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         self.onConnectionActivity = onConnectionActivity
         self.onRequestCompleted = onRequestCompleted
         self.eventSink = eventSink
+        self.connectFailureLog = ConnectFailureLog(
+            logger: logger, eventSink: eventSink,
+            scheduleFlush: ConnectFailureLog.eventLoopScheduler(MultiThreadedEventLoopGroup.singleton)
+        )
     }
 
     package func start() async throws {
@@ -501,7 +509,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                     onConnectionClosed: self.onConnectionClosed,
                     onConnectionActivity: self.onConnectionActivity,
                     onRequestCompleted: self.onRequestCompleted,
-                    eventSink: self.eventSink
+                    eventSink: self.eventSink,
+                    connectFailureLog: self.connectFailureLog
                 )
 
                 do {

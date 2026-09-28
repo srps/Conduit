@@ -40,6 +40,7 @@ enum PMSim {
               strict-direct-reachable Routing: strict mode never goes direct to a reachable origin; hint on 502
               gateway-probe-blocklist Routing: gateway mode never probes or connects to a blocked target
               direct-mode-silence     Phase 2: prove expected-direct causes log .info, not .error
+              direct-failure-storm    Direct NXDOMAIN storm: no error_rate.alarm or re-probe, one log line; upstream failures still alarm
               vpn-flap-idle           idle CONNECT tunnel survives a brief VPN flap
               vpn-flap-stream         streaming HTTP response survives a brief VPN flap
               vpn-flap-long-outage    long outage transitions to .vpnDisconnected, recovers on reconnect
@@ -171,6 +172,7 @@ enum PMSim {
         "strict-direct-reachable",
         "gateway-probe-blocklist",
         "direct-mode-silence",
+        "direct-failure-storm",
         "vpn-flap-idle",
         "vpn-flap-stream",
         "vpn-flap-long-outage",
@@ -246,6 +248,8 @@ enum PMSim {
             return [try await PACRoutingScenarios.gatewayProbeBlocklist(verbose: verbose)]
         case "direct-mode-silence":
             return [try await OrchestratorScenarios.directModeSilence(verbose: verbose)]
+        case "direct-failure-storm":
+            return [try await DirectFailureStormScenarios.run(verbose: verbose)]
         case "vpn-flap-idle":
             return [try await VPNFlapScenarios.vpnFlapShortIdleTunnel(verbose: verbose)]
         case "vpn-flap-stream":

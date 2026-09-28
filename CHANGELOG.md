@@ -121,6 +121,12 @@ form Conduit cannot route by.
   Mode) do not, since they change no route. The system DNS reconcile still runs on every
   update, because a VPN client can rewrite service DNS without a material path change.
   (#101)
+- A direct route whose origin fails (a host that does not resolve, refuses or times out)
+  no longer counts toward the upstream error-rate alarm; one app retrying a PAC-DIRECT
+  host that returned NXDOMAIN raised `error_rate.alarm` and re-probed the upstreams.
+  Every failure still counts in the request metrics. A dial to a link-local address
+  that another dial is still waiting on now joins it instead of opening a second
+  two-second attempt. (#100)
 
 ### Logging
 
@@ -137,6 +143,10 @@ form Conduit cannot route by.
   line moves from info to notice, so proxy.log says why the DNS transports were reset.
   Unchanged updates are counted in a coalesced `network.path_unchanged` (at counts 1, 2,
   4 … 64, then every 64th). (#101)
+- Connect failures (`Direct connect to … failed`, `CONNECT tunnel failed`, `Proxy
+  exchange failed`) are logged once per target and failure kind a minute, then as one
+  summary line with `suppressed=N`; their events carry the same bound and a new `kind=`
+  field. `direct.link_local_refused` is emitted once per remembered timeout. (#100)
 
 ### Development
 
@@ -144,8 +154,9 @@ form Conduit cannot route by.
   daemon over `FakeMachine` in tests no longer reads or writes the login Keychain. (#83)
 - `pm-sim` gains `lifecycle-stop-overtakes-start`, `helper-caller-identity`,
   `pac-unsupported-only` (a PAC with no usable answer routes through the upstream and
-  never reaches the origin directly), `strict-direct-reachable` and `network-path-churn`
-  (20 identical path updates reset nothing; a gateway roam resets once).
+  never reaches the origin directly), `strict-direct-reachable`, `network-path-churn`
+  (20 identical path updates reset nothing; a gateway roam resets once) and
+  `direct-failure-storm`.
 
 ## 0.3.3
 
