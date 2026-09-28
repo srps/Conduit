@@ -359,7 +359,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// failed with a 502. Probe the target directly once (per host, per
     /// cooldown) and, if it answers, say that a No-proxy entry would reach it
     /// (#87). The request is not retried directly. Failures the pool refused
-    /// locally never reached the upstream and get no hint.
+    /// locally never reached the upstream and get no hint, and none is
+    /// probed while routing is changing under the proxy (#97): the detector
+    /// decides that from the current direct-mode cause and the orchestrator's
+    /// `RoutingTransitionSignal`.
     private func hintIfStrictModeTargetIsDirectlyReachable(target: HTTPRequestTarget, error: Error) {
         guard configProvider().strictMode,
               !ConnectionPoolError.isPoolExhausted(error),
@@ -368,7 +371,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let port = target.port
         let eventSink = self.eventSink
         let logger = self.logger
-        directConnectDetector.probeForStrictModeHint(host: host, port: port, gatewayMode: gatewayMode) {
+        directConnectDetector.probeForStrictModeHint(
+            host: host, port: port, gatewayMode: gatewayMode, directModeCause: directModeProvider().1
+        ) {
             let event = RuntimeEvent(
                 kind: .routing,
                 event: "routing.strict_direct_reachable",

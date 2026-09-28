@@ -63,6 +63,36 @@ final class VPNTransitionTableTests: XCTestCase {
                        DirectModeCause.transientNetworkChange.healthSummary)
     }
 
+    // MARK: - Routing transition signal (#97)
+
+    /// Every VPN transition, and every direct-mode change, stamps the signal
+    /// the strict-mode hint reads; an interface-only change does not.
+    func testVPNTransitionsStampTheRoutingTransitionSignal() async throws {
+        let orchestrator = makeOrchestrator()
+        try await orchestrator.startProxy()
+        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+        let signal = orchestrator.routingTransitions
+
+        var last = signal.current.completed
+        for state: VPNObservedState in [.connected, .reasserting, .connected, .disconnected(reason: .userInitiated), .connected] {
+            await orchestrator.handleVPNStateChange(state, interfaceName: "utun4")
+            XCTAssertGreaterThan(signal.current.completed, last, "\(state) did not stamp the signal")
+            XCTAssertEqual(signal.current.inFlight, 0, "\(state) left a transition open")
+            XCTAssertTrue(signal.isSettling(at: Date(), window: DirectConnectDetector.strictHintSettleWindow))
+            last = signal.current.completed
+        }
+
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun5")
+        XCTAssertEqual(signal.current.completed, last, "an interface-only change is not a transition")
+
+        orchestrator.setDirectModeForTesting(.upstreamsUnreachable)
+        XCTAssertEqual(signal.current.completed, last + 1, "a direct-mode change did not stamp the signal")
+        orchestrator.setDirectModeForTesting(.none)
+        XCTAssertEqual(signal.current.completed, last + 2, "upstreams recovering did not stamp the signal")
+        orchestrator.setDirectModeForTesting(.none)
+        XCTAssertEqual(signal.current.completed, last + 2, "an unchanged cause is not a transition")
+    }
+
     // MARK: - Interface name
 
     func testInterfaceNameFollowsTheObserverAndClearsOffConnected() async throws {

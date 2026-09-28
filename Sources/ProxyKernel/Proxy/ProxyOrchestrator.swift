@@ -1000,12 +1000,20 @@ package final class ProxyOrchestrator {
     /// changed nothing material (#101). One path and one counter.
     private var networkPathTracker = NetworkPathTracker()
 
+    /// When routing last changed under the proxy: stamped by every VPN
+    /// transition and direct-mode change, read by the strict-mode hint probe
+    /// so a transient failure is not reported as a No-proxy candidate (#97).
+    package let routingTransitions = RoutingTransitionSignal()
+    private let strictHintSettleWindow: TimeInterval
+
     private lazy var directConnectDetector: DirectConnectDetector = {
         DirectConnectDetector(
             group: MultiThreadedEventLoopGroup.singleton,
             logger: logStore,
             ttlSeconds: TimeInterval(configBox.current.directConnectTTLMinutes * 60),
             baseTimeoutMS: Int64(configBox.current.connectionCheckTimeoutMS),
+            routingTransitions: routingTransitions,
+            strictHintSettleWindow: strictHintSettleWindow,
             eventSink: { [eventLog] event in eventLog.append(event) }
         )
     }()
@@ -1167,10 +1175,12 @@ package final class ProxyOrchestrator {
         relayAcceptProbe: @escaping @Sendable (String, Int) -> Bool = { host, port in
             TCPAcceptProbe.accepts(host: host, port: port)
         },
-        authFallbackEventGate: RuntimeEventRepeatGate = RuntimeEventRepeatGate()
+        authFallbackEventGate: RuntimeEventRepeatGate = RuntimeEventRepeatGate(),
+        strictHintSettleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow
     ) {
         self.relayAcceptProbe = relayAcceptProbe
         self.authFallbackEventGate = authFallbackEventGate
+        self.strictHintSettleWindow = strictHintSettleWindow
         self.portHolderProbe = portHolderProbe
         self.resolverManager = resolverManager
         self.auditSink = auditSink
@@ -1768,6 +1778,10 @@ package final class ProxyOrchestrator {
             }
             return
         }
+        // Routing is unsettled until this returns, reprobe included, and for
+        // the strict-mode hint's settle window after (#97).
+        routingTransitions.begin()
+        defer { routingTransitions.end() }
 
         vpnConnectedForDNSBox.withLockedValue { $0 = state == .connected }
         mutateSnapshot {
@@ -2421,6 +2435,8 @@ package final class ProxyOrchestrator {
             return prior
         }
         if prior != cause {
+            // Entering direct mode, or upstreams recovering out of it (#97).
+            routingTransitions.mark()
             refreshLocalPACForDirectModeChange(cause)
             logDirectModeEntry(from: prior, to: cause)
         }
