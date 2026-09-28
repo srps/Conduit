@@ -78,6 +78,13 @@ form Conduit cannot route by.
   a strict-mode request fails through the upstream, Conduit probes the host once and, if
   it answers, emits `routing.strict_direct_reachable` suggesting a No-proxy entry; the
   request is not retried directly. Outside strict mode the shortcut is unchanged. (#87)
+- A PAC answer is now cached for 10 minutes instead of 60 seconds, and once it is a
+  minute old it is served at once and evaluated again in the background, one evaluation
+  per host at a time. A host whose PAC evaluation is slow (Outlook's EWS host took 0.5 to
+  1.6 s) no longer makes a request wait for it about once a minute. A refresh that fetches
+  the same script keeps the cached answers; a different script, a VPN transition or a
+  material network-path change drops them. A path change keeps the loaded script, so
+  requests are still routed by it while the PAC is fetched again. (#34)
 
 ### Fixed
 
@@ -170,6 +177,10 @@ form Conduit cannot route by.
 - `auth.kerberos_failed` reports a Kerberos failure that has no NTLM answer to fall back
   on, on the initial handshake leg or a continuation GSS rejects, at most once a minute
   per upstream host and reason. (#75)
+- "PAC evaluation took Nms for <host>" is reported at most once per host every 10
+  minutes, with a count of the slow evaluations held back, and is derived from the new
+  `pac.evaluation_slow` event. A failed background re-evaluation is
+  `pac.revalidation_failed`. (#34)
 - `network.path_changed` names the fields that changed (`changed=`, and one
   `field=old->new` token each) and how many unchanged updates came before it, and its log
   line moves from info to notice, so proxy.log says why the DNS transports were reset.

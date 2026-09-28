@@ -8,6 +8,18 @@ package enum PACRouteInvalidationReason: String, Sendable {
     case vpnConnected = "vpn_connected"
     /// A VPN went down for good (not a flap).
     case vpnDisconnected = "vpn_disconnected"
+    /// A material network-path change (#101's fields: status, interfaces,
+    /// gateways, address families, DNS) other than the first path seen.
+    case networkChanged = "network_changed"
+
+    /// Whether the loaded script goes with the answers. A VPN transition
+    /// moves to a network whose PAC server may hand out another script. A
+    /// path change keeps the script: the answers go, because `myIpAddress()`,
+    /// `dnsResolve()` and `isInNet()` may answer differently now, but the
+    /// forced refetch that follows replaces the script only if it can reach
+    /// the PAC server. Dropping it would leave every request without PAC
+    /// routes on an unsatisfied path or while the fetch backs off.
+    var dropsScript: Bool { self != .networkChanged }
 }
 
 package final class PACRoutingEngine: @unchecked Sendable {
@@ -16,10 +28,38 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// Failures (timeout, error, refusal) are not cached.
     private struct RouteCacheEntry {
         let chain: PACChain
+        /// Served as is until then; after it, still served, and evaluated
+        /// again in the background (#34).
+        var revalidateAfter: Date
+        /// Never served after it.
         let expiresAt: Date
     }
 
-    private static let routeCacheTTL: TimeInterval = 60
+    private enum CachedRoute {
+        case fresh(PACChain)
+        /// Past `revalidateAfter`: serve it and evaluate it again.
+        case stale(PACChain)
+        case miss
+    }
+
+    /// How long an answer may be served at all (#34). Everything that changes
+    /// an answer's inputs already drops the cache: a refresh that installs a
+    /// different script, a VPN transition, a material path change. An answer
+    /// in use is evaluated again, in the background, every
+    /// `routeRevalidationAge`. The TTL is left to bound what none of those
+    /// see: a host requested rarely, whose answer depends on the time
+    /// (`timeRange`) or on a DNS answer that moved with no path change. Ten
+    /// minutes keeps a slow host's answer across the gaps between an idle
+    /// client's polls (Outlook EWS paid 0.5–1.6 s about every minute at the
+    /// old 60 s), and is the same horizon as the PAC fetch backoff cap.
+    package static let routeCacheTTL: TimeInterval = 600
+    /// Age after which a cached answer is evaluated again in the background
+    /// while it goes on being served: the old TTL, so an answer in use is as
+    /// current as before and no request waits for it.
+    package static let routeRevalidationAge: TimeInterval = 60
+    /// `pac.evaluation_slow` and `pac.revalidation_failed` are reported at
+    /// most once per host in this interval.
+    package static let slowEvaluationReportInterval: TimeInterval = 600
     private static let routeCacheLimit = 512
 
     private let configProvider: () -> ProxyConfig
@@ -36,6 +76,14 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// URL of the last fetch started. The backoff is per URL.
     private var lastAttemptedPACURL = ""
     private var jsEvaluator: (any PacScriptEvaluating)?
+    /// The text `jsEvaluator` was compiled from. A refresh that fetches the
+    /// same text keeps the cached answers (marked for re-evaluation) rather
+    /// than making every host pay for its first request again.
+    private var loadedScript: String?
+    /// Bumped when a refresh installs a different script. An evaluation by
+    /// the script it replaced may still hand its answer to its waiters, as
+    /// before, but does not cache it.
+    private var scriptVersion: UInt64 = 0
     private var lastRefreshAt: Date?
     /// The refresh running now, if any: one at a time, and later callers
     /// wait for it. It clears itself in the same critical section that
@@ -81,6 +129,12 @@ package final class PACRoutingEngine: @unchecked Sendable {
     private var queuedEvaluations = 0
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let noUsableRouteReporter: PACNoUsableRouteReporter
+    /// Per-host limit for `pac.evaluation_slow` and `pac.revalidation_failed`
+    /// (64 host/reason pairs).
+    private let evaluationReportGate: RuntimeEventRepeatGate
+    /// Drives the route cache and the evaluation timing, so tests can move
+    /// time. The refresh interval and fetch backoff use the wall clock.
+    private let now: @Sendable () -> Date
 
     // The pre-split concrete resolver default was
     // removed — the kernel can no longer construct the concrete resolver.
@@ -94,8 +148,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
         evalTimeoutSeconds: TimeInterval = 5,
         pacLoader: (@Sendable (String) async throws -> String)? = nil,
         queuedEvaluationLimit: Int = 64,
-        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.now = now
+        self.evaluationReportGate = RuntimeEventRepeatGate(repeatInterval: Self.slowEvaluationReportInterval, now: now)
         self.configProvider = configProvider
         self.resolver = resolver
         self.logger = logger
@@ -190,7 +247,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         var url = initialURL
         while true {
             let generation = lock.withLock { routeGeneration }
-            let fetched: Result<any PacScriptEvaluating, any Error>
+            let fetched: Result<(evaluator: any PacScriptEvaluating, script: String), any Error>
             do {
                 fetched = .success(try await fetchAndCompile(url: url))
             } catch {
@@ -198,7 +255,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             }
 
             switch fetched {
-            case .success(let newEvaluator):
+            case .success(let (newEvaluator, script)):
                 // The URL may have changed while this fetch ran. An evaluator
                 // for the old URL is discarded, and the new URL fetched now,
                 // so no request routes by a PAC the configuration no longer names.
@@ -220,30 +277,45 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 }
                 // Routes invalidated while this fetch ran: the script came
                 // from the network before the transition. Fetch again.
-                let installed = lock.withLock { () -> (Bool, PACRouteInvalidationReason?) in
-                    guard routeGeneration == generation else { return (false, nil) }
+                let installedAt = now()
+                let installed = lock.withLock { () -> (installed: Bool, after: PACRouteInvalidationReason?, sameScript: Bool) in
+                    guard routeGeneration == generation else { return (false, nil, false) }
+                    let sameScript = jsEvaluator != nil && cachedPACURL == url && loadedScript == script
                     cachedPACURL = url
                     jsEvaluator = newEvaluator
+                    loadedScript = script
                     lastRefreshAt = .now
                     consecutiveFailures = 0
                     lastFailureAt = nil
-                    routeCache.removeAll()
-                    routeCacheOrder.removeAll()
+                    if sameScript {
+                        // Same script, same network: the answers stand, and
+                        // are evaluated again in the background on next use.
+                        for key in Array(routeCache.keys) {
+                            routeCache[key]?.revalidateAfter = installedAt
+                        }
+                    } else {
+                        scriptVersion &+= 1
+                        routeCache.removeAll()
+                        routeCacheOrder.removeAll()
+                    }
                     runningRefresh = nil
                     defer { pendingInvalidation = nil }
-                    return (true, pendingInvalidation)
+                    return (true, pendingInvalidation, sameScript)
                 }
-                guard installed.0 else { continue }
+                guard installed.installed else { continue }
                 let redacted = Self.redactedURL(url)
-                if let reason = installed.1 {
+                let unchanged = installed.sameScript ? " script=unchanged" : ""
+                if let reason = installed.after {
                     // A reload after a network transition is rare and the
                     // owner needs to see it in the app's notice-level log.
                     eventSink?(RuntimeEvent(kind: .routing, event: "pac.refreshed",
-                                            detail: "url=\(redacted) after=\(reason.rawValue)"))
-                    logger?.log(.notice, "Reloaded PAC routing rules from \(redacted) after \(reason.rawValue).", category: .pac)
+                                            detail: "url=\(redacted) after=\(reason.rawValue)\(unchanged)"))
+                    logger?.log(.notice, "Reloaded PAC routing rules from \(redacted) after \(reason.rawValue)"
+                        + "\(installed.sameScript ? " (script unchanged)" : "").", category: .pac)
                 } else {
-                    eventSink?(RuntimeEvent(kind: .routing, event: "pac.refreshed", detail: "url=\(redacted)"))
-                    logger?.log(.info, "Refreshed PAC routing rules from \(redacted).", category: .pac)
+                    eventSink?(RuntimeEvent(kind: .routing, event: "pac.refreshed", detail: "url=\(redacted)\(unchanged)"))
+                    logger?.log(.info, "Refreshed PAC routing rules from \(redacted)"
+                        + "\(installed.sameScript ? " (script unchanged; cached answers kept)" : "").", category: .pac)
                 }
                 operation.finish(.success(()))
                 return
@@ -274,9 +346,9 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
     }
 
-    private func fetchAndCompile(url: String) async throws -> any PacScriptEvaluating {
+    private func fetchAndCompile(url: String) async throws -> (evaluator: any PacScriptEvaluating, script: String) {
         let pacScript = try await pacLoader(url)
-        return try compile(pacScript)
+        return (try compile(pacScript), pacScript)
     }
 
     /// Synchronous on purpose: the evaluator is built on `jsQueue` and waited
@@ -311,11 +383,13 @@ package final class PACRoutingEngine: @unchecked Sendable {
     }
 
     /// Drop every answer computed on the network that just went away: the
-    /// route cache, the loaded script (a PAC server may serve a different one
-    /// per network) and any evaluation or fetch still running. Until the next
-    /// refresh installs a script, requests get no PAC routes and go through
-    /// the configured upstreams (`pac.no_usable_route reason=not_loaded`),
-    /// never an answer from before the call. Follow it with
+    /// route cache, any evaluation or fetch still running (a background
+    /// re-evaluation included) and, when `reason.dropsScript`, the loaded
+    /// script (a PAC server may serve a different one per network). Without
+    /// a script, until the next refresh installs one, requests get no PAC
+    /// routes and go through the configured upstreams
+    /// (`pac.no_usable_route reason=not_loaded`); with it, they are evaluated
+    /// afresh. Never an answer from before the call. Follow it with
     /// `refresh(force: true)`; a fetch already running starts over instead.
     /// Emits one `pac.routes_invalidated` when PAC routing is on.
     package func invalidateRoutes(reason: PACRouteInvalidationReason) {
@@ -325,18 +399,23 @@ package final class PACRoutingEngine: @unchecked Sendable {
             let dropped = (routeCache.count, jsEvaluator != nil, runningRefresh != nil)
             routeGeneration &+= 1
             pendingInvalidation = reason
-            jsEvaluator = nil
+            if reason.dropsScript {
+                jsEvaluator = nil
+                loadedScript = nil
+            }
             routeCache.removeAll()
             routeCacheOrder.removeAll()
             return dropped
         }
+        let script = !hadScript ? "none" : reason.dropsScript ? "dropped" : "kept"
         eventSink?(RuntimeEvent(
             kind: .routing,
             event: "pac.routes_invalidated",
-            detail: "reason=\(reason.rawValue) routes=\(routes) script=\(hadScript ? "dropped" : "none") "
+            detail: "reason=\(reason.rawValue) routes=\(routes) script=\(script) "
                 + "fetch=\(fetching ? "restarted" : "idle")"
         ))
-        logger?.log(.notice, "PAC answers dropped (\(reason.rawValue)): \(routes) cached route(s)\(hadScript ? " and the loaded script" : ""); refetching.", category: .pac)
+        let scriptNote = script == "dropped" ? " and the loaded script" : ""
+        logger?.log(.notice, "PAC answers dropped (\(reason.rawValue)): \(routes) cached route(s)\(scriptNote); refetching.", category: .pac)
     }
 
     /// Synchronous decision (tests and tools; the proxy uses `decisionFuture`).
@@ -351,34 +430,45 @@ package final class PACRoutingEngine: @unchecked Sendable {
         refreshInBackgroundIfNeeded(for: config)
 
         let cacheKey = Self.routeCacheKey(for: requestURL, host: host)
-        if let cached = cachedChain(forKey: cacheKey) {
+        switch cachedRoute(forKey: cacheKey) {
+        case .fresh(let cached):
             return answer(PACDecision(chain: cached), host: host)
+        case .stale(let cached):
+            revalidateInBackground(requestURL: requestURL, host: host, cacheKey: cacheKey)
+            return answer(PACDecision(chain: cached), host: host)
+        case .miss:
+            break
         }
 
-        let (evaluator, evaluatedURL, generation) = lock.withLock { (jsEvaluator, cachedPACURL, routeGeneration) }
+        let (evaluator, evaluatedURL, generation, version) = lock.withLock {
+            (jsEvaluator, cachedPACURL, routeGeneration, scriptVersion)
+        }
         guard let evaluator else { return answer(.noUsableAnswer(.notLoaded, rejected: []), host: host) }
 
-        let start = CFAbsoluteTimeGetCurrent()
+        let now = self.now
         nonisolated(unsafe) var result: Result<[String], any Error>?
+        nonisolated(unsafe) var elapsed: TimeInterval = 0
         let evalTimeout: DispatchTime = .now() + 2.0
         let semaphore = DispatchSemaphore(value: 0)
         jsQueue.async {
+            let start = now()
             result = Result { try evaluator.resolveProxyChain(for: requestURL) }
+            elapsed = now().timeIntervalSince(start)
             semaphore.signal()
         }
         if semaphore.wait(timeout: evalTimeout) == .timedOut {
             logger?.log(.warning, "PAC evaluation timed out (2s) for \(host)", category: .pac)
             return answer(.noUsableAnswer(.timeout, rejected: []), host: host)
         }
-        let elapsed = CFAbsoluteTimeGetCurrent() - start
-        if elapsed > slowEvalThresholdSeconds {
-            logger?.log(.warning, "PAC evaluation took \(Int(elapsed * 1000))ms for \(host)", category: .pac)
-        }
+        reportIfSlow(elapsed, host: host)
 
         switch result {
         case .success(let rawChain):
             let chain = resolver.routeChain(for: rawChain)
-            guard storeCachedChain(chain, forKey: cacheKey, evaluatedWith: evaluatedURL, generation: generation) else {
+            let stored = storeCachedChain(
+                chain, forKey: cacheKey, evaluatedWith: evaluatedURL, generation: generation, scriptVersion: version
+            )
+            guard stored != .superseded else {
                 return answer(.noUsableAnswer(.superseded, rejected: []), host: host)
             }
             if let first = chain.routes.first {
@@ -434,37 +524,46 @@ package final class PACRoutingEngine: @unchecked Sendable {
         refreshInBackgroundIfNeeded(for: config)
 
         let cacheKey = Self.routeCacheKey(for: requestURL, host: host)
-        if let cached = cachedChain(forKey: cacheKey) {
+        switch cachedRoute(forKey: cacheKey) {
+        case .fresh(let cached):
             return eventLoop.makeSucceededFuture(answer(PACDecision(chain: cached), host: host))
+        case .stale(let cached):
+            // Served now; the request never waits on a host it has an answer for.
+            revalidateInBackground(requestURL: requestURL, host: host, cacheKey: cacheKey)
+            return eventLoop.makeSucceededFuture(answer(PACDecision(chain: cached), host: host))
+        case .miss:
+            break
         }
-
-        let (evaluator, evaluatedURL, generation) = lock.withLock { (jsEvaluator, cachedPACURL, routeGeneration) }
-        guard let evaluator else {
-            return eventLoop.makeSucceededFuture(answer(.noUsableAnswer(.notLoaded, rejected: []), host: host))
-        }
-        // Waiters join an evaluation of the same generation only, so a
-        // request after an invalidation never waits on a pre-transition answer.
-        let pendingKey = "\(generation) \(cacheKey)"
 
         let promise = eventLoop.makePromise(of: PACDecision.self)
-        enum Admission { case leader, waiter, refused(reason: String, limit: Int) }
+        enum Admission { case leader(EvaluationJob), waiter, notLoaded, refused(reason: String, limit: Int) }
         let admission = lock.withLock { () -> Admission in
-            guard let waiters = pendingEvaluations[pendingKey] else {
+            guard let evaluator = jsEvaluator else { return .notLoaded }
+            // Waiters join an evaluation of the same generation only, so a
+            // request after an invalidation never waits on a pre-transition answer.
+            let job = EvaluationJob(
+                requestURL: requestURL, host: host, cacheKey: cacheKey, generation: routeGeneration,
+                evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion
+            )
+            guard let waiters = pendingEvaluations[job.pendingKey] else {
                 guard queuedEvaluations < queuedEvaluationLimit else {
                     return .refused(reason: "queue_full", limit: queuedEvaluationLimit)
                 }
                 queuedEvaluations += 1
-                pendingEvaluations[pendingKey] = []
-                return .leader
+                pendingEvaluations[job.pendingKey] = []
+                return .leader(job)
             }
             guard waiters.count < Self.pendingWaiterLimit else {
                 return .refused(reason: "waiters_full", limit: Self.pendingWaiterLimit)
             }
-            pendingEvaluations[pendingKey]!.append(promise)
+            pendingEvaluations[job.pendingKey]!.append(promise)
             return .waiter
         }
         switch admission {
         case .waiter:
+            return promise.futureResult
+        case .notLoaded:
+            promise.succeed(answer(.noUsableAnswer(.notLoaded, rejected: []), host: host))
             return promise.futureResult
         case .refused(let reason, let limit):
             // Event first: fail-closed routing under overload must be
@@ -477,49 +576,93 @@ package final class PACRoutingEngine: @unchecked Sendable {
             logger?.log(.warning, "PAC evaluation for \(host) refused (\(reason), limit \(limit)); answering without routes.", category: .pac)
             promise.succeed(answer(.noUsableAnswer(.refused, rejected: []), host: host))
             return promise.futureResult
-        case .leader:
-            break
+        case .leader(let job):
+            startEvaluation(job, leader: promise)
+            return promise.futureResult
         }
+    }
 
+    /// One evaluation of one cache key, and what it was started under.
+    private struct EvaluationJob: Sendable {
+        let requestURL: URL
+        let host: String
+        let cacheKey: String
+        let generation: UInt64
+        let evaluator: any PacScriptEvaluating
+        let evaluatedURL: String
+        let scriptVersion: UInt64
+
+        var pendingKey: String { "\(generation) \(cacheKey)" }
+    }
+
+    /// Starts a background evaluation of a stale answer, unless one of this
+    /// key is already running (a foreground one included) or the evaluation
+    /// queue is full. Either way the stale answer is what the request gets;
+    /// a skipped re-evaluation is tried again on the key's next request.
+    private func revalidateInBackground(requestURL: URL, host: String, cacheKey: String) {
+        let job = lock.withLock { () -> EvaluationJob? in
+            guard let evaluator = jsEvaluator else { return nil }
+            let job = EvaluationJob(
+                requestURL: requestURL, host: host, cacheKey: cacheKey, generation: routeGeneration,
+                evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion
+            )
+            guard pendingEvaluations[job.pendingKey] == nil, queuedEvaluations < queuedEvaluationLimit else { return nil }
+            queuedEvaluations += 1
+            pendingEvaluations[job.pendingKey] = []
+            return job
+        }
+        guard let job else { return }
+        startEvaluation(job, leader: nil)
+    }
+
+    /// Runs `job` on the evaluator queue, bounded by `evalTimeoutSeconds`.
+    /// Its result (or timeout) settles `leader` and every request that joined
+    /// it; a decision without a usable answer is reported once for the whole
+    /// group. A background re-evaluation has no leader: with nobody waiting,
+    /// a success is only cached, and a failure keeps the stale answer.
+    /// Promises are fulfilled on their own loops.
+    private func startEvaluation(_ job: EvaluationJob, leader: EventLoopPromise<PACDecision>?) {
         let completion = PACRouteEvaluationCompletion()
-        let start = CFAbsoluteTimeGetCurrent()
         let timeout = evalTimeoutSeconds
-        let resolver = self.resolver
-        let logger = self.logger
-        let slowEvalThresholdSeconds = self.slowEvalThresholdSeconds
-        let requestURLForEval = requestURL
+        let now = self.now
+        let host = job.host
 
-        // Leader's result (or timeout) settles every request that queued
-        // behind it. Promises are fulfilled on their own loops. A decision
-        // without a usable answer is reported once for the whole group.
         let finish: @Sendable (PACDecision, (any Error)?) -> Void = { decision, error in
+            let waiters = self.lock.withLock { self.pendingEvaluations.removeValue(forKey: job.pendingKey) ?? [] }
+            let promises = (leader.map { [$0] } ?? []) + waiters
+            guard !promises.isEmpty else {
+                self.backgroundEvaluationFinished(decision, job: job, error: error)
+                return
+            }
             let decision = self.answer(decision, host: host, error: error)
-            let waiters = self.lock.withLock { self.pendingEvaluations.removeValue(forKey: pendingKey) ?? [] }
-            for waiter in [promise] + waiters {
+            for waiter in promises {
                 waiter.futureResult.eventLoop.execute { waiter.succeed(decision) }
             }
         }
 
         jsQueue.async {
-            let result = Result { try evaluator.resolveProxyChain(for: requestURLForEval) }
+            let start = now()
+            let result = Result { try job.evaluator.resolveProxyChain(for: job.requestURL) }
+            let elapsed = now().timeIntervalSince(start)
             self.lock.withLock { self.queuedEvaluations -= 1 }
             completion.complete {
                 switch result {
                 case .success(let rawChain):
-                    let elapsed = CFAbsoluteTimeGetCurrent() - start
-                    let chain = resolver.routeChain(for: rawChain)
-                    if elapsed > slowEvalThresholdSeconds {
-                        logger?.log(.warning, "PAC evaluation took \(Int(elapsed * 1000))ms for \(host)", category: .pac)
-                    }
+                    let chain = self.resolver.routeChain(for: rawChain)
+                    self.reportIfSlow(elapsed, host: host)
                     // A result from a PAC the configuration no longer names,
                     // or from before an invalidation, is neither cached nor
                     // handed to the waiters.
-                    guard self.storeCachedChain(chain, forKey: cacheKey, evaluatedWith: evaluatedURL, generation: generation) else {
+                    let stored = self.storeCachedChain(
+                        chain, forKey: job.cacheKey, evaluatedWith: job.evaluatedURL,
+                        generation: job.generation, scriptVersion: job.scriptVersion
+                    )
+                    guard stored != .superseded else {
                         finish(.noUsableAnswer(.superseded, rejected: []), nil)
                         return
                     }
                     if let first = chain.routes.first {
-                        logger?.log(.debug, "PAC route for \(host): \(first) (chain entries: \(rawChain.count))", category: .pac)
+                        self.logger?.log(.debug, "PAC route for \(host): \(first) (chain entries: \(rawChain.count))", category: .pac)
                     }
                     finish(PACDecision(chain: chain), nil)
                 case .failure(let error):
@@ -530,12 +673,52 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + timeout) {
             completion.complete {
-                logger?.log(.warning, "PAC evaluation timed out (\(Int(timeout))s) for \(host)", category: .pac)
+                self.logger?.log(.warning, "PAC evaluation timed out (\(Int(timeout))s) for \(host)", category: .pac)
                 finish(.noUsableAnswer(.timeout, rejected: []), nil)
             }
         }
+    }
 
-        return promise.futureResult
+    /// A background re-evaluation that nobody waited for has finished
+    /// without an answer to cache. Superseded: an invalidation or a new
+    /// script dropped the stale answer too, and said so. Failed: the stale
+    /// answer is kept, until it expires, and not tried again for
+    /// `routeRevalidationAge`, so a failing host costs one evaluation a
+    /// minute, not one per request.
+    private func backgroundEvaluationFinished(_ decision: PACDecision, job: EvaluationJob, error: (any Error)?) {
+        guard case .noUsableAnswer(let reason, _) = decision else { return }
+        guard reason != .superseded else {
+            logger?.log(.debug, "Background PAC re-evaluation for \(job.host) finished after its answer was dropped; discarded.", category: .pac)
+            return
+        }
+        let retryAt = now().addingTimeInterval(Self.routeRevalidationAge)
+        lock.withLock {
+            guard routeGeneration == job.generation, routeCache[job.cacheKey] != nil else { return }
+            routeCache[job.cacheKey]?.revalidateAfter = retryAt
+        }
+        guard let suppressed = evaluationReportGate.admit(host: job.host.lowercased(), reason: "revalidation_failed") else { return }
+        eventSink?(RuntimeEvent(
+            kind: .routing,
+            event: "pac.revalidation_failed",
+            detail: "host=\(job.host) reason=\(reason.rawValue) suppressed=\(suppressed)"
+        ))
+        let cause = error.map { ": \($0.displayDescription)" } ?? ""
+        logger?.log(.warning, "Background PAC re-evaluation for \(job.host) failed (\(reason.rawValue)\(cause)); "
+            + "serving its previous answer until it expires.", category: .pac)
+    }
+
+    /// `pac.evaluation_slow`, at most once per host per
+    /// `slowEvaluationReportInterval`, with the slow evaluations held back
+    /// since the last report. The time is the script's own run, not the
+    /// wait for the evaluator queue.
+    private func reportIfSlow(_ elapsed: TimeInterval, host: String) {
+        guard elapsed > slowEvalThresholdSeconds else { return }
+        guard let suppressed = evaluationReportGate.admit(host: host.lowercased(), reason: "slow") else { return }
+        let ms = Int((elapsed * 1000).rounded())
+        eventSink?(RuntimeEvent(kind: .routing, event: "pac.evaluation_slow",
+                                detail: "host=\(host) ms=\(ms) suppressed=\(suppressed)"))
+        let held = suppressed > 0 ? " (\(suppressed) more slow evaluation(s) of it since the last report)" : ""
+        logger?.log(.warning, "PAC evaluation took \(ms)ms for \(host)\(held)", category: .pac)
     }
 
     package func route(for url: String, host: String) -> PACRoute? {
@@ -581,6 +764,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             cachedPACURL = ""
             lastAttemptedPACURL = ""
             jsEvaluator = nil
+            loadedScript = nil
             lastRefreshAt = nil
             // `runningRefresh` belongs to the refresh that claimed it; it
             // releases the slot itself after re-reading the configuration.
@@ -591,35 +775,48 @@ package final class PACRoutingEngine: @unchecked Sendable {
         }
     }
 
-    private func cachedChain(forKey key: String) -> PACChain? {
-        lock.withLock {
-            purgeExpiredRouteCacheEntriesLocked(now: .now)
-            guard let entry = routeCache[key], entry.expiresAt > .now else {
-                routeCache.removeValue(forKey: key)
-                routeCacheOrder.removeAll { $0 == key }
-                return nil
-            }
+    private func cachedRoute(forKey key: String) -> CachedRoute {
+        let now = self.now()
+        return lock.withLock {
+            purgeExpiredRouteCacheEntriesLocked(now: now)
+            guard let entry = routeCache[key] else { return .miss }
             touchRouteCacheKeyLocked(key)
-            return entry.chain
+            return now >= entry.revalidateAfter ? .stale(entry.chain) : .fresh(entry.chain)
         }
     }
 
-    /// Caches `chain` if the PAC it came from is still the loaded one and no
-    /// invalidation came since. Returns whether it did; a `false` means the
-    /// result is superseded and must not be used either.
+    private enum StoreOutcome {
+        case stored
+        /// Evaluated by a script a refresh has since replaced: still an
+        /// answer for the request that waited on it, as before, but not cached.
+        case scriptReplaced
+        /// From a PAC the configuration no longer names, or from before an
+        /// invalidation: neither cached nor used.
+        case superseded
+    }
+
     private func storeCachedChain(
-        _ chain: PACChain, forKey key: String, evaluatedWith pacURL: String, generation: UInt64
-    ) -> Bool {
-        lock.withLock {
-            guard cachedPACURL == pacURL, jsEvaluator != nil, routeGeneration == generation else { return false }
+        _ chain: PACChain, forKey key: String, evaluatedWith pacURL: String, generation: UInt64, scriptVersion version: UInt64
+    ) -> StoreOutcome {
+        let now = self.now()
+        return lock.withLock {
+            guard cachedPACURL == pacURL, jsEvaluator != nil, routeGeneration == generation else { return .superseded }
+            guard scriptVersion == version else { return .scriptReplaced }
             routeCache[key] = RouteCacheEntry(
                 chain: chain,
-                expiresAt: Date().addingTimeInterval(Self.routeCacheTTL)
+                revalidateAfter: now.addingTimeInterval(Self.routeRevalidationAge),
+                expiresAt: now.addingTimeInterval(Self.routeCacheTTL)
             )
             touchRouteCacheKeyLocked(key)
-            evictRouteCacheIfNeededLocked(now: .now)
-            return true
+            evictRouteCacheIfNeededLocked(now: now)
+            return .stored
         }
+    }
+
+    /// Evaluations running or queued, one per cache key and generation
+    /// (tests and pm-sim wait on it to reach zero).
+    package func pendingEvaluationCount() -> Int {
+        lock.withLock { pendingEvaluations.count }
     }
 
     private func touchRouteCacheKeyLocked(_ key: String) {
