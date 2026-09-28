@@ -44,8 +44,9 @@ package struct NetworkPathState: Sendable, Equatable {
     }
 
     package let status: Status
-    /// In the path's preference order: the first is the one traffic takes, so
-    /// a reorder (Ethernet plugged in under Wi-Fi) is a change.
+    /// Sorted by name, then type. `availableInterfaces` order is not a
+    /// documented route preference, so the same set in another order is not
+    /// a change, and the set renders the same way for the `old->new` tokens.
     package let interfaces: [Interface]
     /// Sorted, so a report that lists the same gateways in another order is
     /// not a change.
@@ -67,7 +68,7 @@ package struct NetworkPathState: Sendable, Equatable {
         isConstrained: Bool = false
     ) {
         self.status = status
-        self.interfaces = interfaces
+        self.interfaces = interfaces.sorted { ($0.name, $0.type) < ($1.name, $1.type) }
         self.gateways = gateways.sorted()
         self.supportsIPv4 = supportsIPv4
         self.supportsIPv6 = supportsIPv6

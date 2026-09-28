@@ -50,11 +50,15 @@ final class NetworkPathStateTests: XCTestCase {
         XCTAssertEqual(path(gateways: [], ipv6: false).changedFields(from: base), [.gateways, .supportsIPv6])
     }
 
-    /// Ethernet plugged in under Wi-Fi moves the route even with the same set.
-    func testInterfaceOrderIsAChange() {
+    /// `availableInterfaces` order is not a documented route preference, so
+    /// the same set in another order is no change, and it renders the same
+    /// either way for the `old->new` tokens.
+    func testInterfaceOrderIsNotAChange() {
         let wifiFirst = path(interfaces: [("en0", "wifi"), ("en7", "wired")])
         let wiredFirst = path(interfaces: [("en7", "wired"), ("en0", "wifi")])
-        XCTAssertEqual(wiredFirst.changedFields(from: wifiFirst), [.interfaces])
+        XCTAssertEqual(wiredFirst.changedFields(from: wifiFirst), [])
+        XCTAssertEqual(wiredFirst.render(.interfaces), "en0/wifi,en7/wired")
+        XCTAssertEqual(wifiFirst.render(.interfaces), wiredFirst.render(.interfaces))
     }
 
     /// Field keys become event tokens beside `satisfied=`, `dns=`, `pac=` and
