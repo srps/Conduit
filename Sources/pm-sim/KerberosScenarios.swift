@@ -80,21 +80,33 @@ enum KerberosScenarios {
         func advance(_ seconds: TimeInterval) { lock.withLock { current.addTimeInterval(seconds) } }
     }
 
-    /// Fails with a fixed Kerberos minor until `ticketable` is set, the way a
-    /// TGS request fails until the credential cache can ticket the proxy.
+    /// Fails the way macOS SPNEGO does, `BAD_MECH, minor 0` with a TGT
+    /// present, until `ticketable` is set, and explains the failure through
+    /// the production `KerberosMechDiagnoser`, whose probe stands in for the
+    /// raw-mech `gss_init_sec_context` and counts its TGS requests.
     private final class ServiceTicketProvider: GSSTokenProvider, @unchecked Sendable {
         static let principalUnknown = OM_uint32(bitPattern: -1_765_328_377)
         private let lock = NSLock()
         private var ticketable = false
+        private var probes = 0
+        private(set) var diagnoser: KerberosMechDiagnoser!
 
+        init(clock: SimulatedClock) {
+            diagnoser = KerberosMechDiagnoser(interval: 60, now: { clock.now }, probe: { [unowned self] _ in
+                self.lock.withLock { self.probes += 1 }
+                return .status(major: OM_uint32(GSS_S_FAILURE), minor: Self.principalUnknown)
+            })
+        }
+
+        var probeCount: Int { lock.withLock { probes } }
         func makeTicketable() { lock.withLock { ticketable = true } }
 
         func generateToken(host: String, inputToken: Data?) throws -> Data? {
             guard lock.withLock({ ticketable }) else {
-                throw KerberosAuthError.initiatorFailure(
-                    major: OM_uint32(GSS_S_BAD_MECH), minor: Self.principalUnknown, host: host,
+                throw diagnoser.annotate(KerberosAuthError.initiatorFailure(
+                    major: OM_uint32(GSS_S_BAD_MECH), minor: 0, host: host,
                     hasInitiatorCredential: { true }
-                )
+                ))
             }
             return Data([0x60, 0x01, 0x00])
         }
@@ -119,7 +131,7 @@ enum KerberosScenarios {
             logger: logger,
             authFallbackEventGate: RuntimeEventRepeatGate(repeatInterval: 60, now: { clock.now })
         )
-        let provider = ServiceTicketProvider()
+        let provider = ServiceTicketProvider(clock: clock)
         let ntlm = NTLMAuthenticator(credentials: ProxyCredentials(
             username: "sim", domain: "SIM", workstation: "WS", ntHash: SecretBytes.repeating(0xAA, count: 16)
         ))
@@ -149,7 +161,8 @@ enum KerberosScenarios {
         }
         let burstEvents = fallbackEvents().count
         let burstLines = fallbackLines().count
-        let codes = "major=\(GSS_S_BAD_MECH) minor=-1765328377 krb5_error=KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN"
+        let codes = "major=\(GSS_S_BAD_MECH) minor=0 krb5_major=\(GSS_S_FAILURE) krb5_minor=-1765328377 krb5_error=KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN"
+        let burstProbes = provider.probeCount
         let firstCarriesCodes = fallbackEvents().first?.detail?.contains(codes) ?? false
 
         clock.advance(60)
@@ -169,7 +182,9 @@ enum KerberosScenarios {
                 .init("every handshake in the burst fell back to NTLM", burstUsedNTLM),
                 .init("100 fallbacks in a minute are one event", burstEvents == 1),
                 .init("100 fallbacks in a minute are one log line", burstLines == 1),
-                .init("the event carries the GSS major, minor and Kerberos error name", firstCarriesCodes),
+                .init("the event carries SPNEGO's codes and the Kerberos mech's real error", firstCarriesCodes),
+                .init("100 failing handshakes in a minute send one diagnostic TGS request", burstProbes == 1),
+                .init("a failure that lasts past the interval is diagnosed again", provider.probeCount == 2),
                 .init("the first fallback after the interval reports suppressed=99",
                       fallbackEvents().count == 2 && repeatDetail.hasSuffix("suppressed=99")),
                 .init("its log line carries the codes and the count",

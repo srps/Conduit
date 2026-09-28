@@ -39,7 +39,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         let error = KerberosAuthError.initiatorFailure(
             major: badMech, minor: 0, host: "proxy.corp.example", hasInitiatorCredential: probe.probe
         )
-        guard case .serviceTicketUnavailable(let host, let major, let minor) = error else {
+        guard case .serviceTicketUnavailable(let host, let major, let minor, _) = error else {
             return XCTFail("expected .serviceTicketUnavailable, got \(error)")
         }
         XCTAssertEqual(host, "proxy.corp.example")
@@ -276,7 +276,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         guard present.calls == 1 else {
             throw XCTSkip("GSS did not answer with an ambiguous code for an unticketable name here: \(first)")
         }
-        guard case .failure(KerberosAuthError.serviceTicketUnavailable(host, _, _)) = first else {
+        guard case .failure(KerberosAuthError.serviceTicketUnavailable(host, _, _, _)) = first else {
             return XCTFail("expected .serviceTicketUnavailable, got \(first)")
         }
         XCTAssertThrowsError(try provider.generateToken(host: host, inputToken: nil))

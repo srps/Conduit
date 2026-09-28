@@ -36,15 +36,56 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
     private let lock = NSLock()
     private let gate: GSSInitiatorGate
     private let hasInitiatorCredential: @Sendable () -> Bool
+    private let mechDiagnoser: KerberosMechDiagnoser
 
     /// `hasInitiatorCredential` is asked only after an ambiguous failure; see
-    /// `KerberosAuthError.initiatorFailure`. Tests inject it.
+    /// `KerberosAuthError.initiatorFailure`. `mechDiagnoser` explains a
+    /// service-ticket failure; see `KerberosMechDiagnoser`. Tests inject both.
     package init(
         gate: GSSInitiatorGate = .shared,
-        hasInitiatorCredential: @escaping @Sendable () -> Bool = SystemGSSTokenProvider.hasDefaultInitiatorCredential
+        hasInitiatorCredential: @escaping @Sendable () -> Bool = SystemGSSTokenProvider.hasDefaultInitiatorCredential,
+        mechDiagnoser: KerberosMechDiagnoser = .shared
     ) {
         self.gate = gate
         self.hasInitiatorCredential = hasInitiatorCredential
+        self.mechDiagnoser = mechDiagnoser
+    }
+
+    /// One `gss_init_sec_context` against the raw Kerberos mech for
+    /// `HTTP@host`, to learn why SPNEGO could not get a service ticket. Its
+    /// context, output token and name are released and never read; only the
+    /// status codes leave. Caller holds `GSSInitiatorGate`.
+    package static func probeKerberosMech(host: String) -> KerberosMechStatus {
+        let name: gss_name_t
+        do {
+            name = try importServiceName(host: host)
+        } catch {
+            // The handshake imported the same name a moment ago; a failure
+            // here is reported in the detail as `krb5_probe=failed`.
+            return .probeFailed
+        }
+        var targetName: gss_name_t? = name
+        defer {
+            var releaseMinor: OM_uint32 = 0
+            gss_release_name(&releaseMinor, &targetName)
+        }
+        var minor: OM_uint32 = 0
+        var context: gss_ctx_id_t?
+        var outputToken = gss_buffer_desc(length: 0, value: nil)
+        var mechOIDBytes = krb5OIDBytes
+        let major: OM_uint32 = mechOIDBytes.withUnsafeMutableBufferPointer { oidPtr in
+            var mechOID = gss_OID_desc(length: OM_uint32(oidPtr.count), elements: oidPtr.baseAddress)
+            return gss_init_sec_context(
+                &minor, nil, &context, name, &mechOID, kGSSContextFlags,
+                0, nil, nil, nil, &outputToken, nil, nil
+            )
+        }
+        var releaseMinor: OM_uint32 = 0
+        gss_release_buffer(&releaseMinor, &outputToken)
+        if context != nil {
+            gss_delete_sec_context(&releaseMinor, &context, nil)
+        }
+        return .status(major: major, minor: minor)
     }
 
     /// Whether the default credential cache holds an unexpired Kerberos
@@ -112,7 +153,7 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
             deleteContext()
         }
 
-        let targetNameNonOpt = try importServiceName(host: host)
+        let targetNameNonOpt = try Self.importServiceName(host: host)
         var targetName: gss_name_t? = targetNameNonOpt
         defer {
             var minor: OM_uint32 = 0
@@ -174,10 +215,12 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
 
         guard major & kGSSErrorMask == 0 else {
             deleteContext()
-            throw KerberosAuthError.initiatorFailure(
+            // Still inside the gate, so the diagnostic call is serialised
+            // with every other initiator call.
+            throw mechDiagnoser.annotate(KerberosAuthError.initiatorFailure(
                 major: major, minor: minor, host: host,
                 hasInitiatorCredential: hasInitiatorCredential
-            )
+            ))
         }
 
         guard outputToken.length > 0, let value = outputToken.value else {
@@ -197,7 +240,7 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
         deleteContext()
     }
 
-    private func importServiceName(host: String) throws -> gss_name_t {
+    private static func importServiceName(host: String) throws -> gss_name_t {
         let spn = "HTTP@\(host)"
         var minor: OM_uint32 = 0
         var targetName: gss_name_t?
@@ -242,7 +285,9 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
     /// A ticket-granting ticket is present, but no service ticket for `host`
     /// could be obtained: the KDC is unreachable, or the SPN is not registered.
     /// See `initiatorFailure(major:minor:host:hasInitiatorCredential:)`.
-    case serviceTicketUnavailable(host: String, major: OM_uint32, minor: OM_uint32)
+    /// `mech` is what the Kerberos mech itself answered for the same name,
+    /// when `KerberosMechDiagnoser` asked it; diagnostic only (#99).
+    case serviceTicketUnavailable(host: String, major: OM_uint32, minor: OM_uint32, mech: KerberosMechStatus? = nil)
     case emptyToken
     case noTicket
 
@@ -276,7 +321,7 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
             return "Kerberos: service name import failed — check the proxy hostname (GSS major=\(major), minor=\(minor))."
         case .initSecContextFailed(let major, let minor):
             return "Kerberos: \(Self.gssRoutineDescription(major)) (GSS major=\(major), minor=\(minor))."
-        case .serviceTicketUnavailable(let host, let major, let minor):
+        case .serviceTicketUnavailable(let host, let major, let minor, _):
             return "Kerberos: a Kerberos ticket is present, but no service ticket for HTTP/\(host) could be obtained — the KDC may be unreachable (check the VPN and DNS), or the proxy has no registered service principal (GSS major=\(major), minor=\(minor))."
         case .emptyToken:
             return "Kerberos: the initial authentication step produced no token."
@@ -346,23 +391,37 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
     /// printed signed, the way Kerberos error codes are written. Codes only:
     /// no principal, host or token. `nil` for a failure without GSS codes.
     ///
-    /// SPNEGO often answers minor 0 for a Kerberos-mech failure (#73); then
-    /// there is no name to give.
+    /// SPNEGO often answers minor 0 for a Kerberos-mech failure (#73). For a
+    /// service-ticket failure `KerberosMechDiagnoser` then asks the Kerberos
+    /// mech itself, and its answer follows as `krb5_major=`, `krb5_minor=`
+    /// and `krb5_error=` (named from the mech's minor), or `krb5_probe=failed`
+    /// when the question could not be asked.
     package var diagnosticDetail: String? {
         let major: OM_uint32
         let minor: OM_uint32
+        var mech: KerberosMechStatus?
         switch self {
         case .importNameFailed(let codeMajor, let codeMinor),
              .initSecContextFailed(let codeMajor, let codeMinor):
             (major, minor) = (codeMajor, codeMinor)
-        case .serviceTicketUnavailable(_, let ticketMajor, let ticketMinor):
-            (major, minor) = (ticketMajor, ticketMinor)
+        case .serviceTicketUnavailable(_, let ticketMajor, let ticketMinor, let mechStatus):
+            (major, minor, mech) = (ticketMajor, ticketMinor, mechStatus)
         case .emptyToken, .noTicket:
             return nil
         }
         var detail = "major=\(major) minor=\(Int32(bitPattern: minor))"
-        if let name = Self.kerberosErrorName(minor: minor) {
-            detail += " krb5_error=\(name)"
+        switch mech {
+        case .status(let mechMajor, let mechMinor):
+            detail += " krb5_major=\(mechMajor) krb5_minor=\(Int32(bitPattern: mechMinor))"
+            if let name = Self.kerberosErrorName(minor: mechMinor) {
+                detail += " krb5_error=\(name)"
+            }
+        case .probeFailed:
+            detail += " krb5_probe=failed"
+        case nil:
+            if let name = Self.kerberosErrorName(minor: minor) {
+                detail += " krb5_error=\(name)"
+            }
         }
         return detail
     }

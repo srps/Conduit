@@ -153,6 +153,12 @@ form Conduit cannot route by.
   back since the last one. On 2026-09-28 this line was 1,248 of the log's lines. Both
   events, and the line, now carry the GSS `major=` and `minor=` codes, and `krb5_error=`
   with the Kerberos error's name when the minor is one Conduit knows. (#99)
+- SPNEGO reports a failed service-ticket request as `BAD_MECH` with minor 0, which says
+  nothing about the cause. When that happens, Conduit now asks the Kerberos mech directly
+  for the same service principal, at most once per host a minute. The answer appears as
+  `krb5_major=`, `krb5_minor=` and `krb5_error=`, for example
+  `KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN` or `KRB5_KDC_UNREACH`. The extra request is diagnostic
+  only and never changes whether the handshake uses Kerberos or NTLM. (#99)
 
 ### Development
 
