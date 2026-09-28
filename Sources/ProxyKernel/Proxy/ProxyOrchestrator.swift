@@ -1060,19 +1060,9 @@ package final class ProxyOrchestrator {
                 }
             }
         },
-        onRequestCompleted: { [weak self] success, _ in
+        onRequestCompleted: { [weak self] outcome, _ in
             Task { @MainActor in
-                guard let s = self else { return }
-                s.snapshot.runtimeStatus.metrics.requestsHandled += 1
-                if !success {
-                    s.snapshot.runtimeStatus.metrics.failedRequests += 1
-                    s.snapshot.runtimeStatus.metrics.lastFailure = .now
-                    s.refreshUpstreamStatuses()
-                }
-                s.emitSnapshotCoalesced()
-                if !success {
-                    s.trackFailureForErrorRate()
-                }
+                self?.recordRequestCompletion(outcome)
             }
         },
         eventSink: { [eventLog] event in eventLog.append(event) },
@@ -2302,6 +2292,21 @@ package final class ProxyOrchestrator {
     /// Quiet period after the alarm; without it the alarm re-arms as soon as
     /// the probe returns.
     package static let errorRateCooldown: TimeInterval = 30
+
+    /// Counts a completed request. Every failure counts in the metrics; only
+    /// one that implicates an upstream feeds the error-rate alarm (#100).
+    package func recordRequestCompletion(_ outcome: RequestOutcome) {
+        snapshot.runtimeStatus.metrics.requestsHandled += 1
+        if !outcome.succeeded {
+            snapshot.runtimeStatus.metrics.failedRequests += 1
+            snapshot.runtimeStatus.metrics.lastFailure = .now
+            refreshUpstreamStatuses()
+        }
+        emitSnapshotCoalesced()
+        if outcome.implicatesUpstream {
+            trackFailureForErrorRate()
+        }
+    }
 
     private func trackFailureForErrorRate() {
         let now = Date()

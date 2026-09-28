@@ -19,7 +19,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let onConnectionOpened: @Sendable (ActiveConnectionInfo) -> Void
     private let onConnectionClosed: @Sendable (UUID) -> Void
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
-    private let onRequestCompleted: @Sendable (Bool, String?) -> Void
+    private let onRequestCompleted: @Sendable (RequestOutcome, String?) -> Void
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let authHandshakeLimiter = AuthHandshakeLimiter()
     private let group = MultiThreadedEventLoopGroup.singleton
@@ -129,7 +129,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in },
-        onRequestCompleted: @Sendable @escaping (Bool, String?) -> Void,
+        onRequestCompleted: @Sendable @escaping (RequestOutcome, String?) -> Void,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         bindRetryLimit: Int = 10,
         socksHandshakeTimeout: TimeAmount = .seconds(10),
