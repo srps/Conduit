@@ -49,6 +49,9 @@ final class DaemonRuntimeHost {
 
     let orchestrator: ProxyOrchestrator
     private let credentialManager: CredentialManager
+    /// The saved password's read at proxy start; see `AppState`'s twin
+    /// (#98). Internal so a test can join it.
+    private(set) var credentialWarmup: Task<Void, Never>?
     /// Base client every privileged side effect goes through, wrapped by
     /// `auditedPrivilegeClient`. Injectable so tests can drive the platform
     /// side-effect paths (apply on start, revert on a failed start) without
@@ -358,6 +361,9 @@ final class DaemonRuntimeHost {
         defer { runtimeLane.end(token) }
         do {
             try await orchestrator.startProxy()
+            credentialWarmup = credentialManager.warmCacheInBackground(
+                eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
+            )
         } catch {
             // A failed start must not leave the machine pointing at listeners
             // that are not there. These side effects outlive the process and

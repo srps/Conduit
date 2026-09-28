@@ -889,6 +889,17 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Reads the saved password once at proxy start, so a Keychain prompt
+    /// appears now rather than in the middle of a burst of NTLM fallbacks
+    /// (#98). Internal so the harness can join it.
+    private(set) var credentialWarmup: Task<Void, Never>?
+
+    private func warmCredentialCache() {
+        credentialWarmup = credentialManager.warmCacheInBackground(
+            eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
+        )
+    }
+
     func clearCredentials() {
         do {
             try credentialManager.clear(for: config)
@@ -984,6 +995,7 @@ final class AppState: ObservableObject {
 
         do {
             try await orchestrator.startProxy()
+            warmCredentialCache()
             // A stop issued while the listeners came up has already queued
             // its clear; applying now would put the surfaces back after it.
             guard proxyStartIsCurrent(token) else { return false }
