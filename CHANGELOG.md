@@ -127,6 +127,21 @@ form Conduit cannot route by.
   Every failure still counts in the request metrics. A dial to a link-local address
   that another dial is still waiting on now joins it instead of opening a second
   two-second attempt. (#100)
+- Connecting the VPN no longer keeps routing by the PAC answers from before it came up.
+  A PAC loaded at login, before the VPN client connected, went on answering with its
+  off-network proxies (`policy-detection…:80`, `localhost:80`) until the next network
+  change or the 60 s route cache expired: a burst of failed CONNECTs, a high-error-rate
+  alarm and false strict-mode hints on every reconnect. A VPN coming up, at cold start or
+  after an outage, and a VPN going down for good now drop the cached routes, the loaded
+  script and any evaluation or fetch in flight (`pac.routes_invalidated`), then fetch the
+  PAC again whatever its failure backoff. Until it loads, requests go through the
+  configured upstreams. A flap keeps the PAC as it is. Both the drop and the reload
+  (`Reloaded PAC routing rules … after vpn_connected`) are logged at notice. (#96)
+- A PAC refresh that finds another one running now waits for it to finish instead of
+  returning at once, so proxy start, a configuration reload, a wake or a VPN transition
+  continues with the new evaluator installed, or with its failure known. A cancelled
+  caller stops waiting without cancelling the fetch the others wait on; the per-request
+  background refresh still never waits. (#39)
 
 ### Logging
 
