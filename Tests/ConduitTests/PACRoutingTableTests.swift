@@ -258,17 +258,26 @@ final class PACRoutingTableTests: XCTestCase {
         let servers = try await Servers.start()
         defer { servers.stop() }
         let cause = NIOLockedValueBox(DirectModeCause.transientNetworkChange)
+        let flap = expectation(description: "suppressed, reason=flap")
+        let directMode = expectation(description: "suppressed, reason=direct_mode")
         let fixture = try await ProxyFixture.start(
             servers: servers, strict: true, pac: nil,
             upstreamPort: try Servers.closedPort(),
-            directMode: cause, transitions: RoutingTransitionSignal()
+            directMode: cause, transitions: RoutingTransitionSignal(),
+            onEvent: { event in
+                guard event.event == "routing.strict_direct_reachable_suppressed" else { return }
+                if event.detail?.hasPrefix("reason=flap ") == true { flap.fulfill() }
+                if event.detail?.hasPrefix("reason=direct_mode ") == true { directMode.fulfill() }
+            }
         )
+        // The handler reads the cause when it reports the failure, which is
+        // after the client has its 502: change the cause only once the flap
+        // failure has been decided.
         XCTAssertEqual(try fixture.request(.connect, target: servers.origin.port), .badGateway)
+        await fulfillment(of: [flap], timeout: 10)
         cause.withLockedValue { $0 = .upstreamsUnreachable }
         XCTAssertEqual(try fixture.request(.http, target: servers.origin.port), .badGateway)
-        for _ in 0..<500 where fixture.events(named: "routing.strict_direct_reachable_suppressed").count < 2 {
-            try await Task.sleep(for: .milliseconds(10))
-        }
+        await fulfillment(of: [directMode], timeout: 10)
         let reasons = fixture.events(named: "routing.strict_direct_reachable_suppressed").compactMap {
             $0.detail?.split(separator: " ").first.map(String.init)
         }
