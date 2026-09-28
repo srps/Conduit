@@ -1963,7 +1963,9 @@ package final class ProxyOrchestrator {
     /// fetched and evaluated on (#96): the engine drops its answers, and the
     /// caller refetches with `refreshPACRouting(force: true)`, which ignores
     /// the failure backoff since the backoff was earned on the old network.
-    /// A flap keeps the network and does neither.
+    /// A flap keeps the network and does neither. A material path change
+    /// (`handleNetworkChange`) drops the answers but keeps the script, and
+    /// its refetch honours the backoff.
     private func invalidatePACRoutes(reason: PACRouteInvalidationReason) {
         pacRoutingEngine?.invalidateRoutes(reason: reason)
     }
@@ -2051,6 +2053,15 @@ package final class ProxyOrchestrator {
         )
         if resetsDNS {
             resetDNSTransportsForRecovery(source: "network_change")
+        }
+        // The cached PAC answers were computed on the old path (`myIpAddress`,
+        // `dnsResolve`, `isInNet`), and live up to ten minutes (#34); the
+        // refresh below would drop them only if it fetched a new script. The
+        // script is kept, so an unsatisfied path or a backed-off fetch does
+        // not leave requests without PAC routes. The first path has nothing
+        // to compare with.
+        if change.previous != nil {
+            invalidatePACRoutes(reason: .networkChanged)
         }
         guard pathSatisfied else { return }
         await refreshPACRouting(force: true, honorBackoff: true)
