@@ -417,6 +417,7 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
             }
 
         case .awaitingFinal:
+            authenticator?.credentialsRejected(host: connection.proxy.host)
             logger.log(.error, "Auth rejected after challenge-response for \(SensitiveValueSanitizer.observableTarget(target))", category: .auth)
             fail(ConnectionPoolError.authenticationRejected, context: context)
         }

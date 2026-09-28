@@ -27,3 +27,21 @@ package extension Error {
         (self as? any CredentialFailureClassifying)?.isCredentialRetryable ?? false
     }
 }
+
+/// A credential-store failure that can name itself in the reason vocabulary
+/// of `auth.credentials_unavailable`: `not_found`, `denied`,
+/// `interaction_not_allowed`, `invalid_payload` or `status=<n>`.
+///
+/// `ProxyAuth` reports the event but cannot see the store's error types
+/// (`KeychainStoreError` lives in `PlatformMac`), so those adopt this.
+package protocol CredentialReadFailureDescribing: Error {
+    var credentialReadFailureReason: String { get }
+}
+
+package extension Error {
+    /// The `auth.credentials_unavailable` reason for this error, or `other`
+    /// for an error that does not describe itself.
+    var credentialReadFailureReason: String {
+        (self as? any CredentialReadFailureDescribing)?.credentialReadFailureReason ?? "other"
+    }
+}

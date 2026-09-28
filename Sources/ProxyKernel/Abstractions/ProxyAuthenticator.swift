@@ -30,6 +30,16 @@ package protocol ProxyAuthenticator: AnyObject, Sendable {
 
     /// Discard any connection-scoped state (called on pool eviction or reconnect).
     func reset()
+
+    /// The upstream answered this handshake's final leg with another 407:
+    /// it refused the credentials rather than the scheme. An authenticator
+    /// whose credentials came from a cache has it drop them, so a later
+    /// handshake reads the store again.
+    func credentialsRejected(host: String)
+}
+
+package extension ProxyAuthenticator {
+    func credentialsRejected(host: String) {}
 }
 
 /// An authenticator with a weaker fallback scheme it would otherwise switch

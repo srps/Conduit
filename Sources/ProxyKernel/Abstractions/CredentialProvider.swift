@@ -45,4 +45,14 @@ package protocol CredentialProvider: Sendable {
 
     /// Persist `credentials` for `upstream`. Idempotent overwrite.
     func setCredentials(_ credentials: ProxyCredentials, for upstream: UpstreamProxy) throws
+
+    /// The upstream answered credentials read from this provider with a
+    /// final 407. A conformer that caches drops the entry so a later
+    /// handshake reads the store again, and returns whether it dropped one.
+    func dropRejectedCredentials(for upstream: UpstreamProxy) -> Bool
+}
+
+package extension CredentialProvider {
+    /// Nothing is cached, so there is nothing to drop.
+    func dropRejectedCredentials(for upstream: UpstreamProxy) -> Bool { false }
 }
