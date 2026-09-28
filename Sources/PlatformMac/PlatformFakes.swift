@@ -527,10 +527,29 @@ package final class InMemorySecretStore: SecretStore, @unchecked Sendable {
         lock.withLock { secrets[account] = secret }
     }
 
+    private let holdCondition = NSCondition()
+    private var _held = false
+
+    /// Makes every `load(account:)` block until `releaseLoads()`, as a read
+    /// behind a Keychain prompt nobody answers does.
+    package func holdLoads() {
+        holdCondition.withLock { _held = true }
+    }
+
+    package func releaseLoads() {
+        holdCondition.withLock {
+            _held = false
+            holdCondition.broadcast()
+        }
+    }
+
     package func load(account: String) throws -> SecretBytes? {
         let (failure, delay) = lock.withLock { () -> ((any Error)?, TimeInterval) in
             _loads += 1
             return (_loadFailure, _loadDelay)
+        }
+        holdCondition.withLock {
+            while _held { holdCondition.wait() }
         }
         if delay > 0 { Thread.sleep(forTimeInterval: delay) }
         if let failure { throw failure }

@@ -47,19 +47,23 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     private let identityProvider: @Sendable () -> Identity
     private let failureRetryInterval: TimeInterval
     private let rejectionInterval: TimeInterval
+    private let pendingReadWait: TimeInterval
     private let now: @Sendable () -> Date
 
     /// The last read of the store, for one account key: at most one entry,
-    /// replaced when the identity changes. A read in progress is recorded
-    /// too, so handshakes that arrive during it wait for its answer instead
-    /// of each asking the Keychain (and each raising its access prompt).
-    private enum CacheEntry {
-        case loading(account: String)
-        case loaded(account: String, result: Result<ProxyCredentials?, any Error>, at: Date)
+    /// replaced when the identity changes.
+    private struct CacheEntry {
+        let account: String
+        let result: Result<ProxyCredentials?, any Error>
+        let at: Date
     }
 
     private let cacheCondition = NSCondition()
     private var cacheEntry: CacheEntry?
+    /// The account of the one store read that is out, if any. Never more
+    /// than one: callers that need the store meanwhile wait for it instead
+    /// of each asking the Keychain (and each raising its access prompt).
+    private var readInFlight: String?
     /// Bumped by every invalidation, so a read that started before one does
     /// not store its now-stale answer.
     private var cacheGeneration = 0
@@ -74,18 +78,21 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// can fix and which is held until the next save, clear or proxy start.
     /// A 407 that rejects the credentials drops them at most once per
     /// `rejectionInterval`, so a wrong password does not become a Keychain
-    /// read per request.
+    /// read per request. A handshake waits at most `pendingReadWait` for a
+    /// read that is out; see `credentials(for:)`.
     package init(
         identityProvider: @escaping @Sendable () -> Identity,
         store: any SecretStore = KeychainStore(),
         failureRetryInterval: TimeInterval = 60,
         rejectionInterval: TimeInterval = 60,
+        pendingReadWait: TimeInterval = 2,
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.identityProvider = identityProvider
         self.keychain = store
         self.failureRetryInterval = failureRetryInterval
         self.rejectionInterval = rejectionInterval
+        self.pendingReadWait = pendingReadWait
         self.now = now
     }
 
@@ -96,11 +103,15 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// profile's identity. See file header for rationale.
     ///
     /// Answered from the cache; the store is read once per invalidation.
-    /// Blocks while another caller's read of the same account is out, which
-    /// is how a burst of NTLM fallbacks makes one read. The lock is never
-    /// held across the read itself.
+    /// The read itself runs on a utility queue, never on the caller's
+    /// thread: callers are handshakes on the cooperative pool, and a read
+    /// can sit on a Keychain access prompt for as long as the user leaves
+    /// it (expected after every update). A caller waits for the read at
+    /// most `pendingReadWait`, then throws `CredentialReadPending`
+    /// (`read_pending`) and its handshake goes without NTLM; the read
+    /// carries on and serves the handshakes after it.
     package func credentials(for _: UpstreamProxy) throws -> ProxyCredentials? {
-        try cachedCredentials(account: accountKey(for: identityProvider()))
+        try cachedCredentials(account: accountKey(for: identityProvider()), waitLimit: pendingReadWait)
     }
 
     /// Drops credentials the upstream answered with a final 407, so a
@@ -110,7 +121,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     package func dropRejectedCredentials(for _: UpstreamProxy) -> Bool {
         cacheCondition.lock()
         defer { cacheCondition.unlock() }
-        guard case .loaded(_, .success(.some), _)? = cacheEntry else { return false }
+        guard case .success(.some)? = cacheEntry?.result else { return false }
         let current = now()
         if let lastRejectionDrop, current.timeIntervalSince(lastRejectionDrop) < rejectionInterval {
             return false
@@ -136,7 +147,9 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         cacheCondition.unlock()
         do {
             guard try keychain.exists(account: account) else { return }
-            _ = try cachedCredentials(account: account)
+            // Already on a utility queue; this is the one caller that waits
+            // for the prompt to be answered.
+            _ = try cachedCredentials(account: account, waitLimit: nil)
         } catch {
             eventSink?(RuntimeEvent(
                 kind: .auth, event: "auth.credentials_unavailable",
@@ -148,8 +161,8 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// `warmCache` on a utility queue rather than the caller's actor or the
     /// cooperative pool, since an access prompt holds the thread until the
     /// user answers. Both hosts call it once their listeners are up;
-    /// handshakes that need the password meanwhile wait for this read. The
-    /// task finishes when the read has.
+    /// handshakes that need the password meanwhile wait for it at most
+    /// `pendingReadWait`. The task finishes when the read has.
     @discardableResult
     package func warmCacheInBackground(eventSink: (@Sendable (RuntimeEvent) -> Void)?) -> Task<Void, Never> {
         Task {
@@ -162,32 +175,46 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         }
     }
 
-    private func cachedCredentials(account: String) throws -> ProxyCredentials? {
+    /// With `waitLimit` nil, waits for the read however long it takes; only
+    /// `warmCache`, already off the cooperative pool, does that.
+    private func cachedCredentials(account: String, waitLimit: TimeInterval?) throws -> ProxyCredentials? {
+        let deadline = waitLimit.map { Date().addingTimeInterval($0) }
         cacheCondition.lock()
-        wait: while true {
-            switch cacheEntry {
-            case .loaded(let cached, let result, let at)? where cached == account && isCurrent(result, loadedAt: at):
-                cacheCondition.unlock()
-                return try result.get()
-            case .loading(let pending)? where pending == account:
-                cacheCondition.wait()
-            default:
-                break wait
+        defer { cacheCondition.unlock() }
+        while true {
+            if let entry = cacheEntry, entry.account == account, isCurrent(entry.result, loadedAt: entry.at) {
+                return try entry.result.get()
             }
+            if readInFlight == nil {
+                startReadLocked(account: account)
+            }
+            guard let deadline else {
+                cacheCondition.wait()
+                continue
+            }
+            guard Date() < deadline else {
+                throw CredentialReadPending()
+            }
+            _ = cacheCondition.wait(until: deadline)
         }
-        cacheEntry = .loading(account: account)
+    }
+
+    /// Caller holds `cacheCondition`. Hands the store read to a utility
+    /// queue, so the only thread that can sit on an access prompt is one of
+    /// its own.
+    private func startReadLocked(account: String) {
+        readInFlight = account
         let generation = cacheGeneration
-        cacheCondition.unlock()
-
-        let result = Result { try readStore(account: account) }
-
-        cacheCondition.lock()
-        if cacheGeneration == generation, case .loading(account)? = cacheEntry {
-            cacheEntry = .loaded(account: account, result: result, at: now())
+        DispatchQueue.global(qos: .utility).async {
+            let result = Result { try self.readStore(account: account) }
+            self.cacheCondition.lock()
+            self.readInFlight = nil
+            if self.cacheGeneration == generation {
+                self.cacheEntry = CacheEntry(account: account, result: result, at: self.now())
+            }
+            self.cacheCondition.broadcast()
+            self.cacheCondition.unlock()
         }
-        cacheCondition.broadcast()
-        cacheCondition.unlock()
-        return try result.get()
     }
 
     private func isCurrent(_ result: Result<ProxyCredentials?, any Error>, loadedAt: Date) -> Bool {
@@ -210,8 +237,9 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         return credentials
     }
 
-    /// Caller holds `cacheCondition`. Wakes the waiters of a read in
-    /// progress; they read again rather than take its answer.
+    /// Caller holds `cacheCondition`. A read that is out stays out, and its
+    /// answer is dropped when it lands; the next caller starts a fresh one
+    /// then, so there is still never more than one.
     private func invalidateLocked() {
         cacheGeneration += 1
         cacheEntry = nil
@@ -278,5 +306,15 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
 
     private func accountKey(for identity: Identity) -> String {
         "\(identity.domain)|\(identity.username)|\(identity.profileName)"
+    }
+}
+
+/// A handshake gave up waiting for a credential read that is still out,
+/// typically behind an unanswered Keychain access prompt. Not cached: the
+/// read carries on and answers the handshakes after it.
+package struct CredentialReadPending: Error, LocalizedError, CredentialReadFailureDescribing {
+    package var credentialReadFailureReason: String { "read_pending" }
+    package var errorDescription: String? {
+        "The saved proxy password is still being read from the Keychain; check for an access prompt."
     }
 }

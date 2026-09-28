@@ -142,6 +142,17 @@ form Conduit cannot route by.
   continues with the new evaluator installed, or with its failure known. A cancelled
   caller stops waiting without cancelling the fetch the others wait on; the per-request
   background refresh still never waits. (#39)
+- The NTLM fallback no longer reads the Keychain on every handshake (1,248 reads in one
+  day of use), and a failed read is no longer silently ignored. The saved password is
+  read once, at proxy start when one is saved, and kept in memory until it is saved or
+  cleared, the proxy restarts, or the upstream rejects it. Any Keychain access prompt
+  (expected after each update of the self-signed app) now appears once at start instead
+  of in the middle of a burst of requests. A handshake waits at most 2 s for a read that
+  is still out; past that it goes without NTLM, and the prompt no longer holds up the
+  proxy. A read that fails is reported as `auth.credentials_unavailable` with a reason
+  (`not_found`, `denied`, `interaction_not_allowed`, `invalid_payload`, `read_pending`,
+  `status=<n>`), once a minute; a refused prompt is not shown again until you re-save the
+  password or restart the proxy. (#98)
 
 ### Logging
 

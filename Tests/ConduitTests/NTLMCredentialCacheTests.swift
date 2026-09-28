@@ -49,7 +49,11 @@ final class NTLMCredentialCacheTests: XCTestCase {
         var unavailable: [RuntimeEvent] { events.events.filter { $0.event == "auth.credentials_unavailable" } }
     }
 
-    private func makeFixture(authMode: AuthenticationMode = .systemNegotiated, saved: Bool = true) throws -> Fixture {
+    private func makeFixture(
+        authMode: AuthenticationMode = .systemNegotiated,
+        saved: Bool = true,
+        pendingReadWait: TimeInterval = 2
+    ) throws -> Fixture {
         let store = InMemorySecretStore()
         let clock = Clock()
         let config = NIOLockedValueBox(makeConfig(authMode: authMode))
@@ -59,6 +63,7 @@ final class NTLMCredentialCacheTests: XCTestCase {
                 return (domain: c.domain, username: c.username, profileName: c.profileName)
             },
             store: store,
+            pendingReadWait: pendingReadWait,
             now: { clock.now }
         )
         if saved { try manager.saveHash(savedHash, for: config.withLockedValue { $0 }) }
@@ -100,6 +105,40 @@ final class NTLMCredentialCacheTests: XCTestCase {
 
         _ = try fallbackToken(fixture)
         XCTAssertEqual(fixture.store.loads, 1, "a later handshake must use the cached credential")
+    }
+
+    /// Review of #105: a read sitting on a Keychain prompt nobody answers
+    /// must not hold every handshake that needs the password. Each waits at
+    /// most the bound, goes without NTLM, and none starts a second read.
+    func testHandshakesWaitingOnAnUnansweredPromptGiveUpAtTheBound() throws {
+        let fixture = try makeFixture(pendingReadWait: 0.2)
+        fixture.store.holdLoads()
+        // Safety net: without the bound the handshakes below would never
+        // return; release late so a regression fails instead of hanging.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { fixture.store.releaseLoads() }
+
+        let started = Date()
+        let answers = NIOLockedValueBox<[String]>([])
+        DispatchQueue.concurrentPerform(iterations: 16) { _ in
+            do {
+                let token = try fallbackToken(fixture)
+                answers.withLockedValue { $0.append(token) }
+            } catch is KerberosAuthError {
+                answers.withLockedValue { $0.append("no-ntlm") }
+            } catch {
+                answers.withLockedValue { $0.append("unexpected: \(error)") }
+            }
+        }
+        let elapsed = Date().timeIntervalSince(started)
+
+        XCTAssertLessThan(elapsed, 2, "every handshake returns within the bound, not when the prompt is answered")
+        XCTAssertEqual(answers.withLockedValue { $0 }, Array(repeating: "no-ntlm", count: 16))
+        XCTAssertEqual(fixture.store.loads, 1, "no handshake starts a second read while one is out")
+        XCTAssertEqual(fixture.unavailable.map(\.detail), ["host=proxy.example.test:3128 reason=read_pending source=handshake suppressed=0"])
+
+        fixture.store.releaseLoads()
+        XCTAssertTrue(try fallbackToken(fixture).hasPrefix("NTLM "), "the answered read serves the next handshake")
+        XCTAssertEqual(fixture.store.loads, 1)
     }
 
     func testSaveAndClearInvalidateTheCache() throws {
