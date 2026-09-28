@@ -88,12 +88,16 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
         // `NegotiateAuthenticator`'s NTLM fallback on every call; anything
         // else (KDC unreachable, clock skew, ...) is a network-class failure
         // that every queued handshake would otherwise re-run.
-        return try gate.run(target: host, shouldCoolDown: { error in
-            guard let kerberosError = error as? KerberosAuthError else { return true }
-            return !kerberosError.isCredentialUnavailable
-        }) {
+        return try gate.run(target: host, shouldCoolDown: Self.startsGateCooldown) {
             try initiateLocked(host: host, inputToken: inputToken)
         }
+    }
+
+    /// Whether a failed initiator call starts `GSSInitiatorGate`'s cooldown
+    /// for its target: everything but credential absence.
+    package static func startsGateCooldown(_ error: Error) -> Bool {
+        guard let kerberosError = error as? KerberosAuthError else { return true }
+        return !kerberosError.isCredentialUnavailable
     }
 
     /// Caller holds `lock` and the gate.
