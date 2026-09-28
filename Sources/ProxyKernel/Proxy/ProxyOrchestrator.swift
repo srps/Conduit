@@ -1852,6 +1852,9 @@ package final class ProxyOrchestrator {
                              "VPN flap recovered after \(durationMS) ms — \(activeTunnels) active tunnel(s) preserved.",
                              category: .network)
             case .disconnected:
+                // Before anything else routes: the PAC answers are from off the VPN.
+                invalidatePACRoutes(reason: .vpnConnected)
+                async let pacRefreshed: Void = refreshPACRouting(force: true)
                 localProxyServer.resetCircuitsAfterFlap()
                 // Real-outage recovery: the VPN was fully down and is now
                 // back. Same DoH-transport recycle as the flap path —
@@ -1861,19 +1864,25 @@ package final class ProxyOrchestrator {
                 let summary = await refreshConnectivityMode()
                 setDirectMode(deriveDirectModeCause(probeSummary: summary))
                 resumeNormalRoutingIfReachable(summary: summary)
+                await pacRefreshed
                 emitEvent(.vpn, "vpn.connected")
                 logStore.log(.notice, "VPN reconnected — re-probing upstreams.", category: .network)
             case .unknown, .connected:
-                // Cold start or VPN observer priming to .connected. Recycle DoH
+                // Cold start or VPN observer priming to .connected. The PAC
+                // loaded at proxy start may predate the VPN (login before the
+                // VPN client connects), so its answers go first. Recycle DoH
                 // transports when the forwarder is running so a connect-while-app-
                 // is-up (or post-start VPN attach) does not reuse stale utun-pinned
                 // URLSession pools.
+                invalidatePACRoutes(reason: .vpnConnected)
+                async let pacRefreshed: Void = refreshPACRouting(force: true)
                 if snapshot.dnsRunState == .running {
                     resetDNSTransportsForRecovery(source: "vpn_connected")
                 }
                 let summary = await refreshConnectivityMode()
                 setDirectMode(deriveDirectModeCause(probeSummary: summary))
                 resumeNormalRoutingIfReachable(summary: summary)
+                await pacRefreshed
                 emitEvent(.vpn, "vpn.connected")
             }
 
@@ -1882,7 +1891,10 @@ package final class ProxyOrchestrator {
             // network": on-prem users have no VPN utun while the upstream proxy
             // is still reachable. Run the lightweight proxy-semantic probe
             // (CONNECT without credentials) before deciding whether to force
-            // DIRECT.
+            // DIRECT. The PAC answers are from on the VPN; an on-prem user
+            // keeps routing by PAC, and so does anyone once direct mode ends.
+            invalidatePACRoutes(reason: .vpnDisconnected)
+            async let pacRefreshed: Void = refreshPACRouting(force: true)
             flapStartedAt = nil
             healthChecker.stop()
             let summary = await refreshConnectivityMode()
@@ -1900,6 +1912,7 @@ package final class ProxyOrchestrator {
                 }
             }
             reconcileConnectivityMonitors(for: cause)
+            await pacRefreshed
             switch reason {
             case .userInitiated:
                 emitEvent(.vpn, "vpn.disconnected.user")
@@ -1930,6 +1943,15 @@ package final class ProxyOrchestrator {
             // the observer primes.)
             break
         }
+    }
+
+    /// A VPN coming up or going down for good changes the network the PAC was
+    /// fetched and evaluated on (#96): the engine drops its answers, and the
+    /// caller refetches with `refreshPACRouting(force: true)`, which ignores
+    /// the failure backoff since the backoff was earned on the old network.
+    /// A flap keeps the network and does neither.
+    private func invalidatePACRoutes(reason: PACRouteInvalidationReason) {
+        pacRoutingEngine?.invalidateRoutes(reason: reason)
     }
 
     /// Helper for VPN-recovery transitions: if the post-recovery probe found

@@ -49,6 +49,7 @@ enum PMSim {
               transparent-direct      intercepted SNI client relays direct on VPN-down, upstream otherwise
               network-transition      Wi-Fi → VPN → captive portal → resume; recovery <5s, DoH recycled
               network-path-churn      20 identical path updates reset nothing; a gateway roam resets once
+              vpn-pac-refresh         VPN connect/disconnect drops cached PAC answers; first request uses the new PAC
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
               websocket-upgrade       101 upgrade relayed, frames flow both ways
               connect-early-direct    CONNECT with early bytes through a direct tunnel
@@ -182,6 +183,7 @@ enum PMSim {
         "transparent-direct",
         "network-transition",
         "network-path-churn",
+        "vpn-pac-refresh",
         "upstream-flap",
         "websocket-upgrade",
         "connect-early-direct",
@@ -268,6 +270,8 @@ enum PMSim {
             return [try await NetworkTransitionScenarios.networkTransition(verbose: verbose)]
         case "network-path-churn":
             return [try await NetworkTransitionScenarios.networkPathChurn(verbose: verbose)]
+        case "vpn-pac-refresh":
+            return [try await VPNPACScenarios.refreshOnTransition(verbose: verbose)]
         case "upstream-flap":
             return [try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose)]
         case "websocket-upgrade":
