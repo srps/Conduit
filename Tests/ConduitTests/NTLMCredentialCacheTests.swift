@@ -117,9 +117,12 @@ final class NTLMCredentialCacheTests: XCTestCase {
         // return; release late so a regression fails instead of hanging.
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) { fixture.store.releaseLoads() }
 
-        let started = Date()
         let answers = NIOLockedValueBox<[String]>([])
+        let longestWait = NIOLockedValueBox<TimeInterval>(0)
         DispatchQueue.concurrentPerform(iterations: 16) { _ in
+            // Timed per call: how many run at once depends on the runner's
+            // cores; how long each one waits must not.
+            let started = Date()
             do {
                 let token = try fallbackToken(fixture)
                 answers.withLockedValue { $0.append(token) }
@@ -128,17 +131,25 @@ final class NTLMCredentialCacheTests: XCTestCase {
             } catch {
                 answers.withLockedValue { $0.append("unexpected: \(error)") }
             }
+            let waited = Date().timeIntervalSince(started)
+            longestWait.withLockedValue { $0 = max($0, waited) }
         }
-        let elapsed = Date().timeIntervalSince(started)
 
-        XCTAssertLessThan(elapsed, 2, "every handshake returns within the bound, not when the prompt is answered")
+        XCTAssertLessThan(longestWait.withLockedValue { $0 }, 2, "every handshake returns within the bound, not when the prompt is answered")
         XCTAssertEqual(answers.withLockedValue { $0 }, Array(repeating: "no-ntlm", count: 16))
-        XCTAssertEqual(fixture.store.loads, 1, "no handshake starts a second read while one is out")
+        XCTAssertLessThanOrEqual(fixture.store.loads, 1, "no handshake starts a second read while one is out")
         XCTAssertEqual(fixture.unavailable.map(\.detail), ["host=proxy.example.test:3128 reason=read_pending source=handshake suppressed=0"])
 
         fixture.store.releaseLoads()
-        XCTAssertTrue(try fallbackToken(fixture).hasPrefix("NTLM "), "the answered read serves the next handshake")
-        XCTAssertEqual(fixture.store.loads, 1)
+        // The released read lands on its own queue; a handshake that comes
+        // before it does waits the bound again, so poll rather than time it.
+        var answered: String?
+        for _ in 0..<50 where answered == nil {
+            answered = try? fallbackToken(fixture)
+        }
+        XCTAssertEqual(answered.map { $0.hasPrefix("NTLM ") }, true, "the answered read serves the next handshake")
+        XCTAssertEqual(fixture.store.loads, 1, "the one read that was out is the one that answered")
+        XCTAssertEqual(fixture.unavailable.count, 1, "waiting again is still one event per interval")
     }
 
     func testSaveAndClearInvalidateTheCache() throws {

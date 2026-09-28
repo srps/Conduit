@@ -59,6 +59,14 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     }
 
     private let cacheCondition = NSCondition()
+    /// Where the store is read, and where `warmCache` waits for it. Private
+    /// serial queues get a thread of their own, where a global queue's work
+    /// can wait for one: on a busy machine a `.utility` global block did
+    /// not start for seconds, so handshakes gave up with `read_pending`
+    /// though no prompt was up. `.userInitiated` because a handshake is
+    /// waiting on the answer.
+    private let readQueue = DispatchQueue(label: "io.github.srps.Conduit.credential-read", qos: .userInitiated)
+    private let warmQueue = DispatchQueue(label: "io.github.srps.Conduit.credential-warm", qos: .userInitiated)
     private var cacheEntry: CacheEntry?
     /// The account of the one store read that is out, if any. Never more
     /// than one: callers that need the store meanwhile wait for it instead
@@ -103,7 +111,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// profile's identity. See file header for rationale.
     ///
     /// Answered from the cache; the store is read once per invalidation.
-    /// The read itself runs on a utility queue, never on the caller's
+    /// The read itself runs on `readQueue`, never on the caller's
     /// thread: callers are handshakes on the cooperative pool, and a read
     /// can sit on a Keychain access prompt for as long as the user leaves
     /// it (expected after every update). A caller waits for the read at
@@ -147,7 +155,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         cacheCondition.unlock()
         do {
             guard try keychain.exists(account: account) else { return }
-            // Already on a utility queue; this is the one caller that waits
+            // Already on `warmQueue`; this is the one caller that waits
             // for the prompt to be answered.
             _ = try cachedCredentials(account: account, waitLimit: nil)
         } catch {
@@ -158,7 +166,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         }
     }
 
-    /// `warmCache` on a utility queue rather than the caller's actor or the
+    /// `warmCache` on its own queue rather than the caller's actor or the
     /// cooperative pool, since an access prompt holds the thread until the
     /// user answers. Both hosts call it once their listeners are up;
     /// handshakes that need the password meanwhile wait for it at most
@@ -167,7 +175,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     package func warmCacheInBackground(eventSink: (@Sendable (RuntimeEvent) -> Void)?) -> Task<Void, Never> {
         Task {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                DispatchQueue.global(qos: .utility).async {
+                self.warmQueue.async {
                     self.warmCache(eventSink: eventSink)
                     continuation.resume()
                 }
@@ -199,13 +207,12 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         }
     }
 
-    /// Caller holds `cacheCondition`. Hands the store read to a utility
-    /// queue, so the only thread that can sit on an access prompt is one of
-    /// its own.
+    /// Caller holds `cacheCondition`. Hands the store read to `readQueue`,
+    /// so the only thread that can sit on an access prompt is its own.
     private func startReadLocked(account: String) {
         readInFlight = account
         let generation = cacheGeneration
-        DispatchQueue.global(qos: .utility).async {
+        readQueue.async {
             let result = Result { try self.readStore(account: account) }
             self.cacheCondition.lock()
             self.readInFlight = nil
