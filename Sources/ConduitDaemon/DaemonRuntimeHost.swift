@@ -755,9 +755,15 @@ final class DaemonRuntimeHost {
         }
     }
 
-    private func handleNetworkChange(_ change: NetworkMonitor.PathChange) async {
-        await orchestrator.handleNetworkChange(description: change.description, pathSatisfied: change.satisfied)
-        await reconcileSystemDNSIfRunning()
+    /// Only a material change resets DNS transports and refetches PAC; the
+    /// DNS reconcile runs for every report, since a VPN client can rewrite
+    /// service DNS with no material path change (#101, `NetworkPathReports`).
+    private func handleNetworkChange(_ path: NetworkPathState) async {
+        await NetworkPathReports.receive(
+            path, orchestrator: orchestrator,
+            act: { [orchestrator] change in await orchestrator.handleNetworkChange(change) },
+            reconcileSystemDNS: { [weak self] in await self?.reconcileSystemDNSIfRunning() }
+        )
     }
 
     private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?) async {

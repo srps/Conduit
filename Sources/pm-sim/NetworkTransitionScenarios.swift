@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import PlatformMac
 import ProxyKernel
 
 /// `pm-sim network-transition`. Exercises the full
@@ -150,6 +151,131 @@ enum NetworkTransitionScenarios {
                 .init("settled final state", finalStateOk),
                 .init("wake retrigger resets once", idempotenceOk),
             ],
+            notes: notes
+        )
+    }
+
+    /// `pm-sim network-path-churn` (#101). `NWPathMonitor` delivered an update
+    /// every ~75 s for hours with nothing material changed, and each one reset
+    /// the DoH transports and refetched the PAC. With the DNS forwarder
+    /// running (so a reset is real and counted), and each report taken the
+    /// way both hosts take it (`NetworkPathReports.receive`), asserts:
+    ///
+    ///  * 20 identical updates after the first cause 0 resets, 0 PAC
+    ///    refetches and 0 `network.path_changed`, and are reported as
+    ///    coalesced `network.path_unchanged` events (counts 1, 2, 4, 8, 16)
+    ///  * each of those 20 still asks for the system DNS reconcile, which is
+    ///    what re-pins 127.0.0.1 after a VPN client rewrites service DNS with
+    ///    no material path change
+    ///  * a Wi-Fi roam (same interface, new gateway) causes exactly 1 reset,
+    ///    and its event names the field and carries the 20 it absorbed
+    ///  * a system wake still resets, whatever the path did
+    @MainActor
+    static func networkPathChurn(verbose: Bool) async throws -> ScenarioResult {
+        let name = "networkPathChurn"
+        let start = Date()
+        var notes: [String] = []
+
+        let orchestrator = makeBareOrchestrator(verbose: verbose)
+        var config = orchestrator.config
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        orchestrator.config = config
+        ScenarioCleanup.register {
+            await orchestrator.stopDNS()
+            await orchestrator.stopProxy()
+        }
+        try await orchestrator.startProxy()
+        await orchestrator.startDNS()
+        let dnsRunning = orchestrator.snapshot.dnsRunState == .running
+        notes.append("dnsRunState=\(orchestrator.snapshot.dnsRunState)")
+
+        func wifi(gateway: String) -> NetworkPathState {
+            NetworkPathState(
+                status: .satisfied,
+                interfaces: [.init(name: "en0", type: "wifi")],
+                gateways: [gateway, "fe80::1%en0"],
+                supportsIPv4: true, supportsIPv6: true, supportsDNS: true
+            )
+        }
+        func events(_ name: String, since cutoff: Date) -> [RuntimeEvent] {
+            orchestrator.eventLog.events.filter { $0.timestamp >= cutoff && $0.event == name }
+        }
+
+        var acted = 0
+        var reconciles = 0
+        func report(_ path: NetworkPathState) async {
+            await NetworkPathReports.receive(
+                path, orchestrator: orchestrator,
+                act: { change in
+                    acted += 1
+                    await orchestrator.handleNetworkChange(change)
+                },
+                reconcileSystemDNS: { reconciles += 1 }
+            )
+        }
+
+        await report(wifi(gateway: "192.168.1.1"))
+
+        let churnCutoff = Date()
+        acted = 0
+        reconciles = 0
+        for _ in 0..<20 {
+            await report(wifi(gateway: "192.168.1.1"))
+        }
+        let churnActed = acted
+        let churnReconciles = reconciles
+        let churnResets = events("dns.transports_reset", since: churnCutoff).count
+        let churnChanged = events("network.path_changed", since: churnCutoff)
+        let churnPACRefetches = churnChanged.filter { $0.detail?.contains("pac=refresh") == true }.count
+        let unchangedCounts = events("network.path_unchanged", since: churnCutoff)
+            .compactMap { $0.detail?.split(separator: " ").first.map(String.init) }
+        notes.append(
+            "churn: acted=\(churnActed) resets=\(churnResets) pac_refetches=\(churnPACRefetches) "
+                + "path_changed=\(churnChanged.count) reconciles=\(churnReconciles) unchanged=\(unchangedCounts)"
+        )
+
+        let roamCutoff = Date()
+        acted = 0
+        reconciles = 0
+        await report(wifi(gateway: "192.168.1.254"))
+        let roamActed = acted == 1
+        let roamResets = events("dns.transports_reset", since: roamCutoff).count
+        let roamDetail = events("network.path_changed", since: roamCutoff).first?.detail ?? ""
+        notes.append("roam: acted=\(roamActed) resets=\(roamResets) reconciles=\(reconciles) detail=\(roamDetail)")
+
+        let wakeCutoff = Date()
+        await orchestrator.handleSystemWake()
+        let wakeResets = events("dns.transports_reset", since: wakeCutoff).count
+        notes.append("wake resets=\(wakeResets)")
+
+        let assertions: [ScenarioAssertion] = [
+            .init("DNS forwarder running, so resets are observable", dnsRunning),
+            .init("20 identical updates: 0 resets, 0 PAC refetches",
+                  churnActed == 0 && churnResets == 0 && churnPACRefetches == 0 && churnChanged.isEmpty),
+            .init("20 identical updates: system DNS reconcile still asked for 20 times", churnReconciles == 20),
+            .init("identical updates coalesced into path_unchanged",
+                  unchangedCounts == ["count=1", "count=2", "count=4", "count=8", "count=16"]),
+            .init("gateway change: 1 reset and a reconcile", roamActed && roamResets == 1 && reconciles == 1),
+            .init("gateway change names the field and the absorbed count",
+                  roamDetail.contains("changed=gateways") && roamDetail.contains("unchanged_before=20")
+                    && roamDetail.contains("gateways=192.168.1.1,fe80::1%en0->192.168.1.254,fe80::1%en0")),
+            .init("system wake still resets", wakeResets == 1),
+        ]
+        notes.append(assertions.allSatisfy(\.passed) ? "PASS" : "FAIL")
+
+        return ScenarioResult(
+            name: name,
+            clientCount: 0,
+            clientsOpened: 0,
+            clientsWithFirstByte: 0,
+            clientsClosedEarly: 0,
+            totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: assertions,
             notes: notes
         )
     }

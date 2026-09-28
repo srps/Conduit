@@ -383,7 +383,7 @@ final class AppState: ObservableObject {
 
         networkMonitor.onChange = { [weak self, deliveries] change in
             deliveries.deliver {
-                self?.handleNetworkChange(change)
+                await self?.handleNetworkChange(change)
             }
         }
         // The interface name is read here, on the monitor's own delivery,
@@ -1840,15 +1840,24 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func handleNetworkChange(_ change: NetworkMonitor.PathChange) {
+    /// Only a material change resets DNS transports and refetches PAC; the
+    /// DNS reconcile runs for every report, since a VPN client can rewrite
+    /// service DNS with no material path change (#101, `NetworkPathReports`).
+    /// The reaction is its own delivery, so the reconcile is scheduled in
+    /// this turn rather than after the PAC fetch.
+    private func handleNetworkChange(_ path: NetworkPathState) async {
         guard !rejectUnavailableConfiguration() else { return }
-        deliveries.deliver { [orchestrator] in
-            await orchestrator.handleNetworkChange(description: change.description, pathSatisfied: change.satisfied)
-        }
-
-        if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
-            scheduleDNSReconcile()
-        }
+        await NetworkPathReports.receive(
+            path, orchestrator: orchestrator,
+            act: { [deliveries, orchestrator] change in
+                deliveries.deliver { await orchestrator.handleNetworkChange(change) }
+            },
+            reconcileSystemDNS: { [weak self] in
+                guard let self, self.platformConfig.manageSystemDNS,
+                      self.orchestrator.snapshot.dnsRunState == .running else { return }
+                self.scheduleDNSReconcile()
+            }
+        )
         // Note: `autoEnableOnVPN` / `autoDisableOffVPN` retired in Phase 3 of
         // docs/design-vpn-flap-resilience.md. The behavior they encoded
         // ("toggle the whole proxy on VPN state change") is now subsumed by
