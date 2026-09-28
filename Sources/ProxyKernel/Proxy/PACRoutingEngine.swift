@@ -42,6 +42,9 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// installs its script or records its failure, so an invalidation after
     /// that point finds no refresh running and the next one fetches afresh.
     private var runningRefresh: PACRefreshOperation?
+    /// The reason of the last invalidation no script has been installed
+    /// since; the next install is reported against it.
+    private var pendingInvalidation: PACRouteInvalidationReason?
     /// Failure backoff state; see `refresh(force:honorBackoff:)`.
     private var consecutiveFailures = 0
     private var lastFailureAt: Date?
@@ -217,8 +220,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 }
                 // Routes invalidated while this fetch ran: the script came
                 // from the network before the transition. Fetch again.
-                let installed = lock.withLock { () -> Bool in
-                    guard routeGeneration == generation else { return false }
+                let installed = lock.withLock { () -> (Bool, PACRouteInvalidationReason?) in
+                    guard routeGeneration == generation else { return (false, nil) }
                     cachedPACURL = url
                     jsEvaluator = newEvaluator
                     lastRefreshAt = .now
@@ -227,11 +230,21 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     routeCache.removeAll()
                     routeCacheOrder.removeAll()
                     runningRefresh = nil
-                    return true
+                    defer { pendingInvalidation = nil }
+                    return (true, pendingInvalidation)
                 }
-                guard installed else { continue }
-                eventSink?(RuntimeEvent(kind: .routing, event: "pac.refreshed", detail: "url=\(Self.redactedURL(url))"))
-                logger?.log(.info, "Refreshed PAC routing rules from \(Self.redactedURL(url)).", category: .pac)
+                guard installed.0 else { continue }
+                let redacted = Self.redactedURL(url)
+                if let reason = installed.1 {
+                    // A reload after a network transition is rare and the
+                    // owner needs to see it in the app's notice-level log.
+                    eventSink?(RuntimeEvent(kind: .routing, event: "pac.refreshed",
+                                            detail: "url=\(redacted) after=\(reason.rawValue)"))
+                    logger?.log(.notice, "Reloaded PAC routing rules from \(redacted) after \(reason.rawValue).", category: .pac)
+                } else {
+                    eventSink?(RuntimeEvent(kind: .routing, event: "pac.refreshed", detail: "url=\(redacted)"))
+                    logger?.log(.info, "Refreshed PAC routing rules from \(redacted).", category: .pac)
+                }
                 operation.finish(.success(()))
                 return
 
@@ -311,6 +324,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         let (routes, hadScript, fetching) = lock.withLock { () -> (Int, Bool, Bool) in
             let dropped = (routeCache.count, jsEvaluator != nil, runningRefresh != nil)
             routeGeneration &+= 1
+            pendingInvalidation = reason
             jsEvaluator = nil
             routeCache.removeAll()
             routeCacheOrder.removeAll()
@@ -322,7 +336,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             detail: "reason=\(reason.rawValue) routes=\(routes) script=\(hadScript ? "dropped" : "none") "
                 + "fetch=\(fetching ? "restarted" : "idle")"
         ))
-        logger?.log(.info, "PAC answers dropped (\(reason.rawValue)): \(routes) cached route(s)\(hadScript ? " and the loaded script" : ""); refetching.", category: .pac)
+        logger?.log(.notice, "PAC answers dropped (\(reason.rawValue)): \(routes) cached route(s)\(hadScript ? " and the loaded script" : ""); refetching.", category: .pac)
     }
 
     /// Synchronous decision (tests and tools; the proxy uses `decisionFuture`).

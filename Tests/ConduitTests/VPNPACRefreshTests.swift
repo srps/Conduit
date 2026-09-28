@@ -76,6 +76,31 @@ final class VPNPACRefreshTests: XCTestCase {
         XCTAssertEqual(events(named: "pac.refreshed", in: orchestrator.eventLog, since: cutoff).count, 1)
     }
 
+    /// The app's proxy.log keeps NOTICE and above and it writes no
+    /// events.ndjson, so both the drop and the reload show there.
+    func testTheDropAndTheReloadAreVisibleAtNotice() async throws {
+        let pac = NetworkPAC()
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.upstreams = []
+        config.pacRoutingEnabled = true
+        config.pacURL = "http://pac.example.test/proxy.pac"
+        let log = RecordingLogSink(minLevel: .notice)
+        let orchestrator = ProxyOrchestrator(config: config, logger: log, pacEvaluator: pac)
+        try await orchestrator.startProxy()
+        defer { Task { @MainActor in await orchestrator.stopProxy() } }
+
+        pac.setOnVPN(true)
+        let cutoff = Date()
+        await orchestrator.handleVPNStateChange(.connected)
+
+        XCTAssertTrue(log.containsMessage("PAC answers dropped (vpn_connected)", at: .notice))
+        XCTAssertTrue(log.containsMessage("Reloaded PAC routing rules from http://pac.example.test/proxy.pac after vpn_connected",
+                                          at: .notice))
+        XCTAssertEqual(events(named: "pac.refreshed", in: orchestrator.eventLog, since: cutoff).map(\.detail),
+                       ["url=http://pac.example.test/proxy.pac after=vpn_connected"])
+    }
+
     /// A full outage and reconnect: each side of it fetches the PAC.
     func testDisconnectAndReconnectEachFetchThePAC() async throws {
         let pac = NetworkPAC()
