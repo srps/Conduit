@@ -9,9 +9,10 @@ import ProxyKernel
 /// VPN state** — that's Tier B's job (`VPNStatusMonitor`).
 ///
 /// Reports every debounced update as a `NetworkPathState`. Whether one changed
-/// anything material is the orchestrator's call
-/// (`ProxyOrchestrator.admitNetworkPath`), so both hosts dedupe alike and the
-/// decision is a `RuntimeEvent` (#101).
+/// anything material, and so resets DNS transports and refetches PAC, is the
+/// orchestrator's call (`ProxyOrchestrator.admitNetworkPath`), so both hosts
+/// dedupe alike and the decision is a `RuntimeEvent` (#101). The hosts' DNS
+/// reconcile runs for every report (`NetworkPathReports`).
 package final class NetworkMonitor {
     /// `NWPathMonitor` reports several updates per wake or roam within a second.
     package static let defaultDebounceInterval: TimeInterval = 2

@@ -114,11 +114,13 @@ form Conduit cannot route by.
   config fails to load still runs the journal restores before it exits, as the app does.
   (#17, #88)
 - A network-path update that changes nothing material no longer resets the DNS
-  forwarder's DoH transports, refetches the PAC or reconciles system DNS. macOS reported
-  such updates about every 75 s for hours with nothing moved, and each one dropped
-  in-flight DNS queries. Status, interfaces and their order, gateways and IPv4/IPv6/DNS
-  support decide; a Wi-Fi roam to a new gateway still acts. Expensive and constrained
-  (hotspot, Low Data Mode) do not, since they change no route. (#101)
+  forwarder's DoH transports or refetches the PAC. macOS reported such updates about
+  every 75 s for hours with nothing moved, and each one dropped in-flight DNS queries.
+  Status, the set of interfaces, the set of gateways and IPv4/IPv6/DNS support decide; a
+  Wi-Fi roam to a new gateway still acts. Expensive and constrained (hotspot, Low Data
+  Mode) do not, since they change no route. The system DNS reconcile still runs on every
+  update, because a VPN client can rewrite service DNS without a material path change.
+  (#101)
 
 ### Logging
 

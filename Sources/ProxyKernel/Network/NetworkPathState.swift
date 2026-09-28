@@ -7,8 +7,9 @@ import Foundation
 ///
 /// `NWPathMonitor` reports updates in which nothing the proxy depends on has
 /// moved (#101: a pair every ~75 s for hours, with the VPN off). Only the
-/// `materialFields` decide whether the orchestrator resets DNS transports and
-/// refetches PAC. `isExpensive` and `isConstrained` are carried for the log
+/// `Field`s decide whether the orchestrator resets DNS transports and
+/// refetches PAC; the hosts' system DNS reconcile runs for every report
+/// (`NetworkPathReports`). `isExpensive` and `isConstrained` are carried for the log
 /// line but are not material: they are cost hints (hotspot, Low Data Mode)
 /// that change no route, resolver or gateway, and a switch to a hotspot that
 /// does change the route also changes the interfaces and gateways.
@@ -125,7 +126,7 @@ package struct NetworkPathState: Sendable, Equatable {
 }
 
 /// A path update that differs materially from the last one acted on, and
-/// so drives the DNS transport reset, the PAC refresh and the DNS reconcile.
+/// so drives the DNS transport reset and the PAC refresh.
 package struct NetworkPathChange: Sendable, Equatable {
     package let path: NetworkPathState
     /// `nil` for the first path the runtime sees.

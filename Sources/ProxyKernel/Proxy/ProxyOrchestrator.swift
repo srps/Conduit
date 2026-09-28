@@ -1941,11 +1941,13 @@ package final class ProxyOrchestrator {
     /// which nothing the proxy depends on moved; acting on each one reset the
     /// DoH transports (dropping in-flight queries) and refetched the PAC every
     /// ~75 s for hours (#101). Only an update whose material fields differ
-    /// from the last one acted on is returned, for `handleNetworkChange(_:)`
-    /// and the host's DNS reconcile. The rest are counted and reported as a
-    /// coalesced `network.path_unchanged`, and nothing else happens.
+    /// from the last one acted on is returned, for `handleNetworkChange(_:)`.
+    /// The rest are counted and reported as a coalesced
+    /// `network.path_unchanged`, with no transport reset and no PAC refetch.
+    /// The hosts' system DNS reconcile is not gated by this: it runs for
+    /// every report (`NetworkPathReports` in PlatformMac).
     ///
-    /// Synchronous, so a host decides on its DNS reconcile in the turn the
+    /// Synchronous, so the app host can start the reaction in the turn the
     /// update arrives in. Both hosts come through here and dedupe alike.
     package func admitNetworkPath(_ path: NetworkPathState) -> NetworkPathChange? {
         switch networkPathTracker.admit(path) {
@@ -1953,12 +1955,12 @@ package final class ProxyOrchestrator {
             return change
         case .unchanged(let count, let emit):
             guard emit else { return nil }
-            let detail = "count=\(count) action=none path=\(path.description)"
+            let detail = "count=\(count) dns=kept pac=skipped path=\(path.description)"
             emitEvent(.health, "network.path_unchanged", detail: detail)
             logStore.log(
                 .notice,
                 "Network path update changed nothing material (\(count) since the last change); "
-                    + "DNS transports and PAC left alone. Path: \(path.description)",
+                    + "DNS transports kept, PAC not refetched. Path: \(path.description)",
                 category: .network
             )
             return nil
