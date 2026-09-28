@@ -19,11 +19,15 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     private let onConnectionOpened: @Sendable (ActiveConnectionInfo) -> Void
     private let onConnectionClosed: @Sendable (UUID) -> Void
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
-    private let onRequestCompleted: @Sendable (Bool, String?) -> Void
+    private let onRequestCompleted: @Sendable (RequestOutcome, String?) -> Void
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let authHandshakeLimiter = AuthHandshakeLimiter()
     private let group = MultiThreadedEventLoopGroup.singleton
     private let inboundBudget = InboundConnectionBudget()
+    /// One per listener: every HTTP handler reports connect failures through
+    /// it, so a host that fails a thousand times is one line and a summary
+    /// per interval (#100). Bounded by `ConnectFailureLog.defaultCapacity`.
+    private let connectFailureLog: ConnectFailureLog
     private let socksHandshakeTimeout: TimeAmount
     /// Count of accept sockets this server has successfully bound. Lets callers
     /// (and tests) distinguish "the listener was preserved" from "the listener
@@ -129,7 +133,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in },
-        onRequestCompleted: @Sendable @escaping (Bool, String?) -> Void,
+        onRequestCompleted: @Sendable @escaping (RequestOutcome, String?) -> Void,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         bindRetryLimit: Int = 10,
         socksHandshakeTimeout: TimeAmount = .seconds(10),
@@ -150,6 +154,10 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         self.onConnectionActivity = onConnectionActivity
         self.onRequestCompleted = onRequestCompleted
         self.eventSink = eventSink
+        self.connectFailureLog = ConnectFailureLog(
+            logger: logger, eventSink: eventSink,
+            scheduleFlush: ConnectFailureLog.eventLoopScheduler(MultiThreadedEventLoopGroup.singleton)
+        )
     }
 
     package func start() async throws {
@@ -501,7 +509,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                     onConnectionClosed: self.onConnectionClosed,
                     onConnectionActivity: self.onConnectionActivity,
                     onRequestCompleted: self.onRequestCompleted,
-                    eventSink: self.eventSink
+                    eventSink: self.eventSink,
+                    connectFailureLog: self.connectFailureLog
                 )
 
                 do {

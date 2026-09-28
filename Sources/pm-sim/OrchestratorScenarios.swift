@@ -268,8 +268,8 @@ enum OrchestratorScenarios {
             onConnectionOpened: { _ in },
             onConnectionClosed: { _ in },
             onConnectionActivity: { _ in },
-            onRequestCompleted: { succeeded, _ in
-                if !succeeded { failedRequests.withLockedValue { $0 += 1 } }
+            onRequestCompleted: { outcome, _ in
+                if !outcome.succeeded { failedRequests.withLockedValue { $0 += 1 } }
             },
             eventSink: { events.append($0) }
         )
