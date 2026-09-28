@@ -1840,10 +1840,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func handleNetworkChange(_ change: NetworkMonitor.PathChange) {
+    /// An update that changed nothing material is counted by the
+    /// orchestrator and goes no further, reconcile included (#101).
+    private func handleNetworkChange(_ path: NetworkPathState) {
         guard !rejectUnavailableConfiguration() else { return }
+        guard let change = orchestrator.admitNetworkPath(path) else { return }
         deliveries.deliver { [orchestrator] in
-            await orchestrator.handleNetworkChange(description: change.description, pathSatisfied: change.satisfied)
+            await orchestrator.handleNetworkChange(change)
         }
 
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {

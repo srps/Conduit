@@ -978,6 +978,9 @@ package final class ProxyOrchestrator {
     private var errorRateAlarmAt: Date?
     /// One warning per credential outage.
     private var credentialOutageReported = false
+    /// The last network path acted on, and the count of updates since that
+    /// changed nothing material (#101). One path and one counter.
+    private var networkPathTracker = NetworkPathTracker()
 
     private lazy var directConnectDetector: DirectConnectDetector = {
         DirectConnectDetector(
@@ -1934,6 +1937,42 @@ package final class ProxyOrchestrator {
         startHealthLoop()
     }
 
+    /// Tier C network-change admission. `NWPathMonitor` reports updates in
+    /// which nothing the proxy depends on moved; acting on each one reset the
+    /// DoH transports (dropping in-flight queries) and refetched the PAC every
+    /// ~75 s for hours (#101). Only an update whose material fields differ
+    /// from the last one acted on is returned, for `handleNetworkChange(_:)`
+    /// and the host's DNS reconcile. The rest are counted and reported as a
+    /// coalesced `network.path_unchanged`, and nothing else happens.
+    ///
+    /// Synchronous, so a host decides on its DNS reconcile in the turn the
+    /// update arrives in. Both hosts come through here and dedupe alike.
+    package func admitNetworkPath(_ path: NetworkPathState) -> NetworkPathChange? {
+        switch networkPathTracker.admit(path) {
+        case .changed(let change):
+            return change
+        case .unchanged(let count, let emit):
+            guard emit else { return nil }
+            let detail = "count=\(count) action=none path=\(path.description)"
+            emitEvent(.health, "network.path_unchanged", detail: detail)
+            logStore.log(
+                .notice,
+                "Network path update changed nothing material (\(count) since the last change); "
+                    + "DNS transports and PAC left alone. Path: \(path.description)",
+                category: .network
+            )
+            return nil
+        }
+    }
+
+    /// Admits `path` and, if it changed, acts on it. Returns whether it acted.
+    @discardableResult
+    package func handleNetworkPath(_ path: NetworkPathState) async -> Bool {
+        guard let change = admitNetworkPath(path) else { return false }
+        await handleNetworkChange(change)
+        return true
+    }
+
     /// Tier C network-change reaction: refresh PAC, log the new path. Does NOT
     /// re-probe upstreams or flip direct mode — those are Tier B's
     /// (`handleVPNStateChange`) responsibility now. Splitting general network
@@ -1943,16 +1982,25 @@ package final class ProxyOrchestrator {
     ///
     /// An unsatisfied path still recycles the DoH transports but has nothing
     /// to fetch the PAC over. The fetch honours the engine's failure backoff.
-    /// One `network.path_changed` event records the change and both
-    /// decisions; the log line derives from it.
-    package func handleNetworkChange(description: String, pathSatisfied: Bool = true) async {
+    /// One `network.path_changed` event records which fields changed and both
+    /// decisions; the NOTICE line derives from it, so proxy.log says why.
+    package func handleNetworkChange(_ change: NetworkPathChange) async {
         let resetsDNS = snapshot.dnsRunState == .running
-        emitEvent(
-            .health, "network.path_changed",
-            detail: "satisfied=\(pathSatisfied) dns=\(resetsDNS ? "reset" : "idle") "
-                + "pac=\(pathSatisfied ? "refresh" : "skipped_unsatisfied") path=\(description)"
+        let pathSatisfied = change.path.satisfied
+        let dnsDecision = resetsDNS ? "reset" : "idle"
+        let pacDecision = pathSatisfied ? "refresh" : "skipped_unsatisfied"
+        let tokens = [
+            "satisfied=\(pathSatisfied)", "dns=\(dnsDecision)", "pac=\(pacDecision)",
+            "changed=\(change.changedToken)", "unchanged_before=\(change.unchangedBefore)",
+        ] + change.diffTokens + ["path=\(change.path.description)"]
+        emitEvent(.health, "network.path_changed", detail: tokens.joined(separator: " "))
+        let what = change.diffTokens.isEmpty ? "first path" : change.diffTokens.joined(separator: " ")
+        logStore.log(
+            .notice,
+            "Network path changed (\(what)): DNS transports \(dnsDecision), PAC \(pacDecision); "
+                + "\(change.unchangedBefore) unchanged updates before it. Path: \(change.path.description)",
+            category: .network
         )
-        logStore.log(.info, "Network changed: \(description) (\(pathSatisfied ? "satisfied" : "unsatisfied"))", category: .network)
         if resetsDNS {
             resetDNSTransportsForRecovery(source: "network_change")
         }

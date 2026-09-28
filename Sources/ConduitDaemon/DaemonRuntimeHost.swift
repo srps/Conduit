@@ -755,8 +755,10 @@ final class DaemonRuntimeHost {
         }
     }
 
-    private func handleNetworkChange(_ change: NetworkMonitor.PathChange) async {
-        await orchestrator.handleNetworkChange(description: change.description, pathSatisfied: change.satisfied)
+    /// An update that changed nothing material is counted by the
+    /// orchestrator and goes no further, reconcile included (#101).
+    private func handleNetworkChange(_ path: NetworkPathState) async {
+        guard await orchestrator.handleNetworkPath(path) else { return }
         await reconcileSystemDNSIfRunning()
     }
 
