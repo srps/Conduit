@@ -39,7 +39,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         let error = KerberosAuthError.initiatorFailure(
             major: badMech, minor: 0, host: "proxy.corp.example", hasInitiatorCredential: probe.probe
         )
-        guard case .serviceTicketUnavailable(let host, let major, let minor) = error else {
+        guard case .serviceTicketUnavailable(let host, let major, let minor, _) = error else {
             return XCTFail("expected .serviceTicketUnavailable, got \(error)")
         }
         XCTAssertEqual(host, "proxy.corp.example")
@@ -107,7 +107,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         let auth = NegotiateAuthenticator(
             kerberos: KerberosAuthenticator(tokenProvider: provider),
             ntlmFallback: ntlm(),
-            onKerberosFallback: { _, reason in reasons.withLockedValue { $0.append(reason) } }
+            onKerberosFallback: { _, reason, _ in reasons.withLockedValue { $0.append(reason) } }
         )
 
         let result = try auth.initialToken(for: "proxy.corp.example", allowFallback: false)
@@ -164,7 +164,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         let failures = NIOLockedValueBox<[String]>([])
         let auth = NegotiateAuthenticator(
             kerberos: KerberosAuthenticator(tokenProvider: provider),
-            onKerberosFailure: { host, reason in failures.withLockedValue { $0.append("\(host) \(reason)") } }
+            onKerberosFailure: { host, reason, _ in failures.withLockedValue { $0.append("\(host) \(reason)") } }
         )
 
         XCTAssertThrowsError(try auth.initialToken(for: "proxy.corp.example", allowFallback: false))
@@ -181,7 +181,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         let failures = NIOLockedValueBox<[String]>([])
         let auth = NegotiateAuthenticator(
             kerberos: KerberosAuthenticator(tokenProvider: provider),
-            onKerberosFailure: { _, reason in failures.withLockedValue { $0.append(reason) } }
+            onKerberosFailure: { _, reason, _ in failures.withLockedValue { $0.append(reason) } }
         )
 
         XCTAssertThrowsError(try auth.initialToken(for: "proxy.corp.example", allowFallback: false))
@@ -198,7 +198,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         let auth = NegotiateAuthenticator(
             kerberos: KerberosAuthenticator(tokenProvider: provider),
             ntlmFallback: ntlm(),
-            onKerberosFailure: { _, _ in failures.withLockedValue { $0 += 1 } }
+            onKerberosFailure: { _, _, _ in failures.withLockedValue { $0 += 1 } }
         )
 
         _ = try auth.initialToken(for: "proxy.corp.example", allowFallback: false)
@@ -220,7 +220,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         let failures = NIOLockedValueBox<[String]>([])
         let auth = NegotiateAuthenticator(
             kerberos: KerberosAuthenticator(tokenProvider: RejectsContinuation(failure: .initSecContextFailed(failure, 5))),
-            onKerberosFailure: { host, reason in failures.withLockedValue { $0.append("\(host) \(reason)") } }
+            onKerberosFailure: { host, reason, _ in failures.withLockedValue { $0.append("\(host) \(reason)") } }
         )
 
         _ = try auth.initialToken(for: "proxy.corp.example", allowFallback: false)
@@ -234,7 +234,7 @@ final class KerberosServiceTicketTests: XCTestCase {
     /// succeed on every request whose continuation leg then fails.
     func testFailureEventGateReportsOncePerHostAndReasonPerInterval() {
         let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
-        let gate = KerberosFailureEventGate(repeatInterval: 60, now: { clock.withLockedValue { $0 } })
+        let gate = RuntimeEventRepeatGate(repeatInterval: 60, now: { clock.withLockedValue { $0 } })
 
         XCTAssertTrue(gate.shouldEmit(host: "de", reason: "service_ticket_unavailable"))
         XCTAssertFalse(gate.shouldEmit(host: "de", reason: "service_ticket_unavailable"))
@@ -252,13 +252,13 @@ final class KerberosServiceTicketTests: XCTestCase {
 
     func testFailureEventGateIsBounded() {
         let clock = NIOLockedValueBox(Date(timeIntervalSince1970: 1_000))
-        let gate = KerberosFailureEventGate(now: { clock.withLockedValue { $0 } })
-        for index in 0...KerberosFailureEventGate.maximumEntries {
+        let gate = RuntimeEventRepeatGate(now: { clock.withLockedValue { $0 } })
+        for index in 0...RuntimeEventRepeatGate.maximumEntries {
             clock.withLockedValue { $0.addTimeInterval(1) }
             XCTAssertTrue(gate.shouldEmit(host: "host-\(index)", reason: "failure"))
         }
         XCTAssertTrue(gate.shouldEmit(host: "host-0", reason: "failure"), "the oldest entry was evicted")
-        XCTAssertFalse(gate.shouldEmit(host: "host-\(KerberosFailureEventGate.maximumEntries)", reason: "failure"))
+        XCTAssertFalse(gate.shouldEmit(host: "host-\(RuntimeEventRepeatGate.maximumEntries)", reason: "failure"))
     }
 
     // MARK: - Live GSS
@@ -276,7 +276,7 @@ final class KerberosServiceTicketTests: XCTestCase {
         guard present.calls == 1 else {
             throw XCTSkip("GSS did not answer with an ambiguous code for an unticketable name here: \(first)")
         }
-        guard case .failure(KerberosAuthError.serviceTicketUnavailable(host, _, _)) = first else {
+        guard case .failure(KerberosAuthError.serviceTicketUnavailable(host, _, _, _)) = first else {
             return XCTFail("expected .serviceTicketUnavailable, got \(first)")
         }
         XCTAssertThrowsError(try provider.generateToken(host: host, inputToken: nil))

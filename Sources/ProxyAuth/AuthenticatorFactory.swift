@@ -41,14 +41,16 @@ import ProxyKernel
 /// `auth.kerberos_failed`, at most once a minute per host and reason: a
 /// failing proxy fails every request, and one event per request would push
 /// everything else out of the bounded `RuntimeEventLog`. See
-/// `KerberosFailureEventGate`.
+/// `RuntimeEventRepeatGate`. A fallback reaches `outcomeHandler` every
+/// time, with the failure's GSS codes as the fourth argument; the
+/// orchestrator applies the same limit to the event and line it derives.
 package func credentialBasedAuthenticatorProvider(
     configProvider: @escaping @Sendable () -> ProxyConfig,
     credentialProvider: any CredentialProvider,
-    outcomeHandler: (@Sendable (RuntimeAuthOutcome, String, String?) -> Void)? = nil,
+    outcomeHandler: (@Sendable (RuntimeAuthOutcome, String, String?, String?) -> Void)? = nil,
     eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
 ) -> @Sendable (UpstreamProxy) throws -> ProxyAuthenticator {
-    let failureGate = KerberosFailureEventGate()
+    let failureGate = RuntimeEventRepeatGate()
     return { destination in
         let config = configProvider()
         guard let upstream = config.enabledUpstreams.first(where: {
@@ -71,68 +73,25 @@ package func credentialBasedAuthenticatorProvider(
                     return NTLMAuthenticator(credentials: credentials)
                 },
                 onKerberosSuccess: { successHost in
-                    outcomeHandler?(.kerberos, successHost, nil)
+                    outcomeHandler?(.kerberos, successHost, nil, nil)
                 },
-                onKerberosFallback: { fallbackHost, reason in
-                    outcomeHandler?(.ntlmFallback, fallbackHost, reason)
+                onKerberosFallback: { fallbackHost, reason, diagnostics in
+                    outcomeHandler?(.ntlmFallback, fallbackHost, reason, diagnostics)
                 },
-                onKerberosFailure: { failedHost, reason in
-                    guard failureGate.shouldEmit(host: failedHost, reason: reason) else { return }
+                onKerberosFailure: { failedHost, reason, diagnostics in
+                    guard let suppressed = failureGate.admit(host: failedHost, reason: reason) else { return }
+                    let codes = diagnostics.map { " \($0)" } ?? ""
                     eventSink?(RuntimeEvent(kind: .auth, event: "auth.kerberos_failed",
-                                            detail: "host=\(failedHost) reason=\(reason)"))
+                                            detail: "host=\(failedHost) reason=\(reason)\(codes) suppressed=\(suppressed)"))
                 }
             )
         case .ntlmv2:
             guard let credentials = try credentialProvider.credentials(for: upstream) else {
                 throw CredentialManagerError.missingCredentials
             }
-            outcomeHandler?(.ntlmDirect, host, nil)
+            outcomeHandler?(.ntlmDirect, host, nil, nil)
             return NTLMAuthenticator(credentials: credentials)
         }
-    }
-}
-
-/// Limits `auth.kerberos_failed` to one event per host and reason per
-/// `repeatInterval`. Each pair has its own cooldown, so a proxy that
-/// alternates between two reasons still reports each at most once per
-/// interval. Time rather than success re-arms it: a continuation leg can
-/// fail on every request right after an initial leg that succeeded, so a
-/// success says nothing about whether the failure is over. Bounded at
-/// `maximumEntries` pairs; past that the oldest goes, which at worst repeats
-/// an event.
-package final class KerberosFailureEventGate: @unchecked Sendable {
-    package static let maximumEntries = 64
-
-    private struct Key: Hashable {
-        let host: String
-        let reason: String
-    }
-
-    private let repeatInterval: TimeInterval
-    private let now: @Sendable () -> Date
-    private let lock = NSLock()
-    /// When each host and reason was last reported.
-    private var lastReported: [Key: Date] = [:]
-
-    package init(repeatInterval: TimeInterval = 60, now: @escaping @Sendable () -> Date = { Date() }) {
-        self.repeatInterval = repeatInterval
-        self.now = now
-    }
-
-    package func shouldEmit(host: String, reason: String) -> Bool {
-        let key = Key(host: host, reason: reason)
-        let current = now()
-        lock.lock()
-        defer { lock.unlock() }
-        if let at = lastReported[key], current.timeIntervalSince(at) < repeatInterval {
-            return false
-        }
-        if lastReported[key] == nil, lastReported.count >= Self.maximumEntries,
-           let oldest = lastReported.min(by: { $0.value < $1.value })?.key {
-            lastReported.removeValue(forKey: oldest)
-        }
-        lastReported[key] = current
-        return true
     }
 }
 

@@ -147,6 +147,18 @@ form Conduit cannot route by.
   exchange failed`) are logged once per target and failure kind a minute, then as one
   summary line with `suppressed=N`; their events carry the same bound and a new `kind=`
   field. `direct.link_local_refused` is emitted once per remembered timeout. (#100)
+- The "Kerberos unavailable for <host> (<reason>); falling back to NTLMv2." line and its
+  `auth.kerberos_fallback_ntlm` event are reported at most once a minute per upstream host
+  and reason instead of on every handshake, with `suppressed=` counting the fallbacks held
+  back since the last one. On 2026-09-28 this line was 1,248 of the log's lines. Both
+  events, and the line, now carry the GSS `major=` and `minor=` codes, and `krb5_error=`
+  with the Kerberos error's name when the minor is one Conduit knows. (#99)
+- SPNEGO reports a failed service-ticket request as `BAD_MECH` with minor 0, which says
+  nothing about the cause. When that happens, Conduit now asks the Kerberos mech directly
+  for the same service principal, at most once per host a minute. The answer appears as
+  `krb5_major=`, `krb5_minor=` and `krb5_error=`, for example
+  `KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN` or `KRB5_KDC_UNREACH`. The extra request is diagnostic
+  only and never changes whether the handshake uses Kerberos or NTLM. (#99)
 
 ### Development
 

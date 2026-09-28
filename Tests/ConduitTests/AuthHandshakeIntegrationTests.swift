@@ -339,8 +339,8 @@ final class AuthHandshakeIntegrationTests: XCTestCase {
         let provider = credentialBasedAuthenticatorProvider(
             configProvider: orchestrator.configSnapshotProvider,
             credentialProvider: credentialProvider,
-            outcomeHandler: { [weak orchestrator] outcome, host, reason in
-                orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason)
+            outcomeHandler: { [weak orchestrator] outcome, host, reason, diagnostics in
+                orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason, diagnostics: diagnostics)
             }
         )
 

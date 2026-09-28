@@ -36,15 +36,56 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
     private let lock = NSLock()
     private let gate: GSSInitiatorGate
     private let hasInitiatorCredential: @Sendable () -> Bool
+    private let mechDiagnoser: KerberosMechDiagnoser
 
     /// `hasInitiatorCredential` is asked only after an ambiguous failure; see
-    /// `KerberosAuthError.initiatorFailure`. Tests inject it.
+    /// `KerberosAuthError.initiatorFailure`. `mechDiagnoser` explains a
+    /// service-ticket failure; see `KerberosMechDiagnoser`. Tests inject both.
     package init(
         gate: GSSInitiatorGate = .shared,
-        hasInitiatorCredential: @escaping @Sendable () -> Bool = SystemGSSTokenProvider.hasDefaultInitiatorCredential
+        hasInitiatorCredential: @escaping @Sendable () -> Bool = SystemGSSTokenProvider.hasDefaultInitiatorCredential,
+        mechDiagnoser: KerberosMechDiagnoser = .shared
     ) {
         self.gate = gate
         self.hasInitiatorCredential = hasInitiatorCredential
+        self.mechDiagnoser = mechDiagnoser
+    }
+
+    /// One `gss_init_sec_context` against the raw Kerberos mech for
+    /// `HTTP@host`, to learn why SPNEGO could not get a service ticket. Its
+    /// context, output token and name are released and never read; only the
+    /// status codes leave. Caller holds `GSSInitiatorGate`.
+    package static func probeKerberosMech(host: String) -> KerberosMechStatus {
+        let name: gss_name_t
+        do {
+            name = try importServiceName(host: host)
+        } catch {
+            // The handshake imported the same name a moment ago; a failure
+            // here is reported in the detail as `krb5_probe=failed`.
+            return .probeFailed
+        }
+        var targetName: gss_name_t? = name
+        defer {
+            var releaseMinor: OM_uint32 = 0
+            gss_release_name(&releaseMinor, &targetName)
+        }
+        var minor: OM_uint32 = 0
+        var context: gss_ctx_id_t?
+        var outputToken = gss_buffer_desc(length: 0, value: nil)
+        var mechOIDBytes = krb5OIDBytes
+        let major: OM_uint32 = mechOIDBytes.withUnsafeMutableBufferPointer { oidPtr in
+            var mechOID = gss_OID_desc(length: OM_uint32(oidPtr.count), elements: oidPtr.baseAddress)
+            return gss_init_sec_context(
+                &minor, nil, &context, name, &mechOID, kGSSContextFlags,
+                0, nil, nil, nil, &outputToken, nil, nil
+            )
+        }
+        var releaseMinor: OM_uint32 = 0
+        gss_release_buffer(&releaseMinor, &outputToken)
+        if context != nil {
+            gss_delete_sec_context(&releaseMinor, &context, nil)
+        }
+        return .status(major: major, minor: minor)
     }
 
     /// Whether the default credential cache holds an unexpired Kerberos
@@ -88,12 +129,16 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
         // `NegotiateAuthenticator`'s NTLM fallback on every call; anything
         // else (KDC unreachable, clock skew, ...) is a network-class failure
         // that every queued handshake would otherwise re-run.
-        return try gate.run(target: host, shouldCoolDown: { error in
-            guard let kerberosError = error as? KerberosAuthError else { return true }
-            return !kerberosError.isCredentialUnavailable
-        }) {
+        return try gate.run(target: host, shouldCoolDown: Self.startsGateCooldown) {
             try initiateLocked(host: host, inputToken: inputToken)
         }
+    }
+
+    /// Whether a failed initiator call starts `GSSInitiatorGate`'s cooldown
+    /// for its target: everything but credential absence.
+    package static func startsGateCooldown(_ error: Error) -> Bool {
+        guard let kerberosError = error as? KerberosAuthError else { return true }
+        return !kerberosError.isCredentialUnavailable
     }
 
     /// Caller holds `lock` and the gate.
@@ -108,7 +153,7 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
             deleteContext()
         }
 
-        let targetNameNonOpt = try importServiceName(host: host)
+        let targetNameNonOpt = try Self.importServiceName(host: host)
         var targetName: gss_name_t? = targetNameNonOpt
         defer {
             var minor: OM_uint32 = 0
@@ -170,10 +215,12 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
 
         guard major & kGSSErrorMask == 0 else {
             deleteContext()
-            throw KerberosAuthError.initiatorFailure(
+            // Still inside the gate, so the diagnostic call is serialised
+            // with every other initiator call.
+            throw mechDiagnoser.annotate(KerberosAuthError.initiatorFailure(
                 major: major, minor: minor, host: host,
                 hasInitiatorCredential: hasInitiatorCredential
-            )
+            ))
         }
 
         guard outputToken.length > 0, let value = outputToken.value else {
@@ -193,7 +240,7 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
         deleteContext()
     }
 
-    private func importServiceName(host: String) throws -> gss_name_t {
+    private static func importServiceName(host: String) throws -> gss_name_t {
         let spn = "HTTP@\(host)"
         var minor: OM_uint32 = 0
         var targetName: gss_name_t?
@@ -238,7 +285,9 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
     /// A ticket-granting ticket is present, but no service ticket for `host`
     /// could be obtained: the KDC is unreachable, or the SPN is not registered.
     /// See `initiatorFailure(major:minor:host:hasInitiatorCredential:)`.
-    case serviceTicketUnavailable(host: String, major: OM_uint32, minor: OM_uint32)
+    /// `mech` is what the Kerberos mech itself answered for the same name,
+    /// when `KerberosMechDiagnoser` asked it; diagnostic only (#99).
+    case serviceTicketUnavailable(host: String, major: OM_uint32, minor: OM_uint32, mech: KerberosMechStatus? = nil)
     case emptyToken
     case noTicket
 
@@ -272,7 +321,7 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
             return "Kerberos: service name import failed — check the proxy hostname (GSS major=\(major), minor=\(minor))."
         case .initSecContextFailed(let major, let minor):
             return "Kerberos: \(Self.gssRoutineDescription(major)) (GSS major=\(major), minor=\(minor))."
-        case .serviceTicketUnavailable(let host, let major, let minor):
+        case .serviceTicketUnavailable(let host, let major, let minor, _):
             return "Kerberos: a Kerberos ticket is present, but no service ticket for HTTP/\(host) could be obtained — the KDC may be unreachable (check the VPN and DNS), or the proxy has no registered service principal (GSS major=\(major), minor=\(minor))."
         case .emptyToken:
             return "Kerberos: the initial authentication step produced no token."
@@ -333,6 +382,80 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
         case .noTicket: return "no_ticket"
         case .serviceTicketUnavailable: return "service_ticket_unavailable"
         case .importNameFailed, .emptyToken: return "other"
+        }
+    }
+
+    /// The failure's GSS codes for an event detail or log line:
+    /// `major=<n> minor=<n>`, plus `krb5_error=<name>` when the minor is a
+    /// Kerberos error `kerberosErrorName(minor:)` knows. The minor is
+    /// printed signed, the way Kerberos error codes are written. Codes only:
+    /// no principal, host or token. `nil` for a failure without GSS codes.
+    ///
+    /// SPNEGO often answers minor 0 for a Kerberos-mech failure (#73). For a
+    /// service-ticket failure `KerberosMechDiagnoser` then asks the Kerberos
+    /// mech itself, and its answer follows as `krb5_major=`, `krb5_minor=`
+    /// and `krb5_error=` (named from the mech's minor), or `krb5_probe=failed`
+    /// when the question could not be asked.
+    package var diagnosticDetail: String? {
+        let major: OM_uint32
+        let minor: OM_uint32
+        var mech: KerberosMechStatus?
+        switch self {
+        case .importNameFailed(let codeMajor, let codeMinor),
+             .initSecContextFailed(let codeMajor, let codeMinor):
+            (major, minor) = (codeMajor, codeMinor)
+        case .serviceTicketUnavailable(_, let ticketMajor, let ticketMinor, let mechStatus):
+            (major, minor, mech) = (ticketMajor, ticketMinor, mechStatus)
+        case .emptyToken, .noTicket:
+            return nil
+        }
+        var detail = "major=\(major) minor=\(Int32(bitPattern: minor))"
+        switch mech {
+        case .status(let mechMajor, let mechMinor):
+            detail += " krb5_major=\(mechMajor) krb5_minor=\(Int32(bitPattern: mechMinor))"
+            if let name = Self.kerberosErrorName(minor: mechMinor) {
+                detail += " krb5_error=\(name)"
+            }
+        case .probeFailed:
+            detail += " krb5_probe=failed"
+        case nil:
+            if let name = Self.kerberosErrorName(minor: minor) {
+                detail += " krb5_error=\(name)"
+            }
+        }
+        return detail
+    }
+
+    /// The symbolic name of a Kerberos error carried as a GSS minor status,
+    /// for the codes a proxy handshake is likely to meet. Values are from
+    /// `krb5.h` in the macOS SDK (`usr/include/krb5/krb5.h`); Heimdal's
+    /// `krb5_err` table uses the same ones. A table rather than
+    /// `gss_display_status(GSS_C_MECH_CODE)`: outside the failing call's
+    /// context GSS.framework answers "unknown mech-code" for all of them.
+    package static func kerberosErrorName(minor: OM_uint32) -> String? {
+        switch Int32(bitPattern: minor) {
+        case -1_765_328_378: return "KRB5KDC_ERR_C_PRINCIPAL_UNKNOWN"
+        case -1_765_328_377: return "KRB5KDC_ERR_S_PRINCIPAL_UNKNOWN"
+        case -1_765_328_373: return "KRB5KDC_ERR_NEVER_VALID"
+        case -1_765_328_372: return "KRB5KDC_ERR_POLICY"
+        case -1_765_328_370: return "KRB5KDC_ERR_ETYPE_NOSUPP"
+        case -1_765_328_364: return "KRB5KDC_ERR_TGT_REVOKED"
+        case -1_765_328_361: return "KRB5KDC_ERR_KEY_EXP"
+        case -1_765_328_360: return "KRB5KDC_ERR_PREAUTH_FAILED"
+        case -1_765_328_352: return "KRB5KRB_AP_ERR_TKT_EXPIRED"
+        case -1_765_328_351: return "KRB5KRB_AP_ERR_TKT_NYV"
+        case -1_765_328_347: return "KRB5KRB_AP_ERR_SKEW"
+        case -1_765_328_343: return "KRB5KRB_AP_ERR_MODIFIED"
+        case -1_765_328_332: return "KRB5KRB_ERR_RESPONSE_TOO_BIG"
+        case -1_765_328_316: return "KRB5KDC_ERR_WRONG_REALM"
+        case -1_765_328_243: return "KRB5_CC_NOTFOUND"
+        case -1_765_328_242: return "KRB5_CC_END"
+        case -1_765_328_241: return "KRB5_NO_TKT_SUPPLIED"
+        case -1_765_328_230: return "KRB5_REALM_UNKNOWN"
+        case -1_765_328_228: return "KRB5_KDC_UNREACH"
+        case -1_765_328_189: return "KRB5_FCC_NOFILE"
+        case -1_765_328_164: return "KRB5_REALM_CANT_RESOLVE"
+        default: return nil
         }
     }
 
@@ -466,16 +589,18 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
     package typealias KerberosSuccessHandler = @Sendable (_ host: String) -> Void
     /// Callback invoked on the credential-unavailable branch that triggers
     /// NTLM fallback. Receives the target host plus a short machine-readable
-    /// reason code (see `KerberosAuthError.fallbackReasonCode`). Used by the
+    /// reason code (see `KerberosAuthError.fallbackReasonCode`) and the GSS
+    /// codes (`KerberosAuthError.diagnosticDetail`). Used by the
     /// auth factory to fire an `auth.kerberos_fallback_ntlm` `RuntimeEvent`
     /// so the silent downgrade to NTLM is no longer invisible.
-    package typealias KerberosFallbackHandler = @Sendable (_ host: String, _ reason: String) -> Void
+    package typealias KerberosFallbackHandler = @Sendable (_ host: String, _ reason: String, _ diagnostics: String?) -> Void
     /// Callback invoked when a Kerberos failure is raised to the caller with
     /// no NTLM answer: no saved password to fall back to, a failure that
     /// permits no fallback, or a continuation leg GSS rejects. Not invoked for a failure withheld so the
     /// kernel's retry can wait for the ticket; that retry has its own event.
-    /// Receives the target host and `KerberosAuthError.fallbackReasonCode`.
-    package typealias KerberosFailureHandler = @Sendable (_ host: String, _ reason: String) -> Void
+    /// Receives the target host, `KerberosAuthError.fallbackReasonCode` and
+    /// `KerberosAuthError.diagnosticDetail`.
+    package typealias KerberosFailureHandler = @Sendable (_ host: String, _ reason: String, _ diagnostics: String?) -> Void
 
     private let kerberos: KerberosAuthenticator
     private var ntlmFallback: NTLMAuthenticator?
@@ -565,13 +690,13 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
             }
             if let fallback = resolvedFallback() {
                 usingFallback = true
-                onKerberosFallback?(host, kerberosError.fallbackReasonCode)
+                onKerberosFallback?(host, kerberosError.fallbackReasonCode, kerberosError.diagnosticDetail)
                 return (try fallback.initialToken(for: host), true)
             }
-            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode, kerberosError.diagnosticDetail)
             throw kerberosError
         } catch let kerberosError as KerberosAuthError {
-            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode, kerberosError.diagnosticDetail)
             throw kerberosError
         }
     }
@@ -587,7 +712,7 @@ package final class NegotiateAuthenticator: FallbackDeferringAuthenticator, @unc
         do {
             return try kerberos.processChallenge(headerValues: headerValues, host: host)
         } catch let kerberosError as KerberosAuthError {
-            onKerberosFailure?(host, kerberosError.fallbackReasonCode)
+            onKerberosFailure?(host, kerberosError.fallbackReasonCode, kerberosError.diagnosticDetail)
             throw kerberosError
         }
     }
