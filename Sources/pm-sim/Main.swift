@@ -63,6 +63,7 @@ enum PMSim {
               observable-target-redaction  Query/fragment privacy across observations
               security-boundaries     Auth destinations, config rejection, and loopback listeners
               kerberos-service-ticket A TGT without a service ticket is unreachable, not a missing credential
+              kerberos-fallback-flood A fallback on every handshake is one event a minute, with the GSS codes
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
 
             OPTIONS:
@@ -195,6 +196,7 @@ enum PMSim {
         "observable-target-redaction",
         "security-boundaries",
         "kerberos-service-ticket",
+        "kerberos-fallback-flood",
         "helper-caller-identity",
         "lifecycle-stop-overtakes-start",
     ]
@@ -294,6 +296,8 @@ enum PMSim {
             return [try await SecurityScenarios.boundaries(verbose: verbose)]
         case "kerberos-service-ticket":
             return [try await KerberosScenarios.serviceTicketUnavailable(verbose: verbose)]
+        case "kerberos-fallback-flood":
+            return [try await KerberosScenarios.fallbackFlood()]
         case "lifecycle-stop-overtakes-start":
             return [try await LifecycleScenarios.stopOvertakesStart()]
         case "fixture-pass", "fixture-fail", "fixture-missing":
