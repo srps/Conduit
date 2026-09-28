@@ -154,6 +154,102 @@ enum NetworkTransitionScenarios {
         )
     }
 
+    /// `pm-sim network-path-churn` (#101). `NWPathMonitor` delivered an update
+    /// every ~75 s for hours with nothing material changed, and each one reset
+    /// the DoH transports and refetched the PAC. With the DNS forwarder
+    /// running (so a reset is real and counted), asserts:
+    ///
+    ///  * 20 identical updates after the first cause 0 resets and 0
+    ///    `network.path_changed`, and are reported as coalesced
+    ///    `network.path_unchanged` events (counts 1, 2, 4, 8, 16)
+    ///  * a Wi-Fi roam (same interface, new gateway) causes exactly 1 reset,
+    ///    and its event names the field and carries the 20 it absorbed
+    ///  * a system wake still resets, whatever the path did
+    @MainActor
+    static func networkPathChurn(verbose: Bool) async throws -> ScenarioResult {
+        let name = "networkPathChurn"
+        let start = Date()
+        var notes: [String] = []
+
+        let orchestrator = makeBareOrchestrator(verbose: verbose)
+        var config = orchestrator.config
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        orchestrator.config = config
+        ScenarioCleanup.register {
+            await orchestrator.stopDNS()
+            await orchestrator.stopProxy()
+        }
+        try await orchestrator.startProxy()
+        await orchestrator.startDNS()
+        let dnsRunning = orchestrator.snapshot.dnsRunState == .running
+        notes.append("dnsRunState=\(orchestrator.snapshot.dnsRunState)")
+
+        func wifi(gateway: String) -> NetworkPathState {
+            NetworkPathState(
+                status: .satisfied,
+                interfaces: [.init(name: "en0", type: "wifi")],
+                gateways: [gateway, "fe80::1%en0"],
+                supportsIPv4: true, supportsIPv6: true, supportsDNS: true
+            )
+        }
+        func events(_ name: String, since cutoff: Date) -> [RuntimeEvent] {
+            orchestrator.eventLog.events.filter { $0.timestamp >= cutoff && $0.event == name }
+        }
+
+        await orchestrator.handleNetworkPath(wifi(gateway: "192.168.1.1"))
+
+        let churnCutoff = Date()
+        var acted = 0
+        for _ in 0..<20 {
+            if await orchestrator.handleNetworkPath(wifi(gateway: "192.168.1.1")) { acted += 1 }
+        }
+        let churnResets = events("dns.transports_reset", since: churnCutoff).count
+        let churnChanged = events("network.path_changed", since: churnCutoff).count
+        let unchangedCounts = events("network.path_unchanged", since: churnCutoff)
+            .compactMap { $0.detail?.split(separator: " ").first.map(String.init) }
+        notes.append("churn: acted=\(acted) resets=\(churnResets) path_changed=\(churnChanged) unchanged=\(unchangedCounts)")
+
+        let roamCutoff = Date()
+        let roamActed = await orchestrator.handleNetworkPath(wifi(gateway: "192.168.1.254"))
+        let roamResets = events("dns.transports_reset", since: roamCutoff).count
+        let roamDetail = events("network.path_changed", since: roamCutoff).first?.detail ?? ""
+        notes.append("roam: acted=\(roamActed) resets=\(roamResets) detail=\(roamDetail)")
+
+        let wakeCutoff = Date()
+        await orchestrator.handleSystemWake()
+        let wakeResets = events("dns.transports_reset", since: wakeCutoff).count
+        notes.append("wake resets=\(wakeResets)")
+
+        let assertions: [ScenarioAssertion] = [
+            .init("DNS forwarder running, so resets are observable", dnsRunning),
+            .init("20 identical updates: 0 resets", acted == 0 && churnResets == 0 && churnChanged == 0),
+            .init("identical updates coalesced into path_unchanged",
+                  unchangedCounts == ["count=1", "count=2", "count=4", "count=8", "count=16"]),
+            .init("gateway change: 1 reset", roamActed && roamResets == 1),
+            .init("gateway change names the field and the absorbed count",
+                  roamDetail.contains("changed=gateways") && roamDetail.contains("unchanged_before=20")
+                    && roamDetail.contains("gateways=192.168.1.1,fe80::1%en0->192.168.1.254,fe80::1%en0")),
+            .init("system wake still resets", wakeResets == 1),
+        ]
+        notes.append(assertions.allSatisfy(\.passed) ? "PASS" : "FAIL")
+
+        return ScenarioResult(
+            name: name,
+            clientCount: 0,
+            clientsOpened: 0,
+            clientsWithFirstByte: 0,
+            clientsClosedEarly: 0,
+            totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: assertions,
+            notes: notes
+        )
+    }
+
     @MainActor
     private static func makeBareOrchestrator(verbose: Bool) -> ProxyOrchestrator {
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)

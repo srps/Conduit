@@ -113,6 +113,12 @@ form Conduit cannot route by.
   ready, and adopts or removes resolver files an earlier release wrote. A daemon whose
   config fails to load still runs the journal restores before it exits, as the app does.
   (#17, #88)
+- A network-path update that changes nothing material no longer resets the DNS
+  forwarder's DoH transports, refetches the PAC or reconciles system DNS. macOS reported
+  such updates about every 75 s for hours with nothing moved, and each one dropped
+  in-flight DNS queries. Status, interfaces and their order, gateways and IPv4/IPv6/DNS
+  support decide; a Wi-Fi roam to a new gateway still acts. Expensive and constrained
+  (hotspot, Low Data Mode) do not, since they change no route. (#101)
 
 ### Logging
 
@@ -124,6 +130,11 @@ form Conduit cannot route by.
 - `auth.kerberos_failed` reports a Kerberos failure that has no NTLM answer to fall back
   on, on the initial handshake leg or a continuation GSS rejects, at most once a minute
   per upstream host and reason. (#75)
+- `network.path_changed` names the fields that changed (`changed=`, and one
+  `field=old->new` token each) and how many unchanged updates came before it, and its log
+  line moves from info to notice, so proxy.log says why the DNS transports were reset.
+  Unchanged updates are counted in a coalesced `network.path_unchanged` (at counts 1, 2,
+  4 … 64, then every 64th). (#101)
 
 ### Development
 
@@ -131,7 +142,8 @@ form Conduit cannot route by.
   daemon over `FakeMachine` in tests no longer reads or writes the login Keychain. (#83)
 - `pm-sim` gains `lifecycle-stop-overtakes-start`, `helper-caller-identity`,
   `pac-unsupported-only` (a PAC with no usable answer routes through the upstream and
-  never reaches the origin directly) and `strict-direct-reachable`.
+  never reaches the origin directly), `strict-direct-reachable` and `network-path-churn`
+  (20 identical path updates reset nothing; a gateway roam resets once).
 
 ## 0.3.3
 
