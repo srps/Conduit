@@ -44,7 +44,23 @@ jobs:
         run: xcrun swift test
       - name: Verify optimized PAC behavior
         timeout-minutes: 15
-        run: xcrun swift test -c release --filter 'PACPreviewTests|CFPACEvaluatorTests'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swift build -c release --build-tests
+          bin_dir="$(xcrun swift build -c release --show-bin-path)"
+          test_bundle="$bin_dir/ConduitPackageTests.xctest"
+          if [ ! -d "$test_bundle" ]; then
+            test_bundle="$bin_dir/ConduitTests.xctest"
+          fi
+          test -d "$test_bundle"
+          test_log="$(mktemp /tmp/conduit-pac-tests-XXXXXX)"
+          trap 'rm -f "$test_log"' EXIT
+          # The optimized SwiftPM discovery helper hangs on the hosted Xcode
+          # toolchain. Run these built XCTest classes through Apple's runner.
+          xcrun xctest -XCTest 'ConduitTests.PACPreviewTests,ConduitTests.CFPACEvaluatorTests' "$test_bundle" 2>&1 | tee "$test_log"
+          grep -q "Test Suite 'PACPreviewTests' passed" "$test_log"
+          grep -q "Test Suite 'CFPACEvaluatorTests' passed" "$test_log"
       - name: Build signed ZIP and drag-to-Applications disk image
         run: bash scripts/package-release.sh
       - name: Verify packaged app and PAC preview
