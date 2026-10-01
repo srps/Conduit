@@ -47,7 +47,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          xcrun swift build -c release --build-tests
+          xcrun swift build -c release --build-tests -Xswiftc -enable-testing
           bin_dir="$(xcrun swift build -c release --show-bin-path)"
           test_bundle="$bin_dir/ConduitPackageTests.xctest"
           if [ ! -d "$test_bundle" ]; then
