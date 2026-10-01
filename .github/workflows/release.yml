@@ -40,8 +40,11 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
           fi
-      - name: Test release configuration
-        run: xcrun swift test -c release
+      - name: Run the standard full test suite
+        run: xcrun swift test
+      - name: Verify optimized PAC behavior
+        timeout-minutes: 15
+        run: xcrun swift test -c release --filter 'PACPreviewTests|CFPACEvaluatorTests'
       - name: Build signed ZIP and drag-to-Applications disk image
         run: bash scripts/package-release.sh
       - name: Verify packaged app and PAC preview
@@ -60,6 +63,7 @@ jobs:
           bin_dir="$(xcrun swift build -c release --show-bin-path)"
           "$bin_dir/pm-sim" pac-preview
           "$bin_dir/pm-sim" pac-fetch-bounds
+          "$bin_dir/pm-sim" flood-slow-drain
       - uses: actions/upload-artifact@v4
         with:
           name: Conduit-${{ matrix.architecture }}
