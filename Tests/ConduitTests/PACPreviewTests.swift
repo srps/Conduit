@@ -26,7 +26,9 @@ final class PACPreviewTests: XCTestCase {
         XCTAssertEqual(state.pacPreviewMessage, PACResolverError.invalidTargetURL.localizedDescription)
         XCTAssertFalse(state.isPACPreviewRunning)
         XCTAssertNil(state.pacPreviewTask)
-        XCTAssertEqual(state.eventLog.events.last?.event, "pac.preview_failed")
+        XCTAssertTrue(state.eventLog.events.contains {
+            $0.event == "pac.preview_failed" && $0.detail == PACResolverError.invalidTargetURL.localizedDescription
+        })
     }
 
     func testPreviewTargetDefaultsAndRepairsLegacyEmptyPreference() throws {
@@ -75,7 +77,9 @@ final class PACPreviewTests: XCTestCase {
         XCTAssertFalse(state.isPACPreviewRunning)
         XCTAssertEqual(state.pacPreviewMessage, state.lastErrorMessage)
         XCTAssertTrue(state.pacPreviewMessage?.contains("evaluation failed") == true)
-        XCTAssertEqual(state.eventLog.events.last?.event, "pac.preview_failed")
+        XCTAssertTrue(state.eventLog.events.contains {
+            $0.event == "pac.preview_failed" && $0.detail == state.pacPreviewMessage
+        })
         try setScript("function FindProxyForURL() { return 'DIRECT'; }", on: state)
         state.refreshPACResolutionPreview()
         await state.pacPreviewTask?.value
