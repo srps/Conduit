@@ -18,6 +18,14 @@ A **macOS-native corporate proxy manager** built with SwiftUI and SwiftNIO. If y
 
 ## Quick Start
 
+Download a ready-to-install disk image from [Releases](https://github.com/srps/Conduit/releases).
+Choose **arm64** for an Apple Silicon Mac or **x86_64** for Intel (macOS 26 or
+later). Open the disk image, drag Conduit into Applications, and open it.
+No Xcode or local build is required. These builds are ad-hoc signed; if macOS
+blocks the first launch, use System Settings > Privacy & Security > Open Anyway.
+
+To build from source instead:
+
 ```bash
 # Build
 swift build
@@ -271,6 +279,28 @@ For an optimized release build:
 Once installed the app can be found in Spotlight, Launchpad, and Finder > Applications. Pin it to the Dock by right-clicking its Dock icon > Options > Keep in Dock. The "Launch at Login" setting also requires the app to be in `/Applications`.
 
 On first launch macOS may show a Gatekeeper warning ("cannot verify the developer") because the app is ad-hoc signed. Right-click the app > **Open** > click **Open** in the dialog. This is only needed once.
+
+To create an optimized test build for another Mac with the same architecture:
+
+```bash
+./bundle-app.sh --share
+```
+
+Send the ZIP under `.build/share/`. It preserves executable permissions and uses
+ad-hoc signing instead of the builder's local signing certificate. The app
+requires macOS 26 or later. This build is not notarized; the recipient may need
+to approve it in System Settings > Privacy & Security. It does not install or
+replace the app on the builder's Mac. An existing helper pinned to a different
+signing identity will refuse this build; without a helper, the app falls back
+to macOS admin prompts.
+
+Maintainers can run `bash scripts/package-release.sh` to also create a disk
+image with an Applications shortcut and SHA-256 checksums. `VERSION` controls
+the app and asset versions. The Release packages workflow builds and tests
+both architectures on pull requests that change packaging, or when run
+manually. After merging, push a matching `v<version>` tag to prepare a draft
+GitHub release with the installable packages attached. Review the draft and
+publish it when ready.
 
 ## Run Tests
 
