@@ -28,6 +28,7 @@ See also:
 
 ## Reliability
 
+- [ ] **macOS network location awareness (next planned work, [#110](https://github.com/srps/Conduit/issues/110))** - observe active-location changes explicitly; scope proxy/DNS restoration by stable location and service identifiers, including inactive locations, and reconcile managed settings after external switches. Preserve VPN detection, direct mode, and flap resilience. Follow with optional location-to-profile associations once named profiles exist; automatic location switching stays opt-in and follows compatibility and recovery validation on macOS 26/27. [Rel, Obs, UI, Sim]
 - [ ] **Kerberos credential expiry** - mid-session TGT expiry emits an event, attempts renewal, and falls back to NTLM cleanly. [Rel]
 - [ ] **Upstream circuit-breaker formalization** - explicit open / half-open / closed state machine with an event per transition and an `upstream-flap` simulator scenario. [Rel, Obs]
 - [ ] **Upstream selection strategies** - expose `priority` vs `automatic stable` selection. Priority mode preserves the draggable order; automatic mode prefers lower-latency upstreams using EWMA/hysteresis so a healthy upstream isn't dropped for one transient faster probe. [Rel, Obs, UI]
