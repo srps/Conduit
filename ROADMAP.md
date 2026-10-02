@@ -16,6 +16,10 @@ See also:
 
 ---
 
+## Near-term priorities
+
+- [ ] **In-app updating from GitHub Releases ([#111](https://github.com/srps/Conduit/issues/111))** - Sparkle 2 with manual and opt-in automatic checks, release notes, and an explicit "Install Update and Restart" action. Authenticate release ZIPs with Ed25519 signatures and an embedded public key; retain ad-hoc signing without making Developer ID signing or notarization a prerequisite. Preflight helper identity compatibility, preserve config/state, safely restore proxy/DNS settings before shutdown, and reapply them only after the new runtime is ready. Include recovery for download, verification, replacement, launch, and Gatekeeper failures. Accept a brief proxy interruption initially; zero-downtime daemon handoff remains separate. [OSS, Rel, Sec, UI, Obs, Sim]
+
 ## Security hardening
 
 - [ ] **Inbound gateway auth** - enforce `strictMode` by requiring `Proxy-Authorization` from gateway clients (`Negotiate` via `gss_accept_sec_context`, plus NTLM challenge-response). Closes the gap where `strictMode` declares intent without enforcement. [Sec]
@@ -97,7 +101,6 @@ the menu bar covers 90% of daily tasks.
 - [ ] SemVer policy: 0.x allows breaking changes; 1.0 when the daily-driver reliability criteria are met. [OSS]
 - [ ] **`SMAppService` signed privileged helper** - replaces the LaunchDaemon + install script; unlocks MDM distribution and userspace DNS interception. Depends on Developer ID signing. [OSS, Sec]
 - [ ] **Credential isolation via Data Protection Keychain** - migrate off the login Keychain; eliminates ACL prompts. Requires signing. [Sec]
-- [ ] **In-app updating** - Sparkle 2 with an EdDSA-signed appcast from GitHub Releases; opt-in automatic checks. Daemon-aware: hands the daemon over via the graceful-upgrade FD-handoff so in-flight connections survive, and fetches the appcast through the proxy/DIRECT per current routing. Depends on Developer ID signing + notarization. [OSS, Rel, UI]
 - [~] **Config backup / restore** - runtime config now carries a schema version and auto-normalizes unversioned files; remaining: a user-facing backup/restore flow and explicit migration hooks. [UI, OSS]
 
 ## SASE coexistence
