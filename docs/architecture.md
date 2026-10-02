@@ -1,6 +1,6 @@
 # Conduit Architecture
 
-> Describes the multi-target shape that landed in the module split, plus the subsequent security additions (the CFNetwork PAC evaluator and `SecretBytes`) and the orchestrator/UI performance cleanup. For the file-by-file migration history and the rationale behind every seam, read [`docs/design-module-split.md`](./design-module-split.md). For the higher-level product roadmap that commissioned the split, read [`roadmap-v2.md`](roadmap-v2.md) and [`ROADMAP.md`](../ROADMAP.md).
+> Describes the multi-target shape that landed in the module split, plus the subsequent security additions (the CFNetwork PAC evaluator and `SecretBytes`) and the orchestrator/UI performance cleanup. For the file-by-file migration history and the rationale behind every seam, read [`docs/design-module-split.md`](./design-module-split.md). For current implementation rationale and priorities, read [`planning.md`](./planning.md) and [`ROADMAP.md`](../ROADMAP.md).
 
 ## Overview
 
@@ -415,10 +415,10 @@ The `AGENTS.md` import-fence rule is documentation of intent; these greps + the 
 
 ## What's next
 
-The module split is complete. The CFNetwork PAC evaluator and `SecretBytes` shipped afterward, and a security-hardening wave tightened helper IPC versioning + IPv6 metadata canonicalisation. A UI performance cleanup cut menu-bar CPU spikes via the orchestrator's two-tier snapshot emission + an O(1) active-connection store + the Settings UI for the CFNetwork evaluator. The security-foundation batch added the threat model, centralized log/event sanitization, `pm-proxy` auth outcome parity, SNI false-positive fuzz coverage, and DNS question-match checks before cache/forward. Sequencing + scope sketches for the rest live in [`docs/design-split-followups.md`](./design-split-followups.md); the higher-level milestones live in [`ROADMAP.md`](../ROADMAP.md) and [`roadmap-v2.md`](roadmap-v2.md).
+The module split is complete. The CFNetwork PAC evaluator and `SecretBytes` shipped afterward, and a security-hardening wave tightened helper IPC versioning + IPv6 metadata canonicalisation. A UI performance cleanup cut menu-bar CPU spikes via the orchestrator's two-tier snapshot emission + an O(1) active-connection store + the Settings UI for the CFNetwork evaluator. The security-foundation batch added the threat model, centralized log/event sanitization, `pm-proxy` auth outcome parity, SNI false-positive fuzz coverage, and DNS question-match checks before cache/forward. Sequencing + scope sketches for the rest live in [`docs/design-split-followups.md`](./design-split-followups.md); priorities and status live in [`ROADMAP.md`](../ROADMAP.md), with acceptance criteria in [`planning.md`](./planning.md).
 
 - **`pm-tunnel` auth-event carrier** — `pm-proxy` now reports runtime auth outcomes through the orchestrator, but `pm-tunnel` still constructs the tunnel stack directly and has no `RuntimeEventLog` owner. Add one only when the event-stream shape needs it.
-- **Reliability scenarios** — add `auth-storm`, `connection-flood`, `upstream-flap`, `tunnel-flap`, and `dns-poison-attempt` to `pm-sim` so the new security/reliability invariants are exercised end-to-end, not only by unit tests.
+- **Reliability scenarios** — `auth-storm`, `connection-flood`, and `upstream-flap` exist; audit remaining tunnel-health and DNS-poison coverage against the queue in `ROADMAP.md`.
 - **Preset externalization shipped** — vendor defaults now live in bundled JSON resources; runtime persistence falls back to generic defaults.
 - **`PlatformIntegration` design** — the composite protocol for system-proxy / DNS / env / login-item side-effects, driven by the control-plane reload path's actual call sites (not speculation). See [`docs/design-module-split.md § PlatformIntegration (deferred)`](./design-module-split.md) for why the 8-method god protocol was rejected during the split.
 
@@ -432,5 +432,5 @@ The module split is complete. The CFNetwork PAC evaluator and `SecretBytes` ship
 - [`docs/auth-architecture.md`](./auth-architecture.md) — the `ProxyAuth` module's NTLM / Kerberos / Negotiate handshake details.
 - [`docs/STYLE.md`](./STYLE.md) — engineering discipline: bounded everything, structured events first, side-effects behind protocols, deterministic where possible.
 - [`AGENTS.md`](../AGENTS.md) — import-fence statement, side-effects-behind-protocols rule, toolchain / test commands.
-- [`roadmap-v2.md`](roadmap-v2.md) — the v2 product plan that commissioned the split (target shape, security hardening, daemon-first work, OSS prep).
-- [`ROADMAP.md`](../ROADMAP.md) — milestone checklist with pillar tags.
+- [`planning.md`](./planning.md) — current implementation rationale, dependencies, and acceptance criteria.
+- [`ROADMAP.md`](../ROADMAP.md) — execution queue and sole product-work status tracker, with pillar tags.

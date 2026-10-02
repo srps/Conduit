@@ -1,156 +1,104 @@
 # Conduit Roadmap
 
-Forward-looking plan. For shipped history see [`CHANGELOG.md`](./CHANGELOG.md); for the
-longer-form design philosophy behind these themes see [`docs/roadmap-v2.md`](./docs/roadmap-v2.md).
+The execution queue and sole tracker of product-work status. Reviewed against the
+checkout on 2026-10-02. Conduit remains a macOS-native Swift corporate proxy manager;
+no rewrite or cross-platform port is planned.
 
-Every item is tagged with the product pillar(s) it serves: **[Rel]** Reliability,
-**[Sec]** Security, **[Eff]** Efficiency, **[Obs]** Observability, **[UI]** Great UI,
-**[Dmn]** Daemon-first, **[Sim]** Simulators & demos, **[OSS]** Open-source readiness.
-An item without a pillar fit doesn't belong here. `[~]` marks work that is partially landed.
+Implementation rationale, dependencies, and acceptance criteria live in
+[`docs/planning.md`](./docs/planning.md). Shipped history lives in
+[`CHANGELOG.md`](./CHANGELOG.md). Later features do not block the current work.
 
-See also:
+Pillars: **[Rel]** Reliability, **[Sec]** Security, **[Eff]** Efficiency,
+**[Obs]** Observability, **[UI]** Great UI, **[Dmn]** Daemon-first,
+**[Sim]** Simulators & demos, **[OSS]** Open-source readiness.
+`[ ]` means planned; `[~]` means partially implemented; `[x]` means implemented,
+with remaining validation called out separately. An item needs a pillar fit.
 
-- [Product Pillars](./README.md#product-pillars) - the contributor contract.
-- [`AGENTS.md`](./AGENTS.md) - review-time rules.
-- [`docs/STYLE.md`](./docs/STYLE.md) - engineering discipline.
+See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
+and [`docs/STYLE.md`](./docs/STYLE.md).
 
----
+## Now
 
-## Near-term priorities
+1. [ ] **Network-location-safe recovery ([#110](https://github.com/srps/Conduit/issues/110))** — observe active-location changes independently of network-path/VPN signals; scope proxy/DNS prior state by stable location and service identifiers, including inactive locations; reconcile external switches without restoring another location's settings or retaining dead loopback endpoints. Preserve VPN detection, direct mode, split-DNS gating, and flap resilience. Keep platform work shared by both hosts behind protocols and fakes. Validate on macOS 26/27 with the corporate VPN client. Profile associations and automatic switching follow later. [Rel, Obs, UI, Sim]
+2. [ ] **Secure GitHub Releases updating ([#111](https://github.com/srps/Conduit/issues/111))** — manual and opt-in automatic checks, release notes, and explicit Install Update and Restart. Prefer Sparkle 2 with Ed25519-authenticated archives and an embedded verification key. Preserve config/state, preflight helper identity compatibility, restore proxy/DNS before shutdown, and reapply only after readiness. Keep downloads/staging/retries bounded and recover from verification/replacement/launch failures. A brief interruption is acceptable; Developer ID/notarization and zero-downtime handoff do not gate this feature. [OSS, Rel, Sec, UI, Obs, Sim]
+3. [~] **Owner-death recovery and one mutation authority** — app and daemon launch recovery exist. Remaining: exclusive ownership of platform mutations and durable recovery when no replacement runtime starts. Coordinate journal authority, authenticated helper sessions, and any helper-owned leases; preserve later external changes. This is a production daemon-migration gate. [Rel, Sec, Dmn, Sim]
+4. [~] **Request-body replay bounds and isolation** — per-body bounded spooling exists. Remaining: runtime-owned private spool storage, aggregate disk/queued-write budgets, replay backpressure tied to downstream completion/writability, off-event-loop cleanup, and structured failure reporting. Cover slow origins, disk failures, cancellation, and concurrent runtimes. [Rel, Sec, Eff, Sim]
 
-- [ ] **In-app updating from GitHub Releases ([#111](https://github.com/srps/Conduit/issues/111))** - Sparkle 2 with manual and opt-in automatic checks, release notes, and an explicit "Install Update and Restart" action. Authenticate release ZIPs with Ed25519 signatures and an embedded public key; retain ad-hoc signing without making Developer ID signing or notarization a prerequisite. Preflight helper identity compatibility, preserve config/state, safely restore proxy/DNS settings before shutdown, and reapply them only after the new runtime is ready. Include recovery for download, verification, replacement, launch, and Gatekeeper failures. Accept a brief proxy interruption initially; zero-downtime daemon handoff remains separate. [OSS, Rel, Sec, UI, Obs, Sim]
+## Next
 
-## Security hardening
+Implement the daemon work in the order below. Named profiles, demo UI, and advanced
+metrics do not block the first usable daemon/client slice.
 
-- [ ] **Inbound gateway auth** - enforce `strictMode` by requiring `Proxy-Authorization` from gateway clients (`Negotiate` via `gss_accept_sec_context`, plus NTLM challenge-response). Closes the gap where `strictMode` declares intent without enforcement. [Sec]
-- [ ] **Upstream-proxy certificate pinning** - per-upstream expected SPKI hash in config; a mismatch refuses the connection and emits an event. Defends against MITM between the app and the corporate proxy. [Sec]
-- [ ] **Connection audit log** - rolling, size-capped NDJSON at `$state-dir/audit.ndjson` recording CONNECT target, PAC decision, routing choice, and auth method per connection, with credentials masked. Complementary to the event stream. [Sec, Obs]
-- [ ] **SOCKS5 auth hardening** - username/password mode alongside no-auth; per-client-CIDR allow-list enforcement for gateway deployments. [Sec]
-- [ ] **Control-socket capability handshake** - clients declare `observe` / `control` / `configure` scope at connect; the daemon enforces per command. Belt-and-suspenders on top of the owner-only socket for a multi-client future. [Sec, Dmn]
-- [~] **Audit remaining credential-bearing strings** - in-memory credential boundaries and durable log/event surfaces are covered; one-shot HTTP header strings remain lifecycle-bound. [Sec]
-- [~] **Keychain ACL tightening** - device-bound accessibility is applied; caller bundle-ID restriction is deferred to the signed-helper / Data Protection Keychain work. [Sec]
+1. [~] **Production control socket** — protocol, bridge, `DaemonClient`, `pmctl`, versioning, metadata, config generation, and stable error codes exist; `pm-proxy` has an isolated server. Wire a bounded server into `ConduitDaemon` for status/start/stop/reload and event access, then upstream tests. Define subscription limits, cancellation, disconnects, and version mismatch behavior. [Dmn, Obs, Rel]
+2. [~] **User-session daemon and LaunchAgent lifecycle** — `ConduitDaemon` owns an explicit runtime host, platform managers, credential-store seam, launch recovery, and observable files. Remaining: production install/uninstall/upgrade lifecycle, exclusive-owner startup/readiness, state-dir checks, stale-state repair, restart policy, and crash-restart evidence. Confirm logged-in-user Keychain, Kerberos, and CFNetwork behavior. `pm-proxy` stays side-effect-free. [Dmn, Rel, Sec, Sim]
+3. [ ] **App and menu bar adopt the daemon client** — replace app ownership of listeners, monitors, and platform mutations with commands and snapshot/event subscriptions. Bootstrap the LaunchAgent when needed; reconnect after UI restart. Keep any in-process fallback dev-only and remove it from production before 1.0. [Dmn, UI, Rel, Sim]
+4. [~] **Reload and observability parity** — section diffing, reload paths, capped `events.ndjson`, atomic `snapshot.json`, and offline diagnostics exist. Verify supported unrelated changes preserve active HTTP/CONNECT/SOCKS5/DNS/tunnel sessions. Wire the connection audit sink into `DaemonRuntimeHost`; bounded, redacted audit files already work in the app and `pm-proxy`. [Dmn, Rel, Sec, Obs, Sim]
+5. [~] **Release and daily-driver evidence** — Full debug tests, simulator CI, and cold-start/throughput gates exist. ARM/Intel ZIP/DMG packaging and optimized PAC checks are on the separate release-work branch and still need landing on main. Remaining: representative release-build latency, idle CPU/RSS and sustained-growth baselines, crash/restart/upgrade evidence, human accessibility validation, and a recorded 90-day reliability window for 1.0. [Rel, Eff, UI, OSS]
+6. [ ] **Release trust and installation** — Developer ID signing/notarization for app and helper, documented identities/upgrade/rollback behavior, and clean-machine installation validation. Local caller-identity signing and ad-hoc CI packaging are foundations, not completion of public release trust. [OSS, Sec]
+7. [ ] **Configuration and architecture documentation** — document every config field's units/defaults/validation in `docs/configuration.md`; refresh `docs/architecture.md` for the actual target graph, both hosts, and daemon/client migration. Add release guidance covering installation, signing, updates, and rollback. [OSS, Obs]
 
-## Reliability
+## Later
 
-- [ ] **macOS network location awareness (next planned work, [#110](https://github.com/srps/Conduit/issues/110))** - observe active-location changes explicitly; scope proxy/DNS restoration by stable location and service identifiers, including inactive locations, and reconcile managed settings after external switches. Preserve VPN detection, direct mode, and flap resilience. Follow with optional location-to-profile associations once named profiles exist; automatic location switching stays opt-in and follows compatibility and recovery validation on macOS 26/27. [Rel, Obs, UI, Sim]
-- [ ] **Kerberos credential expiry** - mid-session TGT expiry emits an event, attempts renewal, and falls back to NTLM cleanly. [Rel]
-- [ ] **Upstream circuit-breaker formalization** - explicit open / half-open / closed state machine with an event per transition and an `upstream-flap` simulator scenario. [Rel, Obs]
-- [ ] **Upstream selection strategies** - expose `priority` vs `automatic stable` selection. Priority mode preserves the draggable order; automatic mode prefers lower-latency upstreams using EWMA/hysteresis so a healthy upstream isn't dropped for one transient faster probe. [Rel, Obs, UI]
-- [ ] **Crash cleanup** - `pm-proxy` recovers after `SIGKILL` without manual state-dir intervention. [Rel]
-- [ ] **Tunnel health probes** - per-tunnel lightweight probe on a configurable interval; a failing probe moves the tunnel to `warning` without tearing down active sessions. Adds a `tunnel-flap` scenario. [Rel, Obs]
-- [ ] **Graceful upgrade / zero-downtime restart** - a replacement daemon takes over the listening socket via Unix-domain-socket file-descriptor handoff; in-flight connections survive. Makes install and auto-update invisible to clients. [Rel, Dmn]
-- [~] **HTTP standards hygiene** - the proxy answers `Expect: 100-continue` on its own behalf and forwards response trailers on the pooled path. Remaining: `421 Misdirected Request` handling on reused connections. [Rel]
+### Reliability and security
 
-## Daemon-first architecture & control plane
+- [ ] **Kerberos credential expiry** — explicit mid-session expiry/renewal/fallback contract and scenario coverage, including unavailable renewal and absent NTLM credentials. [Rel, Sec, Sim]
+- [ ] **Tunnel health probes** — bounded per-tunnel probes; failures mark warning without tearing down active sessions; add `tunnel-flap`. [Rel, Obs, Sim]
+- [ ] **Upstream selection strategies** — retain draggable priority order; optionally add automatic stable selection with measured EWMA/hysteresis behavior. [Rel, Obs, UI]
+- [ ] **Isolated crash cleanup** — verify `pm-proxy` restart after `SIGKILL` repairs its own socket/spool state without manual intervention or host side effects. [Rel, Sim]
+- [~] **HTTP standards hygiene** — `Expect: 100-continue` and pooled response trailers exist; remaining: `421 Misdirected Request` handling on reused connections. [Rel]
+- [ ] **Graceful upgrade and connection draining** — design listener handoff plus outgoing-runtime session draining, deadlines, rollback, and platform-ownership transfer. Listener FD handoff alone does not preserve active sessions; validate each supported protocol before claiming zero downtime. [Rel, Dmn, Sim]
+- [ ] **Inbound gateway admission/authentication** — define explicit client admission and auth policy, then supported Negotiate/NTLM server-side mechanisms. Keep `strictMode` as routing policy; it is not client authentication. [Sec, Sim]
+- [ ] **SOCKS5 auth hardening** — username/password mode alongside no-auth, with explicit per-client-CIDR admission for gateway deployments. [Sec, Sim]
+- [ ] **Secure upstream transport, then optional pinning** — model transport kind, hostname/trust validation, handshake deadlines, auth binding, and downgrade refusal before adding per-upstream SPKI pins and rotation windows. [Sec, Rel, Sim]
+- [ ] **Control-socket capability scopes** — demand-gated observe/control/configure authorization for a multi-client model, after the production owner-only socket contract. [Sec, Dmn]
+- [~] **Credential-bearing string audit** — in-memory boundaries and durable sinks are covered; document lifecycle-bound one-shot HTTP header strings and verify cleanup/redaction. [Sec]
+- [~] **Keychain isolation** — device-bound accessibility exists; design caller restrictions and Data Protection Keychain migration with signing/access-group and upgrade compatibility tests. [Sec, UI]
 
-**Goal:** the runtime runs without the UI; menu bar, main app, and CLI are all clients of
-the same control plane. Detailed plan: [`docs/design-daemon-first-control-plane.md`](./docs/design-daemon-first-control-plane.md).
+### Daily UI and profiles
 
-- [ ] **Control protocol completion** - the shared control protocol, bridge, and `pmctl` exist; complete the contract (`start`, `set-profile`, daemon metadata, config generation, stable error codes) with bounded, versioned request frames. [Dmn, Obs]
-- [ ] **Production user-session daemon** - a LaunchAgent executable that owns the runtime. `pm-proxy` stays side-effect-free for CI and isolated testing rather than becoming this daemon. [Dmn, Rel]
-- [ ] **Runtime & platform ownership migration** - move ownership of the orchestrator, listeners, DNS forwarder, transparent proxy, tunnel forwarder, network/VPN monitors, and platform side effects (system proxy, PAC URL, environment, resolver files, helper relay) out of the app into the daemon. The app becomes a controller over the daemon. [Dmn, UI, Sec]
-- [ ] **User-session credential contract** - the production daemon runs as the logged-in user so Keychain, Kerberos ticket cache, CFNetwork PAC evaluation, and user network state stay available; privileged work stays delegated to the helper. [Dmn, Sec]
-- [ ] **Control socket server** at `$state-dir/control.sock` - typed request/response for `status`, `start`, `stop`, `reload`, `set-profile`, `test-upstream`, `events --follow`, `diag`, and a dev-only fault-injection command. One implementation serves both `pmctl` and the app. [Dmn, Obs]
-- [ ] **Observable state files** - the daemon writes a capped `events.ndjson` and an atomic `snapshot.json`, readable by `pmctl diag` even when the control socket is down. [Obs, Dmn]
-- [ ] **LaunchAgent lifecycle** - ship the agent plist, install/uninstall/upgrade commands, stale-socket cleanup, state-dir ownership checks, and keep-alive on unexpected exit. Prefer user-space bootstrap; escalate to the helper only where required. [Dmn, Rel]
-- [ ] **Crash/restart contract** - after `SIGKILL` the daemon emits a crash-restart event with prior-exit evidence, reloads config, repairs stale socket/spool state, reapplies system side effects, and resumes without UI involvement. [Rel, Dmn]
-- [ ] **App adopts the daemon client** - the app detects the daemon, bootstraps the LaunchAgent if missing, subscribes to snapshots/events, and stops owning listeners. The in-process fallback is dev-only and gated for removal before 1.0. [Dmn, UI]
-- [ ] **Menu bar & settings over the control plane** - profile switcher, per-upstream traffic light, direct-mode indicator, connection count, test-upstream, diag bundle, events viewer, reload, and guarded quit all go through the daemon client. [UI, Dmn, Obs]
-- [ ] **Config hot reload** - `reload` applies a config diff subsystem-by-subsystem; active HTTP, CONNECT, SOCKS5, DNS, and tunnel sessions survive unrelated changes. [Dmn, Rel]
-- [ ] **Per-connection/tunnel metrics over the control socket** - bytes, uptime, detected protocol, last activity, active route, upstream, and auth mode, bounded and redacted. [Obs]
-- [ ] **Daemon-first simulators** - force-quit the UI while traffic flows, `kill -9` the daemon and assert restart, reload DNS-only config without dropping sessions, verify `pmctl status/events/diag` against a live daemon. [Rel, Dmn, Sim]
+- [ ] **Named profiles and quick switching** — storage, validation, credential identity, and transactional switch behavior; then `set-profile`, menu-bar profile header, and optional location-to-profile associations. [UI, Dmn, Rel]
+- [ ] **Opt-in location switching** — only after location-safe recovery and profiles; respect manual overrides and brief VPN flaps, with macOS/VPN compatibility and recovery validation. [Rel, UI, Sim]
+- [ ] **Event inspector** — live, bounded, filterable, copyable/exportable events, plus an upstream detail sheet with latency history, recent auth outcomes, test-now, and temporary disable. [UI, Obs]
+- [~] **Accessibility and HIG validation** — existing VoiceOver labels/grouping need listening tests; audit text scaling, high contrast, keyboard access, and remaining views. [UI]
+- [~] **Floating status surface** — keep-on-top exists; a minimal status-only window remains optional. [UI]
+- [ ] **Gateway onboarding** — Docker/VM settings that explain binding, admission/auth policy, and recovery. [UI, Sec]
+- [~] **Config backup/restore** — schema versioning and normalization exist; remaining: user-facing export/import and explicit migration hooks. [UI, OSS]
+- [ ] **Connection/tunnel metrics** — bounded, redacted bytes, uptime, protocol, activity, route/upstream/auth data over the control plane and in the UI. [Obs, Dmn]
 
-> Demand-gated (post-1.0, design-doc first; see [`docs/design-extension-model-and-vision-grounding.md`](./docs/design-extension-model-and-vision-grounding.md)): out-of-process routing-decision hooks and out-of-process auth-provider extensions. In-process plugins are a non-goal.
+### Measurement and demonstrations
 
-## Efficiency
+- [~] **Allocation and performance analysis** — add Instruments allocation stacks and drift baselines to existing gates. Parser/header-interning changes follow measured bottlenecks. [Eff]
+- [~] **Scenario coverage completion** — audit behavioral coverage before adding named scenarios: auth expiry, PAC fallback, DNS poison rejection, tunnel rotation, mixed HTTP/SOCKS, gateway admission, and tunnel health. Network transitions, connection flood, auth storm, and upstream flap already have scenarios. [Rel, Sec, Sim]
+- [ ] **Chaos demo and recording** — dev-only SwiftUI state/events/fault UI over fake credentials and isolated resources; a short recovery demonstration after the daemon/client path works. [Sim, UI, Obs, OSS]
 
-- [~] **Allocation capture & perf baselines** - repeatable cold-start and throughput gates run in CI; remaining: Instruments-backed allocation stacks, drift baselines once stable CI artifacts exist, and a raw-CONNECT header parser / header-interning pass. [Eff]
+### Distribution and demand-gated integrations
 
-## UI excellence (Liquid Glass, HIG)
+- [ ] **Homebrew tap** and documented SemVer/migration policy. [OSS]
+- [ ] **Signed helper lifecycle** — evaluate `SMAppService` installation/removal after public signing is established; treat any DNS Network Extension as a separate entitlement/distribution design. [OSS, Sec]
+- [~] **TLS-inspection diagnostics** — `pm-tls-check` exists; remaining: control/UI integration and an event on inspection-CA change. [Sec, Obs, UI]
+- [ ] **SASE coexistence** — demand-gated injectable agent/listener detection and documented endpoint presets; automatic profile changes depend on profiles and verified routing behavior. [Rel, Obs, OSS]
+- [ ] **Identity-aware auth extensions** — real-deployment demand required; separate processes over the control plane. [Sec, Dmn]
+- [ ] **Enterprise integrations (post-1.0)** — managed preferences, managed update policy, silent `.pkg` deployment, opt-in telemetry export, and helper-binary integrity checks. None delay the daily-driver queue. [Sec, OSS, Obs]
 
-**Goal:** native to macOS 26 - Liquid Glass, proper materials, SF Symbols, correct spacing;
-the menu bar covers 90% of daily tasks.
+## Implemented foundations
 
-- [ ] HIG audit across every view; triage violations and fix bottom-up. [UI]
-- [~] Menu-bar popover: state line, quick toggles, active upstream plus fallback summary, recent events, open/restart/diagnostics/quit footer. Remaining: profile header (needs profiles). [UI]
-- [~] Floating window: "Keep window on top" in General floats the app window. Remaining: a minimal status-only variant. [UI]
-- [x] Settings redesign aligned to the config sections with inline validation feedback. [UI]
-- [x] Liquid Glass on the menu-bar popover (chrome only, per HIG). [UI]
-- [~] VoiceOver pass over the popover and the app window. The popover reads one element per row, the live status strips read label then value, decorative symbols are hidden, icon-only buttons are named, and every validation reason is reachable from its field. Remaining: listen to each surface with VoiceOver running; nothing has been verified by ear yet. [UI]
-- [x] Show the VPN interface name (`utun4`) on the Overview VPN row. [UI, Obs]
-- [x] Inline validation for the circuit breaker window and the inbound warn threshold, as boundary rules the UI picks up. [UI]
-- [ ] Event inspector window - live, filterable, copyable, exportable (the UI equivalent of `pmctl events --follow`). [UI, Obs]
-- [ ] Upstream detail sheet - latency sparkline, recent auth outcomes, test-now, temporary-disable. [UI, Obs]
-- [ ] Accessibility pass - VoiceOver, Dynamic Type, high-contrast. [UI]
-- [ ] Launch-at-login as a first-class Settings toggle with explanation. [UI]
-- [ ] Multiple named profiles with quick switching. [UI]
-- [ ] Docker / VM gateway-mode onboarding and dedicated settings. [UI]
+This is a baseline for planning, not a replacement for the changelog.
 
-## Simulators & demos
-
-- [ ] Expand the `pm-sim` suite: `network-transition`, `auth-expiry`, `pac-fallback`, `dns-poison-attempt`, `tunnel-rotation`, `upstream-flap`, `socks5-mixed`, `gateway-mode`, `tunnel-flap`. [Rel, Sec, Sim]
-- [ ] Chaos demo window (dev builds only): live state, color-coded event stream, and a fault injector (kill upstream, expire TGT, cut network, saturate, reset), excluded from release builds. [Sim, UI, Obs]
-- [ ] 60-second demo recording - healthy → kill upstream → auto-failover → expire TGT → NTLM fallback → reset. Evidence, not marketing; linked from the README. [OSS]
-
-## Open-source readiness
-
-- [ ] `docs/architecture.md` expansion with the module and daemon/client diagrams. [OSS]
-- [ ] `docs/configuration.md`: every config field documented with units, defaults, and validation rules. [OSS]
-- [ ] Homebrew formula in a dedicated tap. [OSS]
-- [ ] Developer ID signing + notarization for the app and helper; a `docs/releasing.md` documents the identity. [OSS, Sec]
-- [ ] SemVer policy: 0.x allows breaking changes; 1.0 when the daily-driver reliability criteria are met. [OSS]
-- [ ] **`SMAppService` signed privileged helper** - replaces the LaunchDaemon + install script; unlocks MDM distribution and userspace DNS interception. Depends on Developer ID signing. [OSS, Sec]
-- [ ] **Credential isolation via Data Protection Keychain** - migrate off the login Keychain; eliminates ACL prompts. Requires signing. [Sec]
-- [~] **Config backup / restore** - runtime config now carries a schema version and auto-normalizes unversioned files; remaining: a user-facing backup/restore flow and explicit migration hooks. [UI, OSS]
-
-## SASE coexistence
-
-**Goal:** stay useful as corporate networks migrate from legacy explicit proxies to SASE
-clients (Zscaler, Netskope, Cloudflare One). Design + rationale:
-[`docs/design-extension-model-and-vision-grounding.md`](./docs/design-extension-model-and-vision-grounding.md).
-
-- [~] **TLS-inspection diagnostics** - `pm-tls-check` captures the presented chain (direct or via CONNECT), classifies *publicly trusted* / *locally-trusted inspection* / *untrusted*, heuristically names the vendor, and exports the inspection CA as PEM. Remaining: live per-connection capture in `pmctl test-upstream` and the upstream detail UI, plus a structured event on inspection-CA change. [Sec, Obs, UI]
-- [ ] **SASE-client coexistence detection** - model SASE agents like the VPN observer: detect the agent's localhost proxy listener behind an injectable protocol, treat it as an upstream that appears/disappears, and switch profiles automatically. [Rel, Obs]
-- [ ] **SASE edge presets** - ship presets for documented explicit-proxy endpoints of major SASE vendors. Pure config + docs. [OSS]
-- [ ] **Identity-aware auth (demand-gated)** - OIDC/device-cert auth legs as out-of-process extensions when a real deployment needs them; never speculatively in-core. [Sec]
-
----
-
-## Non-goals
-
-Declared so contributors don't drag the project here (rationale:
-[`docs/design-extension-model-and-vision-grounding.md`](./docs/design-extension-model-and-vision-grounding.md)):
-
-- **Packet-tunnel VPN.** Conduit coexists with corporate VPNs; it doesn't implement one. The adjacent step is a DNS-proxy provider post-signing.
-- **In-process dylib/bundle plugins.** Extensions are separate processes over the versioned control plane + event stream. Third-party code never shares the daemon's address space (GSS contexts, secrets, Keychain).
-- **HTTP/3 / QUIC / MASQUE (pre-2.0).** Proxied clients fall back to TCP; corporate MASQUE adoption is ~nil. Track, don't build.
-- **Client-facing HTTP/2 listener (demand-gated).** HTTP/2 flows opaquely through CONNECT today; almost no client speaks HTTP/2 to an explicit proxy. Revisit on real demand.
-
-## Enterprise addenda (post-1.0)
-
-IT-integration work that complements but doesn't drive daily-driver quality. None of these
-should delay the core roadmap.
-
-- [ ] MDM / managed-preferences profile; the app reads the managed defaults domain on launch and locks managed fields in the UI. [Sec, OSS]
-- [ ] `.pkg` installer with the helper bundled for silent deployment. [OSS]
-- [ ] OpenTelemetry-compatible telemetry export (opt-in, complementary to the event stream). [Obs]
-- [ ] Helper-binary tamper detection: verify the hash on startup and refuse to start on mismatch. [Sec]
-
-## Optional cross-platform port (gated)
-
-**Not active work.** Considered only if sustained non-macOS demand, macOS stability, and
-ecosystem readiness all materialize; the architecture is preserved in
-[`docs/roadmap-v2.md`](./docs/roadmap-v2.md).
-
-- [ ] Linux headless support (`pm-proxy` + a systemd service file).
-- [ ] Windows support.
+- [x] Module split, protocol seams, STYLE, threat model, `SecretBytes`, credential/log redaction, and bundled JSON presets. [Sec, OSS]
+- [x] Native CFNetwork PAC evaluation; JavaScriptCore migration is complete. [Rel, Sec]
+- [x] Explicit upstream circuit-breaker states, transition events, tests, and `upstream-flap`. [Rel, Obs, Sim]
+- [x] Network-transition, connection-flood, and auth-storm scenarios; scenario outcomes and full-suite CI gates. [Rel, Sim]
+- [x] Settings redesign with inline validation, Liquid Glass menu chrome, VPN interface display, keep-on-top, and the General launch-at-login toggle. [UI, Obs]
+- [x] App/daemon launch recovery and serialized platform work; helper caller-identity support with local signing. Production installation/soak evidence remains tracked above. [Rel, Sec]
+- [x] Full debug tests, simulator CI, and cold-start/throughput performance gates. Release packaging and optimized checks remain tracked above until they land on main. [OSS, Eff]
 
 ## Out of scope
 
-Explicitly not planned. Reversing any of these requires documenting a decision in
-[`docs/roadmap-v2.md`](./docs/roadmap-v2.md).
+- Rewrites, cross-platform ports, and iOS/iPadOS support.
+- Packet-tunnel VPNs and in-process third-party plugins.
+- A stabilized C ABI for external embedders; clients use the versioned control protocol.
+- HTTP/3/QUIC/MASQUE and a client-facing HTTP/2 listener without a demonstrated deployment need.
+- A unified verbose-log mode as the primary diagnostic surface; structured events remain the contract.
 
-- **iOS / iPadOS** - a Network-Extension architecture, fundamentally different from a user-space daemon.
-- **Cross-platform Swift port** - SwiftNIO on Windows is pre-production and there's no maintained Swift Kerberos wrapper; a Rust port is the answer if cross-platform ever triggers.
-- **Stabilized C ABI for external embedders** - if a port ever happens, the public API is the Unix-socket control protocol, not a C ABI.
-- **A unified "verbose log everything" debug mode** - structured events first; log verbosity is a last-resort view.
+Scope changes require a documented decision in [`docs/planning.md`](./docs/planning.md).
+The dated ecosystem research is [archived](./docs/archive/planning-research-2026-04.md).

@@ -339,7 +339,7 @@ The app's own log file is `~/Library/Logs/Conduit/proxy.log` (on by default, 5 M
 
 Contributions are welcome. Before you open a PR, a few things worth knowing:
 
-- **Product direction** lives in [`docs/roadmap-v2.md`](./docs/roadmap-v2.md). The [Product Pillars](#product-pillars) at the top of this README are the contributor contract - any proposed change that doesn't fit Reliability, Security, Efficiency, Observability, Great UI, Daemon-first, or Simulators & demos should include a short rationale for why it still belongs here.
+- **Priorities and status** live in [`ROADMAP.md`](./ROADMAP.md); implementation rationale and acceptance criteria live in [`docs/planning.md`](./docs/planning.md). The [Product Pillars](#product-pillars) at the top of this README are the contributor contract - any proposed change that doesn't fit Reliability, Security, Efficiency, Observability, Great UI, Daemon-first, or Simulators & demos should include a short rationale for why it still belongs here.
 - **Engineering discipline** lives in [`docs/STYLE.md`](./docs/STYLE.md): bounded everything, assert invariants, structured events first, validate at the boundary, no silent failures, explicit resource lifetime, side-effects behind protocols, security-first, deterministic where possible.
 - **Agent and contributor guardrails** (toolchain commands, import fences, judgment boundaries) live in [`AGENTS.md`](./AGENTS.md). Both humans and AI assistants read that file first; it supersedes informal conventions.
 - **Tests are not optional.** New runtime behaviour adds a `pm-sim` scenario and unit tests before it ships. The full suite must stay green on Xcode's toolchain (`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test`).
