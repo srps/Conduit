@@ -3,6 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="Conduit"
+APP_VERSION="$(cat "$SCRIPT_DIR/VERSION")"
+if [[ ! "$APP_VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
+    echo "VERSION must contain a version such as 0.3.4." >&2
+    exit 1
+fi
 BUNDLE_ID="io.github.srps.Conduit"
 APP_DIR="$SCRIPT_DIR/$APP_NAME.app"
 INSTALL_DIR="/Applications/$APP_NAME.app"
@@ -13,12 +18,27 @@ HELPERS="$CONTENTS/Library/LaunchServices"
 ARCH="$(uname -m)"
 BUILD_CONFIG="debug"
 INSTALL=false
+SHARE=false
 for arg in "$@"; do
     case "$arg" in
         --install) INSTALL=true ;;
         --release) BUILD_CONFIG="release" ;;
+        --share) SHARE=true ;;
+        *) echo "Unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
+
+if $SHARE; then
+    if $INSTALL; then
+        echo "--share cannot be combined with --install." >&2
+        exit 1
+    fi
+    BUILD_CONFIG="release"
+    APP_DIR="$SCRIPT_DIR/.build/share/$APP_NAME.app"
+    CONTENTS="$APP_DIR/Contents"
+    MACOS="$CONTENTS/MacOS"
+    HELPERS="$CONTENTS/Library/LaunchServices"
+fi
 
 echo "Building ($BUILD_CONFIG, $ARCH)..."
 cd "$SCRIPT_DIR"
@@ -55,6 +75,13 @@ if [ -f "$SCRIPT_DIR/Resources/AppIcon.icns" ]; then
     cp "$SCRIPT_DIR/Resources/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 fi
 
+# SwiftPM's generated Bundle.module accessor looks in the app's Resources.
+# Ship dependency resources too (including NIO's privacy manifest), so the
+# installed app never depends on a checkout or build directory.
+for resource_bundle in "$BUILD_DIR"/*.bundle(N); do
+    cp -R "$resource_bundle" "$CONTENTS/Resources/"
+done
+
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -71,13 +98,13 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
-    <string>0.3.3</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.3.3</string>
+    <string>$APP_VERSION</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
+    <string>26.0</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key>
@@ -100,7 +127,15 @@ PLIST
 SIGNING_NAME="Conduit Local Signing"
 SIGNING_HASH="$(security find-identity -p codesigning 2>/dev/null \
     | awk -v name="\"$SIGNING_NAME\"" 'index($0, name) { print $2; exit }' || true)"
-if [ -n "$SIGNING_HASH" ]; then
+if $SHARE; then
+    # A local self-signed certificate is for helper identity pinning on the
+    # builder's Mac. Shared test builds must not depend on that Mac's trust.
+    echo "Signing shared test build ad-hoc..."
+    codesign --force --sign - "$HELPERS/$BUNDLE_ID.Helper"
+    codesign --force --sign - "$MACOS/pm-dns"
+    codesign --force --sign - "$APP_DIR"
+    codesign --verify --strict --deep "$APP_DIR"
+elif [ -n "$SIGNING_HASH" ]; then
     echo "Signing with \"$SIGNING_NAME\" ($SIGNING_HASH), hardened runtime..."
     codesign --force --deep --options runtime --timestamp=none --sign "$SIGNING_HASH" "$APP_DIR"
     codesign --verify --strict --deep "$APP_DIR"
@@ -116,6 +151,15 @@ fi
 
 echo ""
 echo "Built: $APP_DIR"
+
+if $SHARE; then
+    SHARE_ZIP="$SCRIPT_DIR/.build/share/Conduit-$APP_VERSION-macOS26-$ARCH.zip"
+    rm -f "$SHARE_ZIP"
+    ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$SHARE_ZIP"
+    echo "Shared test build: $SHARE_ZIP"
+    echo "Requires macOS 26 or later, architecture $ARCH. Not notarized."
+    exit 0
+fi
 
 if $INSTALL; then
     echo ""

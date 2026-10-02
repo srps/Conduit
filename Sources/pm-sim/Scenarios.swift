@@ -403,7 +403,9 @@ enum Scenarios {
         ScenarioCleanup.register { await harness.stop() }
         let floodBytes = 2_000_000
         try await harness.start(
-            originBehavior: .floodThenClose(floodBytes: floodBytes)
+            originBehavior: .floodThenClose(floodBytes: floodBytes),
+            // Force the origin burst/FIN to arrive before relay installation.
+            upstreamRelaySetupDelayMilliseconds: 50
         )
 
         let start = Date()
@@ -413,12 +415,16 @@ enum Scenarios {
             localProxyHost: harness.localProxyHost,
             localProxyPort: harness.localProxyPort,
             target: "flood.example:443",
-            behavior: .slowDrain(requestBytes: 256, smallRcvBufBytes: 4096)
+            behavior: .slowDrain(requestBytes: 256)
         )
         try await client.run()
         await client.waitForClose(timeout: 30)
         let elapsed = Date().timeIntervalSince(start)
         let m = client.metrics
+        let relay = harness.upstream!.floodMetrics
+        func time(_ value: Date?) -> String {
+            value.map { String(format: "%.3f", $0.timeIntervalSince(start)) } ?? "-"
+        }
         // Did client receive everything despite origin force-closing mid-burst?
         let complete = m.bytesReceived >= floodBytes
         return ScenarioResult(
@@ -436,12 +442,18 @@ enum Scenarios {
             earliestClose: m.closedAt?.timeIntervalSince(start),
             latestClose: m.closedAt?.timeIntervalSince(start),
             assertions: [
+                .init("fake upstream read the entire origin burst", relay.bytesRead == floodBytes),
+                .init("fake upstream drained and closed cleanly", relay.clientCloseFinishedAt != nil && relay.failure == nil),
+                .init("client used paced reads", m.pacedReadCount > 1 && m.receiveBufferError == nil),
                 .init("entire flood delivered exactly once", m.bytesReceived == floodBytes),
                 .init("stream closed within deadline", m.closedAt != nil),
             ],
             notes: [
-                "originSent=\(floodBytes)",
-                "clientRcvBuf=4096",
+                "originSent=\(floodBytes) relaySetupDelay=50ms",
+                "relayFailure=\(relay.failure ?? "-")",
+                "clientRcvBuf=\(m.receiveBufferBytes.map(String.init) ?? "-") error=\(m.receiveBufferError ?? "-")",
+                "originRelayRead=\(relay.bytesRead) inactive=\(time(relay.originInactiveAt)) drainFinished=\(time(relay.clientDrainFinishedAt)) closeFinished=\(time(relay.clientCloseFinishedAt))",
+                "clientReads=\(m.readCount) pacedReads=\(m.pacedReadCount) firstByte=\(time(m.firstByteAt)) lastByte=\(time(m.lastByteAt))",
                 "clientReceived=\(m.bytesReceived)",
                 complete ? "COMPLETE" : "TRUNCATED (lost \(floodBytes - m.bytesReceived) bytes)",
                 "closeReason=\(m.closeReason ?? "-")"

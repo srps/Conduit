@@ -1,0 +1,119 @@
+name: Release packages
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "bundle-app.sh"
+      - "scripts/package-release.sh"
+      - "VERSION"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            architecture: arm64
+          - runner: macos-26-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check version and architecture
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            test "$GITHUB_REF_NAME" = "v$(cat VERSION)"
+          fi
+      - name: Run the standard full test suite
+        run: xcrun swift test
+      - name: Verify optimized PAC behavior
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swift build -c release --build-tests -Xswiftc -enable-testing
+          bin_dir="$(xcrun swift build -c release --show-bin-path)"
+          test_bundle="$bin_dir/ConduitPackageTests.xctest"
+          if [ ! -d "$test_bundle" ]; then
+            test_bundle="$bin_dir/ConduitTests.xctest"
+          fi
+          test -d "$test_bundle"
+          test_log="$(mktemp /tmp/conduit-pac-tests-XXXXXX)"
+          trap 'rm -f "$test_log"' EXIT
+          # The optimized SwiftPM discovery helper hangs on the hosted Xcode
+          # toolchain. Run these built XCTest classes through Apple's runner.
+          xcrun xctest -XCTest 'ConduitTests.PACPreviewTests,ConduitTests.CFPACEvaluatorTests' "$test_bundle" 2>&1 | tee "$test_log"
+          grep -q "Test Suite 'PACPreviewTests' passed" "$test_log"
+          grep -q "Test Suite 'CFPACEvaluatorTests' passed" "$test_log"
+      - name: Build signed ZIP and drag-to-Applications disk image
+        run: bash scripts/package-release.sh
+      - name: Verify packaged app and PAC preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cat VERSION)"
+          architecture="$(uname -m)"
+          verification_dir="$(mktemp -d /tmp/conduit-verify-XXXXXX)"
+          trap 'rm -rf "$verification_dir"' EXIT
+          ditto -x -k ".build/share/Conduit-$version-macOS26-$architecture.zip" "$verification_dir"
+          codesign --verify --strict --deep "$verification_dir/Conduit.app"
+          test -x "$verification_dir/Conduit.app/Contents/MacOS/Conduit"
+          test -d "$verification_dir/Conduit.app/Contents/Resources/Conduit_ProxyKernel.bundle"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$verification_dir/Conduit.app/Contents/Info.plist")" = "$version"
+          bin_dir="$(xcrun swift build -c release --show-bin-path)"
+          "$bin_dir/pm-sim" pac-preview
+          "$bin_dir/pm-sim" pac-fetch-bounds
+          "$bin_dir/pm-sim" flood-slow-drain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Conduit-${{ matrix.architecture }}
+          path: |
+            .build/share/*.zip
+            .build/share/*.dmg
+            .build/share/*.sha256
+          if-no-files-found: error
+
+  draft-release:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: Conduit-*
+          merge-multiple: true
+          path: release-assets
+      - name: Create draft with installable packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" --json isDraft --jq '.isDraft' > release-is-draft; then
+            # A retry may finish a partial draft upload; published assets
+            # must never be replaced by a rerun.
+            test "$(cat release-is-draft)" = true
+            gh release upload "$GITHUB_REF_NAME" release-assets/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* \
+              --verify-tag --draft --title "Conduit $GITHUB_REF_NAME" \
+              --generate-notes --notes-file docs/release-installation.md
+          fi

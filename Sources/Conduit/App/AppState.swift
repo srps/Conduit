@@ -49,6 +49,9 @@ final class AppState: ObservableObject {
     /// popover, the menu commands, and the window agree on it.
     @Published var selectedSection: AppSection = .overview
     @Published var lastErrorMessage: String?
+    @Published private(set) var pacPreviewMessage: String?
+    @Published private(set) var isPACPreviewRunning = false
+    private(set) var pacPreviewTask: Task<Void, Never>?
     @Published private(set) var activationPreflight: ActivationPreflight = .noAdmin
     @Published private(set) var helperStatusState: HelperToolPrivilegeClient.Status = .notInstalled
 
@@ -120,6 +123,8 @@ final class AppState: ObservableObject {
     /// proxy and DNS starts and stops, one block per step. Serial, so a stop's
     /// clear lands after the apply of a start it overtook.
     private let platformWork = PlatformWork(label: "io.github.srps.Conduit.app.platform-work")
+    /// One preview in flight, admitted before either fetching or queueing.
+    private let pacPreviewWork = PlatformWork(label: "io.github.srps.Conduit.app.pac-preview")
     /// `startProxy` / `stopProxy`: which is the latest, and a repeat of the
     /// one in flight joins it. See `LifecycleLane`.
     private let proxyLane = LifecycleLane(name: "proxy")
@@ -1815,17 +1820,49 @@ final class AppState: ObservableObject {
     // MARK: - Misc
 
     func refreshPACResolutionPreview() {
-        guard !config.pacURL.isEmpty else { return }
-        Task {
+        guard !isPACPreviewRunning else { return }
+        let pacURL = config.pacURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target: URL
+        do {
+            guard !pacURL.isEmpty else { throw PACResolverError.invalidURL }
+            target = try PACPreviewTarget.parse(appPreferences.preferredBrowserTestURL)
+        } catch {
+            recordPACPreviewFailure(error)
+            return
+        }
+        isPACPreviewRunning = true
+        pacPreviewMessage = nil
+        let evaluator = pacEvaluator
+        let work = pacPreviewWork
+        pacPreviewTask = Task {
+            defer {
+                isPACPreviewRunning = false
+                pacPreviewTask = nil
+            }
             do {
-                let script = try await pacEvaluator.fetchPAC(from: config.pacURL)
-                let result = try pacEvaluator.resolveProxyChain(for: URL(string: appPreferences.preferredBrowserTestURL)!, pacScript: script)
+                let script = try await evaluator.fetchPAC(from: pacURL)
+                let outcome = await work.run {
+                    Result { try evaluator.resolveProxyChain(for: target, pacScript: script) }
+                }
+                let result = try outcome.get()
                 let answer = result.isEmpty ? "no entries (routed through the configured upstreams)" : result.joined(separator: "; ")
-                logStore.log(.info, "PAC preview for \(appPreferences.preferredBrowserTestURL): \(answer)", category: .pac)
+                let event = RuntimeEvent(kind: .routing, event: "pac.preview_completed", detail: "target=\(target.absoluteString) chain=\(answer)")
+                eventLog.append(event)
+                logStore.log(.info, event.detail ?? answer, category: .pac)
+                pacPreviewMessage = "\(target.absoluteString): \(answer)"
             } catch {
-                lastErrorMessage = error.localizedDescription
+                recordPACPreviewFailure(error)
             }
         }
+    }
+
+    private func recordPACPreviewFailure(_ error: any Error) {
+        let event = RuntimeEvent(kind: .routing, event: "pac.preview_failed", detail: error.localizedDescription)
+        eventLog.append(event)
+        let message = event.detail ?? "PAC preview failed."
+        logStore.log(.warning, message, category: .pac)
+        pacPreviewMessage = message
+        lastErrorMessage = message
     }
 
     func revealHealthTestURL() {
