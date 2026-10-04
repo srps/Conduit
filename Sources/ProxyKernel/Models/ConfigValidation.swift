@@ -17,6 +17,7 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// target from, so a bad value here is reported once, at its own field,
     /// instead of once per row that inherited it.
     case invalidTransparentProxyIP(value: String)
+    case invalidSystemProxyBypass(reason: String)
     case conflict(description: String)
 
     /// Whether this error must stop the proxy listener from coming up.
@@ -48,7 +49,7 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// for.
     package var blocksProxyStart: Bool {
         switch self {
-        case .invalidInterceptPattern, .invalidInterceptIP, .invalidTransparentProxyIP:
+        case .invalidInterceptPattern, .invalidInterceptIP, .invalidTransparentProxyIP, .invalidSystemProxyBypass:
             // The transparent-proxy IP is in the same category: the listener
             // bound to it is `startTransparentProxy`, whose failure is already
             // a logged warning rather than a start failure.
@@ -85,6 +86,8 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
                  + "and intercept answers are synthesized as A records."
         case .conflict(let description):
             return description
+        case .invalidSystemProxyBypass(let reason):
+            return "routing.noProxyHosts: Manual system-proxy bypass settings: \(reason) Routing and PAC proxying remain available."
         }
     }
 }
@@ -164,7 +167,7 @@ extension ProxyConfig {
             errors.append(.invalidHost(field: "routing.noProxyHosts[\(i)]", value: host))
         }
         if let problem = ProxyBypassSyntax.validationProblem(routing.noProxyHosts) {
-            errors.append(.conflict(description: "routing.noProxyHosts: \(problem)"))
+            errors.append(.invalidSystemProxyBypass(reason: problem))
         }
         for (i, host) in routing.forceProxyHosts.enumerated() where !Self.isSafeHostToken(host, allowWildcard: true) {
             errors.append(.invalidHost(field: "routing.forceProxyHosts[\(i)]", value: host))

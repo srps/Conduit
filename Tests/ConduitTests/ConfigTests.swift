@@ -238,10 +238,10 @@ final class ConfigTests: XCTestCase {
         config.noProxyHosts = Array(repeating: "short.example", count: 256)
         XCTAssertTrue(bypassProblems().isEmpty)
         config.noProxyHosts.append("another.example")
-        XCTAssertTrue(bypassProblems().contains { $0.blocksProxyStart })
+        XCTAssertTrue(bypassProblems().contains { !$0.blocksProxyStart })
         config.noProxyHosts = Array(repeating: String(repeating: "a", count: 253), count: 256)
-        XCTAssertTrue(bypassProblems().contains { $0.blocksProxyStart && $0.errorDescription?.contains("8192") == true })
+        XCTAssertTrue(bypassProblems().contains { !$0.blocksProxyStart && $0.errorDescription?.contains("8192") == true })
         config.noProxyHosts = [String(repeating: "a", count: 254)]
-        XCTAssertTrue(bypassProblems().contains { $0.blocksProxyStart })
+        XCTAssertTrue(bypassProblems().contains { !$0.blocksProxyStart })
     }
 }
