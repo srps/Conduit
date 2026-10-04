@@ -895,7 +895,14 @@ final class DaemonRuntimeHost {
         let manager = systemDNSManager
         repeat {
             dnsReconcileWanted = false
-            await platformWork.run { [logger] in manager.reconcile(logger: logger) }
+            await runtimeLane.waitUntilIdle()
+            guard systemDNSReconcileIsDue else { break }
+            let token = runtimeLane.observationToken
+            let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
+            await platformWork.run { [logger] in
+                guard !token.isSuperseded else { return }
+                manager.reconcile(logger: logger, forwarderPort: forwarderPort)
+            }
         } while dnsReconcileWanted && systemDNSReconcileIsDue
         dnsReconcileWanted = false
     }

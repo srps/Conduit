@@ -23,8 +23,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         emit(RuntimeEvent(kind: .config, event: "platform.location_" + event, detail: detail))
     }
 
-    package func relayStopFailure(_ error: Error) -> RuntimeEvent {
-        let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=stop_relay reason=\(error.localizedDescription)")
+    package func failureEvent(operation: String, error: Error) -> RuntimeEvent {
+        let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=\(operation) reason=\(error.localizedDescription)")
         emit(event)
         return event
     }
@@ -260,6 +260,10 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             let candidate = NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
                                                   kind: kind, expected: current, replacement: replacement, requireActive: false)
             for key in candidate.cleanupKeys where replacement[key] != current[key] { cleanup.removeValue(forKey: key) }
+            for (endpoint, enable) in [("HTTPProxy", "HTTPEnable"), ("HTTPSProxy", "HTTPSEnable"), ("ProxyAutoConfigURLString", "ProxyAutoConfigEnable")]
+                where current[endpoint] != nil && cleanup[endpoint] == nil {
+                cleanup.removeValue(forKey: enable)
+            }
             let cleanupRequest = NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
                                                        kind: kind, expected: current, replacement: cleanup, requireActive: false)
             guard cleanupRequest.isCleanup else { throw PrivilegeClientError.refused(.noConsoleUser, "Prior settings retained for the next login.") }
@@ -329,8 +333,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             }
             let current = fields(member, kind)
             let replacement = removeResidue(current, kind: kind, config: config)
-            if kind == .proxies && containsLoopbackEndpoint(replacement) {
-                report("failed", "operation=legacy_cleanup location=\(member.locationID) surface=proxies reason=unattributed_loopback_endpoint")
+            if kind == .proxies && !legacy.isEmpty && containsUnattributedEndpoint(replacement, legacy: legacy) {
+                report("failed", "operation=legacy_cleanup location=\(member.locationID) surface=proxies reason=unattributed_proxy_endpoint")
                 unreadable = true
             }
             guard current != replacement else { continue }
@@ -350,12 +354,28 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         }
     }
 
-    private func containsLoopbackEndpoint(_ fields: [String: NetworkSettingValue]) -> Bool {
+    private func containsUnattributedEndpoint(_ fields: [String: NetworkSettingValue], legacy: [PlatformStateRecord]) -> Bool {
         for prefix in ["HTTP", "HTTPS"] {
-            if case .text(let host) = fields[prefix + "Proxy"], Self.isLoopback(host) { return true }
+            guard case .text(let host) = fields[prefix + "Proxy"], !host.isEmpty else { continue }
+            if Self.isLoopback(host) { return true }
+            guard case .number(let port) = fields[prefix + "Port"] else { return true }
+            let enabled = fields[prefix + "Enable"] == .number(1)
+            let knownPrior = legacy.contains { record in
+                let prior = ProxyServiceState(journalValues: record.priorValue ?? [:])
+                return prefix == "HTTP"
+                    ? prior.webHost == host && prior.webPort == String(port) && prior.webEnabled == enabled
+                    : prior.secureHost == host && prior.securePort == String(port) && prior.secureEnabled == enabled
+            }
+            if !knownPrior { return true }
         }
-        if case .text(let text) = fields["ProxyAutoConfigURLString"], let url = URL(string: text),
-           Self.isLoopback(url.host ?? "") { return true }
+        if case .text(let text) = fields["ProxyAutoConfigURLString"], !text.isEmpty {
+            if let url = URL(string: text), Self.isLoopback(url.host ?? "") { return true }
+            let enabled = fields["ProxyAutoConfigEnable"] == .number(1)
+            return !legacy.contains { record in
+                let prior = ProxyServiceState(journalValues: record.priorValue ?? [:])
+                return prior.autoURL == text && prior.autoEnabled == enabled
+            }
+        }
         return false
     }
 

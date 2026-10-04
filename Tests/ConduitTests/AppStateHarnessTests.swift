@@ -313,6 +313,27 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
+    func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        locations.edit { $0.services[0].enabled = false }
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        await state.startDNS()
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        locations.edit { $0.services[0].enabled = true }
+        harness.vpn.emit(.connected)
+        await harness.settle("same-location VPN report reapplied DNS", timeoutMilliseconds: 5_000) {
+            harness.journal.hasRecords(for: .systemDNS)
+        }
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        let port = try XCTUnwrap(state.runtimeSnapshot.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)])
+        await state.stopDNS()
+    }
+
     func testLocationNotificationDuringDNSStopCannotRepinStoppedListener() async throws {
         harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
         let locations = NetworkLocationFixture.store()

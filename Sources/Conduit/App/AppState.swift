@@ -2025,14 +2025,23 @@ final class AppState: ObservableObject {
         dnsReconcileInFlight = true
         let manager = systemDNSManager
         deliveries.deliver { [weak self, platformWork, logStore] in
+            guard let self else { return }
+            await self.dnsLane.waitUntilIdle()
+            guard self.platformConfig.manageSystemDNS, self.orchestrator.snapshot.dnsRunState == .running else {
+                self.dnsReconcileInFlight = false
+                self.dnsReconcileWanted = false
+                return
+            }
+            let token = self.dnsLane.observationToken
+            let forwarderPort = self.effectiveDNSForwarderPort
             // Followed at once by a liveness probe, so a relay that died
             // across sleep or VPN churn is restarted now rather than at the
             // next 30 s health tick.
             let alive = await platformWork.run {
-                manager.reconcile(logger: logStore)
+                guard !token.isSuperseded else { return true }
+                manager.reconcile(logger: logStore, forwarderPort: forwarderPort)
                 return manager.probeLiveness()
             }
-            guard let self else { return }
             self.dnsReconcileInFlight = false
             if self.dnsReconcileWanted {
                 self.dnsReconcileWanted = false

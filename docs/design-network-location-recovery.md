@@ -57,8 +57,11 @@ Legacy service-name entries have unknown location identity. Never migrate their
 prior values into the current location by guessing. Sweep exact Conduit loopback
 residue across all sets, removing those endpoints while preserving external
 configuration, then retire ambiguous legacy records only after successful cleanup.
-Unrecognized loopback endpoints (such as a previous configured port) retain the
-legacy evidence and emit a failure rather than silently claiming recovery.
+Unrecognized loopback or gateway endpoints (such as a previous configured host
+or port) retain legacy evidence. Non-loopback endpoints exactly matching a known
+legacy prior are left as-is; prior values are never installed by service name.
+Other unmatched endpoints require residue inspection before retiring the record.
+Unattributed residue retains the legacy evidence and emit a failure rather than silently claiming recovery.
 Known scoped records are restored independently before that legacy failure is
 returned, so an ambiguous old record cannot prevent their teardown.
 DNS residue cleanup returns explicit DNS to DHCP, since the original location is
@@ -93,16 +96,22 @@ readiness drives apply even if the journal currently has no records, so passing
 through an empty location cannot suppress a later valid-location retry.
 DNS reconciliation restores inactive records independently, then establishes
 the privileged relay idempotently at the actual bound forwarder port. A failed relay start withholds system DNS redirection;
-a later notification can retry even without saved DNS records. Existing
+a later notification can retry even without saved DNS records. Ordinary VPN/path
+reconciliation also takes the scoped path before checking legacy saved records,
+waits for lifecycle work and uses the actual forwarder port. Existing
 service-name manager paths remain only for explicit legacy harness composition;
 production hosts always construct the scoped store. Dev launches inject fakes.
 
 When no console user is present, scoped removal of loopback listener fields is
 admitted, while corporate endpoints and bypass lists cannot be removed through
-that exception. Valid 127/8 addresses, localhost and IPv6 loopback are supported.
+that exception. Malformed scoped arguments retain their invalid-arguments
+response/audit category after peer and caller-identity admission; they cannot
+execute or be mistaken for session readiness failures. Valid 127/8 addresses, localhost and IPv6 loopback are supported.
 Installing prior
 values is deferred. The journal keeps the previous settings until login; this
 removes dead loopback endpoints without widening apply permission at loginwindow.
+Endpoint/PAC URL removal also removes its enable flag, even when the prior
+configuration was enabled, so cleanup cannot leave an enabled empty proxy.
 DNS cleanup attempts to stop the privileged relay on every outcome, including
 failed and deferred restoration. Journal evidence stays available for retry;
 a failed relay-stop command emits a structured failure instead of claiming success.

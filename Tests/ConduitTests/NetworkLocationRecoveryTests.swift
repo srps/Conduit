@@ -324,6 +324,34 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testLegacyRecordRetainsUnmatchedGatewayEndpointUntilResidueIsRemoved() throws {
+        try withRecovery { store, journal, recovery, _ in
+            journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["webHost": "corporate.example", "webPort": "8080", "webEnabled": "true"])
+            let old: [String: NetworkSettingValue] = ["HTTPProxy": .text("192.0.2.25"), "HTTPPort": .number(54321), "HTTPEnable": .number(1)]
+            store.edit { $0.services[0].proxies = old; $0.services[1].proxies = [:] }
+            var config = ProxyConfig()
+            config.gatewayMode = true
+            config.localHost = "192.0.2.10"
+            XCTAssertThrowsError(try recovery.clear(kind: .proxies, config: config))
+            XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+            XCTAssertEqual(try store.snapshot().services[0].proxies, old)
+            store.edit { $0.services[0].proxies = [:] }
+            try recovery.clear(kind: .proxies, config: config)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+        }
+    }
+
+    func testLegacyKnownCorporatePriorDoesNotNeedGuessedRestoration() throws {
+        try withRecovery { store, journal, recovery, _ in
+            journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["webHost": "corporate.example", "webPort": "8080", "webEnabled": "true"])
+            let corporate: [String: NetworkSettingValue] = ["HTTPProxy": .text("corporate.example"), "HTTPPort": .number(8080), "HTTPEnable": .number(1)]
+            store.edit { $0.services[0].proxies = corporate; $0.services[1].proxies = [:] }
+            try recovery.clear(kind: .proxies, config: ProxyConfig())
+            XCTAssertEqual(try store.snapshot().services[0].proxies, corporate)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+        }
+    }
+
     func testLegacyRecordSurvivesAnUnrecognizedOldListenerPort() throws {
         try withRecovery { store, journal, recovery, events in
             journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["httpHost": "corporate.example"])
@@ -331,7 +359,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             XCTAssertThrowsError(try recovery.clear(kind: .proxies, config: ProxyConfig()))
             XCTAssertTrue(journal.hasRecords(for: .systemProxy))
             XCTAssertEqual(try store.snapshot().services[0].proxies["HTTPPort"], .number(54321))
-            XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" && $0.detail?.contains("unattributed_loopback_endpoint") == true })
+            XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" && $0.detail?.contains("unattributed_proxy_endpoint") == true })
         }
     }
 
@@ -473,6 +501,41 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             privilege.failing = []
             try dns.clear(logger: nil)
             XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+        }
+    }
+
+    func testDeferredProxyCleanupRemovesEnableFlagsEvenWhenPriorWasEnabled() throws {
+        let pairs: [([String: NetworkSettingValue], [String: NetworkSettingValue], String)] = [
+            (["HTTPProxy": .text("corporate.example"), "HTTPPort": .number(8080), "HTTPEnable": .number(1)],
+             ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)], "HTTPEnable"),
+            (["ProxyAutoConfigURLString": .text("https://corporate.example/proxy.pac"), "ProxyAutoConfigEnable": .number(1)],
+             ["ProxyAutoConfigURLString": .text("http://127.0.0.1:8090/proxy.pac"), "ProxyAutoConfigEnable": .number(1)], "ProxyAutoConfigEnable")
+        ]
+        for (prior, applied, enable) in pairs {
+            try withRecovery { store, journal, recovery, _ in
+                store.edit { $0.services[0].proxies = prior }
+                try recovery.apply(kind: .proxies, desired: applied, config: ProxyConfig())
+                store.atLoginwindow = true
+                XCTAssertThrowsError(try recovery.clear(kind: .proxies, config: ProxyConfig()))
+                XCTAssertNil(try store.snapshot().services[0].proxies[enable])
+                XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+                store.atLoginwindow = false
+                try recovery.clear(kind: .proxies, config: ProxyConfig())
+                XCTAssertEqual(try store.snapshot().services[0].proxies, prior)
+            }
+        }
+    }
+
+    func testSameLocationNetworkReconcileRetriesAfterInitiallyDisabledService() throws {
+        try withRecovery { store, journal, recovery, _ in
+            store.edit { $0.services[0].enabled = false }
+            let dns = SystemDNSManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+            XCTAssertThrowsError(try dns.apply(forwarderPort: 15053, logger: nil))
+            XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+            store.edit { $0.services[0].enabled = true }
+            dns.reconcile(logger: nil, forwarderPort: 15053)
+            XCTAssertEqual(try store.snapshot().services[0].dns, localDNS)
+            try dns.clear(logger: nil)
         }
     }
 

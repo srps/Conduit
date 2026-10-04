@@ -504,7 +504,7 @@ package final class SystemDNSManager: @unchecked Sendable {
             try privilegeClient.execute(.stopDNSRelay, values: [])
             logger?.log(.notice, "DNS relay on :53 stopped.", category: .system)
         } catch {
-            let event = locationRecovery?.relayStopFailure(error) ?? RuntimeEvent(
+            let event = locationRecovery?.failureEvent(operation: "stop_relay", error: error) ?? RuntimeEvent(
                 kind: .config, event: "platform.location_failed", detail: "operation=stop_relay reason=\(error.localizedDescription)"
             )
             logger?.log(.warning, event.detail ?? event.event, category: .system)
@@ -582,18 +582,19 @@ package final class SystemDNSManager: @unchecked Sendable {
 
     // MARK: - Reconcile (VPN transitions)
 
-    package func reconcile(logger: (any LogSink)?) {
+    package func reconcile(logger: (any LogSink)?, forwarderPort: Int? = nil) {
         operations.lock()
         defer { operations.unlock() }
-        guard hasSavedInterfaces() else { return }
         if let locationRecovery {
             do {
-                try locationRecovery.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: configProvider())
+                try reconcileLocation(apply: true, forwarderPort: forwarderPort ?? configProvider().dnsForwarderPort, logger: logger)
             } catch {
-                logger?.log(.warning, "Location DNS reconciliation failed: \(error.displayDescription)", category: .system)
+                let event = locationRecovery.failureEvent(operation: "reconcile", error: error)
+                logger?.log(.warning, event.detail ?? event.event, category: .system)
             }
             return
         }
+        guard hasSavedInterfaces() else { return }
         guard let currentServices = try? connectedNetworkServices(logger: nil) else { return }
 
         let currentSet = Set(currentServices)

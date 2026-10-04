@@ -467,6 +467,28 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
+    func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        locations.edit { $0.services[0].enabled = false }
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        locations.edit { $0.services[0].enabled = true }
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        let port = try XCTUnwrap(host.orchestrator.snapshot.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)])
+        await host.stopRuntime()
+    }
+
     func testLocationNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0

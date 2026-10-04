@@ -140,6 +140,25 @@ enum NetworkLocationScenarios {
         catch { retryExhausted = retryStore.pendingCompareFailures == 8 && journal.hasRecords(for: .systemDNS) }
         retryStore.conflictNextWrites(0)
         try retryRecovery.clear(kind: .dns, config: config)
+        retryStore.edit { $0.services[1].enabled = false }
+        do { try relayDNS.apply(forwarderPort: 15053, logger: nil) }
+        catch NetworkSettingsError.unavailable { /* Empty service failure is observable. */ }
+        retryStore.edit { $0.services[1].enabled = true }
+        relayDNS.reconcile(logger: nil, forwarderPort: 15053)
+        let sameLocationRetryApplied = try retryStore.snapshot().services[1].dns == localDNS
+        try relayDNS.clear(logger: nil)
+        let gatewayStore = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
+        let gatewayRecovery = LocationSettingsRecovery(store: gatewayStore, journal: journal, emit: { events.append($0) })
+        journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["webHost": "corporate.example", "webPort": "8080", "webEnabled": "true"])
+        gatewayStore.edit { $0.services[0].proxies = ["HTTPProxy": .text("192.0.2.25"), "HTTPPort": .number(54321), "HTTPEnable": .number(1)] }
+        var gatewayConfig = config
+        gatewayConfig.gatewayMode = true
+        gatewayConfig.localHost = "192.0.2.10"
+        var gatewayLegacyRetained = false
+        do { try gatewayRecovery.clear(kind: .proxies, config: gatewayConfig) }
+        catch { gatewayLegacyRetained = journal.hasRecords(for: .systemProxy) }
+        gatewayStore.edit { $0.services[0].proxies = [:] }
+        try gatewayRecovery.clear(kind: .proxies, config: gatewayConfig)
         let corrupt = Data("{broken}".utf8)
         try corrupt.write(to: corruptFile)
         let corruptJournal = PlatformStateJournal(fileURL: corruptFile)
@@ -197,6 +216,16 @@ enum NetworkLocationScenarios {
         let failedRestoreRelayStopped = ordinaryRestoreFailed && dnsPrivilege.commands(matching: .stopDNSRelay).count == stopsBeforeFailure + 1
         store.refuseWrites(false)
         try dnsManager.clear(logger: nil)
+        let enabledPrior: [String: NetworkSettingValue] = ["HTTPProxy": .text("corporate.example"), "HTTPPort": .number(8080), "HTTPEnable": .number(1)]
+        store.edit { $0.services[0].proxies = enabledPrior }
+        try recovery.apply(kind: .proxies, desired: oldProxy, config: config)
+        store.atLoginwindow = true
+        do { try recovery.clear(kind: .proxies, config: config) }
+        catch PrivilegeClientError.refused(.noConsoleUser, _) { /* Prior stays recorded until login. */ }
+        let cleanupProxy = try store.snapshot().services[0].proxies
+        let proxyDisabledOnDeferredCleanup = cleanupProxy["HTTPProxy"] == nil && cleanupProxy["HTTPEnable"] == nil
+        store.atLoginwindow = false
+        try recovery.clear(kind: .proxies, config: config)
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -221,6 +250,10 @@ enum NetworkLocationScenarios {
                 .init("same-location compare failures retry with a fixed budget and retain evidence on exhaustion", compareRetrySucceeded && retryExhausted),
                 .init("loginwindow deferred prior restoration still stops the DNS relay", deferredRelayStopped),
                 .init("ordinary restoration failure still stops the relay and keeps retry evidence", failedRestoreRelayStopped),
+                .init("malformed scoped admission retains its invalid-arguments diagnostic", HelperAdmission.scopedSettingsAdmission(values: ["{broken}"]) == .invalidArguments),
+                .init("same-location network reconcile retries DNS after an initially unavailable service", sameLocationRetryApplied),
+                .init("unmatched legacy gateway endpoints retain recovery evidence", gatewayLegacyRetained),
+                .init("deferred proxy cleanup removes enable flags with endpoints", proxyDisabledOnDeferredCleanup),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
