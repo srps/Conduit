@@ -27,6 +27,10 @@ enum HelperTool {
         case .ping, .startDNSRelay, .stopDNSRelay, .startTCPRelay, .stopTCPRelay:
             return
 
+        case .compareNetworkSettings:
+            guard arguments.values.count == 1 else { throw NetworkSettingsError.invalidRequest }
+            try NetworkSettingsWriter.run(NetworkSettingsRequest.decode(arguments.values[0]))
+
         case .applyDNS:
             guard arguments.values.count >= 2 else {
                 throw HelperToolError.invalidInput("applyDNS requires domain and servers")

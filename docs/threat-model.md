@@ -102,6 +102,19 @@ Boundary: app-to-helper Unix socket / IPC contract.
 
 Existing controls: helper commands are versioned and validated in `ConduitShared`; socket permissions and peer validation restrict access; port values are validated before relay startup; legacy unversioned requests are rejected.
 
+Location-scoped writes (#110) use helper protocol v5 and one bounded
+`compare-network-settings` request (65 KiB, UUID location/service IDs). Only the
+HTTP/HTTPS/PAC/bypass fields and DNS ServerAddresses are mutable; proxy-auth fields,
+search domains, SOCKS settings and other protocol keys are preserved. The helper
+locks SCPreferences without waiting and validates active-set identity when required,
+set membership and expected managed values before committing. It never selects a
+location. Older helpers cannot receive a service-name or AppleScript fallback for
+this operation. At loginwindow, the last admitted user may only remove fields or
+disable an endpoint, not apply new values. Recovery is journaled before writes,
+compares previous/intended generations and preserves external edits. Ambiguous
+legacy prior values are never assigned to a guessed location. Hardware/VPN
+validation and reinstalling the v5 helper remain deployment requirements.
+
 Caller identity (#46). The console-user uid says whose process is asking, not which program. When `install-helper.sh` finds `/Applications/Conduit.app` signed with a real certificate (the self-signed "Conduit Local Signing" identity from `scripts/create-signing-identity.sh`), it writes `/Library/Application Support/io.github.srps.Conduit/helper-callers.req`, root:wheel 0644 in a root:wheel 0755 directory: `certificate leaf = H"<sha1>" and (identifier "io.github.srps.Conduit" or identifier "io.github.srps.Conduit.Daemon")`. The helper reads it once at start, without following links, and checks owner and mode on the descriptor it reads. For every connection, before the request is read, it takes the peer's audit token from the socket (`LOCAL_PEERTOKEN`), resolves the code with `SecCodeCopyGuestWithAttributes`, and checks it with `SecCodeCheckValidity` against the pin; the program must also be signed with the hardened runtime, because a same-uid process could otherwise start the genuine app with `DYLD_INSERT_LIBRARIES`. The audit token carries the pid version, so a recycled pid cannot stand in for the caller. Nothing the peer sends is used to identify it. A refusal is `unauthorized`, with a message naming the rule and the fix; the wire contract is unchanged.
 
 - Unenforced mode: no pin (never installed with a signed app, or an ad-hoc app at the last install). Admission is by uid alone as before; the helper logs a warning once per start and records each peer's identity.

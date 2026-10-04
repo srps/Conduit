@@ -294,7 +294,18 @@ enum DevLaunch {
             homeDirectory: home,
             resolverDirectory: resolverDirectory.path,
             loginItemManager: loginItems.manager,
-            vpnStatusMonitor: vpn
+            vpnStatusMonitor: vpn,
+            networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in
+                FakeNetworkLocationStore(snapshot: NetworkLocationSnapshot(
+                    activeLocationID: "11111111-1111-1111-1111-111111111111",
+                    services: [LocationServiceSettings(
+                        locationID: "11111111-1111-1111-1111-111111111111",
+                        serviceID: "33333333-3333-3333-3333-333333333333",
+                        name: "Wi-Fi", enabled: true, proxies: [:], dns: [:]
+                    )]
+                ))
+            }
         )
         if let section = options.section {
             state.selectedSection = section

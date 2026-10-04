@@ -225,7 +225,7 @@ enum HelperDaemon {
             return (.ok(), .ok)
         case .applyDNS, .removeDNS, .applySystemProxy, .clearSystemProxy,
              .setProxyBypass, .setAutoproxyURL, .disableAutoproxy,
-             .setWebProxyEndpoint, .setAutoproxy, .setDNSServers:
+             .setWebProxyEndpoint, .setAutoproxy, .setDNSServers, .compareNetworkSettings:
             let args = HelperArguments(command: request.command, values: request.values)
             do {
                 try HelperTool.run(arguments: args, deadline: deadline)

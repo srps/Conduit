@@ -38,6 +38,7 @@ not current dependency versions, market claims, or a second implementation plan.
 ## Network locations and recovery
 
 The location-recovery work is tracked in [#110](https://github.com/srps/Conduit/issues/110).
+The implemented contract is in [design-network-location-recovery.md](./design-network-location-recovery.md).
 
 Network-path and VPN signals do not identify the macOS network location whose
 settings Conduit captured. Restoring prior settings by service name alone can

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import ProxyKernel
+import ConduitShared
 
 enum SystemProxyManagerError: Error, LocalizedError {
     case noNetworkServices
@@ -43,6 +44,8 @@ package final class SystemProxyManager: @unchecked Sendable {
 
     /// Whether a loopback port is being served. Injectable so `restoreIfNeeded`
     /// is testable without a real listener.
+    private let locationRecovery: LocationSettingsRecovery?
+    private let configProvider: @Sendable () -> ProxyConfig
     private let portProbe: @Sendable (Int) -> Bool
 
     package init(
@@ -51,12 +54,39 @@ package final class SystemProxyManager: @unchecked Sendable {
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
-        portProbe: @escaping @Sendable (Int) -> Bool = { LoopbackPortProbe.isServed(port: $0) }
+        portProbe: @escaping @Sendable (Int) -> Bool = { LoopbackPortProbe.isServed(port: $0) },
+        locationRecovery: LocationSettingsRecovery? = nil,
+        configProvider: @escaping @Sendable () -> ProxyConfig = { ProxyConfig() }
     ) {
         self.privilegeClient = privilegeClient
         self.journal = journal
         self.commandRunner = commandRunner
         self.portProbe = portProbe
+        self.locationRecovery = locationRecovery
+        self.configProvider = configProvider
+    }
+
+    package static func locationFields(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String?) -> [String: NetworkSettingValue] {
+        switch mode {
+        case .manual:
+            return ["HTTPEnable": .number(1), "HTTPProxy": .text(config.effectiveClientHost), "HTTPPort": .number(config.localPort),
+                    "HTTPSEnable": .number(1), "HTTPSProxy": .text(config.effectiveClientHost), "HTTPSPort": .number(config.localPort),
+                    "ProxyAutoConfigEnable": .number(0), "ExceptionsList": .list(config.noProxyHosts)]
+        case .pac:
+            return ["HTTPEnable": .number(0), "HTTPSEnable": .number(0), "ProxyAutoConfigEnable": .number(1),
+                    "ProxyAutoConfigURLString": .text(effectivePACURL(config: config, localPACURL: localPACURL))]
+        }
+    }
+
+    package func reconcileLocation(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String?, apply: Bool) throws {
+        try operations.withLock {
+            guard let locationRecovery else { return }
+            if apply && hasManagedState() {
+                try locationRecovery.apply(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL), config: config)
+            } else {
+                try locationRecovery.restore(kind: .proxies, inactiveOnly: true)
+            }
+        }
     }
 
     // MARK: - State Detection
@@ -69,6 +99,9 @@ package final class SystemProxyManager: @unchecked Sendable {
     }
 
     package func isApplied(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String? = nil) -> Bool {
+        if let locationRecovery {
+            return locationRecovery.isApplied(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL))
+        }
         guard let services = try? connectedNetworkServices(logger: nil),
               !services.isEmpty else { return false }
 
@@ -90,6 +123,7 @@ package final class SystemProxyManager: @unchecked Sendable {
     }
 
     package func isCleared() -> Bool {
+        if let locationRecovery { return locationRecovery.isCleared(kind: .proxies) }
         let services = (try? connectedNetworkServices(logger: nil)) ?? allNetworkServices()
         return services.allSatisfy { service in
             !readProxyState(service: service, type: "webproxy").enabled
@@ -134,6 +168,10 @@ package final class SystemProxyManager: @unchecked Sendable {
     package func apply(config: ProxyConfig, mode: SystemProxyMode, logger: (any LogSink)?, localPACURL: String? = nil) throws {
         operations.lock()
         defer { operations.unlock() }
+        if let locationRecovery {
+            try locationRecovery.apply(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL), config: config)
+            return
+        }
         let candidates = try connectedNetworkServices(logger: logger)
         guard !candidates.isEmpty else {
             throw SystemProxyManagerError.noNetworkServices
@@ -245,6 +283,10 @@ package final class SystemProxyManager: @unchecked Sendable {
     package func clear(logger: (any LogSink)?) throws {
         operations.lock()
         defer { operations.unlock() }
+        if let locationRecovery {
+            try locationRecovery.clear(kind: .proxies, config: configProvider())
+            return
+        }
         // A teardown that already ran must not run its fallback again. `clear`
         // restores the recorded prior state and then forgets it, so a second
         // call finds `.notRecorded` — and the unconditional fallback would
@@ -509,6 +551,15 @@ package final class SystemProxyManager: @unchecked Sendable {
     package func restoreIfNeeded(logger: (any LogSink)?) -> LaunchRecoveryOutcome {
         operations.lock()
         defer { operations.unlock() }
+        if let locationRecovery {
+            let config = configProvider()
+            do {
+                let live = try locationRecovery.proxyListenerIsLive(config: config, probe: portProbe)
+                return locationRecovery.recover(kind: .proxies, config: config, listenerIsLive: live)
+            } catch {
+                return .failed(reason: error.displayDescription)
+            }
+        }
         guard journal.isMarkedApplied(surface: .systemProxy)
                 || journal.hasRecords(for: .systemProxy),
               let appliedAt = journal.oldestRecordDate(for: .systemProxy) else {

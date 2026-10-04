@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import ProxyKernel
+import ConduitShared
 
 package enum SystemDNSManagerError: Error, LocalizedError, Equatable {
     case listingFailed(exitCode: Int32)
@@ -49,6 +50,8 @@ package final class SystemDNSManager: @unchecked Sendable {
         try operations.withLock(body)
     }
 
+    private let locationRecovery: LocationSettingsRecovery?
+    private let configProvider: @Sendable () -> ProxyConfig
     private let privilegeClient: PrivilegeClient
     /// Prior per-service DNS servers. Shared with every other platform surface
     /// so there is one answer to "what was here before us" rather than the
@@ -79,13 +82,28 @@ package final class SystemDNSManager: @unchecked Sendable {
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
-        relayIsLive: @escaping @Sendable () -> Bool = { SystemDNSManager.dnsResponds(onPort: 53) }
+        relayIsLive: @escaping @Sendable () -> Bool = { SystemDNSManager.dnsResponds(onPort: 53) },
+        locationRecovery: LocationSettingsRecovery? = nil,
+        configProvider: @escaping @Sendable () -> ProxyConfig = { ProxyConfig() }
     ) {
         self.privilegeClient = privilegeClient
         self.journal = journal
         self.commandRunner = commandRunner
         self.relayIsLive = relayIsLive
         self.legacySnapshotFile = legacySnapshotFile
+        self.locationRecovery = locationRecovery
+        self.configProvider = configProvider
+    }
+
+    package func reconcileLocation(apply: Bool) throws {
+        try operations.withLock {
+            guard let locationRecovery else { return }
+            if apply && hasSavedInterfaces() {
+                try locationRecovery.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: configProvider())
+            } else {
+                try locationRecovery.restore(kind: .dns, inactiveOnly: true)
+            }
+        }
     }
 
     // MARK: - Saved state
@@ -115,6 +133,11 @@ package final class SystemDNSManager: @unchecked Sendable {
     package func apply(forwarderPort: Int, logger: (any LogSink)?) throws {
         operations.lock()
         defer { operations.unlock() }
+        if let locationRecovery {
+            try startRelay(forwarderPort: forwarderPort, logger: logger)
+            try locationRecovery.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: configProvider())
+            return
+        }
         // Nothing captured, nothing redirected. Every host calls
         // `saveCurrentDNS` first and treats its failure as non-fatal, so
         // without this guard a listing that failed once left the interfaces
@@ -149,6 +172,12 @@ package final class SystemDNSManager: @unchecked Sendable {
     package func clear(logger: (any LogSink)?) throws {
         operations.lock()
         defer { operations.unlock() }
+        if let locationRecovery {
+            // Restore before stopping the relay; a partial recovery remains usable and retryable.
+            try locationRecovery.clear(kind: .dns, config: configProvider())
+            stopRelay(logger: logger)
+            return
+        }
         guard hasSavedInterfaces() else {
             // A previous teardown restored this surface. Probing the machine
             // now would flag a user's own 127.0.0.1 resolver — just restored —
@@ -277,6 +306,10 @@ package final class SystemDNSManager: @unchecked Sendable {
         // would record a stranded 127.0.0.1 as the prior value and make the
         // snapshot unimportable for good.
         importLegacySnapshotIfPresent(logger: logger)
+        if let locationRecovery {
+            try locationRecovery.validateSnapshot()
+            return
+        }
         let services = try connectedNetworkServices(logger: logger)
         for service in services {
             // First-write-wins in the journal: a second `saveCurrentDNS` in the
@@ -314,6 +347,9 @@ package final class SystemDNSManager: @unchecked Sendable {
         operations.lock()
         defer { operations.unlock() }
         importLegacySnapshotIfPresent(logger: logger)
+        if let locationRecovery {
+            return locationRecovery.recover(kind: .dns, config: configProvider(), listenerIsLive: relayIsLive())
+        }
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else {
             return .nothingToDo(.nothingRecorded)
         }
@@ -538,6 +574,14 @@ package final class SystemDNSManager: @unchecked Sendable {
         operations.lock()
         defer { operations.unlock() }
         guard hasSavedInterfaces() else { return }
+        if let locationRecovery {
+            do {
+                try locationRecovery.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: configProvider())
+            } catch {
+                logger?.log(.warning, "Location DNS reconciliation failed: \(error.displayDescription)", category: .system)
+            }
+            return
+        }
         guard let currentServices = try? connectedNetworkServices(logger: nil) else { return }
 
         let currentSet = Set(currentServices)

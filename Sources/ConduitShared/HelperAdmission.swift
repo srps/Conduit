@@ -20,7 +20,7 @@ public enum HelperAdmission {
             return true
         case .applyDNS, .applySystemProxy, .startDNSRelay, .startTCPRelay,
              .setWebProxyEndpoint, .setAutoproxyURL, .setAutoproxy,
-             .setProxyBypass, .setDNSServers:
+             .setProxyBypass, .setDNSServers, .compareNetworkSettings:
             return false
         }
     }
@@ -30,7 +30,11 @@ public enum HelperAdmission {
     /// teardown stops the relay first, and a service left on 127.0.0.1 after
     /// that has no resolver at all.
     public static func isDNSReset(_ command: HelperCommand, values: [String]) -> Bool {
-        command == .setDNSServers && values.count == 2
+        if command == .compareNetworkSettings {
+            guard values.count == 1, let request = try? NetworkSettingsRequest.decode(values[0]) else { return false }
+            return request.isCleanup
+        }
+        return command == .setDNSServers && values.count == 2
             && values[1].caseInsensitiveCompare(HelperInputValidator.emptyListSentinel) == .orderedSame
     }
 

@@ -105,6 +105,7 @@ exactly these semantics; do not repurpose them.
 | `auth.credential_retry` | The initial Kerberos token was unavailable and is being retried (`host=`, `attempt=`, `delayMs=`). |
 | `auth.credential_outage` | A retried handshake still had no credential; further handshakes to that upstream fail at once for the hold (`upstream=`, `holdSeconds=`). |
 | `recovery.skipped` | The recovery ladder was not run because the health check failed for a missing credential, which no ladder step can supply (`reason=credential_unavailable`, `summary=`). |
+| `auth.privilege_helper_required` | A scoped network write cannot reach a compatible v5 helper; refuse the operation without an unsafe AppleScript fallback. Reinstall the helper. |
 | `auth.privilege_request` | A privileged-helper call was made; request/outcome pair, raw helper values never included. |
 | `config.auth_changed` / `config.auth_reauth_failed` / `config.tunnel_auth_reauth` | Auth-section config reload outcomes. |
 
@@ -137,6 +138,15 @@ exactly these semantics; do not repurpose them.
 ### config
 | Event | Emitted when |
 | --- | --- |
+| `platform.location_observed` | The dedicated preferences observer reports a stable active-location ID, independently of VPN and NWPath changes. |
+| `platform.location_apply` | Stable location/service IDs and surface selected for a compare-and-write; durable prior/applied fields are saved before mutation. |
+| `platform.location_restore` | Prior fields selected for restoration, including inactive locations; external fields remain preserved. `scope=`, `surface=`, `active=`. |
+| `platform.location_external_preserved` | No owned fields remain to restore; the current settings are preserved and the record is released after comparison. |
+| `platform.location_deleted` | The recorded stable location/service identity no longer exists; only its record is retired. |
+| `platform.location_legacy_cleanup` | Exact configured loopback residue found in a location with unknown legacy attribution; remove residue without assigning legacy prior values to that location. |
+| `platform.location_legacy_retired` | Ambiguous service-name record retired after all location residue cleanup succeeded. `prior_location=unknown`. |
+| `platform.location_failed` | Inspection, capture, apply, restore, or recovery failed; no stale write is allowed and outstanding evidence remains available for retry. |
+| `platform.location_cleanup_deferred` | At loginwindow, remove owned fields safely and retain the original prior values for restoration after login. |
 | `config.routing_changed`, `config.logging_changed`, `config.metadata_changed`, `config.proxy_limits_updated`, `config.dns_restart`, `config.health_restart`, `config.proxy_restart`, `config.proxy_restart_failed`, `config.strict_mode_pac_refresh`, `config.tunnels_reconcile`, `config.tunnels_reconcile_rejected`, `config.upstreams_refresh`, `config.upstreams_deferred` | Per-subsystem outcomes of a config reload. The set grows with the targeted-reload work; treat unknown `config.*` names as informational. |
 | `config.platform_integration` | A platform integration switch (system proxy, shell environment, resolver files, system DNS, launch at login) changed on save and its surface is about to be applied or cleared; `detail` names the action. Emitted by the app, before the side effect. |
 
