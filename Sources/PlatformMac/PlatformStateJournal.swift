@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import ProxyKernel
+import ConduitShared
 
 /// A platform setting Conduit changes on the user's machine.
 ///
@@ -46,6 +47,9 @@ package struct PlatformStateRecord: Codable, Equatable, Sendable {
     /// record at all, which the journal represents by the entry's absence.
     package var priorValue: [String: String]?
     package var recordedAt: Date
+    package var locationID: String? = nil
+    package var serviceID: String? = nil
+    package var appliedValue: [String: String]? = nil
 }
 
 /// Remembers what the machine looked like before Conduit changed it, so
@@ -102,6 +106,13 @@ package final class PlatformStateJournal: @unchecked Sendable {
         self.logger = logger
     }
 
+    /// Applying new machine settings needs readable prior-state storage.
+    /// Recovery may keep retry evidence in memory, but must not use that as
+    /// permission to publish new settings while disk evidence is corrupt.
+    package func requireReadableForApply() throws {
+        guard fileState != .unreadable else { throw NetworkSettingsError.unreadableJournal }
+    }
+
     /// Whether the on-disk journal could be read. Callers use this to tell
     /// "we hold nothing on this surface" from "we cannot say what we hold".
     package var fileState: FileState {
@@ -145,6 +156,47 @@ package final class PlatformStateJournal: @unchecked Sendable {
             PlatformStateRecord(surface: surface, scope: scope, priorValue: value, recordedAt: now)
         )
         saveLocked(records)
+    }
+
+    /// Durable write-ahead evidence for identity-scoped network mutations.
+    package func recordNetworkState(
+        surface: PlatformSurface, locationID: String, serviceID: String,
+        prior: [String: String], applied: [String: String], maximumRecords: Int
+    ) throws {
+        try lock.withLock {
+            var records = loadLocked()
+            let committed = records
+            guard fileStateBox != .unreadable else { throw NetworkSettingsError.persistenceFailed }
+            let scope = locationID + "/" + serviceID
+            if let index = records.firstIndex(where: { $0.surface == surface && $0.scope == scope }) {
+                records[index].appliedValue = applied
+                records[index].recordedAt = .now
+            } else {
+                guard records.filter({ $0.locationID != nil }).count < maximumRecords else {
+                    throw NetworkSettingsError.capacityExceeded
+                }
+                records.append(PlatformStateRecord(
+                    surface: surface, scope: scope, priorValue: prior, recordedAt: .now,
+                    locationID: locationID, serviceID: serviceID, appliedValue: applied
+                ))
+            }
+            guard saveLocked(records) else {
+                loaded = committed
+                throw NetworkSettingsError.persistenceFailed
+            }
+        }
+    }
+
+    package func forgetNetworkState(surface: PlatformSurface, scope: String) throws {
+        try lock.withLock {
+            var records = loadLocked()
+            let committed = records
+            records.removeAll { $0.surface == surface && $0.scope == scope }
+            guard saveLocked(records) else {
+                loaded = committed
+                throw NetworkSettingsError.persistenceFailed
+            }
+        }
     }
 
     /// Reserved scope for the surface-ownership marker. Prefixed with a
@@ -335,18 +387,22 @@ package final class PlatformStateJournal: @unchecked Sendable {
         }
         do {
             let data = try Data(contentsOf: fileURL)
-            let decoded = try JSONDecoder.iso8601Decoder.decode([PlatformStateRecord].self, from: data)
+            let decoded: [PlatformStateRecord]
+            do {
+                decoded = try CanonicalJSON.decoder().decode([PlatformStateRecord].self, from: data)
+            } catch {
+                // Upgrade the historical ISO-8601 journal on its next successful write.
+                decoded = try JSONDecoder.iso8601Decoder.decode([PlatformStateRecord].self, from: data)
+            }
             fileStateBox = .loaded
             loaded = decoded
             return decoded
         } catch {
-            // Recovered, not swallowed: callers read `.unreadable` as "we
-            // cannot say what we changed" and fall back to an unconditional
-            // teardown, which is the safe direction. Say so out loud, because
-            // it also means a crash from here on cannot restore anything.
+            // Recovery may inspect recognized residue, but cannot attribute
+            // prior settings. Keep the file intact for diagnosis and repair.
             logger?.log(
                 .warning,
-                "Could not read the platform-state journal at \(fileURL.path) (\(error.displayDescription)); teardown will clear settings unconditionally instead of restoring them.",
+                "Could not read the platform-state journal at \(fileURL.path) (\(error.displayDescription)); recovery will inspect recognized residue; prior settings are unknown and the journal will be preserved.",
                 category: .system
             )
             fileStateBox = .unreadable
@@ -355,13 +411,19 @@ package final class PlatformStateJournal: @unchecked Sendable {
         }
     }
 
-    /// Returns whether the records reached disk. The in-memory copy is
-    /// updated either way, so this process keeps working from it.
+    /// Returns whether the records reached disk. Legacy callers retain an
+    /// in-memory copy after failure; durable network operations roll it back.
     @discardableResult
     private func saveLocked(_ records: [PlatformStateRecord]) -> Bool {
+        // Legacy resolver adoption needs its in-memory evidence for retry even
+        // when persistence is unavailable. Never replace the corrupt disk file.
         loaded = records
+        guard fileStateBox != .unreadable else {
+            logger?.log(.error, "Refusing to overwrite an unreadable platform-state journal; repair it before recording new state.", category: .system)
+            return false
+        }
         do {
-            let data = try JSONEncoder.prettyISO8601Encoder.encode(records)
+            let data = try CanonicalJSON.encoder().encode(records)
             try FileManager.default.createDirectory(
                 at: fileURL.deletingLastPathComponent(),
                 withIntermediateDirectories: true

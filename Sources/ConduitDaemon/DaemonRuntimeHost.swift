@@ -83,7 +83,9 @@ final class DaemonRuntimeHost {
     private lazy var systemConduit = SystemProxyManager(
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
-        commandRunner: commandRunner
+        commandRunner: commandRunner,
+        locationRecovery: locationRecovery,
+        configProvider: orchestrator.configSnapshotProvider
     )
     private lazy var environmentManager = EnvironmentManager(
         journal: platformStateJournal,
@@ -103,8 +105,23 @@ final class DaemonRuntimeHost {
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
         legacySnapshotFile: environment.legacySavedDNSFile,
-        commandRunner: commandRunner
+        commandRunner: commandRunner,
+        locationRecovery: locationRecovery,
+        configProvider: orchestrator.configSnapshotProvider
     )
+    private let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
+    private let networkLocationObserver: any NetworkLocationObserving
+    private lazy var locationRecovery: LocationSettingsRecovery? = {
+        guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
+        let eventLog = orchestrator.eventLog
+        let logger = logger
+        return LocationSettingsRecovery(store: store, journal: platformStateJournal) { event in
+            eventLog.append(event)
+            logger.log(.notice, "Network location: \(event.event) \(event.detail ?? "")", category: .system)
+        }
+    }()
+    private var locationReconcileInFlight = false
+    private var locationReconcileWanted = false
     private let networkMonitor = NetworkMonitor()
     /// The hops from the observers and the orchestrator's callbacks onto the
     /// main actor. Internal so the tests can `drain()` them instead of
@@ -157,6 +174,8 @@ final class DaemonRuntimeHost {
         logger: any LogSink,
         loadedConfiguration: RuntimeConfigurationLoadResult,
         configFilePredatesLaunch: Bool,
+        networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
+        networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) },
         vpnStatusMonitor: VPNStatusObserving? = nil,
         privilegeClient: (any PrivilegeClient)? = nil,
         credentialStore: (any SecretStore)? = nil,
@@ -164,6 +183,8 @@ final class DaemonRuntimeHost {
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil
     ) {
+        self.networkLocationObserver = networkLocationObserver
+        self.networkLocationStoreFactory = networkLocationStoreFactory
         self.environment = environment
         self.logger = logger
         self.config = loadedConfiguration.config
@@ -302,6 +323,7 @@ final class DaemonRuntimeHost {
                 logger: logger
             )
         }
+        startLocationObserver()
     }
 
     /// Waits for launch-time crash recovery before this host touches a
@@ -514,6 +536,7 @@ final class DaemonRuntimeHost {
             guard isCurrent(token, "runtime_start") else { return }
         }
 
+        startLocationObserver()
         networkMonitor.start()
         vpnStatusMonitor.start()
         runtimeStarted = true
@@ -547,6 +570,7 @@ final class DaemonRuntimeHost {
         runtimeStarted = false
         stopDNSHealthTimer()
         vpnStatusMonitor.stop()
+        networkLocationObserver.stop()
         networkMonitor.stop()
 
         let config = self.config
@@ -764,6 +788,59 @@ final class DaemonRuntimeHost {
     /// Only a material change resets DNS transports and refetches PAC; the
     /// DNS reconcile runs for every report, since a VPN client can rewrite
     /// service DNS with no material path change (#101, `NetworkPathReports`).
+    private func startLocationObserver() {
+        networkLocationObserver.start { [weak self, deliveries] result in
+            deliveries.deliver { await self?.handleLocationChange(result) }
+        }
+    }
+
+    private func handleLocationChange(_ result: Result<String, NetworkSettingsError>) async {
+        switch result {
+        case .success(let locationID):
+            recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_observed", detail: "location=\(locationID)"))
+        case .failure(let error):
+            recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=observe reason=\(error.localizedDescription)"))
+            return
+        }
+        guard !locationReconcileInFlight else { locationReconcileWanted = true; return }
+        locationReconcileInFlight = true
+        defer { locationReconcileInFlight = false }
+        repeat {
+            locationReconcileWanted = false
+            await awaitLaunchRecovery()
+            await runtimeLane.waitUntilIdle()
+            let state = runtimeState()
+            let proxyToken = runtimeLane.observationToken
+            let dnsToken = runtimeLane.observationToken
+            let proxy = systemConduit, dns = systemDNSManager
+            let config = self.config, platform = platformConfig
+            let pacURL = orchestrator.snapshot.bindings.localPACURL
+            let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
+            let events = orchestrator.eventLog, logger = logger
+            await platformWork.run {
+                do {
+                    if !proxyToken.isSuperseded {
+                        try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL,
+                                                    apply: platform.manageSystemProxy && state.proxyIsUp)
+                    }
+                } catch {
+                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
+                    events.append(event)
+                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
+                }
+                do {
+                    if !dnsToken.isSuperseded {
+                        try dns.reconcileLocation(apply: platform.manageSystemDNS && state.dnsIsUp, forwarderPort: forwarderPort, logger: logger)
+                    }
+                } catch {
+                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemDNS reason=\(error.localizedDescription)")
+                    events.append(event)
+                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
+                }
+            }
+        } while locationReconcileWanted
+    }
+
     private func handleNetworkChange(_ path: NetworkPathState) async {
         await NetworkPathReports.receive(
             path, orchestrator: orchestrator,
@@ -818,7 +895,14 @@ final class DaemonRuntimeHost {
         let manager = systemDNSManager
         repeat {
             dnsReconcileWanted = false
-            await platformWork.run { [logger] in manager.reconcile(logger: logger) }
+            await runtimeLane.waitUntilIdle()
+            guard systemDNSReconcileIsDue else { break }
+            let token = runtimeLane.observationToken
+            let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
+            await platformWork.run { [logger] in
+                guard !token.isSuperseded else { return }
+                manager.reconcile(logger: logger, forwarderPort: forwarderPort)
+            }
         } while dnsReconcileWanted && systemDNSReconcileIsDue
         dnsReconcileWanted = false
     }
@@ -924,12 +1008,13 @@ extension DaemonRuntimeHost {
         environment: RuntimeEnvironment,
         logger: any LogSink,
         privilegeClient: (any PrivilegeClient)? = nil,
-        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil
+        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) }
     ) async -> [RuntimeEvent] {
         let writer = RuntimeEventFileWriter(fileURL: environment.eventsFile, logger: logger)
-        let emitted = NIOLockedValueBox<[RuntimeEvent]>([])
+        let emitted = RuntimeEventLog(capacity: 2048)
         let emit: @Sendable (RuntimeEvent) -> Void = { event in
-            emitted.withLockedValue { $0.append(event) }
+            emitted.append(event)
             writer.record(event)
         }
         let base = privilegeClient ?? HelperToolPrivilegeClient(eventSink: emit)
@@ -938,13 +1023,17 @@ extension DaemonRuntimeHost {
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         }
         let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
+        let locationRecovery = networkLocationStoreFactory(audited).map {
+            LocationSettingsRecovery(store: $0, journal: journal, emit: emit)
+        }
         let systemDNS = SystemDNSManager(
             privilegeClient: audited,
             journal: journal,
             legacySnapshotFile: environment.legacySavedDNSFile,
-            commandRunner: runner
+            commandRunner: runner,
+            locationRecovery: locationRecovery
         )
-        let systemProxy = SystemProxyManager(privilegeClient: audited, journal: journal, commandRunner: runner)
+        let systemProxy = SystemProxyManager(privilegeClient: audited, journal: journal, commandRunner: runner, locationRecovery: locationRecovery)
         let recovery = LaunchRecovery {
             LaunchRecovery.recoverPlatformSurfaces(
                 systemDNS: systemDNS,
@@ -959,7 +1048,7 @@ extension DaemonRuntimeHost {
         if !writer.flush() {
             logger.log(.warning, "Launch recovery events were not all written to \(environment.eventsFile.path) before the deadline.", category: .general)
         }
-        return emitted.withLockedValue { $0 }
+        return emitted.events
     }
 }
 

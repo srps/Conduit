@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import XCTest
+import ConduitShared
 @testable import Conduit
 @testable import PlatformMac
 @testable import ProxyKernel
@@ -24,6 +25,8 @@ final class AppStateHarness {
     let environment: RuntimeEnvironment
     let machine: FakeMachine
     let vpn = FakeVPNStatusObserver()
+    let locationObserver = FakeNetworkLocationObserver()
+    var locationStore: FakeNetworkLocationStore?
     let loginItems = FakeLoginItems()
     let helper = FakeHelperLifecycle()
     let secrets = InMemorySecretStore()
@@ -69,7 +72,9 @@ final class AppStateHarness {
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
-            vpnStatusMonitor: vpn
+            vpnStatusMonitor: vpn,
+            networkLocationObserver: locationObserver,
+            networkLocationStoreFactory: { [locationStore] _ in locationStore }
         )
         appState = state
         return state
@@ -277,6 +282,83 @@ final class AppStateHarnessTests: XCTestCase {
     /// Ephemeral ports throughout: the harness runs beside whatever else the
     /// machine has bound. One split-DNS entry, so the resolver surface has
     /// a file to write.
+    func testLocationSwitchWithoutVPNOrPathChangeRestoresInactiveStateAndPreservesExternalEdits() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        try await state.startProxy()
+        await state.startDNS()
+        let vpnBefore = state.runtimeSnapshot.vpnState
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        harness.locationObserver.emit(NetworkLocationFixture.office)
+        await harness.deliveries()
+        let switched = try locations.snapshot()
+        XCTAssertEqual(switched.services[0].proxies, original.services[0].proxies)
+        XCTAssertEqual(switched.services[0].dns, original.services[0].dns)
+        XCTAssertEqual(switched.services[1].proxies["HTTPProxy"], .text("127.0.0.1"))
+        XCTAssertEqual(switched.services[1].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        let boundDNSPort = try XCTUnwrap(state.runtimeSnapshot.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(boundDNSPort)])
+        XCTAssertEqual(state.runtimeSnapshot.vpnState, vpnBefore)
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "platform.location_observed" })
+        locations.edit { $0.services[1].dns["ServerAddresses"] = .list(["192.0.2.9"]) }
+        await state.stopDNS()
+        await state.stopProxy()
+        XCTAssertEqual(try locations.snapshot().services[1].dns["ServerAddresses"], .list(["192.0.2.9"]))
+        XCTAssertEqual(try locations.snapshot().services[1].proxies, original.services[1].proxies)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+    }
+
+    func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        locations.edit { $0.services[0].enabled = false }
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        await state.startDNS()
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        locations.edit { $0.services[0].enabled = true }
+        harness.vpn.emit(.connected)
+        await harness.settle("same-location VPN report reapplied DNS", timeoutMilliseconds: 5_000) {
+            harness.journal.hasRecords(for: .systemDNS)
+        }
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        let port = try XCTUnwrap(state.runtimeSnapshot.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)])
+        await state.stopDNS()
+    }
+
+    func testLocationNotificationDuringDNSStopCannotRepinStoppedListener() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        await state.startDNS()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
+        let stop = Task { await state.stopDNS() }
+        await harness.hold.waitUntilReached()
+        defer { harness.hold.release() }
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        harness.locationObserver.emit(NetworkLocationFixture.office)
+        await harness.settle("location notification arrived during stop") {
+            state.eventLog.events.contains { $0.event == "platform.location_observed" }
+        }
+        harness.hold.release()
+        await stop.value
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot().services, original.services)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+    }
+
     private func makeConfig() -> ProxyConfig {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0

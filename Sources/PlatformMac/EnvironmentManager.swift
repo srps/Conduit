@@ -59,6 +59,7 @@ package final class EnvironmentManager: @unchecked Sendable {
     package func apply(config: ProxyConfig, logger: (any LogSink)?) throws {
         operations.lock()
         defer { operations.unlock() }
+        try journal.requireReadableForApply()
         let block = renderBlock(config: config)
         for file in targetFiles {
             try ensureParentDirectory(for: file)

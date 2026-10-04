@@ -523,6 +523,7 @@ package final class DNSManager: @unchecked Sendable {
             }
         }
 
+        try journal?.requireReadableForApply()
         for entry in enabledEntries {
             recordManaged(entry.domain)
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
@@ -657,6 +658,7 @@ package final class DNSManager: @unchecked Sendable {
                 try Self.validateServer(server)
             }
         }
+        try journal?.requireReadableForApply()
         for entry in entries {
             recordManaged(entry.domain)
             try privilegeClient.execute(.applyDNS, values: [entry.domain, entry.servers.joined(separator: ",")])
@@ -697,6 +699,7 @@ package final class DNSManager: @unchecked Sendable {
         for domain in interceptDomains {
             try Self.validateDomain(domain)
         }
+        try journal?.requireReadableForApply()
         for domain in interceptDomains {
             recordManaged(domain)
             try privilegeClient.execute(.applyDNS, values: [domain, "127.0.0.1", String(config.dnsForwarderPort)])

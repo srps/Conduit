@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import ProxyKernel
+import ConduitShared
 
 package enum SystemDNSManagerError: Error, LocalizedError, Equatable {
     case listingFailed(exitCode: Int32)
@@ -49,6 +50,8 @@ package final class SystemDNSManager: @unchecked Sendable {
         try operations.withLock(body)
     }
 
+    private let locationRecovery: LocationSettingsRecovery?
+    private let configProvider: @Sendable () -> ProxyConfig
     private let privilegeClient: PrivilegeClient
     /// Prior per-service DNS servers. Shared with every other platform surface
     /// so there is one answer to "what was here before us" rather than the
@@ -79,13 +82,31 @@ package final class SystemDNSManager: @unchecked Sendable {
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
-        relayIsLive: @escaping @Sendable () -> Bool = { SystemDNSManager.dnsResponds(onPort: 53) }
+        relayIsLive: @escaping @Sendable () -> Bool = { SystemDNSManager.dnsResponds(onPort: 53) },
+        locationRecovery: LocationSettingsRecovery? = nil,
+        configProvider: @escaping @Sendable () -> ProxyConfig = { ProxyConfig() }
     ) {
         self.privilegeClient = privilegeClient
         self.journal = journal
         self.commandRunner = commandRunner
         self.relayIsLive = relayIsLive
         self.legacySnapshotFile = legacySnapshotFile
+        self.locationRecovery = locationRecovery
+        self.configProvider = configProvider
+    }
+
+    package func reconcileLocation(apply: Bool, forwarderPort: Int, logger: (any LogSink)? = nil) throws {
+        try operations.withLock {
+            guard let locationRecovery else { return }
+            // Old locations must recover even if relay readiness fails.
+            try locationRecovery.restore(kind: .dns, inactiveOnly: apply)
+            if apply {
+                guard (1...65_535).contains(forwarderPort) else { throw NetworkSettingsError.invalidRequest }
+                // A running forwarder alone does not prove the privileged
+                // relay started. Its idempotent start must succeed first.
+                try self.apply(forwarderPort: forwarderPort, logger: logger)
+            }
+        }
     }
 
     // MARK: - Saved state
@@ -115,6 +136,12 @@ package final class SystemDNSManager: @unchecked Sendable {
     package func apply(forwarderPort: Int, logger: (any LogSink)?) throws {
         operations.lock()
         defer { operations.unlock() }
+        if let locationRecovery {
+            try journal.requireReadableForApply()
+            try startRelay(forwarderPort: forwarderPort, logger: logger)
+            try locationRecovery.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: configProvider())
+            return
+        }
         // Nothing captured, nothing redirected. Every host calls
         // `saveCurrentDNS` first and treats its failure as non-fatal, so
         // without this guard a listing that failed once left the interfaces
@@ -149,6 +176,13 @@ package final class SystemDNSManager: @unchecked Sendable {
     package func clear(logger: (any LogSink)?) throws {
         operations.lock()
         defer { operations.unlock() }
+        if let locationRecovery {
+            // Restore first, but the relay must never outlive a stopped
+            // forwarder. Failed restoration keeps its journal for retry.
+            defer { stopRelay(logger: logger) }
+            try locationRecovery.clear(kind: .dns, config: configProvider())
+            return
+        }
         guard hasSavedInterfaces() else {
             // A previous teardown restored this surface. Probing the machine
             // now would flag a user's own 127.0.0.1 resolver — just restored —
@@ -277,6 +311,10 @@ package final class SystemDNSManager: @unchecked Sendable {
         // would record a stranded 127.0.0.1 as the prior value and make the
         // snapshot unimportable for good.
         importLegacySnapshotIfPresent(logger: logger)
+        if let locationRecovery {
+            try locationRecovery.validateSnapshot()
+            return
+        }
         let services = try connectedNetworkServices(logger: logger)
         for service in services {
             // First-write-wins in the journal: a second `saveCurrentDNS` in the
@@ -314,6 +352,9 @@ package final class SystemDNSManager: @unchecked Sendable {
         operations.lock()
         defer { operations.unlock() }
         importLegacySnapshotIfPresent(logger: logger)
+        if let locationRecovery {
+            return locationRecovery.recover(kind: .dns, config: configProvider(), listenerIsLive: relayIsLive())
+        }
         guard hasSavedInterfaces(), let savedAt = journal.oldestRecordDate(for: .systemDNS) else {
             return .nothingToDo(.nothingRecorded)
         }
@@ -459,8 +500,15 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func stopRelay(logger: (any LogSink)?) {
-        try? privilegeClient.execute(.stopDNSRelay, values: [])
-        logger?.log(.notice, "DNS relay on :53 stopped.", category: .system)
+        do {
+            try privilegeClient.execute(.stopDNSRelay, values: [])
+            logger?.log(.notice, "DNS relay on :53 stopped.", category: .system)
+        } catch {
+            let event = locationRecovery?.failureEvent(operation: "stop_relay", error: error) ?? RuntimeEvent(
+                kind: .config, event: "platform.location_failed", detail: "operation=stop_relay reason=\(error.localizedDescription)"
+            )
+            logger?.log(.warning, event.detail ?? event.event, category: .system)
+        }
     }
 
     package func readDNSServers(service: String) -> [String] {
@@ -534,9 +582,18 @@ package final class SystemDNSManager: @unchecked Sendable {
 
     // MARK: - Reconcile (VPN transitions)
 
-    package func reconcile(logger: (any LogSink)?) {
+    package func reconcile(logger: (any LogSink)?, forwarderPort: Int? = nil) {
         operations.lock()
         defer { operations.unlock() }
+        if let locationRecovery {
+            do {
+                try reconcileLocation(apply: true, forwarderPort: forwarderPort ?? configProvider().dnsForwarderPort, logger: logger)
+            } catch {
+                let event = locationRecovery.failureEvent(operation: "reconcile", error: error)
+                logger?.log(.warning, event.detail ?? event.event, category: .system)
+            }
+            return
+        }
         guard hasSavedInterfaces() else { return }
         guard let currentServices = try? connectedNetworkServices(logger: nil) else { return }
 

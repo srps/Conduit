@@ -76,6 +76,16 @@ final class ProxyStartGateTests: XCTestCase {
         XCTAssertNotNil(server.listeningPort)
     }
 
+    func testHelperOnlyBypassBoundsDoNotWithholdTheProxyListener() async throws {
+        var config = makeConfig()
+        config.noProxyHosts = Array(repeating: "short.example", count: 257)
+        XCTAssertTrue(config.validate().contains { if case .invalidSystemProxyBypass = $0 { return true }; return false })
+        let server = makeServer(config)
+        try await server.start()
+        addTeardownBlock { await server.stop() }
+        XCTAssertNotNil(server.listeningPort)
+    }
+
     /// An intercept IP that is not an address is the same category: it is only
     /// ever written into a resolver file's synthesized answer.
     func testAnUnusableInterceptIPStillLetsTheProxyStart() async throws {
@@ -137,7 +147,7 @@ final class ProxyStartGateTests: XCTestCase {
     /// Every case answers deliberately. A new case added without a decision is
     /// a compile error in `blocksProxyStart`, which is the point of putting it
     /// on the enum rather than in a filter at the call site.
-    func testOnlyTheInterceptCasesAreNonBlocking() {
+    func testOnlyPlatformIntegrationCasesAreNonBlocking() {
         XCTAssertFalse(
             ConfigValidationError.invalidInterceptPattern(
                 index: 0, pattern: "*", reason: .empty
@@ -156,6 +166,7 @@ final class ProxyStartGateTests: XCTestCase {
         XCTAssertTrue(ConfigValidationError.invalidDuration(field: "d", value: -1).blocksProxyStart)
         XCTAssertTrue(ConfigValidationError.invalidHost(field: "h", value: "!").blocksProxyStart)
         XCTAssertTrue(ConfigValidationError.conflict(description: "c").blocksProxyStart)
+        XCTAssertFalse(ConfigValidationError.invalidSystemProxyBypass(reason: "too large").blocksProxyStart)
     }
 }
 

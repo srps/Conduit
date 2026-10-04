@@ -63,6 +63,8 @@ package final class LifecycleLane {
 
     /// How many generations have begun, termination's included.
     package var current: Int { latest.value }
+    /// A generation guard for observer work which must not outlive a later stop/start.
+    package var observationToken: Token { Token(generation: current, latest: latest) }
     package var isIdle: Bool { active == 0 }
     /// How many callers are in `waitUntilIdle()`. For a test that has to
     /// know a reconcile pass is waiting, not time it.
