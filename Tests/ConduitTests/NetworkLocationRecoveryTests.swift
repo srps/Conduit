@@ -147,6 +147,33 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testStoppedManagersRestoreRetainedRecordsAfterReturningToTheirLocation() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let original = try store.snapshot()
+            let config = ProxyConfig()
+            let privilege = RecordingPrivilegeClient()
+            let proxy = SystemProxyManager(privilegeClient: privilege, journal: journal, locationRecovery: recovery)
+            let dns = SystemDNSManager(privilegeClient: privilege, journal: journal, locationRecovery: recovery)
+            try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+            try dns.apply(forwarderPort: 15053, logger: nil)
+            store.edit { $0.activeLocationID = office }
+            store.refuseWrites(true)
+            XCTAssertThrowsError(try proxy.clear(logger: nil))
+            XCTAssertThrowsError(try dns.clear(logger: nil))
+            XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+            XCTAssertTrue(journal.hasRecords(for: .systemDNS))
+            store.refuseWrites(false)
+            store.edit { $0.activeLocationID = home }
+            let relayStarts = privilege.commands(matching: .startDNSRelay).count
+            try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: false)
+            try dns.reconcileLocation(apply: false, forwarderPort: 0)
+            XCTAssertEqual(try store.snapshot().services, original.services)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+            XCTAssertEqual(privilege.commands(matching: .startDNSRelay).count, relayStarts)
+        }
+    }
+
     func testManagersRetryApplyAfterEmptyLocationReleasedAllPriorRecords() throws {
         try withRecovery { store, journal, recovery, _ in
             let config = ProxyConfig()
@@ -337,6 +364,22 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             XCTAssertEqual(try store.snapshot().services[0].proxies, old)
             store.edit { $0.services[0].proxies = [:] }
             try recovery.clear(kind: .proxies, config: config)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+        }
+    }
+
+    func testLegacyCleanupPreservesUnrelatedCorporateServiceWithoutBlockingRecovery() throws {
+        try withRecovery { store, journal, recovery, _ in
+            journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["webHost": "old-corporate.example", "webPort": "8080", "webEnabled": "true"])
+            let unrelated: [String: NetworkSettingValue] = ["HTTPProxy": .text("other-corporate.example"), "HTTPPort": .number(9090), "HTTPEnable": .number(1)]
+            store.edit {
+                $0.services[0].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)]
+                $0.services[1].name = "Ethernet"
+                $0.services[1].proxies = unrelated
+            }
+            try recovery.clear(kind: .proxies, config: ProxyConfig())
+            XCTAssertEqual(try store.snapshot().services[0].proxies, [:])
+            XCTAssertEqual(try store.snapshot().services[1].proxies, unrelated)
             XCTAssertFalse(journal.hasRecords(for: .systemProxy))
         }
     }

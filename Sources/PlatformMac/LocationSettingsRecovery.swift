@@ -333,7 +333,10 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             }
             let current = fields(member, kind)
             let replacement = removeResidue(current, kind: kind, config: config)
-            if kind == .proxies && !legacy.isEmpty && containsUnattributedEndpoint(replacement, legacy: legacy) {
+            let couldHoldLegacyState = legacy.contains { record in
+                record.scope == member.name || !snapshot.services.contains { $0.name == record.scope }
+            }
+            if kind == .proxies && !legacy.isEmpty && couldHoldLegacyState && containsUnattributedEndpoint(replacement, legacy: legacy) {
                 report("failed", "operation=legacy_cleanup location=\(member.locationID) surface=proxies reason=unattributed_proxy_endpoint")
                 unreadable = true
             }

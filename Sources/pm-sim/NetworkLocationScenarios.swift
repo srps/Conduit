@@ -105,6 +105,23 @@ enum NetworkLocationScenarios {
             && retrySnapshot.services[1].dns == localDNS
         try retryProxy.clear(logger: nil)
         try retryDNS.clear(logger: nil)
+        retryStore.edit { $0.activeLocationID = home }
+        let beforeStoppedRecovery = try retryStore.snapshot()
+        try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+        try retryDNS.apply(forwarderPort: 15053, logger: nil)
+        retryStore.edit { $0.activeLocationID = office }
+        retryStore.refuseWrites(true)
+        do { try retryProxy.clear(logger: nil) }
+        catch { /* Retained proxy records are retried after returning to home. */ }
+        do { try retryDNS.clear(logger: nil) }
+        catch { /* Retained DNS records are retried after returning to home. */ }
+        let stoppedRecordsRetained = journal.hasRecords(for: .systemProxy) && journal.hasRecords(for: .systemDNS)
+        retryStore.refuseWrites(false)
+        retryStore.edit { $0.activeLocationID = home }
+        try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: false)
+        try retryDNS.reconcileLocation(apply: false, forwarderPort: 0)
+        let stoppedActiveRestored = try stoppedRecordsRetained && retryStore.snapshot().services == beforeStoppedRecovery.services
+            && !journal.hasRecords(for: .systemProxy) && !journal.hasRecords(for: .systemDNS)
         let relayPrivilege = RecordingPrivilegeClient()
         let relayDNS = SystemDNSManager(privilegeClient: relayPrivilege, journal: journal, locationRecovery: retryRecovery)
         retryStore.edit { $0.activeLocationID = home }
@@ -159,6 +176,15 @@ enum NetworkLocationScenarios {
         catch { gatewayLegacyRetained = journal.hasRecords(for: .systemProxy) }
         gatewayStore.edit { $0.services[0].proxies = [:] }
         try gatewayRecovery.clear(kind: .proxies, config: gatewayConfig)
+        journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["webHost": "old-corporate.example", "webPort": "8080", "webEnabled": "true"])
+        let unrelatedCorporate: [String: NetworkSettingValue] = ["HTTPProxy": .text("other-corporate.example"), "HTTPPort": .number(9090), "HTTPEnable": .number(1)]
+        gatewayStore.edit {
+            $0.services[0].proxies = oldProxy
+            $0.services[1].name = "Ethernet"
+            $0.services[1].proxies = unrelatedCorporate
+        }
+        try gatewayRecovery.clear(kind: .proxies, config: config)
+        let unrelatedCorporatePreserved = try gatewayStore.snapshot().services[1].proxies == unrelatedCorporate
         let corrupt = Data("{broken}".utf8)
         try corrupt.write(to: corruptFile)
         let corruptJournal = PlatformStateJournal(fileURL: corruptFile)
@@ -245,6 +271,7 @@ enum NetworkLocationScenarios {
                 .init("corrupt journal recovery clears recognized residue and preserves evidence", corruptFailures == 2 && corruptResidueCleared && corruptEvidencePreserved && !corruptRecovery.isCleared(kind: .dns)),
                 .init("unreadable journal withholds new environment and resolver publication", newSurfaceWritesBlocked),
                 .init("apply retries in a valid location after an empty location released all records", emptyRetrySucceeded),
+                .init("stopped reconciliation restores retained records after returning to their location", stoppedActiveRestored),
                 .init("failed relay start still restores inactive DNS, withholds active redirection, and retries later", relayFailurePreserved && relayRetryApplied),
                 .init("successful reapply no longer claims external edits back to the previous generation", externalPreviousPreserved),
                 .init("same-location compare failures retry with a fixed budget and retain evidence on exhaustion", compareRetrySucceeded && retryExhausted),
@@ -253,6 +280,7 @@ enum NetworkLocationScenarios {
                 .init("malformed scoped admission retains its invalid-arguments diagnostic", HelperAdmission.scopedSettingsAdmission(values: ["{broken}"]) == .invalidArguments),
                 .init("same-location network reconcile retries DNS after an initially unavailable service", sameLocationRetryApplied),
                 .init("unmatched legacy gateway endpoints retain recovery evidence", gatewayLegacyRetained),
+                .init("unrelated corporate service does not block legacy recovery", unrelatedCorporatePreserved),
                 .init("deferred proxy cleanup removes enable flags with endpoints", proxyDisabledOnDeferredCleanup),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })

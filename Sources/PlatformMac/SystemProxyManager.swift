@@ -84,7 +84,7 @@ package final class SystemProxyManager: @unchecked Sendable {
             if apply {
                 try locationRecovery.apply(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL), config: config)
             } else {
-                try locationRecovery.restore(kind: .proxies, inactiveOnly: true)
+                try locationRecovery.restore(kind: .proxies)
             }
         }
     }

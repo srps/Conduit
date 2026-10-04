@@ -99,7 +99,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         try operations.withLock {
             guard let locationRecovery else { return }
             // Old locations must recover even if relay readiness fails.
-            try locationRecovery.restore(kind: .dns, inactiveOnly: true)
+            try locationRecovery.restore(kind: .dns, inactiveOnly: apply)
             if apply {
                 guard (1...65_535).contains(forwarderPort) else { throw NetworkSettingsError.invalidRequest }
                 // A running forwarder alone does not prove the privileged

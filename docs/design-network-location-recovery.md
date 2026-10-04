@@ -60,8 +60,12 @@ configuration, then retire ambiguous legacy records only after successful cleanu
 Unrecognized loopback or gateway endpoints (such as a previous configured host
 or port) retain legacy evidence. Non-loopback endpoints exactly matching a known
 legacy prior are left as-is; prior values are never installed by service name.
-Other unmatched endpoints require residue inspection before retiring the record.
-Unattributed residue retains the legacy evidence and emit a failure rather than silently claiming recovery.
+Other unmatched endpoints on a service associated by the legacy name require
+residue inspection before retiring the record. If that name is absent, identity
+is unknown and evidence is retained. Corporate endpoints on unrelated named
+services do not block recovery. These name checks only limit ambiguity; they
+never authorize installing legacy prior values.
+Unattributed residue retains the legacy evidence and emits a failure rather than silently claiming recovery.
 Known scoped records are restored independently before that legacy failure is
 returned, so an ambiguous old record cannot prevent their teardown.
 DNS residue cleanup returns explicit DNS to DHCP, since the original location is
@@ -71,7 +75,10 @@ Unsupported or credential-bearing protocol settings are isolated to that service
 and protocol. Its recovery record remains for retry; other identities and the
 other protocol can still recover. No credential-bearing fields enter the snapshot.
 
-On an external location switch, restore outstanding inactive-location records and
+When application is disabled, location reconciliation retries every outstanding
+record, including the active location, so returning after a failed teardown cannot
+leave settings pointing at a stopped listener. When application is enabled, an external location switch restores outstanding
+inactive-location records and
 reconcile the active location through the existing host readiness and VPN gates.
 Do not modify routing mode, VPN detection, or split-DNS policy. Active-set and expected-value checks
 inside the privileged write reject a switch racing an apply.
