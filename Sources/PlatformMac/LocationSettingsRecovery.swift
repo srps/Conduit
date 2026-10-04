@@ -50,15 +50,16 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     /// Probing only today's config misses a live session after a port/config change.
     package func proxyListenerIsLive(config: ProxyConfig, probe: @Sendable (Int) -> Bool) throws -> Bool {
         let snapshot = try store.snapshot()
-        for service in snapshot.services {
+        for service in snapshot.services where service.enabled && service.locationID == snapshot.activeLocationID {
             let current = service.proxies
             for prefix in ["HTTP", "HTTPS"] {
-                guard case .text(let host) = current[prefix + "Proxy"],
+                guard current[prefix + "Enable"] == .number(1), case .text(let host) = current[prefix + "Proxy"],
                       host == config.effectiveClientHost || Self.isLoopback(host),
                       case .number(let port) = current[prefix + "Port"], (1...65535).contains(port) else { continue }
                 if probe(port) { return true }
             }
-            if case .text(let text) = current["ProxyAutoConfigURLString"], let url = URL(string: text),
+            if current["ProxyAutoConfigEnable"] == .number(1),
+               case .text(let text) = current["ProxyAutoConfigURLString"], let url = URL(string: text),
                Self.isLoopback(url.host ?? ""), let port = url.port, (1...65535).contains(port), probe(port) { return true }
         }
         return false
@@ -100,9 +101,14 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
 
     package func apply(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
         try operations.withLock {
+            if kind == .proxies && desired["ProxyAutoConfigEnable"] == .number(1) {
+                guard case .text(let url) = desired["ProxyAutoConfigURLString"], !url.isEmpty else {
+                    report("failed", "operation=apply surface=proxies reason=missing_pac_url")
+                    throw NetworkSettingsError.invalidRequest
+                }
+            }
             // Put back inactive locations first; their endpoints must not outlive this runtime.
-            try cleanLegacy(kind: kind, config: config)
-            try restore(kind: kind, inactiveOnly: true)
+            try cleanLegacyAndRestore(kind: kind, config: config, inactiveOnly: true)
             let snapshot = try store.snapshot()
             let active = snapshot.services.filter { $0.locationID == snapshot.activeLocationID && $0.enabled && $0.supports(kind) }
             guard !active.isEmpty else { throw NetworkSettingsError.unavailable }
@@ -232,8 +238,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                     if journal.hasRecords(for: surface(kind)) || residue { return .declinedLiveListener }
                 }
                 let hadRecords = journal.hasRecords(for: surface(kind))
-                try cleanLegacy(kind: kind, config: config)
-                try restore(kind: kind)
+                try cleanLegacyAndRestore(kind: kind, config: config)
                 return hadRecords ? .restored(stale: false) : .nothingToDo(.nothingRecorded)
             } catch {
                 report("failed", "operation=recover reason=\(error.localizedDescription)")
@@ -244,10 +249,19 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
 
     package func clear(kind: NetworkSettingsKind, config: ProxyConfig) throws {
         try operations.withLock {
-            try cleanLegacy(kind: kind, config: config)
-            try restore(kind: kind)
+            try cleanLegacyAndRestore(kind: kind, config: config)
             if !journal.hasRecords(for: surface(kind)) { journal.markReleased(surface: surface(kind)) }
         }
+    }
+
+    /// Ambiguous legacy settings cannot prevent restoration of known scoped identities.
+    private func cleanLegacyAndRestore(kind: NetworkSettingsKind, config: ProxyConfig, inactiveOnly: Bool = false) throws {
+        var firstError: Error?
+        do { try cleanLegacy(kind: kind, config: config) }
+        catch { firstError = error }
+        do { try restore(kind: kind, inactiveOnly: inactiveOnly) }
+        catch { if firstError == nil { firstError = error } }
+        if let firstError { throw firstError }
     }
 
     private func cleanLegacy(kind: NetworkSettingsKind, config: ProxyConfig) throws {

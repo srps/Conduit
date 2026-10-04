@@ -99,6 +99,7 @@ package final class SystemProxyManager: @unchecked Sendable {
     }
 
     package func isApplied(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String? = nil) -> Bool {
+        if mode == .pac && Self.effectivePACURL(config: config, localPACURL: localPACURL).isEmpty { return false }
         if let locationRecovery {
             return locationRecovery.isApplied(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL))
         }

@@ -70,6 +70,21 @@ final class NetworkSettingsHelperTests: XCTestCase {
         XCTAssertTrue(update.isCleanup)
     }
 
+    func testCleanupRecognizesSupportedLoopbackAddressesAndRejectsLookalikes() {
+        var update = request()
+        update.kind = .proxies
+        update.requireActive = false
+        update.replacement = [:]
+        for host in ["127.0.0.2", "127.255.255.254", "LOCALHOST", "::1"] {
+            update.expected = ["HTTPProxy": .text(host), "HTTPPort": .number(3128), "HTTPEnable": .number(1)]
+            XCTAssertTrue(update.isCleanup, host)
+        }
+        update.expected["HTTPProxy"] = .text("127.attacker.example")
+        XCTAssertFalse(update.isCleanup)
+        update.expected = ["ProxyAutoConfigURLString": .text("http://127.0.0.2:8888/proxy.pac"), "ProxyAutoConfigEnable": .number(1)]
+        XCTAssertTrue(update.isCleanup)
+    }
+
     func testUnsupportedProxyProjectionDoesNotPoisonDNSOrExposeCredentials() {
         let proxy = SystemNetworkLocationStore.readFields(["ProxyAutoConfigURLString": "https://user:password@example.com/proxy.pac"], kind: .proxies)
         XCTAssertTrue(proxy.unreadable)

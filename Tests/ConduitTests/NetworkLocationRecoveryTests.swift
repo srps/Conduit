@@ -185,6 +185,19 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testAmbiguousLegacyCleanupDoesNotBlockKnownScopedRestoration() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let original = try store.snapshot().services[0].proxies
+            try recovery.apply(kind: .proxies, desired: ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)], config: ProxyConfig())
+            journal.recordPrior(surface: .systemProxy, scope: "Legacy service", value: ["httpHost": "corporate.example"])
+            store.edit { $0.services[1].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(54321), "HTTPEnable": .number(1)] }
+            XCTAssertThrowsError(try recovery.clear(kind: .proxies, config: ProxyConfig()))
+            XCTAssertEqual(try store.snapshot().services[0].proxies, original)
+            XCTAssertEqual(journal.records(for: .systemProxy).map(\.scope), ["Legacy service"])
+            XCTAssertEqual(try store.snapshot().services[1].proxies["HTTPPort"], .number(54321))
+        }
+    }
+
     func testReapplyPreservesInitialPriorAndRebasesExternalDNSRewrite() throws {
         try withRecovery { store, _, recovery, _ in
             try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig())
@@ -234,6 +247,31 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             XCTAssertEqual(recovery.recover(kind: .proxies, config: changedConfig, listenerIsLive: live), .declinedLiveListener)
             XCTAssertEqual(try store.snapshot().services[0].proxies["HTTPPort"], .number(7777))
             XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+        }
+    }
+
+    func testDisabledOrInactiveEndpointsDoNotProtectAnUnrelatedListener() throws {
+        try withRecovery { store, _, recovery, _ in
+            let disabled: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(7777), "HTTPEnable": .number(0),
+                                                          "ProxyAutoConfigEnable": .number(0), "ProxyAutoConfigURLString": .text("http://localhost:7777/proxy.pac")]
+            store.edit { $0.services[0].proxies = disabled; $0.services[1].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(7777), "HTTPEnable": .number(1)] }
+            XCTAssertFalse(try recovery.proxyListenerIsLive(config: ProxyConfig(), probe: { _ in true }))
+            store.edit { $0.services[0].proxies["HTTPEnable"] = .number(1); $0.services[0].enabled = false }
+            XCTAssertFalse(try recovery.proxyListenerIsLive(config: ProxyConfig(), probe: { _ in true }))
+            store.edit { $0.services[0].enabled = true }
+            XCTAssertTrue(try recovery.proxyListenerIsLive(config: ProxyConfig(), probe: { _ in true }))
+        }
+    }
+
+    func testPACModeWithoutAURLPreservesPriorProxyAndDoesNotCapture() throws {
+        try withRecovery { store, journal, recovery, events in
+            let original = try store.snapshot()
+            let manager = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+            XCTAssertFalse(manager.isApplied(config: ProxyConfig(), mode: .pac))
+            XCTAssertThrowsError(try manager.apply(config: ProxyConfig(), mode: .pac, logger: nil))
+            XCTAssertEqual(try store.snapshot(), original)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertTrue(events.events.contains { $0.detail?.contains("missing_pac_url") == true })
         }
     }
 

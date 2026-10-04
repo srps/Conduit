@@ -47,6 +47,18 @@ enum NetworkLocationScenarios {
         do { try recovery.apply(kind: .dns, desired: localDNS, config: config) }
         catch { racedApplyRejected = true }
         try recovery.clear(kind: .dns, config: config)
+        let beforePAC = try store.snapshot()
+        var emptyPACRejected = false
+        do {
+            try recovery.apply(kind: .proxies, desired: ["ProxyAutoConfigEnable": .number(1), "ProxyAutoConfigURLString": .text("")], config: config)
+        } catch NetworkSettingsError.invalidRequest { emptyPACRejected = true }
+        let afterPAC = try store.snapshot()
+        let invalidPACPreservedPrior = emptyPACRejected && afterPAC == beforePAC
+        let cleanup = NetworkSettingsRequest(locationID: home, serviceID: services[0].serviceID, kind: .proxies,
+            expected: ["HTTPProxy": .text("127.0.0.2"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)],
+            replacement: [:], requireActive: false)
+        store.edit { $0.services[0].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(7777), "HTTPEnable": .number(0)] }
+        let disabledIgnored = try !recovery.proxyListenerIsLive(config: config, probe: { _ in true })
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -57,6 +69,9 @@ enum NetworkLocationScenarios {
                 .init("external edit and rename survive retry and repeated recovery", externalPreserved),
                 .init("external switch racing apply rejects stale active-location write", racedApplyRejected),
                 .init("recovery releases all records", !journal.hasRecords(for: .systemDNS)),
+                .init("empty PAC URL cannot overwrite prior proxy settings", invalidPACPreservedPrior),
+                .init("loginwindow cleanup accepts non-default IPv4 loopback", cleanup.isCleanup),
+                .init("disabled endpoint cannot protect an unrelated listener", disabledIgnored),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]

@@ -44,6 +44,11 @@ package struct NetworkSettingsRequest: Codable, Equatable, Sendable {
         guard UUID(uuidString: locationID) != nil, UUID(uuidString: serviceID) != nil else {
             throw NetworkSettingsError.invalidRequest
         }
+        if requireActive && replacement["ProxyAutoConfigEnable"] == .number(1) {
+            guard case .text(let url) = replacement["ProxyAutoConfigURLString"], !url.isEmpty else {
+                throw NetworkSettingsError.invalidRequest
+            }
+        }
         for fields in [expected, replacement] {
             guard Set(fields.keys).isSubset(of: kind.keys) else { throw NetworkSettingsError.invalidRequest }
             for (key, value) in fields {
@@ -104,7 +109,8 @@ package struct NetworkSettingsRequest: Codable, Equatable, Sendable {
     }
 
     private static func isLoopback(_ host: String) -> Bool {
-        host == "localhost" || host == "::1" || host == "[::1]" || host == "127.0.0.1"
+        host.caseInsensitiveCompare("localhost") == .orderedSame || host == "::1" || host == "[::1]"
+            || (host.hasPrefix("127.") && HelperInputValidator.validateIPAddress(host))
     }
 
     package func encoded() throws -> String {

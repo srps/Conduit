@@ -13,6 +13,8 @@ request: location ID, service ID, DNS or proxies, expected managed fields,
 replacement managed fields, and whether the location must still be active.
 Only ServerAddresses and Conduit's existing HTTP/HTTPS/PAC/bypass fields are
 mutable. Authentication fields and unrelated protocol settings are excluded.
+Applying PAC mode requires a nonempty URL before any mutation. Live-session
+protection probes only enabled endpoints on enabled services in the active set.
 The helper locks SCPreferences without waiting, verifies set membership, active
 set when required, and expected fields before committing. It merges the selected
 fields into the current configuration, preserving unrelated fields. Recovery can
@@ -36,6 +38,8 @@ residue across all sets, removing those endpoints while preserving external
 configuration, then retire ambiguous legacy records only after successful cleanup.
 Unrecognized loopback endpoints (such as a previous configured port) retain the
 legacy evidence and emit a failure rather than silently claiming recovery.
+Known scoped records are restored independently before that legacy failure is
+returned, so an ambiguous old record cannot prevent their teardown.
 DNS residue cleanup returns explicit DNS to DHCP, since the original location is
 unknown. Emit events describing that loss of prior-state attribution.
 
@@ -67,7 +71,8 @@ production hosts always construct the scoped store. Dev launches inject fakes.
 
 When no console user is present, scoped removal of loopback listener fields is
 admitted, while corporate endpoints and bypass lists cannot be removed through
-that exception. Installing prior
+that exception. Valid 127/8 addresses, localhost and IPv6 loopback are supported.
+Installing prior
 values is deferred. The journal keeps the previous settings until login; this
 removes dead loopback endpoints without widening apply permission at loginwindow.
 
