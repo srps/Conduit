@@ -134,6 +134,7 @@ package final class SystemDNSManager: @unchecked Sendable {
         operations.lock()
         defer { operations.unlock() }
         if let locationRecovery {
+            try journal.requireReadableForApply()
             try startRelay(forwarderPort: forwarderPort, logger: logger)
             try locationRecovery.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: configProvider())
             return
@@ -174,7 +175,14 @@ package final class SystemDNSManager: @unchecked Sendable {
         defer { operations.unlock() }
         if let locationRecovery {
             // Restore before stopping the relay; a partial recovery remains usable and retryable.
-            try locationRecovery.clear(kind: .dns, config: configProvider())
+            do {
+                try locationRecovery.clear(kind: .dns, config: configProvider())
+            } catch PrivilegeClientError.refused(.noConsoleUser, let message) {
+                // Loopback cleanup landed, but prior settings await login.
+                // The relay must not outlive the in-process forwarder.
+                stopRelay(logger: logger)
+                throw PrivilegeClientError.refused(.noConsoleUser, message)
+            }
             stopRelay(logger: logger)
             return
         }

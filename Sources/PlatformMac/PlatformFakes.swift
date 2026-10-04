@@ -611,4 +611,9 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
     }
     package func stop() { lock.withLock { callback = nil } }
     package func emit(_ locationID: String) { lock.withLock { callback }?(.success(locationID)) }
+    /// Models a callback already in flight when observation is stopped.
+    package func pendingDelivery(_ locationID: String) -> (@Sendable () -> Void)? {
+        guard let callback = lock.withLock({ callback }) else { return nil }
+        return { callback(.success(locationID)) }
+    }
 }

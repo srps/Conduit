@@ -808,6 +808,7 @@ final class DaemonRuntimeHost {
         repeat {
             locationReconcileWanted = false
             await awaitLaunchRecovery()
+            await runtimeLane.waitUntilIdle()
             let state = runtimeState()
             let proxyToken = runtimeLane.observationToken
             let dnsToken = runtimeLane.observationToken

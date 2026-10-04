@@ -41,7 +41,13 @@ unchanged as prior state. Residue cleanup requires legacy journal evidence or an
 unreadable journal. A corrupt journal triggers recognized residue inspection and
 cleanup, reports that prior settings are unknown, and stays intact for repair.
 All journal writes refuse to replace that evidence, including other surfaces'
-release markers. New application fails until the journal is repaired and reloaded.
+release markers. New network, environment and resolver application fails until
+the journal is repaired and reloaded. Resolver cleanup may retain in-memory
+adoption records for retry; these do not authorize new writes.
+The unreadable-journal fallback deliberately favors removing recognized dead
+listener residue over retaining an indistinguishable user-owned loopback setting.
+Unlike an absent journal, corrupt existing evidence cannot prove Conduit never
+changed the settings. This matches the established resolver/proxy recovery policy.
 Legacy service-name entries have unknown location identity. Never migrate their
 prior values into the current location by guessing. Sweep exact Conduit loopback
 residue across all sets, removing those endpoints while preserving external
@@ -75,7 +81,9 @@ installation and controlled macOS 26/27 corporate-VPN validation.
 
 The helper operation, shared recovery policy, journal, observer, fakes, and both
 host compositions are implemented. Observer work is coalesced and guarded by the
-host's existing lifecycle generation so a later stop supersedes it. Existing
+host's existing lifecycle generation so a later stop supersedes it. Observations
+wait for lifecycle lanes to become idle before reading readiness, so a notification
+during stop cannot enqueue reapplication behind teardown. Existing
 service-name manager paths remain only for explicit legacy harness composition;
 production hosts always construct the scoped store. Dev launches inject fakes.
 
@@ -85,6 +93,7 @@ that exception. Valid 127/8 addresses, localhost and IPv6 loopback are supported
 Installing prior
 values is deferred. The journal keeps the previous settings until login; this
 removes dead loopback endpoints without widening apply permission at loginwindow.
+DNS cleanup stops the privileged relay even when prior restoration is deferred.
 
 New clients require the v5 helper for scoped operations, with no AppleScript or
 service-name fallback. Run `sudo ./install-helper.sh` after installing this build;

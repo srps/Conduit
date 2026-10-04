@@ -367,6 +367,22 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testLoginwindowDeferredRestorationStopsDNSRelayAndRetainsPrior() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let privilege = RecordingPrivilegeClient()
+            let manager = SystemDNSManager(privilegeClient: privilege, journal: journal, locationRecovery: recovery)
+            try manager.apply(forwarderPort: 15053, logger: nil)
+            store.atLoginwindow = true
+            XCTAssertThrowsError(try manager.clear(logger: nil))
+            XCTAssertEqual(privilege.commands(matching: .stopDNSRelay).count, 1)
+            XCTAssertEqual(try store.snapshot().services[0].dns, [:])
+            XCTAssertTrue(journal.hasRecords(for: .systemDNS))
+            store.atLoginwindow = false
+            try manager.clear(logger: nil)
+            XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+        }
+    }
+
     func testRecordCapacityFailsBeforeSecondServiceMutation() throws {
         try withRecovery { store, journal, _, events in
             store.edit { $0.services[1].locationID = home }

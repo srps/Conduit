@@ -465,6 +465,38 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
+    func testLocationNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let notification = harness.locationObserver.pendingDelivery(NetworkLocationFixture.office)
+        XCTAssertNotNil(notification)
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
+        let stop = Task { await host.stopRuntime() }
+        await harness.hold.waitUntilReached()
+        defer { harness.hold.release() }
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        notification?()
+        for _ in 0..<5_000 where !host.orchestrator.eventLog.events.contains(where: { $0.event == "platform.location_observed" }) {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "platform.location_observed" })
+        harness.hold.release()
+        await stop.value
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services, original.services)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+    }
+
     /// #98, as in `AppState`: the runtime start reads the saved password
     /// once, and the handshakes after it are answered from that read.
     func testRuntimeStartReadsASavedPasswordOnce() async throws {

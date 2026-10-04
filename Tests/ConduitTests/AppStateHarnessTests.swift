@@ -311,6 +311,31 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
+    func testLocationNotificationDuringDNSStopCannotRepinStoppedListener() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        await state.startDNS()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
+        let stop = Task { await state.stopDNS() }
+        await harness.hold.waitUntilReached()
+        defer { harness.hold.release() }
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        harness.locationObserver.emit(NetworkLocationFixture.office)
+        await harness.settle("location notification arrived during stop") {
+            state.eventLog.events.contains { $0.event == "platform.location_observed" }
+        }
+        harness.hold.release()
+        await stop.value
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot().services, original.services)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+    }
+
     private func makeConfig() -> ProxyConfig {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0

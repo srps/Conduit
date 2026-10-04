@@ -43,7 +43,9 @@ form Conduit cannot route by.
   warnings identify oversized lists; routing and PAC proxying remain available.
 - An unreadable journal triggers recognized loopback residue cleanup while keeping
   the corrupt file intact. Unknown prior state is surfaced, and new application
-  waits for journal repair.
+  waits for journal repair, including environment and resolver publication.
+- Location observations wait for in-flight start/stop work before reconciling.
+  Deferred loginwindow DNS restoration still stops the privileged relay.
 - Legacy service-name records never restore their values into a guessed location.
   Exact Conduit loopback residue is removed across locations; ambiguous legacy DNS
   residue returns to DHCP. Profiles and automatic location selection remain later

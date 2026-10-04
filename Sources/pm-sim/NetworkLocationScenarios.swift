@@ -100,6 +100,36 @@ enum NetworkLocationScenarios {
         let corruptSnapshot = try corruptStore.snapshot()
         let corruptEvidencePreserved = try Data(contentsOf: corruptFile) == corrupt
         let corruptResidueCleared = corruptSnapshot.services[0].proxies.isEmpty && corruptSnapshot.services[0].dns.isEmpty
+        let corruptHome = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-home-\(UUID())")
+        try FileManager.default.createDirectory(at: corruptHome, withIntermediateDirectories: true)
+        defer {
+            do { try FileManager.default.removeItem(at: corruptHome) }
+            catch { fputs("network-location-recovery home cleanup failed: \(error.localizedDescription)\n", stderr) }
+        }
+        let machine = FakeMachine(resolverDirectory: corruptHome)
+        let environment = EnvironmentManager(journal: corruptJournal, homeDirectory: corruptHome, commandRunner: machine.run)
+        let resolvers = DNSManager(privilegeClient: machine, resolverDirectory: corruptHome.path, journal: corruptJournal)
+        var resolverConfig = config
+        resolverConfig.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["192.0.2.1"])]
+        var environmentBlocked = false
+        var resolverBlocked = false
+        do { try environment.apply(config: config, logger: nil) }
+        catch { environmentBlocked = true }
+        do { try resolvers.applyEntryFiles(config: resolverConfig, logger: nil) }
+        catch { resolverBlocked = true }
+        let newSurfaceWritesBlocked = environmentBlocked && resolverBlocked && machine.privilege.commands.isEmpty
+            && environment.targetFiles.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) }
+        store.edit { $0.services[0].proxies = [:] }
+        let dnsPrivilege = RecordingPrivilegeClient()
+        let dnsManager = SystemDNSManager(privilegeClient: dnsPrivilege, journal: journal, locationRecovery: recovery)
+        try dnsManager.apply(forwarderPort: 15053, logger: nil)
+        store.atLoginwindow = true
+        var cleanupDeferred = false
+        do { try dnsManager.clear(logger: nil) }
+        catch PrivilegeClientError.refused(.noConsoleUser, _) { cleanupDeferred = true }
+        let deferredRelayStopped = cleanupDeferred && dnsPrivilege.commands(matching: .stopDNSRelay).count == 1 && journal.hasRecords(for: .systemDNS)
+        store.atLoginwindow = false
+        try dnsManager.clear(logger: nil)
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -117,6 +147,8 @@ enum NetworkLocationScenarios {
                 .init("oversized request rejects before journal capture or mutation", oversizedRejected && beforeOversized == afterOversized && !journal.hasRecords(for: .systemProxy)),
                 .init("manual bypass limits warn without blocking routing or PAC startup", bypassWarningAtBoundary),
                 .init("corrupt journal recovery clears recognized residue and preserves evidence", corruptFailures == 2 && corruptResidueCleared && corruptEvidencePreserved && !corruptRecovery.isCleared(kind: .dns)),
+                .init("unreadable journal withholds new environment and resolver publication", newSurfaceWritesBlocked),
+                .init("loginwindow deferred prior restoration still stops the DNS relay", deferredRelayStopped),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]

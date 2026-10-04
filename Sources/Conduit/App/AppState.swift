@@ -1902,6 +1902,10 @@ final class AppState: ObservableObject {
         repeat {
             locationReconcileWanted = false
             await awaitLaunchRecovery()
+            while !proxyLane.isIdle || !dnsLane.isIdle {
+                await proxyLane.waitUntilIdle()
+                await dnsLane.waitUntilIdle()
+            }
             let state = runtimeState()
             let proxyToken = proxyLane.observationToken
             let dnsToken = dnsLane.observationToken
