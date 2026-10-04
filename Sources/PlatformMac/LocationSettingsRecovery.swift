@@ -72,6 +72,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     package func validateSnapshot() throws { _ = try store.snapshot() }
 
     package func isCleared(kind: NetworkSettingsKind) -> Bool {
+        guard !journal.hasRecords(for: surface(kind)) else { return false }
         do {
             let snapshot = try store.snapshot()
             return snapshot.services.filter { $0.locationID == snapshot.activeLocationID }.allSatisfy { member in
@@ -134,7 +135,11 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 for (key, value) in desired { replacement[key] = value }
                 let request = NetworkSettingsRequest(locationID: service.locationID, serviceID: service.serviceID,
                                                      kind: kind, expected: expected, replacement: replacement, requireActive: true)
-                try request.validate()
+                do { try request.validate() }
+                catch {
+                    report("failed", "operation=validate location=\(service.locationID) reason=\(error.localizedDescription)")
+                    throw error
+                }
                 // Without a legacy or scoped record, loopback settings belong to the user.
                 let prior = expected
                 do {

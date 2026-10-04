@@ -161,6 +161,34 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testClearedReadCannotSkipAnInactiveOutstandingRecord() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let original = try store.snapshot().services[0].proxies
+            try recovery.apply(kind: .proxies, desired: ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)], config: ProxyConfig())
+            store.edit { $0.activeLocationID = office; $0.services[1].proxies = [:] }
+            store.refuseWrites(true)
+            XCTAssertThrowsError(try recovery.restore(kind: .proxies, inactiveOnly: true))
+            store.refuseWrites(false)
+            let manager = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+            XCTAssertFalse(manager.isCleared())
+            try manager.clear(logger: nil)
+            XCTAssertEqual(try store.snapshot().services[0].proxies, original)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertTrue(manager.isCleared())
+        }
+    }
+
+    func testWholeRequestBudgetRejectsBeforeJournalCaptureAndReportsWhy() throws {
+        try withRecovery { store, journal, recovery, events in
+            let original = try store.snapshot()
+            let oversized: [String: NetworkSettingValue] = ["ExceptionsList": .list(Array(repeating: String(repeating: "a", count: 253), count: 256))]
+            XCTAssertThrowsError(try recovery.apply(kind: .proxies, desired: oversized, config: ProxyConfig()))
+            XCTAssertEqual(try store.snapshot(), original)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" && $0.detail?.contains("operation=validate") == true })
+        }
+    }
+
     func testLegacyPriorIsNeverRestoredIntoGuessedLocation() throws {
         try withRecovery { store, journal, recovery, events in
             journal.recordPrior(surface: .systemDNS, scope: "Wi-Fi", value: ["servers": "203.0.113.99"])

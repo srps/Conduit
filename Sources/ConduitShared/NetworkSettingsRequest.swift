@@ -82,6 +82,8 @@ package struct NetworkSettingsRequest: Codable, Equatable, Sendable {
                 }
             }
         }
+        // Enforce the whole wire budget before callers durably capture prior state.
+        guard try JSONEncoder().encode(self).count <= 65_536 else { throw NetworkSettingsError.invalidRequest }
     }
 
     /// Loginwindow may only remove loopback listener fields, never unrelated settings or prior values.

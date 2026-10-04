@@ -121,6 +121,10 @@ final class NetworkSettingsHelperTests: XCTestCase {
         XCTAssertThrowsError(try update.validate())
         update.replacement = ["ServerAddresses": .number(53)]
         XCTAssertThrowsError(try update.validate())
+        update.kind = .proxies
+        update.expected = [:]
+        update.replacement = ["ExceptionsList": .list(Array(repeating: String(repeating: "a", count: 253), count: 256))]
+        XCTAssertThrowsError(try update.validate(), "Individually bounded fields must also fit the whole request budget")
         XCTAssertThrowsError(try NetworkSettingsFields.project(["HTTPPort": 8080.5], kind: .proxies))
         XCTAssertEqual(HelperProtocolVersion.current, 5)
         XCTAssertEqual(HelperProtocolVersion.replyVersion(forRequest: 3), 3)

@@ -28,6 +28,8 @@ and intended applied fields. Failed reapplication can therefore recover either
 observable generation. Persist them before mutation and fail closed on persistence errors.
 Restoration compares the applied fields; external edits are preserved. Successful
 or superseded records are released individually; failures remain for retry.
+The cleared fast path requires no outstanding records, including inactive sets,
+so stopping retries recovery after an earlier location-switch write failed.
 Service/location deletion releases only that identity's record. Renames retain it.
 
 Untracked settings, including a user's local resolver, are preserved and captured

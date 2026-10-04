@@ -57,8 +57,24 @@ enum NetworkLocationScenarios {
         let cleanup = NetworkSettingsRequest(locationID: home, serviceID: services[0].serviceID, kind: .proxies,
             expected: ["HTTPProxy": .text("127.0.0.2"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)],
             replacement: [:], requireActive: false)
+        try recovery.apply(kind: .proxies, desired: cleanup.expected, config: config)
+        store.edit { $0.activeLocationID = office }
+        store.refuseWrites(true)
+        do { try recovery.restore(kind: .proxies, inactiveOnly: true) }
+        catch { /* Recovery emits the failure and retains its record for the retry below. */ }
+        let outstandingPreventsSkip = !recovery.isCleared(kind: .proxies)
+        store.refuseWrites(false)
+        try recovery.clear(kind: .proxies, config: config)
+        let inactiveProxyRestored = try store.snapshot().services[0].proxies == beforePAC.services[0].proxies
+        store.edit { $0.activeLocationID = home }
         store.edit { $0.services[0].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(7777), "HTTPEnable": .number(0)] }
         let disabledIgnored = try !recovery.proxyListenerIsLive(config: config, probe: { _ in true })
+        let beforeOversized = try store.snapshot()
+        var oversizedRejected = false
+        do {
+            try recovery.apply(kind: .proxies, desired: ["ExceptionsList": .list(Array(repeating: String(repeating: "a", count: 253), count: 256))], config: config)
+        } catch NetworkSettingsError.invalidRequest { oversizedRejected = true }
+        let afterOversized = try store.snapshot()
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -72,6 +88,8 @@ enum NetworkLocationScenarios {
                 .init("empty PAC URL cannot overwrite prior proxy settings", invalidPACPreservedPrior),
                 .init("loginwindow cleanup accepts non-default IPv4 loopback", cleanup.isCleanup),
                 .init("disabled endpoint cannot protect an unrelated listener", disabledIgnored),
+                .init("inactive recovery failure cannot skip teardown on an empty active location", outstandingPreventsSkip && inactiveProxyRestored),
+                .init("whole request budget rejects before journal capture or mutation", oversizedRejected && beforeOversized == afterOversized && !journal.hasRecords(for: .systemProxy)),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
