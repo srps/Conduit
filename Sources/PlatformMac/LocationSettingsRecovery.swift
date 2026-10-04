@@ -112,7 +112,10 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             try cleanLegacyAndRestore(kind: kind, config: config, inactiveOnly: true)
             let snapshot = try store.snapshot()
             let active = snapshot.services.filter { $0.locationID == snapshot.activeLocationID && $0.enabled && $0.supports(kind) }
-            guard !active.isEmpty else { throw NetworkSettingsError.unavailable }
+            guard !active.isEmpty else {
+                report("failed", "operation=apply surface=\(kind.rawValue) reason=no_enabled_services")
+                throw NetworkSettingsError.unavailable
+            }
             guard !active.contains(where: { $0.isUnreadable(kind) }) else {
                 report("failed", "operation=apply surface=\(kind.rawValue) reason=unsupported_settings")
                 throw NetworkSettingsError.invalidRequest

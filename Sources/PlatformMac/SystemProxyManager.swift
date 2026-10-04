@@ -81,7 +81,7 @@ package final class SystemProxyManager: @unchecked Sendable {
     package func reconcileLocation(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String?, apply: Bool) throws {
         try operations.withLock {
             guard let locationRecovery else { return }
-            if apply && hasManagedState() {
+            if apply {
                 try locationRecovery.apply(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL), config: config)
             } else {
                 try locationRecovery.restore(kind: .proxies, inactiveOnly: true)

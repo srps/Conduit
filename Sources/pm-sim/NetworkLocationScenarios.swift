@@ -83,6 +83,28 @@ enum NetworkLocationScenarios {
         let bypassWarningAtBoundary = invalidBypassConfig.validate().contains {
             !$0.blocksProxyStart && $0.errorDescription?.hasPrefix("routing.noProxyHosts:") == true
         }
+        let retryStore = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
+        let retryRecovery = LocationSettingsRecovery(store: retryStore, journal: journal, emit: { events.append($0) })
+        let retryProxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: retryRecovery)
+        let retryDNS = SystemDNSManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: retryRecovery)
+        try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+        try retryDNS.apply(forwarderPort: 15053, logger: nil)
+        retryStore.edit { $0.activeLocationID = "55555555-5555-5555-5555-555555555555" }
+        var emptyFailures = 0
+        do { try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true) }
+        catch NetworkSettingsError.unavailable { emptyFailures += 1 }
+        do { try retryDNS.reconcileLocation(apply: true) }
+        catch NetworkSettingsError.unavailable { emptyFailures += 1 }
+        let emptyReleased = !journal.hasRecords(for: .systemProxy) && !journal.hasRecords(for: .systemDNS)
+        retryStore.edit { $0.activeLocationID = office }
+        try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+        try retryDNS.reconcileLocation(apply: true)
+        let retrySnapshot = try retryStore.snapshot()
+        let emptyRetrySucceeded = emptyFailures == 2 && emptyReleased
+            && retrySnapshot.services[1].proxies["HTTPProxy"] == .text(config.effectiveClientHost)
+            && retrySnapshot.services[1].dns == localDNS
+        try retryProxy.clear(logger: nil)
+        try retryDNS.clear(logger: nil)
         let corrupt = Data("{broken}".utf8)
         try corrupt.write(to: corruptFile)
         let corruptJournal = PlatformStateJournal(fileURL: corruptFile)
@@ -148,6 +170,7 @@ enum NetworkLocationScenarios {
                 .init("manual bypass limits warn without blocking routing or PAC startup", bypassWarningAtBoundary),
                 .init("corrupt journal recovery clears recognized residue and preserves evidence", corruptFailures == 2 && corruptResidueCleared && corruptEvidencePreserved && !corruptRecovery.isCleared(kind: .dns)),
                 .init("unreadable journal withholds new environment and resolver publication", newSurfaceWritesBlocked),
+                .init("apply retries in a valid location after an empty location released all records", emptyRetrySucceeded),
                 .init("loginwindow deferred prior restoration still stops the DNS relay", deferredRelayStopped),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })

@@ -83,7 +83,9 @@ The helper operation, shared recovery policy, journal, observer, fakes, and both
 host compositions are implemented. Observer work is coalesced and guarded by the
 host's existing lifecycle generation so a later stop supersedes it. Observations
 wait for lifecycle lanes to become idle before reading readiness, so a notification
-during stop cannot enqueue reapplication behind teardown. Existing
+during stop cannot enqueue reapplication behind teardown. Requested runtime
+readiness drives apply even if the journal currently has no records, so passing
+through an empty location cannot suppress a later valid-location retry. Existing
 service-name manager paths remain only for explicit legacy harness composition;
 production hosts always construct the scoped store. Dev launches inject fakes.
 

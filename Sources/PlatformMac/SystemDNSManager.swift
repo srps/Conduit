@@ -98,7 +98,7 @@ package final class SystemDNSManager: @unchecked Sendable {
     package func reconcileLocation(apply: Bool) throws {
         try operations.withLock {
             guard let locationRecovery else { return }
-            if apply && hasSavedInterfaces() {
+            if apply {
                 try locationRecovery.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: configProvider())
             } else {
                 try locationRecovery.restore(kind: .dns, inactiveOnly: true)

@@ -110,6 +110,28 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testManagersRetryApplyAfterEmptyLocationReleasedAllPriorRecords() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let config = ProxyConfig()
+            let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+            let dns = SystemDNSManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+            try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+            try dns.apply(forwarderPort: 15053, logger: nil)
+            store.edit { $0.activeLocationID = "55555555-5555-5555-5555-555555555555" }
+            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true))
+            XCTAssertThrowsError(try dns.reconcileLocation(apply: true))
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+            store.edit { $0.activeLocationID = office }
+            try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
+            try dns.reconcileLocation(apply: true)
+            XCTAssertEqual(try store.snapshot().services[1].proxies["HTTPProxy"], .text(config.effectiveClientHost))
+            XCTAssertEqual(try store.snapshot().services[1].dns, localDNS)
+            try proxy.clear(logger: nil)
+            try dns.clear(logger: nil)
+        }
+    }
+
     func testSwitchDuringApplyRejectsStaleActiveWriteAndRetainsRecoveryEvidence() throws {
         try withRecovery { store, journal, recovery, events in
             store.switchDuringNextWrite(to: office)
