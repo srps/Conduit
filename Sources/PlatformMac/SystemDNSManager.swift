@@ -95,11 +95,14 @@ package final class SystemDNSManager: @unchecked Sendable {
         self.configProvider = configProvider
     }
 
-    package func reconcileLocation(apply: Bool) throws {
+    package func reconcileLocation(apply: Bool, forwarderPort: Int, logger: (any LogSink)? = nil) throws {
         try operations.withLock {
             guard let locationRecovery else { return }
             if apply {
-                try locationRecovery.apply(kind: .dns, desired: ["ServerAddresses": .list(["127.0.0.1"])], config: configProvider())
+                guard (1...65_535).contains(forwarderPort) else { throw NetworkSettingsError.invalidRequest }
+                // A running forwarder alone does not prove the privileged
+                // relay started. Its idempotent start must succeed first.
+                try self.apply(forwarderPort: forwarderPort, logger: logger)
             } else {
                 try locationRecovery.restore(kind: .dns, inactiveOnly: true)
             }

@@ -110,6 +110,25 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testLocationDNSApplyWaitsForRelaySuccessAndRetriesFailedStart() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let original = try store.snapshot()
+            let privilege = RecordingPrivilegeClient()
+            privilege.failing = [.startDNSRelay]
+            let dns = SystemDNSManager(privilegeClient: privilege, journal: journal, locationRecovery: recovery)
+            XCTAssertThrowsError(try dns.apply(forwarderPort: 15053, logger: nil))
+            store.edit { $0.activeLocationID = office }
+            XCTAssertThrowsError(try dns.reconcileLocation(apply: true, forwarderPort: 15053))
+            XCTAssertEqual(try store.snapshot().services, original.services)
+            XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+            privilege.failing = []
+            try dns.reconcileLocation(apply: true, forwarderPort: 15053)
+            XCTAssertEqual(privilege.commands(matching: .startDNSRelay).last, ["15053"])
+            XCTAssertEqual(try store.snapshot().services[1].dns, localDNS)
+            try dns.clear(logger: nil)
+        }
+    }
+
     func testManagersRetryApplyAfterEmptyLocationReleasedAllPriorRecords() throws {
         try withRecovery { store, journal, recovery, _ in
             let config = ProxyConfig()
@@ -119,12 +138,12 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             try dns.apply(forwarderPort: 15053, logger: nil)
             store.edit { $0.activeLocationID = "55555555-5555-5555-5555-555555555555" }
             XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true))
-            XCTAssertThrowsError(try dns.reconcileLocation(apply: true))
+            XCTAssertThrowsError(try dns.reconcileLocation(apply: true, forwarderPort: 15053))
             XCTAssertFalse(journal.hasRecords(for: .systemProxy))
             XCTAssertFalse(journal.hasRecords(for: .systemDNS))
             store.edit { $0.activeLocationID = office }
             try proxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
-            try dns.reconcileLocation(apply: true)
+            try dns.reconcileLocation(apply: true, forwarderPort: 15053)
             XCTAssertEqual(try store.snapshot().services[1].proxies["HTTPProxy"], .text(config.effectiveClientHost))
             XCTAssertEqual(try store.snapshot().services[1].dns, localDNS)
             try proxy.clear(logger: nil)
@@ -141,6 +160,36 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             try recovery.clear(kind: .dns, config: ProxyConfig())
             XCTAssertFalse(journal.hasRecords(for: .systemDNS))
             XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" })
+        }
+    }
+
+    func testSuccessfulReapplyPreservesAnExternalEditBackToPreviousGeneration() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let old: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)]
+            var new = old
+            new["HTTPPort"] = .number(4218)
+            try recovery.apply(kind: .proxies, desired: old, config: ProxyConfig())
+            try recovery.apply(kind: .proxies, desired: new, config: ProxyConfig())
+            XCTAssertNil(journal.records(for: .systemProxy).first?.appliedValue?["previousNetworkSettings"])
+            store.edit { $0.services[0].proxies = old }
+            try recovery.clear(kind: .proxies, config: ProxyConfig())
+            XCTAssertEqual(try store.snapshot().services[0].proxies, old)
+        }
+    }
+
+    func testCompareConflictRetriesWithinTheSameLocationAndHasAFixedBudget() throws {
+        try withRecovery { store, journal, recovery, events in
+            store.conflictNextWrites(1)
+            try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig())
+            XCTAssertEqual(try store.snapshot().services[0].dns, localDNS)
+            XCTAssertEqual(events.events.filter { $0.event == "platform.location_retry" }.count, 1)
+            try recovery.clear(kind: .dns, config: ProxyConfig())
+            store.conflictNextWrites(10)
+            XCTAssertThrowsError(try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig()))
+            XCTAssertEqual(store.pendingCompareFailures, 8)
+            XCTAssertTrue(journal.hasRecords(for: .systemDNS))
+            store.conflictNextWrites(0)
+            try recovery.clear(kind: .dns, config: ProxyConfig())
         }
     }
 
@@ -397,6 +446,7 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             store.atLoginwindow = true
             XCTAssertThrowsError(try manager.clear(logger: nil))
             XCTAssertEqual(privilege.commands(matching: .stopDNSRelay).count, 1)
+            XCTAssertNil(journal.records(for: .systemDNS).first?.appliedValue?["previousNetworkSettings"])
             XCTAssertEqual(try store.snapshot().services[0].dns, [:])
             XCTAssertTrue(journal.hasRecords(for: .systemDNS))
             store.atLoginwindow = false

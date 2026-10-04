@@ -30,6 +30,11 @@ behavior; old helpers reject v5 rather than receiving service-name fallbacks.
 New records carry stable location/service IDs, prior fields, and both the previous
 and intended applied fields. Failed reapplication can therefore recover either
 observable generation. Persist them before mutation and fail closed on persistence errors.
+After a successful compare-and-write, finalize the journal without the previous
+generation so a later external edit back to it is preserved. Compare/helper
+execution failures in the same active location retry from a fresh snapshot,
+with two attempts by default (configurable from one to four), structured retry
+events, and no timer. Admission refusals and location switches do not retry.
 Restoration compares the applied fields; external edits are preserved. Successful
 or superseded records are released individually; failures remain for retry.
 The cleared fast path requires no outstanding records, including inactive sets,
@@ -85,7 +90,10 @@ host's existing lifecycle generation so a later stop supersedes it. Observations
 wait for lifecycle lanes to become idle before reading readiness, so a notification
 during stop cannot enqueue reapplication behind teardown. Requested runtime
 readiness drives apply even if the journal currently has no records, so passing
-through an empty location cannot suppress a later valid-location retry. Existing
+through an empty location cannot suppress a later valid-location retry.
+DNS reconciliation first establishes the privileged relay idempotently at the
+actual bound forwarder port. A failed relay start withholds system DNS redirection;
+a later notification can retry even without saved DNS records. Existing
 service-name manager paths remain only for explicit legacy harness composition;
 production hosts always construct the scoped store. Dev launches inject fakes.
 

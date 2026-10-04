@@ -145,6 +145,7 @@ exactly these semantics; do not repurpose them.
 | `platform.location_deleted` | The recorded stable location/service identity no longer exists; only its record is retired. |
 | `platform.location_legacy_cleanup` | Exact configured loopback residue found in a location with unknown legacy attribution; remove residue without assigning legacy prior values to that location. |
 | `platform.location_legacy_retired` | Ambiguous service-name record retired after all location residue cleanup succeeded. `prior_location=unknown`. |
+| `platform.location_retry` | A same-location compare/helper execution failure retries from a fresh snapshot within the configured attempt budget. |
 | `platform.location_failed` | Inspection, capture, apply, restore, or recovery failed; no stale write is allowed and outstanding evidence remains available for retry. |
 | `platform.location_cleanup_deferred` | At loginwindow, remove owned fields safely and retain the original prior values for restoration after login. |
 | `config.routing_changed`, `config.logging_changed`, `config.metadata_changed`, `config.proxy_limits_updated`, `config.dns_restart`, `config.health_restart`, `config.proxy_restart`, `config.proxy_restart_failed`, `config.strict_mode_pac_refresh`, `config.tunnels_reconcile`, `config.tunnels_reconcile_rejected`, `config.upstreams_refresh`, `config.upstreams_deferred` | Per-subsystem outcomes of a config reload. The set grows with the targeted-reload work; treat unknown `config.*` names as informational. |

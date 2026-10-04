@@ -8,11 +8,14 @@ package struct NetworkLocationLimits: Sendable {
     package var maximumLocations = 64
     package var maximumServices = 256
     package var maximumRecords = 512
-    package init(maximumLocations: Int = 64, maximumServices: Int = 256, maximumRecords: Int = 512) {
+    package var maximumApplyAttempts = 2
+    package init(maximumLocations: Int = 64, maximumServices: Int = 256, maximumRecords: Int = 512, maximumApplyAttempts: Int = 2) {
         precondition(maximumLocations > 0 && maximumServices > 0 && maximumRecords > 0)
         self.maximumLocations = maximumLocations
         self.maximumServices = maximumServices
+        precondition((1...4).contains(maximumApplyAttempts))
         self.maximumRecords = maximumRecords
+        self.maximumApplyAttempts = maximumApplyAttempts
     }
 }
 

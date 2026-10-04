@@ -815,6 +815,7 @@ final class DaemonRuntimeHost {
             let proxy = systemConduit, dns = systemDNSManager
             let config = self.config, platform = platformConfig
             let pacURL = orchestrator.snapshot.bindings.localPACURL
+            let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logger
             await platformWork.run {
                 do {
@@ -829,7 +830,7 @@ final class DaemonRuntimeHost {
                 }
                 do {
                     if !dnsToken.isSuperseded {
-                        try dns.reconcileLocation(apply: platform.manageSystemDNS && state.dnsIsUp)
+                        try dns.reconcileLocation(apply: platform.manageSystemDNS && state.dnsIsUp, forwarderPort: forwarderPort, logger: logger)
                     }
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemDNS reason=\(error.localizedDescription)")

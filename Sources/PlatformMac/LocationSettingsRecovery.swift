@@ -102,6 +102,29 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
 
     package func apply(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
         try operations.withLock {
+            let locationID = try store.snapshot().activeLocationID
+            for attempt in 1...limits.maximumApplyAttempts {
+                do {
+                    try applyAttempt(kind: kind, desired: desired, config: config)
+                    return
+                } catch {
+                    let retryable: Bool
+                    switch error {
+                    case NetworkSettingsError.changed, PrivilegeClientError.executionFailed: retryable = true
+                    default: retryable = false
+                    }
+                    guard retryable, attempt < limits.maximumApplyAttempts,
+                          try store.snapshot().activeLocationID == locationID else { throw error }
+                    // Ordinary helper execution errors include CAS conflicts;
+                    // never infer their type from human-readable error text.
+                    report("retry", "surface=\(kind.rawValue) location=\(locationID) attempt=\(attempt + 1) maximum=\(limits.maximumApplyAttempts)")
+                }
+            }
+        }
+    }
+
+    private func applyAttempt(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
+        try operations.withLock {
             if kind == .proxies && desired["ProxyAutoConfigEnable"] == .number(1) {
                 guard case .text(let url) = desired["ProxyAutoConfigURLString"], !url.isEmpty else {
                     report("failed", "operation=apply surface=proxies reason=missing_pac_url")
@@ -157,6 +180,16 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 do { try store.compareAndWrite(request) }
                 catch {
                     report("failed", "operation=apply location=\(service.locationID) reason=\(error.localizedDescription)")
+                    throw error
+                }
+                do {
+                    // The CAS succeeded: an external edit back to the old
+                    // generation is no longer an uncertain write outcome.
+                    try journal.recordNetworkState(surface: surface(kind), locationID: service.locationID,
+                                                   serviceID: service.serviceID, prior: pack(prior),
+                                                   applied: pack(replacement), maximumRecords: limits.maximumRecords)
+                } catch {
+                    report("failed", "operation=finalize location=\(service.locationID) reason=\(error.localizedDescription)")
                     throw error
                 }
             }
@@ -229,6 +262,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                                            maximumRecords: limits.maximumRecords)
             report("cleanup_deferred", "scope=\(record.scope) surface=\(kind.rawValue) reason=no_console_user")
             try store.compareAndWrite(cleanupRequest)
+            try journal.recordNetworkState(surface: surface(kind), locationID: member.locationID, serviceID: member.serviceID,
+                                           prior: record.priorValue ?? [:], applied: pack(cleanup), maximumRecords: limits.maximumRecords)
             throw PrivilegeClientError.refused(.noConsoleUser, "Cleanup completed; prior settings retained for the next login.")
         }
         try journal.forgetNetworkState(surface: surface(kind), scope: record.scope)

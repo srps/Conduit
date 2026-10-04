@@ -583,12 +583,22 @@ package final class FakeNetworkLocationStore: NetworkLocationStoring, @unchecked
     package func snapshot() throws -> NetworkLocationSnapshot { lock.withLock { state } }
     package func edit(_ body: (inout NetworkLocationSnapshot) -> Void) { lock.withLock { body(&state) } }
     package func refuseWrites(_ refuse: Bool) { lock.withLock { failWrites = refuse } }
+    private var compareFailuresRemaining = 0
+    package var pendingCompareFailures: Int { lock.withLock { compareFailuresRemaining } }
+    package func conflictNextWrites(_ count: Int) {
+        precondition((0...64).contains(count))
+        lock.withLock { compareFailuresRemaining = count }
+    }
     package func switchDuringNextWrite(to locationID: String) { lock.withLock { nextActiveLocation = locationID } }
     package func compareAndWrite(_ request: NetworkSettingsRequest) throws {
         try request.validate()
         try lock.withLock {
             if let nextActiveLocation { state.activeLocationID = nextActiveLocation; self.nextActiveLocation = nil }
             guard !failWrites else { throw NetworkSettingsError.unavailable }
+            if compareFailuresRemaining > 0 {
+                compareFailuresRemaining -= 1
+                throw NetworkSettingsError.changed
+            }
             if _atLoginwindow && !request.isCleanup { throw PrivilegeClientError.refused(.noConsoleUser, "No console user") }
             guard !request.requireActive || state.activeLocationID == request.locationID,
                   let index = state.services.firstIndex(where: {

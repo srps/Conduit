@@ -93,18 +93,50 @@ enum NetworkLocationScenarios {
         var emptyFailures = 0
         do { try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true) }
         catch NetworkSettingsError.unavailable { emptyFailures += 1 }
-        do { try retryDNS.reconcileLocation(apply: true) }
+        do { try retryDNS.reconcileLocation(apply: true, forwarderPort: 15053) }
         catch NetworkSettingsError.unavailable { emptyFailures += 1 }
         let emptyReleased = !journal.hasRecords(for: .systemProxy) && !journal.hasRecords(for: .systemDNS)
         retryStore.edit { $0.activeLocationID = office }
         try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
-        try retryDNS.reconcileLocation(apply: true)
+        try retryDNS.reconcileLocation(apply: true, forwarderPort: 15053)
         let retrySnapshot = try retryStore.snapshot()
         let emptyRetrySucceeded = emptyFailures == 2 && emptyReleased
             && retrySnapshot.services[1].proxies["HTTPProxy"] == .text(config.effectiveClientHost)
             && retrySnapshot.services[1].dns == localDNS
         try retryProxy.clear(logger: nil)
         try retryDNS.clear(logger: nil)
+        let relayPrivilege = RecordingPrivilegeClient()
+        relayPrivilege.failing = [.startDNSRelay]
+        let relayDNS = SystemDNSManager(privilegeClient: relayPrivilege, journal: journal, locationRecovery: retryRecovery)
+        let beforeRelayFailure = try retryStore.snapshot()
+        var failedRelayWithheld = false
+        do { try relayDNS.reconcileLocation(apply: true, forwarderPort: 15053) }
+        catch { failedRelayWithheld = true }
+        let afterRelayFailure = try retryStore.snapshot()
+        let relayFailurePreserved = failedRelayWithheld && beforeRelayFailure == afterRelayFailure && !journal.hasRecords(for: .systemDNS)
+        relayPrivilege.failing = []
+        try relayDNS.reconcileLocation(apply: true, forwarderPort: 15053)
+        let relayRetryApplied = try retryStore.snapshot().services[1].dns == localDNS
+        try relayDNS.clear(logger: nil)
+        let oldProxy: [String: NetworkSettingValue] = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)]
+        var newProxy = oldProxy
+        newProxy["HTTPPort"] = .number(4218)
+        try retryRecovery.apply(kind: .proxies, desired: oldProxy, config: config)
+        try retryRecovery.apply(kind: .proxies, desired: newProxy, config: config)
+        retryStore.edit { $0.services[1].proxies = oldProxy }
+        try retryRecovery.clear(kind: .proxies, config: config)
+        let externalPreviousPreserved = try retryStore.snapshot().services[1].proxies == oldProxy
+        retryStore.edit { $0.services[1].proxies = [:] }
+        retryStore.conflictNextWrites(1)
+        try retryRecovery.apply(kind: .dns, desired: localDNS, config: config)
+        let compareRetrySucceeded = try retryStore.snapshot().services[1].dns == localDNS
+        try retryRecovery.clear(kind: .dns, config: config)
+        retryStore.conflictNextWrites(10)
+        var retryExhausted = false
+        do { try retryRecovery.apply(kind: .dns, desired: localDNS, config: config) }
+        catch { retryExhausted = retryStore.pendingCompareFailures == 8 && journal.hasRecords(for: .systemDNS) }
+        retryStore.conflictNextWrites(0)
+        try retryRecovery.clear(kind: .dns, config: config)
         let corrupt = Data("{broken}".utf8)
         try corrupt.write(to: corruptFile)
         let corruptJournal = PlatformStateJournal(fileURL: corruptFile)
@@ -150,6 +182,7 @@ enum NetworkLocationScenarios {
         do { try dnsManager.clear(logger: nil) }
         catch PrivilegeClientError.refused(.noConsoleUser, _) { cleanupDeferred = true }
         let deferredRelayStopped = cleanupDeferred && dnsPrivilege.commands(matching: .stopDNSRelay).count == 1 && journal.hasRecords(for: .systemDNS)
+            && journal.records(for: .systemDNS).first?.appliedValue?["previousNetworkSettings"] == nil
         store.atLoginwindow = false
         try dnsManager.clear(logger: nil)
         return ScenarioResult(
@@ -171,6 +204,9 @@ enum NetworkLocationScenarios {
                 .init("corrupt journal recovery clears recognized residue and preserves evidence", corruptFailures == 2 && corruptResidueCleared && corruptEvidencePreserved && !corruptRecovery.isCleared(kind: .dns)),
                 .init("unreadable journal withholds new environment and resolver publication", newSurfaceWritesBlocked),
                 .init("apply retries in a valid location after an empty location released all records", emptyRetrySucceeded),
+                .init("failed relay start withholds DNS redirection and a later successful start retries", relayFailurePreserved && relayRetryApplied),
+                .init("successful reapply no longer claims external edits back to the previous generation", externalPreviousPreserved),
+                .init("same-location compare failures retry with a fixed budget and retain evidence on exhaustion", compareRetrySucceeded && retryExhausted),
                 .init("loginwindow deferred prior restoration still stops the DNS relay", deferredRelayStopped),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })

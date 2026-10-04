@@ -300,6 +300,8 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(switched.services[0].dns, original.services[0].dns)
         XCTAssertEqual(switched.services[1].proxies["HTTPProxy"], .text("127.0.0.1"))
         XCTAssertEqual(switched.services[1].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        let boundDNSPort = try XCTUnwrap(state.runtimeSnapshot.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(boundDNSPort)])
         XCTAssertEqual(state.runtimeSnapshot.vpnState, vpnBefore)
         XCTAssertTrue(state.eventLog.events.contains { $0.event == "platform.location_observed" })
         locations.edit { $0.services[1].dns["ServerAddresses"] = .list(["192.0.2.9"]) }
