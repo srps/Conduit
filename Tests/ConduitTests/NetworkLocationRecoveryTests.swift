@@ -50,6 +50,35 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testFreshJournalPreservesUserLoopbackDNSAndRestoresItAfterApply() throws {
+        try withRecovery { store, _, recovery, _ in
+            store.edit { $0.services[0].dns = localDNS }
+            XCTAssertEqual(recovery.recover(kind: .dns, config: ProxyConfig(), listenerIsLive: false), .nothingToDo(.nothingRecorded))
+            XCTAssertEqual(try store.snapshot().services[0].dns, localDNS)
+            try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig())
+            try recovery.clear(kind: .dns, config: ProxyConfig())
+            XCTAssertEqual(try store.snapshot().services[0].dns, localDNS)
+        }
+    }
+
+    func testUnreadableProtocolRetainsItsRecordAndDoesNotBlockOtherRecovery() throws {
+        try withRecovery { store, journal, recovery, events in
+            let original = try store.snapshot()
+            try recovery.apply(kind: .proxies, desired: ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)], config: ProxyConfig())
+            try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig())
+            store.edit { $0.services[0].unreadableProxies = true; $0.services[1].unreadableProxies = true }
+            try recovery.clear(kind: .dns, config: ProxyConfig())
+            XCTAssertEqual(try store.snapshot().services[0].dns, original.services[0].dns)
+            XCTAssertThrowsError(try recovery.clear(kind: .proxies, config: ProxyConfig()))
+            XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+            store.edit { $0.services[0].unreadableProxies = false }
+            try recovery.clear(kind: .proxies, config: ProxyConfig())
+            XCTAssertEqual(try store.snapshot().services[0].proxies, original.services[0].proxies)
+            XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+            XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" })
+        }
+    }
+
     func testSwitchDuringApplyRejectsStaleActiveWriteAndRetainsRecoveryEvidence() throws {
         try withRecovery { store, journal, recovery, events in
             store.switchDuringNextWrite(to: office)
@@ -142,6 +171,17 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             XCTAssertEqual(snapshot.services[1].dns, ["ServerAddresses": .list(["192.0.2.2"])])
             XCTAssertTrue(events.events.contains { $0.event == "platform.location_legacy_retired" })
             XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+        }
+    }
+
+    func testLegacyRecordSurvivesAnUnrecognizedOldListenerPort() throws {
+        try withRecovery { store, journal, recovery, events in
+            journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: ["httpHost": "corporate.example"])
+            store.edit { $0.services[0].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(54321), "HTTPEnable": .number(1)] }
+            XCTAssertThrowsError(try recovery.clear(kind: .proxies, config: ProxyConfig()))
+            XCTAssertTrue(journal.hasRecords(for: .systemProxy))
+            XCTAssertEqual(try store.snapshot().services[0].proxies["HTTPPort"], .number(54321))
+            XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" && $0.detail?.contains("unattributed_loopback_endpoint") == true })
         }
     }
 

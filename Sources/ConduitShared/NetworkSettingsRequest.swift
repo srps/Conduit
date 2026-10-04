@@ -79,11 +79,32 @@ package struct NetworkSettingsRequest: Codable, Equatable, Sendable {
         }
     }
 
-    /// Loginwindow may remove fields or disable an existing endpoint, never install prior values.
+    /// Loginwindow may only remove loopback listener fields, never unrelated settings or prior values.
     package var isCleanup: Bool {
-        !requireActive && replacement.allSatisfy { key, value in
+        let changed = Set(expected.keys).union(replacement.keys).filter { expected[$0] != replacement[$0] }
+        return !requireActive && changed.isSubset(of: cleanupKeys) && replacement.allSatisfy { key, value in
             value == expected[key] || (key.hasSuffix("Enable") && value == .number(0))
         }
+    }
+
+    package var cleanupKeys: Set<String> {
+        if kind == .dns { return expected["ServerAddresses"] == .list(["127.0.0.1"]) ? ["ServerAddresses"] : [] }
+        var keys: Set<String> = []
+        for prefix in ["HTTP", "HTTPS"] {
+            if case .text(let host) = expected[prefix + "Proxy"], Self.isLoopback(host),
+               case .number(let port) = expected[prefix + "Port"], (1...65535).contains(port) {
+                keys.formUnion([prefix + "Proxy", prefix + "Port", prefix + "Enable"])
+            }
+        }
+        if case .text(let text) = expected["ProxyAutoConfigURLString"], let url = URLComponents(string: text),
+           Self.isLoopback(url.host ?? ""), url.path == "/proxy.pac" {
+            keys.formUnion(["ProxyAutoConfigURLString", "ProxyAutoConfigEnable"])
+        }
+        return keys
+    }
+
+    private static func isLoopback(_ host: String) -> Bool {
+        host == "localhost" || host == "::1" || host == "[::1]" || host == "127.0.0.1"
     }
 
     package func encoded() throws -> String {

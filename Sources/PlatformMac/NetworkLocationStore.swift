@@ -25,9 +25,12 @@ package struct LocationServiceSettings: Equatable, Sendable {
     package var dns: [String: NetworkSettingValue]
     package var supportsProxies: Bool
     package var supportsDNS: Bool
+    package var unreadableProxies: Bool
+    package var unreadableDNS: Bool
     package init(locationID: String, serviceID: String, name: String, enabled: Bool,
                  proxies: [String: NetworkSettingValue], dns: [String: NetworkSettingValue],
-                 supportsProxies: Bool = true, supportsDNS: Bool = true) {
+                 supportsProxies: Bool = true, supportsDNS: Bool = true,
+                 unreadableProxies: Bool = false, unreadableDNS: Bool = false) {
         self.locationID = locationID
         self.serviceID = serviceID
         self.name = name
@@ -36,8 +39,11 @@ package struct LocationServiceSettings: Equatable, Sendable {
         self.dns = dns
         self.supportsProxies = supportsProxies
         self.supportsDNS = supportsDNS
+        self.unreadableProxies = unreadableProxies
+        self.unreadableDNS = unreadableDNS
     }
     package func supports(_ kind: NetworkSettingsKind) -> Bool { kind == .proxies ? supportsProxies : supportsDNS }
+    package func isUnreadable(_ kind: NetworkSettingsKind) -> Bool { kind == .proxies ? unreadableProxies : unreadableDNS }
 }
 
 package struct NetworkLocationSnapshot: Equatable, Sendable {
@@ -95,13 +101,15 @@ package final class SystemNetworkLocationStore: NetworkLocationStoring, @uncheck
                 // Protocol absence is different from an empty configuration: do not create it.
                 let proxies = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies)
                 let dns = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeDNS)
+                let proxyFields = proxies.map { Self.readFields(SCNetworkProtocolGetConfiguration($0) as? [String: Any] ?? [:], kind: .proxies) }
+                let dnsFields = dns.map { Self.readFields(SCNetworkProtocolGetConfiguration($0) as? [String: Any] ?? [:], kind: .dns) }
                 services.append(LocationServiceSettings(
                     locationID: locationID, serviceID: serviceID,
                     name: SCNetworkServiceGetName(service) as String? ?? serviceID,
                     enabled: SCNetworkServiceGetEnabled(service),
-                    proxies: try proxies.map { try Self.fields($0, kind: .proxies) } ?? [:],
-                    dns: try dns.map { try Self.fields($0, kind: .dns) } ?? [:],
-                    supportsProxies: proxies != nil, supportsDNS: dns != nil
+                    proxies: proxyFields?.fields ?? [:], dns: dnsFields?.fields ?? [:],
+                    supportsProxies: proxies != nil, supportsDNS: dns != nil,
+                    unreadableProxies: proxyFields?.unreadable ?? false, unreadableDNS: dnsFields?.unreadable ?? false
                 ))
             }
         }
@@ -113,12 +121,16 @@ package final class SystemNetworkLocationStore: NetworkLocationStoring, @uncheck
         try write(request)
     }
 
-    private static func fields(_ proto: SCNetworkProtocol, kind: NetworkSettingsKind) throws -> [String: NetworkSettingValue] {
-        let configuration = SCNetworkProtocolGetConfiguration(proto) as? [String: Any] ?? [:]
-        let fields = try NetworkSettingsFields.project(configuration, kind: kind)
-        // Same validation on machine reads as on requests; never capture credentials in PAC URLs.
-        try NetworkSettingsRequest(locationID: UUID().uuidString, serviceID: UUID().uuidString,
-                                   kind: kind, expected: fields, replacement: [:], requireActive: false).validate()
-        return fields
+    package static func readFields(_ configuration: [String: Any], kind: NetworkSettingsKind) -> (fields: [String: NetworkSettingValue], unreadable: Bool) {
+        do {
+            let fields = try NetworkSettingsFields.project(configuration, kind: kind)
+            // Invalid or credential-bearing fields never enter a snapshot or journal.
+            try NetworkSettingsRequest(locationID: UUID().uuidString, serviceID: UUID().uuidString,
+                                       kind: kind, expected: fields, replacement: [:], requireActive: false).validate()
+            return (fields, false)
+        } catch {
+            // The identity remains visible, so its recovery record is retained, not treated as deleted.
+            return ([:], true)
+        }
     }
 }

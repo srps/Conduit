@@ -74,6 +74,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         do {
             let snapshot = try store.snapshot()
             return snapshot.services.filter { $0.locationID == snapshot.activeLocationID }.allSatisfy { member in
+                guard !member.isUnreadable(kind) else { return false }
                 let current = fields(member, kind)
                 if kind == .dns { return current["ServerAddresses"] != .list(["127.0.0.1"]) }
                 return ["HTTPEnable", "HTTPSEnable", "ProxyAutoConfigEnable"].allSatisfy { current[$0] != .number(1) }
@@ -89,7 +90,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             let snapshot = try store.snapshot()
             let active = snapshot.services.filter { $0.locationID == snapshot.activeLocationID && $0.enabled && $0.supports(kind) }
             return !active.isEmpty && active.allSatisfy { service in
-                desired.allSatisfy { fields(service, kind)[$0.key] == $0.value }
+                !service.isUnreadable(kind) && desired.allSatisfy { fields(service, kind)[$0.key] == $0.value }
             }
         } catch {
             report("failed", "operation=inspect reason=\(error.localizedDescription)")
@@ -105,6 +106,10 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             let snapshot = try store.snapshot()
             let active = snapshot.services.filter { $0.locationID == snapshot.activeLocationID && $0.enabled && $0.supports(kind) }
             guard !active.isEmpty else { throw NetworkSettingsError.unavailable }
+            guard !active.contains(where: { $0.isUnreadable(kind) }) else {
+                report("failed", "operation=apply surface=\(kind.rawValue) reason=unsupported_settings")
+                throw NetworkSettingsError.invalidRequest
+            }
             for service in active {
                 let current = fields(service, kind)
                 let scope = service.locationID + "/" + service.serviceID
@@ -124,7 +129,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 let request = NetworkSettingsRequest(locationID: service.locationID, serviceID: service.serviceID,
                                                      kind: kind, expected: expected, replacement: replacement, requireActive: true)
                 try request.validate()
-                let prior = removeResidue(expected, kind: kind, config: config)
+                // Without a legacy or scoped record, loopback settings belong to the user.
+                let prior = expected
                 do {
                     try journal.recordNetworkState(surface: surface(kind), locationID: service.locationID,
                                                    serviceID: service.serviceID, prior: pack(prior),
@@ -169,6 +175,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             return
         }
         let current = fields(member, kind)
+        guard !member.isUnreadable(kind) else { throw NetworkSettingsError.invalidRequest }
         let prior = try unpack(record.priorValue)
         let applied = try unpack(record.appliedValue)
         let previous = try record.appliedValue?["previousNetworkSettings"].map {
@@ -197,13 +204,17 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                                                              kind: kind, expected: current, replacement: replacement, requireActive: false))
         } catch PrivilegeClientError.refused(.noConsoleUser, _) {
             var cleanup = current
-            for key in kind.keys where replacement[key] != current[key] { cleanup.removeValue(forKey: key) }
+            let candidate = NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
+                                                  kind: kind, expected: current, replacement: replacement, requireActive: false)
+            for key in candidate.cleanupKeys where replacement[key] != current[key] { cleanup.removeValue(forKey: key) }
+            let cleanupRequest = NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
+                                                       kind: kind, expected: current, replacement: cleanup, requireActive: false)
+            guard cleanupRequest.isCleanup else { throw PrivilegeClientError.refused(.noConsoleUser, "Prior settings retained for the next login.") }
             try journal.recordNetworkState(surface: surface(kind), locationID: member.locationID, serviceID: member.serviceID,
                                            prior: record.priorValue ?? [:], applied: packApplied(cleanup, previous: current),
                                            maximumRecords: limits.maximumRecords)
             report("cleanup_deferred", "scope=\(record.scope) surface=\(kind.rawValue) reason=no_console_user")
-            try store.compareAndWrite(NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
-                                                             kind: kind, expected: current, replacement: cleanup, requireActive: false))
+            try store.compareAndWrite(cleanupRequest)
             throw PrivilegeClientError.refused(.noConsoleUser, "Cleanup completed; prior settings retained for the next login.")
         }
         try journal.forgetNetworkState(surface: surface(kind), scope: record.scope)
@@ -242,21 +253,41 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     private func cleanLegacy(kind: NetworkSettingsKind, config: ProxyConfig) throws {
         let legacy = journal.records(for: surface(kind)).filter { $0.locationID == nil }
         // A released surface contains the user's own settings; never sweep it again.
-        guard !legacy.isEmpty || (journal.ownership(of: surface(kind)) == .unknown && !journal.hasRecords(for: surface(kind))) else { return }
+        guard !legacy.isEmpty else { return }
         let snapshot = try store.snapshot()
         let scoped = Set(journal.records(for: surface(kind)).filter { $0.locationID != nil }.map(\.scope))
+        var unreadable = false
         for member in snapshot.services where member.supports(kind) && !scoped.contains(member.locationID + "/" + member.serviceID) {
+            if member.isUnreadable(kind) {
+                report("failed", "operation=legacy_cleanup location=\(member.locationID) surface=\(kind.rawValue) reason=unsupported_settings")
+                unreadable = true
+                continue
+            }
             let current = fields(member, kind)
             let replacement = removeResidue(current, kind: kind, config: config)
+            if kind == .proxies && containsLoopbackEndpoint(replacement) {
+                report("failed", "operation=legacy_cleanup location=\(member.locationID) surface=proxies reason=unattributed_loopback_endpoint")
+                unreadable = true
+            }
             guard current != replacement else { continue }
             report("legacy_cleanup", "location=\(member.locationID) service=\(member.serviceID) surface=\(kind.rawValue) prior_location=unknown")
             try store.compareAndWrite(NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
                                                              kind: kind, expected: current, replacement: replacement, requireActive: false))
         }
+        guard !unreadable else { throw NetworkSettingsError.invalidRequest }
         for record in legacy {
             report("legacy_retired", "surface=\(kind.rawValue) prior_location=unknown")
             try journal.forgetNetworkState(surface: surface(kind), scope: record.scope)
         }
+    }
+
+    private func containsLoopbackEndpoint(_ fields: [String: NetworkSettingValue]) -> Bool {
+        for prefix in ["HTTP", "HTTPS"] {
+            if case .text(let host) = fields[prefix + "Proxy"], Self.isLoopback(host) { return true }
+        }
+        if case .text(let text) = fields["ProxyAutoConfigURLString"], let url = URL(string: text),
+           Self.isLoopback(url.host ?? "") { return true }
+        return false
     }
 
     private func removeResidue(_ current: [String: NetworkSettingValue], kind: NetworkSettingsKind,

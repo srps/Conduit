@@ -44,12 +44,39 @@ final class NetworkSettingsHelperTests: XCTestCase {
                                                command: .compareNetworkSettings, values: [try update.encoded()]), .noConsoleUser)
         update.requireActive = false
         update.replacement = [:]
+        XCTAssertEqual(HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501,
+                                               command: .compareNetworkSettings, values: [try update.encoded()]), .noConsoleUser)
+        update.expected = ["ServerAddresses": .list(["127.0.0.1"])]
         XCTAssertNil(HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501,
                                              command: .compareNetworkSettings, values: [try update.encoded()]))
         XCTAssertEqual(HelperAdmission.refusal(peerUID: 502, consoleUID: 0, lastConsoleUID: 501,
                                                command: .compareNetworkSettings, values: [try update.encoded()]), .noConsoleUser)
         update.replacement = ["ServerAddresses": .list(["192.0.2.9"])]
         XCTAssertFalse(update.isCleanup)
+    }
+
+    func testLoginwindowCannotRemoveCorporateProxyOrBypassFields() throws {
+        var update = request()
+        update.kind = .proxies
+        update.requireActive = false
+        update.expected = ["HTTPProxy": .text("corporate.example"), "HTTPPort": .number(8080), "HTTPEnable": .number(1)]
+        update.replacement = [:]
+        XCTAssertFalse(update.isCleanup)
+        update.expected["HTTPProxy"] = .text("127.0.0.1")
+        XCTAssertTrue(update.isCleanup)
+        update.expected["ExceptionsList"] = .list(["corporate.example"])
+        XCTAssertFalse(update.isCleanup)
+        update.replacement = ["ExceptionsList": .list(["corporate.example"])]
+        XCTAssertTrue(update.isCleanup)
+    }
+
+    func testUnsupportedProxyProjectionDoesNotPoisonDNSOrExposeCredentials() {
+        let proxy = SystemNetworkLocationStore.readFields(["ProxyAutoConfigURLString": "https://user:password@example.com/proxy.pac"], kind: .proxies)
+        XCTAssertTrue(proxy.unreadable)
+        XCTAssertTrue(proxy.fields.isEmpty)
+        let dns = SystemNetworkLocationStore.readFields(["ServerAddresses": ["192.0.2.1"]], kind: .dns)
+        XCTAssertFalse(dns.unreadable)
+        XCTAssertEqual(dns.fields, ["ServerAddresses": .list(["192.0.2.1"])])
     }
 
     func testMissingHelperNeverInvokesAppleScriptForScopedWrites() throws {

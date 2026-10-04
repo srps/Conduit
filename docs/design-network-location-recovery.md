@@ -28,12 +28,20 @@ Restoration compares the applied fields; external edits are preserved. Successfu
 or superseded records are released individually; failures remain for retry.
 Service/location deletion releases only that identity's record. Renames retain it.
 
+Untracked settings, including a user's local resolver, are preserved and captured
+unchanged as prior state. Residue cleanup requires legacy journal evidence.
 Legacy service-name entries have unknown location identity. Never migrate their
 prior values into the current location by guessing. Sweep exact Conduit loopback
 residue across all sets, removing those endpoints while preserving external
 configuration, then retire ambiguous legacy records only after successful cleanup.
+Unrecognized loopback endpoints (such as a previous configured port) retain the
+legacy evidence and emit a failure rather than silently claiming recovery.
 DNS residue cleanup returns explicit DNS to DHCP, since the original location is
 unknown. Emit events describing that loss of prior-state attribution.
+
+Unsupported or credential-bearing protocol settings are isolated to that service
+and protocol. Its recovery record remains for retry; other identities and the
+other protocol can still recover. No credential-bearing fields enter the snapshot.
 
 On an external location switch, restore outstanding inactive-location records and
 reconcile the active location through the existing host readiness and VPN gates.
@@ -57,7 +65,9 @@ host's existing lifecycle generation so a later stop supersedes it. Existing
 service-name manager paths remain only for explicit legacy harness composition;
 production hosts always construct the scoped store. Dev launches inject fakes.
 
-When no console user is present, scoped removal is admitted but installing prior
+When no console user is present, scoped removal of loopback listener fields is
+admitted, while corporate endpoints and bypass lists cannot be removed through
+that exception. Installing prior
 values is deferred. The journal keeps the previous settings until login; this
 removes dead loopback endpoints without widening apply permission at loginwindow.
 

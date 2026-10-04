@@ -17,7 +17,10 @@ enum NetworkLocationScenarios {
         ]
         let store = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-\(UUID()).json")
-        defer { try? FileManager.default.removeItem(at: file) }
+        defer {
+            do { try FileManager.default.removeItem(at: file) }
+            catch { fputs("network-location-recovery journal cleanup failed: \(error.localizedDescription)\n", stderr) }
+        }
         let journal = PlatformStateJournal(fileURL: file)
         let events = RuntimeEventLog(capacity: 64)
         let recovery = LocationSettingsRecovery(store: store, journal: journal, emit: { events.append($0) })
@@ -54,7 +57,7 @@ enum NetworkLocationScenarios {
                 .init("external edit and rename survive retry and repeated recovery", externalPreserved),
                 .init("external switch racing apply rejects stale active-location write", racedApplyRejected),
                 .init("recovery releases all records", !journal.hasRecords(for: .systemDNS)),
-                .init("observeable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
+                .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
         )

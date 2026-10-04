@@ -109,8 +109,9 @@ search domains, SOCKS settings and other protocol keys are preserved. The helper
 locks SCPreferences without waiting and validates active-set identity when required,
 set membership and expected managed values before committing. It never selects a
 location. Older helpers cannot receive a service-name or AppleScript fallback for
-this operation. At loginwindow, the last admitted user may only remove fields or
-disable an endpoint, not apply new values. Recovery is journaled before writes,
+this operation. At loginwindow, the last admitted user may only remove loopback
+listener fields or disable those endpoints; corporate endpoints and bypass lists
+are excluded. Installing prior values waits for login. Recovery is journaled before writes,
 compares previous/intended generations and preserves external edits. Ambiguous
 legacy prior values are never assigned to a guessed location. Hardware/VPN
 validation and reinstalling the v5 helper remain deployment requirements.

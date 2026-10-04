@@ -28,8 +28,11 @@ enum HelperTool {
             return
 
         case .compareNetworkSettings:
-            guard arguments.values.count == 1 else { throw NetworkSettingsError.invalidRequest }
-            try NetworkSettingsWriter.run(NetworkSettingsRequest.decode(arguments.values[0]))
+            guard arguments.values.count == 1 else { throw HelperToolError.invalidInput("invalid scoped network settings") }
+            let request: NetworkSettingsRequest
+            do { request = try NetworkSettingsRequest.decode(arguments.values[0]) }
+            catch { throw HelperToolError.invalidInput("invalid scoped network settings") }
+            try NetworkSettingsWriter.run(request)
 
         case .applyDNS:
             guard arguments.values.count >= 2 else {
