@@ -110,6 +110,24 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testRelayFailureStillRestoresInactiveLocationBeforeWithholdingActiveDNS() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let original = try store.snapshot()
+            let privilege = RecordingPrivilegeClient()
+            let dns = SystemDNSManager(privilegeClient: privilege, journal: journal, locationRecovery: recovery)
+            try dns.apply(forwarderPort: 15053, logger: nil)
+            store.edit { $0.activeLocationID = office }
+            privilege.failing = [.startDNSRelay]
+            XCTAssertThrowsError(try dns.reconcileLocation(apply: true, forwarderPort: 15053))
+            XCTAssertEqual(try store.snapshot().services, original.services)
+            XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+            privilege.failing = []
+            try dns.reconcileLocation(apply: true, forwarderPort: 15053)
+            XCTAssertEqual(try store.snapshot().services[1].dns, localDNS)
+            try dns.clear(logger: nil)
+        }
+    }
+
     func testLocationDNSApplyWaitsForRelaySuccessAndRetriesFailedStart() throws {
         try withRecovery { store, journal, recovery, _ in
             let original = try store.snapshot()
@@ -434,6 +452,26 @@ final class NetworkLocationRecoveryTests: XCTestCase {
             store.atLoginwindow = false
             try recovery.clear(kind: .dns, config: ProxyConfig())
             XCTAssertEqual(try store.snapshot().services[0].dns, ["ServerAddresses": .list(["192.0.2.1"])])
+            XCTAssertFalse(journal.hasRecords(for: .systemDNS))
+        }
+    }
+
+    func testFailedRestorationStillAttemptsRelayStopWithoutLosingPriorEvidence() throws {
+        try withRecovery { store, journal, recovery, events in
+            let privilege = RecordingPrivilegeClient()
+            let dns = SystemDNSManager(privilegeClient: privilege, journal: journal, locationRecovery: recovery)
+            try dns.apply(forwarderPort: 15053, logger: nil)
+            store.refuseWrites(true)
+            privilege.failing = [.stopDNSRelay]
+            XCTAssertThrowsError(try dns.clear(logger: nil)) { error in
+                guard case NetworkSettingsError.unavailable = error else { return XCTFail("Relay stop must not replace restoration error") }
+            }
+            XCTAssertEqual(privilege.commands(matching: .stopDNSRelay).count, 1)
+            XCTAssertTrue(journal.hasRecords(for: .systemDNS))
+            XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" && $0.detail?.contains("operation=stop_relay") == true })
+            store.refuseWrites(false)
+            privilege.failing = []
+            try dns.clear(logger: nil)
             XCTAssertFalse(journal.hasRecords(for: .systemDNS))
         }
     }

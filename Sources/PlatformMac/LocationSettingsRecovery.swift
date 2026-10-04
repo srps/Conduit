@@ -23,6 +23,12 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         emit(RuntimeEvent(kind: .config, event: "platform.location_" + event, detail: detail))
     }
 
+    package func relayStopFailure(_ error: Error) -> RuntimeEvent {
+        let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=stop_relay reason=\(error.localizedDescription)")
+        emit(event)
+        return event
+    }
+
     private func surface(_ kind: NetworkSettingsKind) -> PlatformSurface {
         kind == .proxies ? .systemProxy : .systemDNS
     }

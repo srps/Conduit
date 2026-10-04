@@ -91,8 +91,8 @@ wait for lifecycle lanes to become idle before reading readiness, so a notificat
 during stop cannot enqueue reapplication behind teardown. Requested runtime
 readiness drives apply even if the journal currently has no records, so passing
 through an empty location cannot suppress a later valid-location retry.
-DNS reconciliation first establishes the privileged relay idempotently at the
-actual bound forwarder port. A failed relay start withholds system DNS redirection;
+DNS reconciliation restores inactive records independently, then establishes
+the privileged relay idempotently at the actual bound forwarder port. A failed relay start withholds system DNS redirection;
 a later notification can retry even without saved DNS records. Existing
 service-name manager paths remain only for explicit legacy harness composition;
 production hosts always construct the scoped store. Dev launches inject fakes.
@@ -103,7 +103,9 @@ that exception. Valid 127/8 addresses, localhost and IPv6 loopback are supported
 Installing prior
 values is deferred. The journal keeps the previous settings until login; this
 removes dead loopback endpoints without widening apply permission at loginwindow.
-DNS cleanup stops the privileged relay even when prior restoration is deferred.
+DNS cleanup attempts to stop the privileged relay on every outcome, including
+failed and deferred restoration. Journal evidence stays available for retry;
+a failed relay-stop command emits a structured failure instead of claiming success.
 
 New clients require the v5 helper for scoped operations, with no AppleScript or
 service-name fallback. Run `sudo ./install-helper.sh` after installing this build;

@@ -98,13 +98,13 @@ package final class SystemDNSManager: @unchecked Sendable {
     package func reconcileLocation(apply: Bool, forwarderPort: Int, logger: (any LogSink)? = nil) throws {
         try operations.withLock {
             guard let locationRecovery else { return }
+            // Old locations must recover even if relay readiness fails.
+            try locationRecovery.restore(kind: .dns, inactiveOnly: true)
             if apply {
                 guard (1...65_535).contains(forwarderPort) else { throw NetworkSettingsError.invalidRequest }
                 // A running forwarder alone does not prove the privileged
                 // relay started. Its idempotent start must succeed first.
                 try self.apply(forwarderPort: forwarderPort, logger: logger)
-            } else {
-                try locationRecovery.restore(kind: .dns, inactiveOnly: true)
             }
         }
     }
@@ -177,16 +177,10 @@ package final class SystemDNSManager: @unchecked Sendable {
         operations.lock()
         defer { operations.unlock() }
         if let locationRecovery {
-            // Restore before stopping the relay; a partial recovery remains usable and retryable.
-            do {
-                try locationRecovery.clear(kind: .dns, config: configProvider())
-            } catch PrivilegeClientError.refused(.noConsoleUser, let message) {
-                // Loopback cleanup landed, but prior settings await login.
-                // The relay must not outlive the in-process forwarder.
-                stopRelay(logger: logger)
-                throw PrivilegeClientError.refused(.noConsoleUser, message)
-            }
-            stopRelay(logger: logger)
+            // Restore first, but the relay must never outlive a stopped
+            // forwarder. Failed restoration keeps its journal for retry.
+            defer { stopRelay(logger: logger) }
+            try locationRecovery.clear(kind: .dns, config: configProvider())
             return
         }
         guard hasSavedInterfaces() else {
@@ -506,8 +500,15 @@ package final class SystemDNSManager: @unchecked Sendable {
     }
 
     package func stopRelay(logger: (any LogSink)?) {
-        try? privilegeClient.execute(.stopDNSRelay, values: [])
-        logger?.log(.notice, "DNS relay on :53 stopped.", category: .system)
+        do {
+            try privilegeClient.execute(.stopDNSRelay, values: [])
+            logger?.log(.notice, "DNS relay on :53 stopped.", category: .system)
+        } catch {
+            let event = locationRecovery?.relayStopFailure(error) ?? RuntimeEvent(
+                kind: .config, event: "platform.location_failed", detail: "operation=stop_relay reason=\(error.localizedDescription)"
+            )
+            logger?.log(.warning, event.detail ?? event.event, category: .system)
+        }
     }
 
     package func readDNSServers(service: String) -> [String] {

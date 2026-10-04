@@ -106,14 +106,17 @@ enum NetworkLocationScenarios {
         try retryProxy.clear(logger: nil)
         try retryDNS.clear(logger: nil)
         let relayPrivilege = RecordingPrivilegeClient()
-        relayPrivilege.failing = [.startDNSRelay]
         let relayDNS = SystemDNSManager(privilegeClient: relayPrivilege, journal: journal, locationRecovery: retryRecovery)
-        let beforeRelayFailure = try retryStore.snapshot()
+        retryStore.edit { $0.activeLocationID = home }
+        try relayDNS.apply(forwarderPort: 15053, logger: nil)
+        retryStore.edit { $0.activeLocationID = office }
+        relayPrivilege.failing = [.startDNSRelay]
         var failedRelayWithheld = false
         do { try relayDNS.reconcileLocation(apply: true, forwarderPort: 15053) }
         catch { failedRelayWithheld = true }
         let afterRelayFailure = try retryStore.snapshot()
-        let relayFailurePreserved = failedRelayWithheld && beforeRelayFailure == afterRelayFailure && !journal.hasRecords(for: .systemDNS)
+        let relayFailurePreserved = failedRelayWithheld && afterRelayFailure.services[0].dns == services[0].dns
+            && afterRelayFailure.services[1].dns == services[1].dns && !journal.hasRecords(for: .systemDNS)
         relayPrivilege.failing = []
         try relayDNS.reconcileLocation(apply: true, forwarderPort: 15053)
         let relayRetryApplied = try retryStore.snapshot().services[1].dns == localDNS
@@ -185,6 +188,15 @@ enum NetworkLocationScenarios {
             && journal.records(for: .systemDNS).first?.appliedValue?["previousNetworkSettings"] == nil
         store.atLoginwindow = false
         try dnsManager.clear(logger: nil)
+        try dnsManager.apply(forwarderPort: 15053, logger: nil)
+        store.refuseWrites(true)
+        let stopsBeforeFailure = dnsPrivilege.commands(matching: .stopDNSRelay).count
+        var ordinaryRestoreFailed = false
+        do { try dnsManager.clear(logger: nil) }
+        catch { ordinaryRestoreFailed = journal.hasRecords(for: .systemDNS) }
+        let failedRestoreRelayStopped = ordinaryRestoreFailed && dnsPrivilege.commands(matching: .stopDNSRelay).count == stopsBeforeFailure + 1
+        store.refuseWrites(false)
+        try dnsManager.clear(logger: nil)
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -204,10 +216,11 @@ enum NetworkLocationScenarios {
                 .init("corrupt journal recovery clears recognized residue and preserves evidence", corruptFailures == 2 && corruptResidueCleared && corruptEvidencePreserved && !corruptRecovery.isCleared(kind: .dns)),
                 .init("unreadable journal withholds new environment and resolver publication", newSurfaceWritesBlocked),
                 .init("apply retries in a valid location after an empty location released all records", emptyRetrySucceeded),
-                .init("failed relay start withholds DNS redirection and a later successful start retries", relayFailurePreserved && relayRetryApplied),
+                .init("failed relay start still restores inactive DNS, withholds active redirection, and retries later", relayFailurePreserved && relayRetryApplied),
                 .init("successful reapply no longer claims external edits back to the previous generation", externalPreviousPreserved),
                 .init("same-location compare failures retry with a fixed budget and retain evidence on exhaustion", compareRetrySucceeded && retryExhausted),
                 .init("loginwindow deferred prior restoration still stops the DNS relay", deferredRelayStopped),
+                .init("ordinary restoration failure still stops the relay and keeps retry evidence", failedRestoreRelayStopped),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
