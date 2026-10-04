@@ -29,10 +29,26 @@ public enum HelperAdmission {
     /// only value-carrying form admitted at the loginwindow: system-DNS
     /// teardown stops the relay first, and a service left on 127.0.0.1 after
     /// that has no resolver at all.
+    package enum ScopedSettingsAdmission: Equatable {
+        case invalidArguments
+        case cleanup
+        case requiresConsoleUser
+    }
+
+    /// Carries decode failure as a diagnostic category without exposing the
+    /// request or decoding error's payload in audit output.
+    package static func scopedSettingsAdmission(values: [String]) -> ScopedSettingsAdmission {
+        guard values.count == 1 else { return .invalidArguments }
+        do {
+            return try NetworkSettingsRequest.decode(values[0]).isCleanup ? .cleanup : .requiresConsoleUser
+        } catch {
+            return .invalidArguments
+        }
+    }
+
     public static func isDNSReset(_ command: HelperCommand, values: [String]) -> Bool {
         if command == .compareNetworkSettings {
-            guard values.count == 1, let request = try? NetworkSettingsRequest.decode(values[0]) else { return false }
-            return request.isCleanup
+            return scopedSettingsAdmission(values: values) == .cleanup
         }
         return command == .setDNSServers && values.count == 2
             && values[1].caseInsensitiveCompare(HelperInputValidator.emptyListSentinel) == .orderedSame

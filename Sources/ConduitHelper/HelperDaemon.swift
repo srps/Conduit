@@ -137,6 +137,18 @@ enum HelperDaemon {
             // decided, never from the request's values or an error's text:
             // those carry whatever the peer sent. A peer refused early has
             // no command in its line, since its request is never decoded.
+            if refusalBeforeReading == nil, refusal?.reason != .unauthorized,
+               let request, request.command == .compareNetworkSettings,
+               let replyVersion = HelperProtocolVersion.replyVersion(forRequest: request.protocolVersion),
+               HelperAdmission.scopedSettingsAdmission(values: request.values) == .invalidArguments {
+                let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request.command, outcome: .invalidArguments)
+                HelperLog.notice(line)
+                var response = HelperResponse.error("Invalid scoped network settings")
+                response.protocolVersion = replyVersion
+                writeLine(fd: clientFD, response: response, deadline: replyDeadline)
+                close(clientFD)
+                continue
+            }
             if let refusal {
                 let line = HelperAudit.line(identity: identity, verdict: callerVerdict, command: request?.command, outcome: refusal.outcome)
                 switch refusal.reason {

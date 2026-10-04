@@ -38,6 +38,18 @@ final class NetworkSettingsHelperTests: XCTestCase {
         XCTAssertEqual(merged["HTTPProxyUsername"] as? String, "synthetic-user")
     }
 
+    func testMalformedScopedAdmissionHasAnInvalidArgumentsCategory() throws {
+        XCTAssertEqual(HelperAdmission.scopedSettingsAdmission(values: []), .invalidArguments)
+        XCTAssertEqual(HelperAdmission.scopedSettingsAdmission(values: ["{broken}"]), .invalidArguments)
+        XCTAssertEqual(HelperAdmission.scopedSettingsAdmission(values: ["{}", "extra"]), .invalidArguments)
+        var update = request()
+        XCTAssertEqual(HelperAdmission.scopedSettingsAdmission(values: [try update.encoded()]), .requiresConsoleUser)
+        update.expected = ["ServerAddresses": .list(["127.0.0.1"])]
+        update.replacement = [:]
+        update.requireActive = false
+        XCTAssertEqual(HelperAdmission.scopedSettingsAdmission(values: [try update.encoded()]), .cleanup)
+    }
+
     func testLoginwindowAcceptsScopedRemovalButRefusesApplyingOrRestoringValues() throws {
         var update = request()
         XCTAssertEqual(HelperAdmission.refusal(peerUID: 501, consoleUID: 0, lastConsoleUID: 501,
