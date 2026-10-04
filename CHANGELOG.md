@@ -38,6 +38,8 @@ form Conduit cannot route by.
   retaining existing VPN, direct-routing and split-DNS policy. Expected-value
   comparisons preserve later external edits; rename/deletion, interrupted recovery,
   failed reapplication and loginwindow cleanup remain recoverable and observable.
+- Bypass lists are validated before startup with the same bounds as scoped helper
+  writes: 256 entries, 253 UTF-8 bytes per entry, and 8 KiB encoded aggregate size.
 - Legacy service-name records never restore their values into a guessed location.
   Exact Conduit loopback residue is removed across locations; ambiguous legacy DNS
   residue returns to DHCP. Profiles and automatic location selection remain later

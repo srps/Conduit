@@ -76,6 +76,9 @@ package struct NetworkSettingsRequest: Codable, Equatable, Sendable {
                           list.allSatisfy({ $0.utf8.count <= 253 && !$0.contains("\u{0}") }) else {
                         throw NetworkSettingsError.invalidRequest
                     }
+                    if key == "ExceptionsList", ProxyBypassSyntax.validationProblem(list) != nil {
+                        throw NetworkSettingsError.invalidRequest
+                    }
                     if key == "ServerAddresses", !list.allSatisfy(HelperInputValidator.validateIPAddress) {
                         throw NetworkSettingsError.invalidRequest
                     }

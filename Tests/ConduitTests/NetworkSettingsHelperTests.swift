@@ -124,6 +124,10 @@ final class NetworkSettingsHelperTests: XCTestCase {
         update.kind = .proxies
         update.expected = [:]
         update.replacement = ["ExceptionsList": .list(Array(repeating: String(repeating: "a", count: 253), count: 256))]
+        XCTAssertThrowsError(try update.validate(), "Aggregate bypass bounds match config validation")
+        update.replacement = ["HTTPProxy": .text(String(repeating: "\u{1}", count: 4096)),
+                              "HTTPSProxy": .text(String(repeating: "\u{1}", count: 4096))]
+        update.expected = update.replacement
         XCTAssertThrowsError(try update.validate(), "Individually bounded fields must also fit the whole request budget")
         XCTAssertThrowsError(try NetworkSettingsFields.project(["HTTPPort": 8080.5], kind: .proxies))
         XCTAssertEqual(HelperProtocolVersion.current, 5)

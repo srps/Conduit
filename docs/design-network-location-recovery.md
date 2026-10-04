@@ -15,6 +15,9 @@ Only ServerAddresses and Conduit's existing HTTP/HTTPS/PAC/bypass fields are
 mutable. Authentication fields and unrelated protocol settings are excluded.
 Applying PAC mode requires a nonempty URL before any mutation. Live-session
 protection probes only enabled endpoints on enabled services in the active set.
+Bypass lists share config/helper grammar bounds: 256 entries, 253 UTF-8 bytes
+per entry, and 8 KiB encoded aggregate size. Startup rejects larger lists instead
+of discovering them during privileged application.
 The helper locks SCPreferences without waiting, verifies set membership, active
 set when required, and expected fields before committing. It merges the selected
 fields into the current configuration, preserving unrelated fields. Recovery can

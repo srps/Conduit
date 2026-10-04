@@ -180,8 +180,10 @@ final class NetworkLocationRecoveryTests: XCTestCase {
 
     func testWholeRequestBudgetRejectsBeforeJournalCaptureAndReportsWhy() throws {
         try withRecovery { store, journal, recovery, events in
+            store.edit { $0.services[0].proxies = ["HTTPProxy": .text(String(repeating: "\u{1}", count: 4096)),
+                                                  "HTTPSProxy": .text(String(repeating: "\u{1}", count: 4096))] }
             let original = try store.snapshot()
-            let oversized: [String: NetworkSettingValue] = ["ExceptionsList": .list(Array(repeating: String(repeating: "a", count: 253), count: 256))]
+            let oversized: [String: NetworkSettingValue] = ["HTTPEnable": .number(1)]
             XCTAssertThrowsError(try recovery.apply(kind: .proxies, desired: oversized, config: ProxyConfig()))
             XCTAssertEqual(try store.snapshot(), original)
             XCTAssertFalse(journal.hasRecords(for: .systemProxy))

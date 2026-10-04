@@ -163,6 +163,9 @@ extension ProxyConfig {
         for (i, host) in routing.noProxyHosts.enumerated() where !Self.isSafeHostToken(host, allowWildcard: true) {
             errors.append(.invalidHost(field: "routing.noProxyHosts[\(i)]", value: host))
         }
+        if let problem = ProxyBypassSyntax.validationProblem(routing.noProxyHosts) {
+            errors.append(.conflict(description: "routing.noProxyHosts: \(problem)"))
+        }
         for (i, host) in routing.forceProxyHosts.enumerated() where !Self.isSafeHostToken(host, allowWildcard: true) {
             errors.append(.invalidHost(field: "routing.forceProxyHosts[\(i)]", value: host))
         }

@@ -75,6 +75,11 @@ enum NetworkLocationScenarios {
             try recovery.apply(kind: .proxies, desired: ["ExceptionsList": .list(Array(repeating: String(repeating: "a", count: 253), count: 256))], config: config)
         } catch NetworkSettingsError.invalidRequest { oversizedRejected = true }
         let afterOversized = try store.snapshot()
+        var invalidBypassConfig = config
+        invalidBypassConfig.noProxyHosts = Array(repeating: "short.example", count: 257)
+        let bypassRejectedAtBoundary = invalidBypassConfig.validate().contains {
+            $0.blocksProxyStart && $0.errorDescription?.hasPrefix("routing.noProxyHosts:") == true
+        }
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -89,7 +94,8 @@ enum NetworkLocationScenarios {
                 .init("loginwindow cleanup accepts non-default IPv4 loopback", cleanup.isCleanup),
                 .init("disabled endpoint cannot protect an unrelated listener", disabledIgnored),
                 .init("inactive recovery failure cannot skip teardown on an empty active location", outstandingPreventsSkip && inactiveProxyRestored),
-                .init("whole request budget rejects before journal capture or mutation", oversizedRejected && beforeOversized == afterOversized && !journal.hasRecords(for: .systemProxy)),
+                .init("oversized request rejects before journal capture or mutation", oversizedRejected && beforeOversized == afterOversized && !journal.hasRecords(for: .systemProxy)),
+                .init("bypass limits reject configuration before startup", bypassRejectedAtBoundary),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
