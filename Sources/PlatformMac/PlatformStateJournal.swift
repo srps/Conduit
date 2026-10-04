@@ -106,6 +106,13 @@ package final class PlatformStateJournal: @unchecked Sendable {
         self.logger = logger
     }
 
+    /// Applying new machine settings needs readable prior-state storage.
+    /// Recovery may keep retry evidence in memory, but must not use that as
+    /// permission to publish new settings while disk evidence is corrupt.
+    package func requireReadableForApply() throws {
+        guard fileState != .unreadable else { throw NetworkSettingsError.unreadableJournal }
+    }
+
     /// Whether the on-disk journal could be read. Callers use this to tell
     /// "we hold nothing on this surface" from "we cannot say what we hold".
     package var fileState: FileState {

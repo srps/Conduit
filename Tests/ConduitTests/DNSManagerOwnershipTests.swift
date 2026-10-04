@@ -176,6 +176,18 @@ final class DNSManagerOwnershipTests: XCTestCase {
         try Data("{ truncated".utf8).write(to: journalDirectory.appendingPathComponent("platform-state.json"))
     }
 
+    func testUnreadableJournalWithholdsNewResolverWrites() throws {
+        try corruptJournal()
+        let manager = makeManager()
+        XCTAssertThrowsError(try manager.apply(config: makeConfig(), logger: nil, vpnConnected: true))
+        XCTAssertThrowsError(try manager.applyEntryFiles(config: makeConfig(), logger: nil))
+        var interceptConfig = makeInterceptConfig()
+        interceptConfig.dns.transparentProxyEnabled = true
+        XCTAssertThrowsError(try manager.applyInterceptFiles(config: interceptConfig, logger: nil))
+        XCTAssertTrue(recording.commands.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: journalDirectory.appendingPathComponent("platform-state.json")), Data("{ truncated".utf8))
+    }
+
     private func writeResolverFile(_ domain: String, _ contents: String) throws {
         try contents.write(to: journalDirectory.appendingPathComponent(domain), atomically: true, encoding: .utf8)
     }

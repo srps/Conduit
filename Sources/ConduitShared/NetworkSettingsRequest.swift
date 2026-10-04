@@ -148,7 +148,7 @@ package enum NetworkSettingsError: Error, LocalizedError {
         case .unavailable: "Network preferences could not be read or committed."
         case .persistenceFailed: "Network prior state could not be saved; no settings were changed."
         case .capacityExceeded: "Network location recovery capacity exceeded; no settings were changed."
-        case .unreadableJournal: "The network recovery journal is unreadable. Recognized residue was cleared; prior settings are unknown. Repair the journal before applying new settings."
+        case .unreadableJournal: "The network recovery journal is unreadable. Prior settings are unknown; recognized residue cleanup is conservative. Repair the journal before applying new settings."
         }
     }
 }
