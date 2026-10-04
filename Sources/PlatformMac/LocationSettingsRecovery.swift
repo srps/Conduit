@@ -72,7 +72,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     package func validateSnapshot() throws { _ = try store.snapshot() }
 
     package func isCleared(kind: NetworkSettingsKind) -> Bool {
-        guard !journal.hasRecords(for: surface(kind)) else { return false }
+        guard journal.fileState != .unreadable, !journal.hasRecords(for: surface(kind)) else { return false }
         do {
             let snapshot = try store.snapshot()
             return snapshot.services.filter { $0.locationID == snapshot.activeLocationID }.allSatisfy { member in
@@ -271,8 +271,9 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
 
     private func cleanLegacy(kind: NetworkSettingsKind, config: ProxyConfig) throws {
         let legacy = journal.records(for: surface(kind)).filter { $0.locationID == nil }
+        let journalUnreadable = journal.fileState == .unreadable
         // A released surface contains the user's own settings; never sweep it again.
-        guard !legacy.isEmpty else { return }
+        guard !legacy.isEmpty || journalUnreadable else { return }
         let snapshot = try store.snapshot()
         let scoped = Set(journal.records(for: surface(kind)).filter { $0.locationID != nil }.map(\.scope))
         var unreadable = false
@@ -294,6 +295,11 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                                                              kind: kind, expected: current, replacement: replacement, requireActive: false))
         }
         guard !unreadable else { throw NetworkSettingsError.invalidRequest }
+        // Retain corrupt evidence and never overwrite it with a released marker.
+        if journalUnreadable {
+            report("failed", "operation=legacy_cleanup surface=\(kind.rawValue) reason=unreadable_journal prior_location=unknown")
+            throw NetworkSettingsError.unreadableJournal
+        }
         for record in legacy {
             report("legacy_retired", "surface=\(kind.rawValue) prior_location=unknown")
             try journal.forgetNetworkState(surface: surface(kind), scope: record.scope)

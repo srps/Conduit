@@ -61,6 +61,37 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testCorruptJournalClearsRecognizedResidueWithoutReplacingEvidence() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("location-corrupt-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let corrupt = Data("{broken}".utf8)
+        try corrupt.write(to: file)
+        let journal = PlatformStateJournal(fileURL: file)
+        let store = machine()
+        store.edit {
+            $0.services[0].proxies = ["HTTPProxy": .text("127.0.0.1"), "HTTPPort": .number(3128), "HTTPEnable": .number(1)]
+            $0.services[0].dns = localDNS
+        }
+        let events = RuntimeEventLog()
+        let recovery = LocationSettingsRecovery(store: store, journal: journal, emit: { events.append($0) })
+        for kind in [NetworkSettingsKind.proxies, .dns] {
+            guard case .failed = recovery.recover(kind: kind, config: ProxyConfig(), listenerIsLive: false) else {
+                XCTFail("Unreadable recovery must report unknown prior state")
+                return
+            }
+            XCTAssertFalse(recovery.isCleared(kind: kind))
+            XCTAssertThrowsError(try recovery.clear(kind: kind, config: ProxyConfig()))
+        }
+        XCTAssertEqual(try store.snapshot().services[0].proxies, [:])
+        XCTAssertEqual(try store.snapshot().services[0].dns, [:])
+        XCTAssertEqual(try store.snapshot().services[1].dns, ["ServerAddresses": .list(["192.0.2.2"])])
+        XCTAssertThrowsError(try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig()))
+        journal.markReleased(surface: .launchdEnvironment)
+        XCTAssertEqual(journal.fileState, .unreadable)
+        XCTAssertEqual(try Data(contentsOf: file), corrupt)
+        XCTAssertTrue(events.events.contains { $0.event == "platform.location_failed" })
+    }
+
     func testUnreadableProtocolRetainsItsRecordAndDoesNotBlockOtherRecovery() throws {
         try withRecovery { store, journal, recovery, events in
             let original = try store.snapshot()

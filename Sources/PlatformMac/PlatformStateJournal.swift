@@ -391,13 +391,11 @@ package final class PlatformStateJournal: @unchecked Sendable {
             loaded = decoded
             return decoded
         } catch {
-            // Recovered, not swallowed: callers read `.unreadable` as "we
-            // cannot say what we changed" and fall back to an unconditional
-            // teardown, which is the safe direction. Say so out loud, because
-            // it also means a crash from here on cannot restore anything.
+            // Recovery may inspect recognized residue, but cannot attribute
+            // prior settings. Keep the file intact for diagnosis and repair.
             logger?.log(
                 .warning,
-                "Could not read the platform-state journal at \(fileURL.path) (\(error.displayDescription)); teardown will clear settings unconditionally instead of restoring them.",
+                "Could not read the platform-state journal at \(fileURL.path) (\(error.displayDescription)); recovery will inspect recognized residue; prior settings are unknown and the journal will be preserved.",
                 category: .system
             )
             fileStateBox = .unreadable
@@ -410,7 +408,13 @@ package final class PlatformStateJournal: @unchecked Sendable {
     /// in-memory copy after failure; durable network operations roll it back.
     @discardableResult
     private func saveLocked(_ records: [PlatformStateRecord]) -> Bool {
+        // Legacy resolver adoption needs its in-memory evidence for retry even
+        // when persistence is unavailable. Never replace the corrupt disk file.
         loaded = records
+        guard fileStateBox != .unreadable else {
+            logger?.log(.error, "Refusing to overwrite an unreadable platform-state journal; repair it before recording new state.", category: .system)
+            return false
+        }
         do {
             let data = try CanonicalJSON.encoder().encode(records)
             try FileManager.default.createDirectory(

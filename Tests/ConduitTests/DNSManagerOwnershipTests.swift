@@ -195,19 +195,19 @@ final class DNSManagerOwnershipTests: XCTestCase {
         try manager.clearRecorded(configs: [makeTwoDomainConfig()], logger: nil)
 
         XCTAssertEqual(removedDomains(), ["corp.example"], "internal.example has contents we never write")
-        XCTAssertFalse(manager.hasManagedState(), "the journal was rebuilt and then released")
+        XCTAssertTrue(manager.hasManagedState(), "corrupt evidence remains suspect until repaired")
     }
 
-    /// Nothing of ours on disk must settle the surface, not leave it forever
-    /// suspect: every later stop and quit would otherwise re-run the scan.
-    func testUnreadableJournalWithNothingOfOursSettlesTheSurface() throws {
+    /// No matching files can be removed, but cannot justify overwriting a
+    /// corrupt journal that may describe another surface's settings.
+    func testUnreadableJournalWithNothingOfOursPreservesUnknownState() throws {
         try corruptJournal()
         let manager = makeManager()
 
         try manager.clearRecorded(configs: [makeConfig()], logger: nil)
 
         XCTAssertTrue(removedDomains().isEmpty)
-        XCTAssertFalse(manager.hasManagedState())
+        XCTAssertTrue(manager.hasManagedState(), "the unreadable disk journal remains intact")
     }
 
     /// One save can edit the entries and turn the switch off together. With
@@ -228,8 +228,8 @@ final class DNSManagerOwnershipTests: XCTestCase {
     }
 
     /// Adopting a file records it, so a removal that then fails is retried by
-    /// the next teardown from the journal — even once the config has moved on
-    /// and no longer names the domain.
+    /// the next teardown from in-memory evidence — even once the config has
+    /// moved on and no longer names the domain. Corrupt disk evidence stays intact.
     func testUnreadableJournalAdoptionMakesAFailedRemovalRetryable() throws {
         try corruptJournal()
         try writeResolverFile("corp.example", "nameserver 10.1.1.1")
@@ -244,8 +244,8 @@ final class DNSManagerOwnershipTests: XCTestCase {
         movedOn.dnsEntries = []
         try manager.clearRecorded(configs: [movedOn], logger: nil)
 
-        XCTAssertEqual(removedDomains(), ["corp.example", "corp.example"], "retried from the rebuilt journal")
-        XCTAssertFalse(manager.hasManagedState())
+        XCTAssertEqual(removedDomains(), ["corp.example", "corp.example"], "retried from retained in-memory evidence")
+        XCTAssertTrue(manager.hasManagedState(), "the unreadable disk journal remains intact")
     }
 
     private func makeInterceptConfig() -> ProxyConfig {

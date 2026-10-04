@@ -17,9 +17,12 @@ enum NetworkLocationScenarios {
         ]
         let store = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
         let file = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-\(UUID()).json")
+        let corruptFile = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-corrupt-\(UUID()).json")
         defer {
-            do { try FileManager.default.removeItem(at: file) }
-            catch { fputs("network-location-recovery journal cleanup failed: \(error.localizedDescription)\n", stderr) }
+            for journalFile in [file, corruptFile] where FileManager.default.fileExists(atPath: journalFile.path) {
+                do { try FileManager.default.removeItem(at: journalFile) }
+                catch { fputs("network-location-recovery journal cleanup failed: \(error.localizedDescription)\n", stderr) }
+            }
         }
         let journal = PlatformStateJournal(fileURL: file)
         let events = RuntimeEventLog(capacity: 64)
@@ -77,9 +80,26 @@ enum NetworkLocationScenarios {
         let afterOversized = try store.snapshot()
         var invalidBypassConfig = config
         invalidBypassConfig.noProxyHosts = Array(repeating: "short.example", count: 257)
-        let bypassRejectedAtBoundary = invalidBypassConfig.validate().contains {
-            $0.blocksProxyStart && $0.errorDescription?.hasPrefix("routing.noProxyHosts:") == true
+        let bypassWarningAtBoundary = invalidBypassConfig.validate().contains {
+            !$0.blocksProxyStart && $0.errorDescription?.hasPrefix("routing.noProxyHosts:") == true
         }
+        let corrupt = Data("{broken}".utf8)
+        try corrupt.write(to: corruptFile)
+        let corruptJournal = PlatformStateJournal(fileURL: corruptFile)
+        let corruptStore = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
+        corruptStore.edit {
+            $0.services[0].proxies = ["HTTPProxy": .text(config.effectiveClientHost), "HTTPPort": .number(config.localPort), "HTTPEnable": .number(1)]
+            $0.services[0].dns = localDNS
+        }
+        let corruptRecovery = LocationSettingsRecovery(store: corruptStore, journal: corruptJournal, emit: { events.append($0) })
+        var corruptFailures = 0
+        for kind in [NetworkSettingsKind.proxies, .dns] {
+            if case .failed = corruptRecovery.recover(kind: kind, config: config, listenerIsLive: false) { corruptFailures += 1 }
+        }
+        corruptJournal.markReleased(surface: .launchdEnvironment)
+        let corruptSnapshot = try corruptStore.snapshot()
+        let corruptEvidencePreserved = try Data(contentsOf: corruptFile) == corrupt
+        let corruptResidueCleared = corruptSnapshot.services[0].proxies.isEmpty && corruptSnapshot.services[0].dns.isEmpty
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -95,7 +115,8 @@ enum NetworkLocationScenarios {
                 .init("disabled endpoint cannot protect an unrelated listener", disabledIgnored),
                 .init("inactive recovery failure cannot skip teardown on an empty active location", outstandingPreventsSkip && inactiveProxyRestored),
                 .init("oversized request rejects before journal capture or mutation", oversizedRejected && beforeOversized == afterOversized && !journal.hasRecords(for: .systemProxy)),
-                .init("bypass limits reject configuration before startup", bypassRejectedAtBoundary),
+                .init("manual bypass limits warn without blocking routing or PAC startup", bypassWarningAtBoundary),
+                .init("corrupt journal recovery clears recognized residue and preserves evidence", corruptFailures == 2 && corruptResidueCleared && corruptEvidencePreserved && !corruptRecovery.isCleared(kind: .dns)),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]

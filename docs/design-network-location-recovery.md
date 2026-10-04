@@ -16,8 +16,9 @@ mutable. Authentication fields and unrelated protocol settings are excluded.
 Applying PAC mode requires a nonempty URL before any mutation. Live-session
 protection probes only enabled endpoints on enabled services in the active set.
 Bypass lists share config/helper grammar bounds: 256 entries, 253 UTF-8 bytes
-per entry, and 8 KiB encoded aggregate size. Startup rejects larger lists instead
-of discovering them during privileged application.
+per entry, and 8 KiB encoded aggregate size. Configuration warnings identify larger
+lists and manual system-proxy application rejects them before capture. Routing and
+PAC startup remain available because they do not consume the helper bypass list.
 The helper locks SCPreferences without waiting, verifies set membership, active
 set when required, and expected fields before committing. It merges the selected
 fields into the current configuration, preserving unrelated fields. Recovery can
@@ -36,7 +37,11 @@ so stopping retries recovery after an earlier location-switch write failed.
 Service/location deletion releases only that identity's record. Renames retain it.
 
 Untracked settings, including a user's local resolver, are preserved and captured
-unchanged as prior state. Residue cleanup requires legacy journal evidence.
+unchanged as prior state. Residue cleanup requires legacy journal evidence or an
+unreadable journal. A corrupt journal triggers recognized residue inspection and
+cleanup, reports that prior settings are unknown, and stays intact for repair.
+All journal writes refuse to replace that evidence, including other surfaces'
+release markers. New application fails until the journal is repaired and reloaded.
 Legacy service-name entries have unknown location identity. Never migrate their
 prior values into the current location by guessing. Sweep exact Conduit loopback
 residue across all sets, removing those endpoints while preserving external

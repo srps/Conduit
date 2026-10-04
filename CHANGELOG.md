@@ -38,8 +38,12 @@ form Conduit cannot route by.
   retaining existing VPN, direct-routing and split-DNS policy. Expected-value
   comparisons preserve later external edits; rename/deletion, interrupted recovery,
   failed reapplication and loginwindow cleanup remain recoverable and observable.
-- Bypass lists are validated before startup with the same bounds as scoped helper
-  writes: 256 entries, 253 UTF-8 bytes per entry, and 8 KiB encoded aggregate size.
+- Manual system-proxy bypass lists share the helper's bounds: 256 entries,
+  253 UTF-8 bytes per entry, and 8 KiB encoded aggregate size. Configuration
+  warnings identify oversized lists; routing and PAC proxying remain available.
+- An unreadable journal triggers recognized loopback residue cleanup while keeping
+  the corrupt file intact. Unknown prior state is surfaced, and new application
+  waits for journal repair.
 - Legacy service-name records never restore their values into a guessed location.
   Exact Conduit loopback residue is removed across locations; ambiguous legacy DNS
   residue returns to DHCP. Profiles and automatic location selection remain later
