@@ -2,16 +2,20 @@
 
 **Date:** 2026-06-10
 **Status:** Proposal — grounds the "lightweight core + plugins" vision and the
-"modern web standards" goal against the existing Plan A architecture, and
+"modern web standards" goal against the macOS architecture, and
 defines the implementation plan for both. Companion critique of
-`roadmap-v2.md` / `ROADMAP.md` is in §1.
+the original April 2026 plan / `ROADMAP.md` is in §1.
+
+> Historical proposal: the current [planning detail](./planning.md) and
+> [roadmap](../ROADMAP.md) take precedence. Cross-platform/rewrite proposals are
+> superseded; this document preserves extension and protocol rationale.
 
 ---
 
 ## 1. Vision grounding — what stands, what should change
 
-The written plan (roadmap-v2 + ROADMAP) is unusually honest and mostly
-correct: the niche analysis is real, the Plan B gating is wise, and the
+The written plan (the original April 2026 plan + ROADMAP) is unusually honest and mostly
+correct: the niche analysis is real, cross-platform work was explicitly gated, and the
 module-split → hardening → daemonize sequencing was the right order. The
 points below are where the vision as *spoken* ("full featured corporate
 proxy/VPN, plugin-extensible, lightweight core") diverges from what the
@@ -78,7 +82,7 @@ extends naturally into the SASE world.
 UI-excellence work (6–10 sessions) and the chaos demos currently sit between
 today and open-source prep (signing, brew, getting-started). But every
 strategic gate in the
-plan — Plan B triggers, enterprise addenda, even 1.0 — keys off *external
+historical plan — cross-platform triggers, enterprise addenda, even 1.0 — keys off *external
 demand signals* that cannot arrive until people can install the thing. The
 SASE anti-trigger cuts both ways: the legacy-explicit-proxy niche is
 shrinking, so time-to-public matters more than polish. Make it explicit:
@@ -150,7 +154,7 @@ and hybrid messes are all just upstreams with different health behaviors.
   extend it to every new target (§2).
 - Bounded-everything + structured-events-first. These two invariants are
   what will make the OSS project reviewable by strangers.
-- Plan B preservation with explicit triggers/anti-triggers. Don't touch it.
+- Keep dated ecosystem research as historical context; no rewrite or cross-platform port is planned.
 - pm-sim-before-ship. The GSS crash is the counterexample that proves the
   rule: the one subsystem a simulator can't fake (real Heimdal) is where the
   field crash lived. Hence the sanitizer-soak recommendation (§4).
@@ -247,7 +251,7 @@ client failure we investigated was the client bypassing the proxy, not a
 Conduit gap. Plan: a `docs/` compatibility note + a
 `pm-sim h2-through-connect` scenario asserting the tunnel is truly opaque
 (no buffering/latency cliffs for long-lived h2 streams). Implementing an h2
-listener is post-1.0 at earliest, demand-gated like Plan B.
+listener is post-1.0 at earliest, subject to demonstrated deployment demand.
 
 **HTTP/3 / QUIC / MASQUE (explicit non-goal pre-2.0).** Clients with a
 configured proxy fall back from QUIC to TCP; MASQUE (`CONNECT-UDP`) adoption

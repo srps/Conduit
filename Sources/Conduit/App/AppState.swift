@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import AppKit
 import PlatformMac
+import ConduitShared
 import ProxyAuth
 import ProxyKernel
 import ProxyPAC
@@ -81,7 +82,9 @@ final class AppState: ObservableObject {
     private lazy var systemConduit = SystemProxyManager(
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
-        commandRunner: commandRunner
+        commandRunner: commandRunner,
+        locationRecovery: locationRecovery,
+        configProvider: orchestrator.configSnapshotProvider
     )
     private lazy var environmentManager = EnvironmentManager(
         journal: platformStateJournal,
@@ -97,9 +100,24 @@ final class AppState: ObservableObject {
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
         legacySnapshotFile: runtimeEnvironment.legacySavedDNSFile,
-        commandRunner: commandRunner
+        commandRunner: commandRunner,
+        locationRecovery: locationRecovery,
+        configProvider: orchestrator.configSnapshotProvider
     )
     private let loginItemManager: LoginItemManager
+    private let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
+    private let networkLocationObserver: any NetworkLocationObserving
+    private lazy var locationRecovery: LocationSettingsRecovery? = {
+        guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
+        let eventLog = orchestrator.eventLog
+        let logger = logStore
+        return LocationSettingsRecovery(store: store, journal: platformStateJournal) { event in
+            eventLog.append(event)
+            logger.log(.notice, "Network location: \(event.event) \(event.detail ?? "")", category: .system)
+        }
+    }()
+    private var locationReconcileInFlight = false
+    private var locationReconcileWanted = false
     private let networkMonitor = NetworkMonitor()
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<VPNFlapWindowConfig>
@@ -198,7 +216,9 @@ final class AppState: ObservableObject {
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
-        vpnStatusMonitor: VPNStatusObserving? = nil
+        vpnStatusMonitor: VPNStatusObserving? = nil,
+        networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
+        networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) }
     ) {
         let runtimeEnvironment = runtimeEnvironment ?? AppState.runtimeEnvironment()
         let logStore = AppLogStore()
@@ -246,6 +266,8 @@ final class AppState: ObservableObject {
             base: privilegeClient ?? helperClient,
             eventSink: { event in privilegeAuditEventSink.emit(event) }
         )
+        self.networkLocationObserver = networkLocationObserver
+        self.networkLocationStoreFactory = networkLocationStoreFactory
         self.runtimeEnvironment = runtimeEnvironment
         self.logStore = logStore
         self.helperLifecycle = helperLifecycle ?? helperClient
@@ -432,6 +454,7 @@ final class AppState: ObservableObject {
         logStore.minStderrLevel = config.verboseLogging ? .debug : .notice
         logStore.minBufferedLevel = config.verboseLogging ? .debug : .notice
         notificationManager.requestAuthorization()
+        startLocationObserver()
         networkMonitor.start()
         self.vpnStatusMonitor.start()
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -1766,6 +1789,7 @@ final class AppState: ObservableObject {
         }
         runtime.stop()
         stopDNSHealthTimer()
+        networkLocationObserver.stop()
         networkMonitor.stop()
         // Tier B observer owns an SCDynamicStore handle bound to a dispatch
         // queue plus pending grace/min-visible DispatchWorkItem timers. Without
@@ -1894,6 +1918,63 @@ final class AppState: ObservableObject {
     /// service DNS with no material path change (#101, `NetworkPathReports`).
     /// The reaction is its own delivery, so the reconcile is scheduled in
     /// this turn rather than after the PAC fetch.
+    private func startLocationObserver() {
+        networkLocationObserver.start { [weak self, deliveries] result in
+            deliveries.deliver { await self?.handleLocationChange(result) }
+        }
+    }
+
+    private func handleLocationChange(_ result: Result<String, NetworkSettingsError>) async {
+        guard !rejectUnavailableConfiguration() else { return }
+        switch result {
+        case .success(let locationID):
+            recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_observed", detail: "location=\(locationID)"))
+        case .failure(let error):
+            recordLifecycle(RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=observe reason=\(error.localizedDescription)"))
+            return
+        }
+        guard !locationReconcileInFlight else { locationReconcileWanted = true; return }
+        locationReconcileInFlight = true
+        defer { locationReconcileInFlight = false }
+        repeat {
+            locationReconcileWanted = false
+            await awaitLaunchRecovery()
+            while !proxyLane.isIdle || !dnsLane.isIdle {
+                await proxyLane.waitUntilIdle()
+                await dnsLane.waitUntilIdle()
+            }
+            let state = runtimeState()
+            let proxyToken = proxyLane.observationToken
+            let dnsToken = dnsLane.observationToken
+            let proxy = systemConduit, dns = systemDNSManager
+            let config = self.config, platform = platformConfig
+            let pacURL = orchestrator.snapshot.bindings.localPACURL
+            let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
+            let events = orchestrator.eventLog, logger = logStore
+            await platformWork.run {
+                do {
+                    if !proxyToken.isSuperseded {
+                        try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL,
+                                                    apply: platform.manageSystemProxy && state.proxyIsUp)
+                    }
+                } catch {
+                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
+                    events.append(event)
+                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
+                }
+                do {
+                    if !dnsToken.isSuperseded {
+                        try dns.reconcileLocation(apply: platform.manageSystemDNS && state.dnsIsUp, forwarderPort: forwarderPort, logger: logger)
+                    }
+                } catch {
+                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemDNS reason=\(error.localizedDescription)")
+                    events.append(event)
+                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
+                }
+            }
+        } while locationReconcileWanted
+    }
+
     private func handleNetworkChange(_ path: NetworkPathState) async {
         guard !rejectUnavailableConfiguration() else { return }
         await NetworkPathReports.receive(
@@ -1981,14 +2062,23 @@ final class AppState: ObservableObject {
         dnsReconcileInFlight = true
         let manager = systemDNSManager
         deliveries.deliver { [weak self, platformWork, logStore] in
+            guard let self else { return }
+            await self.dnsLane.waitUntilIdle()
+            guard self.platformConfig.manageSystemDNS, self.orchestrator.snapshot.dnsRunState == .running else {
+                self.dnsReconcileInFlight = false
+                self.dnsReconcileWanted = false
+                return
+            }
+            let token = self.dnsLane.observationToken
+            let forwarderPort = self.effectiveDNSForwarderPort
             // Followed at once by a liveness probe, so a relay that died
             // across sleep or VPN churn is restarted now rather than at the
             // next 30 s health tick.
             let alive = await platformWork.run {
-                manager.reconcile(logger: logStore)
+                guard !token.isSuperseded else { return true }
+                manager.reconcile(logger: logStore, forwarderPort: forwarderPort)
                 return manager.probeLiveness()
             }
-            guard let self else { return }
             self.dnsReconcileInFlight = false
             if self.dnsReconcileWanted {
                 self.dnsReconcileWanted = false

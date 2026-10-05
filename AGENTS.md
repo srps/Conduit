@@ -70,5 +70,6 @@ Executables:
 - `docs/architecture.md`: module graph and daemon/client shape.
 - `docs/STYLE.md`: the full engineering discipline behind these rules.
 - `docs/events.md`: the `RuntimeEvent` catalogue.
-- `docs/roadmap-v2.md`: product plan.
+- `ROADMAP.md`: execution queue and product-work status.
+- `docs/planning.md`: implementation rationale, dependencies, and acceptance criteria.
 - `docs/design-*.md`: subsystem designs (module split, VPN flap resilience, tunnel DNS override, DNS intercept and transparent proxy).

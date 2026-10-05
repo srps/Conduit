@@ -69,6 +69,7 @@ enum PMSim {
               kerberos-service-ticket A TGT without a service ticket is unreachable, not a missing credential
               kerberos-fallback-flood A fallback on every handshake is one event a minute, with the GSS codes
               ntlm-credential-cache   A burst of NTLM fallbacks reads the saved password once; a failing store is reported once
+              network-location-recovery  inactive-location recovery, external edits, and write races
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
 
             OPTIONS:
@@ -208,6 +209,7 @@ enum PMSim {
         "kerberos-fallback-flood",
         "ntlm-credential-cache",
         "helper-caller-identity",
+        "network-location-recovery",
         "lifecycle-stop-overtakes-start",
     ]
 
@@ -318,6 +320,8 @@ enum PMSim {
             return [try await KerberosScenarios.fallbackFlood()]
         case "ntlm-credential-cache":
             return [try await CredentialCacheScenarios.burstReadsOnce(verbose: verbose)]
+        case "network-location-recovery":
+            return [try NetworkLocationScenarios.recovery()]
         case "lifecycle-stop-overtakes-start":
             return [try await LifecycleScenarios.stopOvertakesStart()]
         case "fixture-pass", "fixture-fail", "fixture-missing":

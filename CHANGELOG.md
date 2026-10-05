@@ -16,9 +16,10 @@ identity, in this order:
 3. Run `sudo ./install-helper.sh`; its summary says `Callers: ENFORCED`.
 
 Without the identity, the app is signed ad-hoc as before, and the new helper keeps the
-console-user rule and logs that identity is unenforced. The helper protocol did not
-change: a new app works with an older helper, and an older app works with the new helper
-while identity is unenforced. Once the pin is installed, the helper refuses any build not
+console-user rule and logs that identity is unenforced. Helper protocol v5 adds location-scoped proxy/DNS writes. Reinstall the helper
+before using this build: these writes deliberately do not fall back to service-name
+commands or AppleScript with an older helper. The v5 helper continues to accept
+legacy v3/v4 requests; caller-identity admission still applies. Once the pin is installed, the helper refuses any build not
 signed with the pinned identity, including every earlier release, which was signed
 ad-hoc; to roll back past this release, reinstall the older release's helper too, which
 drops enforcement.
@@ -29,6 +30,26 @@ now goes through the upstream. A `routing.strict_direct_reachable` event names e
 that failed through the upstream but answers directly; add it to No-proxy hosts if it
 should not use the proxy. A frequent `pac.no_usable_route` means the PAC answers in a
 form Conduit cannot route by.
+
+### Network location recovery
+
+- Proxy and DNS prior state is keyed by stable location/service IDs. External
+  location switches restore inactive locations and reconcile the active one while
+  retaining existing VPN, direct-routing and split-DNS policy. Expected-value
+  comparisons preserve later external edits; rename/deletion, interrupted recovery,
+  failed reapplication and loginwindow cleanup remain recoverable and observable.
+- Manual system-proxy bypass lists share the helper's bounds: 256 entries,
+  253 UTF-8 bytes per entry, and 8 KiB encoded aggregate size. Configuration
+  warnings identify oversized lists; routing and PAC proxying remain available.
+- An unreadable journal triggers recognized loopback residue cleanup while keeping
+  the corrupt file intact. Unknown prior state is surfaced, and new application
+  waits for journal repair, including environment and resolver publication.
+- Location observations wait for in-flight start/stop work before reconciling.
+  Deferred loginwindow DNS restoration still stops the privileged relay.
+- Legacy service-name records never restore their values into a guessed location.
+  Exact Conduit loopback residue is removed across locations; ambiguous legacy DNS
+  residue returns to DHCP. Profiles and automatic location selection remain later
+  work. Controlled macOS 26/27 corporate-VPN checks are required before deployment.
 
 ### Security
 

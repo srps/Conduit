@@ -75,6 +75,9 @@ struct UpstreamsSettingsView: View {
                         problems: indexedProblems(prefix: "routing.noProxyHosts", problems: problems)
                     )
                 }
+                if let problem = problems.message(for: "routing.noProxyHosts") {
+                    FieldProblem(message: problem)
+                }
                 LabeledContent("Force-proxy hosts") {
                     HostListEditor(
                         entries: $appState.config.forceProxyHosts,

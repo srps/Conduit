@@ -323,6 +323,8 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     private func apply(_ operation: PrivilegedOperation, _ values: [String]) throws {
         switch operation {
+        case .compareNetworkSettings:
+            throw PrivilegeClientError.executionFailed("Inject FakeNetworkLocationStore for location writes")
         case .applyDNS:
             guard values.count >= 2 else { throw PrivilegeClientError.executionFailed("apply-dns: missing values") }
             let servers = values[1].split(separator: ",").map(String.init)
@@ -562,5 +564,66 @@ package final class InMemorySecretStore: SecretStore, @unchecked Sendable {
 
     package func delete(account: String) throws {
         lock.withLock { _ = secrets.removeValue(forKey: account) }
+    }
+}
+
+// MARK: - Network locations
+
+package final class FakeNetworkLocationStore: NetworkLocationStoring, @unchecked Sendable {
+    private let lock = NSRecursiveLock()
+    private var state: NetworkLocationSnapshot
+    private var failWrites = false
+    private var _atLoginwindow = false
+    package var atLoginwindow: Bool {
+        get { lock.withLock { _atLoginwindow } }
+        set { lock.withLock { _atLoginwindow = newValue } }
+    }
+    private var nextActiveLocation: String?
+    package init(snapshot: NetworkLocationSnapshot) { state = snapshot }
+    package func snapshot() throws -> NetworkLocationSnapshot { lock.withLock { state } }
+    package func edit(_ body: (inout NetworkLocationSnapshot) -> Void) { lock.withLock { body(&state) } }
+    package func refuseWrites(_ refuse: Bool) { lock.withLock { failWrites = refuse } }
+    private var compareFailuresRemaining = 0
+    package var pendingCompareFailures: Int { lock.withLock { compareFailuresRemaining } }
+    package func conflictNextWrites(_ count: Int) {
+        precondition((0...64).contains(count))
+        lock.withLock { compareFailuresRemaining = count }
+    }
+    package func switchDuringNextWrite(to locationID: String) { lock.withLock { nextActiveLocation = locationID } }
+    package func compareAndWrite(_ request: NetworkSettingsRequest) throws {
+        try request.validate()
+        try lock.withLock {
+            if let nextActiveLocation { state.activeLocationID = nextActiveLocation; self.nextActiveLocation = nil }
+            guard !failWrites else { throw NetworkSettingsError.unavailable }
+            if compareFailuresRemaining > 0 {
+                compareFailuresRemaining -= 1
+                throw NetworkSettingsError.changed
+            }
+            if _atLoginwindow && !request.isCleanup { throw PrivilegeClientError.refused(.noConsoleUser, "No console user") }
+            guard !request.requireActive || state.activeLocationID == request.locationID,
+                  let index = state.services.firstIndex(where: {
+                      $0.locationID == request.locationID && $0.serviceID == request.serviceID
+                  }) else { throw NetworkSettingsError.changed }
+            let current = request.kind == .proxies ? state.services[index].proxies : state.services[index].dns
+            guard current == request.expected else { throw NetworkSettingsError.changed }
+            if request.kind == .proxies { state.services[index].proxies = request.replacement }
+            else { state.services[index].dns = request.replacement }
+        }
+    }
+}
+
+package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: (@Sendable (Result<String, NetworkSettingsError>) -> Void)?
+    package init() {}
+    package func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void) {
+        lock.withLock { callback = onChange }
+    }
+    package func stop() { lock.withLock { callback = nil } }
+    package func emit(_ locationID: String) { lock.withLock { callback }?(.success(locationID)) }
+    /// Models a callback already in flight when observation is stopped.
+    package func pendingDelivery(_ locationID: String) -> (@Sendable () -> Void)? {
+        guard let callback = lock.withLock({ callback }) else { return nil }
+        return { callback(.success(locationID)) }
     }
 }

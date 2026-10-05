@@ -682,7 +682,7 @@ Concrete consequences:
 
 ### Module placement (interim)
 
-All new files land in `Sources/ConduitCore/Network/` alongside `NetworkMonitor.swift` until the module split (`roadmap-v2.md §2.2`) separates Core. Files using `SystemConfiguration` carry a header comment:
+All new files land in `Sources/ConduitCore/Network/` alongside `NetworkMonitor.swift` until the module split (see `design-module-split.md` for the historical split plan) separates Core. Files using `SystemConfiguration` carry a header comment:
 
 ```
 // NOTE: module split — relocate to PlatformMac. Imports SystemConfiguration which
@@ -717,7 +717,7 @@ Not required for v1 ship; revisit if signal warrants:
 - `Sources/ConduitCore/Network/NetworkMonitor.swift` — current Tier C
 - `Sources/ConduitCore/Support/TCPKeepalive.swift` — keepalive defaults
 - `Sources/Conduit/App/AppState.swift` — `handleNetworkChange`, `autoDisableOffVPN`, `autoEnableOnVPN` (lines 89–93, 554–569)
-- `roadmap-v2.md §2.2` — module split
+- [`design-module-split.md`](./design-module-split.md) — historical module split; current priorities are in [`ROADMAP.md`](../ROADMAP.md).
 - `docs/STYLE.md` — engineering discipline (bounded everything, structured events first, side-effects behind protocols)
 - `[NEVPNStatus` (Apple)](https://developer.apple.com/documentation/networkextension/nevpnstatus) — validates "macOS doesn't close TCP on VPN transitions"
 - `[NETunnelProviderManager` (Apple)](https://developer.apple.com/documentation/networkextension/netunnelprovidermanager) — `VPNSubType` association, why Tier A is rejected for v1

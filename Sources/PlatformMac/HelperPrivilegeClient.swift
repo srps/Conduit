@@ -92,6 +92,8 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
 
     func shellScript(for operation: PrivilegedOperation, values: [String]) throws -> String {
         switch operation {
+        case .compareNetworkSettings:
+            throw PrivilegeClientError.executionFailed("Location-safe writes require the v5 Conduit helper; reinstall the helper.")
         case .applyDNS:
             guard values.count >= 2 else { throw PrivilegeClientError.executionFailed("applyDNS requires domain and servers") }
             let domain = values[0].shellQuoted
@@ -365,6 +367,10 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
                 if let clientError = error as? PrivilegeClientError, !clientError.isHelperUnreachable {
                     throw clientError
                 }
+                if command == .compareNetworkSettings {
+                    eventSink?(RuntimeEvent(kind: .auth, event: "auth.privilege_helper_required", detail: "command=compare-network-settings reason=\(error.displayDescription)"))
+                    throw PrivilegeClientError.executionFailed("Location-safe writes require the v5 Conduit helper; reinstall the helper. \(error.displayDescription)")
+                }
                 // The documented fallback, which until now was unreachable:
                 // `sendRequest` throws `helperNotInstalled` on a failed connect
                 // and `communicationFailed` on a version mismatch, and both
@@ -408,6 +414,9 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
 
     private func validate(command: HelperCommand, values: [String]) throws {
         switch command {
+        case .compareNetworkSettings:
+            guard values.count == 1 else { throw NetworkSettingsError.invalidRequest }
+            _ = try NetworkSettingsRequest.decode(values[0])
         case .ping, .stopDNSRelay, .stopTCPRelay:
             return
         case .startDNSRelay:
@@ -636,6 +645,8 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
 extension HelperCommand {
     package init(_ operation: PrivilegedOperation) {
         switch operation {
+        case .compareNetworkSettings:
+            self = .compareNetworkSettings
         case .applyDNS:
             self = .applyDNS
         case .removeDNS:

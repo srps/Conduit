@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
+import ConduitShared
 @testable import ConduitDaemon
 @testable import PlatformMac
 @testable import ProxyKernel
@@ -32,7 +33,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: environment, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
             configFilePredatesLaunch: true,
-            vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: RecordingPrivilegeClient(),
+            networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: RecordingPrivilegeClient(),
             credentialStore: secrets
         )
         // Recovery writes the journal under `directory`; let it land before
@@ -60,7 +62,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: environment, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
             configFilePredatesLaunch: true,
-            vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(),
+            networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(),
             commandRunner: { path, arguments in try machine.run(path, arguments) },
             homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
         )
@@ -97,7 +100,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = DaemonRuntimeHost(environment: environment, logger: DiscardingLogSink(),
                                      loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
                                      configFilePredatesLaunch: true,
-                                     vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
+                                     networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
                                      credentialStore: InMemorySecretStore(),
                                      commandRunner: { path, arguments in try machine.run(path, arguments) },
                                      homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path)
@@ -136,7 +140,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
             configFilePredatesLaunch: true,
-            vpnStatusMonitor: FakeVPNStatusObserver(),
+            networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(),
             credentialStore: InMemorySecretStore()
         )
 
@@ -170,7 +175,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
             configFilePredatesLaunch: false,
-            vpnStatusMonitor: observer,
+            networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
             credentialStore: InMemorySecretStore()
         )
         // Recovery writes the journal under the state directory; let it land
@@ -213,7 +219,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
             configFilePredatesLaunch: false,
-            vpnStatusMonitor: observer,
+            networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
             credentialStore: InMemorySecretStore()
         )
         // Recovery writes the journal under the state directory; let it land
@@ -277,7 +284,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 warnings: []
             ),
             configFilePredatesLaunch: false,
-            vpnStatusMonitor: FakeVPNStatusObserver(),
+            networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(),
             privilegeClient: recording,
             credentialStore: InMemorySecretStore()
         )
@@ -307,6 +315,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let environment: RuntimeEnvironment
         let machine: FakeMachine
         let vpn = FakeVPNStatusObserver()
+        let locationObserver = FakeNetworkLocationObserver()
+        var locationStore: FakeNetworkLocationStore?
         /// Holds the machine's `networksetup` listings when armed, so a
         /// scenario can keep one system DNS reconcile out while more arrive.
         let listings = HeldListings()
@@ -347,7 +357,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 // The harness writes the config file before the host exists,
                 // the way an established install has one.
                 configFilePredatesLaunch: true,
-                vpnStatusMonitor: vpn,
+                networkLocationObserver: locationObserver,
+                networkLocationStoreFactory: { [locationStore] _ in locationStore }, vpnStatusMonitor: vpn,
                 privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
                 credentialStore: secrets,
                 commandRunner: { launchPath, arguments in
@@ -421,6 +432,93 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
         harness = try DaemonHarness(config: config, platformConfig: platform)
         return try harness.makeHost()
+    }
+
+    func testLocationSwitchWithoutVPNOrPathChangeRestoresInactiveStateAndPreservesExternalEdits() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let vpnBefore = host.orchestrator.snapshot.vpnState
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        harness.locationObserver.emit(NetworkLocationFixture.office)
+        await host.deliveries.drain()
+        let switched = try locations.snapshot()
+        XCTAssertEqual(switched.services[0].proxies, original.services[0].proxies)
+        XCTAssertEqual(switched.services[0].dns, original.services[0].dns)
+        XCTAssertEqual(switched.services[1].proxies["HTTPProxy"], .text("127.0.0.1"))
+        XCTAssertEqual(switched.services[1].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        let boundDNSPort = try XCTUnwrap(host.orchestrator.snapshot.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(boundDNSPort)])
+        XCTAssertEqual(host.orchestrator.snapshot.vpnState, vpnBefore)
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "platform.location_observed" })
+        locations.edit { $0.services[1].dns["ServerAddresses"] = .list(["192.0.2.9"]) }
+        await host.stopRuntime()
+        XCTAssertEqual(try locations.snapshot().services[1].dns["ServerAddresses"], .list(["192.0.2.9"]))
+        XCTAssertEqual(try locations.snapshot().services[1].proxies, original.services[1].proxies)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+    }
+
+    func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        locations.edit { $0.services[0].enabled = false }
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        locations.edit { $0.services[0].enabled = true }
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services[0].dns["ServerAddresses"], .list(["127.0.0.1"]))
+        let port = try XCTUnwrap(host.orchestrator.snapshot.bindings.dnsPort)
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .startDNSRelay).last, [String(port)])
+        await host.stopRuntime()
+    }
+
+    func testLocationNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let notification = harness.locationObserver.pendingDelivery(NetworkLocationFixture.office)
+        XCTAssertNotNil(notification)
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
+        let stop = Task { await host.stopRuntime() }
+        await harness.hold.waitUntilReached()
+        defer { harness.hold.release() }
+        locations.edit { $0.activeLocationID = NetworkLocationFixture.office }
+        notification?()
+        for _ in 0..<5_000 where !host.orchestrator.eventLog.events.contains(where: { $0.event == "platform.location_observed" }) {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "platform.location_observed" })
+        harness.hold.release()
+        await stop.value
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services, original.services)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
     /// #98, as in `AppState`: the runtime start reads the saved password
@@ -651,7 +749,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             environment: harness.environment,
             logger: DiscardingLogSink(),
             privilegeClient: machine,
-            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) }
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            networkLocationStoreFactory: { _ in nil }
         )
 
         XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "journal recovery proceeds despite the broken file")

@@ -19,6 +19,12 @@ final class ConfigFieldProblemsTests: XCTestCase {
         XCTAssertNil(problems.message(for: "proxy.socksPort"))
     }
 
+    func testAggregateBypassProblemHasAnEditorMessage() {
+        var config = ProxyConfig()
+        config.noProxyHosts = Array(repeating: "short.example", count: 257)
+        XCTAssertNotNil(ConfigFieldProblems(config: config).message(for: "routing.noProxyHosts"))
+    }
+
     func testConflictsAreListedSeparatelyAndFilterable() {
         var config = ProxyConfig()
         config.socksEnabled = true

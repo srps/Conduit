@@ -410,7 +410,7 @@ Two design choices, easy decision:
 
 - `pm-proxy --status-interval` snapshots gain `lastAuthOutcome` / `lastAuthFallbackReason` fields — surfaces silent fallback to operators running headless
 - `pm-sim` scenario `auth-fallback-storm` (planned in the reliability-scenario backlog) can land
-- Audit-log expansion (`audit.ndjson`, per [`roadmap-v2.md`](./roadmap-v2.md)) gets these events on every host
+- Audit-log expansion (`audit.ndjson`, per [`planning.md`](./planning.md)) gets these events on every host
 
 ### Non-goals
 
@@ -461,5 +461,5 @@ All five are single-PR candidates (the vendor-preset test-site migration may war
 
 - [`docs/architecture.md`](./architecture.md) — target architecture + protocol layout. The shapes these follow-ups extend.
 - [`docs/design-module-split.md`](./design-module-split.md) — especially `§New Abstractions → PlatformIntegration (deferred)` (rejection rationale) and `§Open Items (Deferred)` (the originating list).
-- [`roadmap-v2.md`](./roadmap-v2.md) — the security-hardening backlog that commissions CFNetwork PAC + SecretBytes, the daemon-first architecture that drives `PlatformIntegration`'s shape, and the OSS preparation that commissions the vendor-preset JSON externalization.
-- [`ROADMAP.md`](../ROADMAP.md) — the security / daemon-first / OSS checklists; this doc is the *how*, ROADMAP is the *what + when*.
+- [`planning.md`](./planning.md) — current implementation boundaries and acceptance criteria; these older sketches are subject to that plan.
+- [`ROADMAP.md`](../ROADMAP.md) — current execution queue and status; these sketches describe the original follow-up designs.

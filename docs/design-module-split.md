@@ -19,7 +19,7 @@ The consequences today:
 4. **The import fence in `AGENTS.md` exists but is unenforceable.** The fence is asserted ("ProxyKernel may import only Foundation, Dispatch, NIO*"), but `ProxyKernel` doesn't yet exist as a target — the rule has no compiler to lean on.
 5. **Every subsequent roadmap item compounds the cost.** The roadmap's `JavaScriptCore → CFNetwork` PAC swap, the `pm-proxy` daemonization with control socket, the UI re-shape, and the `CorporateDefaults` externalization — each one is shaped by which target the relevant types live in. Doing them before the split bakes today's monolith into the change.
 
-This document is the executable plan for the module-split items in `[roadmap-v2.md](roadmap-v2.md)` (§2.2 + §2.4). The roadmap describes the target shape in three paragraphs of prose; this doc lists every file, every callsite that crosses the new boundaries, every protocol that has to be introduced, and every phase boundary at which the build must stay green.
+This document records the historical module-split implementation plan and delivery. Current priorities and status live in [`ROADMAP.md`](../ROADMAP.md); current acceptance criteria live in [`planning.md`](./planning.md). The old section references below describe the original April 2026 plan, available in Git history. The roadmap describes the target shape in three paragraphs of prose; this doc lists every file, every callsite that crosses the new boundaries, every protocol that has to be introduced, and every phase boundary at which the build must stay green.
 
 ## Goals
 
@@ -34,10 +34,10 @@ In priority order:
 
 ## Non-Goals
 
-- **No CFNetwork PAC swap.** That's a later roadmap item (`[roadmap-v2.md](roadmap-v2.md)` §2.5, the CFNetwork PAC evaluator), and it changes a concrete impl after the target exists. Doing it during the split conflates "move file" with "rewrite logic" and makes either change impossible to revert independently.
-- **No `CorporateDefaults` → `Resources/Presets/example-corp.json`.** That's the OSS-prep vendor-preset externalization (`[roadmap-v2.md](roadmap-v2.md)` §2.9). The split moves `CorporateDefaults.swift` from `ProxyKernel` to `PlatformMac` (so the kernel ships vendor-neutral); the JSON externalization is a separate, later move.
-- **No `SecretBytes`.** That's a later roadmap item (`[roadmap-v2.md](roadmap-v2.md)` §2.5, the opaque credential type). It's an opaque-bytes type that replaces `String` at credential boundaries — the boundaries (what crosses target lines as a credential) are identified by the split, but introducing the type is later work.
-- **No `ProxyOrchestrator.startProxy()` decomposition.** That's a separate cleanup (`[roadmap-v2.md](roadmap-v2.md)` §2.4 #5), a STYLE rule-5 cleanup. Mixing it with the split would obscure both diffs.
+- **No CFNetwork PAC swap.** That's a later roadmap item (the original April 2026 plan §2.5, the CFNetwork PAC evaluator), and it changes a concrete impl after the target exists. Doing it during the split conflates "move file" with "rewrite logic" and makes either change impossible to revert independently.
+- **No `CorporateDefaults` → `Resources/Presets/example-corp.json`.** That's the OSS-prep vendor-preset externalization (the original April 2026 plan §2.9). The split moves `CorporateDefaults.swift` from `ProxyKernel` to `PlatformMac` (so the kernel ships vendor-neutral); the JSON externalization is a separate, later move.
+- **No `SecretBytes`.** That's a later roadmap item (the original April 2026 plan §2.5, the opaque credential type). It's an opaque-bytes type that replaces `String` at credential boundaries — the boundaries (what crosses target lines as a credential) are identified by the split, but introducing the type is later work.
+- **No `ProxyOrchestrator.startProxy()` decomposition.** That's a separate cleanup (the original April 2026 plan §2.4 #5), a STYLE rule-5 cleanup. Mixing it with the split would obscure both diffs.
 - **No `pm-tunnel`-the-LaunchAgent or `pmctl`.** Those are the later control-plane work. The split is a precondition (the daemon binary must not link `PlatformMac`) but doesn't ship the daemon promotion itself.
 - **No new functional capability.** This is pure structural refactoring. If the split adds a feature, the feature is escaping its phase.
 - **No `NotificationSink` protocol introduction yet.** `NotificationManager` is currently invoked **only from `AppState`** (the SwiftUI app), never from `ConduitCore` itself. It moves directly to `PlatformMac` (or stays an app-level concern) without a kernel-side protocol — YAGNI. A protocol gets introduced the day the kernel needs to fire user-visible notifications, not before.
@@ -100,7 +100,7 @@ This means the work-shape for the split is much narrower than feared: the `Platf
 
 ### Pillar seven: `NotificationManager` is already app-only
 
-`NotificationManager` (UserNotifications, `UNUserNotificationCenter`) is created and held by `AppState` (`Sources/Conduit/App/AppState.swift:37`) — never instantiated or referenced inside `ConduitCore`. So it moves to `PlatformMac` with no protocol seam needed. The `NotificationSink` abstraction listed in `[roadmap-v2.md](roadmap-v2.md)` (§2.2) is a future-proof slot, deferred until kernel code wants to fire a notification.
+`NotificationManager` (UserNotifications, `UNUserNotificationCenter`) is created and held by `AppState` (`Sources/Conduit/App/AppState.swift:37`) — never instantiated or referenced inside `ConduitCore`. So it moves to `PlatformMac` with no protocol seam needed. The `NotificationSink` abstraction listed in the original April 2026 plan (§2.2) is a future-proof slot, deferred until kernel code wants to fire a notification.
 
 ## Target Module Graph
 
@@ -272,7 +272,7 @@ Every file in `Sources/ConduitCore/`, with its destination and the reason. Files
 | ----------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------- |
 | `AutoRecovery.swift`          | Kernel              | Foundation; takes `LogSink`                                                                           |
 | `DirectConnectDetector.swift` | Kernel              | Foundation + NIO                                                                                      |
-| `DNSWireFormat.swift`         | Kernel              | Darwin (libc); also compiles on Linux as `Glibc`/`Musl` if Plan B activates                           |
+| `DNSWireFormat.swift`         | Kernel              | Darwin (libc); also compiles on Linux as `Glibc`/`Musl` as a portability property                           |
 | `HealthChecker.swift`         | Kernel              | Foundation + NIOConcurrencyHelpers                                                                    |
 | `LocalDNSForwarder.swift`     | Kernel              | Foundation + NIO                                                                                      |
 | `NetworkMonitor.swift`        | **PlatformMac**     | `import Network` (NWPathMonitor)                                                                      |
@@ -635,7 +635,7 @@ Exit criteria (as verified):
 
 Non-goals for this step:
 
-- No CFNetwork PAC swap. `PACResolver` still uses JavaScriptCore. The swap is a later roadmap item (`[roadmap-v2.md](roadmap-v2.md)` §2.5, the CFNetwork PAC evaluator); the `PacEvaluator` protocol created here is the seam it lands behind.
+- No CFNetwork PAC swap. `PACResolver` still uses JavaScriptCore. The swap is a later roadmap item (the original April 2026 plan §2.5, the CFNetwork PAC evaluator); the `PacEvaluator` protocol created here is the seam it lands behind.
 - No collapsing PAC fetch + evaluate lifecycle into a single method. That is tempting for API cleanliness but would force `PACRoutingEngine` to re-fetch on every route lookup and defeats the existing caching. If a future rewrite lifts the cache into the `PacEvaluator` impl, the two-protocol shape can fold into one.
 
 What the ProxyPAC move taught us that carries into the later steps:
@@ -782,7 +782,7 @@ This is the inverse of the original plan (where the abstractions came first and 
 
 #### Pre-audit
 
-- `**import ConduitCore` count**: 41 in `Sources/`, 26 in `Tests/` — 67 mechanical replacements. Plus 4 prose references in `docs/` and `roadmap-v2.md` (preserved verbatim where they describe history; updated where they describe the post-split shape). Verified via `rg -l '^import ConduitCore' Sources Tests | wc -l`.
+- `**import ConduitCore` count**: 41 in `Sources/`, 26 in `Tests/` — 67 mechanical replacements. Plus 4 prose references in `docs/` and the original April 2026 plan (preserved verbatim where they describe history; updated where they describe the post-split shape). Verified via `rg -l '^import ConduitCore' Sources Tests | wc -l`.
 - **String-literal `ConduitCore` references**: only intentional ones survive — none in log category names (those are `LogCategory` enum cases), none in bundle IDs (those reference `io.github.srps.Conduit`, the app bundle), none in persisted file paths (those are under `~/Library/Application Support/Conduit`, also the app bundle). Verified via `rg 'ConduitCore' Sources Tests | rg -v '^import '`.
 - **Existing protocol files to relocate into `Abstractions/`** (six files containing eight protocols):
   - `Sources/ConduitCore/Proxy/ProxyAuthenticator.swift` → `Sources/ProxyKernel/Abstractions/ProxyAuthenticator.swift`
@@ -806,7 +806,7 @@ This is the inverse of the original plan (where the abstractions came first and 
   - `README.md`: update target-name references in any architecture summary; preserve historical references.
   - `ROADMAP.md`: update the rename + abstractions entries (separately, see ROADMAP changes); preserve the chronological "Done" log verbatim.
   - `docs/design-module-split.md`: this file. Update the Target Module Graph section's prose where it describes `ConduitCore` as the current state; the matrix already reads `ProxyKernel`. Preserve every mention of `ConduitCore` inside the earlier-step sections (those describe what shipped under the old name).
-  - `roadmap-v2.md`: do not edit — it's a historical plan document and should keep its original target names.
+  - the original April 2026 plan: do not edit — it's a historical plan document and should keep its original target names.
   - `docs/architecture.md`: not a stub — describes the pre-split single-`ConduitCore` shape and is no longer accurate after the rename. Add a status banner pointing readers at `README.md` § Architecture + `docs/design-module-split.md`; defer the substantive rewrite to after the abstractions step when the final shape (`LogSink`, widened `CredentialProvider`, `Sources/ProxyKernel/Abstractions/` directory) is locked in. Other in-`docs/` design docs that referenced `Sources/ConduitCore/...` paths (`design-tunnel-dns-override.md`, `design-dns-intercept-transparent-proxy.md`, `design-vpn-flap-resilience.md`) get either a path-translation banner or surgical sed depending on reference count.
 7. **Tests** are unchanged in content; only their `import ConduitCore` lines flipped via sed in step 2. The `@testable import` chain (which lists `ConduitCore` in many files) is rewritten by the same sed.
 
@@ -838,7 +838,7 @@ This is the inverse of the original plan (where the abstractions came first and 
 - **6 protocol files moved into `Sources/ProxyKernel/Abstractions/`** as planned — `ProxyAuthenticator`, `PacEvaluator`, `TunnelResolverApplying`, `VPNStatusObserving`, `CredentialProvider`, `PrivilegeClient`. The now-empty `Sources/ProxyKernel/System/` directory was removed.
 - `**Sources/ConduitCore/` directory removed**; `Sources/ProxyKernel/` is now the canonical kernel directory, with the same six subdirectories (`Models`, `Network`, `Proxy`, `Security`, `Support`, plus the new `Abstractions`).
 - `**Package.swift`**: `ProxyKernel` target now points at `Sources/ProxyKernel` and inherits the `ConduitShared` + NIO dependencies that the renamed-from-Core target had; the stub `ProxyKernel` target from the first step was deleted (the rename consumes that name); the library product flipped from `name: "ConduitCore"` to `name: "ProxyKernel"`; 11 dependency references across `ProxyAuth`, `ProxyPAC`, `PlatformMac`, `pm-proxy`, `pm-sim`, `pm-tunnel`, `pm-dns`, `pm-vpn-check`, `pm-auth-check`, `ConduitHelper`, `Conduit`, and the test target updated.
-- **Doc updates**: `AGENTS.md` § Architecture lists the four targets explicitly with their dep relationships; `README.md` § Architecture replaces the old `ConduitCore` ASCII diagram with the post-split executable / consumer matrix; this design doc gets a status banner at the top + a "shipped" subsection for this step. `roadmap-v2.md` § 2.2 gets a forward-pointer to ROADMAP / this doc as the as-shipped source of truth (the historical plan body preserved verbatim). Three subsidiary design docs got file-path updates discovered during review: `docs/design-tunnel-dns-override.md` (3 surgical sed replacements; `TunnelResolverManager` updated to its PlatformMac home), `docs/design-dns-intercept-transparent-proxy.md` (1 surgical sed), `docs/design-vpn-flap-resilience.md` (~15 references — added a path-translation status banner because the doc is finished + the cost of mechanical sed exceeds the clarity gain). `docs/architecture.md` got a status banner explaining the doc predates the split; substantive rewrite deferred to after the abstractions step.
+- **Doc updates**: `AGENTS.md` § Architecture lists the four targets explicitly with their dep relationships; `README.md` § Architecture replaces the old `ConduitCore` ASCII diagram with the post-split executable / consumer matrix; this design doc gets a status banner at the top + a "shipped" subsection for this step. the original April 2026 plan § 2.2 gets a forward-pointer to ROADMAP / this doc as the as-shipped source of truth (the historical plan body preserved verbatim). Three subsidiary design docs got file-path updates discovered during review: `docs/design-tunnel-dns-override.md` (3 surgical sed replacements; `TunnelResolverManager` updated to its PlatformMac home), `docs/design-dns-intercept-transparent-proxy.md` (1 surgical sed), `docs/design-vpn-flap-resilience.md` (~15 references — added a path-translation status banner because the doc is finished + the cost of mechanical sed exceeds the clarity gain). `docs/architecture.md` got a status banner explaining the doc predates the split; substantive rewrite deferred to after the abstractions step.
 - **13 string-literal `ConduitCore` references survive in `Sources/`** (in comments describing where files used to live). These are the explicit "preserve historical-context comments" exit criterion. Verified via `rg 'ConduitCore' Sources Tests | rg -v '^[^:]+:[0-9]+:[ \t]*//' | wc -l` → 0 (every remaining mention is inside a line comment).
 - **Build green; 730 tests, 3 skipped, 0 failures** — same count as the PlatformMac move. Rename verified non-behavior-changing.
 
@@ -1152,20 +1152,20 @@ If a third party ever consumes `ProxyKernel` as a library in the future, the pub
 
 ## Architecture Notes
 
-### Why this is *not* preparation for Plan B
+### Why the split serves the macOS product
 
-The split is justified by macOS-only Plan A goals:
+The split is justified by macOS product goals:
 
 - The build-time fence makes "what is portable?" answerable at the file level.
 - The dependency graph stops dragging every Apple framework into `pm-proxy`/`pm-sim`/`pm-dns`/`pm-tunnel`.
 - Cross-target callsites become protocol-mediated, which is itself a security and testability win (a `RecordingLogSink` in tests is much sharper than `AppLogStore`-with-side-effects).
 - The later CFNetwork PAC swap, the daemon promotion, and the `CorporateDefaults` externalization are all easier to land cleanly in an already-split codebase.
 
-If Plan B ever activates, the split is also the precondition for "extract `ProxyKernel` as the protocol layer the Rust port re-implements" — but that's a future benefit, not a present-day justification. The split is justified because today's monolith is in the way of today's roadmap.
+No rewrite or cross-platform port is planned. The split was justified by the macOS runtime's security, testability, and ownership boundaries.
 
 ### Why "4 targets, not 7" stays the right choice
 
-`[roadmap-v2.md](roadmap-v2.md)` (§2.2) argues for 4–5 targets, not the 7 the original plan listed. After this audit, 4 (or 5 if `ProxyKernel/Tunnels` ever earns its own target) is still right:
+The original April 2026 plan (§2.2) argued for 4–5 targets, not the 7 the original plan listed. After this audit, 4 (or 5 if `ProxyKernel/Tunnels` ever earns its own target) is still right:
 
 - `Models`, `DNS`, `Tunnels`, `Logging` would be additional targets on paper but they don't cross-import Apple frameworks. Splitting them now adds bureaucracy (more target boundaries to maintain, more `package` access widening) without enabling anything we want to do.
 - The day one of those subdirectories earns its own target — say, `ProxyDNS` because we want a vendored `pm-dns` daemon that doesn't link the proxy at all — we split it then. The current 4 targets are the minimum that pays for itself in compile-time enforcement.
@@ -1216,9 +1216,9 @@ The earlier-doc rationale for the original ordering — "the rename can only be 
 Not required for the split to ship; revisit when the relevant phase comes around:
 
 - `**PlatformIntegration` protocol** (and the `PlatformMacIntegration` composite). Originally planned for the rename step. Evidence after the PlatformMac move (orchestrator references zero PlatformMac concretes; AppState owns every platform side-effect call site) showed no kernel caller exists today. Re-enters the plan with the later control-plane work when the reload path becomes its first real consumer; the shape (composite vs per-concern) is a design choice driven by that work's actual call sites, not pre-emptive. See "New Abstractions § PlatformIntegration (deferred)" for the full rationale.
-- `**SecretBytes` opaque credential type.** `[roadmap-v2.md](roadmap-v2.md)` (§2.5). Replaces `String` at credential boundaries; the boundaries are clearer after the abstractions step (every `CredentialProvider` callsite is one). Later roadmap work.
-- **CFNetwork PAC evaluator.** `[roadmap-v2.md](roadmap-v2.md)` (§2.5). Second `PacEvaluator` impl swappable behind a feature flag. Later roadmap work.
-- `**CorporateDefaults.swift` → `Resources/Presets/example-corp.json`.** `[roadmap-v2.md](roadmap-v2.md)` (§2.9). Vendor preset externalization for OSS distribution. The file stayed kernel-side at the PlatformMac move (originally planned to move to PlatformMac as `CorporatePreset.swift`); `ProxyConfig.testFixture()` introduced at the abstractions step reduces the test-site surface that the later OSS-prep work has to migrate.
+- `**SecretBytes` opaque credential type.** The original April 2026 plan (§2.5). Replaces `String` at credential boundaries; the boundaries are clearer after the abstractions step (every `CredentialProvider` callsite is one). Later roadmap work.
+- **CFNetwork PAC evaluator.** The original April 2026 plan (§2.5). Second `PacEvaluator` impl swappable behind a feature flag. Later roadmap work.
+- `**CorporateDefaults.swift` → `Resources/Presets/example-corp.json`.** The original April 2026 plan (§2.9). Vendor preset externalization for OSS distribution. The file stayed kernel-side at the PlatformMac move (originally planned to move to PlatformMac as `CorporatePreset.swift`); `ProxyConfig.testFixture()` introduced at the abstractions step reduces the test-site surface that the later OSS-prep work has to migrate.
 - `**NotificationSink` protocol.** Introduce when kernel code needs to fire user-visible notifications. Not before.
 - **Generic `LogSink` parameterization.** If profiling under `pm-sim multi-100` shows existential dispatch on `any LogSink` is hot (>2% in witness tables), switch the hottest 2–3 callsites to `<L: LogSink>` generic parameters. Measure before optimizing.
 - `**PacEvaluator` → `PacFetcher` + `PacEvaluatorFactory` decomposition.** The existing 3-method `PacEvaluator` mixes fetch and evaluation — different lifetimes. Worth considering a future split when the later `CFPACEvaluator` lands and there are two impls to compare. Don't pre-emptively split.
@@ -1230,9 +1230,8 @@ Not required for the split to ship; revisit when the relevant phase comes around
 
 ### Plan documents
 
-- `[roadmap-v2.md](roadmap-v2.md)` (§2.2) — module split description (4–5 targets) and the import-fence rules this design implements.
-- `[roadmap-v2.md](roadmap-v2.md)` (§2.4) — the module-split task list.
-- `[ROADMAP.md](../ROADMAP.md)` — pillar-tagged checklist of the module-split work items.
+- [`planning.md`](./planning.md) — current implementation rationale and acceptance criteria.
+- [`ROADMAP.md`](../ROADMAP.md) — current execution queue and status; the module split is an implemented foundation.
 - `[AGENTS.md](../AGENTS.md)` — NEVER section (import fence statement), ALWAYS section (side-effects-behind-protocols rule).
 - `[docs/STYLE.md](./STYLE.md)` — engineering discipline. Specifically: rule 3 (structured events first), rule 8 (side-effects gated behind protocols).
 - `[docs/design-vpn-flap-resilience.md](./design-vpn-flap-resilience.md)` — the precedent for how side-effecting behaviours (`VPNStatusMonitor`) are introduced behind a protocol (`VPNStatusObserving`) with an injectable fake (`FakeVPNStatusObserver`). Same pattern, applied to the existing PlatformMac surface.

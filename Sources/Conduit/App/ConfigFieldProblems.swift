@@ -33,6 +33,8 @@ struct ConfigFieldProblems {
                 }
             case .conflict(let description):
                 conflicts.append(description)
+            case .invalidSystemProxyBypass:
+                byField["routing.noProxyHosts"] = error.localizedDescription
             case .invalidInterceptPattern, .invalidInterceptIP, .invalidTransparentProxyIP:
                 // The DNS section validates these per row already, with the
                 // same validators, so they are not indexed twice.

@@ -27,6 +27,7 @@ package enum PrivilegedOperation: String, Sendable, CaseIterable {
     case stopDNSRelay = "stop-dns-relay"
     case startTCPRelay = "start-tcp-relay"
     case stopTCPRelay = "stop-tcp-relay"
+    case compareNetworkSettings = "compare-network-settings"
     case ping
 }
 

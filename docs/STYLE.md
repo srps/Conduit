@@ -23,7 +23,8 @@ STYLE encodes the habits that keep those failure modes out.
 
 - **[`AGENTS.md`](../AGENTS.md)** — short, actionable contract for human and AI contributors (NEVER / ASK / ALWAYS). Carries the judgment layer. References this doc.
 - **`STYLE.md`** (this file) — the full discipline, with rationale and examples.
-- **[`roadmap-v2.md`](roadmap-v2.md)** — product plan. §2.3 is the source for this doc; §5.7 is the research on why we didn't just adopt TIGER_STYLE verbatim.
+- **[`ROADMAP.md`](../ROADMAP.md)** — execution queue and status.
+- **[`planning.md`](./planning.md)** — implementation rationale and acceptance criteria; historical inspiration is retained in the [April research archive](./archive/planning-research-2026-04.md).
 - **[`docs/architecture.md`](./architecture.md)** — target module graph.
 
 ## Principles
@@ -162,7 +163,7 @@ When any of the above changes, [`docs/threat-model.md`](./threat-model.md) gets 
 
 ## How this differs from TIGER_STYLE
 
-STYLE is TIGER_STYLE minus the parts that are over-engineering for a desktop proxy. The full rationale is in [`roadmap-v2.md §5.7`](roadmap-v2.md).
+STYLE is TIGER_STYLE minus the parts that are over-engineering for a desktop proxy. The historical rationale is in the [April research archive](./archive/planning-research-2026-04.md#57-ghostty--tigerbeetle-architectural-fact-check).
 
 | TIGER_STYLE rule | STYLE position |
 |---|---|

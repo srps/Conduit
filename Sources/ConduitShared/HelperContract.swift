@@ -2,7 +2,7 @@
 import Foundation
 
 public enum HelperProtocolVersion {
-    public static let current = 4
+    public static let current = 5
 
     /// Oldest request version the helper still honours.
     ///
@@ -91,6 +91,8 @@ public enum HelperProtocolVersion {
     /// `current` because it is written before the request is read, so a
     /// client with an exact-match guard on an older version still falls
     /// back — the behaviour it had before, not a regression.
+    /// v5 adds compare-network-settings; v3/v4 command semantics are unchanged.
+    /// v5 clients require v5 for scoped writes and never degrade them to networksetup.
     public static let minimumSupported = 3
 
     public static func isSupported(_ version: Int) -> Bool {
@@ -150,6 +152,8 @@ public enum HelperCommand: String, Codable, Sendable, CaseIterable {
     case stopDNSRelay = "stop-dns-relay"
     case startTCPRelay = "start-tcp-relay"
     case stopTCPRelay = "stop-tcp-relay"
+    /// One bounded JSON NetworkSettingsRequest; ID-addressed compare-and-write under SCPreferences lock.
+    case compareNetworkSettings = "compare-network-settings"
     case ping = "ping"
 }
 
