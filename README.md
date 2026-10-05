@@ -18,6 +18,14 @@ A **macOS-native corporate proxy manager** built with SwiftUI and SwiftNIO. If y
 
 ## Quick Start
 
+Download a ready-to-install disk image from [Releases](https://github.com/srps/Conduit/releases).
+Choose **arm64** for an Apple Silicon Mac or **x86_64** for Intel (macOS 26 or
+later). Open the disk image, drag Conduit into Applications, and open it.
+No Xcode or local build is required. These builds are ad-hoc signed; if macOS
+blocks the first launch, use System Settings > Privacy & Security > Open Anyway.
+
+To build from source instead:
+
 ```bash
 # Build
 swift build
@@ -272,6 +280,29 @@ Once installed the app can be found in Spotlight, Launchpad, and Finder > Applic
 
 On first launch macOS may show a Gatekeeper warning ("cannot verify the developer") because the app is ad-hoc signed. Right-click the app > **Open** > click **Open** in the dialog. This is only needed once.
 
+To create an optimized test build for another Mac with the same architecture:
+
+```bash
+./bundle-app.sh --share
+```
+
+Send the ZIP under `.build/share/`. It preserves executable permissions and uses
+ad-hoc signing instead of the builder's local signing certificate. The app
+requires macOS 26 or later. This build is not notarized; the recipient may need
+to approve it in System Settings > Privacy & Security. It does not install or
+replace the app on the builder's Mac. An existing helper pinned to a different
+signing identity will refuse this build. Managed proxy and system DNS settings
+require helper v5; see [release installation](docs/release-installation.md) for
+the bundled installer and signing-policy implications.
+
+Maintainers can run `bash scripts/package-release.sh` to also create a disk
+image with an Applications shortcut and SHA-256 checksums. `VERSION` controls
+the app and asset versions. The Release packages workflow builds and tests
+both architectures on pull requests that change packaging, or when run
+manually. After merging, push a matching `v<version>` tag to prepare a draft
+GitHub release with the installable packages attached. Review the draft and
+publish it when ready.
+
 ## Run Tests
 
 ```bash
@@ -280,7 +311,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 
 ## Privileged Helper (One-Time Setup)
 
-System proxy changes, `/etc/resolver` writes, and the DNS port 53 relay require admin. By default the app prompts each time. To eliminate repeated prompts, install the privileged helper once:
+Managed system proxy and system DNS settings require helper v5. Resolver writes and the DNS port 53 relay also require admin authorization. Install the privileged helper once:
 
 ```bash
 ./bundle-app.sh --install
@@ -313,7 +344,7 @@ To remove the helper:
 sudo ./uninstall-helper.sh
 ```
 
-The app automatically falls back to standard macOS admin prompts when the helper is not installed.
+Location-scoped proxy and system DNS operations do not fall back to admin prompts when the helper is missing or outdated. Update it before enabling those settings.
 
 The helper logs to the unified log, and the app mirrors its own log lines there under the same subsystem, so one query reads both processes in order:
 

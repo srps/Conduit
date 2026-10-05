@@ -6,30 +6,20 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
-**Upgrading:** this release changes the helper, so reinstall it. To also turn on caller
-identity, in this order:
+## 0.4.0
 
-1. Run `scripts/create-signing-identity.sh` once, as yourself. It asks for a one-time
-   transfer passphrase, and macOS asks for it again in its import dialog.
-2. Rebuild and install the app with `./bundle-app.sh --release --install`. Answer
-   "Allow", not "Always Allow", when `codesign` asks to use the key.
-3. Run `sudo ./install-helper.sh`; its summary says `Callers: ENFORCED`.
+Network-location-safe proxy/DNS recovery, helper v5, and recovery of managed
+proxy settings after helper upgrades and VPN rewrites. Both runtime hosts share
+the same policy; profiles and automatic location selection remain future work.
 
-Without the identity, the app is signed ad-hoc as before, and the new helper keeps the
-console-user rule and logs that identity is unenforced. Helper protocol v5 adds location-scoped proxy/DNS writes. Reinstall the helper
-before using this build: these writes deliberately do not fall back to service-name
-commands or AppleScript with an older helper. The v5 helper continues to accept
-legacy v3/v4 requests; caller-identity admission still applies. Once the pin is installed, the helper refuses any build not
-signed with the pinned identity, including every earlier release, which was signed
-ad-hoc; to roll back past this release, reinstall the older release's helper too, which
-drops enforcement.
-
-Routing changed in two ways worth watching after the upgrade (see Changed). With strict
-mode on, the default, a host that used to go direct because it answered a direct probe
-now goes through the upstream. A `routing.strict_direct_reachable` event names each host
-that failed through the upstream but answers directly; add it to No-proxy hosts if it
-should not use the proxy. A frequent `pac.no_usable_route` means the PAC answers in a
-form Conduit cannot route by.
+**Upgrading:** reinstall the privileged helper from this app before enabling
+managed macOS proxy or system DNS settings. Helper v5 accepts legacy v3/v4
+requests; new location-scoped writes require v5 and never fall back to
+AppleScript or service-name commands. The installer is included in the app
+resources; see [release installation](docs/release-installation.md).
+Stop this version and complete proxy/DNS restoration before rolling back to an
+older client while scoped journal records exist. Config and saved credentials
+remain in their existing locations.
 
 ### Network location recovery
 
@@ -50,6 +40,46 @@ form Conduit cannot route by.
   Exact Conduit loopback residue is removed across locations; ambiguous legacy DNS
   residue returns to DHCP. Profiles and automatic location selection remain later
   work. Controlled macOS 26/27 corporate-VPN checks are required before deployment.
+
+### Fixed
+
+- A failed proxy/PAC write at startup is retried when a compatible helper becomes
+  available. VPN/path reports and wake also reconcile managed proxy settings even
+  when the macOS location is unchanged. Corporate PAC rewrites can no longer
+  silently leave applications bypassing Conduit's Kerberos/NTLM authentication.
+  Matching settings cause no writes; pending work is coalesced and a later stop
+  supersedes it. Existing listeners and active connections stay running.
+
+### Distribution
+
+- ARM and Intel ZIP/DMG workflows and optimized PAC checks are part of main.
+  The downloaded app includes the helper installer for upgrades without Xcode.
+  Packages remain ad-hoc signed and are not notarized; locally signed source
+  builds can retain their existing helper caller pin.
+
+## 0.3.4
+
+**Upgrading:** this release changes the helper, so reinstall it. To also turn on caller
+identity, in this order:
+
+1. Run `scripts/create-signing-identity.sh` once, as yourself. It asks for a one-time
+   transfer passphrase, and macOS asks for it again in its import dialog.
+2. Rebuild and install the app with `./bundle-app.sh --release --install`. Answer
+   "Allow", not "Always Allow", when `codesign` asks to use the key.
+3. Run `sudo ./install-helper.sh`; its summary says `Callers: ENFORCED`.
+
+Without the identity, the app is signed ad-hoc as before, and the new helper keeps the
+console-user rule and logs that identity is unenforced. Once the pin is installed, the helper refuses any build not
+signed with the pinned identity, including every earlier release, which was signed
+ad-hoc; to roll back past this release, reinstall the older release's helper too, which
+drops enforcement.
+
+Routing changed in two ways worth watching after the upgrade (see Changed). With strict
+mode on, the default, a host that used to go direct because it answered a direct probe
+now goes through the upstream. A `routing.strict_direct_reachable` event names each host
+that failed through the upstream but answers directly; add it to No-proxy hosts if it
+should not use the proxy. A frequent `pac.no_usable_route` means the PAC answers in a
+form Conduit cannot route by.
 
 ### Security
 

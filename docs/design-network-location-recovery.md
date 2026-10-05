@@ -78,10 +78,16 @@ other protocol can still recover. No credential-bearing fields enter the snapsho
 When application is disabled, location reconciliation retries every outstanding
 record, including the active location, so returning after a failed teardown cannot
 leave settings pointing at a stopped listener. When application is enabled, an external location switch restores outstanding
-inactive-location records and
-reconcile the active location through the existing host readiness and VPN gates.
+inactive-location records and reconciles the active location through the existing host readiness and VPN gates.
 Do not modify routing mode, VPN detection, or split-DNS policy. Active-set and expected-value checks
 inside the privileged write reject a switch racing an apply.
+
+Managed proxy reconciliation also runs after helper availability, VPN/path reports,
+and wake. This repairs failed startup writes and same-location PAC rewrites.
+It reads the active settings first and skips already-matching writes; an external
+edit becomes the new captured prior state before repair. Both hosts coalesce work
+with one in-flight flag and one pending flag, wait for lifecycle work, and check
+the lifecycle generation before mutation. Listener bindings remain unchanged.
 
 ## Verification and deployment
 

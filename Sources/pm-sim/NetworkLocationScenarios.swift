@@ -105,6 +105,26 @@ enum NetworkLocationScenarios {
             && retrySnapshot.services[1].dns == localDNS
         try retryProxy.clear(logger: nil)
         try retryDNS.clear(logger: nil)
+        var localPACConfig = config
+        localPACConfig.localPACEnabled = true
+        let localPAC = "http://127.0.0.1:63145/proxy.pac"
+        retryStore.refuseWrites(true)
+        var initialPACFailureRetained = false
+        do { try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true) }
+        catch { initialPACFailureRetained = journal.hasRecords(for: .systemProxy) }
+        retryStore.refuseWrites(false)
+        try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true)
+        let repairedPAC = try retryStore.snapshot().services[1].proxies["ProxyAutoConfigURLString"] == .text(localPAC)
+        let corporatePAC = NetworkSettingValue.text("http://corporate.example/proxy.pac")
+        retryStore.edit { $0.services[1].proxies["ProxyAutoConfigURLString"] = corporatePAC }
+        try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true)
+        let rewriteRepaired = try retryStore.snapshot().services[1].proxies["ProxyAutoConfigURLString"] == .text(localPAC)
+        retryStore.refuseWrites(true)
+        try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true)
+        retryStore.refuseWrites(false)
+        try retryProxy.clear(logger: nil)
+        let rewrittenPriorRestored = try retryStore.snapshot().services[1].proxies["ProxyAutoConfigURLString"] == corporatePAC
+        retryStore.edit { $0.services[1].proxies = services[1].proxies }
         retryStore.edit { $0.activeLocationID = home }
         let beforeStoppedRecovery = try retryStore.snapshot()
         try retryProxy.reconcileLocation(config: config, mode: .manual, localPACURL: nil, apply: true)
@@ -272,6 +292,7 @@ enum NetworkLocationScenarios {
                 .init("unreadable journal withholds new environment and resolver publication", newSurfaceWritesBlocked),
                 .init("apply retries in a valid location after an empty location released all records", emptyRetrySucceeded),
                 .init("stopped reconciliation restores retained records after returning to their location", stoppedActiveRestored),
+                .init("failed PAC application and same-location VPN rewrite recover without redundant writes", initialPACFailureRetained && repairedPAC && rewriteRepaired && rewrittenPriorRestored),
                 .init("failed relay start still restores inactive DNS, withholds active redirection, and retries later", relayFailurePreserved && relayRetryApplied),
                 .init("successful reapply no longer claims external edits back to the previous generation", externalPreviousPreserved),
                 .init("same-location compare failures retry with a fixed budget and retain evidence on exhaustion", compareRetrySucceeded && retryExhausted),

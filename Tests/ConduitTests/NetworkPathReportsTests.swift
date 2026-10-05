@@ -31,17 +31,20 @@ final class NetworkPathReportsTests: XCTestCase {
         let orchestrator = makeOrchestrator()
         var acted = 0
         var reconciles = 0
+        var proxyReconciles = 0
 
         for _ in 0..<21 {
             await NetworkPathReports.receive(
                 Self.wifi(), orchestrator: orchestrator,
                 act: { _ in acted += 1 },
-                reconcileSystemDNS: { reconciles += 1 }
+                reconcileSystemDNS: { reconciles += 1 },
+                reconcileSystemProxy: { proxyReconciles += 1 }
             )
         }
 
         XCTAssertEqual(acted, 1, "only the first path is material")
         XCTAssertEqual(reconciles, 21, "the reconcile is not deduped")
+        XCTAssertEqual(proxyReconciles, 21, "unchanged path reports retry system proxy drift too")
     }
 
     func testGatewayChangeActsAndReconciles() async throws {

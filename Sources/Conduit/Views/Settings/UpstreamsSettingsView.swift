@@ -27,11 +27,26 @@ struct UpstreamsSettingsView: View {
                 }
                 Toggle("Use upstream PAC for Conduit routing", isOn: $appState.config.pacRoutingEnabled)
                     .disabled(pacURLIsEmpty)
+                ConfigFieldRow("Preview URL", problem: nil, width: 360) {
+                    TextField("Preview URL", text: $appState.appPreferences.preferredBrowserTestURL,
+                              prompt: Text(AppPreferences.defaultBrowserTestURL))
+                        .accessibilityLabel("PAC preview URL")
+                }
+                SettingsNote("Preview shows whether the PAC chooses direct access or a proxy for this URL. This is also the Browser Test URL in General.")
                 HStack {
-                    Button("Preview PAC") { appState.refreshPACResolutionPreview() }
-                        .disabled(pacURLIsEmpty)
-                        .help("Evaluate the upstream PAC for the browser test URL and log the resulting proxy chain under Events.")
+                    Button(appState.isPACPreviewRunning ? "Previewing…" : "Preview PAC") { appState.refreshPACResolutionPreview() }
+                        .disabled(pacURLIsEmpty || appState.isPACPreviewRunning)
+                        .help("Evaluate the upstream PAC for the Preview URL above.")
+                    if appState.isPACPreviewRunning {
+                        ProgressView().controlSize(.small)
+                    }
                     Spacer()
+                }
+                if let message = appState.pacPreviewMessage {
+                    Text(message)
+                        .font(.callout)
+                        .textSelection(.enabled)
+                        .accessibilityLabel("PAC preview: \(message)")
                 }
             } header: {
                 Text("Upstream PAC Routing")

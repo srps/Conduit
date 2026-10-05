@@ -8,6 +8,32 @@ import ProxyPAC
 enum PACFetchScenarios {
     private struct Failure: Error { let message: String }
 
+    static func preview() throws -> ScenarioResult {
+        let started = Date()
+        for value in ["", " ", "relative/path", "http://", "file:///tmp/test", "https://user:password@example.test/"] {
+            do {
+                _ = try PACPreviewTarget.parse(value)
+                throw Failure(message: "Invalid preview target was accepted")
+            } catch PACResolverError.invalidTargetURL {
+                // A cleared or legacy empty value must never reach CFNetwork.
+            }
+        }
+        let target = try PACPreviewTarget.parse(AppPreferences().preferredBrowserTestURL)
+        let evaluator = CFPACEvaluator()
+        let chain = try evaluator.resolveProxyChain(for: target, pacScript: "function FindProxyForURL() { return 'PROXY proxy.test:8080; DIRECT'; }")
+        guard chain == ["PROXY proxy.test:8080", "DIRECT"] else {
+            throw Failure(message: "Preview lost the evaluated proxy chain")
+        }
+        return ScenarioResult(
+            name: "pac-preview", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
+            clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
+            aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [.init("first-run and invalid targets rejected; valid target evaluates", true)],
+            notes: ["Empty Browser Test URL is an actionable error, not a forced-unwrap crash"]
+        )
+    }
+
     @MainActor
     static func bounds() async throws -> ScenarioResult {
         let started = Date()

@@ -50,6 +50,9 @@ final class AppState: ObservableObject {
     /// popover, the menu commands, and the window agree on it.
     @Published var selectedSection: AppSection = .overview
     @Published var lastErrorMessage: String?
+    @Published private(set) var pacPreviewMessage: String?
+    @Published private(set) var isPACPreviewRunning = false
+    private(set) var pacPreviewTask: Task<Void, Never>?
     @Published private(set) var activationPreflight: ActivationPreflight = .noAdmin
     @Published private(set) var helperStatusState: HelperToolPrivilegeClient.Status = .notInstalled
 
@@ -115,6 +118,8 @@ final class AppState: ObservableObject {
     }()
     private var locationReconcileInFlight = false
     private var locationReconcileWanted = false
+    private var proxySettingsReconcileInFlight = false
+    private var proxySettingsReconcileWanted = false
     private let networkMonitor = NetworkMonitor()
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<VPNFlapWindowConfig>
@@ -138,6 +143,8 @@ final class AppState: ObservableObject {
     /// proxy and DNS starts and stops, one block per step. Serial, so a stop's
     /// clear lands after the apply of a start it overtook.
     private let platformWork = PlatformWork(label: "io.github.srps.Conduit.app.platform-work")
+    /// One preview in flight, admitted before either fetching or queueing.
+    private let pacPreviewWork = PlatformWork(label: "io.github.srps.Conduit.app.pac-preview")
     /// `startProxy` / `stopProxy`: which is the latest, and a repeat of the
     /// one in flight joins it. See `LifecycleLane`.
     private let proxyLane = LifecycleLane(name: "proxy")
@@ -1681,8 +1688,12 @@ final class AppState: ObservableObject {
             )
             Task { @MainActor [weak self] in
                 guard let self, self.preflightRefreshID == refreshID else { return }
+                let helperBecameAvailable = helperStatus == .installed && self.helperStatusState != .installed
                 self.helperStatusState = helperStatus
                 self.activationPreflight = preflight
+                if helperBecameAvailable {
+                    self.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
+                }
             }
         }
     }
@@ -1839,17 +1850,49 @@ final class AppState: ObservableObject {
     // MARK: - Misc
 
     func refreshPACResolutionPreview() {
-        guard !config.pacURL.isEmpty else { return }
-        Task {
+        guard !isPACPreviewRunning else { return }
+        let pacURL = config.pacURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target: URL
+        do {
+            guard !pacURL.isEmpty else { throw PACResolverError.invalidURL }
+            target = try PACPreviewTarget.parse(appPreferences.preferredBrowserTestURL)
+        } catch {
+            recordPACPreviewFailure(error)
+            return
+        }
+        isPACPreviewRunning = true
+        pacPreviewMessage = nil
+        let evaluator = pacEvaluator
+        let work = pacPreviewWork
+        pacPreviewTask = Task {
+            defer {
+                isPACPreviewRunning = false
+                pacPreviewTask = nil
+            }
             do {
-                let script = try await pacEvaluator.fetchPAC(from: config.pacURL)
-                let result = try pacEvaluator.resolveProxyChain(for: URL(string: appPreferences.preferredBrowserTestURL)!, pacScript: script)
+                let script = try await evaluator.fetchPAC(from: pacURL)
+                let outcome = await work.run {
+                    Result { try evaluator.resolveProxyChain(for: target, pacScript: script) }
+                }
+                let result = try outcome.get()
                 let answer = result.isEmpty ? "no entries (routed through the configured upstreams)" : result.joined(separator: "; ")
-                logStore.log(.info, "PAC preview for \(appPreferences.preferredBrowserTestURL): \(answer)", category: .pac)
+                let event = RuntimeEvent(kind: .routing, event: "pac.preview_completed", detail: "target=\(target.absoluteString) chain=\(answer)")
+                eventLog.append(event)
+                logStore.log(.info, event.detail ?? answer, category: .pac)
+                pacPreviewMessage = "\(target.absoluteString): \(answer)"
             } catch {
-                lastErrorMessage = error.localizedDescription
+                recordPACPreviewFailure(error)
             }
         }
+    }
+
+    private func recordPACPreviewFailure(_ error: any Error) {
+        let event = RuntimeEvent(kind: .routing, event: "pac.preview_failed", detail: error.localizedDescription)
+        eventLog.append(event)
+        let message = event.detail ?? "PAC preview failed."
+        logStore.log(.warning, message, category: .pac)
+        pacPreviewMessage = message
+        lastErrorMessage = message
     }
 
     func revealHealthTestURL() {
@@ -1861,6 +1904,7 @@ final class AppState: ObservableObject {
 
     private func handleSystemWake() {
         guard !rejectUnavailableConfiguration() else { return }
+        deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         deliveries.deliver { [orchestrator] in
             await orchestrator.handleSystemWake()
         }
@@ -1949,6 +1993,9 @@ final class AppState: ObservableObject {
                 guard let self, self.platformConfig.manageSystemDNS,
                       self.orchestrator.snapshot.dnsRunState == .running else { return }
                 self.scheduleDNSReconcile()
+            },
+            reconcileSystemProxy: { [weak self] in
+                self?.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
             }
         )
         // Note: `autoEnableOnVPN` / `autoDisableOffVPN` retired in Phase 3 of
@@ -1965,6 +2012,7 @@ final class AppState: ObservableObject {
         guard !rejectUnavailableConfiguration() else { return }
         let entriesWantedChanged = splitDNSGate.update(state)
 
+        deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         deliveries.deliver { [orchestrator] in
             await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
         }
@@ -1999,6 +2047,35 @@ final class AppState: ObservableObject {
             logger: logStore,
             runtimeStarted: proxyIsUp
         )
+    }
+
+    /// One pass and one pending retry; never queues a helper call per report.
+    private func reconcileSystemProxyIfRunning() async {
+        guard !rejectUnavailableConfiguration(), platformConfig.manageSystemProxy else { return }
+        guard !proxySettingsReconcileInFlight else { proxySettingsReconcileWanted = true; return }
+        proxySettingsReconcileInFlight = true
+        defer { proxySettingsReconcileInFlight = false; proxySettingsReconcileWanted = false }
+        repeat {
+            proxySettingsReconcileWanted = false
+            await awaitLaunchRecovery()
+            await proxyLane.waitUntilIdle()
+            guard platformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
+            let token = proxyLane.observationToken
+            let proxy = systemConduit, config = config, platform = platformConfig
+            let pacURL = orchestrator.snapshot.bindings.localPACURL
+            let events = orchestrator.eventLog, logger = logStore
+            await platformWork.run {
+                guard !token.isSuperseded else { return }
+                do {
+                    try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL, apply: true)
+                } catch {
+                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed",
+                                             detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
+                    events.append(event)
+                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
+                }
+            }
+        } while proxySettingsReconcileWanted
     }
 
     private func scheduleDNSReconcile() {

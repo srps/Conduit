@@ -313,6 +313,56 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
+    func testHelperBecomingAvailableRepairsFailedPACApplicationWithoutRestartingProxy() async throws {
+        var config = makeConfig()
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let locations = NetworkLocationFixture.store()
+        locations.refuseWrites(true)
+        harness.locationStore = locations
+        harness.helper.status = .outdated
+        let state = harness.launch()
+        await harness.launchRecovery()
+        await harness.settle("old helper status received") { state.helperStatus == .outdated }
+        try await state.startProxy()
+        let bindings = state.runtimeSnapshot.bindings
+        let url = try XCTUnwrap(bindings.localPACURL)
+        XCTAssertNotEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        locations.refuseWrites(false)
+        harness.helper.status = .installed
+        state.refreshPreflight()
+        await harness.settle("new helper repairs PAC", timeoutMilliseconds: 5_000) {
+            (try? locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"]) == .text(url)
+        }
+        await harness.deliveries()
+        XCTAssertEqual(state.runtimeSnapshot.bindings, bindings)
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "platform.location_reconcile" })
+        await state.stopProxy()
+    }
+
+    func testVPNRewriteOfPACInSameLocationIsRepairedWithoutRestartingProxy() async throws {
+        var config = makeConfig()
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        try await state.startProxy()
+        let bindings = state.runtimeSnapshot.bindings
+        let url = try XCTUnwrap(bindings.localPACURL)
+        let corporatePAC = NetworkSettingValue.text("http://corporate.example/proxy.pac")
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
+        harness.vpn.emit(.connected)
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        XCTAssertEqual(state.runtimeSnapshot.bindings, bindings)
+        await state.stopProxy()
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
+    }
+
     func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
         harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
         let locations = NetworkLocationFixture.store()
@@ -357,6 +407,29 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(try locations.snapshot().services, original.services)
         XCTAssertFalse(harness.machine.dnsRelayRunning)
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+    }
+
+    func testVPNNotificationDuringProxyStopCannotRepinStoppedListener() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        try await state.startProxy()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/bin/launchctl" && arguments.first == "unsetenv"
+        }
+        let stop = Task { await state.stopProxy() }
+        await harness.hold.waitUntilReached()
+        defer { harness.hold.release() }
+        harness.vpn.emit(.connected)
+        await harness.settle("proxy recovery waits for the held stop") { state.passesWaitingForLifecycle > 0 }
+        harness.hold.release()
+        await stop.value
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot().services, original.services)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 
     private func makeConfig() -> ProxyConfig {
@@ -539,10 +612,16 @@ final class AppStateHarnessTests: XCTestCase {
         let start = Task { try await appState.startProxy() }
         await harness.hold.waitUntilReached()
         XCTAssertFalse(harness.hold.reachedOnMainThread, "the start's surface work is off the main thread")
-        await harness.setVPN(.disconnected(reason: .userInitiated))
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        // Proxy reconciliation now waits for the held start; observe the VPN
+        // transition first, then drain recovery after releasing that start.
+        await harness.settle("the VPN drop reached the orchestrator") {
+            appState.runtimeSnapshot.vpnState == .disconnected(reason: .userInitiated)
+        }
         XCTAssertNil(machine.resolverFile(for: "corp.example"), "the drop found nothing to remove yet")
         harness.hold.release()
         try await start.value
+        await harness.deliveries()
 
         XCTAssertTrue(isRunning(appState))
         XCTAssertNil(machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")

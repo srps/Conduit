@@ -11,6 +11,7 @@ import Foundation
 
 package enum PACResolverError: Error, LocalizedError {
     case invalidURL
+    case invalidTargetURL
     case invalidPAC
     case evaluationFailed(String)
     /// The evaluator stopped waiting for the script (CFNetwork's own deadline).
@@ -21,6 +22,8 @@ package enum PACResolverError: Error, LocalizedError {
         switch self {
         case .invalidURL:
             return "The PAC URL is invalid."
+        case .invalidTargetURL:
+            return "Enter an absolute HTTP or HTTPS Preview URL without embedded credentials."
         case .invalidPAC:
             return "The PAC file could not be evaluated."
         case .evaluationFailed(let message):
@@ -30,6 +33,21 @@ package enum PACResolverError: Error, LocalizedError {
         case .fetchFailed(let message):
             return "The PAC file could not be fetched: \(message)"
         }
+    }
+}
+
+/// The diagnostic target is user input, independent of the PAC download URL.
+package enum PACPreviewTarget {
+    package static func parse(_ value: String) throws -> URL {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil else {
+            throw PACResolverError.invalidTargetURL
+        }
+        return url
     }
 }
 

@@ -80,6 +80,8 @@ exactly these semantics; do not repurpose them.
 | `direct_mode.entered` | Routing flipped to direct (`detail` carries the cause). |
 | `local_pac.starting` / `started` / `stopping` / `stopped` / `restarting` / `updated` / `failed` | Local PAC server lifecycle; `detail: reason=…`. |
 | `pac.refreshed` | The routing engine installed a freshly fetched PAC (`url=`, credentials stripped). The first install after a `pac.routes_invalidated` adds `after=` with its reason and logs at notice, so the app's `proxy.log` shows the reload. A different script drops every cached answer. The same script as the one loaded ends the detail with `script=unchanged` and keeps them: each is served on its next use and evaluated again in the background. |
+| `pac.preview_completed` | Settings evaluated a PAC for a validated Browser Test URL; `target=` and `chain=` describe the answer also shown beside Preview PAC. Evaluation runs off the main thread, with one preview in flight. |
+| `pac.preview_failed` | Settings rejected the diagnostic URL or failed to fetch/evaluate the PAC. The error text is also shown beside Preview PAC. An invalid target is rejected before fetching. |
 | `pac.refresh_wait_refused` | A caller found a PAC refresh running with 64 callers already waiting on it (`limit=`), so it went on without waiting for the outcome. Only control-plane callers wait, so this marks a runaway caller. |
 | `pac.refresh_failed` | A PAC fetch or compile failed; `detail` is the error text. The last working evaluator stays in place, unless `pac.routes_invalidated` dropped it. A fetch that started before a `pac.routes_invalidated` and failed after it ends its `detail` with `superseded=refetching`: it does not count towards the backoff, and the fetch is retried on the new network. |
 | `pac.refresh_backoff` | A path-triggered refresh was skipped because the URL is in failure backoff (`failures=`, `remainingSeconds=`). Wake, VPN connect and disconnect, user action and a changed URL bypass it. |
@@ -140,6 +142,7 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `platform.location_observed` | The dedicated preferences observer reports a stable active-location ID, independently of VPN and NWPath changes. |
 | `platform.location_apply` | Stable location/service IDs and surface selected for a compare-and-write; durable prior/applied fields are saved before mutation. |
+| `platform.location_reconcile` | Managed settings drifted or an earlier application did not land; repair through the scoped writer. `surface=`, `reason=managed_settings_drift`. Already matching settings require no writes. |
 | `platform.location_restore` | Prior fields selected for restoration, including inactive locations; external fields remain preserved. `scope=`, `surface=`, `active=`. |
 | `platform.location_external_preserved` | No owned fields remain to restore; the current settings are preserved and the record is released after comparison. |
 | `platform.location_deleted` | The recorded stable location/service identity no longer exists; only its record is retired. |

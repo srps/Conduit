@@ -11,8 +11,11 @@ struct ClientMetrics: Sendable {
     var lastByteAt: Date?
     var bytesReceived: Int = 0
     var readCount: Int = 0
+    var pacedReadCount: Int = 0
     var closedAt: Date?
     var closeReason: String?
+    var receiveBufferBytes: Int?
+    var receiveBufferError: String?
 }
 
 /// Opens a raw TCP connection to the local proxy, sends a CONNECT request, reads back the
@@ -54,7 +57,16 @@ final class FakeClient: @unchecked Sendable {
         let metricsBox = self.metricsBox
         let channelBox = self.channelBox
 
-        let channel = try await ClientBootstrap(group: group)
+        var bootstrap = ClientBootstrap(group: group)
+        if case .slowDrain = behavior {
+            // Bound one explicit read to 8 KiB. A normal-size TCP window avoids
+            // platform-dependent tiny-window/persist delays while reads are paced.
+            bootstrap = bootstrap
+                .channelOption(ChannelOptions.socketOption(.so_rcvbuf), value: 65_536)
+                .channelOption(ChannelOptions.recvAllocator, value: FixedSizeRecvByteBufferAllocator(capacity: 8_192))
+                .channelOption(ChannelOptions.maxMessagesPerRead, value: 1)
+        }
+        let channel = try await bootstrap
             .channelInitializer { channel in
                 channel.pipeline.addHandler(
                     FakeClientHandler(
@@ -98,7 +110,7 @@ enum ClientBehavior: Sendable {
     /// Slow-draining client: throttle inbound reads so the proxy-to-client direction
     /// builds up backpressure. Simulates the AE5F6815 pattern where fast upstream
     /// saturates a slow client and upstream then closes mid-stream.
-    case slowDrain(requestBytes: Int, smallRcvBufBytes: Int)
+    case slowDrain(requestBytes: Int)
 }
 
 private final class FakeClientHandler: ChannelInboundHandler, @unchecked Sendable {
@@ -115,6 +127,7 @@ private final class FakeClientHandler: ChannelInboundHandler, @unchecked Sendabl
     private var phase: Phase = .awaitingConnectResponse
     private var connectResponseAccum = ByteBufferAllocator().buffer(capacity: 1024)
     private var pingTask: RepeatedTask?
+    private var pacedReadTask: Scheduled<Void>?
 
     init(
         id: Int,
@@ -205,13 +218,42 @@ private final class FakeClientHandler: ChannelInboundHandler, @unchecked Sendabl
                 self.emit(channel: channel, bytes: pingBytes)
             }
 
-        case .slowDrain(let requestBytes, let smallRcvBufBytes):
-            // Shrink the client's socket receive buffer. That forces the kernel to
-            // advertise a small TCP receive window, which makes the proxy's outbound
-            // socket (to us) fill up fast → proxy hits backpressure → peer.isWritable=false
-            // path in TunnelRelayHandler.
-            _ = context.channel.setOption(ChannelOptions.socketOption(.so_rcvbuf), value: CInt(smallRcvBufBytes))
+        case .slowDrain(let requestBytes):
+            let channel = context.channel
+            let metricsBox = self.metricsBox
+            channel.getOption(ChannelOptions.socketOption(.so_rcvbuf)).whenComplete { result in
+                metricsBox.withLockedValue {
+                    switch result {
+                    case .success(let size): $0.receiveBufferBytes = Int(size)
+                    case .failure(let error): $0.receiveBufferError = String(describing: error)
+                    }
+                }
+            }
+            channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { error in
+                channel.pipeline.fireErrorCaught(error)
+            }
             emit(context: context, bytes: requestBytes)
+            schedulePacedRead(channel: channel, delay: .milliseconds(200))
+        }
+    }
+
+    func channelReadComplete(context: ChannelHandlerContext) {
+        if case .slowDrain = behavior, phase == .tunnelOpen {
+            schedulePacedRead(channel: context.channel, delay: .milliseconds(5))
+        }
+        context.fireChannelReadComplete()
+    }
+
+    private func schedulePacedRead(channel: Channel, delay: TimeAmount) {
+        guard pacedReadTask == nil, channel.isActive else { return }
+        // At most one pending timer per client. channelReadComplete schedules
+        // the next read only after this one finishes; inactive cancels it.
+        pacedReadTask = channel.eventLoop.scheduleTask(in: delay) { [weak self] in
+            guard let self else { return }
+            self.pacedReadTask = nil
+            guard channel.isActive else { return }
+            self.metricsBox.withLockedValue { $0.pacedReadCount += 1 }
+            channel.read()
         }
     }
 
@@ -229,6 +271,8 @@ private final class FakeClientHandler: ChannelInboundHandler, @unchecked Sendabl
     func channelInactive(context: ChannelHandlerContext) {
         pingTask?.cancel()
         pingTask = nil
+        pacedReadTask?.cancel()
+        pacedReadTask = nil
         metricsBox.withLockedValue { m in
             m.closedAt = Date()
             if m.closeReason == nil { m.closeReason = "channel_inactive" }

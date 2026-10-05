@@ -27,6 +27,7 @@ enum PMSim {
               multi-100               100 concurrent bursty streams for 10s
               bounded-writers         Slow storage, bounded queues and append amplification
               pac-fetch-bounds        Bounded PAC downloads and last-good retention
+              pac-preview             Validate preview targets and evaluate a proxy chain
               shared-inbound-budget   Mixed HTTP/SOCKS admission and handshake deadlines
               connection-flood        Saturate inbound connection cap, then verify recovery
               auth-storm              Saturate pending auth handshakes, verify bounded rejection
@@ -165,6 +166,7 @@ enum PMSim {
         "multi-100",
         "bounded-writers",
         "pac-fetch-bounds",
+        "pac-preview",
         "shared-inbound-budget",
         "connection-flood",
         "auth-storm",
@@ -232,6 +234,8 @@ enum PMSim {
             return [try await BoundedWriterScenarios.slowStorage()]
         case "pac-fetch-bounds":
             return [try await PACFetchScenarios.bounds()]
+        case "pac-preview":
+            return [try PACFetchScenarios.preview()]
         case "helper-caller-identity":
             return [try HelperCallerIdentityScenarios.run()]
         case "shared-inbound-budget":

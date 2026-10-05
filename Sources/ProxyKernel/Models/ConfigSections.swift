@@ -419,6 +419,7 @@ package struct AppPreferences: Codable, Equatable, Sendable {
     /// command palette in every developer editor.
     package var globalShortcutEnabled: Bool
     package var preferredBrowserTestURL: String
+    package static let defaultBrowserTestURL = "https://example.com/"
     /// Default **on**. A menu-bar app that runs unattended for days fails
     /// when nobody is watching; an opt-in log is only there for failures
     /// that were predicted. Rolled by size (`RotatingLogFile`), so "on" is
@@ -429,7 +430,7 @@ package struct AppPreferences: Codable, Equatable, Sendable {
         showMenuBarIcon: Bool = true,
         floatingWindowEnabled: Bool = false,
         globalShortcutEnabled: Bool = false,
-        preferredBrowserTestURL: String = "",
+        preferredBrowserTestURL: String = AppPreferences.defaultBrowserTestURL,
         fileLoggingEnabled: Bool = true
     ) {
         self.showMenuBarIcon = showMenuBarIcon
@@ -444,7 +445,9 @@ package struct AppPreferences: Codable, Equatable, Sendable {
         showMenuBarIcon = try c.decodeIfPresent(Bool.self, forKey: .showMenuBarIcon) ?? true
         floatingWindowEnabled = try c.decodeIfPresent(Bool.self, forKey: .floatingWindowEnabled) ?? false
         globalShortcutEnabled = try c.decodeIfPresent(Bool.self, forKey: .globalShortcutEnabled) ?? false
-        preferredBrowserTestURL = try c.decodeIfPresent(String.self, forKey: .preferredBrowserTestURL) ?? ""
+        let browserTestURL = try c.decodeIfPresent(String.self, forKey: .preferredBrowserTestURL) ?? Self.defaultBrowserTestURL
+        preferredBrowserTestURL = browserTestURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? Self.defaultBrowserTestURL : browserTestURL
         fileLoggingEnabled = try c.decodeIfPresent(Bool.self, forKey: .fileLoggingEnabled) ?? true
     }
 }

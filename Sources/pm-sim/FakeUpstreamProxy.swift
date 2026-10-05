@@ -4,6 +4,14 @@ import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 
+struct FloodRelayMetrics: Sendable {
+    var bytesRead = 0
+    var originInactiveAt: Date?
+    var clientDrainFinishedAt: Date?
+    var clientCloseFinishedAt: Date?
+    var failure: String?
+}
+
 /// A tiny stand-in for a corporate proxy. Accepts CONNECT, plays the 407→200 auth dance
 /// with a fake Negotiate scheme, then opens a TCP connection to the configured origin and
 /// relays bytes in both directions for the life of the tunnel.
@@ -22,6 +30,7 @@ final class FakeUpstreamProxy: @unchecked Sendable {
     /// The `Proxy-Authenticate` value of the first 407. The default suits a
     /// Negotiate mock; an NTLM handshake needs `NTLM <type-2 message>`.
     let challenge: String
+    let originRelaySetupDelayMilliseconds: Int
     private(set) var channel: Channel?
     /// Accepted child channels. Closing the listener with NIO does NOT close
     /// already-accepted child channels — they keep serving requests off the
@@ -38,6 +47,8 @@ final class FakeUpstreamProxy: @unchecked Sendable {
     /// assert on this — both paths reach the same origin, so the byte stream
     /// alone cannot tell them apart.
     private let connectCountBox = NIOLockedValueBox(0)
+    private let floodMetricsBox = NIOLockedValueBox(FloodRelayMetrics())
+    var floodMetrics: FloodRelayMetrics { floodMetricsBox.withLockedValue { $0 } }
     var connectCount: Int { connectCountBox.withLockedValue { $0 } }
 
     init(
@@ -47,9 +58,12 @@ final class FakeUpstreamProxy: @unchecked Sendable {
         requireAuth: Bool = true,
         plainHTTPResponse: String? = nil,
         serverFirst: [[UInt8]] = [],
-        challenge: String = "Negotiate"
+        challenge: String = "Negotiate",
+        originRelaySetupDelayMilliseconds: Int = 0
     ) {
         self.group = group
+        precondition((0...1_000).contains(originRelaySetupDelayMilliseconds))
+        self.originRelaySetupDelayMilliseconds = originRelaySetupDelayMilliseconds
         self.challenge = challenge
         self.originHost = originHost
         self.originPort = originPort
@@ -74,11 +88,13 @@ final class FakeUpstreamProxy: @unchecked Sendable {
         let plainHTTPResponse = self.plainHTTPResponse
         let serverFirst = self.serverFirst
         let challenge = self.challenge
+        let originRelaySetupDelayMilliseconds = self.originRelaySetupDelayMilliseconds
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { [weak self] channel in
                 self?.trackChild(channel)
                 let connectCountBox = self?.connectCountBox
+                let floodMetricsBox = self?.floodMetricsBox
                 return channel.pipeline.addHandler(
                     FakeUpstreamSession(
                         originHost: originHost,
@@ -87,7 +103,9 @@ final class FakeUpstreamProxy: @unchecked Sendable {
                         plainHTTPResponse: plainHTTPResponse,
                         serverFirst: serverFirst,
                         challenge: challenge,
-                        onConnect: { connectCountBox?.withLockedValue { $0 += 1 } }
+                        onConnect: { connectCountBox?.withLockedValue { $0 += 1 } },
+                        floodMetricsBox: floodMetricsBox,
+                        originRelaySetupDelayMilliseconds: originRelaySetupDelayMilliseconds
                     )
                 )
             }
@@ -132,6 +150,8 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
     private let serverFirst: [[UInt8]]
     private let challenge: String
     private let onConnect: @Sendable () -> Void
+    private let floodMetricsBox: NIOLockedValueBox<FloodRelayMetrics>?
+    private let originRelaySetupDelayMilliseconds: Int
     private var phase: Phase
     private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
     private var originChannel: Channel?
@@ -143,7 +163,9 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
         plainHTTPResponse: String?,
         serverFirst: [[UInt8]] = [],
         challenge: String = "Negotiate",
-        onConnect: @escaping @Sendable () -> Void = {}
+        onConnect: @escaping @Sendable () -> Void = {},
+        floodMetricsBox: NIOLockedValueBox<FloodRelayMetrics>? = nil,
+        originRelaySetupDelayMilliseconds: Int
     ) {
         self.serverFirst = serverFirst
         self.challenge = challenge
@@ -152,6 +174,8 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
         self.requireAuth = requireAuth
         self.plainHTTPResponse = plainHTTPResponse
         self.onConnect = onConnect
+        self.floodMetricsBox = floodMetricsBox
+        self.originRelaySetupDelayMilliseconds = originRelaySetupDelayMilliseconds
         self.phase = requireAuth ? .awaitingFirstConnect : .awaitingAuthedConnect
     }
 
@@ -212,6 +236,10 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
     private func openOriginAndPromote(context: ChannelHandlerContext) {
         let clientChannel = context.channel
         ClientBootstrap(group: context.eventLoop.next())
+            // The origin may send its entire stream and FIN immediately. Until
+            // the CONNECT response is flushed and its relay installed, inbound
+            // bytes would otherwise reach NIO's tail and be discarded.
+            .channelOption(ChannelOptions.autoRead, value: false)
             .connect(host: originHost, port: originPort)
             .whenComplete { [self] result in
                 switch result {
@@ -233,10 +261,16 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
                     }
                     clientChannel.writeAndFlush(out).whenComplete { [self] _ in
                         self.phase = .relaying
-                        let clientToOriginBridge = OriginRelayToClient(peer: clientChannel)
-                        originChannel.pipeline.addHandler(clientToOriginBridge).whenFailure { _ in
-                            clientChannel.close(promise: nil)
-                        }
+                        let clientToOriginBridge = OriginRelayToClient(peer: clientChannel, metrics: self.floodMetricsBox)
+                        originChannel.eventLoop.scheduleTask(in: .milliseconds(Int64(self.originRelaySetupDelayMilliseconds))) {}
+                            .futureResult.flatMap {
+                                originChannel.pipeline.addHandler(clientToOriginBridge)
+                            }.flatMap {
+                                originChannel.setOption(ChannelOptions.autoRead, value: true)
+                            }.whenFailure { error in
+                                self.floodMetricsBox?.withLockedValue { $0.failure = "relay setup: \(error)" }
+                                clientChannel.close(promise: nil)
+                            }
                     }
 
                 case .failure:
@@ -266,10 +300,16 @@ private final class OriginRelayToClient: ChannelInboundHandler, @unchecked Senda
 
     private let peer: Channel
 
-    init(peer: Channel) { self.peer = peer }
+    private let metrics: NIOLockedValueBox<FloodRelayMetrics>?
+
+    init(peer: Channel, metrics: NIOLockedValueBox<FloodRelayMetrics>?) {
+        self.peer = peer
+        self.metrics = metrics
+    }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let buf = unwrapInboundIn(data)
+        metrics?.withLockedValue { $0.bytesRead += buf.readableBytes }
         peer.writeAndFlush(buf, promise: nil)
     }
 
@@ -277,9 +317,20 @@ private final class OriginRelayToClient: ChannelInboundHandler, @unchecked Senda
         // Drain pending writes before closing peer, or the sim truncates bytes that the
         // real code already delivered correctly. Same pattern as TunnelRelayHandler.gracefulClosePeer.
         let peer = self.peer
+        let metrics = self.metrics
+        metrics?.withLockedValue { $0.originInactiveAt = Date() }
         if peer.isActive {
-            peer.writeAndFlush(peer.allocator.buffer(capacity: 0)).whenComplete { _ in
-                peer.close(mode: .all, promise: nil)
+            peer.writeAndFlush(peer.allocator.buffer(capacity: 0)).whenComplete { result in
+                metrics?.withLockedValue {
+                    $0.clientDrainFinishedAt = Date()
+                    if case .failure(let error) = result { $0.failure = "relay drain: \(error)" }
+                }
+                peer.close(mode: .all).whenComplete { result in
+                    metrics?.withLockedValue {
+                        $0.clientCloseFinishedAt = Date()
+                        if case .failure(let error) = result { $0.failure = "relay close: \(error)" }
+                    }
+                }
             }
         } else {
             peer.close(mode: .all, promise: nil)

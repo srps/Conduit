@@ -14,15 +14,19 @@ import ProxyKernel
 /// and logs nothing.
 @MainActor
 package enum NetworkPathReports {
-    /// `act` runs first and only for a material change; `reconcileSystemDNS`
-    /// runs after it for every report. The host decides inside
-    /// `reconcileSystemDNS` whether system DNS is managed and running.
+    /// Proxy reconciliation is requested before a material change can suspend
+    /// in `act`; DNS reconciliation follows it. Both run for every report.
+    /// Each host guards reconciliation with managed settings and readiness.
     package static func receive(
         _ path: NetworkPathState,
         orchestrator: ProxyOrchestrator,
         act: @MainActor (NetworkPathChange) async -> Void,
-        reconcileSystemDNS: @MainActor () async -> Void
+        reconcileSystemDNS: @MainActor () async -> Void,
+        reconcileSystemProxy: @MainActor () async -> Void = {}
     ) async {
+        // Repair a failed application or a VPN rewrite before a PAC refetch
+        // can suspend the transition. Unchanged reports also retry drift.
+        await reconcileSystemProxy()
         if let change = orchestrator.admitNetworkPath(path) {
             await act(change)
         }

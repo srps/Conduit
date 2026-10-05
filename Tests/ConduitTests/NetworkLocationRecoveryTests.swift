@@ -174,6 +174,56 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testPACReconcileRetriesFailurePreservesRewriteAndAvoidsUnchangedWrites() throws {
+        try withRecovery { store, journal, recovery, events in
+            let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+            var config = ProxyConfig()
+            config.localPACEnabled = true
+            let url = "http://127.0.0.1:63145/proxy.pac"
+            store.refuseWrites(true)
+            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+            store.refuseWrites(false)
+            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            let applied = try store.snapshot().services[0].proxies
+            store.refuseWrites(true)
+            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            store.refuseWrites(false)
+            let corporatePAC = NetworkSettingValue.text("http://corporate.example/proxy.pac")
+            store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
+            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            XCTAssertEqual(try store.snapshot().services[0].proxies, applied)
+            try proxy.clear(logger: nil)
+            XCTAssertEqual(try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
+            XCTAssertEqual(events.events.filter { $0.event == "platform.location_reconcile" }.count, 3)
+        }
+    }
+
+    func testPACReconcileRepairsEthernetWhenWiFiAlreadyMatches() throws {
+        try withRecovery { store, journal, recovery, _ in
+            let corporatePAC: [String: NetworkSettingValue] = [
+                "ProxyAutoConfigEnable": .number(1),
+                "ProxyAutoConfigURLString": .text("http://corporate.example/proxy.pac")
+            ]
+            store.edit { snapshot in
+                snapshot.services.append(.init(locationID: home,
+                    serviceID: "55555555-5555-5555-5555-555555555555", name: "USB Ethernet", enabled: true,
+                    proxies: corporatePAC, dns: [:]))
+            }
+            let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+            var config = ProxyConfig()
+            config.localPACEnabled = true
+            let url = "http://127.0.0.1:63145/proxy.pac"
+            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            store.edit { $0.services[2].proxies = corporatePAC }
+            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            let repaired = try store.snapshot()
+            XCTAssertEqual(repaired.services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+            XCTAssertEqual(repaired.services[2].proxies["ProxyAutoConfigURLString"], .text(url))
+            try proxy.clear(logger: nil)
+            XCTAssertEqual(try store.snapshot().services[2].proxies, corporatePAC)
+        }
+    }
+
     func testManagersRetryApplyAfterEmptyLocationReleasedAllPriorRecords() throws {
         try withRecovery { store, journal, recovery, _ in
             let config = ProxyConfig()
