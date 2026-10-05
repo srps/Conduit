@@ -83,7 +83,10 @@ Do not modify routing mode, VPN detection, or split-DNS policy. Active-set and e
 inside the privileged write reject a switch racing an apply.
 
 Managed proxy reconciliation also runs after helper availability, VPN/path reports,
-and wake. This repairs failed startup writes and same-location PAC rewrites.
+and wake. Preferences notifications with an unchanged location ID also schedule
+proxy reconciliation: a VPN client can rewrite PAC after its VPN/path reports
+have already settled. Waiting for another NWPath report can leave the corporate
+PAC active for minutes. This repairs failed startup writes and late same-location PAC rewrites.
 It reads the active settings first and skips already-matching writes; an external
 edit becomes the new captured prior state before repair. Both hosts coalesce work
 with one in-flight flag and one pending flag, wait for lifecycle work, and check
@@ -97,6 +100,9 @@ cover those contracts; both host harnesses cover observer delivery. Bounds cap
 snapshot size, request size, and outstanding location records. No verification
 mutates the serving app or installed helper. Deployment needs an explicit helper
 installation and controlled macOS 26/27 corporate-VPN validation.
+
+For 0.4.0, the release owner has waived unavailable macOS 27 corporate-VPN
+validation. Record macOS 27 as untested; validate the VPN cycle on macOS 26.
 
 ## Implementation and deployment status
 

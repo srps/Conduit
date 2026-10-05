@@ -791,9 +791,16 @@ final class DaemonRuntimeHost {
     /// DNS reconcile runs for every report, since a VPN client can rewrite
     /// service DNS with no material path change (#101, `NetworkPathReports`).
     private func startLocationObserver() {
-        networkLocationObserver.start { [weak self, deliveries] result in
+        networkLocationObserver.start(onChange: { [weak self, deliveries] result in
             deliveries.deliver { await self?.handleLocationChange(result) }
-        }
+        }, onSettingsChange: { [weak self, deliveries] in
+            deliveries.deliver {
+                guard let self else { return }
+                self.recordLifecycle(RuntimeEvent(kind: .config, event: "platform.settings_observed",
+                                                  detail: "surface=proxies source=preferences"))
+                await self.reconcileSystemProxyIfRunning()
+            }
+        })
     }
 
     private func handleLocationChange(_ result: Result<String, NetworkSettingsError>) async {

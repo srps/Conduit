@@ -4,28 +4,32 @@ import SystemConfiguration
 import ConduitShared
 
 package protocol NetworkLocationObserving: Sendable {
-    func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void)
+    func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void,
+               onSettingsChange: @escaping @Sendable () -> Void)
     func stop()
 }
 
-/// Preferences apply notifications detect location switches even with an unchanged NWPath.
-/// Holds one subscription, one last identity and one callback; no polling or per-location timers.
+/// Preferences notifications detect location switches and later settings rewrites
+/// even with an unchanged NWPath. Holds one subscription and two callbacks.
 package final class NetworkLocationMonitor: NetworkLocationObserving, @unchecked Sendable {
     private let lock = NSRecursiveLock()
     private let queue = DispatchQueue(label: "Conduit.network-location")
     private let queueKey = DispatchSpecificKey<Bool>()
     private var preferences: SCPreferences?
     private var callback: (@Sendable (Result<String, NetworkSettingsError>) -> Void)?
+    private var settingsCallback: (@Sendable () -> Void)?
     private var lastID: String?
 
     package init() { queue.setSpecific(key: queueKey, value: true) }
 
-    package func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void) {
+    package func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void,
+                       onSettingsChange: @escaping @Sendable () -> Void) {
         var initial: SCPreferences?
         var unavailable = false
         lock.withLock {
             guard preferences == nil else { return }
             callback = onChange
+            settingsCallback = onSettingsChange
             guard let prefs = SCPreferencesCreate(nil, "Conduit location observer" as CFString, nil) else {
                 unavailable = true
                 return
@@ -48,22 +52,27 @@ package final class NetworkLocationMonitor: NetworkLocationObserving, @unchecked
     }
 
     private func receive(_ prefs: SCPreferences) {
-        let delivery = lock.withLock { () -> ((@Sendable (Result<String, NetworkSettingsError>) -> Void), Result<String, NetworkSettingsError>)? in
+        let delivery = lock.withLock { () -> (@Sendable () -> Void)? in
             guard preferences === prefs, let callback else { return nil }
             SCPreferencesSynchronize(prefs)
             guard let current = SCNetworkSetCopyCurrent(prefs), let id = SCNetworkSetGetSetID(current) as String? else {
-                return (callback, .failure(.unavailable))
+                return { callback(.failure(.unavailable)) }
             }
-            guard id != lastID else { return nil }
-            lastID = id
-            return (callback, .success(id))
+            if id != lastID {
+                lastID = id
+                return { callback(.success(id)) }
+            }
+            // A VPN client can rewrite Proxies after its path/VPN reports have
+            // settled. The location identity stays unchanged. The host's
+            // bounded reconcile compares values and skips our own writes.
+            return settingsCallback
         }
-        if let (callback, result) = delivery { callback(result) }
+        delivery?()
     }
 
     package func stop() {
         let prefs = lock.withLock { () -> SCPreferences? in
-            defer { preferences = nil; callback = nil; lastID = nil }
+            defer { preferences = nil; callback = nil; settingsCallback = nil; lastID = nil }
             return preferences
         }
         if let prefs {
