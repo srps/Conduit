@@ -112,8 +112,8 @@ cover those contracts; both host harnesses cover observer delivery. Bounds cap
 snapshot size, request size, and outstanding location records. No verification
 mutates the serving app or installed helper. Deployment needs an explicit helper
 installation and controlled corporate-VPN validation. The general target is
-macOS 26/27; for 0.4.0, the release owner has waived unavailable macOS 27 testing.
-That release requires the macOS 26 VPN cycle and must report macOS 27 as untested.
+macOS 26/27. 0.4.0 passed the macOS 26 corporate-VPN cycle with helper v5; the
+release owner waived unavailable macOS 27 testing, which remains untested.
 
 ## Implementation and deployment status
 
@@ -154,4 +154,5 @@ canonical epoch timestamps and reads historical ISO-8601 records. Do not roll ba
 to an old client while scoped records remain outstanding; stop this build and
 complete restoration first, and retain the journal when troubleshooting rollback.
 
-Controlled macOS 26/27 corporate-VPN validation remains required before deployment.
+Validated on macOS 26 with the corporate VPN client for 0.4.0; macOS 27 is untested.
+Profile associations (#114) and opt-in location switching (#115) are separate work.

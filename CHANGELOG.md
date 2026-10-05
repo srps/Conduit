@@ -14,6 +14,12 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   settings stand and `platform.location_contended` reports the conflict once.
   Start and stop are not limited. (#116)
 
+### Documentation
+
+- Network-location recovery is recorded as validated on macOS 26 with the
+  corporate VPN client; macOS 27 remains untested. Profile associations (#114)
+  and opt-in location switching (#115) are tracked separately.
+
 ## 0.4.0
 
 Network-location-safe proxy/DNS recovery, helper v5, and recovery of managed
