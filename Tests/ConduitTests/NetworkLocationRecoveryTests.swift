@@ -273,6 +273,38 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         XCTAssertFalse(journal.hasRecords(for: .systemProxy))
     }
 
+    func testFailedRepairsDoNotSpendTheBudgetAndContentionReturnsTheRetryDelay() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("location-tests-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = machine()
+        let journal = PlatformStateJournal(fileURL: directory.appendingPathComponent("journal.json"))
+        let events = RuntimeEventLog()
+        let clock = ManualInstant()
+        let recovery = LocationSettingsRecovery(store: store, journal: journal,
+                                                limits: .init(maximumDriftRepairs: 1, driftRepairWindow: .seconds(60)),
+                                                now: { clock.value }, emit: { events.append($0) })
+        let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+        var config = ProxyConfig()
+        config.localPACEnabled = true
+        let url = "http://127.0.0.1:63145/proxy.pac"
+        store.refuseWrites(true)
+        for _ in 0..<3 {
+            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+        }
+        store.refuseWrites(false)
+        XCTAssertNil(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+        XCTAssertEqual(try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        XCTAssertFalse(events.events.contains { $0.event == "platform.location_contended" })
+
+        clock.advance(.seconds(10))
+        store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = .text("http://enforced.example/proxy.pac") }
+        XCTAssertEqual(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true), .seconds(50))
+        let contended = try XCTUnwrap(events.events.first { $0.event == "platform.location_contended" })
+        XCTAssertTrue(contended.detail?.contains("retry_seconds=50") == true, contended.detail ?? "")
+        try proxy.clear(logger: nil)
+    }
+
     func testManagersRetryApplyAfterEmptyLocationReleasedAllPriorRecords() throws {
         try withRecovery { store, journal, recovery, _ in
             let config = ProxyConfig()

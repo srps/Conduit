@@ -111,11 +111,14 @@ final class DaemonRuntimeHost {
     )
     private let networkLocationStoreFactory: @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?
     private let networkLocationObserver: any NetworkLocationObserving
+    private let networkLocationLimits: NetworkLocationLimits
+    /// At most one pending retry for a drift repair withheld by the contention budget.
+    private var proxyRepairRetry: Task<Void, Never>?
     private lazy var locationRecovery: LocationSettingsRecovery? = {
         guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
         let eventLog = orchestrator.eventLog
         let logger = logger
-        return LocationSettingsRecovery(store: store, journal: platformStateJournal) { event in
+        return LocationSettingsRecovery(store: store, journal: platformStateJournal, limits: networkLocationLimits) { event in
             eventLog.append(event)
             logger.log(.notice, "Network location: \(event.event) \(event.detail ?? "")", category: .system)
         }
@@ -179,6 +182,7 @@ final class DaemonRuntimeHost {
         configFilePredatesLaunch: Bool,
         networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) },
+        networkLocationLimits: NetworkLocationLimits = .init(),
         vpnStatusMonitor: VPNStatusObserving? = nil,
         privilegeClient: (any PrivilegeClient)? = nil,
         credentialStore: (any SecretStore)? = nil,
@@ -188,6 +192,7 @@ final class DaemonRuntimeHost {
     ) {
         self.networkLocationObserver = networkLocationObserver
         self.networkLocationStoreFactory = networkLocationStoreFactory
+        self.networkLocationLimits = networkLocationLimits
         self.environment = environment
         self.logger = logger
         self.config = loadedConfiguration.config
@@ -827,11 +832,12 @@ final class DaemonRuntimeHost {
             let pacURL = orchestrator.snapshot.bindings.localPACURL
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logger
-            await platformWork.run {
+            let proxyRetry = await platformWork.run { () -> Duration? in
+                var retry: Duration?
                 do {
                     if !proxyToken.isSuperseded {
-                        try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL,
-                                                    apply: platform.manageSystemProxy && state.proxyIsUp)
+                        retry = try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL,
+                                                            apply: platform.manageSystemProxy && state.proxyIsUp)
                     }
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
@@ -847,7 +853,9 @@ final class DaemonRuntimeHost {
                     events.append(event)
                     logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
                 }
+                return retry
             }
+            if let proxyRetry { scheduleProxyRepairRetry(after: proxyRetry) }
         } while locationReconcileWanted
     }
 
@@ -902,18 +910,31 @@ final class DaemonRuntimeHost {
             let proxy = systemConduit, config = config, platform = platformConfig
             let pacURL = orchestrator.snapshot.bindings.localPACURL
             let events = orchestrator.eventLog, logger = logger
-            await platformWork.run {
-                guard !token.isSuperseded else { return }
+            let retry = await platformWork.run { () -> Duration? in
+                guard !token.isSuperseded else { return nil }
                 do {
-                    try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL, apply: true)
+                    return try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL, apply: true)
                 } catch {
                     let event = RuntimeEvent(kind: .config, event: "platform.location_failed",
                                              detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
                     events.append(event)
                     logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
+                    return nil
                 }
             }
+            if let retry { scheduleProxyRepairRetry(after: retry) }
         } while proxySettingsReconcileWanted
+    }
+
+    /// Twin of `AppState.scheduleProxyRepairRetry`: one pass when a contended
+    /// repair budget reopens, since no notification may follow.
+    private func scheduleProxyRepairRetry(after delay: Duration) {
+        proxyRepairRetry?.cancel()
+        proxyRepairRetry = Task { [weak self] in
+            do { try await Task.sleep(for: delay) }
+            catch { return } // Cancelled by a newer schedule; that one runs instead.
+            await self?.reconcileSystemProxyIfRunning()
+        }
     }
 
     /// Twin of `AppState.runDNSReconcile`, without the debounce: off the main

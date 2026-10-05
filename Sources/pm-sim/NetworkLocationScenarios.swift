@@ -325,7 +325,7 @@ enum NetworkLocationScenarios {
                 .init("unmatched legacy gateway endpoints retain recovery evidence", gatewayLegacyRetained),
                 .init("unrelated corporate service does not block legacy recovery", unrelatedCorporatePreserved),
                 .init("deferred proxy cleanup removes enable flags with endpoints", proxyDisabledOnDeferredCleanup),
-                .init("an enforcing external writer exhausts a fixed repair budget, reports contention once, then recovers", contention),
+                .init("an enforcing external writer exhausts a fixed repair budget, reports contention once, then recovers; failed writes do not count", contention),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
@@ -354,9 +354,18 @@ enum NetworkLocationScenarios {
         config.localPACEnabled = true
         let url = "http://127.0.0.1:63145/proxy.pac"
         let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
+        // A helper outage first: failed writes must not spend the contention budget.
+        store.refuseWrites(true)
+        var failedWrites = 0
+        for _ in 0..<10 {
+            do { try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true) }
+            catch { failedWrites += 1 }
+        }
+        store.refuseWrites(false)
+        var retry: Duration?
         for _ in 0..<50 {
             store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
-            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+            retry = try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
         }
         let repairs = events.events.filter { $0.event == "platform.location_reconcile" }.count
         let contended = events.events.filter { $0.event == "platform.location_contended" }.count
@@ -367,7 +376,8 @@ enum NetworkLocationScenarios {
         try proxy.clear(logger: nil)
         let restored = try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"] == enforced
             && !journal.hasRecords(for: .systemProxy)
-        return repairs == 3 && contended == 1 && yielded && reopened && restored
+        return failedWrites == 10 && repairs == 13 && contended == 1 && retry == .seconds(60)
+            && yielded && reopened && restored
     }
 }
 

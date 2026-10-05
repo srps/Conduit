@@ -12,7 +12,8 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   profile that re-applies its own proxy settings after every Conduit write can no
   longer hold both in a write loop: past 4 repairs in 60 s per location, its
   settings stand and `platform.location_contended` reports the conflict once.
-  Start and stop are not limited. (#116)
+  One repair pass is scheduled for when the window reopens, and failed helper
+  writes do not count toward the limit. Start and stop are not limited. (#116)
 
 ### Documentation
 

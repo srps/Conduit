@@ -118,36 +118,45 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         }
     }
 
-    package func reconcile(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
+    /// Returns when to retry if drift repair was withheld by the contention budget,
+    /// so the host can schedule one pass for when the window reopens.
+    @discardableResult
+    package func reconcile(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws -> Duration? {
         try operations.withLock {
             try restore(kind: kind, inactiveOnly: true)
-            guard !isApplied(kind: kind, desired: desired) else { return }
-            guard try admitRepair(kind: kind, locationID: store.snapshot().activeLocationID) else { return }
+            guard !isApplied(kind: kind, desired: desired) else { return nil }
+            let locationID = try store.snapshot().activeLocationID
+            if let retry = withheldRepair(kind: kind, locationID: locationID) { return retry }
             report("reconcile", "surface=\(kind.rawValue) reason=managed_settings_drift")
             try apply(kind: kind, desired: desired, config: config)
+            // Only completed repairs count: helper failures have their own retry bound
+            // and are not evidence that another program is rewriting the settings.
+            repairBudgets[kind]?.repairs.append(now())
+            return nil
         }
     }
 
     /// A program that rewrites the same settings after every Conduit write would
     /// otherwise ping-pong with each preferences notification. Past the budget,
     /// its settings stand until the window slides; explicit apply is not limited.
-    private func admitRepair(kind: NetworkSettingsKind, locationID: String) -> Bool {
+    private func withheldRepair(kind: NetworkSettingsKind, locationID: String) -> Duration? {
         let instant = now()
         var budget = repairBudgets[kind].flatMap { $0.locationID == locationID ? $0 : nil }
             ?? RepairBudget(locationID: locationID)
         budget.repairs.removeAll { instant - $0 >= limits.driftRepairWindow }
         defer { repairBudgets[kind] = budget }
-        guard budget.repairs.count < limits.maximumDriftRepairs else {
-            if !budget.contentionReported {
-                budget.contentionReported = true
-                report("contended", "surface=\(kind.rawValue) location=\(locationID) repairs=\(budget.repairs.count) "
-                    + "window_seconds=\(limits.driftRepairWindow.components.seconds) reason=repeated_external_rewrites")
-            }
-            return false
+        guard budget.repairs.count >= limits.maximumDriftRepairs, let oldest = budget.repairs.min() else {
+            budget.contentionReported = false
+            return nil
         }
-        budget.repairs.append(instant)
-        budget.contentionReported = false
-        return true
+        let retry = limits.driftRepairWindow - (instant - oldest)
+        if !budget.contentionReported {
+            budget.contentionReported = true
+            report("contended", "surface=\(kind.rawValue) location=\(locationID) repairs=\(budget.repairs.count) "
+                + "window_seconds=\(limits.driftRepairWindow.components.seconds) retry_seconds=\(retry.components.seconds + (retry.components.attoseconds > 0 ? 1 : 0)) "
+                + "reason=repeated_external_rewrites")
+        }
+        return retry
     }
 
     package func apply(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws {

@@ -97,9 +97,12 @@ Drift repair is bounded per surface and active location: at most
 `maximumDriftRepairs` (default 4) within a sliding `driftRepairWindow` (default
 60 s). A VPN client or MDM profile that re-applies its own proxy settings after
 every Conduit write therefore cannot hold both programs in a write loop. Past the
-budget its settings stand, one `platform.location_contended` event reports the
-episode, and repair resumes when the window slides or the active location changes.
-Explicit apply at start and restoration at stop are never limited.
+budget its settings stand and one `platform.location_contended` event reports the
+episode. Only completed repairs count; helper failures keep their own retry bound.
+The withheld repair returns its retry delay, and each host keeps at most one
+pending pass for when the window reopens, so Conduit's settings come back even if
+the other program goes quiet and no notification follows. A location change also
+starts a fresh budget. Explicit apply at start and restoration at stop are never limited.
 
 Preferences notifications repair proxies only. Same-location DNS rewrites are
 repaired by the per-report DNS reconcile on VPN/path changes (#101).
