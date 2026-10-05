@@ -26,7 +26,7 @@ import XCTest
 ///    the injected `ipv4Reconnect` with a first-A-record `SocketAddress`).
 /// 3. `resolveIPv4` successfully returns an IPv4 loopback address for
 ///    `localhost` and fails with `DirectIPv4FallbackError.resolutionFailed`
-///    for an obviously-invalid host.
+///    for an IPv6 literal passed to the IPv4-only resolver.
 /// 4. `DirectIPv4FallbackError.errorDescription` produces the human-readable
 ///    strings surfaced to users on bad-gateway responses.
 final class DirectIPv4FallbackTests: XCTestCase {
@@ -78,22 +78,21 @@ final class DirectIPv4FallbackTests: XCTestCase {
         }
     }
 
-    /// An obviously-nonexistent hostname must surface a
-    /// `DirectIPv4FallbackError.resolutionFailed` (not crash, not hang, not
-    /// resolve to something else). `.invalid` is the RFC 2606 / RFC 6761
-    /// reserved TLD guaranteed never to resolve.
-    func testResolveIPv4_invalidHost_returnsResolutionFailedError() async throws {
+    /// An IPv6 literal is rejected locally by the AF_INET resolver, without
+    /// consulting external DNS. This pins the immediate resolution-failure
+    /// contract without depending on a DNS server replying to `.invalid`.
+    func testResolveIPv4_ipv6Literal_returnsResolutionFailedError() async throws {
         let loop = MultiThreadedEventLoopGroup.singleton.next()
 
         do {
             _ = try await HTTPProxyHandler
-                .resolveIPv4(host: "this-host-definitely-does-not-exist.invalid", port: 443, on: loop)
+                .resolveIPv4(host: "::1", port: 443, on: loop)
                 .get()
-            XCTFail("Expected resolveIPv4 to fail for .invalid hostname")
+            XCTFail("Expected the IPv4 resolver to reject an IPv6 literal")
         } catch let err as DirectIPv4FallbackError {
             switch err {
             case .resolutionFailed(let host, _):
-                XCTAssertEqual(host, "this-host-definitely-does-not-exist.invalid")
+                XCTAssertEqual(host, "::1")
             case .noIPv4Address:
                 XCTFail("Expected .resolutionFailed for a host getaddrinfo rejects outright, got .noIPv4Address")
             case .resolutionTimedOut:
@@ -222,7 +221,7 @@ final class DirectIPv4FallbackTests: XCTestCase {
         do {
             _ = try await HTTPProxyHandler.applyHalfOpenFallback(
                 upstreamChannel: halfOpen,
-                host: "this-host-definitely-does-not-exist.invalid",
+                host: "::1",
                 port: 443,
                 on: loop,
                 ipv4Reconnect: { _ in
@@ -234,7 +233,7 @@ final class DirectIPv4FallbackTests: XCTestCase {
         } catch let err as DirectIPv4FallbackError {
             switch err {
             case .resolutionFailed(let host, _):
-                XCTAssertEqual(host, "this-host-definitely-does-not-exist.invalid")
+                XCTAssertEqual(host, "::1")
             case .noIPv4Address:
                 XCTFail("Expected .resolutionFailed, got .noIPv4Address")
             case .resolutionTimedOut:
