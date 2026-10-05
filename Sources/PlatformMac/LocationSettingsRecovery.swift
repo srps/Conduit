@@ -13,6 +13,8 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     private let now: @Sendable () -> ContinuousClock.Instant
     /// Recent drift repairs per surface, for one active location. Guarded by `operations`.
     private var repairBudgets: [NetworkSettingsKind: RepairBudget] = [:]
+    /// Successful writes, so a repair that mutated before failing still spends budget.
+    private var committedWrites = 0
 
     private struct RepairBudget {
         var locationID: String
@@ -29,6 +31,12 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         self.limits = limits
         self.now = now
         self.emit = emit
+    }
+
+    /// Every committed write posts a preferences notification, which can start another repair.
+    private func commit(_ request: NetworkSettingsRequest) throws {
+        try store.compareAndWrite(request)
+        committedWrites += 1
     }
 
     private func report(_ event: String, _ detail: String) {
@@ -128,9 +136,16 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             let locationID = try store.snapshot().activeLocationID
             if let retry = withheldRepair(kind: kind, locationID: locationID) { return retry }
             report("reconcile", "surface=\(kind.rawValue) reason=managed_settings_drift")
-            try apply(kind: kind, desired: desired, config: config)
-            // Only completed repairs count: helper failures have their own retry bound
-            // and are not evidence that another program is rewriting the settings.
+            // A repair counts once it has written anything: each write posts a
+            // notification that can start the next pass, even if a later service
+            // failed. A pass that wrote nothing has its own retry bound and is not
+            // evidence that another program is rewriting the settings.
+            let writesBefore = committedWrites
+            do { try apply(kind: kind, desired: desired, config: config) }
+            catch {
+                if committedWrites > writesBefore { repairBudgets[kind]?.repairs.append(now()) }
+                throw error
+            }
             repairBudgets[kind]?.repairs.append(now())
             return nil
         }
@@ -218,6 +233,11 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 let expected = fields(member, kind)
                 var replacement = expected
                 for (key, value) in desired { replacement[key] = value }
+                // Already applied and recorded: a no-op commit would only post
+                // another notification while a sibling service keeps failing.
+                let recorded = try journal.records(for: surface(kind)).first(where: { $0.scope == scope })
+                    .map { try unpack($0.appliedValue) }
+                if replacement == expected && recorded == expected { continue }
                 let request = NetworkSettingsRequest(locationID: service.locationID, serviceID: service.serviceID,
                                                      kind: kind, expected: expected, replacement: replacement, requireActive: true)
                 do { try request.validate() }
@@ -236,7 +256,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                     throw error
                 }
                 report("apply", "location=\(service.locationID) service=\(service.serviceID) surface=\(kind.rawValue)")
-                do { try store.compareAndWrite(request) }
+                do { try commit(request) }
                 catch {
                     report("failed", "operation=apply location=\(service.locationID) reason=\(error.localizedDescription)")
                     throw error
@@ -306,7 +326,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                "scope=\(record.scope) surface=\(kind.rawValue) active=\(member.locationID == snapshot.activeLocationID)")
         // Compare even a no-op so an external change between snapshot and release is detected.
         do {
-            try store.compareAndWrite(NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
+            try commit(NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
                                                              kind: kind, expected: current, replacement: replacement, requireActive: false))
         } catch PrivilegeClientError.refused(.noConsoleUser, _) {
             var cleanup = current
@@ -324,7 +344,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                                            prior: record.priorValue ?? [:], applied: packApplied(cleanup, previous: current),
                                            maximumRecords: limits.maximumRecords)
             report("cleanup_deferred", "scope=\(record.scope) surface=\(kind.rawValue) reason=no_console_user")
-            try store.compareAndWrite(cleanupRequest)
+            try commit(cleanupRequest)
             try journal.recordNetworkState(surface: surface(kind), locationID: member.locationID, serviceID: member.serviceID,
                                            prior: record.priorValue ?? [:], applied: pack(cleanup), maximumRecords: limits.maximumRecords)
             throw PrivilegeClientError.refused(.noConsoleUser, "Cleanup completed; prior settings retained for the next login.")
@@ -395,7 +415,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             }
             guard current != replacement else { continue }
             report("legacy_cleanup", "location=\(member.locationID) service=\(member.serviceID) surface=\(kind.rawValue) prior_location=unknown")
-            try store.compareAndWrite(NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
+            try commit(NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
                                                              kind: kind, expected: current, replacement: replacement, requireActive: false))
         }
         guard !unreadable else { throw NetworkSettingsError.invalidRequest }

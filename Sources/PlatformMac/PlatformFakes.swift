@@ -590,11 +590,18 @@ package final class FakeNetworkLocationStore: NetworkLocationStoring, @unchecked
         lock.withLock { compareFailuresRemaining = count }
     }
     package func switchDuringNextWrite(to locationID: String) { lock.withLock { nextActiveLocation = locationID } }
+    private var refusedServices: Set<String> = []
+    /// Writes to these services fail while others succeed: a partial apply.
+    package func refuseWrites(toService serviceID: String, _ refuse: Bool) {
+        lock.withLock { if refuse { refusedServices.insert(serviceID) } else { refusedServices.remove(serviceID) } }
+    }
+    private var _committedWrites = 0
+    package var committedWrites: Int { lock.withLock { _committedWrites } }
     package func compareAndWrite(_ request: NetworkSettingsRequest) throws {
         try request.validate()
         try lock.withLock {
             if let nextActiveLocation { state.activeLocationID = nextActiveLocation; self.nextActiveLocation = nil }
-            guard !failWrites else { throw NetworkSettingsError.unavailable }
+            guard !failWrites, !refusedServices.contains(request.serviceID) else { throw NetworkSettingsError.unavailable }
             if compareFailuresRemaining > 0 {
                 compareFailuresRemaining -= 1
                 throw NetworkSettingsError.changed
@@ -608,6 +615,7 @@ package final class FakeNetworkLocationStore: NetworkLocationStoring, @unchecked
             guard current == request.expected else { throw NetworkSettingsError.changed }
             if request.kind == .proxies { state.services[index].proxies = request.replacement }
             else { state.services[index].dns = request.replacement }
+            _committedWrites += 1
         }
     }
 }

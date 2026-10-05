@@ -305,6 +305,53 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         try proxy.clear(logger: nil)
     }
 
+    func testPartialApplyCannotLoopWhenASiblingServiceKeepsFailing() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("location-tests-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = machine()
+        let ethernet = "55555555-5555-5555-5555-555555555555"
+        store.edit { $0.services.append(.init(locationID: home, serviceID: ethernet, name: "USB Ethernet", enabled: true,
+                                              proxies: [:], dns: [:])) }
+        store.refuseWrites(toService: ethernet, true)
+        let journal = PlatformStateJournal(fileURL: directory.appendingPathComponent("journal.json"))
+        let events = RuntimeEventLog()
+        let recovery = LocationSettingsRecovery(store: store, journal: journal,
+                                                limits: .init(maximumDriftRepairs: 2, driftRepairWindow: .seconds(60)),
+                                                now: { ContinuousClock.now }, emit: { events.append($0) })
+        let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+        var config = ProxyConfig()
+        config.localPACEnabled = true
+        let url = "http://127.0.0.1:63145/proxy.pac"
+
+        // Our own Wi-Fi write notifies; later passes must not re-commit the unchanged Wi-Fi settings.
+        XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+        let afterFirstPass = store.committedWrites
+        XCTAssertGreaterThan(afterFirstPass, 0)
+        for _ in 0..<10 {
+            XCTAssertThrowsError(try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true))
+        }
+        XCTAssertEqual(store.committedWrites, afterFirstPass)
+
+        // An enforcing writer on Wi-Fi: passes that wrote before Ethernet failed still spend the budget.
+        let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
+        var writesPerPass: [Int] = []
+        for _ in 0..<10 {
+            let before = store.committedWrites
+            store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
+            do { try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true) }
+            catch { /* Ethernet keeps failing; the budget, not the error, ends the loop. */ }
+            writesPerPass.append(store.committedWrites - before)
+        }
+        XCTAssertTrue(writesPerPass.prefix(1).allSatisfy { $0 > 0 }, "\(writesPerPass)")
+        XCTAssertTrue(writesPerPass.dropFirst(1).allSatisfy { $0 == 0 }, "\(writesPerPass)")
+        XCTAssertEqual(events.events.filter { $0.event == "platform.location_contended" }.count, 1)
+
+        store.refuseWrites(toService: ethernet, false)
+        try proxy.clear(logger: nil)
+        XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+    }
+
     func testManagersRetryApplyAfterEmptyLocationReleasedAllPriorRecords() throws {
         try withRecovery { store, journal, recovery, _ in
             let config = ProxyConfig()

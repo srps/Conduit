@@ -293,6 +293,7 @@ enum NetworkLocationScenarios {
         store.atLoginwindow = false
         try recovery.clear(kind: .proxies, config: config)
         let contention = try contendedRewritesStayBounded(services: services, home: home)
+        let partialApplyBounded = try partialApplyCannotLoop(services: services, home: home)
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -325,7 +326,8 @@ enum NetworkLocationScenarios {
                 .init("unmatched legacy gateway endpoints retain recovery evidence", gatewayLegacyRetained),
                 .init("unrelated corporate service does not block legacy recovery", unrelatedCorporatePreserved),
                 .init("deferred proxy cleanup removes enable flags with endpoints", proxyDisabledOnDeferredCleanup),
-                .init("an enforcing external writer exhausts a fixed repair budget, reports contention once, then recovers; failed writes do not count", contention),
+                .init("an enforcing external writer exhausts a fixed repair budget, reports contention once, then recovers; passes that wrote nothing do not count", contention),
+                .init("a sibling service that keeps failing cannot turn partial applies into a write loop", partialApplyBounded),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
@@ -378,6 +380,47 @@ enum NetworkLocationScenarios {
             && !journal.hasRecords(for: .systemProxy)
         return failedWrites == 10 && repairs == 13 && contended == 1 && retry == .seconds(60)
             && yielded && reopened && restored
+    }
+}
+
+extension NetworkLocationScenarios {
+    /// Two enabled services; the second refuses every write. Each pass writes the
+    /// first, which notifies, then fails. Unchanged services are not re-committed,
+    /// and passes that wrote spend the budget even though they failed.
+    fileprivate static func partialApplyCannotLoop(services: [LocationServiceSettings], home: String) throws -> Bool {
+        let ethernet = "55555555-5555-5555-5555-555555555555"
+        let store = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services + [
+            LocationServiceSettings(locationID: home, serviceID: ethernet, name: "USB Ethernet", enabled: true, proxies: [:], dns: [:])
+        ]))
+        store.refuseWrites(toService: ethernet, true)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-partial-\(UUID()).json")
+        defer {
+            if FileManager.default.fileExists(atPath: file.path) {
+                do { try FileManager.default.removeItem(at: file) }
+                catch { fputs("network-location-recovery partial journal cleanup failed: \(error.localizedDescription)\n", stderr) }
+            }
+        }
+        let journal = PlatformStateJournal(fileURL: file)
+        let recovery = LocationSettingsRecovery(store: store, journal: journal,
+                                                limits: .init(maximumDriftRepairs: 3, driftRepairWindow: .seconds(60)),
+                                                emit: { _ in })
+        let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+        var config = ProxyConfig()
+        config.localPACEnabled = true
+        let url = "http://127.0.0.1:63145/proxy.pac"
+        func pass() { do { try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true) } catch { /* Ethernet refuses. */ } }
+        pass()
+        let afterFirst = store.committedWrites
+        for _ in 0..<100 { pass() }
+        let selfNotificationsQuiet = afterFirst > 0 && store.committedWrites == afterFirst
+        for _ in 0..<100 {
+            store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = .text("http://enforced.example/proxy.pac") }
+            pass()
+        }
+        let enforcedBounded = store.committedWrites - afterFirst <= 2 * 2 // two remaining repairs, at most restore + apply each
+        store.refuseWrites(toService: ethernet, false)
+        try proxy.clear(logger: nil)
+        return selfNotificationsQuiet && enforcedBounded && !journal.hasRecords(for: .systemProxy)
     }
 }
 

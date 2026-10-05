@@ -98,7 +98,9 @@ Drift repair is bounded per surface and active location: at most
 60 s). A VPN client or MDM profile that re-applies its own proxy settings after
 every Conduit write therefore cannot hold both programs in a write loop. Past the
 budget its settings stand and one `platform.location_contended` event reports the
-episode. Only completed repairs count; helper failures keep their own retry bound.
+episode. A repair counts once it has committed any write, even if a later service
+fails, because each commit posts a notification; a pass that wrote nothing keeps
+its own retry bound. Services already applied and recorded are not re-committed.
 The withheld repair returns its retry delay, and each host keeps at most one
 pending pass for when the window reopens, so Conduit's settings come back even if
 the other program goes quiet and no notification follows. A location change also
