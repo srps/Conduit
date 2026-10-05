@@ -321,7 +321,7 @@ enum PMSim {
         case "ntlm-credential-cache":
             return [try await CredentialCacheScenarios.burstReadsOnce(verbose: verbose)]
         case "network-location-recovery":
-            return [try NetworkLocationScenarios.recovery()]
+            return [try await NetworkLocationScenarios.recovery()]
         case "lifecycle-stop-overtakes-start":
             return [try await LifecycleScenarios.stopOvertakesStart()]
         case "fixture-pass", "fixture-fail", "fixture-missing":

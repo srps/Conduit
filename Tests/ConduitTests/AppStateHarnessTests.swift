@@ -363,6 +363,46 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
     }
 
+    func testLatePACRewriteRepairsOnSettingsNotificationWithoutAnotherVPNOrPathReport() async throws {
+        var config = makeConfig()
+        config.localPort = 0
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        try await state.startProxy()
+        harness.vpn.emit(.connected)
+        await harness.deliveries()
+        let bindings = state.runtimeSnapshot.bindings
+        let url = try XCTUnwrap(bindings.localPACURL)
+        let corporatePAC = NetworkSettingValue.text("http://corporate.example/late.pac")
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
+        harness.locationObserver.emitSettingsChange()
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        XCTAssertEqual(state.runtimeSnapshot.bindings, bindings)
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "platform.settings_observed" })
+        // Our own preferences notifications cannot trigger another write.
+        let failuresBefore = state.eventLog.events.filter { $0.event == "platform.location_failed" }.count
+        locations.refuseWrites(true)
+        for _ in 0..<20 { harness.locationObserver.emitSettingsChange() }
+        await harness.deliveries()
+        XCTAssertEqual(state.eventLog.events.filter { $0.event == "platform.location_failed" }.count, failuresBefore)
+        locations.refuseWrites(false)
+        let pending = try XCTUnwrap(harness.locationObserver.pendingSettingsDelivery())
+        await state.stopProxy()
+        let stopped = try locations.snapshot()
+        pending()
+        harness.locationObserver.emitSettingsChange()
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot(), stopped)
+        XCTAssertEqual(stopped.services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+    }
+
     func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
         harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemDNS: true))
         let locations = NetworkLocationFixture.store()
@@ -430,6 +470,31 @@ final class AppStateHarnessTests: XCTestCase {
         await harness.deliveries()
         XCTAssertEqual(try locations.snapshot().services, original.services)
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+    }
+
+    func testSettingsNotificationDuringProxyStopCannotRepinStoppedListener() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let state = harness.launch()
+        await harness.launchRecovery()
+        try await state.startProxy()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/bin/launchctl" && arguments.first == "unsetenv"
+        }
+        let stop = Task { await state.stopProxy() }
+        await harness.hold.waitUntilReached()
+        defer { harness.hold.release() }
+        harness.locationObserver.emitSettingsChange()
+        await harness.settle("proxy recovery waits for the held stop") { state.passesWaitingForLifecycle > 0 }
+        for _ in 0..<1_000 { harness.locationObserver.emitSettingsChange() }
+        harness.hold.release()
+        await stop.value
+        await harness.deliveries()
+        XCTAssertEqual(try locations.snapshot().services, original.services)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+        XCTAssertLessThanOrEqual(state.eventLog.events.filter { $0.event == "platform.settings_observed" }.count, 2)
     }
 
     private func makeConfig() -> ProxyConfig {

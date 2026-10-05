@@ -1,6 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
+/// A settings observer needs the latest state, not a task per notification.
+/// One tracked delivery and one pending pass bound bursts before task creation.
+package final class CoalescedObserverDelivery: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = false
+    private var pending = false
+
+    package init() {}
+
+    package func deliver(using deliveries: ObserverDeliveries,
+                         _ work: @escaping @MainActor @Sendable () async -> Void) {
+        lock.withLock {
+            if active { pending = true; return }
+            active = true
+            // Count the delivery before another submission can return, so
+            // drain() cannot miss work admitted by a different thread.
+            deliveries.deliver {
+                while true {
+                    self.lock.withLock { self.pending = false }
+                    await work()
+                    let again = self.lock.withLock {
+                        if self.pending { return true }
+                        self.active = false
+                        return false
+                    }
+                    if !again { return }
+                }
+            }
+        }
+    }
+}
+
 /// The hops a runtime host makes from an observer's callback onto the main
 /// actor, counted so that something can wait for them.
 ///

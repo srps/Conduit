@@ -497,6 +497,46 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
     }
 
+    func testLatePACRewriteRepairsOnSettingsNotificationWithoutAnotherVPNOrPathReport() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        let bindings = host.orchestrator.snapshot.bindings
+        let url = try XCTUnwrap(bindings.localPACURL)
+        let corporatePAC = NetworkSettingValue.text("http://corporate.example/late.pac")
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        XCTAssertEqual(host.orchestrator.snapshot.bindings, bindings)
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "platform.settings_observed" })
+        // Our own preferences notifications cannot trigger another write.
+        let failuresBefore = host.orchestrator.eventLog.events.filter { $0.event == "platform.location_failed" }.count
+        locations.refuseWrites(true)
+        for _ in 0..<20 { harness.locationObserver.emitSettingsChange() }
+        await host.deliveries.drain()
+        XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.location_failed" }.count, failuresBefore)
+        locations.refuseWrites(false)
+        let pending = try XCTUnwrap(harness.locationObserver.pendingSettingsDelivery())
+        await host.stopRuntime()
+        let stopped = try locations.snapshot()
+        pending()
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot(), stopped)
+        XCTAssertEqual(stopped.services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+    }
+
     func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -580,6 +620,41 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.machine.dnsRelayRunning)
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+    }
+
+    /// A captured settings callback can arrive after observation stops;
+    /// it must wait for teardown and never restore a dead listener's PAC.
+    func testSettingsNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let notification = try XCTUnwrap(harness.locationObserver.pendingSettingsDelivery())
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
+        let stop = Task { await host.stopRuntime() }
+        await harness.hold.waitUntilReached()
+        defer { harness.hold.release() }
+        notification()
+        for _ in 0..<5_000 where host.passesWaitingForLifecycle == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertGreaterThan(host.passesWaitingForLifecycle, 0)
+        for _ in 0..<1_000 { notification() }
+        harness.hold.release()
+        await stop.value
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services, original.services)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+        XCTAssertLessThanOrEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.settings_observed" }.count, 2)
     }
 
     /// #98, as in `AppState`: the runtime start reads the saved password

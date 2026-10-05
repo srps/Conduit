@@ -5,7 +5,7 @@ import ProxyKernel
 import ConduitShared
 
 enum NetworkLocationScenarios {
-    static func recovery() throws -> ScenarioResult {
+    static func recovery() async throws -> ScenarioResult {
         let began = Date()
         let home = "11111111-1111-1111-1111-111111111111"
         let office = "22222222-2222-2222-2222-222222222222"
@@ -116,11 +116,31 @@ enum NetworkLocationScenarios {
         try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true)
         let repairedPAC = try retryStore.snapshot().services[1].proxies["ProxyAutoConfigURLString"] == .text(localPAC)
         let corporatePAC = NetworkSettingValue.text("http://corporate.example/proxy.pac")
+        let settingsObserver = FakeNetworkLocationObserver()
+        let settingsDelivery = CoalescedObserverDelivery()
+        let notificationDeliveries = ObserverDeliveries()
+        settingsObserver.start(onChange: { _ in }, onSettingsChange: { [config = localPACConfig] in
+            settingsDelivery.deliver(using: notificationDeliveries) {
+                do {
+                    try retryProxy.reconcileLocation(config: config, mode: .pac, localPACURL: localPAC, apply: true)
+                } catch {
+                    events.append(RuntimeEvent(kind: .config, event: "platform.location_failed",
+                                               detail: "operation=observed_settings_reconcile reason=\(error.localizedDescription)"))
+                }
+            }
+        })
+        defer { settingsObserver.stop() }
         retryStore.edit { $0.services[1].proxies["ProxyAutoConfigURLString"] = corporatePAC }
-        try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true)
+        settingsObserver.emitSettingsChange()
+        await notificationDeliveries.drain()
         let rewriteRepaired = try retryStore.snapshot().services[1].proxies["ProxyAutoConfigURLString"] == .text(localPAC)
         retryStore.refuseWrites(true)
-        try retryProxy.reconcileLocation(config: localPACConfig, mode: .pac, localPACURL: localPAC, apply: true)
+        let settingsBurstBounded = await MainActor.run {
+            for _ in 0..<10_000 { settingsObserver.emitSettingsChange() }
+            return notificationDeliveries.inFlightCount == 1
+        }
+        await notificationDeliveries.drain()
+        let observedRepairFailed = events.events.contains { $0.detail?.hasPrefix("operation=observed_settings_reconcile") == true }
         retryStore.refuseWrites(false)
         try retryProxy.clear(logger: nil)
         let rewrittenPriorRestored = try retryStore.snapshot().services[1].proxies["ProxyAutoConfigURLString"] == corporatePAC
@@ -292,7 +312,8 @@ enum NetworkLocationScenarios {
                 .init("unreadable journal withholds new environment and resolver publication", newSurfaceWritesBlocked),
                 .init("apply retries in a valid location after an empty location released all records", emptyRetrySucceeded),
                 .init("stopped reconciliation restores retained records after returning to their location", stoppedActiveRestored),
-                .init("failed PAC application and same-location VPN rewrite recover without redundant writes", initialPACFailureRetained && repairedPAC && rewriteRepaired && rewrittenPriorRestored),
+                .init("failed PAC application and late same-location settings notification recover without redundant writes", initialPACFailureRetained && repairedPAC && rewriteRepaired && rewrittenPriorRestored && !observedRepairFailed),
+                .init("ten thousand settings notifications share one delivery without redundant writes", settingsBurstBounded && !observedRepairFailed),
                 .init("failed relay start still restores inactive DNS, withholds active redirection, and retries later", relayFailurePreserved && relayRetryApplied),
                 .init("successful reapply no longer claims external edits back to the previous generation", externalPreviousPreserved),
                 .init("same-location compare failures retry with a fixed budget and retain evidence on exhaustion", compareRetrySucceeded && retryExhausted),

@@ -129,6 +129,7 @@ final class DaemonRuntimeHost {
     /// main actor. Internal so the tests can `drain()` them instead of
     /// sleeping. Same shape as `AppState`.
     let deliveries = ObserverDeliveries()
+    private let proxySettingsNotifications = CoalescedObserverDelivery()
     /// Blocking platform work that needs no answer on the spot. See
     /// `AppState.platformWork`.
     private let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
@@ -791,9 +792,16 @@ final class DaemonRuntimeHost {
     /// DNS reconcile runs for every report, since a VPN client can rewrite
     /// service DNS with no material path change (#101, `NetworkPathReports`).
     private func startLocationObserver() {
-        networkLocationObserver.start { [weak self, deliveries] result in
+        networkLocationObserver.start(onChange: { [weak self, deliveries] result in
             deliveries.deliver { await self?.handleLocationChange(result) }
-        }
+        }, onSettingsChange: { [weak self, deliveries, proxySettingsNotifications] in
+            proxySettingsNotifications.deliver(using: deliveries) {
+                guard let self else { return }
+                self.recordLifecycle(RuntimeEvent(kind: .config, event: "platform.settings_observed",
+                                                  detail: "surface=proxies source=preferences"))
+                await self.reconcileSystemProxyIfRunning()
+            }
+        })
     }
 
     private func handleLocationChange(_ result: Result<String, NetworkSettingsError>) async {

@@ -78,6 +78,47 @@ final class ObserverDeliveriesTests: XCTestCase {
         XCTAssertEqual(count.withLockedValue { $0 }, 50)
     }
 
+    func testSettingsBurstBeforeExecutionCreatesOnlyOneDelivery() async {
+        let deliveries = ObserverDeliveries()
+        let coalesced = CoalescedObserverDelivery()
+        let count = NIOLockedValueBox(0)
+        await MainActor.run {
+            for _ in 0..<10_000 {
+                coalesced.deliver(using: deliveries) { count.withLockedValue { $0 += 1 } }
+            }
+            XCTAssertEqual(deliveries.inFlightCount, 1)
+        }
+        await deliveries.drain()
+        XCTAssertEqual(count.withLockedValue { $0 }, 1)
+    }
+
+    func testSettingsBurstDuringHeldDeliveryRunsOneFollowUpAndCanRestart() async {
+        let deliveries = ObserverDeliveries()
+        let coalesced = CoalescedObserverDelivery()
+        let count = NIOLockedValueBox(0)
+        let gate = NIOLockedValueBox<CheckedContinuation<Void, Never>?>(nil)
+        let held = expectation(description: "first settings pass is held")
+        let work: @MainActor @Sendable () async -> Void = {
+            let first = count.withLockedValue { $0 += 1; return $0 == 1 }
+            if first {
+                await withCheckedContinuation { continuation in
+                    gate.withLockedValue { $0 = continuation }
+                    held.fulfill()
+                }
+            }
+        }
+        coalesced.deliver(using: deliveries, work)
+        await fulfillment(of: [held], timeout: 5)
+        for _ in 0..<10_000 { coalesced.deliver(using: deliveries, work) }
+        XCTAssertEqual(deliveries.inFlightCount, 1)
+        gate.withLockedValue { $0 }?.resume()
+        await deliveries.drain()
+        XCTAssertEqual(count.withLockedValue { $0 }, 2)
+        coalesced.deliver(using: deliveries, work)
+        await deliveries.drain()
+        XCTAssertEqual(count.withLockedValue { $0 }, 3)
+    }
+
     func testEveryWaiterIsReleased() async {
         let deliveries = ObserverDeliveries()
         let gate = NIOLockedValueBox<CheckedContinuation<Void, Never>?>(nil)

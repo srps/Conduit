@@ -615,12 +615,16 @@ package final class FakeNetworkLocationStore: NetworkLocationStoring, @unchecked
 package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unchecked Sendable {
     private let lock = NSLock()
     private var callback: (@Sendable (Result<String, NetworkSettingsError>) -> Void)?
+    private var settingsCallback: (@Sendable () -> Void)?
     package init() {}
-    package func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void) {
-        lock.withLock { callback = onChange }
+    package func start(onChange: @escaping @Sendable (Result<String, NetworkSettingsError>) -> Void,
+                       onSettingsChange: @escaping @Sendable () -> Void) {
+        lock.withLock { callback = onChange; settingsCallback = onSettingsChange }
     }
-    package func stop() { lock.withLock { callback = nil } }
+    package func stop() { lock.withLock { callback = nil; settingsCallback = nil } }
     package func emit(_ locationID: String) { lock.withLock { callback }?(.success(locationID)) }
+    package func emitSettingsChange() { lock.withLock { settingsCallback }?() }
+    package func pendingSettingsDelivery() -> (@Sendable () -> Void)? { lock.withLock { settingsCallback } }
     /// Models a callback already in flight when observation is stopped.
     package func pendingDelivery(_ locationID: String) -> (@Sendable () -> Void)? {
         guard let callback = lock.withLock({ callback }) else { return nil }
