@@ -122,6 +122,8 @@ final class DaemonRuntimeHost {
     }()
     private var locationReconcileInFlight = false
     private var locationReconcileWanted = false
+    private var proxySettingsReconcileInFlight = false
+    private var proxySettingsReconcileWanted = false
     private let networkMonitor = NetworkMonitor()
     /// The hops from the observers and the orchestrator's callbacks onto the
     /// main actor. Internal so the tests can `drain()` them instead of
@@ -845,7 +847,10 @@ final class DaemonRuntimeHost {
         await NetworkPathReports.receive(
             path, orchestrator: orchestrator,
             act: { [orchestrator] change in await orchestrator.handleNetworkChange(change) },
-            reconcileSystemDNS: { [weak self] in await self?.reconcileSystemDNSIfRunning() }
+            reconcileSystemDNS: { [weak self] in await self?.reconcileSystemDNSIfRunning() },
+            reconcileSystemProxy: { [weak self] in
+                self?.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
+            }
         )
     }
 
@@ -869,8 +874,38 @@ final class DaemonRuntimeHost {
             )
         }
 
+        deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
         await reconcileSystemDNSIfRunning()
+    }
+
+    /// Same bounded proxy-drift recovery as the app, guarded against a later stop.
+    private func reconcileSystemProxyIfRunning() async {
+        guard platformConfig.manageSystemProxy else { return }
+        guard !proxySettingsReconcileInFlight else { proxySettingsReconcileWanted = true; return }
+        proxySettingsReconcileInFlight = true
+        defer { proxySettingsReconcileInFlight = false; proxySettingsReconcileWanted = false }
+        repeat {
+            proxySettingsReconcileWanted = false
+            await awaitLaunchRecovery()
+            await runtimeLane.waitUntilIdle()
+            guard platformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
+            let token = runtimeLane.observationToken
+            let proxy = systemConduit, config = config, platform = platformConfig
+            let pacURL = orchestrator.snapshot.bindings.localPACURL
+            let events = orchestrator.eventLog, logger = logger
+            await platformWork.run {
+                guard !token.isSuperseded else { return }
+                do {
+                    try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL, apply: true)
+                } catch {
+                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed",
+                                             detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
+                    events.append(event)
+                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
+                }
+            }
+        } while proxySettingsReconcileWanted
     }
 
     /// Twin of `AppState.runDNSReconcile`, without the debounce: off the main

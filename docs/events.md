@@ -142,6 +142,7 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `platform.location_observed` | The dedicated preferences observer reports a stable active-location ID, independently of VPN and NWPath changes. |
 | `platform.location_apply` | Stable location/service IDs and surface selected for a compare-and-write; durable prior/applied fields are saved before mutation. |
+| `platform.location_reconcile` | Managed settings drifted or an earlier application did not land; repair through the scoped writer. `surface=`, `reason=managed_settings_drift`. Already matching settings require no writes. |
 | `platform.location_restore` | Prior fields selected for restoration, including inactive locations; external fields remain preserved. `scope=`, `surface=`, `active=`. |
 | `platform.location_external_preserved` | No owned fields remain to restore; the current settings are preserved and the record is released after comparison. |
 | `platform.location_deleted` | The recorded stable location/service identity no longer exists; only its record is retired. |

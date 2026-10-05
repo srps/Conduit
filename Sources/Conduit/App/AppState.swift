@@ -118,6 +118,8 @@ final class AppState: ObservableObject {
     }()
     private var locationReconcileInFlight = false
     private var locationReconcileWanted = false
+    private var proxySettingsReconcileInFlight = false
+    private var proxySettingsReconcileWanted = false
     private let networkMonitor = NetworkMonitor()
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<VPNFlapWindowConfig>
@@ -1686,8 +1688,12 @@ final class AppState: ObservableObject {
             )
             Task { @MainActor [weak self] in
                 guard let self, self.preflightRefreshID == refreshID else { return }
+                let helperBecameAvailable = helperStatus == .installed && self.helperStatusState != .installed
                 self.helperStatusState = helperStatus
                 self.activationPreflight = preflight
+                if helperBecameAvailable {
+                    self.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
+                }
             }
         }
     }
@@ -1898,6 +1904,7 @@ final class AppState: ObservableObject {
 
     private func handleSystemWake() {
         guard !rejectUnavailableConfiguration() else { return }
+        deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         deliveries.deliver { [orchestrator] in
             await orchestrator.handleSystemWake()
         }
@@ -1986,6 +1993,9 @@ final class AppState: ObservableObject {
                 guard let self, self.platformConfig.manageSystemDNS,
                       self.orchestrator.snapshot.dnsRunState == .running else { return }
                 self.scheduleDNSReconcile()
+            },
+            reconcileSystemProxy: { [weak self] in
+                self?.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
             }
         )
         // Note: `autoEnableOnVPN` / `autoDisableOffVPN` retired in Phase 3 of
@@ -2002,6 +2012,7 @@ final class AppState: ObservableObject {
         guard !rejectUnavailableConfiguration() else { return }
         let entriesWantedChanged = splitDNSGate.update(state)
 
+        deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         deliveries.deliver { [orchestrator] in
             await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
         }
@@ -2036,6 +2047,35 @@ final class AppState: ObservableObject {
             logger: logStore,
             runtimeStarted: proxyIsUp
         )
+    }
+
+    /// One pass and one pending retry; never queues a helper call per report.
+    private func reconcileSystemProxyIfRunning() async {
+        guard !rejectUnavailableConfiguration(), platformConfig.manageSystemProxy else { return }
+        guard !proxySettingsReconcileInFlight else { proxySettingsReconcileWanted = true; return }
+        proxySettingsReconcileInFlight = true
+        defer { proxySettingsReconcileInFlight = false; proxySettingsReconcileWanted = false }
+        repeat {
+            proxySettingsReconcileWanted = false
+            await awaitLaunchRecovery()
+            await proxyLane.waitUntilIdle()
+            guard platformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
+            let token = proxyLane.observationToken
+            let proxy = systemConduit, config = config, platform = platformConfig
+            let pacURL = orchestrator.snapshot.bindings.localPACURL
+            let events = orchestrator.eventLog, logger = logStore
+            await platformWork.run {
+                guard !token.isSuperseded else { return }
+                do {
+                    try proxy.reconcileLocation(config: config, mode: platform.systemProxyMode, localPACURL: pacURL, apply: true)
+                } catch {
+                    let event = RuntimeEvent(kind: .config, event: "platform.location_failed",
+                                             detail: "operation=reconcile surface=systemProxy reason=\(error.localizedDescription)")
+                    events.append(event)
+                    logger.log(.warning, "Network location: \(event.detail ?? "")", category: .system)
+                }
+            }
+        } while proxySettingsReconcileWanted
     }
 
     private func scheduleDNSReconcile() {

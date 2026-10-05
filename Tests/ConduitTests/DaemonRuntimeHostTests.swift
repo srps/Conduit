@@ -467,6 +467,36 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
     }
 
+    func testVPNReportRepairsFailedPACApplicationAndLaterRewriteWithoutRestartingRuntime() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let locations = NetworkLocationFixture.store()
+        locations.refuseWrites(true)
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let bindings = host.orchestrator.snapshot.bindings
+        let url = try XCTUnwrap(bindings.localPACURL)
+        XCTAssertNotEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        locations.refuseWrites(false)
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        let corporatePAC = NetworkSettingValue.text("http://corporate.example/proxy.pac")
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = corporatePAC }
+        harness.vpn.emit(.disconnected(reason: .userInitiated))
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        XCTAssertEqual(host.orchestrator.snapshot.bindings, bindings)
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "platform.location_reconcile" })
+        await host.stopRuntime()
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
+    }
+
     func testVPNReconcileRetriesDNSInSameLocationAfterInitiallyDisabledService() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -519,6 +549,37 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(try locations.snapshot().services, original.services)
         XCTAssertFalse(harness.machine.dnsRelayRunning)
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+    }
+
+    func testVPNNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = true
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, manageSystemDNS: true))
+        let locations = NetworkLocationFixture.store()
+        let original = try locations.snapshot()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let notification = try XCTUnwrap(harness.vpn.pendingDelivery(.connected))
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.stopDNSRelay.rawValue }
+        let stop = Task { await host.stopRuntime() }
+        await harness.hold.waitUntilReached()
+        defer { harness.hold.release() }
+        notification()
+        for _ in 0..<5_000 where host.passesWaitingForLifecycle == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertGreaterThan(host.passesWaitingForLifecycle, 0)
+        harness.hold.release()
+        await stop.value
+        await host.deliveries.drain()
+        XCTAssertEqual(try locations.snapshot().services, original.services)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 
     /// #98, as in `AppState`: the runtime start reads the saved password
@@ -983,10 +1044,15 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.hold.reachedOnMainThread)
         harness.vpn.start()
         harness.vpn.emit(.disconnected(reason: .userInitiated))
-        await host.deliveries.drain()
+        // The proxy repair waits for this start, so drain after releasing it.
+        for _ in 0..<5_000 where host.passesWaitingForLifecycle == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertGreaterThan(host.passesWaitingForLifecycle, 0)
         XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the drop found nothing to remove yet")
         harness.hold.release()
         try await start.value
+        await host.deliveries.drain()
 
         XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
         XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))

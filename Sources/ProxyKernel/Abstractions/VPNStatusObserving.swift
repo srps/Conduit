@@ -73,4 +73,11 @@ package final class FakeVPNStatusObserver: VPNStatusObserving, @unchecked Sendab
         let callback = onChangeBox.withLockedValue { $0 }
         callback?(state)
     }
+    /// Captures a callback already in flight when observation later stops.
+    package func pendingDelivery(_ state: VPNObservedState) -> (@Sendable () -> Void)? {
+        guard startedBox.withLockedValue({ $0 }),
+              let callback = onChangeBox.withLockedValue({ $0 }) else { return nil }
+        return { callback(state) }
+    }
+
 }

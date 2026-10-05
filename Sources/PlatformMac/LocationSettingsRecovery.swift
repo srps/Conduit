@@ -106,6 +106,15 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         }
     }
 
+    package func reconcile(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
+        try operations.withLock {
+            try restore(kind: kind, inactiveOnly: true)
+            guard !isApplied(kind: kind, desired: desired) else { return }
+            report("reconcile", "surface=\(kind.rawValue) reason=managed_settings_drift")
+            try apply(kind: kind, desired: desired, config: config)
+        }
+    }
+
     package func apply(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
         try operations.withLock {
             let locationID = try store.snapshot().activeLocationID
