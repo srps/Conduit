@@ -193,6 +193,7 @@ final class AppState: ObservableObject {
     /// main actor, and the orchestrator work those handlers start. Internal so
     /// the harness can `drain()` them instead of polling the snapshot.
     let deliveries = ObserverDeliveries()
+    private let proxySettingsNotifications = CoalescedObserverDelivery()
     private let configurationLoadError: ConfigurationLoadError?
 
     /// Every parameter defaults to the production collaborator; the test
@@ -1928,8 +1929,8 @@ final class AppState: ObservableObject {
     private func startLocationObserver() {
         networkLocationObserver.start(onChange: { [weak self, deliveries] result in
             deliveries.deliver { await self?.handleLocationChange(result) }
-        }, onSettingsChange: { [weak self, deliveries] in
-            deliveries.deliver {
+        }, onSettingsChange: { [weak self, deliveries, proxySettingsNotifications] in
+            proxySettingsNotifications.deliver(using: deliveries) {
                 guard let self else { return }
                 self.recordLifecycle(RuntimeEvent(kind: .config, event: "platform.settings_observed",
                                                   detail: "surface=proxies source=preferences"))

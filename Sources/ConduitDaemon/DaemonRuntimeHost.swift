@@ -129,6 +129,7 @@ final class DaemonRuntimeHost {
     /// main actor. Internal so the tests can `drain()` them instead of
     /// sleeping. Same shape as `AppState`.
     let deliveries = ObserverDeliveries()
+    private let proxySettingsNotifications = CoalescedObserverDelivery()
     /// Blocking platform work that needs no answer on the spot. See
     /// `AppState.platformWork`.
     private let platformWork = PlatformWork(label: "io.github.srps.Conduit.daemon.platform-work")
@@ -793,8 +794,8 @@ final class DaemonRuntimeHost {
     private func startLocationObserver() {
         networkLocationObserver.start(onChange: { [weak self, deliveries] result in
             deliveries.deliver { await self?.handleLocationChange(result) }
-        }, onSettingsChange: { [weak self, deliveries] in
-            deliveries.deliver {
+        }, onSettingsChange: { [weak self, deliveries, proxySettingsNotifications] in
+            proxySettingsNotifications.deliver(using: deliveries) {
                 guard let self else { return }
                 self.recordLifecycle(RuntimeEvent(kind: .config, event: "platform.settings_observed",
                                                   detail: "surface=proxies source=preferences"))

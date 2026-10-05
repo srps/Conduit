@@ -88,8 +88,9 @@ proxy reconciliation: a VPN client can rewrite PAC after its VPN/path reports
 have already settled. Waiting for another NWPath report can leave the corporate
 PAC active for minutes. This repairs failed startup writes and late same-location PAC rewrites.
 It reads the active settings first and skips already-matching writes; an external
-edit becomes the new captured prior state before repair. Both hosts coalesce work
-with one in-flight flag and one pending flag, wait for lifecycle work, and check
+edit becomes the new captured prior state before repair. Both hosts coalesce
+preferences bursts before scheduling a task: one tracked delivery and one pending
+pass. They also coalesce helper work, wait for lifecycle work, and check
 the lifecycle generation before mutation. Listener bindings remain unchanged.
 
 ## Verification and deployment
@@ -99,10 +100,9 @@ switches during mutation, failures, and repeat recovery. Unit tests and pm-sim
 cover those contracts; both host harnesses cover observer delivery. Bounds cap
 snapshot size, request size, and outstanding location records. No verification
 mutates the serving app or installed helper. Deployment needs an explicit helper
-installation and controlled macOS 26/27 corporate-VPN validation.
-
-For 0.4.0, the release owner has waived unavailable macOS 27 corporate-VPN
-validation. Record macOS 27 as untested; validate the VPN cycle on macOS 26.
+installation and controlled corporate-VPN validation. The general target is
+macOS 26/27; for 0.4.0, the release owner has waived unavailable macOS 27 testing.
+That release requires the macOS 26 VPN cycle and must report macOS 27 as untested.
 
 ## Implementation and deployment status
 

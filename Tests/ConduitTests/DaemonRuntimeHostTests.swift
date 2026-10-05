@@ -622,8 +622,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 
-    /// #98, as in `AppState`: the runtime start reads the saved password
-    /// once, and the handshakes after it are answered from that read.
+    /// A captured settings callback can arrive after observation stops;
+    /// it must wait for teardown and never restore a dead listener's PAC.
     func testSettingsNotificationDuringRuntimeStopCannotRepinStoppedListeners() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
@@ -646,6 +646,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(1))
         }
         XCTAssertGreaterThan(host.passesWaitingForLifecycle, 0)
+        for _ in 0..<1_000 { notification() }
         harness.hold.release()
         await stop.value
         await host.deliveries.drain()
@@ -653,6 +654,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.machine.dnsRelayRunning)
         XCTAssertFalse(harness.journal.hasRecords(for: .systemDNS))
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+        XCTAssertLessThanOrEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.settings_observed" }.count, 2)
     }
 
     /// #98, as in `AppState`: the runtime start reads the saved password

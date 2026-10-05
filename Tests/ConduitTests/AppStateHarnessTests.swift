@@ -488,11 +488,13 @@ final class AppStateHarnessTests: XCTestCase {
         defer { harness.hold.release() }
         harness.locationObserver.emitSettingsChange()
         await harness.settle("proxy recovery waits for the held stop") { state.passesWaitingForLifecycle > 0 }
+        for _ in 0..<1_000 { harness.locationObserver.emitSettingsChange() }
         harness.hold.release()
         await stop.value
         await harness.deliveries()
         XCTAssertEqual(try locations.snapshot().services, original.services)
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+        XCTAssertLessThanOrEqual(state.eventLog.events.filter { $0.event == "platform.settings_observed" }.count, 2)
     }
 
     private func makeConfig() -> ProxyConfig {
