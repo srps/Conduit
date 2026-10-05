@@ -6,6 +6,13 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+## 0.4.1
+
+Bounds same-location repair of managed proxy settings, so Conduit cannot get
+into a write loop with a VPN client or MDM profile that keeps re-applying its
+own proxy settings. No helper change: the 0.4.0 helper v5 stays installed, and
+only the app needs updating.
+
 ### Fixed
 
 - Same-location repair of managed proxy settings is bounded. A VPN client or MDM
