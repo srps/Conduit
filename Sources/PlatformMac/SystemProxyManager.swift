@@ -78,14 +78,16 @@ package final class SystemProxyManager: @unchecked Sendable {
         }
     }
 
-    package func reconcileLocation(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String?, apply: Bool) throws {
+    /// Returns when to retry a drift repair withheld by the contention budget.
+    @discardableResult
+    package func reconcileLocation(config: ProxyConfig, mode: SystemProxyMode, localPACURL: String?, apply: Bool) throws -> Duration? {
         try operations.withLock {
-            guard let locationRecovery else { return }
+            guard let locationRecovery else { return nil }
             if apply {
-                try locationRecovery.reconcile(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL), config: config)
-            } else {
-                try locationRecovery.restore(kind: .proxies)
+                return try locationRecovery.reconcile(kind: .proxies, desired: Self.locationFields(config: config, mode: mode, localPACURL: localPACURL), config: config)
             }
+            try locationRecovery.restore(kind: .proxies)
+            return nil
         }
     }
 

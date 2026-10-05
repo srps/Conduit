@@ -317,6 +317,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let vpn = FakeVPNStatusObserver()
         let locationObserver = FakeNetworkLocationObserver()
         var locationStore: FakeNetworkLocationStore?
+        var locationLimits = NetworkLocationLimits()
         /// Holds the machine's `networksetup` listings when armed, so a
         /// scenario can keep one system DNS reconcile out while more arrive.
         let listings = HeldListings()
@@ -358,7 +359,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 // the way an established install has one.
                 configFilePredatesLaunch: true,
                 networkLocationObserver: locationObserver,
-                networkLocationStoreFactory: { [locationStore] _ in locationStore }, vpnStatusMonitor: vpn,
+                networkLocationStoreFactory: { [locationStore] _ in locationStore },
+                networkLocationLimits: locationLimits, vpnStatusMonitor: vpn,
                 privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
                 credentialStore: secrets,
                 commandRunner: { launchPath, arguments in
@@ -495,6 +497,48 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "platform.location_reconcile" })
         await host.stopRuntime()
         XCTAssertEqual(try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
+    }
+
+    func testContendedRepairRetriesWhenTheWindowReopensWithoutAnotherNotification() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        harness.locationLimits = NetworkLocationLimits(maximumDriftRepairs: 1, driftRepairWindow: .milliseconds(300))
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        // The real path monitor's first report also reconciles; let it land first,
+        // so only the scheduled retry can repair the withheld write below.
+        for _ in 0..<10_000 where !host.orchestrator.eventLog.events.contains(where: { $0.event == "network.path_changed" }) {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "network.path_changed" })
+        await host.deliveries.drain()
+        let url = try XCTUnwrap(host.orchestrator.snapshot.bindings.localPACURL)
+        let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
+        func pac() throws -> NetworkSettingValue? { try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"] }
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+        XCTAssertEqual(try pac(), .text(url))
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+        XCTAssertEqual(try pac(), enforced)
+        XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "platform.location_contended" }.count, 1)
+        var restored = false
+        for _ in 0..<5_000 where !restored {
+            try await Task.sleep(for: .milliseconds(1))
+            restored = try pac() == .text(url)
+        }
+        XCTAssertTrue(restored, "the withheld repair ran when the window reopened")
+        await host.stopRuntime()
+        XCTAssertEqual(try pac(), enforced)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 
     func testLatePACRewriteRepairsOnSettingsNotificationWithoutAnotherVPNOrPathReport() async throws {

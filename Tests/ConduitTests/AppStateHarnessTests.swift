@@ -27,6 +27,7 @@ final class AppStateHarness {
     let vpn = FakeVPNStatusObserver()
     let locationObserver = FakeNetworkLocationObserver()
     var locationStore: FakeNetworkLocationStore?
+    var locationLimits = NetworkLocationLimits()
     let loginItems = FakeLoginItems()
     let helper = FakeHelperLifecycle()
     let secrets = InMemorySecretStore()
@@ -74,7 +75,8 @@ final class AppStateHarness {
             loginItemManager: loginItems.manager,
             vpnStatusMonitor: vpn,
             networkLocationObserver: locationObserver,
-            networkLocationStoreFactory: { [locationStore] _ in locationStore }
+            networkLocationStoreFactory: { [locationStore] _ in locationStore },
+            networkLocationLimits: locationLimits
         )
         appState = state
         return state
@@ -400,6 +402,46 @@ final class AppStateHarnessTests: XCTestCase {
         await harness.deliveries()
         XCTAssertEqual(try locations.snapshot(), stopped)
         XCTAssertEqual(stopped.services[0].proxies["ProxyAutoConfigURLString"], corporatePAC)
+        XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
+    }
+
+    func testContendedRepairRetriesWhenTheWindowReopensWithoutAnotherNotification() async throws {
+        var config = makeConfig()
+        config.localPort = 0
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        harness.locationLimits = NetworkLocationLimits(maximumDriftRepairs: 1, driftRepairWindow: .milliseconds(300))
+        let state = harness.launch()
+        await harness.launchRecovery()
+        try await state.startProxy()
+        // The real path monitor's first report also reconciles; let it land first,
+        // so only the scheduled retry can repair the withheld write below.
+        await harness.settle("the first path report was handled", timeoutMilliseconds: 10_000) {
+            state.eventLog.events.contains { $0.event == "network.path_changed" }
+        }
+        await harness.deliveries()
+        let url = try XCTUnwrap(state.runtimeSnapshot.bindings.localPACURL)
+        let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
+        func pac() throws -> NetworkSettingValue? { try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"] }
+        // Startup's own write is an explicit apply, outside the budget; the first drift repair spends it.
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
+        harness.locationObserver.emitSettingsChange()
+        await harness.deliveries()
+        XCTAssertEqual(try pac(), .text(url))
+        locations.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
+        harness.locationObserver.emitSettingsChange()
+        await harness.deliveries()
+        XCTAssertEqual(try pac(), enforced)
+        XCTAssertEqual(state.eventLog.events.filter { $0.event == "platform.location_contended" }.count, 1)
+        // The other program went quiet: only the scheduled retry can restore Conduit's PAC.
+        await harness.settle("the withheld repair ran when the window reopened", timeoutMilliseconds: 5_000) {
+            (try? locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"]) == .text(url)
+        }
+        await state.stopProxy()
+        XCTAssertEqual(try pac(), enforced)
         XCTAssertFalse(harness.journal.hasRecords(for: .systemProxy))
     }
 

@@ -93,6 +93,22 @@ preferences bursts before scheduling a task: one tracked delivery and one pendin
 pass. They also coalesce helper work, wait for lifecycle work, and check
 the lifecycle generation before mutation. Listener bindings remain unchanged.
 
+Drift repair is bounded per surface and active location: at most
+`maximumDriftRepairs` (default 4) within a sliding `driftRepairWindow` (default
+60 s). A VPN client or MDM profile that re-applies its own proxy settings after
+every Conduit write therefore cannot hold both programs in a write loop. Past the
+budget its settings stand and one `platform.location_contended` event reports the
+episode. A repair counts once it has committed any write, even if a later service
+fails, because each commit posts a notification; a pass that wrote nothing keeps
+its own retry bound. Services already applied and recorded are not re-committed.
+The withheld repair returns its retry delay, and each host keeps at most one
+pending pass for when the window reopens, so Conduit's settings come back even if
+the other program goes quiet and no notification follows. A location change also
+starts a fresh budget. Explicit apply at start and restoration at stop are never limited.
+
+Preferences notifications repair proxies only. Same-location DNS rewrites are
+repaired by the per-report DNS reconcile on VPN/path changes (#101).
+
 ## Verification and deployment
 
 Fakes model multiple locations, stable identities, external edits, deletion,
@@ -101,8 +117,8 @@ cover those contracts; both host harnesses cover observer delivery. Bounds cap
 snapshot size, request size, and outstanding location records. No verification
 mutates the serving app or installed helper. Deployment needs an explicit helper
 installation and controlled corporate-VPN validation. The general target is
-macOS 26/27; for 0.4.0, the release owner has waived unavailable macOS 27 testing.
-That release requires the macOS 26 VPN cycle and must report macOS 27 as untested.
+macOS 26/27. 0.4.0 passed the macOS 26 corporate-VPN cycle with helper v5; the
+release owner waived unavailable macOS 27 testing, which remains untested.
 
 ## Implementation and deployment status
 
@@ -143,4 +159,5 @@ canonical epoch timestamps and reads historical ISO-8601 records. Do not roll ba
 to an old client while scoped records remain outstanding; stop this build and
 complete restoration first, and retain the journal when troubleshooting rollback.
 
-Controlled macOS 26/27 corporate-VPN validation remains required before deployment.
+Validated on macOS 26 with the corporate VPN client for 0.4.0; macOS 27 is untested.
+Profile associations (#114) and opt-in location switching (#115) are separate work.

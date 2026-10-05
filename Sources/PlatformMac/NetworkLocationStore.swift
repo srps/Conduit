@@ -9,13 +9,21 @@ package struct NetworkLocationLimits: Sendable {
     package var maximumServices = 256
     package var maximumRecords = 512
     package var maximumApplyAttempts = 2
-    package init(maximumLocations: Int = 64, maximumServices: Int = 256, maximumRecords: Int = 512, maximumApplyAttempts: Int = 2) {
+    /// Drift repairs admitted per surface and active location within `driftRepairWindow`.
+    /// Another program that keeps rewriting the same settings cannot hold Conduit in a write loop.
+    package var maximumDriftRepairs = 4
+    package var driftRepairWindow: Duration = .seconds(60)
+    package init(maximumLocations: Int = 64, maximumServices: Int = 256, maximumRecords: Int = 512, maximumApplyAttempts: Int = 2,
+                 maximumDriftRepairs: Int = 4, driftRepairWindow: Duration = .seconds(60)) {
         precondition(maximumLocations > 0 && maximumServices > 0 && maximumRecords > 0)
         self.maximumLocations = maximumLocations
         self.maximumServices = maximumServices
         precondition((1...4).contains(maximumApplyAttempts))
+        precondition((1...16).contains(maximumDriftRepairs) && driftRepairWindow > .zero)
         self.maximumRecords = maximumRecords
         self.maximumApplyAttempts = maximumApplyAttempts
+        self.maximumDriftRepairs = maximumDriftRepairs
+        self.driftRepairWindow = driftRepairWindow
     }
 }
 

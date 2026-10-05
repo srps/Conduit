@@ -66,9 +66,9 @@ Acceptance evidence:
 - Controlled macOS 26/27 checks with the corporate VPN client precede deployment;
   automated tests use fakes and never replace the serving app/helper.
 
-The 0.4.0 release owner has waived unavailable macOS 27 corporate-VPN testing.
-That release requires the controlled macOS 26 VPN cycle; report macOS 27 as
-untested rather than treating it as passed.
+0.4.0 passed the controlled macOS 26 corporate-VPN cycle. The release owner
+waived unavailable macOS 27 testing; report macOS 27 as untested rather than
+treating it as passed. Profile associations are #114 and opt-in switching is #115.
 
 Named profiles can later associate a location with a profile. Automatic location
 switching requires a separate opt-in contract for manual overrides, brief VPN
