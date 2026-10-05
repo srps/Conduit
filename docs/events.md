@@ -142,6 +142,7 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `platform.location_observed` | The dedicated preferences observer reports a stable active-location ID, independently of VPN and NWPath changes. |
 | `platform.settings_observed` | Preferences changed while the active-location ID stayed unchanged; reconcile managed proxy settings without awaiting another VPN/path report. `surface=proxies source=preferences`. Own writes require no further writes. |
+| `platform.location_contended` | Drift repair for this surface and active location exhausted its budget (`maximumDriftRepairs` within `driftRepairWindow`) because another program keeps rewriting the managed settings. Its settings stand until the window slides or the location changes; reported once per episode. `surface=`, `location=`, `repairs=`, `window_seconds=`, `reason=repeated_external_rewrites`. |
 | `platform.location_apply` | Stable location/service IDs and surface selected for a compare-and-write; durable prior/applied fields are saved before mutation. |
 | `platform.location_reconcile` | Managed settings drifted or an earlier application did not land; repair through the scoped writer. `surface=`, `reason=managed_settings_drift`. Already matching settings require no writes. |
 | `platform.location_restore` | Prior fields selected for restoration, including inactive locations; external fields remain preserved. `scope=`, `surface=`, `active=`. |

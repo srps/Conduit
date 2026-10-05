@@ -224,6 +224,55 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testRepeatedExternalRewritesExhaustTheRepairBudgetAndReportContentionOnce() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("location-tests-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = machine()
+        let journal = PlatformStateJournal(fileURL: directory.appendingPathComponent("journal.json"))
+        let events = RuntimeEventLog()
+        let clock = ManualInstant()
+        let recovery = LocationSettingsRecovery(store: store, journal: journal,
+                                                limits: .init(maximumDriftRepairs: 2, driftRepairWindow: .seconds(60)),
+                                                now: { clock.value }, emit: { events.append($0) })
+        let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+        var config = ProxyConfig()
+        config.localPACEnabled = true
+        let url = "http://127.0.0.1:63145/proxy.pac"
+        let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
+        func rewriteAndReconcile() throws {
+            store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
+            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+        }
+        func count(_ name: String) -> Int { events.events.filter { $0.event == name }.count }
+
+        try rewriteAndReconcile()
+        try rewriteAndReconcile()
+        XCTAssertEqual(try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        try rewriteAndReconcile()
+        try rewriteAndReconcile()
+        XCTAssertEqual(try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"], enforced)
+        XCTAssertEqual(count("platform.location_reconcile"), 2)
+        XCTAssertEqual(count("platform.location_contended"), 1)
+
+        clock.advance(.seconds(61))
+        try rewriteAndReconcile()
+        XCTAssertEqual(try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"], .text(url))
+        XCTAssertEqual(count("platform.location_reconcile"), 3)
+
+        // Another location has its own budget even inside the window.
+        try rewriteAndReconcile()
+        try rewriteAndReconcile()
+        XCTAssertEqual(count("platform.location_contended"), 2)
+        store.edit { $0.activeLocationID = office }
+        try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+        XCTAssertEqual(try store.snapshot().services[1].proxies["ProxyAutoConfigURLString"], .text(url))
+
+        // Stopping still restores every record; the budget only limits drift repair.
+        try proxy.clear(logger: nil)
+        XCTAssertFalse(journal.hasRecords(for: .systemProxy))
+    }
+
     func testManagersRetryApplyAfterEmptyLocationReleasedAllPriorRecords() throws {
         try withRecovery { store, journal, recovery, _ in
             let config = ProxyConfig()
@@ -689,4 +738,11 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         request.locationID = "../other"
         XCTAssertThrowsError(try request.validate())
     }
+}
+
+private final class ManualInstant: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = ContinuousClock.now
+    var value: ContinuousClock.Instant { lock.withLock { current } }
+    func advance(_ duration: Duration) { lock.withLock { current = current.advanced(by: duration) } }
 }

@@ -292,6 +292,7 @@ enum NetworkLocationScenarios {
         let proxyDisabledOnDeferredCleanup = cleanupProxy["HTTPProxy"] == nil && cleanupProxy["HTTPEnable"] == nil
         store.atLoginwindow = false
         try recovery.clear(kind: .proxies, config: config)
+        let contention = try contendedRewritesStayBounded(services: services, home: home)
         return ScenarioResult(
             name: "network-location-recovery", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -324,9 +325,55 @@ enum NetworkLocationScenarios {
                 .init("unmatched legacy gateway endpoints retain recovery evidence", gatewayLegacyRetained),
                 .init("unrelated corporate service does not block legacy recovery", unrelatedCorporatePreserved),
                 .init("deferred proxy cleanup removes enable flags with endpoints", proxyDisabledOnDeferredCleanup),
+                .init("an enforcing external writer exhausts a fixed repair budget, reports contention once, then recovers", contention),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
                       && events.events.contains { $0.event == "platform.location_failed" })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
         )
     }
+
+    /// Another program rewrites the PAC after every Conduit write. Repairs stop at
+    /// the budget, one contention event explains why, and the window then reopens.
+    private static func contendedRewritesStayBounded(services: [LocationServiceSettings], home: String) throws -> Bool {
+        let store = FakeNetworkLocationStore(snapshot: .init(activeLocationID: home, services: services))
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("pm-location-contended-\(UUID()).json")
+        defer {
+            if FileManager.default.fileExists(atPath: file.path) {
+                do { try FileManager.default.removeItem(at: file) }
+                catch { fputs("network-location-recovery contention journal cleanup failed: \(error.localizedDescription)\n", stderr) }
+            }
+        }
+        let journal = PlatformStateJournal(fileURL: file)
+        let events = RuntimeEventLog(capacity: 64)
+        let clock = ScenarioInstant()
+        let recovery = LocationSettingsRecovery(store: store, journal: journal,
+                                                limits: .init(maximumDriftRepairs: 3, driftRepairWindow: .seconds(60)),
+                                                now: { clock.value }, emit: { events.append($0) })
+        let proxy = SystemProxyManager(privilegeClient: RecordingPrivilegeClient(), journal: journal, locationRecovery: recovery)
+        var config = ProxyConfig()
+        config.localPACEnabled = true
+        let url = "http://127.0.0.1:63145/proxy.pac"
+        let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
+        for _ in 0..<50 {
+            store.edit { $0.services[0].proxies["ProxyAutoConfigURLString"] = enforced }
+            try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+        }
+        let repairs = events.events.filter { $0.event == "platform.location_reconcile" }.count
+        let contended = events.events.filter { $0.event == "platform.location_contended" }.count
+        let yielded = try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"] == enforced
+        clock.advance(.seconds(61))
+        try proxy.reconcileLocation(config: config, mode: .pac, localPACURL: url, apply: true)
+        let reopened = try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"] == .text(url)
+        try proxy.clear(logger: nil)
+        let restored = try store.snapshot().services[0].proxies["ProxyAutoConfigURLString"] == enforced
+            && !journal.hasRecords(for: .systemProxy)
+        return repairs == 3 && contended == 1 && yielded && reopened && restored
+    }
+}
+
+private final class ScenarioInstant: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = ContinuousClock.now
+    var value: ContinuousClock.Instant { lock.withLock { current } }
+    func advance(_ duration: Duration) { lock.withLock { current = current.advanced(by: duration) } }
 }

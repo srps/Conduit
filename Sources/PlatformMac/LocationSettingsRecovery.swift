@@ -10,12 +10,24 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
     private let limits: NetworkLocationLimits
     private let emit: @Sendable (RuntimeEvent) -> Void
     private let operations = NSRecursiveLock()
+    private let now: @Sendable () -> ContinuousClock.Instant
+    /// Recent drift repairs per surface, for one active location. Guarded by `operations`.
+    private var repairBudgets: [NetworkSettingsKind: RepairBudget] = [:]
+
+    private struct RepairBudget {
+        var locationID: String
+        var repairs: [ContinuousClock.Instant] = []
+        var contentionReported = false
+    }
 
     package init(store: any NetworkLocationStoring, journal: PlatformStateJournal,
-                 limits: NetworkLocationLimits = .init(), emit: @escaping @Sendable (RuntimeEvent) -> Void) {
+                 limits: NetworkLocationLimits = .init(),
+                 now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+                 emit: @escaping @Sendable (RuntimeEvent) -> Void) {
         self.store = store
         self.journal = journal
         self.limits = limits
+        self.now = now
         self.emit = emit
     }
 
@@ -110,9 +122,32 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         try operations.withLock {
             try restore(kind: kind, inactiveOnly: true)
             guard !isApplied(kind: kind, desired: desired) else { return }
+            guard try admitRepair(kind: kind, locationID: store.snapshot().activeLocationID) else { return }
             report("reconcile", "surface=\(kind.rawValue) reason=managed_settings_drift")
             try apply(kind: kind, desired: desired, config: config)
         }
+    }
+
+    /// A program that rewrites the same settings after every Conduit write would
+    /// otherwise ping-pong with each preferences notification. Past the budget,
+    /// its settings stand until the window slides; explicit apply is not limited.
+    private func admitRepair(kind: NetworkSettingsKind, locationID: String) -> Bool {
+        let instant = now()
+        var budget = repairBudgets[kind].flatMap { $0.locationID == locationID ? $0 : nil }
+            ?? RepairBudget(locationID: locationID)
+        budget.repairs.removeAll { instant - $0 >= limits.driftRepairWindow }
+        defer { repairBudgets[kind] = budget }
+        guard budget.repairs.count < limits.maximumDriftRepairs else {
+            if !budget.contentionReported {
+                budget.contentionReported = true
+                report("contended", "surface=\(kind.rawValue) location=\(locationID) repairs=\(budget.repairs.count) "
+                    + "window_seconds=\(limits.driftRepairWindow.components.seconds) reason=repeated_external_rewrites")
+            }
+            return false
+        }
+        budget.repairs.append(instant)
+        budget.contentionReported = false
+        return true
     }
 
     package func apply(kind: NetworkSettingsKind, desired: [String: NetworkSettingValue], config: ProxyConfig) throws {
