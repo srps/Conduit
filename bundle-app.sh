@@ -69,6 +69,8 @@ mkdir -p "$MACOS" "$CONTENTS/Resources" "$HELPERS"
 cp "$BUILD_DIR/$APP_NAME" "$MACOS/$APP_NAME"
 cp "$BUILD_DIR/ConduitHelper" "$HELPERS/$BUNDLE_ID.Helper"
 cp "$BUILD_DIR/pm-dns" "$MACOS/pm-dns"
+cp "$SCRIPT_DIR/install-helper.sh" "$CONTENTS/Resources/install-helper.sh"
+chmod 755 "$CONTENTS/Resources/install-helper.sh"
 echo -n "APPL????" > "$CONTENTS/PkgInfo"
 
 if [ -f "$SCRIPT_DIR/Resources/AppIcon.icns" ]; then

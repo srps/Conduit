@@ -201,10 +201,9 @@ Acceptance evidence:
 
 ## Release evidence and the 1.0 gate
 
-Performance and simulator CI already exist on main. The separate release-work
-branch adds ARM/Intel packaging and optimized PAC checks; land those before treating
-them as the main-branch baseline. Add release documentation covering installation,
-signing, helper-pin, migration, and rollback requirements.
+Performance and simulator CI, ARM/Intel packaging, and optimized PAC checks form
+the 0.4.0 baseline. Release documentation covers installation, signing, helper-pin,
+migration, and rollback requirements in `release-installation.md`.
 
 Measure optimized builds under idle, representative concurrent load, and an
 hours-long soak: request latency percentiles, steady-state/peak RSS, CPU/wakeups,

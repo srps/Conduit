@@ -74,6 +74,8 @@ jobs:
           ditto -x -k ".build/share/Conduit-$version-macOS26-$architecture.zip" "$verification_dir"
           codesign --verify --strict --deep "$verification_dir/Conduit.app"
           test -x "$verification_dir/Conduit.app/Contents/MacOS/Conduit"
+          test -x "$verification_dir/Conduit.app/Contents/Resources/install-helper.sh"
+          zsh -n "$verification_dir/Conduit.app/Contents/Resources/install-helper.sh"
           test -d "$verification_dir/Conduit.app/Contents/Resources/Conduit_ProxyKernel.bundle"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$verification_dir/Conduit.app/Contents/Info.plist")" = "$version"
           bin_dir="$(xcrun swift build -c release --show-bin-path)"

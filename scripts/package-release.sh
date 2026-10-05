@@ -22,9 +22,15 @@ Drag Conduit.app into Applications, then open it from Applications.
 This app is ad-hoc signed and is not notarized. If macOS blocks opening it,
 open System Settings > Privacy & Security and choose Open Anyway.
 
-No Swift, Xcode, terminal commands, or build scripts are needed to install.
-The optional privileged helper is not installed by this disk image; Conduit
-uses macOS admin prompts when it is absent.
+No Swift or Xcode is needed. Managed macOS proxy and system DNS settings
+require the privileged helper v5. Install it in Conduit > General > Privileged
+Helper. If an older helper refuses this build, run the bundled installer:
+
+  sudo /Applications/Conduit.app/Contents/Resources/install-helper.sh --source installed
+
+This ad-hoc build cannot retain a certificate pin from a locally signed app.
+The installer reports caller identity as unenforced and retains the console-user
+admission rule. Review its summary before choosing this installation policy.
 EOF
 
 codesign --verify --strict --deep "$stage_dir/Conduit.app"

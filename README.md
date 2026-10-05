@@ -291,8 +291,9 @@ ad-hoc signing instead of the builder's local signing certificate. The app
 requires macOS 26 or later. This build is not notarized; the recipient may need
 to approve it in System Settings > Privacy & Security. It does not install or
 replace the app on the builder's Mac. An existing helper pinned to a different
-signing identity will refuse this build; without a helper, the app falls back
-to macOS admin prompts.
+signing identity will refuse this build. Managed proxy and system DNS settings
+require helper v5; see [release installation](docs/release-installation.md) for
+the bundled installer and signing-policy implications.
 
 Maintainers can run `bash scripts/package-release.sh` to also create a disk
 image with an Applications shortcut and SHA-256 checksums. `VERSION` controls
@@ -310,7 +311,7 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift test
 
 ## Privileged Helper (One-Time Setup)
 
-System proxy changes, `/etc/resolver` writes, and the DNS port 53 relay require admin. By default the app prompts each time. To eliminate repeated prompts, install the privileged helper once:
+Managed system proxy and system DNS settings require helper v5. Resolver writes and the DNS port 53 relay also require admin authorization. Install the privileged helper once:
 
 ```bash
 ./bundle-app.sh --install
@@ -343,7 +344,7 @@ To remove the helper:
 sudo ./uninstall-helper.sh
 ```
 
-The app automatically falls back to standard macOS admin prompts when the helper is not installed.
+Location-scoped proxy and system DNS operations do not fall back to admin prompts when the helper is missing or outdated. Update it before enabling those settings.
 
 The helper logs to the unified log, and the app mirrors its own log lines there under the same subsystem, so one query reads both processes in order:
 
