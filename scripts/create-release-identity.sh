@@ -46,12 +46,16 @@ ED_PUBLIC_OUT="$ROOT_DIR/Resources/sparkle-public-ed-key"
 P12_NAME="conduit-release-signing.p12"
 ED_NAME="sparkle-ed25519.key.enc"
 # The system LibreSSL: its PKCS#12 defaults are the legacy algorithms
-# `security import` on the release runner expects. `gh` and the key
-# generator can be replaced so scripts/test-create-release-identity.sh runs
-# this without a GitHub repository.
+# `security import` on the release runner expects. `gh`, the key generator
+# and where Swift is looked for can be replaced so
+# scripts/test-create-release-identity.sh runs this without a GitHub
+# repository.
 OPENSSL="${CONDUIT_RELEASE_OPENSSL:-/usr/bin/openssl}"
 GH="${CONDUIT_RELEASE_GH:-gh}"
 KEYGEN="${CONDUIT_RELEASE_KEYGEN:-}"
+# Where Swift is looked for when DEVELOPER_DIR is unset, colon-separated,
+# first one with a working Swift wins: Xcode, then the Command Line Tools.
+DEVELOPER_DIRS="${CONDUIT_RELEASE_DEVELOPER_DIRS:-/Applications/Xcode.app/Contents/Developer:/Library/Developer/CommandLineTools}"
 # A self-signed certificate is pinned by its hash, not trusted through a
 # chain, so its lifetime only has to outlast the project; renewing it means
 # a helper reinstall for every user.
@@ -117,6 +121,27 @@ if $UPLOAD && ! "$GH" auth status >/dev/null 2>&1; then
     echo "Uploading needs an authenticated gh (gh auth login)."
     exit 1
 fi
+# The update key needs Swift for CryptoKit, and the Command Line Tools are
+# enough, so a machine without Xcode falls back to them. Checked before the
+# passphrase prompt so a missing toolchain stops the run before anything is
+# typed or generated.
+if $FROM_BACKUP || [ -z "$KEYGEN" ]; then
+    if [ -z "${DEVELOPER_DIR:-}" ]; then
+        # An Xcode without a working Swift falls through to the next one.
+        for candidate in "${(@s.:.)DEVELOPER_DIRS}"; do
+            if [ -d "$candidate" ] && DEVELOPER_DIR="$candidate" xcrun --find swift >/dev/null 2>&1; then
+                DEVELOPER_DIR="$candidate"
+                break
+            fi
+        done
+    fi
+    if [ -z "${DEVELOPER_DIR:-}" ] || ! DEVELOPER_DIR="$DEVELOPER_DIR" xcrun --find swift >/dev/null 2>&1; then
+        echo "Making the update key needs Swift, from Xcode or the Command Line Tools"
+        echo "(xcode-select --install). Found none${DEVELOPER_DIR:+ in $DEVELOPER_DIR}."
+        exit 1
+    fi
+    export DEVELOPER_DIR
+fi
 
 # A failed or interrupted read stops here rather than carrying on with an
 # empty passphrase that would surface later as a misleading mismatch.
@@ -175,8 +200,7 @@ decrypt_ed_backup() { # <file>
 
 # The Ed25519 public key for a seed, through CryptoKit (LibreSSL has none).
 public_key_of() { # <seed on stdin>
-    DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
-        TMPDIR="$WORK" xcrun swift "$SCRIPT_DIR/ed25519-public.swift"
+    TMPDIR="$WORK" xcrun swift "$SCRIPT_DIR/ed25519-public.swift"
 }
 
 # Exits 0 when the ruleset JSON on stdin actually protects v* tags.
@@ -317,8 +341,7 @@ if [ -n "$KEYGEN" ]; then
     KEYS="$("$KEYGEN")"
 else
     # The interpreter's compile scratch goes under $WORK, so it is removed too.
-    KEYS="$(DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
-        TMPDIR="$WORK" xcrun swift "$SCRIPT_DIR/ed25519-keygen.swift")"
+    KEYS="$(TMPDIR="$WORK" xcrun swift "$SCRIPT_DIR/ed25519-keygen.swift")"
 fi
 ED_PRIVATE="${KEYS%%$'\n'*}"
 ED_PUBLIC="${KEYS#*$'\n'}"
