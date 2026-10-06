@@ -10,6 +10,9 @@ on:
       - "scripts/package-release.sh"
       - "scripts/import-release-identity.sh"
       - "scripts/verify-release-signing.sh"
+      - "scripts/make-appcast.sh"
+      - "Sources/ConduitUpdater/**"
+      - "Resources/ConduitUpdater.entitlements"
       - "install-helper.sh"
       - "VERSION"
   workflow_dispatch:
@@ -70,6 +73,21 @@ jobs:
         env:
           CONDUIT_REQUIRE_RELEASE_SIGNING: ${{ github.ref_type == 'tag' && '1' || '' }}
         run: bash scripts/package-release.sh
+      - name: Sign the update feed
+        shell: bash
+        env:
+          SPARKLE_ED_PRIVATE_KEY: ${{ secrets.SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            bash scripts/make-appcast.sh
+          else
+            # No release secrets outside tag builds: exercise the feed with a
+            # throwaway key, then drop it so no artifact carries it.
+            keys="$(xcrun swift scripts/ed25519-keygen.swift)"
+            SPARKLE_ED_PRIVATE_KEY="${keys%%$'\n'*}" bash scripts/make-appcast.sh --public-key "${keys#*$'\n'}"
+            rm .build/share/appcast.xml
+          fi
       - name: Remove the release signing identity
         if: always() && github.ref_type == 'tag'
         run: bash scripts/import-release-identity.sh --remove
@@ -102,6 +120,7 @@ jobs:
             .build/share/*.zip
             .build/share/*.dmg
             .build/share/*.sha256
+            .build/share/appcast.xml
           if-no-files-found: error
 
   draft-release:

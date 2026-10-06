@@ -30,6 +30,14 @@ refuses this app until the bundled installer is run once; its summary reports
 the new pin. Locally signed builds stay admitted beside releases, because the
 pin includes the release certificate too.
 
+From 0.5, Conduit updates itself: **Check for Updates…** in the Conduit menu
+or the menu bar popover, or turn on **Check for updates automatically** in
+General → Updates. Each update is verified against Conduit's update key before
+it is unpacked, and nothing installs until you choose to. Installing quits
+Conduit, which restores your proxy and DNS settings, then relaunches the new
+version. macOS may ask you to approve the updated app once, as on first launch.
+Releases before 0.5 cannot update themselves; install 0.5 by hand.
+
 After installing the helper, Conduit retries failed managed proxy application
 when it detects helper availability or receives a VPN/path report. The macOS PAC
 URL should point at Conduit's **Currently serving** local PAC URL when adaptive
