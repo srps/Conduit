@@ -156,7 +156,7 @@ rm -f "$scratch/gh/SPARKLE_ED_PRIVATE_KEY"
 # The script picks the Command Line Tools itself here when Xcode is absent,
 # and they check the update key, so a machine without Xcode is known to work.
 clt=/Library/Developer/CommandLineTools
-[ -d "$clt" ] || clt="$DEVELOPER_DIR"
+DEVELOPER_DIR="$clt" xcrun --find swift >/dev/null 2>&1 || clt="$DEVELOPER_DIR"
 rc=0; CONDUIT_RELEASE_DEVELOPER_DIRS="$scratch/no-xcode:$clt" DEVELOPER_DIR="" run "$PASSPHRASE"$'\n' --upload-from-backup "$scratch/backup" --repo example/repo || rc=$?
 if [ "$rc" -eq 0 ]; then ok "the retry from the backups uploads (Swift found in $clt)"; else fail "retry (exit $rc): $(cat "$scratch/out.log")"; fi
 if grep -q "api -X DELETE repos/example/repo/environments/release/deployment-branch-policies/11" "$log"; then
