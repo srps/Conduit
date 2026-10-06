@@ -65,7 +65,8 @@ It asks for a backup passphrase of at least 16 characters. The script then:
   - the tag ruleset "Release tags", so only repository admins can create, move
     or delete `v*` tags. The environment policy matches a tag but cannot say
     who made it. An existing ruleset of that name is checked for what it
-    actually enforces; one that does not protect `v*` tags stops the upload;
+    actually enforces, including who may bypass it (repository admins only);
+    one that does not protect `v*` tags stops the upload;
   - then the secrets `CONDUIT_RELEASE_P12_BASE64`,
     `CONDUIT_RELEASE_P12_PASSWORD` and `SPARKLE_ED_PRIVATE_KEY`.
 

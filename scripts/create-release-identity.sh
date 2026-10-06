@@ -118,18 +118,26 @@ if $UPLOAD && ! "$GH" auth status >/dev/null 2>&1; then
     exit 1
 fi
 
+# A failed or interrupted read stops here rather than carrying on with an
+# empty passphrase that would surface later as a misleading mismatch.
+read_secret() { # <variable> <prompt>
+    if ! read -rs "$1?$2"; then
+        echo ""
+        echo "Could not read the passphrase (input closed or interrupted)." >&2
+        exit 1
+    fi
+    echo ""
+}
+
 PASSPHRASE=""
 if $FROM_BACKUP; then
-    read -rs "PASSPHRASE?Backup passphrase: " || true
-    echo ""
+    read_secret PASSPHRASE "Backup passphrase: "
 else
     echo "Choose a backup passphrase (at least $MIN_PASSPHRASE characters). It encrypts"
     echo "both backup files and is the CI secret that unlocks the certificate."
     CONFIRM=""
-    read -rs "PASSPHRASE?Backup passphrase: " || true
-    echo ""
-    read -rs "CONFIRM?Again: " || true
-    echo ""
+    read_secret PASSPHRASE "Backup passphrase: "
+    read_secret CONFIRM "Again: "
     if [ "${#PASSPHRASE}" -lt "$MIN_PASSPHRASE" ]; then
         echo "The passphrase must be at least $MIN_PASSPHRASE characters."
         exit 1
@@ -178,8 +186,12 @@ import json, sys
 r = json.load(sys.stdin)
 include = r.get("conditions", {}).get("ref_name", {}).get("include", [])
 rules = {rule.get("type") for rule in r.get("rules", [])}
+# Anyone allowed to bypass may create the tags; only repository admins may.
+bypass_ok = all(a.get("actor_type") == "RepositoryRole" and a.get("actor_id") == 5
+                for a in r.get("bypass_actors", []))
 ok = (r.get("enforcement") == "active" and r.get("target") == "tag"
-      and "refs/tags/v*" in include and {"creation", "update", "deletion"} <= rules)
+      and "refs/tags/v*" in include and {"creation", "update", "deletion"} <= rules
+      and bypass_ok)
 sys.exit(0 if ok else 1)'
 }
 
@@ -197,7 +209,9 @@ upload() { # <p12 file>
  "reviewers": [{"type": "User", "id": $owner_id}], "prevent_self_review": false}
 JSON
     # Only the v* tag policy may admit a deployment: drop anything else.
-    policies="$("$GH" api "repos/$REPO/environments/release/deployment-branch-policies")" || return 1
+    # Every page: a policy past the first 30 would still admit its refs.
+    policies="$("$GH" api --paginate "repos/$REPO/environments/release/deployment-branch-policies" \
+        --jq '.branch_policies[] | "\(.id) \(.type // "branch") \(.name)"')" || return 1
     local id type name
     while read -r id type name; do
         [ -n "$id" ] || continue
@@ -205,18 +219,15 @@ JSON
             echo "Removing deployment policy $type \"$name\" from the release environment..."
             "$GH" api -X DELETE "repos/$REPO/environments/release/deployment-branch-policies/$id" >/dev/null || return 1
         fi
-    done < <(/usr/bin/python3 -c 'import json,sys
-for p in json.load(sys.stdin).get("branch_policies", []): print(p["id"], p.get("type", "branch"), p["name"])' <<<"$policies")
-    if ! /usr/bin/python3 -c 'import json,sys
-sys.exit(0 if any(p.get("type") == "tag" and p["name"] == "v*" for p in json.load(sys.stdin).get("branch_policies", [])) else 1)' <<<"$policies"; then
+    done <<<"$policies"
+    if ! grep -qE '^[0-9]+ tag v\*$' <<<"$policies"; then
         "$GH" api -X POST "repos/$REPO/environments/release/deployment-branch-policies" \
             -f 'name=v*' -f 'type=tag' >/dev/null || return 1
     fi
     # The environment policy only matches the ref; who may create the ref is
     # this ruleset's job. Repository admins (role 5) may bypass it.
-    rulesets="$("$GH" api "repos/$REPO/rulesets")" || return 1
-    ruleset_id="$(/usr/bin/python3 -c 'import json,sys
-print(next((str(r["id"]) for r in json.load(sys.stdin) if r.get("name") == sys.argv[1]), ""))' "$RULESET_NAME" <<<"$rulesets")" || return 1
+    rulesets="$("$GH" api --paginate "repos/$REPO/rulesets" --jq '.[] | "\(.id) \(.name)"')" || return 1
+    ruleset_id="$(awk -v name="$RULESET_NAME" '{ id = $1; sub(/^[0-9]+ /, ""); if ($0 == name) { print id; exit } }' <<<"$rulesets")"
     if [ -z "$ruleset_id" ]; then
         echo "Restricting v* tags to repository admins (ruleset \"$RULESET_NAME\")..."
         ruleset_id="$("$GH" api -X POST "repos/$REPO/rulesets" --jq .id --input - <<JSON

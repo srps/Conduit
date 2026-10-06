@@ -40,11 +40,11 @@ case "$*" in
         if [ "$3" = "${STUB_GH_FAIL_SECRET:-}" ]; then cat > /dev/null; exit 1; fi
         cat > "$dir/$3" ;;
     "api -X PUT repos/"*"/environments/release --input -") cat > "$dir/environment.json" ;;
-    "api repos/"*"/deployment-branch-policies") echo '{"branch_policies":[{"id":11,"type":"branch","name":"main"}]}' ;;
+    "api --paginate repos/"*"/deployment-branch-policies --jq "*) echo "11 branch main" ;;
     "api -X DELETE "*) : ;;
     "api -X POST "*"/deployment-branch-policies"*) : ;;
-    "api repos/"*"/rulesets")
-        if [ -f "$dir/ruleset.json" ]; then echo '[{"id":7,"name":"Release tags"}]'; else echo '[]'; fi ;;
+    "api --paginate repos/"*"/rulesets --jq "*)
+        if [ -f "$dir/ruleset.json" ]; then echo "7 Release tags"; fi ;;
     "api -X POST repos/"*"/rulesets --jq .id --input -") cat > "$dir/ruleset.json"; echo 7 ;;
     "api repos/"*"/rulesets/7") cat "$dir/ruleset.json" ;;
     *) echo "unexpected gh call: $*" >&2; exit 3 ;;
@@ -66,6 +66,8 @@ run() { # <stdin> [args...]
         "$script" "$@" > "$scratch/out.log" 2>&1
 }
 
+rc=0; run "" --backup-dir "$scratch/backup" || rc=$?
+if [ "$rc" -ne 0 ] && grep -q "Could not read the passphrase" "$scratch/out.log"; then ok "a closed input stops instead of using an empty passphrase"; else fail "closed input (exit $rc): $(cat "$scratch/out.log")"; fi
 rc=0; run $'short\nshort\n' --backup-dir "$scratch/backup" || rc=$?
 if [ "$rc" -ne 0 ] && grep -q "at least 16" "$scratch/out.log"; then ok "a short passphrase is refused"; else fail "short passphrase (exit $rc)"; fi
 rc=0; run "$PASSPHRASE"$'\nsomething else entirely\n' --backup-dir "$scratch/backup" || rc=$?
@@ -81,6 +83,16 @@ if [ "$rc" -ne 0 ] && grep -q "does not actively restrict" "$scratch/out.log" &&
     ok "a ruleset that does not protect v* tags stops the upload before any secret"
 else
     fail "ineffective ruleset (exit $rc): $(cat "$scratch/out.log")"
+fi
+rm -f "$scratch/gh/ruleset.json"
+# Nor does one that lets a non-admin bypass it: a bypass may create v* tags.
+echo '{"name":"Release tags","target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"}],"bypass_actors":[{"actor_id":2,"actor_type":"RepositoryRole","bypass_mode":"always"}]}' > "$scratch/gh/ruleset.json"
+rm -rf "$scratch/repo/Resources" "$scratch/backup"
+rc=0; run "$PASSPHRASE"$'\n'"$PASSPHRASE"$'\n' --backup-dir "$scratch/backup" --upload --repo example/repo || rc=$?
+if [ "$rc" -ne 0 ] && grep -q "does not actively restrict" "$scratch/out.log" && ! ls "$scratch/gh" | grep -q '^CONDUIT\|^SPARKLE'; then
+    ok "a ruleset a non-admin may bypass stops the upload"
+else
+    fail "bypassable ruleset (exit $rc): $(cat "$scratch/out.log")"
 fi
 rm -f "$scratch/gh/ruleset.json"
 # That run wrote its local outputs before stopping; start the next case clean.
