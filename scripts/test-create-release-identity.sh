@@ -12,10 +12,19 @@ if [ "$(id -u)" -eq 0 ]; then
     echo "Run this without sudo."
     exit 1
 fi
-# Xcode when installed, else the Command Line Tools.
+# The first of Xcode and the Command Line Tools with a working Swift, as the
+# script under test looks for it.
 if [ -z "${DEVELOPER_DIR:-}" ]; then
-    DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-    [ -d "$DEVELOPER_DIR" ] || DEVELOPER_DIR=/Library/Developer/CommandLineTools
+    for candidate in /Applications/Xcode.app/Contents/Developer /Library/Developer/CommandLineTools; do
+        if [ -d "$candidate" ] && DEVELOPER_DIR="$candidate" xcrun --find swift >/dev/null 2>&1; then
+            DEVELOPER_DIR="$candidate"
+            break
+        fi
+    done
+    if [ -z "${DEVELOPER_DIR:-}" ]; then
+        echo "No Swift found in Xcode or the Command Line Tools (xcode-select --install)."
+        exit 1
+    fi
 fi
 export DEVELOPER_DIR
 
