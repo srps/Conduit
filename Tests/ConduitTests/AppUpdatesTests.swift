@@ -264,6 +264,29 @@ final class UpdateCoordinatorTests: XCTestCase {
         XCTAssertEqual(names().last, "update.check_unavailable")
     }
 
+    func testACheckByHandMovesThePendingAutomaticOne() async {
+        let coordinator = coordinator()
+        coordinator.start(automaticChecks: true)
+        await settle { sleeper.requested.count == 1 }
+        XCTAssertEqual(sleeper.requested, [UpdateCheckSchedule.launchDelay])
+        await coordinator.check(.interactive, source: .user)
+        await settle { sleeper.requested.count == 2 }
+        XCTAssertEqual(sleeper.requested.last, UpdateCheckSchedule.interval, "the next automatic check is a day after this one")
+        sleeper.fire()  // the cancelled launch-delay sleep is gone; this wakes the new one
+        await settle { launcher.starts.count == 2 }
+        XCTAssertEqual(launcher.starts, [.interactive, .background])
+        coordinator.stop()
+    }
+
+    func testALaunchFailureReplacesTheShownResult() async {
+        let coordinator = coordinator()
+        coordinator.start(automaticChecks: false)
+        reports.deliver(UpdaterContract.reportUserInfo(.upToDate, detail: nil, hostPath: host))
+        launcher.failure = "no updater at /x"
+        await coordinator.check(.interactive, source: .user)
+        XCTAssertEqual(coordinator.status.lastReport, .init(report: .failed, detail: "reason=no updater at /x"))
+    }
+
     func testLaunchFailuresAndHandOffsAreEvents() async {
         let coordinator = coordinator()
         coordinator.start(automaticChecks: false)

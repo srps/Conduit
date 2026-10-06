@@ -39,6 +39,9 @@ package final class UpdaterLauncher: Sendable {
         try await launch(mode)
     }
 
+    /// How long a hand-off waits for a starting updater: 50 × 100 ms.
+    private static let handOffReadinessPolls = 50
+
     /// The real one, for the app bundle at `hostURL`.
     package static func system(hostURL: URL, hostIdentifier: String) -> UpdaterLauncher {
         UpdaterLauncher { mode in
@@ -47,8 +50,16 @@ package final class UpdaterLauncher: Sendable {
                 throw LaunchError("no updater at \(updaterURL.path)")
             }
             let running = NSRunningApplication.runningApplications(withBundleIdentifier: UpdaterContract.bundleIdentifier)
-                .contains { $0.bundleURL.map { UpdaterContract.samePath($0.path, updaterURL.path) } == true }
-            if running {
+                .first { $0.bundleURL.map { UpdaterContract.samePath($0.path, updaterURL.path) } == true }
+            if let running {
+                // The updater listens from applicationWillFinishLaunching on;
+                // before isFinishedLaunching a request could find no listener.
+                for _ in 0..<Self.handOffReadinessPolls where !running.isFinishedLaunching && !running.isTerminated {
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                guard !running.isTerminated else {
+                    throw LaunchError("the running updater exited before it could take the request; try again")
+                }
                 DistributedNotificationCenter.default().postNotificationName(
                     UpdaterContract.checkNotification(hostIdentifier: hostIdentifier), object: nil,
                     userInfo: [UpdaterContract.Key.hostPath: hostURL.path, UpdaterContract.Key.mode: mode.rawValue],
@@ -327,13 +338,23 @@ package final class UpdateCoordinator {
         state.lastCheck = now()
         status.lastCheck = state.lastCheck
         persist()
+        // A check by hand counts as today's: the pending automatic one moves
+        // a full interval on rather than following it within minutes.
+        if source == .user, automaticChecks {
+            scheduled?.cancel()
+            scheduleNext()
+        }
         do {
             let outcome = try await launcher.start(mode)
             if outcome == .handedOff {
                 record(RuntimeEvent(kind: .lifecycle, event: "update.check_handed_off", detail: "source=\(source.rawValue)"))
             }
         } catch {
-            record(RuntimeEvent(kind: .lifecycle, event: "update.launch_failed", detail: "source=\(source.rawValue) reason=\(error.localizedDescription)"))
+            let reason = "reason=\(error.localizedDescription)"
+            record(RuntimeEvent(kind: .lifecycle, event: "update.launch_failed", detail: "source=\(source.rawValue) \(reason)"))
+            // Settings shows the latest outcome beside "Last checked", so a
+            // failure to start must replace an older result there.
+            status.lastReport = UpdaterContract.ParsedReport(report: .failed, detail: reason)
         }
     }
 

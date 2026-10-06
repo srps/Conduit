@@ -18,13 +18,21 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     private var updater: SPUUpdater?
     private var userDriver: (any SPUUserDriver)?
     private var foundUpdate = false
+    private var handedOff = false
+    /// What to check once Sparkle is up: the launch argument, upgraded to
+    /// interactive if the user asks while this process is still starting.
+    private var startupMode: UpdaterContract.LaunchMode
 
     init(mode: UpdaterContract.LaunchMode, autoInstall: Bool) {
         self.initialMode = mode
+        self.startupMode = mode
         self.autoInstall = autoInstall
     }
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    /// The check observer is registered here, before the process counts as
+    /// finished launching: the app hands a request to a running updater only
+    /// once `isFinishedLaunching` is true, so no request falls in a gap.
+    func applicationWillFinishLaunching(_ notification: Notification) {
         let hostURL = UpdaterContract.hostURL(containing: Bundle.main.bundleURL)
         guard let host = Bundle(url: hostURL), let hostIdentifier = host.bundleIdentifier,
               host.object(forInfoDictionaryKey: "SUFeedURL") != nil,
@@ -36,7 +44,7 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         hostBundle = host
 
         if handOffToRunningUpdater(hostIdentifier: hostIdentifier) {
-            NSApp.terminate(nil)
+            handedOff = true
             return
         }
         DistributedNotificationCenter.default().addObserver(
@@ -48,7 +56,13 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
             guard let mode = UpdaterContract.parseCheck(note.userInfo, hostPath: hostPath) else { return }
             MainActor.assumeIsolated { self?.check(mode) }
         }
+    }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !handedOff, let host = hostBundle else {
+            NSApp.terminate(nil)
+            return
+        }
         var driver: any SPUUserDriver = SPUStandardUserDriver(hostBundle: host, delegate: nil)
         #if DEBUG
         if autoInstall { driver = AutoInstallUserDriver() }
@@ -63,7 +77,7 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
             NSApp.terminate(nil)
             return
         }
-        check(initialMode)
+        check(startupMode)
     }
 
     /// One updater per host: a second launch passes its request on and exits.
@@ -82,7 +96,11 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     }
 
     private func check(_ mode: UpdaterContract.LaunchMode) {
-        guard let updater else { return }
+        guard let updater else {
+            // Still starting: the first check happens once Sparkle is up.
+            if mode == .interactive { startupMode = .interactive }
+            return
+        }
         switch mode {
         case .interactive:
             NSApp.activate()
