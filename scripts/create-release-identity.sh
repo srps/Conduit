@@ -54,7 +54,7 @@ OPENSSL="${CONDUIT_RELEASE_OPENSSL:-/usr/bin/openssl}"
 GH="${CONDUIT_RELEASE_GH:-gh}"
 KEYGEN="${CONDUIT_RELEASE_KEYGEN:-}"
 # Where Swift is looked for when DEVELOPER_DIR is unset, colon-separated,
-# first existing one wins: Xcode, then the Command Line Tools.
+# first one with a working Swift wins: Xcode, then the Command Line Tools.
 DEVELOPER_DIRS="${CONDUIT_RELEASE_DEVELOPER_DIRS:-/Applications/Xcode.app/Contents/Developer:/Library/Developer/CommandLineTools}"
 # A self-signed certificate is pinned by its hash, not trusted through a
 # chain, so its lifetime only has to outlast the project; renewing it means
@@ -127,8 +127,9 @@ fi
 # typed or generated.
 if $FROM_BACKUP || [ -z "$KEYGEN" ]; then
     if [ -z "${DEVELOPER_DIR:-}" ]; then
+        # An Xcode without a working Swift falls through to the next one.
         for candidate in "${(@s.:.)DEVELOPER_DIRS}"; do
-            if [ -d "$candidate" ]; then
+            if [ -d "$candidate" ] && DEVELOPER_DIR="$candidate" xcrun --find swift >/dev/null 2>&1; then
                 DEVELOPER_DIR="$candidate"
                 break
             fi

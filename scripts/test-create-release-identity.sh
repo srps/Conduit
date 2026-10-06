@@ -12,7 +12,12 @@ if [ "$(id -u)" -eq 0 ]; then
     echo "Run this without sudo."
     exit 1
 fi
-export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
+# Xcode when installed, else the Command Line Tools.
+if [ -z "${DEVELOPER_DIR:-}" ]; then
+    DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+    [ -d "$DEVELOPER_DIR" ] || DEVELOPER_DIR=/Library/Developer/CommandLineTools
+fi
+export DEVELOPER_DIR
 
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/release-identity-test.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
@@ -67,13 +72,15 @@ run() { # <stdin> [args...]
 }
 
 # Without Swift the run stops before the passphrase prompt; with
-# DEVELOPER_DIR unset or empty the first existing candidate is used.
+# DEVELOPER_DIR unset or empty the first candidate with a working Swift is
+# used, past a missing one and past one that exists without Swift.
 rc=0; DEVELOPER_DIR="$scratch/no-such-toolchain" run "" --backup-dir "$scratch/backup" || rc=$?
 if [ "$rc" -ne 0 ] && grep -q "needs Swift" "$scratch/out.log" && ! grep -q "passphrase" "$scratch/out.log"; then ok "a DEVELOPER_DIR without Swift stops before the passphrase prompt"; else fail "bad DEVELOPER_DIR (exit $rc): $(cat "$scratch/out.log")"; fi
 rc=0; DEVELOPER_DIR="" CONDUIT_RELEASE_DEVELOPER_DIRS="$scratch/no-xcode:$scratch/no-clt" run "" --backup-dir "$scratch/backup" || rc=$?
 if [ "$rc" -ne 0 ] && grep -q "xcode-select --install" "$scratch/out.log"; then ok "no toolchain at all says how to install one"; else fail "no toolchain (exit $rc): $(cat "$scratch/out.log")"; fi
-rc=0; CONDUIT_RELEASE_DEVELOPER_DIRS="$scratch/no-xcode:$DEVELOPER_DIR" DEVELOPER_DIR="" run "" --backup-dir "$scratch/backup" || rc=$?
-if [ "$rc" -ne 0 ] && grep -q "Could not read the passphrase" "$scratch/out.log"; then ok "a missing Xcode falls back to the next toolchain"; else fail "toolchain fallback (exit $rc): $(cat "$scratch/out.log")"; fi
+mkdir -p "$scratch/broken-xcode"
+rc=0; CONDUIT_RELEASE_DEVELOPER_DIRS="$scratch/no-xcode:$scratch/broken-xcode:$DEVELOPER_DIR" DEVELOPER_DIR="" run "" --backup-dir "$scratch/backup" || rc=$?
+if [ "$rc" -ne 0 ] && grep -q "Could not read the passphrase" "$scratch/out.log"; then ok "a missing or broken Xcode falls back to the next toolchain"; else fail "toolchain fallback (exit $rc): $(cat "$scratch/out.log")"; fi
 
 rc=0; run "" --backup-dir "$scratch/backup" || rc=$?
 if [ "$rc" -ne 0 ] && grep -q "Could not read the passphrase" "$scratch/out.log"; then ok "a closed input stops instead of using an empty passphrase"; else fail "closed input (exit $rc): $(cat "$scratch/out.log")"; fi
@@ -137,12 +144,12 @@ if [ "$rc" -ne 0 ] && grep -q "is not the update key" "$scratch/out.log"; then o
 mv "$scratch/ed.good" "$scratch/backup/sparkle-ed25519.key.enc"
 rm -f "$scratch/gh/SPARKLE_ED_PRIVATE_KEY"
 
-# The Command Line Tools, when installed, check the update key here, so a
-# machine without Xcode is known to work.
+# The script picks the Command Line Tools itself here when Xcode is absent,
+# and they check the update key, so a machine without Xcode is known to work.
 clt=/Library/Developer/CommandLineTools
 [ -d "$clt" ] || clt="$DEVELOPER_DIR"
-rc=0; DEVELOPER_DIR="$clt" run "$PASSPHRASE"$'\n' --upload-from-backup "$scratch/backup" --repo example/repo || rc=$?
-if [ "$rc" -eq 0 ]; then ok "the retry from the backups uploads (Swift from $clt)"; else fail "retry (exit $rc): $(cat "$scratch/out.log")"; fi
+rc=0; CONDUIT_RELEASE_DEVELOPER_DIRS="$scratch/no-xcode:$clt" DEVELOPER_DIR="" run "$PASSPHRASE"$'\n' --upload-from-backup "$scratch/backup" --repo example/repo || rc=$?
+if [ "$rc" -eq 0 ]; then ok "the retry from the backups uploads (Swift found in $clt)"; else fail "retry (exit $rc): $(cat "$scratch/out.log")"; fi
 if grep -q "api -X DELETE repos/example/repo/environments/release/deployment-branch-policies/11" "$log"; then
     ok "a stale branch policy is removed, so only v* tags deploy"
 else
