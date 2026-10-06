@@ -10,6 +10,14 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 - Release packages are Apple Silicon (arm64) only. Intel Macs are no longer
   supported; 0.4.1 is the last release with an x86_64 package.
+- Releases are signed with the project's self-signed "Conduit Release Signing"
+  certificate and the hardened runtime instead of ad-hoc, so a privileged
+  helper can pin them. The helper pin now admits the installed app's
+  certificate or the release certificate, so a helper installed once keeps
+  accepting later GitHub releases, and locally signed builds keep working
+  beside them. Upgrading from an ad-hoc release or a local-only pin needs one
+  helper reinstall. See docs/release-signing.md for key custody, rotation and
+  loss. (#111)
 
 ## 0.4.1
 

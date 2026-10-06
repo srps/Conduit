@@ -21,8 +21,10 @@ A **macOS-native corporate proxy manager** built with SwiftUI and SwiftNIO. If y
 Download a ready-to-install disk image from [Releases](https://github.com/srps/Conduit/releases).
 Builds are for Apple Silicon Macs (M1 or later) on macOS 26 or later; Intel
 Macs are no longer supported. Open the disk image, drag Conduit into Applications, and open it.
-No Xcode or local build is required. These builds are ad-hoc signed; if macOS
-blocks the first launch, use System Settings > Privacy & Security > Open Anyway.
+No Xcode or local build is required. Releases are signed with Conduit's
+self-signed release certificate ([release signing](docs/release-signing.md)) and
+are not notarized; if macOS blocks the first launch, use System Settings >
+Privacy & Security > Open Anyway.
 
 To build from source instead:
 
@@ -278,7 +280,7 @@ For an optimized release build:
 
 Once installed the app can be found in Spotlight, Launchpad, and Finder > Applications. Pin it to the Dock by right-clicking its Dock icon > Options > Keep in Dock. The "Launch at Login" setting also requires the app to be in `/Applications`.
 
-On first launch macOS may show a Gatekeeper warning ("cannot verify the developer") because the app is ad-hoc signed. Right-click the app > **Open** > click **Open** in the dialog. This is only needed once.
+On first launch macOS may show a Gatekeeper warning ("cannot verify the developer") because the app is not notarized (release and locally built apps carry self-signed or ad-hoc signatures). Right-click the app > **Open** > click **Open** in the dialog. This is only needed once.
 
 To create an optimized test build for another Mac with the same architecture:
 
@@ -330,7 +332,7 @@ scripts/create-signing-identity.sh      # once; self-signed "Conduit Local Signi
 sudo ./install-helper.sh                # pins that certificate for the helper's callers
 ```
 
-The pin is the certificate, so later app builds signed with the same identity need no helper reinstall. `./install-helper.sh --print-caller-requirement /Applications/Conduit.app` shows the pin without installing anything. An app signed ad-hoc is refused by a pinned helper with a message pointing here; reinstalling the helper from an ad-hoc app removes the pin. `ConduitDaemon` is not bundled; to run it against a pinned helper, sign it as the pin expects: `codesign -f -o runtime -s "Conduit Local Signing" -i io.github.srps.Conduit.Daemon <path to ConduitDaemon>`.
+The pin is the certificate, so later app builds signed with the same identity need no helper reinstall. When the app carries the published release certificate (`Resources/release-signing.pem`, bundled beside `install-helper.sh`), the pin admits that certificate too, so GitHub releases keep working beside your local builds; see [release signing](docs/release-signing.md). `./install-helper.sh --print-caller-requirement /Applications/Conduit.app` shows the pin without installing anything. An app signed ad-hoc is refused by a pinned helper with a message pointing here; reinstalling the helper from an ad-hoc app removes the pin. `ConduitDaemon` is not bundled; to run it against a pinned helper, sign it as the pin expects: `codesign -f -o runtime -s "Conduit Local Signing" -i io.github.srps.Conduit.Daemon <path to ConduitDaemon>`.
 
 **Important**: after updating the app, reinstall the helper to pick up new helper commands:
 
