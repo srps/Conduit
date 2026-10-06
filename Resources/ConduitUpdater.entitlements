@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Conduit Updater only (#111). A self-signed certificate has no Team ID, and
+  library validation lets a hardened-runtime process load only frameworks
+  with its own Team ID, so the updater could not load Sparkle.framework
+  without this. Never give it to Conduit itself: the helper's caller pin
+  admits Conduit, and with validation off a framework swapped into the
+  bundle would run inside an admitted process. The pin refuses the updater's
+  identifier, io.github.srps.Conduit.Updater.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

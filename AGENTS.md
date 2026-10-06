@@ -33,6 +33,7 @@ Libraries (`Package.swift` is the authority; `docs/architecture.md` has the grap
 Executables:
 
 - `Conduit` (app) and `ConduitDaemon` are twin runtime hosts over the same managers. `ConduitHelper` is the privileged LaunchDaemon.
+- `ConduitUpdater` is the nested self-updater, the only target that links Sparkle (#111).
 - Tools: `pm-proxy` (headless proxy), `pm-sim` (fault-injection scenarios), `pm-dns`, `pm-tunnel`, `pmctl` (daemon control client), and the `pm-*-check` diagnostics.
 
 ## Rules
@@ -46,7 +47,7 @@ Executables:
 
 ### Ask first
 
-- A new dependency in `Package.swift`. Today the only one is `apple/swift-nio`.
+- A new dependency in `Package.swift`. Today there are two: `apple/swift-nio`, and `sparkle-project/Sparkle`, which only `ConduitUpdater` may link.
 - Widening `package` access to `public`, or exposing a concrete type across a target boundary where a protocol exists.
 - An unbounded collection, queue, cache or timer. Every one has a fixed capacity in config; see `RuntimeEventLog`, `maxConnections` and `inboundConnectionMaxLimit`.
 - A new `TODO`, `FIXME` or `XXX`. File an issue instead.
