@@ -20,8 +20,8 @@
 #                                      update key, encrypted under the same
 #                                      passphrase (AES-256-CBC, PBKDF2)
 # With --upload, then: the GitHub environment "release" (deployments from v*
-# tags only), a tag ruleset that lets only repository admins create, move or
-# delete v* tags, and the environment secrets CONDUIT_RELEASE_P12_BASE64,
+# tags only, each one waiting for your approval), a tag ruleset that lets
+# only repository admins create, move or delete v* tags, and the secrets CONDUIT_RELEASE_P12_BASE64,
 # CONDUIT_RELEASE_P12_PASSWORD and SPARKLE_ED_PRIVATE_KEY.
 # --upload-from-backup DIR does only that upload, from an earlier run's
 # backups, for example after a failed upload or a deleted environment.
@@ -165,33 +165,73 @@ decrypt_ed_backup() { # <file>
         -in "$1" -pass fd:3 3< <(print -r -- "$PASSPHRASE")
 }
 
+# The Ed25519 public key for a seed, through CryptoKit (LibreSSL has none).
+public_key_of() { # <seed on stdin>
+    DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
+        TMPDIR="$WORK" xcrun swift "$SCRIPT_DIR/ed25519-public.swift"
+}
+
+# Exits 0 when the ruleset JSON on stdin actually protects v* tags.
+ruleset_protects_release_tags() {
+    /usr/bin/python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+include = r.get("conditions", {}).get("ref_name", {}).get("include", [])
+rules = {rule.get("type") for rule in r.get("rules", [])}
+ok = (r.get("enforcement") == "active" and r.get("target") == "tag"
+      and "refs/tags/v*" in include and {"creation", "update", "deletion"} <= rules)
+sys.exit(0 if ok else 1)'
+}
+
 upload() { # <p12 file>
     # Called as `upload … || upload_failed`, where set -e does not apply, so
-    # every step returns its own failure.
-    local p12="$1"
-    echo "Creating the GitHub environment \"release\" (deployments from v* tags only)..."
-    "$GH" api -X PUT "repos/$REPO/environments/release" \
-        -F 'deployment_branch_policy[protected_branches]=false' \
-        -F 'deployment_branch_policy[custom_branch_policies]=true' >/dev/null || return 1
-    local policies
-    policies="$("$GH" api "repos/$REPO/environments/release/deployment-branch-policies" \
-        --jq '.branch_policies[] | select(.type == "tag") | .name')" || return 1
-    if ! grep -qx 'v\*' <<<"$policies"; then
+    # every step returns its own failure. Everything that guards the secrets
+    # is in place before the first secret is set.
+    local p12="$1" owner_id policies rulesets ruleset_id
+    owner_id="$("$GH" api user --jq .id)" || return 1
+    echo "Configuring the GitHub environment \"release\": v* tags only, deployments need your approval..."
+    # Required reviewers: every job that reads these secrets waits for the
+    # owner, including a rerun of a run that existed before this setup.
+    "$GH" api -X PUT "repos/$REPO/environments/release" --input - >/dev/null <<JSON || return 1
+{"deployment_branch_policy": {"protected_branches": false, "custom_branch_policies": true},
+ "reviewers": [{"type": "User", "id": $owner_id}], "prevent_self_review": false}
+JSON
+    # Only the v* tag policy may admit a deployment: drop anything else.
+    policies="$("$GH" api "repos/$REPO/environments/release/deployment-branch-policies")" || return 1
+    local id type name
+    while read -r id type name; do
+        [ -n "$id" ] || continue
+        if [ "$type" != tag ] || [ "$name" != "v*" ]; then
+            echo "Removing deployment policy $type \"$name\" from the release environment..."
+            "$GH" api -X DELETE "repos/$REPO/environments/release/deployment-branch-policies/$id" >/dev/null || return 1
+        fi
+    done < <(/usr/bin/python3 -c 'import json,sys
+for p in json.load(sys.stdin).get("branch_policies", []): print(p["id"], p.get("type", "branch"), p["name"])' <<<"$policies")
+    if ! /usr/bin/python3 -c 'import json,sys
+sys.exit(0 if any(p.get("type") == "tag" and p["name"] == "v*" for p in json.load(sys.stdin).get("branch_policies", [])) else 1)' <<<"$policies"; then
         "$GH" api -X POST "repos/$REPO/environments/release/deployment-branch-policies" \
             -f 'name=v*' -f 'type=tag' >/dev/null || return 1
     fi
     # The environment policy only matches the ref; who may create the ref is
     # this ruleset's job. Repository admins (role 5) may bypass it.
-    local rulesets
-    rulesets="$("$GH" api "repos/$REPO/rulesets" --jq '.[].name')" || return 1
-    if ! grep -qxF "$RULESET_NAME" <<<"$rulesets"; then
+    rulesets="$("$GH" api "repos/$REPO/rulesets")" || return 1
+    ruleset_id="$(/usr/bin/python3 -c 'import json,sys
+print(next((str(r["id"]) for r in json.load(sys.stdin) if r.get("name") == sys.argv[1]), ""))' "$RULESET_NAME" <<<"$rulesets")" || return 1
+    if [ -z "$ruleset_id" ]; then
         echo "Restricting v* tags to repository admins (ruleset \"$RULESET_NAME\")..."
-        "$GH" api -X POST "repos/$REPO/rulesets" --input - >/dev/null <<JSON || return 1
+        ruleset_id="$("$GH" api -X POST "repos/$REPO/rulesets" --jq .id --input - <<JSON
 {"name": "$RULESET_NAME", "target": "tag", "enforcement": "active",
  "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
  "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
  "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]}
 JSON
+)" || return 1
+    fi
+    # Judged by what it does, not its name: an existing one may be disabled.
+    if ! "$GH" api "repos/$REPO/rulesets/$ruleset_id" | ruleset_protects_release_tags; then
+        echo "The ruleset \"$RULESET_NAME\" does not actively restrict creating, moving and deleting refs/tags/v*." >&2
+        echo "Fix or delete it in the repository settings, then retry; no secret was uploaded." >&2
+        return 1
     fi
     echo "Uploading the release secrets..."
     base64 -i "$p12" | tr -d '\n' \
@@ -214,6 +254,12 @@ if $FROM_BACKUP; then
     fi
     if ! ED_PRIVATE="$(decrypt_ed_backup "$BACKUP_DIR/$ED_NAME" 2>/dev/null)" || [ "${#ED_PRIVATE}" -ne 44 ]; then
         echo "$BACKUP_DIR/$ED_NAME does not open with that passphrase." >&2
+        exit 1
+    fi
+    # The app trusts only the committed public key: a seed from another pair
+    # would sign updates every installed app rejects.
+    if [ "$(print -r -- "$ED_PRIVATE" | public_key_of)" != "$(tr -d '[:space:]' < "$ED_PUBLIC_OUT")" ]; then
+        echo "$BACKUP_DIR/$ED_NAME is not the update key for $ED_PUBLIC_OUT." >&2
         exit 1
     fi
     upload "$BACKUP_DIR/$P12_NAME" || upload_failed
@@ -276,8 +322,16 @@ print -rn -- "$ED_PRIVATE" \
 # exist only in GitHub or only in a temporary directory.
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
-cp "$WORK/identity.p12" "$BACKUP_DIR/$P12_NAME"
-cp "$WORK/$ED_NAME" "$BACKUP_DIR/$ED_NAME"
+# Both or neither: a lone backup would block a rerun and the retry alike.
+if ! { cp "$WORK/identity.p12" "$BACKUP_DIR/.$P12_NAME.partial" \
+        && cp "$WORK/$ED_NAME" "$BACKUP_DIR/.$ED_NAME.partial" \
+        && mv "$BACKUP_DIR/.$P12_NAME.partial" "$BACKUP_DIR/$P12_NAME" \
+        && mv "$BACKUP_DIR/.$ED_NAME.partial" "$BACKUP_DIR/$ED_NAME"; }; then
+    rm -f "$BACKUP_DIR/.$P12_NAME.partial" "$BACKUP_DIR/.$ED_NAME.partial" \
+        "$BACKUP_DIR/$P12_NAME" "$BACKUP_DIR/$ED_NAME"
+    echo "Could not write both backups to $BACKUP_DIR; nothing was published or uploaded." >&2
+    exit 1
+fi
 if [ "$(p12_leaf "$BACKUP_DIR/$P12_NAME")" != "$(leaf_sha1 < "$WORK/cert.pem")" ] \
     || [ "$(decrypt_ed_backup "$BACKUP_DIR/$ED_NAME")" != "$ED_PRIVATE" ]; then
     echo "The backups in $BACKUP_DIR do not read back; nothing was published or uploaded." >&2
@@ -306,7 +360,8 @@ echo "Private, encrypted under your passphrase; store them away from it:"
 echo "  $BACKUP_DIR/$P12_NAME"
 echo "  $BACKUP_DIR/$ED_NAME"
 if $UPLOAD; then
-    echo "GitHub environment \"release\" of $REPO holds the three secrets; v* tags are admin-only."
+    echo "GitHub environment \"release\" of $REPO holds the three secrets; v* tags are admin-only,"
+    echo "and each release build waits for your approval in the Actions run."
 else
     echo "Nothing was uploaded. To upload later: --upload-from-backup $BACKUP_DIR"
 fi

@@ -25,19 +25,29 @@ cat > "$scratch/bin/openssl" <<STUB
 echo "ARGV openssl \$*" >> "$log"
 exec /usr/bin/openssl "\$@"
 STUB
-# Records argv, each secret's stdin into a file named after it, and the
-# ruleset body. STUB_GH_FAIL_SECRET names a secret whose upload fails.
-cat > "$scratch/bin/gh" <<STUB
+# A stand-in GitHub: records argv, each secret's stdin into a file named
+# after it, the environment and ruleset bodies, and DELETEs. The release
+# environment starts with a stale branch policy; STUB_RULESET seeds an
+# existing ruleset; STUB_GH_FAIL_SECRET names a secret whose upload fails.
+cat > "$scratch/bin/gh" <<'STUB'
 #!/bin/bash
-echo "ARGV gh \$*" >> "$log"
-case "\$1 \$2" in
-    "auth status") exit 0 ;;
-    "secret set")
-        if [ "\$3" = "\${STUB_GH_FAIL_SECRET:-}" ]; then cat > /dev/null; exit 1; fi
-        cat > "$scratch/gh/\$3" ;;
-    "api "*)
-        if [[ "\$*" == *"--input -"* ]]; then cat > "$scratch/gh/ruleset.json"; fi
-        exit 0 ;;
+echo "ARGV gh $*" >> "$STUB_LOG"
+dir="$STUB_DIR"
+case "$*" in
+    "auth status"*) exit 0 ;;
+    "api user"*) echo 42 ;;
+    "secret set "*)
+        if [ "$3" = "${STUB_GH_FAIL_SECRET:-}" ]; then cat > /dev/null; exit 1; fi
+        cat > "$dir/$3" ;;
+    "api -X PUT repos/"*"/environments/release --input -") cat > "$dir/environment.json" ;;
+    "api repos/"*"/deployment-branch-policies") echo '{"branch_policies":[{"id":11,"type":"branch","name":"main"}]}' ;;
+    "api -X DELETE "*) : ;;
+    "api -X POST "*"/deployment-branch-policies"*) : ;;
+    "api repos/"*"/rulesets")
+        if [ -f "$dir/ruleset.json" ]; then echo '[{"id":7,"name":"Release tags"}]'; else echo '[]'; fi ;;
+    "api -X POST repos/"*"/rulesets --jq .id --input -") cat > "$dir/ruleset.json"; echo 7 ;;
+    "api repos/"*"/rulesets/7") cat "$dir/ruleset.json" ;;
+    *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 STUB
 chmod +x "$scratch/bin/openssl" "$scratch/bin/gh"
@@ -49,7 +59,7 @@ fail() { echo "FAIL  $1"; failures=$((failures + 1)); }
 run() { # <stdin> [args...]
     local input="$1"
     shift
-    printf '%s' "$input" | TMPDIR="$scratch/tmp" \
+    printf '%s' "$input" | TMPDIR="$scratch/tmp" STUB_LOG="$log" STUB_DIR="$scratch/gh" \
         CONDUIT_RELEASE_REPO_DIR="$scratch/repo" \
         CONDUIT_RELEASE_OPENSSL="$scratch/bin/openssl" \
         CONDUIT_RELEASE_GH="$scratch/bin/gh" \
@@ -63,14 +73,52 @@ if [ "$rc" -ne 0 ] && grep -q "differ" "$scratch/out.log"; then ok "mismatched p
 rc=0; run "$PASSPHRASE"$'\n'"$PASSPHRASE"$'\n' || rc=$?
 if [ "$rc" -ne 0 ] && grep -q "backup-dir is required" "$scratch/out.log"; then ok "--backup-dir is required"; else fail "no backup dir (exit $rc)"; fi
 
+# An existing ruleset of that name that does not protect v* tags stops the
+# upload before any secret is set.
+echo '{"name":"Release tags","target":"tag","enforcement":"disabled","conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"}]}' > "$scratch/gh/ruleset.json"
+rc=0; run "$PASSPHRASE"$'\n'"$PASSPHRASE"$'\n' --backup-dir "$scratch/backup" --upload --repo example/repo || rc=$?
+if [ "$rc" -ne 0 ] && grep -q "does not actively restrict" "$scratch/out.log" && ! ls "$scratch/gh" | grep -q '^CONDUIT\|^SPARKLE'; then
+    ok "a ruleset that does not protect v* tags stops the upload before any secret"
+else
+    fail "ineffective ruleset (exit $rc): $(cat "$scratch/out.log")"
+fi
+rm -f "$scratch/gh/ruleset.json"
+# That run wrote its local outputs before stopping; start the next case clean.
+if [ -s "$scratch/repo/Resources/release-signing.pem" ] && [ -s "$scratch/backup/conduit-release-signing.p12" ]; then
+    ok "local outputs are written before the upload is attempted"
+else
+    fail "the stopped upload left no local outputs"
+fi
+rm -rf "$scratch/repo/Resources" "$scratch/backup"
+
 # The first upload fails at its last secret: every local output must already
 # be written, and the retry must finish from the backups.
 rc=0; STUB_GH_FAIL_SECRET=SPARKLE_ED_PRIVATE_KEY run "$PASSPHRASE"$'\n'"$PASSPHRASE"$'\n' --backup-dir "$scratch/backup" --upload --repo example/repo || rc=$?
-if [ "$rc" -ne 0 ] && grep -q -- "--upload-from-backup" "$scratch/out.log"; then ok "a failed upload says how to retry"; else fail "failed upload (exit $rc): $(cat "$scratch/out.log")"; fi
+if [ "$rc" -ne 0 ] && grep -q "The upload did not finish" "$scratch/out.log" && grep -q -- "--upload-from-backup" "$scratch/out.log"; then ok "a failed upload says how to retry"; else fail "failed upload (exit $rc): $(cat "$scratch/out.log")"; fi
 rc=0; run $'wrong passphrase for this\n' --upload-from-backup "$scratch/backup" --repo example/repo || rc=$?
 if [ "$rc" -ne 0 ] && grep -q "does not open" "$scratch/out.log"; then ok "a retry with the wrong passphrase is refused"; else fail "wrong-passphrase retry (exit $rc): $(cat "$scratch/out.log")"; fi
+# A decryptable update key from another pair is refused.
+mv "$scratch/backup/sparkle-ed25519.key.enc" "$scratch/ed.good"
+other_seed="$(xcrun swift "$(dirname "$script")/ed25519-keygen.swift" | head -1)"
+printf '%s' "$other_seed" | /usr/bin/openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 600000 -salt -a \
+    -pass fd:3 -out "$scratch/backup/sparkle-ed25519.key.enc" 3< <(printf '%s\n' "$PASSPHRASE")
+rc=0; run "$PASSPHRASE"$'\n' --upload-from-backup "$scratch/backup" --repo example/repo || rc=$?
+if [ "$rc" -ne 0 ] && grep -q "is not the update key" "$scratch/out.log"; then ok "a restored update key from another pair is refused"; else fail "mismatched update key (exit $rc): $(cat "$scratch/out.log")"; fi
+mv "$scratch/ed.good" "$scratch/backup/sparkle-ed25519.key.enc"
+rm -f "$scratch/gh/SPARKLE_ED_PRIVATE_KEY"
+
 rc=0; run "$PASSPHRASE"$'\n' --upload-from-backup "$scratch/backup" --repo example/repo || rc=$?
 if [ "$rc" -eq 0 ]; then ok "the retry from the backups uploads"; else fail "retry (exit $rc): $(cat "$scratch/out.log")"; fi
+if grep -q "api -X DELETE repos/example/repo/environments/release/deployment-branch-policies/11" "$log"; then
+    ok "a stale branch policy is removed, so only v* tags deploy"
+else
+    fail "the stale branch policy was kept"
+fi
+if python3 -c 'import json,sys; e=json.load(open(sys.argv[1])); assert e["reviewers"]==[{"type":"User","id":42}]' "$scratch/gh/environment.json"; then
+    ok "every release deployment waits for the owner's approval"
+else
+    fail "environment body: $(cat "$scratch/gh/environment.json" 2>/dev/null)"
+fi
 
 pem="$scratch/repo/Resources/release-signing.pem"
 ed_public="$scratch/repo/Resources/sparkle-public-ed-key"

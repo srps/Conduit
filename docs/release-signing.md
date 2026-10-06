@@ -56,19 +56,26 @@ It asks for a backup passphrase of at least 16 characters. The script then:
 - writes the two public files under `Resources/`; commit them;
 - writes `conduit-release-signing.p12` and `sparkle-ed25519.key.enc` to the
   backup directory, both encrypted under the passphrase;
-- with `--upload`, after all of that is written and read back: creates the
-  GitHub environment `release`, which only `v*` tags may deploy from; adds the
-  tag ruleset "Release tags", so only repository admins can create, move or
-  delete `v*` tags (the environment policy matches a tag but cannot say who
-  made it); and sets the secrets `CONDUIT_RELEASE_P12_BASE64`,
-  `CONDUIT_RELEASE_P12_PASSWORD` and `SPARKLE_ED_PRIVATE_KEY`.
+- with `--upload`, after all of that is written and read back, sets up
+  everything that guards the secrets before setting any of them:
+  - the GitHub environment `release`, which only `v*` tags may deploy from
+    (any other deployment policy is removed), with you as its required
+    reviewer, so every job that reads the secrets waits for your approval,
+    including a rerun of a run that existed before this setup;
+  - the tag ruleset "Release tags", so only repository admins can create, move
+    or delete `v*` tags. The environment policy matches a tag but cannot say
+    who made it. An existing ruleset of that name is checked for what it
+    actually enforces; one that does not protect `v*` tags stops the upload;
+  - then the secrets `CONDUIT_RELEASE_P12_BASE64`,
+    `CONDUIT_RELEASE_P12_PASSWORD` and `SPARKLE_ED_PRIVATE_KEY`.
 
 Keep the passphrase and the backup files in different places, for example the
 passphrase in a password manager and the files on an encrypted drive.
 
 If the upload fails, or to upload again later (for example after deleting the
 environment), upload from the backup. It checks that the backup opens with the
-passphrase and matches the committed certificate:
+passphrase, that its certificate is the committed one and that its update key
+matches the committed public key:
 
 ```sh
 scripts/create-release-identity.sh --upload-from-backup /Volumes/<encrypted-drive>/conduit-release
@@ -77,7 +84,8 @@ scripts/create-release-identity.sh --upload-from-backup /Volumes/<encrypted-driv
 ## In CI
 
 Only tag builds of `.github/workflows/release.yml` run in the `release`
-environment. `scripts/import-release-identity.sh` imports the certificate into
+environment, and each waits for your approval in the Actions run before it
+starts. `scripts/import-release-identity.sh` imports the certificate into
 a throwaway keychain. It refuses a secret whose certificate differs from the
 committed `Resources/release-signing.pem`. `bundle-app.sh --share` then signs
 with it, and `CONDUIT_REQUIRE_RELEASE_SIGNING` turns a missing identity into a
