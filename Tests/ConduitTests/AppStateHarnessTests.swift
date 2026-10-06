@@ -81,7 +81,7 @@ final class AppStateHarness {
             networkLocationObserver: locationObserver,
             networkLocationStoreFactory: { [locationStore] _ in locationStore },
             networkLocationLimits: locationLimits,
-            updaterLauncher: updater.launcher,
+            updaterLauncher: updater,
             updateReports: FakeUpdateReports(),
             updaterAvailability: .available,
             currentVersion: currentVersion

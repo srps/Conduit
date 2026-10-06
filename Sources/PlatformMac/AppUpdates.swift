@@ -13,71 +13,75 @@ import ProxyKernel
 
 // MARK: - Starting the updater
 
+package enum UpdaterLaunchOutcome: Equatable, Sendable {
+    case launched
+    /// An updater was already running; it got the request instead.
+    case handedOff
+}
+
+package struct UpdaterLaunchError: Error, Equatable, LocalizedError {
+    package var reason: String
+    package init(_ reason: String) { self.reason = reason }
+    package var errorDescription: String? { reason }
+}
+
 /// Starts the nested updater, or hands a request to the one already running.
 /// A seam because it launches a real process: a `--dev` instance or a test
-/// host would otherwise start the installed app's updater.
-package final class UpdaterLauncher: Sendable {
-    package enum Outcome: Equatable, Sendable {
-        case launched
-        /// An updater was already running; it got the request instead.
-        case handedOff
-    }
+/// host would otherwise start the installed app's updater. The fake is
+/// `FakeUpdaterLauncher`.
+package protocol UpdaterLaunching: Sendable {
+    func start(_ mode: UpdaterContract.LaunchMode) async throws -> UpdaterLaunchOutcome
+}
 
-    package struct LaunchError: Error, Equatable, LocalizedError {
-        package var reason: String
-        package init(_ reason: String) { self.reason = reason }
-        package var errorDescription: String? { reason }
-    }
-
-    private let launch: @Sendable (UpdaterContract.LaunchMode) async throws -> Outcome
-
-    package init(launch: @escaping @Sendable (UpdaterContract.LaunchMode) async throws -> Outcome) {
-        self.launch = launch
-    }
-
-    package func start(_ mode: UpdaterContract.LaunchMode) async throws -> Outcome {
-        try await launch(mode)
-    }
-
+/// The real one, for the app bundle at `hostURL`.
+package struct SystemUpdaterLauncher: UpdaterLaunching {
     /// How long a hand-off waits for a starting updater: 50 × 100 ms.
     private static let handOffReadinessPolls = 50
 
-    /// The real one, for the app bundle at `hostURL`.
-    package static func system(hostURL: URL, hostIdentifier: String) -> UpdaterLauncher {
-        UpdaterLauncher { mode in
-            let updaterURL = UpdaterContract.updaterURL(inHost: hostURL)
-            guard FileManager.default.fileExists(atPath: updaterURL.path) else {
-                throw LaunchError("no updater at \(updaterURL.path)")
-            }
-            let running = NSRunningApplication.runningApplications(withBundleIdentifier: UpdaterContract.bundleIdentifier)
-                .first { $0.bundleURL.map { UpdaterContract.samePath($0.path, updaterURL.path) } == true }
-            if let running {
-                // The updater listens from applicationWillFinishLaunching on;
-                // before isFinishedLaunching a request could find no listener.
-                for _ in 0..<Self.handOffReadinessPolls where !running.isFinishedLaunching && !running.isTerminated {
-                    try await Task.sleep(for: .milliseconds(100))
-                }
-                guard !running.isTerminated else {
-                    throw LaunchError("the running updater exited before it could take the request; try again")
-                }
-                DistributedNotificationCenter.default().postNotificationName(
-                    UpdaterContract.checkNotification(hostIdentifier: hostIdentifier), object: nil,
-                    userInfo: [UpdaterContract.Key.hostPath: hostURL.path, UpdaterContract.Key.mode: mode.rawValue],
-                    deliverImmediately: true
-                )
-                return .handedOff
-            }
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.arguments = [mode.rawValue]
-            configuration.activates = mode == .interactive
-            configuration.addsToRecentItems = false
-            do {
-                _ = try await NSWorkspace.shared.openApplication(at: updaterURL, configuration: configuration)
-            } catch {
-                throw LaunchError("could not start the updater: \(error.localizedDescription)")
-            }
-            return .launched
+    private let hostURL: URL
+    private let hostIdentifier: String
+
+    package init(hostURL: URL, hostIdentifier: String) {
+        self.hostURL = hostURL
+        self.hostIdentifier = hostIdentifier
+    }
+
+    package func start(_ mode: UpdaterContract.LaunchMode) async throws -> UpdaterLaunchOutcome {
+        let updaterURL = UpdaterContract.updaterURL(inHost: hostURL)
+        guard FileManager.default.fileExists(atPath: updaterURL.path) else {
+            throw UpdaterLaunchError("no updater at \(updaterURL.path)")
         }
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: UpdaterContract.bundleIdentifier)
+            .first { $0.bundleURL.map { UpdaterContract.samePath($0.path, updaterURL.path) } == true }
+        if let running {
+            // The updater listens from applicationWillFinishLaunching on;
+            // before isFinishedLaunching a request could find no listener.
+            for _ in 0..<Self.handOffReadinessPolls where !running.isFinishedLaunching && !running.isTerminated {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            guard !running.isTerminated else {
+                throw UpdaterLaunchError("the running updater exited before it could take the request; try again")
+            }
+            guard running.isFinishedLaunching else {
+                throw UpdaterLaunchError("the running updater did not finish starting within 5 s; try again")
+            }
+            DistributedNotificationCenter.default().postNotificationName(
+                UpdaterContract.checkNotification(hostIdentifier: hostIdentifier), object: nil,
+                userInfo: [UpdaterContract.Key.hostPath: hostURL.path, UpdaterContract.Key.mode: mode.rawValue],
+                deliverImmediately: true
+            )
+            return .handedOff
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.arguments = [mode.rawValue]
+        configuration.activates = mode == .interactive
+        configuration.addsToRecentItems = false
+        do {
+            _ = try await NSWorkspace.shared.openApplication(at: updaterURL, configuration: configuration)
+        } catch {
+            throw UpdaterLaunchError("could not start the updater: \(error.localizedDescription)")
+        }
+        return .launched
     }
 }
 
@@ -227,7 +231,7 @@ package final class UpdateCoordinator {
     private let hostIdentifier: String
     private let hostPath: String
     private let currentVersion: String
-    private let launcher: UpdaterLauncher
+    private let launcher: any UpdaterLaunching
     private let store: UpdateStateStore
     private let reports: any UpdateReportSource
     private let now: @Sendable () -> Date
@@ -248,7 +252,7 @@ package final class UpdateCoordinator {
         hostPath: String,
         currentVersion: String,
         availability: UpdaterAvailability,
-        launcher: UpdaterLauncher,
+        launcher: any UpdaterLaunching,
         store: UpdateStateStore,
         reports: any UpdateReportSource,
         now: @escaping @Sendable () -> Date = Date.init,

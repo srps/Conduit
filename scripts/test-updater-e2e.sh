@@ -19,6 +19,10 @@
 #   DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer scripts/test-updater-e2e.sh [--signed]
 set -euo pipefail
 
+# Name the failing line: under set -e a failed step otherwise ends the run
+# with no output at all.
+trap 'echo "FAIL  stopped at line $LINENO (exit $?)" >&2' ZERR
+
 SIGNED=false
 [ "${1:-}" = "--signed" ] && SIGNED=true
 
@@ -30,7 +34,7 @@ TIMEOUT=90
 cd "$ROOT_DIR"
 xcrun swift build --product ConduitUpdater >/dev/null
 BIN="$(xcrun swift build --show-bin-path)"
-SIGN_UPDATE="$(find "$ROOT_DIR/.build/artifacts" -path '*Sparkle/bin/sign_update' -type f | head -1)"
+SIGN_UPDATE="$(find "$ROOT_DIR/.build/artifacts" -path '*Sparkle/bin/sign_update' -type f -print -quit)"
 [ -x "$SIGN_UPDATE" ] || { echo "sign_update not found under .build/artifacts"; exit 1; }
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/updater-e2e.XXXXXX")"

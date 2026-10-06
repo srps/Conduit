@@ -310,7 +310,7 @@ enum DevLaunch {
                     )]
                 ))
             },
-            updaterLauncher: updater.launcher
+            updaterLauncher: updater
         )
         if let section = options.section {
             state.selectedSection = section

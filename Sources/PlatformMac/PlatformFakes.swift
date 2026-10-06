@@ -645,11 +645,11 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
 /// Stands in for the nested updater: records each start, can refuse them,
 /// and never launches a process, so a `--dev` instance or a test host cannot
 /// start the installed app's updater.
-package final class FakeUpdaterLauncher: @unchecked Sendable {
+package final class FakeUpdaterLauncher: UpdaterLaunching, @unchecked Sendable {
     private let lock = NSLock()
     private var _starts: [UpdaterContract.LaunchMode] = []
     private var _failure: String?
-    private var _outcome: UpdaterLauncher.Outcome = .launched
+    private var _outcome: UpdaterLaunchOutcome = .launched
 
     package init() {}
 
@@ -660,20 +660,18 @@ package final class FakeUpdaterLauncher: @unchecked Sendable {
         get { lock.withLock { _failure } }
         set { lock.withLock { _failure = newValue } }
     }
-    package var outcome: UpdaterLauncher.Outcome {
+    package var outcome: UpdaterLaunchOutcome {
         get { lock.withLock { _outcome } }
         set { lock.withLock { _outcome = newValue } }
     }
 
-    package var launcher: UpdaterLauncher {
-        UpdaterLauncher { [self] mode in
-            let (failure, outcome): (String?, UpdaterLauncher.Outcome) = lock.withLock {
-                _starts.append(mode)
-                return (_failure, _outcome)
-            }
-            if let failure { throw UpdaterLauncher.LaunchError(failure) }
-            return outcome
+    package func start(_ mode: UpdaterContract.LaunchMode) async throws -> UpdaterLaunchOutcome {
+        let (failure, outcome): (String?, UpdaterLaunchOutcome) = lock.withLock {
+            _starts.append(mode)
+            return (_failure, _outcome)
         }
+        if let failure { throw UpdaterLaunchError(failure) }
+        return outcome
     }
 }
 

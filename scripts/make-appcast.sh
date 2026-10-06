@@ -33,7 +33,7 @@ version="$(cat VERSION)"
 architecture="$(uname -m)"
 archive=".build/share/Conduit-$version-macOS26-$architecture.zip"
 [ -f "$archive" ] || { echo "$archive is missing: run scripts/package-release.sh first." >&2; exit 1; }
-sign_update="$(find .build/artifacts -path '*Sparkle/bin/sign_update' -type f | head -1)"
+sign_update="$(find .build/artifacts -path '*Sparkle/bin/sign_update' -type f -print -quit)"
 [ -x "$sign_update" ] || { echo "sign_update not found under .build/artifacts (resolve the Sparkle package first)." >&2; exit 1; }
 
 signature="$(printf '%s' "$SPARKLE_ED_PRIVATE_KEY" | "$sign_update" --ed-key-file - -p "$archive")"

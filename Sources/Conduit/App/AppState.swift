@@ -229,7 +229,7 @@ final class AppState: ObservableObject {
         networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) },
         networkLocationLimits: NetworkLocationLimits = .init(),
-        updaterLauncher: UpdaterLauncher? = nil,
+        updaterLauncher: (any UpdaterLaunching)? = nil,
         updateReports: (any UpdateReportSource)? = nil,
         updaterAvailability: UpdaterAvailability? = nil,
         currentVersion: String? = nil
@@ -370,7 +370,7 @@ final class AppState: ObservableObject {
             currentVersion: currentVersion
                 ?? (hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unbundled",
             availability: updaterAvailability ?? UpdaterAvailability.of(hostBundle: hostBundle),
-            launcher: updaterLauncher ?? UpdaterLauncher.system(hostURL: hostBundle.bundleURL, hostIdentifier: hostIdentifier),
+            launcher: updaterLauncher ?? SystemUpdaterLauncher(hostURL: hostBundle.bundleURL, hostIdentifier: hostIdentifier),
             store: UpdateStateStore(file: runtimeEnvironment.updateStateFile),
             reports: updateReports ?? DistributedUpdateReports(),
             record: { [logStore] event in

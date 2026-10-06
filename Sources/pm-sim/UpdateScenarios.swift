@@ -67,7 +67,7 @@ enum UpdateScenarios {
 
         let coordinator = UpdateCoordinator(
             hostIdentifier: "io.github.srps.Conduit", hostPath: host, currentVersion: "0.5.0",
-            availability: .available, launcher: launcher.launcher, store: store, reports: reports,
+            availability: .available, launcher: launcher, store: store, reports: reports,
             now: { clock.now }, sleep: { try await clock.sleep($0) },
             record: { events.append($0) }
         )
@@ -93,7 +93,7 @@ enum UpdateScenarios {
         let locked = UpdateCoordinator(
             hostIdentifier: "io.github.srps.Conduit", hostPath: host, currentVersion: "0.5.0",
             availability: .unavailable(reason: "this build has no update signing key"),
-            launcher: lockedLauncher.launcher,
+            launcher: lockedLauncher,
             store: UpdateStateStore(file: directory.appendingPathComponent("locked-state.json")),
             reports: FakeUpdateReports(), now: { clock.now }, sleep: { try await clock.sleep($0) },
             record: { lockedEvents.append($0) }

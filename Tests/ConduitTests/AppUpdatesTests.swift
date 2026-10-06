@@ -206,7 +206,7 @@ final class UpdateCoordinatorTests: XCTestCase {
             hostPath: host,
             currentVersion: version,
             availability: availability,
-            launcher: launcher.launcher,
+            launcher: launcher,
             store: store,
             reports: reports,
             now: { clock },

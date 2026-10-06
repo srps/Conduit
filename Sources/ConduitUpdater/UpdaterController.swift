@@ -11,6 +11,8 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     /// A background check that finds nothing exits on its own; this bounds
     /// one that hangs (Sparkle's own request timeouts are per request).
     private static let backgroundCheckLimit: Duration = .seconds(300)
+    /// How long a hand-off waits for the owning updater: 50 × 100 ms.
+    private static let handOffReadinessPolls = 50
 
     private let initialMode: UpdaterContract.LaunchMode
     private let autoInstall: Bool
@@ -18,6 +20,8 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     private var updater: SPUUpdater?
     private var userDriver: (any SPUUserDriver)?
     private var foundUpdate = false
+    /// Set once a failure is reported, so the cycle's own error is not a duplicate.
+    private var reportedFailure = false
     private var handedOff = false
     /// What to check once Sparkle is up: the launch argument, upgraded to
     /// interactive if the user asks while this process is still starting.
@@ -59,10 +63,8 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard !handedOff, let host = hostBundle else {
-            NSApp.terminate(nil)
-            return
-        }
+        // A hand-off terminates once its request is posted.
+        guard !handedOff, let host = hostBundle else { return }
         var driver: any SPUUserDriver = SPUStandardUserDriver(hostBundle: host, delegate: nil)
         #if DEBUG
         if autoInstall { driver = AutoInstallUserDriver() }
@@ -80,18 +82,37 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         check(startupMode)
     }
 
-    /// One updater per host: a second launch passes its request on and exits.
+    /// One updater per host. A newcomer hands its request to an updater that
+    /// is already up, or, when two start together, to the one with the lower
+    /// pid, so two newcomers can never hand off to each other and both exit.
     private func handOffToRunningUpdater(hostIdentifier: String) -> Bool {
         let me = ProcessInfo.processInfo.processIdentifier
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: UpdaterContract.bundleIdentifier)
             .filter { $0.processIdentifier != me && $0.bundleURL.map { UpdaterContract.samePath($0.path, Bundle.main.bundlePath) } == true }
-        guard !others.isEmpty, let host = hostBundle else { return false }
-        DistributedNotificationCenter.default().postNotificationName(
-            UpdaterContract.checkNotification(hostIdentifier: hostIdentifier), object: nil,
-            userInfo: [UpdaterContract.Key.hostPath: host.bundlePath, UpdaterContract.Key.mode: initialMode.rawValue],
-            deliverImmediately: true
-        )
-        logger.info("Updater already running; passed the \(self.initialMode.rawValue, privacy: .public) request on")
+        guard let owner = others.first(where: \.isFinishedLaunching)
+                ?? others.filter({ $0.processIdentifier < me }).min(by: { $0.processIdentifier < $1.processIdentifier }),
+              let host = hostBundle else { return false }
+        let request = [UpdaterContract.Key.hostPath: host.bundlePath, UpdaterContract.Key.mode: initialMode.rawValue]
+        let name = UpdaterContract.checkNotification(hostIdentifier: hostIdentifier)
+        let mode = initialMode.rawValue
+        // The owner listens once it is finishing its launch; post only then,
+        // or the request could reach no one. Bounded like the app's hand-off.
+        Task { @MainActor in
+            for _ in 0..<Self.handOffReadinessPolls where !owner.isFinishedLaunching && !owner.isTerminated {
+                do {
+                    try await Task.sleep(for: .milliseconds(100))
+                } catch {
+                    break  // cancelled: exiting anyway
+                }
+            }
+            if owner.isFinishedLaunching && !owner.isTerminated {
+                DistributedNotificationCenter.default().postNotificationName(name, object: nil, userInfo: request, deliverImmediately: true)
+                logger.info("Updater already running (pid \(owner.processIdentifier)); passed the \(mode, privacy: .public) request on")
+            } else {
+                logger.error("The running updater (pid \(owner.processIdentifier)) never finished starting; the \(mode, privacy: .public) request was not passed on")
+            }
+            NSApp.terminate(nil)
+        }
         return true
     }
 
@@ -121,6 +142,7 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     }
 
     private func report(_ report: UpdaterContract.Report, detail: String?) {
+        if report == .failed { reportedFailure = true }
         guard let host = hostBundle, let identifier = host.bundleIdentifier else { return }
         logger.notice("\(report.rawValue, privacy: .public) \(detail ?? "", privacy: .public)")
         DistributedNotificationCenter.default().postNotificationName(
@@ -168,8 +190,17 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         error: (any Error)?
     ) {
         // The installer, if one was started, is Sparkle's own process and
-        // carries on without this one.
-        MainActor.assumeIsolated { NSApp.terminate(nil) }
+        // carries on without this one. A cycle error nothing has reported
+        // yet is reported here rather than lost with the process.
+        let detail: String? = error.flatMap { error in
+            let nsError = error as NSError
+            guard !(nsError.domain == SUSparkleErrorDomain && nsError.code == Int(SUError.noUpdateError.rawValue)) else { return nil }
+            return "reason=cycle \(Self.describe(error))"
+        }
+        MainActor.assumeIsolated {
+            if let detail, !reportedFailure { report(.failed, detail: detail) }
+            NSApp.terminate(nil)
+        }
     }
 }
 
