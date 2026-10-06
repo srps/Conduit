@@ -204,9 +204,17 @@ make_host "$WORK/installed" 1.0.0
 make_host "$WORK/v2" 2.0.0
 ( cd "$WORK/v2" && ditto -c -k --sequesterRsrc --keepParent E2EHost.app "$WORK/feed/E2EHost-2.0.0.zip" )
 LENGTH="$(stat -f %z "$WORK/feed/E2EHost-2.0.0.zip")"
-( cd "$WORK/feed" && exec python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 ) &
+# The feed server's own output is kept: on a CI runner it is the only clue
+# when the feed never comes up.
+( cd "$WORK/feed" && exec python3 -u -m http.server "$PORT" --bind 127.0.0.1 >"$WORK/server.log" 2>&1 ) &
 SERVER_PID=$!
-wait_for 10 curl -s --noproxy '*' "http://127.0.0.1:$PORT/" -o /dev/null
+if ! wait_for 30 curl -s --noproxy '*' "http://127.0.0.1:$PORT/" -o /dev/null; then
+    echo "FAIL  the local feed on 127.0.0.1:$PORT did not answer within 30 s" >&2
+    echo "      python3: $(command -v python3) ($(python3 --version 2>&1)); server log:" >&2
+    sed 's/^/      /' "$WORK/server.log" >&2
+    curl -sv --noproxy '*' "http://127.0.0.1:$PORT/" -o /dev/null 2>&1 | sed 's/^/      curl: /' >&2 || true
+    exit 1
+fi
 
 run_update() {
     rm -f "$HOST_LOG"
@@ -229,7 +237,7 @@ else
     fail "the updater did not exit after refusing the archive"
 fi
 pkill -f "$WORK/installed/E2EHost.app/Contents/MacOS" || true
-wait_for 10 host_gone
+wait_for 10 host_gone || { echo "FAIL  the 1.0.0 host did not exit after the first case" >&2; exit 1; }
 
 # 2. A correctly signed archive installs: quit, replace, relaunch.
 GOOD_SIGNATURE="$(print -rn -- "$ED_PRIVATE" | "$SIGN_UPDATE" --ed-key-file - -p "$WORK/feed/E2EHost-2.0.0.zip")"
