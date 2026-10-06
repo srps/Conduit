@@ -25,14 +25,19 @@ cat > "$scratch/bin/openssl" <<STUB
 echo "ARGV openssl \$*" >> "$log"
 exec /usr/bin/openssl "\$@"
 STUB
-# Records argv, and each secret's stdin into a file named after it.
+# Records argv, each secret's stdin into a file named after it, and the
+# ruleset body. STUB_GH_FAIL_SECRET names a secret whose upload fails.
 cat > "$scratch/bin/gh" <<STUB
 #!/bin/bash
 echo "ARGV gh \$*" >> "$log"
 case "\$1 \$2" in
     "auth status") exit 0 ;;
-    "secret set") cat > "$scratch/gh/\$3" ;;
-    "api "*) [[ "\$*" == *deployment-branch-policies* && "\$*" != *POST* ]] && echo "" ; exit 0 ;;
+    "secret set")
+        if [ "\$3" = "\${STUB_GH_FAIL_SECRET:-}" ]; then cat > /dev/null; exit 1; fi
+        cat > "$scratch/gh/\$3" ;;
+    "api "*)
+        if [[ "\$*" == *"--input -"* ]]; then cat > "$scratch/gh/ruleset.json"; fi
+        exit 0 ;;
 esac
 STUB
 chmod +x "$scratch/bin/openssl" "$scratch/bin/gh"
@@ -58,8 +63,14 @@ if [ "$rc" -ne 0 ] && grep -q "differ" "$scratch/out.log"; then ok "mismatched p
 rc=0; run "$PASSPHRASE"$'\n'"$PASSPHRASE"$'\n' || rc=$?
 if [ "$rc" -ne 0 ] && grep -q "backup-dir is required" "$scratch/out.log"; then ok "--backup-dir is required"; else fail "no backup dir (exit $rc)"; fi
 
-rc=0; run "$PASSPHRASE"$'\n'"$PASSPHRASE"$'\n' --backup-dir "$scratch/backup" --upload --repo example/repo || rc=$?
-if [ "$rc" -eq 0 ]; then ok "creates the identity"; else fail "create (exit $rc): $(cat "$scratch/out.log")"; fi
+# The first upload fails at its last secret: every local output must already
+# be written, and the retry must finish from the backups.
+rc=0; STUB_GH_FAIL_SECRET=SPARKLE_ED_PRIVATE_KEY run "$PASSPHRASE"$'\n'"$PASSPHRASE"$'\n' --backup-dir "$scratch/backup" --upload --repo example/repo || rc=$?
+if [ "$rc" -ne 0 ] && grep -q -- "--upload-from-backup" "$scratch/out.log"; then ok "a failed upload says how to retry"; else fail "failed upload (exit $rc): $(cat "$scratch/out.log")"; fi
+rc=0; run $'wrong passphrase for this\n' --upload-from-backup "$scratch/backup" --repo example/repo || rc=$?
+if [ "$rc" -ne 0 ] && grep -q "does not open" "$scratch/out.log"; then ok "a retry with the wrong passphrase is refused"; else fail "wrong-passphrase retry (exit $rc): $(cat "$scratch/out.log")"; fi
+rc=0; run "$PASSPHRASE"$'\n' --upload-from-backup "$scratch/backup" --repo example/repo || rc=$?
+if [ "$rc" -eq 0 ]; then ok "the retry from the backups uploads"; else fail "retry (exit $rc): $(cat "$scratch/out.log")"; fi
 
 pem="$scratch/repo/Resources/release-signing.pem"
 ed_public="$scratch/repo/Resources/sparkle-public-ed-key"
@@ -101,6 +112,11 @@ else
     fail "uploaded secrets do not match the backups"
 fi
 if grep -q -- "--env release" "$log" && grep -q "type=tag" "$log"; then ok "secrets go to the tag-only release environment"; else fail "release environment not configured: $(grep 'ARGV gh' "$log")"; fi
+if python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["target"]=="tag" and r["conditions"]["ref_name"]["include"]==["refs/tags/v*"] and {"creation","update","deletion"} <= {x["type"] for x in r["rules"]}' "$scratch/gh/ruleset.json"; then
+    ok "only admins may create, move or delete v* tags"
+else
+    fail "tag ruleset: $(cat "$scratch/gh/ruleset.json" 2>/dev/null)"
+fi
 
 if grep -qF "$PASSPHRASE" "$log" || grep -qF "$seed" "$log"; then fail "a secret appeared on an argv"; else ok "no secret on any argv"; fi
 if [ -z "$(ls -A "$scratch/tmp")" ]; then ok "nothing left in TMPDIR"; else fail "left behind: $(ls -A "$scratch/tmp")"; fi

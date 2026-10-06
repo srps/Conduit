@@ -21,12 +21,14 @@ this explicit administrator installation after copying the app to Applications:
 sudo /Applications/Conduit.app/Contents/Resources/install-helper.sh --source installed
 ```
 
-A helper installed from this app pins the release certificate, so later
-releases keep working with it without reinstalling the helper. A helper that was
-installed from an ad-hoc release, or pinned to a locally signed build only,
-refuses this app until it is reinstalled once; the installer's summary reports
-the new pin. Locally signed builds stay admitted beside releases when the helper
-is installed from them, because the pin includes the release certificate too.
+To enforce caller identity, install the helper with the bundled installer
+command above: it pins the release certificate, so later releases keep working
+with it without reinstalling the helper. **Install Helper** in Settings writes
+no pin, so that helper admits the console user's processes, and a helper pinned
+earlier keeps its old pin. A helper pinned to a locally signed build only
+refuses this app until the bundled installer is run once; its summary reports
+the new pin. Locally signed builds stay admitted beside releases, because the
+pin includes the release certificate too.
 
 After installing the helper, Conduit retries failed managed proxy application
 when it detects helper availability or receives a VPN/path report. The macOS PAC

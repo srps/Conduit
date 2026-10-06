@@ -16,17 +16,23 @@ Ad-hoc builds have no certificate, so a helper cannot pin them. Before 0.5,
 installing a downloaded release over a locally signed one dropped the pin, and a
 self-update could never keep it.
 
-Every release is now signed with the same certificate. A helper installed from
-any certificate-signed app pins the installed app's certificate and the release
-certificate together:
+Every release is now signed with the same certificate. The bundled installer
+(`Conduit.app/Contents/Resources/install-helper.sh`, run with `sudo`), run
+against any certificate-signed app, pins the installed app's certificate and
+the release certificate together:
 
 ```
 (certificate leaf = H"<installed app>" or certificate leaf = H"<release>")
     and (identifier "io.github.srps.Conduit" or identifier "io.github.srps.Conduit.Daemon")
 ```
 
-So a helper installed once keeps admitting later releases from GitHub, and a
-developer's locally signed builds stay admitted beside them. The nested helper
+So a helper installed this way once keeps admitting later releases from
+GitHub, and a developer's locally signed builds stay admitted beside them.
+**Install Helper** in Conduit's Settings copies the helper but neither writes
+nor changes the pin: a helper installed only that way enforces no caller
+identity (it admits the console user's processes), and one pinned earlier keeps
+its old pin. Updates work either way. Only the bundled installer turns on
+enforcement for release builds. The nested helper
 and `pm-dns` are signed as `io.github.srps.Conduit.Helper` and
 `io.github.srps.Conduit.pm-dns`, which the pin refuses.
 `scripts/verify-release-signing.sh` checks all of this on every tagged build.
@@ -50,20 +56,22 @@ It asks for a backup passphrase of at least 16 characters. The script then:
 - writes the two public files under `Resources/`; commit them;
 - writes `conduit-release-signing.p12` and `sparkle-ed25519.key.enc` to the
   backup directory, both encrypted under the passphrase;
-- with `--upload`, creates the GitHub environment `release`, which only `v*`
-  tags may deploy from, and sets its secrets `CONDUIT_RELEASE_P12_BASE64`,
+- with `--upload`, after all of that is written and read back: creates the
+  GitHub environment `release`, which only `v*` tags may deploy from; adds the
+  tag ruleset "Release tags", so only repository admins can create, move or
+  delete `v*` tags (the environment policy matches a tag but cannot say who
+  made it); and sets the secrets `CONDUIT_RELEASE_P12_BASE64`,
   `CONDUIT_RELEASE_P12_PASSWORD` and `SPARKLE_ED_PRIVATE_KEY`.
 
 Keep the passphrase and the backup files in different places, for example the
 passphrase in a password manager and the files on an encrypted drive.
 
-To upload again from the backup, for example after deleting the environment:
+If the upload fails, or to upload again later (for example after deleting the
+environment), upload from the backup. It checks that the backup opens with the
+passphrase and matches the committed certificate:
 
 ```sh
-base64 -i conduit-release-signing.p12 | tr -d '\n' | gh secret set CONDUIT_RELEASE_P12_BASE64 --env release
-gh secret set CONDUIT_RELEASE_P12_PASSWORD --env release   # prompts; type the passphrase
-openssl enc -d -aes-256-cbc -md sha256 -pbkdf2 -iter 600000 -a -in sparkle-ed25519.key.enc \
-    | gh secret set SPARKLE_ED_PRIVATE_KEY --env release      # prompts for the passphrase
+scripts/create-release-identity.sh --upload-from-backup /Volumes/<encrypted-drive>/conduit-release
 ```
 
 ## In CI
@@ -89,5 +97,5 @@ hand. Neither is routine.
   replace them. Publish a release by hand that explains the helper reinstall.
   Sparkle can also rotate the update key by signing one release with both keys;
   see its documentation.
-- **Lost secrets, backup intact:** upload them again from the backup, as above.
+- **Lost secrets, backup intact:** `--upload-from-backup`, as above.
 - **Lost backup and secrets:** treat it as rotation.

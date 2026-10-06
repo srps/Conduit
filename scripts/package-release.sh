@@ -19,8 +19,9 @@ if [ -n "${CONDUIT_RELEASE_SIGNING_IDENTITY:-}" ]; then
 certificate (see docs/release-signing.md) and is not notarized. If macOS
 blocks opening it, open System Settings > Privacy & Security and choose
 Open Anyway."
-    pin_note="A helper installed from this app pins the release certificate, so later
-releases keep working with it without reinstalling the helper."
+    pin_note="To enforce caller identity, install the helper with the command above: it
+pins the release certificate, so later releases keep working with it without
+reinstalling the helper. Install Helper in Settings writes no pin."
 else
     signing_note="This app is ad-hoc signed and is not notarized. If macOS blocks opening it,
 open System Settings > Privacy & Security and choose Open Anyway."

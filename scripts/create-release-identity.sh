@@ -10,7 +10,7 @@
 #   Sparkle Ed25519 key        signs every update archive; the app accepts an
 #                              update only with a valid signature (#111).
 #
-# Outputs:
+# Outputs, all written and checked before anything is uploaded:
 #   Resources/release-signing.pem      public certificate; commit it
 #   Resources/sparkle-public-ed-key    public update key; commit it
 #   <backup-dir>/conduit-release-signing.p12
@@ -19,9 +19,12 @@
 #   <backup-dir>/sparkle-ed25519.key.enc
 #                                      update key, encrypted under the same
 #                                      passphrase (AES-256-CBC, PBKDF2)
-# With --upload, also the GitHub environment "release" (tags v* only) and its
-# secrets CONDUIT_RELEASE_P12_BASE64, CONDUIT_RELEASE_P12_PASSWORD and
-# SPARKLE_ED_PRIVATE_KEY.
+# With --upload, then: the GitHub environment "release" (deployments from v*
+# tags only), a tag ruleset that lets only repository admins create, move or
+# delete v* tags, and the environment secrets CONDUIT_RELEASE_P12_BASE64,
+# CONDUIT_RELEASE_P12_PASSWORD and SPARKLE_ED_PRIVATE_KEY.
+# --upload-from-backup DIR does only that upload, from an earlier run's
+# backups, for example after a failed upload or a deleted environment.
 #
 # No private key or passphrase is ever on an argv or in an unencrypted file:
 # passphrases reach openssl through file descriptors, secrets reach `gh`
@@ -32,6 +35,7 @@
 # docs/release-signing.md.
 #
 #   scripts/create-release-identity.sh --backup-dir DIR [--upload] [--repo OWNER/NAME]
+#   scripts/create-release-identity.sh --upload-from-backup DIR [--repo OWNER/NAME]
 set -euo pipefail
 
 NAME="Conduit Release Signing"
@@ -39,6 +43,8 @@ ROOT_DIR="${CONDUIT_RELEASE_REPO_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CERT_OUT="$ROOT_DIR/Resources/release-signing.pem"
 ED_PUBLIC_OUT="$ROOT_DIR/Resources/sparkle-public-ed-key"
+P12_NAME="conduit-release-signing.p12"
+ED_NAME="sparkle-ed25519.key.enc"
 # The system LibreSSL: its PKCS#12 defaults are the legacy algorithms
 # `security import` on the release runner expects. `gh` and the key
 # generator can be replaced so scripts/test-create-release-identity.sh runs
@@ -52,13 +58,15 @@ KEYGEN="${CONDUIT_RELEASE_KEYGEN:-}"
 DAYS=7300
 MIN_PASSPHRASE=16
 PBKDF2_ITERATIONS=600000
+RULESET_NAME="Release tags"
 
 usage() {
-    sed -n '2,36p' "$0"
+    sed -n '2,39p' "$0"
 }
 
 BACKUP_DIR=""
 UPLOAD=false
+FROM_BACKUP=false
 REPO="srps/Conduit"
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -66,6 +74,9 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || { echo "--backup-dir needs a directory"; exit 1; }
             BACKUP_DIR="$2"; shift 2 ;;
         --upload) UPLOAD=true; shift ;;
+        --upload-from-backup)
+            [ $# -ge 2 ] || { echo "--upload-from-backup needs the backup directory"; exit 1; }
+            BACKUP_DIR="$2"; UPLOAD=true; FROM_BACKUP=true; shift 2 ;;
         --repo)
             [ $# -ge 2 ] || { echo "--repo needs OWNER/NAME"; exit 1; }
             REPO="$2"; shift 2 ;;
@@ -82,43 +93,53 @@ if [ -z "$BACKUP_DIR" ]; then
     echo "--backup-dir is required: the encrypted private keys are written there."
     exit 1
 fi
-for existing in "$CERT_OUT" "$ED_PUBLIC_OUT"; do
-    if [ -e "$existing" ]; then
-        echo "$existing already exists, so the release identity has been created."
-        echo "Rotating it is a deliberate procedure (docs/release-signing.md); remove it first."
-        exit 1
-    fi
-done
-mkdir -p "$BACKUP_DIR"
-chmod 700 "$BACKUP_DIR"
-for name in conduit-release-signing.p12 sparkle-ed25519.key.enc; do
-    if [ -e "$BACKUP_DIR/$name" ]; then
-        echo "$BACKUP_DIR/$name already exists; refusing to overwrite a backup."
-        exit 1
-    fi
-done
+if $FROM_BACKUP; then
+    for required in "$BACKUP_DIR/$P12_NAME" "$BACKUP_DIR/$ED_NAME" "$CERT_OUT" "$ED_PUBLIC_OUT"; do
+        [ -f "$required" ] || { echo "$required is missing; --upload-from-backup needs an earlier run's outputs."; exit 1; }
+    done
+else
+    for existing in "$CERT_OUT" "$ED_PUBLIC_OUT"; do
+        if [ -e "$existing" ]; then
+            echo "$existing already exists, so the release identity has been created."
+            echo "To upload it again use --upload-from-backup. Rotating it is a deliberate"
+            echo "procedure (docs/release-signing.md); remove it first."
+            exit 1
+        fi
+    done
+    for name in "$P12_NAME" "$ED_NAME"; do
+        if [ -e "$BACKUP_DIR/$name" ]; then
+            echo "$BACKUP_DIR/$name already exists; refusing to overwrite a backup."
+            exit 1
+        fi
+    done
+fi
 if $UPLOAD && ! "$GH" auth status >/dev/null 2>&1; then
-    echo "--upload needs an authenticated gh (gh auth login)."
+    echo "Uploading needs an authenticated gh (gh auth login)."
     exit 1
 fi
 
-echo "Choose a backup passphrase (at least $MIN_PASSPHRASE characters). It encrypts"
-echo "both backup files and is the CI secret that unlocks the certificate."
 PASSPHRASE=""
-CONFIRM=""
-read -rs "PASSPHRASE?Backup passphrase: " || true
-echo ""
-read -rs "CONFIRM?Again: " || true
-echo ""
-if [ "${#PASSPHRASE}" -lt "$MIN_PASSPHRASE" ]; then
-    echo "The passphrase must be at least $MIN_PASSPHRASE characters."
-    exit 1
+if $FROM_BACKUP; then
+    read -rs "PASSPHRASE?Backup passphrase: " || true
+    echo ""
+else
+    echo "Choose a backup passphrase (at least $MIN_PASSPHRASE characters). It encrypts"
+    echo "both backup files and is the CI secret that unlocks the certificate."
+    CONFIRM=""
+    read -rs "PASSPHRASE?Backup passphrase: " || true
+    echo ""
+    read -rs "CONFIRM?Again: " || true
+    echo ""
+    if [ "${#PASSPHRASE}" -lt "$MIN_PASSPHRASE" ]; then
+        echo "The passphrase must be at least $MIN_PASSPHRASE characters."
+        exit 1
+    fi
+    if [ "$PASSPHRASE" != "$CONFIRM" ]; then
+        echo "The passphrases differ."
+        exit 1
+    fi
+    unset CONFIRM
 fi
-if [ "$PASSPHRASE" != "$CONFIRM" ]; then
-    echo "The passphrases differ."
-    exit 1
-fi
-unset CONFIRM
 
 umask 077
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/conduit-release.XXXXXX")"
@@ -128,6 +149,78 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM HUP
+
+leaf_sha1() { # <PEM certificate on stdin>
+    "$OPENSSL" x509 -outform der | shasum -a 1 | awk '{ print $1 }'
+}
+
+# The backup's certificate, which must be the published one.
+p12_leaf() { # <p12>
+    "$OPENSSL" pkcs12 -in "$1" -nokeys -clcerts -passin fd:3 3< <(print -r -- "$PASSPHRASE") 2>/dev/null | leaf_sha1
+}
+
+# Decrypts the update key backup; fails on a wrong passphrase.
+decrypt_ed_backup() { # <file>
+    "$OPENSSL" enc -d -aes-256-cbc -md sha256 -pbkdf2 -iter "$PBKDF2_ITERATIONS" -a \
+        -in "$1" -pass fd:3 3< <(print -r -- "$PASSPHRASE")
+}
+
+upload() { # <p12 file>
+    # Called as `upload … || upload_failed`, where set -e does not apply, so
+    # every step returns its own failure.
+    local p12="$1"
+    echo "Creating the GitHub environment \"release\" (deployments from v* tags only)..."
+    "$GH" api -X PUT "repos/$REPO/environments/release" \
+        -F 'deployment_branch_policy[protected_branches]=false' \
+        -F 'deployment_branch_policy[custom_branch_policies]=true' >/dev/null || return 1
+    local policies
+    policies="$("$GH" api "repos/$REPO/environments/release/deployment-branch-policies" \
+        --jq '.branch_policies[] | select(.type == "tag") | .name')" || return 1
+    if ! grep -qx 'v\*' <<<"$policies"; then
+        "$GH" api -X POST "repos/$REPO/environments/release/deployment-branch-policies" \
+            -f 'name=v*' -f 'type=tag' >/dev/null || return 1
+    fi
+    # The environment policy only matches the ref; who may create the ref is
+    # this ruleset's job. Repository admins (role 5) may bypass it.
+    local rulesets
+    rulesets="$("$GH" api "repos/$REPO/rulesets" --jq '.[].name')" || return 1
+    if ! grep -qxF "$RULESET_NAME" <<<"$rulesets"; then
+        echo "Restricting v* tags to repository admins (ruleset \"$RULESET_NAME\")..."
+        "$GH" api -X POST "repos/$REPO/rulesets" --input - >/dev/null <<JSON || return 1
+{"name": "$RULESET_NAME", "target": "tag", "enforcement": "active",
+ "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+ "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
+ "bypass_actors": [{"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}]}
+JSON
+    fi
+    echo "Uploading the release secrets..."
+    base64 -i "$p12" | tr -d '\n' \
+        | "$GH" secret set CONDUIT_RELEASE_P12_BASE64 --env release --repo "$REPO" || return 1
+    print -rn -- "$PASSPHRASE" | "$GH" secret set CONDUIT_RELEASE_P12_PASSWORD --env release --repo "$REPO" || return 1
+    print -rn -- "$ED_PRIVATE" | "$GH" secret set SPARKLE_ED_PRIVATE_KEY --env release --repo "$REPO" || return 1
+}
+
+upload_failed() {
+    echo "" >&2
+    echo "The upload did not finish. Every local output is written and checked;" >&2
+    echo "retry with: scripts/create-release-identity.sh --upload-from-backup $BACKUP_DIR --repo $REPO" >&2
+    exit 1
+}
+
+if $FROM_BACKUP; then
+    if [ "$(p12_leaf "$BACKUP_DIR/$P12_NAME")" != "$(leaf_sha1 < "$CERT_OUT")" ]; then
+        echo "$BACKUP_DIR/$P12_NAME does not open with that passphrase, or is not the certificate in $CERT_OUT." >&2
+        exit 1
+    fi
+    if ! ED_PRIVATE="$(decrypt_ed_backup "$BACKUP_DIR/$ED_NAME" 2>/dev/null)" || [ "${#ED_PRIVATE}" -ne 44 ]; then
+        echo "$BACKUP_DIR/$ED_NAME does not open with that passphrase." >&2
+        exit 1
+    fi
+    upload "$BACKUP_DIR/$P12_NAME" || upload_failed
+    unset PASSPHRASE ED_PRIVATE
+    echo "GitHub environment \"release\" of $REPO holds the three secrets."
+    exit 0
+fi
 
 cat > "$WORK/cert.cnf" <<EOF
 [ req ]
@@ -176,36 +269,33 @@ if [ "${#ED_PRIVATE}" -ne 44 ] || [ "${#ED_PUBLIC}" -ne 44 ]; then
 fi
 print -rn -- "$ED_PRIVATE" \
     | "$OPENSSL" enc -aes-256-cbc -md sha256 -pbkdf2 -iter "$PBKDF2_ITERATIONS" -salt -a \
-        -pass fd:3 -out "$WORK/sparkle-ed25519.key.enc" 3< <(print -r -- "$PASSPHRASE")
+        -pass fd:3 -out "$WORK/$ED_NAME" 3< <(print -r -- "$PASSPHRASE")
 
-if $UPLOAD; then
-    echo "Creating the GitHub environment \"release\" (deployments from v* tags only)..."
-    "$GH" api -X PUT "repos/$REPO/environments/release" \
-        -F 'deployment_branch_policy[protected_branches]=false' \
-        -F 'deployment_branch_policy[custom_branch_policies]=true' >/dev/null
-    if ! "$GH" api "repos/$REPO/environments/release/deployment-branch-policies" \
-        --jq '.branch_policies[] | select(.type == "tag" and .name == "v*") | .name' | grep -qx 'v\*'; then
-        "$GH" api -X POST "repos/$REPO/environments/release/deployment-branch-policies" \
-            -f 'name=v*' -f 'type=tag' >/dev/null
-    fi
-    echo "Uploading the release secrets..."
-    base64 -i "$WORK/identity.p12" | tr -d '\n' \
-        | "$GH" secret set CONDUIT_RELEASE_P12_BASE64 --env release --repo "$REPO"
-    print -rn -- "$PASSPHRASE" | "$GH" secret set CONDUIT_RELEASE_P12_PASSWORD --env release --repo "$REPO"
-    print -rn -- "$ED_PRIVATE" | "$GH" secret set SPARKLE_ED_PRIVATE_KEY --env release --repo "$REPO"
+# Every local output first, each checked by reading it back, so a failure
+# from here on (a full backup volume, a failed upload) never leaves keys that
+# exist only in GitHub or only in a temporary directory.
+mkdir -p "$BACKUP_DIR"
+chmod 700 "$BACKUP_DIR"
+cp "$WORK/identity.p12" "$BACKUP_DIR/$P12_NAME"
+cp "$WORK/$ED_NAME" "$BACKUP_DIR/$ED_NAME"
+if [ "$(p12_leaf "$BACKUP_DIR/$P12_NAME")" != "$(leaf_sha1 < "$WORK/cert.pem")" ] \
+    || [ "$(decrypt_ed_backup "$BACKUP_DIR/$ED_NAME")" != "$ED_PRIVATE" ]; then
+    echo "The backups in $BACKUP_DIR do not read back; nothing was published or uploaded." >&2
+    rm -f "$BACKUP_DIR/$P12_NAME" "$BACKUP_DIR/$ED_NAME"
+    exit 1
 fi
-unset PASSPHRASE ED_PRIVATE
-
-# Backups last: an upload failure above leaves nothing half-written here.
-mv "$WORK/identity.p12" "$BACKUP_DIR/conduit-release-signing.p12"
-mv "$WORK/sparkle-ed25519.key.enc" "$BACKUP_DIR/sparkle-ed25519.key.enc"
 mkdir -p "$(dirname "$CERT_OUT")"
 cp "$WORK/cert.pem" "$CERT_OUT"
 chmod 644 "$CERT_OUT"
 print -r -- "$ED_PUBLIC" > "$ED_PUBLIC_OUT"
 chmod 644 "$ED_PUBLIC_OUT"
 
-LEAF_SHA1="$("$OPENSSL" x509 -in "$CERT_OUT" -outform der | shasum -a 1 | awk '{ print $1 }')"
+if $UPLOAD; then
+    upload "$BACKUP_DIR/$P12_NAME" || upload_failed
+fi
+unset PASSPHRASE ED_PRIVATE
+
+LEAF_SHA1="$(leaf_sha1 < "$CERT_OUT")"
 LEAF_SHA256="$("$OPENSSL" x509 -in "$CERT_OUT" -outform der | shasum -a 256 | awk '{ print $1 }')"
 echo ""
 echo "Created \"$NAME\" (leaf SHA-1 $LEAF_SHA1, SHA-256 $LEAF_SHA256)."
@@ -213,11 +303,10 @@ echo "Public, commit these:"
 echo "  $CERT_OUT"
 echo "  $ED_PUBLIC_OUT"
 echo "Private, encrypted under your passphrase; store them away from it:"
-echo "  $BACKUP_DIR/conduit-release-signing.p12"
-echo "  $BACKUP_DIR/sparkle-ed25519.key.enc"
+echo "  $BACKUP_DIR/$P12_NAME"
+echo "  $BACKUP_DIR/$ED_NAME"
 if $UPLOAD; then
-    echo "GitHub environment \"release\" of $REPO holds the three secrets."
+    echo "GitHub environment \"release\" of $REPO holds the three secrets; v* tags are admin-only."
 else
-    echo "Nothing was uploaded. Rerun is refused once the public files exist; to"
-    echo "upload from the backup instead, see docs/release-signing.md."
+    echo "Nothing was uploaded. To upload later: --upload-from-backup $BACKUP_DIR"
 fi
