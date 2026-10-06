@@ -29,6 +29,8 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     private var lockDescriptor: Int32 = -1
     /// Set when the cycle is over and the lock released, until exit.
     private var exiting = false
+    /// Bounds a background check; cancelled when the user asks for one.
+    private var backgroundTimeout: Task<Void, Never>?
     /// What to check once Sparkle is up: the launch argument, upgraded to
     /// interactive if the user asks while this process is still starting.
     private var startupMode: UpdaterContract.LaunchMode
@@ -147,15 +149,19 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         }
         switch mode {
         case .interactive:
+            // The user's check is not bounded by a background one's limit.
+            backgroundTimeout?.cancel()
+            backgroundTimeout = nil
             NSApp.activate()
             updater.checkForUpdates()
         case .background:
             updater.checkForUpdatesInBackground()
-            Task { [weak self] in
+            backgroundTimeout?.cancel()
+            backgroundTimeout = Task { [weak self] in
                 do {
                     try await Task.sleep(for: Self.backgroundCheckLimit)
                 } catch {
-                    return  // cancelled: the process is exiting anyway
+                    return  // cancelled: the user asked for a check, or the process is exiting
                 }
                 guard let self, !self.foundUpdate else { return }
                 self.report(.failed, detail: "reason=background_check_timeout")

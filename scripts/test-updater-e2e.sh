@@ -48,7 +48,7 @@ cleanup() {
     # stop the stand-ins until none is left.
     local attempt
     for attempt in 1 2 3 4 5; do
-        pkill -f "$WORK/" 2>/dev/null || break
+        pkill -f "$WORK/" 2>/dev/null || true
         sleep 1
     done
     if [ -n "$KEYCHAIN" ]; then
