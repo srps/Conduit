@@ -649,7 +649,6 @@ package final class FakeUpdaterLauncher: UpdaterLaunching, @unchecked Sendable {
     private let lock = NSLock()
     private var _starts: [UpdaterContract.LaunchMode] = []
     private var _failure: String?
-    private var _outcome: UpdaterLaunchOutcome = .launched
 
     package init() {}
 
@@ -660,18 +659,12 @@ package final class FakeUpdaterLauncher: UpdaterLaunching, @unchecked Sendable {
         get { lock.withLock { _failure } }
         set { lock.withLock { _failure = newValue } }
     }
-    package var outcome: UpdaterLaunchOutcome {
-        get { lock.withLock { _outcome } }
-        set { lock.withLock { _outcome = newValue } }
-    }
-
-    package func start(_ mode: UpdaterContract.LaunchMode) async throws -> UpdaterLaunchOutcome {
-        let (failure, outcome): (String?, UpdaterLaunchOutcome) = lock.withLock {
+    package func start(_ mode: UpdaterContract.LaunchMode) async throws {
+        let failure: String? = lock.withLock {
             _starts.append(mode)
-            return (_failure, _outcome)
+            return _failure
         }
         if let failure { throw UpdaterLaunchError(failure) }
-        return outcome
     }
 }
 

@@ -37,12 +37,20 @@ BIN="$(xcrun swift build --show-bin-path)"
 SIGN_UPDATE="$(find "$ROOT_DIR/.build/artifacts" -path '*Sparkle/bin/sign_update' -type f -print -quit)"
 [ -x "$SIGN_UPDATE" ] || { echo "sign_update not found under .build/artifacts"; exit 1; }
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/updater-e2e.XXXXXX")"
+# Canonical (/private/var/…, no "//" from a TMPDIR ending in "/"), so the
+# pkill/pgrep patterns below match the stand-ins' real paths.
+WORK="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/updater-e2e.XXXXXX")" && pwd -P)"
 SERVER_PID=""
 KEYCHAIN=""
 ORIGINAL_KEYCHAINS=()
 cleanup() {
-    pkill -f "$WORK/" 2>/dev/null || true
+    # Sparkle's relaunch of the new version can land after the checks, so
+    # stop the stand-ins until none is left.
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        pkill -f "$WORK/" 2>/dev/null || break
+        sleep 1
+    done
     if [ -n "$KEYCHAIN" ]; then
         security list-keychains -d user -s "${ORIGINAL_KEYCHAINS[@]}"
         security delete-keychain "$KEYCHAIN" 2>/dev/null || true
@@ -219,11 +227,17 @@ if ! wait_for 120 curl -s --noproxy '*' "http://127.0.0.1:$PORT/" -o /dev/null; 
     exit 1
 fi
 
-run_update() {
+run_update() { # [concurrent updater launches, default 1]
     rm -f "$HOST_LOG"
     open -n "$WORK/installed/E2EHost.app"
     wait_for 15 grep -qs "^launched 1.0.0" "$HOST_LOG" || { fail "the 1.0.0 host did not start"; return 1; }
-    open -n "$WORK/installed/E2EHost.app/Contents/Helpers/Conduit Updater.app" --args --check --test-auto-install
+    local i launches=()
+    for i in $(seq 1 "${1:-1}"); do
+        open -n "$WORK/installed/E2EHost.app/Contents/Helpers/Conduit Updater.app" --args --check --test-auto-install &
+        launches+=($!)
+    done
+    # Only these: a bare `wait` would also wait for the feed server.
+    wait "${launches[@]}"
 }
 
 # 1. An archive signed with another key is refused; 1.0.0 stays.
@@ -242,25 +256,34 @@ fi
 pkill -f "$WORK/installed/E2EHost.app/Contents/MacOS" || true
 wait_for 10 host_gone || { echo "FAIL  the 1.0.0 host did not exit after the first case" >&2; exit 1; }
 
-# 2. A correctly signed archive installs: quit, replace, relaunch.
+# 2. A correctly signed archive installs: quit, replace, relaunch. Three
+# updaters start at once; their lock must leave exactly one installing.
 GOOD_SIGNATURE="$(print -rn -- "$ED_PRIVATE" | "$SIGN_UPDATE" --ed-key-file - -p "$WORK/feed/E2EHost-2.0.0.zip")"
 make_feed E2EHost-2.0.0.zip "$GOOD_SIGNATURE" "$LENGTH"
-run_update
+run_update 3
 if wait_for "$TIMEOUT" grep -qs "^launched 2.0.0" "$HOST_LOG"; then
     ok "the signed update was installed and 2.0.0 relaunched"
 else
     fail "no 2.0.0 relaunch within ${TIMEOUT}s; host log: $(tr '\n' ';' < "$HOST_LOG"); installed $(installed_version)"
 fi
-if grep -qs "^terminated 1.0.0" "$HOST_LOG"; then
+host_pid="$(awk '/^launched 1.0.0/ { print $3; exit }' "$HOST_LOG" 2>/dev/null)"
+if [ -n "$host_pid" ] && grep -qs "^terminated 1.0.0 $host_pid\$" "$HOST_LOG"; then
     ok "the running 1.0.0 host quit through its normal termination path"
 else
     fail "the 1.0.0 host never ran applicationWillTerminate"
 fi
 [ "$(installed_version)" = 2.0.0 ] && ok "the bundle on disk is 2.0.0" || fail "installed version is $(installed_version)"
 if wait_for 30 updater_gone; then
-    ok "the updater exited after the install"
+    ok "all three updaters exited after the install"
 else
-    fail "the updater is still running after the install"
+    fail "an updater is still running after the install"
+fi
+sleep 2
+launches="$(grep -c "^launched 2.0.0" "$HOST_LOG" || true)"
+if [ "$launches" = 1 ]; then
+    ok "three concurrent updaters installed and relaunched once"
+else
+    fail "concurrent updaters: $(tr '\n' ';' < "$HOST_LOG")"
 fi
 
 if [ "$failures" -ne 0 ]; then

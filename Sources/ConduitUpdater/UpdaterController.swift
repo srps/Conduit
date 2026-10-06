@@ -1,5 +1,6 @@
 import AppKit
 import ConduitShared
+import CryptoKit
 import os
 import Sparkle
 
@@ -11,8 +12,9 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     /// A background check that finds nothing exits on its own; this bounds
     /// one that hangs (Sparkle's own request timeouts are per request).
     private static let backgroundCheckLimit: Duration = .seconds(300)
-    /// How long a hand-off waits for the owning updater: 50 × 100 ms.
-    private static let handOffReadinessPolls = 50
+    /// How long a finished updater lingers after releasing its lock, to
+    /// take a request posted just before the release.
+    private static let exitGrace: TimeInterval = 0.5
 
     private let initialMode: UpdaterContract.LaunchMode
     private let autoInstall: Bool
@@ -23,6 +25,10 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     /// Set once a failure is reported, so the cycle's own error is not a duplicate.
     private var reportedFailure = false
     private var handedOff = false
+    /// The ownership lock (see `acquireOwnership`); held until exit.
+    private var lockDescriptor: Int32 = -1
+    /// Set when the cycle is over and the lock released, until exit.
+    private var exiting = false
     /// What to check once Sparkle is up: the launch argument, upgraded to
     /// interactive if the user asks while this process is still starting.
     private var startupMode: UpdaterContract.LaunchMode
@@ -33,9 +39,11 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         self.autoInstall = autoInstall
     }
 
-    /// The check observer is registered here, before the process counts as
-    /// finished launching: the app hands a request to a running updater only
-    /// once `isFinishedLaunching` is true, so no request falls in a gap.
+    /// One updater per host, chosen by an exclusive lock on a per-host file.
+    /// Every process registers its check observer first and only then tries
+    /// the lock, so a process that finds the lock taken knows its holder is
+    /// already listening: it passes its request on and exits. No polling, and
+    /// no ordering of arrivals can leave two owners or none.
     func applicationWillFinishLaunching(_ notification: Notification) {
         let hostURL = UpdaterContract.hostURL(containing: Bundle.main.bundleURL)
         guard let host = Bundle(url: hostURL), let hostIdentifier = host.bundleIdentifier,
@@ -46,12 +54,7 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
             exit(EX_CONFIG)
         }
         hostBundle = host
-
-        if handOffToRunningUpdater(hostIdentifier: hostIdentifier) {
-            handedOff = true
-            return
-        }
-        DistributedNotificationCenter.default().addObserver(
+        let observer = DistributedNotificationCenter.default().addObserver(
             forName: UpdaterContract.checkNotification(hostIdentifier: hostIdentifier),
             object: nil, queue: .main
         ) { [weak self] note in
@@ -60,11 +63,30 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
             guard let mode = UpdaterContract.parseCheck(note.userInfo, hostPath: hostPath) else { return }
             MainActor.assumeIsolated { self?.check(mode) }
         }
+        switch acquireOwnership() {
+        case .owner:
+            break
+        case .taken:
+            DistributedNotificationCenter.default().removeObserver(observer)
+            DistributedNotificationCenter.default().postNotificationName(
+                UpdaterContract.checkNotification(hostIdentifier: hostIdentifier), object: nil,
+                userInfo: [UpdaterContract.Key.hostPath: host.bundlePath, UpdaterContract.Key.mode: initialMode.rawValue],
+                deliverImmediately: true
+            )
+            logger.info("Another updater owns this host; passed the \(self.initialMode.rawValue, privacy: .public) request on")
+            handedOff = true
+        case .failed(let reason):
+            // Without the lock two updaters could race an install; refuse.
+            report(.failed, detail: "reason=lock \(reason)")
+            handedOff = true
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // A hand-off terminates once its request is posted.
-        guard !handedOff, let host = hostBundle else { return }
+        guard !handedOff, let host = hostBundle else {
+            NSApp.terminate(nil)
+            return
+        }
         var driver: any SPUUserDriver = SPUStandardUserDriver(hostBundle: host, delegate: nil)
         #if DEBUG
         if autoInstall { driver = AutoInstallUserDriver() }
@@ -82,41 +104,42 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         check(startupMode)
     }
 
-    /// One updater per host. A newcomer hands its request to an updater that
-    /// is already up, or, when two start together, to the one with the lower
-    /// pid, so two newcomers can never hand off to each other and both exit.
-    private func handOffToRunningUpdater(hostIdentifier: String) -> Bool {
-        let me = ProcessInfo.processInfo.processIdentifier
-        let others = NSRunningApplication.runningApplications(withBundleIdentifier: UpdaterContract.bundleIdentifier)
-            .filter { $0.processIdentifier != me && $0.bundleURL.map { UpdaterContract.samePath($0.path, Bundle.main.bundlePath) } == true }
-        guard let owner = others.first(where: \.isFinishedLaunching)
-                ?? others.filter({ $0.processIdentifier < me }).min(by: { $0.processIdentifier < $1.processIdentifier }),
-              let host = hostBundle else { return false }
-        let request = [UpdaterContract.Key.hostPath: host.bundlePath, UpdaterContract.Key.mode: initialMode.rawValue]
-        let name = UpdaterContract.checkNotification(hostIdentifier: hostIdentifier)
-        let mode = initialMode.rawValue
-        // The owner listens once it is finishing its launch; post only then,
-        // or the request could reach no one. Bounded like the app's hand-off.
-        Task { @MainActor in
-            for _ in 0..<Self.handOffReadinessPolls where !owner.isFinishedLaunching && !owner.isTerminated {
-                do {
-                    try await Task.sleep(for: .milliseconds(100))
-                } catch {
-                    break  // cancelled: exiting anyway
-                }
-            }
-            if owner.isFinishedLaunching && !owner.isTerminated {
-                DistributedNotificationCenter.default().postNotificationName(name, object: nil, userInfo: request, deliverImmediately: true)
-                logger.info("Updater already running (pid \(owner.processIdentifier)); passed the \(mode, privacy: .public) request on")
-            } else {
-                logger.error("The running updater (pid \(owner.processIdentifier)) never finished starting; the \(mode, privacy: .public) request was not passed on")
-            }
-            NSApp.terminate(nil)
+    private enum Ownership { case owner, taken, failed(String) }
+
+    /// The lock file, per user and per host path.
+    private func lockURL() -> URL {
+        let path = (hostBundle?.bundleURL ?? Bundle.main.bundleURL).standardizedFileURL.resolvingSymlinksInPath().path
+        let digest = SHA256.hash(data: Data(path.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
+        return FileManager.default.temporaryDirectory.appendingPathComponent("\(UpdaterContract.bundleIdentifier).\(digest).lock")
+    }
+
+    private func acquireOwnership() -> Ownership {
+        if lockDescriptor < 0 {
+            let fd = open(lockURL().path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+            guard fd >= 0 else { return .failed("cannot open \(lockURL().path): \(String(cString: strerror(errno)))") }
+            lockDescriptor = fd
         }
-        return true
+        if flock(lockDescriptor, LOCK_EX | LOCK_NB) == 0 { return .owner }
+        let code = errno
+        return code == EWOULDBLOCK ? .taken : .failed("flock: \(String(cString: strerror(code)))")
+    }
+
+    /// Released before exiting, so a request racing the exit starts a new
+    /// owner instead of reaching a process that is going away.
+    private func releaseOwnership() {
+        guard lockDescriptor >= 0 else { return }
+        if flock(lockDescriptor, LOCK_UN) != 0 {
+            logger.error("Could not release the updater lock: \(String(cString: strerror(errno)), privacy: .public); it goes with the process")
+        }
     }
 
     private func check(_ mode: UpdaterContract.LaunchMode) {
+        if exiting {
+            // A request posted just before the lock was released: take it on
+            // if the lock is still free, or leave it to whoever took it.
+            guard case .owner = acquireOwnership() else { return }
+            exiting = false
+        }
         guard let updater else {
             // Still starting: the first check happens once Sparkle is up.
             if mode == .interactive { startupMode = .interactive }
@@ -199,7 +222,13 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         }
         MainActor.assumeIsolated {
             if let detail, !reportedFailure { report(.failed, detail: detail) }
-            NSApp.terminate(nil)
+            exiting = true
+            releaseOwnership()
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.exitGrace) { [weak self] in
+                MainActor.assumeIsolated {
+                    if self?.exiting != false { NSApp.terminate(nil) }
+                }
+            }
         }
     }
 }

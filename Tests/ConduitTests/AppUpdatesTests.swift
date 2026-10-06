@@ -287,16 +287,13 @@ final class UpdateCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.status.lastReport, .init(report: .failed, detail: "reason=no updater at /x"))
     }
 
-    func testLaunchFailuresAndHandOffsAreEvents() async {
+    func testLaunchFailuresAreEvents() async {
         let coordinator = coordinator()
         coordinator.start(automaticChecks: false)
         launcher.failure = "no updater at /x"
         await coordinator.check(.interactive, source: .user)
         XCTAssertEqual(events.last?.event, "update.launch_failed")
-        launcher.failure = nil
-        launcher.outcome = .handedOff
-        await coordinator.check(.interactive, source: .user)
-        XCTAssertEqual(events.last?.event, "update.check_handed_off")
+        XCTAssertEqual(events.last?.detail, "source=user reason=no updater at /x")
     }
 
     func testReportsBecomeEventsAndStatus() {

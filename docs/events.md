@@ -74,7 +74,6 @@ exactly these semantics; do not repurpose them.
 | `lifecycle.crash_restart` *(planned)* | First startup after an unclean exit; detail references prior exit evidence and the matching crash-report name. |
 | `lifecycle.version_changed` | The app launched with a different version than the last launch recorded in `update-state.json` (`detail: from=… to=…`). After an in-app update this is the first event of the relaunched version; a manual install produces it too. Not emitted on a first launch. |
 | `update.check_requested` | The app started the nested updater (`source=user` for "Check for Updates…", `source=schedule` for the daily background check). Recorded as the last check whatever the outcome, so a failing feed is retried at the next interval rather than in a loop. |
-| `update.check_handed_off` | The updater was already running and received the request instead of a second process (`source=`). |
 | `update.check_unavailable` | A check was asked for in a build that cannot update itself (`source=`, `reason=` no update signing key, no feed, or no bundled updater). |
 | `update.launch_failed` | The updater process could not be started (`source=`, `reason=`). |
 | `update.available` | Reported by the updater: the feed offers a newer, compatible version whose archive Sparkle will verify against the app's update key (`version=`). |

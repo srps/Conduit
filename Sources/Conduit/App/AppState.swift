@@ -370,7 +370,7 @@ final class AppState: ObservableObject {
             currentVersion: currentVersion
                 ?? (hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unbundled",
             availability: updaterAvailability ?? UpdaterAvailability.of(hostBundle: hostBundle),
-            launcher: updaterLauncher ?? SystemUpdaterLauncher(hostURL: hostBundle.bundleURL, hostIdentifier: hostIdentifier),
+            launcher: updaterLauncher ?? SystemUpdaterLauncher(hostURL: hostBundle.bundleURL),
             store: UpdateStateStore(file: runtimeEnvironment.updateStateFile),
             reports: updateReports ?? DistributedUpdateReports(),
             record: { [logStore] event in
