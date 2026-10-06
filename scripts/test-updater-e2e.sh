@@ -53,6 +53,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The feed server starts first: a cold Python on a CI runner has taken over
+# 30 s to answer, and starting it now overlaps that with the builds below.
+# Its output is kept, as the only clue if it never comes up.
+mkdir -p "$WORK/feed"
+PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+FEED="http://127.0.0.1:$PORT/appcast.xml"
+( cd "$WORK/feed" && exec python3 -u -m http.server "$PORT" --bind 127.0.0.1 >"$WORK/server.log" 2>&1 ) &
+SERVER_PID=$!
+
 failures=0
 ok() { echo "ok    $1"; }
 fail() { echo "FAIL  $1"; failures=$((failures + 1)); }
@@ -108,8 +117,6 @@ if $SIGNED; then
     echo "Signing with a throwaway certificate ($IDENTITY) and the hardened runtime"
 fi
 
-PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
-FEED="http://127.0.0.1:$PORT/appcast.xml"
 
 make_host() { # <dir> <version>
     local app="$1/E2EHost.app" version="$2"
@@ -204,12 +211,8 @@ make_host "$WORK/installed" 1.0.0
 make_host "$WORK/v2" 2.0.0
 ( cd "$WORK/v2" && ditto -c -k --sequesterRsrc --keepParent E2EHost.app "$WORK/feed/E2EHost-2.0.0.zip" )
 LENGTH="$(stat -f %z "$WORK/feed/E2EHost-2.0.0.zip")"
-# The feed server's own output is kept: on a CI runner it is the only clue
-# when the feed never comes up.
-( cd "$WORK/feed" && exec python3 -u -m http.server "$PORT" --bind 127.0.0.1 >"$WORK/server.log" 2>&1 ) &
-SERVER_PID=$!
-if ! wait_for 30 curl -s --noproxy '*' "http://127.0.0.1:$PORT/" -o /dev/null; then
-    echo "FAIL  the local feed on 127.0.0.1:$PORT did not answer within 30 s" >&2
+if ! wait_for 120 curl -s --noproxy '*' "http://127.0.0.1:$PORT/" -o /dev/null; then
+    echo "FAIL  the local feed on 127.0.0.1:$PORT did not answer within 120 s" >&2
     echo "      python3: $(command -v python3) ($(python3 --version 2>&1)); server log:" >&2
     sed 's/^/      /' "$WORK/server.log" >&2
     curl -sv --noproxy '*' "http://127.0.0.1:$PORT/" -o /dev/null 2>&1 | sed 's/^/      curl: /' >&2 || true
