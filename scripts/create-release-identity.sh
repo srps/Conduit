@@ -184,14 +184,17 @@ ruleset_protects_release_tags() {
     /usr/bin/python3 -c '
 import json, sys
 r = json.load(sys.stdin)
-include = r.get("conditions", {}).get("ref_name", {}).get("include", [])
+ref_name = r.get("conditions", {}).get("ref_name", {})
+include = ref_name.get("include", [])
+# Any exclusion would leave some v* tags creatable by non-admins.
+excludes_nothing = not ref_name.get("exclude")
 rules = {rule.get("type") for rule in r.get("rules", [])}
 # Anyone allowed to bypass may create the tags; only repository admins may.
 bypass_ok = all(a.get("actor_type") == "RepositoryRole" and a.get("actor_id") == 5
                 for a in r.get("bypass_actors", []))
 ok = (r.get("enforcement") == "active" and r.get("target") == "tag"
-      and "refs/tags/v*" in include and {"creation", "update", "deletion"} <= rules
-      and bypass_ok)
+      and "refs/tags/v*" in include and excludes_nothing
+      and {"creation", "update", "deletion"} <= rules and bypass_ok)
 sys.exit(0 if ok else 1)'
 }
 

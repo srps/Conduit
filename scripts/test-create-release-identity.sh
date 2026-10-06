@@ -85,6 +85,15 @@ else
     fail "ineffective ruleset (exit $rc): $(cat "$scratch/out.log")"
 fi
 rm -f "$scratch/gh/ruleset.json"
+# Nor does one that excludes some v* tags from the restriction.
+echo '{"name":"Release tags","target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":["refs/tags/v0*"]}},"rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"}],"bypass_actors":[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]}' > "$scratch/gh/ruleset.json"
+rm -rf "$scratch/repo/Resources" "$scratch/backup"
+rc=0; run "$PASSPHRASE"$'\n'"$PASSPHRASE"$'\n' --backup-dir "$scratch/backup" --upload --repo example/repo || rc=$?
+if [ "$rc" -ne 0 ] && grep -q "does not actively restrict" "$scratch/out.log" && ! ls "$scratch/gh" | grep -q '^CONDUIT\|^SPARKLE'; then
+    ok "a ruleset that excludes some v* tags stops the upload"
+else
+    fail "ruleset with exclusions (exit $rc): $(cat "$scratch/out.log")"
+fi
 # Nor does one that lets a non-admin bypass it: a bypass may create v* tags.
 echo '{"name":"Release tags","target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"]}},"rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"}],"bypass_actors":[{"actor_id":2,"actor_type":"RepositoryRole","bypass_mode":"always"}]}' > "$scratch/gh/ruleset.json"
 rm -rf "$scratch/repo/Resources" "$scratch/backup"
