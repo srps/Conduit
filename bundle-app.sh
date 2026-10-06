@@ -71,6 +71,11 @@ cp "$BUILD_DIR/ConduitHelper" "$HELPERS/$BUNDLE_ID.Helper"
 cp "$BUILD_DIR/pm-dns" "$MACOS/pm-dns"
 cp "$SCRIPT_DIR/install-helper.sh" "$CONTENTS/Resources/install-helper.sh"
 chmod 755 "$CONTENTS/Resources/install-helper.sh"
+# The published release certificate, next to install-helper.sh, which adds
+# it to the helper's pin so a GitHub release update stays admitted.
+if [ -f "$SCRIPT_DIR/Resources/release-signing.pem" ]; then
+    cp "$SCRIPT_DIR/Resources/release-signing.pem" "$CONTENTS/Resources/release-signing.pem"
+fi
 echo -n "APPL????" > "$CONTENTS/PkgInfo"
 
 if [ -f "$SCRIPT_DIR/Resources/AppIcon.icns" ]; then
@@ -129,7 +134,24 @@ PLIST
 SIGNING_NAME="Conduit Local Signing"
 SIGNING_HASH="$(security find-identity -p codesigning 2>/dev/null \
     | awk -v name="\"$SIGNING_NAME\"" 'index($0, name) { print $2; exit }' || true)"
-if $SHARE; then
+RELEASE_IDENTITY="${CONDUIT_RELEASE_SIGNING_IDENTITY:-}"
+if $SHARE && [ -n "$RELEASE_IDENTITY" ]; then
+    # Release CI (scripts/import-release-identity.sh): every published build
+    # carries the one certificate helpers pin, with the hardened runtime the
+    # helper requires. Inside out, with explicit identifiers: left to itself
+    # codesign names "$BUNDLE_ID.Helper" "$BUNDLE_ID" (it drops what looks
+    # like an extension), and the caller pin admits that identifier.
+    echo "Signing with \"Conduit Release Signing\" ($RELEASE_IDENTITY), hardened runtime..."
+    codesign --force --options runtime --timestamp=none --sign "$RELEASE_IDENTITY" \
+        --identifier "$BUNDLE_ID.Helper" "$HELPERS/$BUNDLE_ID.Helper"
+    codesign --force --options runtime --timestamp=none --sign "$RELEASE_IDENTITY" \
+        --identifier "$BUNDLE_ID.pm-dns" "$MACOS/pm-dns"
+    codesign --force --options runtime --timestamp=none --sign "$RELEASE_IDENTITY" "$APP_DIR"
+    codesign --verify --strict --deep "$APP_DIR"
+elif $SHARE && [ -n "${CONDUIT_REQUIRE_RELEASE_SIGNING:-}" ]; then
+    echo "CONDUIT_REQUIRE_RELEASE_SIGNING is set but CONDUIT_RELEASE_SIGNING_IDENTITY is not; refusing to publish an ad-hoc release." >&2
+    exit 1
+elif $SHARE; then
     # A local self-signed certificate is for helper identity pinning on the
     # builder's Mac. Shared test builds must not depend on that Mac's trust.
     echo "Signing shared test build ad-hoc..."
@@ -160,6 +182,9 @@ if $SHARE; then
     ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "$SHARE_ZIP"
     echo "Shared test build: $SHARE_ZIP"
     echo "Requires macOS 26 or later, architecture $ARCH. Not notarized."
+    if [ -z "$RELEASE_IDENTITY" ]; then
+        echo "Signed ad-hoc: a helper that enforces a caller pin refuses it."
+    fi
     exit 0
 fi
 

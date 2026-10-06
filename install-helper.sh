@@ -36,7 +36,9 @@ usage() {
 #
 # Sets CALLER_REQUIREMENT, or CALLER_REQUIREMENT_ERROR and returns 1 for
 # code that is unsigned, ad-hoc or broken: such code has no certificate to
-# pin, and pinning its hash would break on the next build.
+# pin, and pinning its hash would break on the next build. Returns 3 when the
+# bundled release certificate is unreadable; that is a broken install, not a
+# reason to drop the pin.
 derive_caller_requirement() {
     local target="$1" certs leaf flags
     CALLER_REQUIREMENT=""
@@ -62,13 +64,51 @@ derive_caller_requirement() {
         return 1
     fi
     leaf="$(shasum -a 1 "$certs/cert0" | awk '{ print $1 }')"
+    if ! release_certificate_leaf "$certs"; then
+        rm -rf "$certs"
+        return 3
+    fi
     rm -rf "$certs"
-    CALLER_REQUIREMENT="certificate leaf = H\"$leaf\" and (identifier \"$BUNDLE_ID\" or identifier \"$BUNDLE_ID.Daemon\")"
+    if [ -n "$RELEASE_LEAF" ] && [ "$RELEASE_LEAF" != "$leaf" ]; then
+        CALLER_REQUIREMENT="(certificate leaf = H\"$leaf\" or certificate leaf = H\"$RELEASE_LEAF\") and (identifier \"$BUNDLE_ID\" or identifier \"$BUNDLE_ID.Daemon\")"
+    else
+        CALLER_REQUIREMENT="certificate leaf = H\"$leaf\" and (identifier \"$BUNDLE_ID\" or identifier \"$BUNDLE_ID.Daemon\")"
+    fi
     if [[ "$flags" != *runtime* ]]; then
         # Not a reason to withhold the pin, only a warning: the helper will
         # refuse this build until it is re-signed with the hardened runtime.
         echo "warning: $target is not signed with the hardened runtime; the helper will refuse it until ./bundle-app.sh re-signs it" >&2
     fi
+    return 0
+}
+
+# The published release certificate (scripts/create-release-identity.sh),
+# which signs every GitHub release. A pin that also admits it keeps the helper
+# working after an update from GitHub, whatever signed the installed app. It
+# sits beside this script inside the app and under Resources/ in a checkout.
+# CONDUIT_RELEASE_SIGNING_CERT replaces it for scripts/test-install-helper-args.sh
+# and is ignored under sudo.
+#
+# Sets RELEASE_LEAF (empty when there is no release certificate), or
+# CALLER_REQUIREMENT_ERROR and returns 1 for one that cannot be read: a pin
+# silently missing it would lock out the next update.
+release_certificate_leaf() {
+    local scratch="$1" pem candidates
+    RELEASE_LEAF=""
+    candidates=("$SCRIPT_DIR/release-signing.pem" "$SCRIPT_DIR/Resources/release-signing.pem")
+    if [ "$(id -u)" -ne 0 ] && [ -n "${CONDUIT_RELEASE_SIGNING_CERT:-}" ]; then
+        candidates=("$CONDUIT_RELEASE_SIGNING_CERT")
+    fi
+    for pem in "${candidates[@]}"; do
+        [ -f "$pem" ] || continue
+        if ! /usr/bin/openssl x509 -in "$pem" -outform der -out "$scratch/release.der" 2>/dev/null \
+            || [ ! -s "$scratch/release.der" ]; then
+            CALLER_REQUIREMENT_ERROR="the release certificate $pem is not a PEM certificate"
+            return 1
+        fi
+        RELEASE_LEAF="$(shasum -a 1 "$scratch/release.der" | awk '{ print $1 }')"
+        return 0
+    done
     return 0
 }
 
@@ -115,12 +155,16 @@ done
 
 # Read-only preview of the pin, no root needed: what would be written for
 # this app. Exit 2 when there is nothing to pin.
+# Exit 3 when the release certificate beside this script is unreadable.
 if [ -n "$PRINT_REQUIREMENT_FOR" ]; then
-    if derive_caller_requirement "$PRINT_REQUIREMENT_FOR"; then
+    rc=0
+    derive_caller_requirement "$PRINT_REQUIREMENT_FOR" || rc=$?
+    if [ "$rc" -eq 0 ]; then
         echo "$CALLER_REQUIREMENT"
         exit 0
     fi
     echo "$CALLER_REQUIREMENT_ERROR" >&2
+    [ "$rc" -eq 3 ] && exit 3
     exit 2
 fi
 
@@ -179,7 +223,12 @@ fi
 # signature stops the install with the old helper still running.
 PIN_ACTION="none"
 if [ -d "$PIN_APP" ]; then
-    if derive_caller_requirement "$PIN_APP"; then
+    rc=0
+    derive_caller_requirement "$PIN_APP" || rc=$?
+    if [ "$rc" -eq 3 ]; then
+        echo "$CALLER_REQUIREMENT_ERROR; refusing to install rather than drop the release certificate from the pin."
+        exit 1
+    elif [ "$rc" -eq 0 ]; then
         if ! codesign --verify -R "=$CALLER_REQUIREMENT" "$PIN_APP" 2>/dev/null; then
             echo "The derived caller requirement does not accept $PIN_APP itself; refusing to install a pin that would lock it out:"
             echo "  $CALLER_REQUIREMENT"
@@ -245,6 +294,9 @@ case "$PIN_ACTION" in
         chmod 644 "$pin_tmp"
         mv -f "$pin_tmp" "$CALLER_REQ"
         CALLER_STATUS="ENFORCED: only programs signed like $PIN_APP ($CALLER_REQ)"
+        if [ -n "$RELEASE_LEAF" ]; then
+            CALLER_STATUS="$CALLER_STATUS, or by the Conduit release certificate"
+        fi
         ;;
     remove)
         rm -f "$CALLER_REQ"

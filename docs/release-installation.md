@@ -5,8 +5,9 @@ Open the `.dmg`, drag **Conduit.app** into **Applications**, and launch it from
 Applications. The `.zip` contains the same app if you prefer an archive.
 No Xcode, Swift installation, or local bundling is required.
 
-These packages are ad-hoc signed and are not notarized. If macOS blocks the
-first launch, go to **System Settings → Privacy & Security → Open Anyway**.
+These packages are signed with Conduit's self-signed release certificate
+([release signing](release-signing.md)) and are not notarized. If macOS blocks
+the first launch, go to **System Settings → Privacy & Security → Open Anyway**.
 The privileged helper is not installed by dragging the app. Helper v5 is required
 for **Manage macOS proxy settings** and **Manage system DNS**. Install or reinstall
 it from Conduit's Settings before using those integrations. Other functionality
@@ -20,12 +21,14 @@ this explicit administrator installation after copying the app to Applications:
 sudo /Applications/Conduit.app/Contents/Resources/install-helper.sh --source installed
 ```
 
-Locally certificate-signed builds retain caller-identity enforcement when the
-same certificate signs the new app. These shared ad-hoc packages have no signing
-certificate to pin: their installer reports caller identity as unenforced and
-keeps the console-user admission rule. Installing them over a locally pinned
-build changes that policy; review the installer's summary. To retain your local
-pin, build the release from source using the same local signing identity.
+To enforce caller identity, install the helper with the bundled installer
+command above: it pins the release certificate, so later releases keep working
+with it without reinstalling the helper. **Install Helper** in Settings writes
+no pin, so that helper admits the console user's processes, and a helper pinned
+earlier keeps its old pin. A helper pinned to a locally signed build only
+refuses this app until the bundled installer is run once; its summary reports
+the new pin. Locally signed builds stay admitted beside releases, because the
+pin includes the release certificate too.
 
 After installing the helper, Conduit retries failed managed proxy application
 when it detects helper availability or receives a VPN/path report. The macOS PAC

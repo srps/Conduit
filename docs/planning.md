@@ -175,7 +175,10 @@ architecture-specific release ZIPs, Ed25519 archive signatures, and a public
 verification key embedded in the app. Adding the updater dependency requires the
 normal dependency review.
 
-Keep ad-hoc signing available for shared builds. Developer ID/notarization improves
+Published releases are signed with the self-signed release certificate
+(`docs/release-signing.md`), which the helper pin admits beside the installed
+app's own; ad-hoc signing stays for pull-request and manual packaging. Developer
+ID/notarization improves
 public distribution later but does not gate authenticated archive updates. A brief
 proxy interruption is acceptable initially; zero-downtime daemon handoff is a
 separate feature.
@@ -189,8 +192,9 @@ trusted CAs with TLS verification enabled.
 Acceptance evidence:
 
 - Preflight installation permissions and helper identity compatibility before
-  shutdown. An ad-hoc build cannot satisfy a helper pinned to a local certificate;
-  updates must preserve helper admission checks.
+  shutdown. Releases share one certificate the helper pin admits; an update must
+  still refuse to proceed against a helper whose pin does not admit it, and must
+  preserve helper admission checks.
 - Restore proxy/DNS safely before shutdown and reapply only after the new runtime
   is ready; failed startup must not strand dead loopback settings.
 - Downloads, retries, staging, and cleanup are bounded. Download/authenticity,

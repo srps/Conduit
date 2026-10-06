@@ -8,6 +8,9 @@ on:
       - ".github/workflows/release.yml"
       - "bundle-app.sh"
       - "scripts/package-release.sh"
+      - "scripts/import-release-identity.sh"
+      - "scripts/verify-release-signing.sh"
+      - "install-helper.sh"
       - "VERSION"
   workflow_dispatch:
 
@@ -18,6 +21,11 @@ jobs:
   build:
     # Apple Silicon only: Conduit no longer ships Intel builds.
     runs-on: macos-26
+    # Tag builds sign with "Conduit Release Signing" (docs/release-signing.md).
+    # Its secrets live in the "release" environment, which only v* tags may
+    # deploy from, so pull requests and manual runs never see them and
+    # package ad-hoc.
+    environment: ${{ github.ref_type == 'tag' && 'release' || '' }}
     timeout-minutes: 30
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -52,8 +60,19 @@ jobs:
           xcrun xctest -XCTest 'ConduitTests.PACPreviewTests,ConduitTests.CFPACEvaluatorTests' "$test_bundle" 2>&1 | tee "$test_log"
           grep -q "Test Suite 'PACPreviewTests' passed" "$test_log"
           grep -q "Test Suite 'CFPACEvaluatorTests' passed" "$test_log"
+      - name: Import the release signing identity
+        if: github.ref_type == 'tag'
+        env:
+          CONDUIT_RELEASE_P12_BASE64: ${{ secrets.CONDUIT_RELEASE_P12_BASE64 }}
+          CONDUIT_RELEASE_P12_PASSWORD: ${{ secrets.CONDUIT_RELEASE_P12_PASSWORD }}
+        run: bash scripts/import-release-identity.sh
       - name: Build signed ZIP and drag-to-Applications disk image
+        env:
+          CONDUIT_REQUIRE_RELEASE_SIGNING: ${{ github.ref_type == 'tag' && '1' || '' }}
         run: bash scripts/package-release.sh
+      - name: Remove the release signing identity
+        if: always() && github.ref_type == 'tag'
+        run: bash scripts/import-release-identity.sh --remove
       - name: Verify packaged app and PAC preview
         shell: bash
         run: |
@@ -64,6 +83,9 @@ jobs:
           trap 'rm -rf "$verification_dir"' EXIT
           ditto -x -k ".build/share/Conduit-$version-macOS26-$architecture.zip" "$verification_dir"
           codesign --verify --strict --deep "$verification_dir/Conduit.app"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            bash scripts/verify-release-signing.sh "$verification_dir/Conduit.app"
+          fi
           test -x "$verification_dir/Conduit.app/Contents/MacOS/Conduit"
           test -x "$verification_dir/Conduit.app/Contents/Resources/install-helper.sh"
           zsh -n "$verification_dir/Conduit.app/Contents/Resources/install-helper.sh"
