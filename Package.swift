@@ -25,9 +25,13 @@ let package = Package(
         .executable(name: "pm-tunnel", targets: ["pm-tunnel"]),
         .executable(name: "pm-sim", targets: ["pm-sim"]),
         .executable(name: "pmctl", targets: ["pmctl"]),
+        .executable(name: "ConduitUpdater", targets: ["ConduitUpdater"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.101.0"),
+        // Only `ConduitUpdater` links it; see `UpdaterContract` for why Sparkle
+        // stays out of the app process (#111).
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.10.0"),
     ],
     targets: [
         .target(
@@ -87,6 +91,15 @@ let package = Package(
             name: "pm-dns",
             dependencies: ["ProxyKernel"],
             path: "Sources/pm-dns"
+        ),
+        // Nested in Conduit.app by bundle-app.sh with Sparkle.framework in its
+        // own Contents/Frameworks, hence the rpath.
+        .executableTarget(
+            name: "ConduitUpdater",
+            dependencies: ["ConduitShared", .product(name: "Sparkle", package: "Sparkle")],
+            path: "Sources/ConduitUpdater",
+            exclude: ["AGENTS.md"],
+            linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         ),
         .executableTarget(
             name: "pm-proxy",

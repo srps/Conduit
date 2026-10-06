@@ -24,7 +24,9 @@ Macs are no longer supported. Open the disk image, drag Conduit into Application
 No Xcode or local build is required. Releases are signed with Conduit's
 self-signed release certificate ([release signing](docs/release-signing.md)) and
 are not notarized; if macOS blocks the first launch, use System Settings >
-Privacy & Security > Open Anyway.
+Privacy & Security > Open Anyway. From 0.5 the app updates itself from GitHub
+Releases (**Check for Updates…**, or the daily check in General → Updates);
+see [release installation](docs/release-installation.md).
 
 To build from source instead:
 

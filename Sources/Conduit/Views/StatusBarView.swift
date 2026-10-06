@@ -276,6 +276,9 @@ struct StatusBarView: View {
             commandRow("Restart Proxy") { appState.restartProxy() }
                 .disabled(!MenuBarPresentation.canRestartProxy(for: runtime.runtimeStatus.state))
             commandRow("Copy Diagnostics") { copyDiagnostics() }
+            if appState.updateStatus.availability == .available {
+                commandRow("Check for Updates…") { appState.checkForUpdates() }
+            }
             commandRow("Quit Conduit", shortcut: "⌘Q") { NSApplication.shared.terminate(nil) }
         }
         .padding(.vertical, 4)

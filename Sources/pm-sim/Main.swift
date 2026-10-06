@@ -71,6 +71,7 @@ enum PMSim {
               ntlm-credential-cache   A burst of NTLM fallbacks reads the saved password once; a failing store is reported once
               network-location-recovery  inactive-location recovery, external edits, and write races
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
+              update-coordinator      Daily update checks, version-change event, and updater report validation (#111)
 
             OPTIONS:
               --verbose               Stream per-handler debug logs to stderr
@@ -211,6 +212,7 @@ enum PMSim {
         "helper-caller-identity",
         "network-location-recovery",
         "lifecycle-stop-overtakes-start",
+        "update-coordinator",
     ]
 
     @MainActor private static var setupCleanupCompleted = false
@@ -324,6 +326,8 @@ enum PMSim {
             return [try await NetworkLocationScenarios.recovery()]
         case "lifecycle-stop-overtakes-start":
             return [try await LifecycleScenarios.stopOvertakesStart()]
+        case "update-coordinator":
+            return [try await UpdateScenarios.coordinator()]
         case "fixture-pass", "fixture-fail", "fixture-missing":
             return [.reportingFixture(name: name)]
         case "fixture-throw":

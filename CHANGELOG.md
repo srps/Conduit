@@ -6,6 +6,18 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+### Added
+
+- Self-update from GitHub Releases (#111). **Check for Updates…** in the app
+  and menu bar menus, and an opt-in daily background check in General →
+  Updates. Updates are Sparkle 2 archives, each verified against the Ed25519
+  update key embedded in the app before it is unpacked. Installing is always
+  your choice: Conduit quits through its normal path, which restores managed
+  proxy and DNS settings, and Sparkle replaces and relaunches it. Sparkle runs
+  only in the nested "Conduit Updater" process, which the helper's caller pin
+  refuses. New events: `update.*`, `lifecycle.version_changed`; the app keeps
+  `update-state.json` beside its config.
+
 ### Changed
 
 - Release packages are Apple Silicon (arm64) only. Intel Macs are no longer

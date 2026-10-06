@@ -42,6 +42,11 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         self.logFile = logFile ?? configDirectory.appendingPathComponent("proxy.log")
     }
 
+    /// When the updater last checked and which version last launched (#111).
+    package var updateStateFile: URL {
+        configDirectory.appendingPathComponent("update-state.json")
+    }
+
     /// Where 0.1.x kept the pre-relay DNS servers before the journal existed.
     /// Read once at launch to seed the journal, then removed.
     package var legacySavedDNSFile: URL {

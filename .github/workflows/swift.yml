@@ -24,6 +24,15 @@ jobs:
       run: bash ./scripts/test-install-helper-args.sh
     - name: Signing identity script keeps the key secret
       run: bash ./scripts/test-create-signing-identity.sh
+    - name: Self-update end to end (stand-in host, local feed)
+      timeout-minutes: 10
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      run: |
+        zsh ./scripts/test-updater-e2e.sh
+        # Release-style signing: hardened runtime everywhere, library
+        # validation off for the updater only.
+        zsh ./scripts/test-updater-e2e.sh --signed
     - name: Release identity script keeps the keys secret
       env:
         DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer

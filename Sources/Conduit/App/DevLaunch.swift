@@ -285,6 +285,10 @@ enum DevLaunch {
         // installed helper and the login Keychain.
         let helper = FakeHelperLifecycle()
         let secrets = InMemorySecretStore()
+        // "Check for Updates…" would otherwise start the updater inside this
+        // dev bundle, and installing would replace and relaunch it as the
+        // real app.
+        let updater = FakeUpdaterLauncher()
         let state = AppState(
             runtimeEnvironment: environment,
             privilegeClient: machine,
@@ -305,7 +309,8 @@ enum DevLaunch {
                         name: "Wi-Fi", enabled: true, proxies: [:], dns: [:]
                     )]
                 ))
-            }
+            },
+            updaterLauncher: updater
         )
         if let section = options.section {
             state.selectedSection = section

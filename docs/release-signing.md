@@ -93,6 +93,17 @@ with it, and `CONDUIT_REQUIRE_RELEASE_SIGNING` turns a missing identity into a
 failed build instead of an ad-hoc release. The keychain is deleted at the end of
 the job. Pull requests and manual runs package ad-hoc.
 
+## The update feed
+
+The app reads `https://github.com/srps/Conduit/releases/latest/download/appcast.xml`.
+On a tag build, `scripts/make-appcast.sh` signs the release ZIP with
+`SPARKLE_ED_PRIVATE_KEY`, which reaches Sparkle's `sign_update` on stdin. It
+checks that signature against the committed public key, and writes a one-item
+`appcast.xml` with this version's CHANGELOG section as the release notes. The
+draft release carries it as an asset. GitHub's "latest" resolves only to
+published releases, so publishing the draft is what offers the update. Each
+release's feed lists only itself.
+
 ## Rotation and loss
 
 Replacing the certificate means every user reinstalls the helper once. Their
