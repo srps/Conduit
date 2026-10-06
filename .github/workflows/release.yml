@@ -11,6 +11,7 @@ on:
       - "scripts/import-release-identity.sh"
       - "scripts/verify-release-signing.sh"
       - "scripts/make-appcast.sh"
+      - "scripts/appcast-notes.py"
       - "Sources/ConduitUpdater/**"
       - "Resources/ConduitUpdater.entitlements"
       - "install-helper.sh"
