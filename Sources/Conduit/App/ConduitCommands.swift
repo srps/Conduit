@@ -21,6 +21,11 @@ struct ConduitCommands: Commands {
                 open(AppSection.firstConfigureSection)
             }
             .keyboardShortcut(",", modifiers: [.command])
+
+            Button("Check for Updates…") {
+                appState.checkForUpdates()
+            }
+            .disabled(appState.updateStatus.availability != .available)
         }
 
         CommandGroup(replacing: .appTermination) {

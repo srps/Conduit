@@ -45,6 +45,35 @@ struct GeneralSettingsView: View {
             }
 
             Section {
+                switch appState.updateStatus.availability {
+                case .available:
+                    Toggle("Check for updates automatically", isOn: $appState.appPreferences.automaticUpdateChecks)
+                        .help("Once a day, ask GitHub Releases whether a newer Conduit exists. Nothing installs without your choice.")
+                    LabeledContent("Last checked") {
+                        Text(appState.updateStatus.lastCheck.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
+                            .foregroundStyle(.secondary)
+                    }
+                    if let report = appState.updateStatus.lastReport {
+                        LabeledContent("Result") {
+                            Text(UpdateStatusText.describe(report))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Button("Check for Updates…") { appState.checkForUpdates() }
+                case .unavailable(let reason):
+                    LabeledContent("Updates") {
+                        Text("Unavailable: \(reason)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Updates")
+            } footer: {
+                SettingsNote("Updates come from GitHub Releases, signed with Conduit's update key. Installing quits Conduit, which restores your proxy and DNS settings, then relaunches the new version.")
+            }
+
+            Section {
                 TextField("Health Check URL", text: $appState.config.healthCheckURL)
                     .accessibilityLabel("Health check URL")
                 TextField("Browser Test URL", text: $appState.appPreferences.preferredBrowserTestURL)

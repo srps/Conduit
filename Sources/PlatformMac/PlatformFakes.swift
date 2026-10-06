@@ -639,3 +639,70 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
         return { callback(.success(locationID)) }
     }
 }
+
+// MARK: - Updates
+
+/// Stands in for the nested updater: records each start, can refuse them,
+/// and never launches a process, so a `--dev` instance or a test host cannot
+/// start the installed app's updater.
+package final class FakeUpdaterLauncher: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _starts: [UpdaterContract.LaunchMode] = []
+    private var _failure: String?
+    private var _outcome: UpdaterLauncher.Outcome = .launched
+
+    package init() {}
+
+    /// Every start requested, in order.
+    package var starts: [UpdaterContract.LaunchMode] { lock.withLock { _starts } }
+    /// When set, starts fail with this reason.
+    package var failure: String? {
+        get { lock.withLock { _failure } }
+        set { lock.withLock { _failure = newValue } }
+    }
+    package var outcome: UpdaterLauncher.Outcome {
+        get { lock.withLock { _outcome } }
+        set { lock.withLock { _outcome = newValue } }
+    }
+
+    package var launcher: UpdaterLauncher {
+        UpdaterLauncher { [self] mode in
+            let (failure, outcome): (String?, UpdaterLauncher.Outcome) = lock.withLock {
+                _starts.append(mode)
+                return (_failure, _outcome)
+            }
+            if let failure { throw UpdaterLauncher.LaunchError(failure) }
+            return outcome
+        }
+    }
+}
+
+/// Stands in for the distributed-notification channel: `deliver` runs a
+/// userInfo through the same contract parsing as production, so tests can
+/// send well-formed, malformed and other-host reports.
+@MainActor
+package final class FakeUpdateReports: UpdateReportSource {
+    private var handler: (@MainActor (Result<UpdaterContract.ParsedReport, UpdaterContract.Rejection>) -> Void)?
+    private var hostPath = ""
+
+    package init() {}
+
+    package var isSubscribed: Bool { handler != nil }
+
+    package func subscribe(
+        hostIdentifier: String,
+        hostPath: String,
+        _ handler: @escaping @MainActor (Result<UpdaterContract.ParsedReport, UpdaterContract.Rejection>) -> Void
+    ) {
+        self.hostPath = hostPath
+        self.handler = handler
+    }
+
+    package func cancel() {
+        handler = nil
+    }
+
+    package func deliver(_ userInfo: [AnyHashable: Any]?) {
+        handler?(UpdaterContract.parseReport(userInfo, hostPath: hostPath))
+    }
+}

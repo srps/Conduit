@@ -72,7 +72,17 @@ exactly these semantics; do not repurpose them.
 | `lifecycle.coalesced` | A start or stop arrived while the same kind of operation was the latest and still running, and joined it instead of queueing a second copy of its platform work (`detail: operation=… joined=<generation>`). |
 | `lifecycle.termination_drain_expired` | The app's quit waited `deadline_ms` for the platform queue and went ahead with its clears; a step still running is serialised with them by its manager's lock (`detail: deadline_ms=…`). |
 | `lifecycle.crash_restart` *(planned)* | First startup after an unclean exit; detail references prior exit evidence and the matching crash-report name. |
-| `lifecycle.update_restart` *(planned)* | Restart performed by the in-app updater. |
+| `lifecycle.version_changed` | The app launched with a different version than the last launch recorded in `update-state.json` (`detail: from=… to=…`). After an in-app update this is the first event of the relaunched version; a manual install produces it too. Not emitted on a first launch. |
+| `update.check_requested` | The app started the nested updater (`source=user` for "Check for Updates…", `source=schedule` for the daily background check). Recorded as the last check whatever the outcome, so a failing feed is retried at the next interval rather than in a loop. |
+| `update.check_handed_off` | The updater was already running and received the request instead of a second process (`source=`). |
+| `update.check_unavailable` | A check was asked for in a build that cannot update itself (`source=`, `reason=` no update signing key, no feed, or no bundled updater). |
+| `update.launch_failed` | The updater process could not be started (`source=`, `reason=`). |
+| `update.available` | Reported by the updater: the feed offers a newer, compatible version whose archive Sparkle will verify against the app's update key (`version=`). |
+| `update.up_to_date` | Reported by the updater: nothing newer. |
+| `update.failed` | Reported by the updater: the check, download, signature verification or installation failed (`reason=` Sparkle's error domain, code and message; `reason=start …` when Sparkle refused its configuration; `reason=background_check_timeout` after 300 s). |
+| `update.installing` | Reported by the updater: the user chose to install and Sparkle is about to quit the app with a normal quit event, so termination cleanup restores proxy and DNS settings before the bundle is replaced (`version=`). The next launch emits `lifecycle.version_changed`. |
+| `update.report_rejected` | A message on the updater's channel for this app was malformed or named no known report (`reason=`). Messages addressed to another copy of the app are ignored without an event. |
+| `update.state_unreadable` / `update.state_unwritable` | `update-state.json` could not be read or decoded at launch (the app carries on with no last check and no previous version), or could not be written (`reason=`). |
 
 ### routing
 | Event | Emitted when |
@@ -169,6 +179,7 @@ exactly these semantics; do not repurpose them.
 | --- | --- |
 | `$state-dir/snapshot.json` | Full `ProxyOrchestratorSnapshot`, written atomically (temp + rename) on the status interval. Superset of what the UI shows. |
 | `$state-dir/ready.json` (`pm-proxy`) / `daemon-ready.json` (daemon) | Written once at startup readiness: bindings / initial status. |
+| `$state-dir/update-state.json` (app) | `{"lastCheck": <epoch seconds>, "lastLaunchedVersion": "…"}`, canonical JSON. When the last update check started and which version last launched (`lifecycle.version_changed`). |
 | `$state-dir/audit.ndjson` *(planned)* | Per-connection audit records (CONNECT target, PAC decision, route, auth method), credential-masked. Separate contract; documented when it ships. |
 
 ## Consumer guidance

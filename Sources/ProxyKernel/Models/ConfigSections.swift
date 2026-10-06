@@ -425,19 +425,25 @@ package struct AppPreferences: Codable, Equatable, Sendable {
     /// that were predicted. Rolled by size (`RotatingLogFile`), so "on" is
     /// bounded.
     package var fileLoggingEnabled: Bool
+    /// Default **off** (#111): a daily background check of the GitHub
+    /// release feed through the nested updater. Checking by hand works
+    /// either way; nothing installs without the user choosing to.
+    package var automaticUpdateChecks: Bool
 
     package init(
         showMenuBarIcon: Bool = true,
         floatingWindowEnabled: Bool = false,
         globalShortcutEnabled: Bool = false,
         preferredBrowserTestURL: String = AppPreferences.defaultBrowserTestURL,
-        fileLoggingEnabled: Bool = true
+        fileLoggingEnabled: Bool = true,
+        automaticUpdateChecks: Bool = false
     ) {
         self.showMenuBarIcon = showMenuBarIcon
         self.floatingWindowEnabled = floatingWindowEnabled
         self.globalShortcutEnabled = globalShortcutEnabled
         self.preferredBrowserTestURL = preferredBrowserTestURL
         self.fileLoggingEnabled = fileLoggingEnabled
+        self.automaticUpdateChecks = automaticUpdateChecks
     }
 
     package init(from decoder: Decoder) throws {
@@ -449,5 +455,6 @@ package struct AppPreferences: Codable, Equatable, Sendable {
         preferredBrowserTestURL = browserTestURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? Self.defaultBrowserTestURL : browserTestURL
         fileLoggingEnabled = try c.decodeIfPresent(Bool.self, forKey: .fileLoggingEnabled) ?? true
+        automaticUpdateChecks = try c.decodeIfPresent(Bool.self, forKey: .automaticUpdateChecks) ?? false
     }
 }

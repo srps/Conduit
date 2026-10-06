@@ -42,6 +42,8 @@ final class AppState: ObservableObject {
     @Published var config: ProxyConfig
     @Published var platformConfig: PlatformIntegrationConfig
     @Published var appPreferences: AppPreferences
+    /// What Settings shows about updates (#111).
+    @Published private(set) var updateStatus: UpdateCoordinator.Status
     /// First-run setup, presented as a sheet on the app window. Set at init
     /// when NTLM is configured without saved credentials, so the window is
     /// presented at launch instead of waiting for the popover to be opened.
@@ -64,6 +66,7 @@ final class AppState: ObservableObject {
     private let auditedPrivilegeClient: any PrivilegeClient
     private let runtimeEnvironment: RuntimeEnvironment
     private let orchestrator: ProxyOrchestrator
+    private let updateCoordinator: UpdateCoordinator
     /// Where the platform managers act: the process that runs `networksetup`
     /// and `launchctl`, the home directory whose shell profiles get the proxy
     /// block, and the directory the resolver files live in. Injected by the
@@ -225,7 +228,11 @@ final class AppState: ObservableObject {
         vpnStatusMonitor: VPNStatusObserving? = nil,
         networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) },
-        networkLocationLimits: NetworkLocationLimits = .init()
+        networkLocationLimits: NetworkLocationLimits = .init(),
+        updaterLauncher: UpdaterLauncher? = nil,
+        updateReports: (any UpdateReportSource)? = nil,
+        updaterAvailability: UpdaterAvailability? = nil,
+        currentVersion: String? = nil
     ) {
         let runtimeEnvironment = runtimeEnvironment ?? AppState.runtimeEnvironment()
         let logStore = AppLogStore()
@@ -353,6 +360,26 @@ final class AppState: ObservableObject {
         )
         self.orchestrator = orchestrator
         let eventLog = orchestrator.eventLog
+        // The updater is a process of its own; the seam is what keeps a dev
+        // instance or a test host from starting the installed app's (#111).
+        let hostBundle = Bundle.main
+        let hostIdentifier = hostBundle.bundleIdentifier ?? "io.github.srps.Conduit"
+        let updateCoordinator = UpdateCoordinator(
+            hostIdentifier: hostIdentifier,
+            hostPath: hostBundle.bundlePath,
+            currentVersion: currentVersion
+                ?? (hostBundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String) ?? "unbundled",
+            availability: updaterAvailability ?? UpdaterAvailability.of(hostBundle: hostBundle),
+            launcher: updaterLauncher ?? UpdaterLauncher.system(hostURL: hostBundle.bundleURL, hostIdentifier: hostIdentifier),
+            store: UpdateStateStore(file: runtimeEnvironment.updateStateFile),
+            reports: updateReports ?? DistributedUpdateReports(),
+            record: { [logStore] event in
+                eventLog.append(event)
+                logStore.log(.notice, "Updates: \(event.event) \(event.detail ?? "")", category: .system)
+            }
+        )
+        self.updateCoordinator = updateCoordinator
+        self.updateStatus = updateCoordinator.status
         privilegeAuditEventSink.set { event in eventLog.append(event) }
 
         // CredentialManager's identity-provider reads from the orchestrator's
@@ -461,6 +488,15 @@ final class AppState: ObservableObject {
             .store(in: &cancellables)
         logStore.minStderrLevel = config.verboseLogging ? .debug : .notice
         logStore.minBufferedLevel = config.verboseLogging ? .debug : .notice
+        updateCoordinator.onStatus = { [weak self] status in self?.updateStatus = status }
+        updateCoordinator.start(automaticChecks: appPreferences.automaticUpdateChecks)
+        updateStatus = updateCoordinator.status
+        $appPreferences
+            .map(\.automaticUpdateChecks)
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] enabled in self?.updateCoordinator.setAutomaticChecks(enabled) }
+            .store(in: &cancellables)
         notificationManager.requestAuthorization()
         startLocationObserver()
         networkMonitor.start()
@@ -663,6 +699,14 @@ final class AppState: ObservableObject {
         lastErrorMessage = configurationLoadError.localizedDescription + " Restart Conduit after repairing the file."
         logStore.log(.error, lastErrorMessage ?? configurationLoadError.localizedDescription, category: .system)
         return true
+    }
+
+    // MARK: - Updates
+
+    /// "Check for Updates…": starts the nested updater, which shows its own
+    /// windows (#111).
+    func checkForUpdates() {
+        updateCoordinator.checkNow()
     }
 
     // MARK: - Config
@@ -1790,6 +1834,7 @@ final class AppState: ObservableObject {
     /// step lands after the clear of the manager it belongs to. The expiry is
     /// recorded as `lifecycle.termination_drain_expired`.
     func performTerminationCleanup() {
+        updateCoordinator.stop()
         proxyLane.supersedeAll()
         dnsLane.supersedeAll()
         let deadline = terminationDrainDeadlineMilliseconds

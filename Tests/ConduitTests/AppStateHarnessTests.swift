@@ -31,6 +31,10 @@ final class AppStateHarness {
     let loginItems = FakeLoginItems()
     let helper = FakeHelperLifecycle()
     let secrets = InMemorySecretStore()
+    /// The updater seam: never the real process, which would be the test
+    /// runner's bundle at best.
+    let updater = FakeUpdaterLauncher()
+    var currentVersion = "0.5.0"
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
     private(set) var appState: AppState?
@@ -76,7 +80,11 @@ final class AppStateHarness {
             vpnStatusMonitor: vpn,
             networkLocationObserver: locationObserver,
             networkLocationStoreFactory: { [locationStore] _ in locationStore },
-            networkLocationLimits: locationLimits
+            networkLocationLimits: locationLimits,
+            updaterLauncher: updater.launcher,
+            updateReports: FakeUpdateReports(),
+            updaterAvailability: .available,
+            currentVersion: currentVersion
         )
         appState = state
         return state
@@ -1220,5 +1228,37 @@ final class AppStateHarnessTests: XCTestCase {
             "proxy.corp.example",
             "the prior the start captured is the user's proxy, not the crashed run's port"
         )
+    }
+}
+
+// MARK: - Updates (#111)
+
+extension AppStateHarnessTests {
+    func testCheckForUpdatesStartsTheInjectedUpdater() async throws {
+        let state = try launch()
+        state.checkForUpdates()
+        await harness.settle("the updater was asked to check") { self.harness.updater.starts == [.interactive] }
+        XCTAssertTrue(state.eventLog.events.contains { $0.event == "update.check_requested" && $0.detail == "source=user" })
+        XCTAssertNotNil(state.updateStatus.lastCheck)
+    }
+
+    func testTheFirstLaunchOfANewVersionRecordsTheChange() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        // What the previous version's launch left behind.
+        try UpdateStateStore(file: harness.environment.updateStateFile).save(UpdateState(lastLaunchedVersion: "0.4.1"))
+        harness.currentVersion = "0.5.0"
+        let state = harness.launch()
+        XCTAssertEqual(
+            state.eventLog.events.filter { $0.event == "lifecycle.version_changed" }.map(\.detail),
+            ["from=0.4.1 to=0.5.0"]
+        )
+    }
+
+    func testAutomaticChecksFollowThePreference() async throws {
+        let state = try launch()
+        XCTAssertFalse(state.appPreferences.automaticUpdateChecks, "off by default")
+        state.appPreferences.automaticUpdateChecks = true
+        state.saveConfig()
+        XCTAssertTrue(try AppPreferencesPersistence.load(in: harness.environment).automaticUpdateChecks)
     }
 }
