@@ -6,6 +6,11 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ## Unreleased
 
+### Changed
+
+- Release packages are Apple Silicon (arm64) only. Intel Macs are no longer
+  supported; 0.4.1 is the last release with an x86_64 package.
+
 ## 0.4.1
 
 Bounds same-location repair of managed proxy settings, so Conduit cannot get

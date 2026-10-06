@@ -19,8 +19,8 @@ A **macOS-native corporate proxy manager** built with SwiftUI and SwiftNIO. If y
 ## Quick Start
 
 Download a ready-to-install disk image from [Releases](https://github.com/srps/Conduit/releases).
-Choose **arm64** for an Apple Silicon Mac or **x86_64** for Intel (macOS 26 or
-later). Open the disk image, drag Conduit into Applications, and open it.
+Builds are for Apple Silicon Macs (M1 or later) on macOS 26 or later; Intel
+Macs are no longer supported. Open the disk image, drag Conduit into Applications, and open it.
 No Xcode or local build is required. These builds are ad-hoc signed; if macOS
 blocks the first launch, use System Settings > Privacy & Security > Open Anyway.
 
@@ -298,7 +298,7 @@ the bundled installer and signing-policy implications.
 Maintainers can run `bash scripts/package-release.sh` to also create a disk
 image with an Applications shortcut and SHA-256 checksums. `VERSION` controls
 the app and asset versions. The Release packages workflow builds and tests
-both architectures on pull requests that change packaging, or when run
+the Apple Silicon package on pull requests that change packaging, or when run
 manually. After merging, push a matching `v<version>` tag to prepare a draft
 GitHub release with the installable packages attached. Review the draft and
 publish it when ready.
