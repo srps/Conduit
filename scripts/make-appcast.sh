@@ -48,20 +48,43 @@ python3 - "$version" "$url" "$length" "$signature" > .build/share/appcast.xml <<
 import email.utils, html, re, sys
 version, url, length, signature = sys.argv[1:5]
 
-# This version's CHANGELOG section, as plain HTML: paragraphs, bullet lists
-# and inline code; everything else is escaped text.
+# This version's CHANGELOG section, as plain HTML: headings, paragraphs,
+# bullet lists, fenced code, and inline code, bold and links (relative links
+# point at the tagged tree); everything else is escaped text.
 text = open("CHANGELOG.md", encoding="utf-8").read()
 match = re.search(rf"^## {re.escape(version)}\n(.*?)(?=^## |\Z)", text, re.S | re.M)
 section = match.group(1).strip() if match else f"Conduit {version}."
+tree = f"https://github.com/srps/Conduit/blob/v{version}/"
+def link(m):
+    target = html.unescape(m.group(2))
+    if not re.match(r"[a-z]+:", target):
+        target = tree + target
+    return f'<a href="{html.escape(target, quote=True)}">{m.group(1)}</a>'
 def inline(s):
-    s = html.escape(s)
-    return re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
-blocks, items, para = [], [], []
+    parts = re.split(r"(`[^`]+`)", s)
+    out = []
+    for part in parts:
+        if len(part) > 1 and part.startswith("`") and part.endswith("`"):
+            out.append(f"<code>{html.escape(part[1:-1])}</code>")
+            continue
+        part = html.escape(part)
+        part = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", part)
+        part = re.sub(r"\[([^\]]+)\]\(([^)\s]+)\)", link, part)
+        out.append(part)
+    return "".join(out)
+blocks, items, para, code = [], [], [], None
 def flush():
     if para: blocks.append("<p>" + inline(" ".join(para)) + "</p>"); para.clear()
     if items: blocks.append("<ul>" + "".join(f"<li>{inline(i)}</li>" for i in items) + "</ul>"); items.clear()
 for line in section.splitlines():
-    if line.startswith("### "):
+    if code is not None:
+        if line.startswith("```"):
+            blocks.append("<pre><code>" + html.escape("\n".join(code)) + "</code></pre>"); code = None
+        else:
+            code.append(line)
+    elif line.startswith("```"):
+        flush(); code = []
+    elif line.startswith("### "):
         flush(); blocks.append(f"<h3>{inline(line[4:])}</h3>")
     elif line.startswith("- "):
         if para: flush()
@@ -73,6 +96,8 @@ for line in section.splitlines():
     else:
         if items: flush()
         para.append(line.strip())
+if code is not None:
+    blocks.append("<pre><code>" + html.escape("\n".join(code)) + "</code></pre>")
 flush()
 notes = "\n".join(blocks).replace("]]>", "]]&gt;")
 
