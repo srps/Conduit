@@ -4,7 +4,23 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.5.0
+
+Conduit updates itself from GitHub Releases. Releases are Apple Silicon only
+and signed with the project's release certificate, so the privileged helper can
+pin them once and keep accepting later releases.
+
+**Upgrading:** releases before 0.5 cannot update themselves, so install this one
+by hand. Then run the bundled installer once so the helper pins the release
+certificate:
+
+```sh
+sudo /Applications/Conduit.app/Contents/Resources/install-helper.sh --source installed
+```
+
+The helper itself is unchanged (v5); only the pin it is installed with is new.
+Later releases arrive through **Check for Updates…**. See
+[release installation](docs/release-installation.md).
 
 ### Added
 
@@ -28,8 +44,8 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   installed app's certificate or the release certificate, so a helper pinned
   once keeps accepting later GitHub releases, and locally signed builds keep
   working beside them. A helper pinned to a local build only needs one run of
-  the bundled installer; **Install Helper** in Settings still writes no pin. See docs/release-signing.md for key custody, rotation and
-  loss. (#111)
+  the bundled installer; **Install Helper** in Settings still writes no pin.
+  See docs/release-signing.md for key custody, rotation and loss. (#111)
 
 ## 0.4.1
 
