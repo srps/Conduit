@@ -1,5 +1,5 @@
-Download the disk image matching your Mac: **arm64** for Apple Silicon (M1 or
-later), **x86_64** for Intel. Requires macOS 26 or later on supported hardware.
+Download the **arm64** disk image. Conduit runs on Apple Silicon Macs (M1 or
+later) with macOS 26 or later; Intel Macs are no longer supported.
 
 Open the `.dmg`, drag **Conduit.app** into **Applications**, and launch it from
 Applications. The `.zip` contains the same app if you prefer an archive.

@@ -197,7 +197,7 @@ Acceptance evidence:
   compatibility, replacement, launch, and startup failures have structured events
   and clear recovery paths.
 - Release CI signs archives and publishes the feed; the update key is protected
-  and backed up. Test actual old-to-new updates on macOS 26/27 and both architectures.
+  and backed up. Test actual old-to-new updates on macOS 26/27 on Apple Silicon.
 - Document first-install/post-update Gatekeeper approval and managed-Mac limits;
   do not promise prompt-free launch.
 - Platform work stays behind protocols/fakes, with unit tests and restart/recovery

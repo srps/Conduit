@@ -13,11 +13,7 @@ permissions:
   contents: read
 jobs:
   regression:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-26, macos-26-intel]
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-26
     timeout-minutes: 15
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
