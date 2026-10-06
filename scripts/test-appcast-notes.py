@@ -10,7 +10,11 @@ that no Markdown syntax is left visible and that links point where intended.
 import importlib.util
 from pathlib import Path
 import re
+import sys
 import xml.dom.minidom
+
+# Importing the renderer must not leave scripts/__pycache__ behind.
+sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("appcast_notes", ROOT / "scripts" / "appcast-notes.py")
