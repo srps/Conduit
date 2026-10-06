@@ -45,7 +45,10 @@ its own process rather than inside the app.
 
 ## Creating the keys (once)
 
-Run this in your own Terminal, not through an agent's shell:
+Run this in your own Terminal, not through an agent's shell. The machine needs
+`gh` signed in (`gh auth login`) and Swift for the update key: Xcode, or just
+the Command Line Tools (`xcode-select --install`), which the script falls back
+to when Xcode is not installed.
 
 ```sh
 scripts/create-release-identity.sh --backup-dir /Volumes/<encrypted-drive>/conduit-release --upload
