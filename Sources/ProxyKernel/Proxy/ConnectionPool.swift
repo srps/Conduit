@@ -36,6 +36,10 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     case bodyTooLargeForReplay
     case authHandshakeLimitExceeded
     case streamingResponseInterrupted
+    /// The upstream delivered the whole response, but the client had closed
+    /// before its end could be written. A client hang-up, not an upstream
+    /// failure.
+    case clientClosedDuringResponse
     case upstreamResponseTimedOut
     case upstreamReturnedStatus(Int, target: String)
 
@@ -57,6 +61,8 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
             return "Too many proxy authentication handshakes are already pending."
         case .streamingResponseInterrupted:
             return "The upstream response stream ended after client response forwarding began."
+        case .clientClosedDuringResponse:
+            return "The client closed its connection before the response was complete."
         case .upstreamResponseTimedOut:
             return "Timed out waiting for the upstream proxy to respond."
         case .upstreamReturnedStatus(let statusCode, let target):
@@ -80,6 +86,13 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
 
     package static func isLocalNonUpstreamFailure(_ error: Error) -> Bool {
         isAuthHandshakeLimitExceeded(error) || isPoolExhausted(error)
+    }
+
+    package static func isClientClosedDuringResponse(_ error: Error) -> Bool {
+        if case ConnectionPoolError.clientClosedDuringResponse = error {
+            return true
+        }
+        return false
     }
 
     package static func isStreamingResponseInterrupted(_ error: Error) -> Bool {
@@ -289,9 +302,13 @@ package final class ConnectionPool: @unchecked Sendable {
         // connect-refused on a dead upstream) are upstream health signals and
         // must feed the breaker. Local capacity signals are not upstream
         // failures and are excluded below.
+        // A client that hung up after the upstream answered in full is a
+        // success for the upstream, not a breaker signal.
         return attempt.flatMapError { [weak self] (error: Error) -> EventLoopFuture<StreamingExchangeResult> in
             guard let self else { return attempt }
-            if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
+            if ConnectionPoolError.isClientClosedDuringResponse(error) {
+                self.recordSuccess(for: proxy, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
+            } else if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
                 self.recordFailure(for: proxy)
             }
             return self.group.next().makeFailedFuture(error)
@@ -927,7 +944,8 @@ package final class ConnectionPool: @unchecked Sendable {
             return promise.futureResult
         }.flatMapError { error in
             promise.fail(error)
-            self.logger.log(.warning, "Streaming exchange via \(proxy.endpoint) failed: \(error.displayDescription)", category: .proxy)
+            let level: LogLevel = ConnectionPoolError.isClientClosedDuringResponse(error) ? .info : .warning
+            self.logger.log(level, "Streaming exchange via \(proxy.endpoint) failed: \(error.displayDescription)", category: .proxy)
             connection.channel.close(mode: .all, promise: nil)
             self.lock.withLockVoid {
                 self.removeConnectionLocked(id: connection.id)
@@ -1520,8 +1538,10 @@ private final class HTTPExchangeHandler: ChannelDuplexHandler, RemovableChannelH
                             keepAlive: self.responseHead?.isKeepAlive ?? false,
                             authMethod: self.resolvedAuthMethod()
                         ))
-                    case .failure(let error):
-                        self.failPromises(error)
+                    case .failure:
+                        // The upstream answered in full; only the write to
+                        // the client failed, so the client has gone.
+                        self.failPromises(ConnectionPoolError.clientClosedDuringResponse)
                     }
                 }
                 // Trailers ride `.end` — dropping them here silently breaks

@@ -582,6 +582,15 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     self.onRequestCompleted(.succeeded, exchangeResult.upstream.endpoint)
                     self.onConnectionClosed(infoID)
                     body?.cleanup()
+                case .failure(let error) where ConnectionPoolError.isClientClosedDuringResponse(error):
+                    // The upstream answered; the client hung up before the
+                    // end was written. Not an upstream failure: no 502, no
+                    // DIRECT retry of a request the upstream already served,
+                    // and no strict-mode hint.
+                    self.logger.log(.info, "Client closed before the response from the upstream was complete for \(SensitiveValueSanitizer.observableTarget(head.uri)).", category: .proxy)
+                    self.onRequestCompleted(.failed(.client), nil)
+                    self.onConnectionClosed(infoID)
+                    body?.cleanup()
                 case .failure(let error):
                     if Self.shouldFallbackToDirectAfterProxyExchangeFailure(
                         hasDirectFallback: hasDirectFallback,
