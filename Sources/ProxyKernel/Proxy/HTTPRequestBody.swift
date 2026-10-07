@@ -254,8 +254,19 @@ private final class HTTPRequestBodyFileIO: @unchecked Sendable {
         do {
             try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         } catch {
-            throw RequestBodySpoolError.directoryUnavailable(path: url.path, reason: error.displayDescription)
+            throw RequestBodySpoolError.directoryUnavailable(path: url.path, reason: briefReason(error))
         }
+    }
+
+    /// The POSIX cause under a Foundation error ("File exists (errno 17)"),
+    /// which an event can carry; the full `NSError` description repeats
+    /// paths and user-info that the sanitizer then has to redact.
+    private static func briefReason(_ error: Error) -> String {
+        let nsError = error as NSError
+        if let posix = nsError.userInfo[NSUnderlyingErrorKey] as? NSError, posix.domain == NSPOSIXErrorDomain {
+            return "\(posix.localizedDescription) (errno \(posix.code))"
+        }
+        return error.displayDescription
     }
 
     /// A file that is already gone is not a failure.
