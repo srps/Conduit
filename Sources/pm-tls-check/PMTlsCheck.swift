@@ -234,9 +234,12 @@ struct PMTlsCheck {
         if let proxyHost = options.proxyHost {
             object["proxy"] = "\(proxyHost):\(options.proxyPort)"
         }
-        if let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
-           let text = String(data: data, encoding: .utf8) {
-            print(text)
+        do {
+            let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+            print(String(decoding: data, as: UTF8.self))
+        } catch {
+            FileHandle.standardError.write(Data("pm-tls-check: could not encode JSON report: \(error.localizedDescription)\n".utf8))
+            exit(1)
         }
     }
 
