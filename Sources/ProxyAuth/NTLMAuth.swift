@@ -4,7 +4,12 @@ import Foundation
 import ProxyKernel
 import Security
 
-package enum NTLMAuthError: Error, LocalizedError {
+/// `CredentialFailureClassifying` marks these as authentication failures, so
+/// the kernel never mistakes one for the upstream being unable to reach a
+/// target. None means the credential is missing.
+package enum NTLMAuthError: Error, LocalizedError, CredentialFailureClassifying {
+    package var isCredentialUnavailable: Bool { false }
+
     case invalidChallenge
     case invalidMessage
     case cryptoFailure

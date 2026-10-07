@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import NIOCore
 import XCTest
+@testable import ProxyAuth
 @testable import ProxyKernel
 
 /// Which strict-mode upstream failures may suggest a No-proxy entry: only
@@ -34,6 +35,19 @@ final class StrictHintClassificationTests: XCTestCase {
             .authHandshakeLimitExceeded,
             .bodyTooLargeForReplay,
             .clientClosedDuringResponse,
+        ]
+        for error in quiet {
+            XCTAssertFalse(HTTPProxyHandler.strictHintApplies(to: error), "\(error)")
+        }
+    }
+
+    /// The authenticator's own errors reach the hint unwrapped: no saved
+    /// NTLM credential, no Kerberos ticket, a malformed NTLM challenge.
+    func testAuthenticatorFailuresEarnNoHint() {
+        let quiet: [Error] = [
+            CredentialManagerError.missingCredentials,
+            NTLMAuthError.invalidChallenge,
+            NTLMAuthError.cryptoFailure,
         ]
         for error in quiet {
             XCTAssertFalse(HTTPProxyHandler.strictHintApplies(to: error), "\(error)")

@@ -396,6 +396,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// it failed, and when the request never reached it: suggesting a bypass
     /// then points the user away from the real problem, or around a policy.
     static func strictHintApplies(to error: Error) -> Bool {
+        // The authenticator's own failures (no saved credential, no ticket,
+        // a broken exchange) come through unwrapped.
+        if error is any CredentialFailureClassifying { return false }
         guard let poolError = error as? ConnectionPoolError else { return true }
         switch poolError {
         case .upstreamReturnedStatus(let status, _):
