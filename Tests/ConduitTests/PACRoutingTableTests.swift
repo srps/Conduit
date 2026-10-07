@@ -163,6 +163,7 @@ final class PACRoutingTableTests: XCTestCase {
             XCTAssertEqual(servers.origin.accepted, acceptedBefore, "\(label): the request was retried DIRECT")
             XCTAssertEqual(fixture.detector.probeCount, 0, "\(label): a client hang-up triggered a strict-mode hint probe")
             XCTAssertEqual(fixture.events(named: "upstream.exchange_failed").count, 0, label)
+            XCTAssertEqual(fixture.events(named: "request.client_closed").count, 1, label)
             XCTAssertEqual(fixture.server.upstreamStatuses().map(\.consecutiveFailures), [0], label)
             await fixture.stop()
         }

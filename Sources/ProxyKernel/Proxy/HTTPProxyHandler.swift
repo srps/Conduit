@@ -587,7 +587,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     // end was written. Not an upstream failure: no 502, no
                     // DIRECT retry of a request the upstream already served,
                     // and no strict-mode hint.
-                    self.logger.log(.info, "Client closed before the response from the upstream was complete for \(SensitiveValueSanitizer.observableTarget(head.uri)).", category: .proxy)
+                    self.connectFailureLog.report(
+                        "request.client_closed", level: .info,
+                        target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
+                        message: "Client closed before the response from the upstream was complete.",
+                        eventAtAnyLevel: true
+                    )
                     self.onRequestCompleted(.failed(.client), nil)
                     self.onConnectionClosed(infoID)
                     body?.cleanup()
@@ -1045,11 +1050,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         message: String,
         logger: any LogSink,
         eventSink: (@Sendable (RuntimeEvent) -> Void)?,
+        eventAtAnyLevel: Bool = false,
         kind: ConnectFailureKind? = nil,
         suppressed: Int = 0,
         windowSeconds: Int = 0
     ) {
-        if let event, level >= .warning {
+        if let event, eventAtAnyLevel || level >= .warning {
             var detail = "target=\(target) reason=\(error.displayDescription)"
             if let kind { detail += " kind=\(kind.rawValue)" }
             if suppressed > 0 { detail += " suppressed=\(suppressed) windowSeconds=\(windowSeconds)" }

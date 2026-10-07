@@ -12,7 +12,7 @@ import ProxyPAC
 /// that end to the client fails every time. With PAC `PROXY …; DIRECT`, in
 /// strict and in normal mode, nothing may follow: no DIRECT retry of the
 /// served request, no strict-mode hint probe, no `upstream.exchange_failed`
-/// and no breaker failure.
+/// and no breaker failure; one `request.client_closed` says what happened.
 enum ClientHangUpScenarios {
     private struct Failure: Error { let message: String }
 
@@ -87,13 +87,15 @@ enum ClientHangUpScenarios {
             let recorded = outcomes.withLockedValue { $0 }
             let exchangeFailed = events.events.filter { $0.event == "upstream.exchange_failed" }.count
             let hints = events.events.filter { $0.event == "routing.strict_direct_reachable" }.count
+            let clientClosed = events.events.filter { $0.event == "request.client_closed" }.count
             let failures = server.upstreamStatuses().map(\.consecutiveFailures)
             let directDials = origin.connectionCount - originBefore
-            notes.append("\(label): outcomes=\(recorded) directDials=\(directDials) probes=\(detector.probeCount) exchangeFailed=\(exchangeFailed) hints=\(hints) breakerFailures=\(failures)")
+            notes.append("\(label): outcomes=\(recorded) directDials=\(directDials) probes=\(detector.probeCount) exchangeFailed=\(exchangeFailed) clientClosed=\(clientClosed) hints=\(hints) breakerFailures=\(failures)")
             assertions += [
                 .init("\(label): the client got the upstream's body", body.contains("<upstream>")),
                 .init("\(label): the proxy saw the client close before the end", sawClose),
                 .init("\(label): counted as a client failure", recorded == [.failed(.client)]),
+                .init("\(label): reported as request.client_closed", clientClosed == 1),
                 .init("\(label): no DIRECT retry and no hint probe", directDials == 0 && detector.probeCount == 0),
                 .init("\(label): no upstream failure event or hint", exchangeFailed == 0 && hints == 0),
                 .init("\(label): no breaker failure", failures == [0]),
