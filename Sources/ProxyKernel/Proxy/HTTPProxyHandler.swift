@@ -34,6 +34,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     private var requestHead: HTTPRequestHead?
     private var requestBody = ByteBufferAllocator().buffer(capacity: 0)
     private var requestSpool: SpooledHTTPRequestBody?
+    /// Set when the body crosses into the spool. The spool itself arrives
+    /// asynchronously, so chunks read before it exists must queue behind its
+    /// creation instead of starting a spool of their own.
+    private var spooling = false
+    /// Bytes accepted for this body so far, in memory or spooled or queued.
+    private var storedBodyBytes = 0
     private var requestBodyWriteFuture: EventLoopFuture<Void>?
     private var bodyTooLarge = false
     private var bodyStorageError: Error?
@@ -122,7 +128,15 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 case .success(let body):
                     completedBody = body
                 case .failure(let error):
-                    self.logger.log(.warning, "Request body storage failed for \(SensitiveValueSanitizer.observableTarget(head.uri)): \(error.displayDescription)", category: .proxy)
+                    // A write that failed was reported when it failed; what is
+                    // left is finalizing the spool (closing its file).
+                    if self.bodyStorageError == nil {
+                        let target = SensitiveValueSanitizer.observableTarget(head.uri)
+                        self.connectFailureLog.report(
+                            "request.body_spool_failed", level: .warning, target: target, error: error,
+                            message: "Could not finish storing the request body for \(target) on disk (\(error.displayDescription)); answering 500."
+                        )
+                    }
                     self.onRequestCompleted(.failed(.local), nil)
                     self.writeError(status: .internalServerError, message: "Request body could not be stored for replay.", context: ctx)
                         .whenComplete { _ in ctx.close(promise: nil) }
@@ -239,6 +253,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     private func resetRequestBodyState() {
         requestSpool?.cleanup()
         requestSpool = nil
+        spooling = false
+        storedBodyBytes = 0
         requestBodyWriteFuture = nil
         requestBody.clear()
         bodyTooLarge = false
@@ -247,6 +263,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
 
     private func abandonRequestBodyStorage() {
         requestBody.clear()
+        spooling = false
+        storedBodyBytes = 0
         bodyTooLarge = false
         bodyStorageError = nil
         let pendingWrite = requestBodyWriteFuture
@@ -273,16 +291,24 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
 
         let readableBytes = buffer.readableBytes
         let config = configProvider()
-        let currentStoredBytes = requestSpool?.readableBytes ?? requestBody.readableBytes
-        guard currentStoredBytes + readableBytes <= config.maxSpooledBodyBytes else {
+        guard storedBodyBytes + readableBytes <= config.maxSpooledBodyBytes else {
             bodyTooLarge = true
             return
         }
+        storedBodyBytes += readableBytes
 
-        if let spool = requestSpool {
+        if spooling {
+            // Chained after the spool's creation, so by the time this runs
+            // the spool is set, even when this chunk was read before it was.
+            // Deciding on `requestSpool` here instead started a second spool
+            // for a chunk read in the same batch as the one that crossed the
+            // threshold, and the body lost everything before it.
             let chunk = buffer
             chainBodyStorage(context: context) { eventLoop in
-                spool.append(chunk, eventLoop: eventLoop)
+                guard let spool = self.requestSpool else {
+                    return eventLoop.makeFailedFuture(RequestBodySpoolError.spoolMissing)
+                }
+                return spool.append(chunk, eventLoop: eventLoop)
             }
             return
         }
@@ -292,12 +318,21 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             return
         }
 
+        spooling = true
         var initial = requestBody
         initial.writeBuffer(&buffer)
         let initialBody = initial
         requestBody.clear()
+        // The spool keeps this reporter until it is cleaned up, so it
+        // captures the log, not `self`.
+        let failureLog = connectFailureLog
         chainBodyStorage(context: context) { eventLoop in
-            SpooledHTTPRequestBody.create(initialBody: initialBody, eventLoop: eventLoop).map { spool in
+            SpooledHTTPRequestBody.create(initialBody: initialBody, eventLoop: eventLoop) { failure in
+                failureLog.report(
+                    "request.body_spool_cleanup_failed", level: .warning, target: "request-body-spool",
+                    error: failure, message: failure.message
+                )
+            }.map { spool in
                 self.requestSpool = spool
             }
         }
@@ -308,6 +343,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         operation: @escaping @Sendable (EventLoop) -> EventLoopFuture<Void>
     ) {
         context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
+        // Taken now: a write can fail after `.end` has cleared `requestHead`.
+        let target = requestHead.map { SensitiveValueSanitizer.observableTarget($0.uri) } ?? "unknown"
         nonisolated(unsafe) let ctx = context
         let previous = requestBodyWriteFuture ?? ctx.eventLoop.makeSucceededVoidFuture()
         let chained = previous.flatMap {
@@ -322,7 +359,14 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     ctx.channel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
                 }
             case .failure(let error):
+                // Every write queued behind a failed one fails the same
+                // way; the body's first failure is the one to report.
+                guard self.bodyStorageError == nil else { return }
                 self.bodyStorageError = error
+                self.connectFailureLog.report(
+                    "request.body_spool_failed", level: .warning, target: target, error: error,
+                    message: "Could not store the request body for \(target) on disk (\(error.displayDescription)); closing the client connection."
+                )
                 ctx.close(promise: nil)
             }
         }
