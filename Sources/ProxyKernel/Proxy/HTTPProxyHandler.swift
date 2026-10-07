@@ -128,7 +128,15 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 case .success(let body):
                     completedBody = body
                 case .failure(let error):
-                    self.logger.log(.warning, "Request body storage failed for \(SensitiveValueSanitizer.observableTarget(head.uri)): \(error.displayDescription)", category: .proxy)
+                    // A write that failed was reported when it failed; what is
+                    // left is finalizing the spool (closing its file).
+                    if self.bodyStorageError == nil {
+                        let target = SensitiveValueSanitizer.observableTarget(head.uri)
+                        self.connectFailureLog.report(
+                            "request.body_spool_failed", level: .warning, target: target, error: error,
+                            message: "Could not finish storing the request body for \(target) on disk (\(error.displayDescription)); answering 500."
+                        )
+                    }
                     self.onRequestCompleted(.failed(.local), nil)
                     self.writeError(status: .internalServerError, message: "Request body could not be stored for replay.", context: ctx)
                         .whenComplete { _ in ctx.close(promise: nil) }

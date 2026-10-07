@@ -123,11 +123,14 @@ package final class SpooledHTTPRequestBody: @unchecked Sendable {
     ) -> EventLoopFuture<SpooledHTTPRequestBody> {
         let io = HTTPRequestBodyFileIO.shared
         let fileIO = io.fileIO
-        return io.makeTemporaryPath(in: directory ?? HTTPRequestBodyFileIO.processDirectory, eventLoop: eventLoop).flatMap { path in
+        return io.makeTemporaryPath(in: directory ?? HTTPRequestBodyFileIO.processDirectory, eventLoop: eventLoop).always { _ in
+            // Whether or not this spool's directory could be made: a failed
+            // first spool must not swallow the sweep's report.
             if directory == nil, let sweepFailure = io.takeStartupSweepFailure() {
                 reportFailure(sweepFailure)
             }
-            return fileIO.openFile(
+        }.flatMap { path in
+            fileIO.openFile(
                 _deprecatedPath: path,
                 mode: .write,
                 flags: .allowFileCreation(posixMode: 0o600),
