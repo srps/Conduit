@@ -9,7 +9,8 @@
 # The private key comes from SPARKLE_ED_PRIVATE_KEY and reaches sign_update
 # on stdin. The signature is checked against the public key before anything
 # is written: Resources/sparkle-public-ed-key, or --public-key for a run
-# with a throwaway key (pull requests, which have no release secrets).
+# with a throwaway key (pull requests, which have no release secrets). The
+# notes are rendered by scripts/appcast-notes.py.
 #
 #   SPARKLE_ED_PRIVATE_KEY=… scripts/make-appcast.sh [--public-key BASE64]
 set -euo pipefail
@@ -44,37 +45,11 @@ fi
 length="$(stat -f %z "$archive")"
 url="https://github.com/srps/Conduit/releases/download/v$version/$(basename "$archive")"
 
-python3 - "$version" "$url" "$length" "$signature" > .build/share/appcast.xml <<'PY'
-import email.utils, html, re, sys
-version, url, length, signature = sys.argv[1:5]
+notes="$(python3 scripts/appcast-notes.py "$version")"
 
-# This version's CHANGELOG section, as plain HTML: paragraphs, bullet lists
-# and inline code; everything else is escaped text.
-text = open("CHANGELOG.md", encoding="utf-8").read()
-match = re.search(rf"^## {re.escape(version)}\n(.*?)(?=^## |\Z)", text, re.S | re.M)
-section = match.group(1).strip() if match else f"Conduit {version}."
-def inline(s):
-    s = html.escape(s)
-    return re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
-blocks, items, para = [], [], []
-def flush():
-    if para: blocks.append("<p>" + inline(" ".join(para)) + "</p>"); para.clear()
-    if items: blocks.append("<ul>" + "".join(f"<li>{inline(i)}</li>" for i in items) + "</ul>"); items.clear()
-for line in section.splitlines():
-    if line.startswith("### "):
-        flush(); blocks.append(f"<h3>{inline(line[4:])}</h3>")
-    elif line.startswith("- "):
-        if para: flush()
-        items.append(line[2:].strip())
-    elif line.startswith("  ") and items:
-        items[-1] += " " + line.strip()
-    elif not line.strip():
-        flush()
-    else:
-        if items: flush()
-        para.append(line.strip())
-flush()
-notes = "\n".join(blocks).replace("]]>", "]]&gt;")
+python3 - "$version" "$url" "$length" "$signature" "$notes" > .build/share/appcast.xml <<'PY'
+import email.utils, html, sys
+version, url, length, signature, notes = sys.argv[1:6]
 
 print(f"""<?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
