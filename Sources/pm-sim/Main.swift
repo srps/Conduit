@@ -40,6 +40,7 @@ enum PMSim {
               pac-unsupported-only    Routing: a PAC with no usable answer goes via the upstream, never direct
               strict-direct-reachable Routing: strict mode never goes direct to a reachable origin; hint on 502
               strict-hint-vpn-settle  Routing: no strict-mode hint during a VPN transition or flap; hint after the settle window
+              strict-hint-upstream-refusal Routing: no strict-mode hint when the upstream refuses by policy (403); hint on 502
               client-hangup-after-response Routing: a client hang-up after the upstream answered is no upstream failure, hint or DIRECT retry
               gateway-probe-blocklist Routing: gateway mode never probes or connects to a blocked target
               request-body-spool      Bodies: spooled bodies arrive whole; an unavailable spool closes the client with a structured cause (#81)
@@ -182,6 +183,7 @@ enum PMSim {
         "pac-unsupported-only",
         "strict-direct-reachable",
         "strict-hint-vpn-settle",
+        "strict-hint-upstream-refusal",
         "client-hangup-after-response",
         "gateway-probe-blocklist",
         "request-body-spool",
@@ -266,6 +268,8 @@ enum PMSim {
             return [try await PACRoutingScenarios.unsupportedOnly(verbose: verbose)]
         case "strict-direct-reachable":
             return [try await PACRoutingScenarios.strictDirectReachable(verbose: verbose)]
+        case "strict-hint-upstream-refusal":
+            return [try await PACRoutingScenarios.strictHintUpstreamRefusal(verbose: verbose)]
         case "strict-hint-vpn-settle":
             return [try await StrictHintSettleScenarios.run(verbose: verbose)]
         case "client-hangup-after-response":

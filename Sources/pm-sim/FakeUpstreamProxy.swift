@@ -51,6 +51,15 @@ final class FakeUpstreamProxy: @unchecked Sendable {
     var floodMetrics: FloodRelayMetrics { floodMetricsBox.withLockedValue { $0 } }
     var connectCount: Int { connectCountBox.withLockedValue { $0 } }
 
+    /// When set, an authenticated CONNECT is answered with this status and
+    /// no tunnel, the way a proxy refuses by policy (403) or cannot reach
+    /// the target (502). Settable while running.
+    private let connectRefusalBox = NIOLockedValueBox<Int?>(nil)
+    var connectRefusalStatus: Int? {
+        get { connectRefusalBox.withLockedValue { $0 } }
+        set { connectRefusalBox.withLockedValue { $0 = newValue } }
+    }
+
     init(
         group: EventLoopGroup,
         originHost: String,
@@ -89,6 +98,7 @@ final class FakeUpstreamProxy: @unchecked Sendable {
         let serverFirst = self.serverFirst
         let challenge = self.challenge
         let originRelaySetupDelayMilliseconds = self.originRelaySetupDelayMilliseconds
+        let connectRefusalBox = self.connectRefusalBox
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { [weak self] channel in
@@ -105,7 +115,8 @@ final class FakeUpstreamProxy: @unchecked Sendable {
                         challenge: challenge,
                         onConnect: { connectCountBox?.withLockedValue { $0 += 1 } },
                         floodMetricsBox: floodMetricsBox,
-                        originRelaySetupDelayMilliseconds: originRelaySetupDelayMilliseconds
+                        originRelaySetupDelayMilliseconds: originRelaySetupDelayMilliseconds,
+                        connectRefusal: { connectRefusalBox.withLockedValue { $0 } }
                     )
                 )
             }
@@ -152,6 +163,7 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
     private let onConnect: @Sendable () -> Void
     private let floodMetricsBox: NIOLockedValueBox<FloodRelayMetrics>?
     private let originRelaySetupDelayMilliseconds: Int
+    private let connectRefusal: @Sendable () -> Int?
     private var phase: Phase
     private var accumulated = ByteBufferAllocator().buffer(capacity: 4096)
     private var originChannel: Channel?
@@ -165,8 +177,10 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
         challenge: String = "Negotiate",
         onConnect: @escaping @Sendable () -> Void = {},
         floodMetricsBox: NIOLockedValueBox<FloodRelayMetrics>? = nil,
-        originRelaySetupDelayMilliseconds: Int
+        originRelaySetupDelayMilliseconds: Int,
+        connectRefusal: @escaping @Sendable () -> Int? = { nil }
     ) {
+        self.connectRefusal = connectRefusal
         self.serverFirst = serverFirst
         self.challenge = challenge
         self.originHost = originHost
@@ -210,7 +224,12 @@ private final class FakeUpstreamSession: ChannelInboundHandler, @unchecked Senda
             phase = .awaitingAuthedConnect
 
         case .awaitingAuthedConnect:
-            if method.uppercased() == "CONNECT" {
+            if method.uppercased() == "CONNECT", let status = connectRefusal() {
+                let response = "HTTP/1.1 \(status) Refused\r\nContent-Length: 0\r\n\r\n"
+                var out = context.channel.allocator.buffer(capacity: response.utf8.count)
+                out.writeString(response)
+                context.writeAndFlush(wrapOutboundOut(out), promise: nil)
+            } else if method.uppercased() == "CONNECT" {
                 onConnect()
                 openOriginAndPromote(context: context)
             } else {
