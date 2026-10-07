@@ -296,8 +296,16 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         initial.writeBuffer(&buffer)
         let initialBody = initial
         requestBody.clear()
+        // The spool keeps this reporter until it is cleaned up, so it
+        // captures the log, not `self`.
+        let failureLog = connectFailureLog
         chainBodyStorage(context: context) { eventLoop in
-            SpooledHTTPRequestBody.create(initialBody: initialBody, eventLoop: eventLoop).map { spool in
+            SpooledHTTPRequestBody.create(initialBody: initialBody, eventLoop: eventLoop) { failure in
+                failureLog.report(
+                    "request.body_spool_cleanup_failed", level: .warning, target: "request-body-spool",
+                    error: failure, message: failure.message
+                )
+            }.map { spool in
                 self.requestSpool = spool
             }
         }
@@ -323,6 +331,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 }
             case .failure(let error):
                 self.bodyStorageError = error
+                let target = self.requestHead.map { SensitiveValueSanitizer.observableTarget($0.uri) } ?? "unknown"
+                self.connectFailureLog.report(
+                    "request.body_spool_failed", level: .warning, target: target, error: error,
+                    message: "Could not store the request body for \(target) on disk (\(error.displayDescription)); closing the client connection."
+                )
                 ctx.close(promise: nil)
             }
         }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOEmbedded
 import NIOHTTP1
@@ -54,6 +55,97 @@ final class BodyBufferingTests: XCTestCase {
         SpooledHTTPRequestBody.cleanupStaleTemporaryFiles()
 
         XCTAssertFalse(fileManager.fileExists(atPath: staleFile.path))
+    }
+
+    // MARK: - #81: spool failures are reported, not swallowed
+
+    /// A spool directory that cannot be created fails the spool with the
+    /// cause, instead of surfacing later as an unexplained open failure.
+    /// Only this process's directory is touched: the root is shared with
+    /// any Conduit running as this user.
+    func testSpoolFailsWithTheCauseWhenItsDirectoryCannotBeCreated() async throws {
+        let directory = SpooledHTTPRequestBody.processSpoolDirectory
+        let fileManager = FileManager.default
+        try? fileManager.removeItem(at: directory)
+        try fileManager.createDirectory(at: directory.deletingLastPathComponent(), withIntermediateDirectories: true)
+        // A file where the directory should be.
+        XCTAssertTrue(fileManager.createFile(atPath: directory.path, contents: Data("blocker".utf8)))
+        defer { try? fileManager.removeItem(at: directory) }
+
+        let group = MultiThreadedEventLoopGroup.singleton
+        var buffer = ByteBufferAllocator().buffer(capacity: 2)
+        buffer.writeString("ab")
+        do {
+            let body = try await SpooledHTTPRequestBody.create(initialBody: buffer, eventLoop: group.next()).get()
+            body.cleanup()
+            XCTFail("spooled into a directory that could not be created")
+        } catch let error as RequestBodySpoolError {
+            guard case .directoryUnavailable(let path, _) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(path, directory.path)
+        }
+    }
+
+    func testSpoolCleanupReportsAFileItCouldNotRemove() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let reports = NIOLockedValueBox<[String]>([])
+        var buffer = ByteBufferAllocator().buffer(capacity: 2)
+        buffer.writeString("ab")
+        let body = try await SpooledHTTPRequestBody.create(initialBody: buffer, eventLoop: group.next()) { failure in
+            reports.withLockedValue { $0.append(failure.message) }
+        }.get()
+        _ = try await body.finalize(eventLoop: group.next()).get()
+
+        let directory = SpooledHTTPRequestBody.processSpoolDirectory
+        let fileManager = FileManager.default
+        try fileManager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+        defer { try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+        body.cleanup()
+        body.cleanup()
+
+        XCTAssertEqual(reports.withLockedValue { $0.count }, 1, "\(reports.withLockedValue { $0 })")
+        XCTAssertTrue(reports.withLockedValue { $0.first ?? "" }.contains("Could not remove a spooled request body"))
+    }
+
+    func testSpoolCleanupOfAFileAlreadyGoneReportsNothing() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let reports = NIOLockedValueBox(0)
+        var buffer = ByteBufferAllocator().buffer(capacity: 2)
+        buffer.writeString("ab")
+        let body = try await SpooledHTTPRequestBody.create(initialBody: buffer, eventLoop: group.next()) { _ in
+            reports.withLockedValue { $0 += 1 }
+        }.get()
+        _ = try await body.finalize(eventLoop: group.next()).get()
+        let directory = SpooledHTTPRequestBody.processSpoolDirectory
+        for file in try FileManager.default.contentsOfDirectory(atPath: directory.path) {
+            try FileManager.default.removeItem(at: directory.appendingPathComponent(file))
+        }
+
+        body.cleanup()
+
+        XCTAssertEqual(reports.withLockedValue { $0 }, 0)
+    }
+
+    /// A dead process's directory the sweep cannot remove is counted with
+    /// its cause rather than skipped silently.
+    func testStartupSweepCountsWhatItCouldNotRemove() throws {
+        let fileManager = FileManager.default
+        let root = SpooledHTTPRequestBody.processSpoolDirectory.deletingLastPathComponent()
+        // No process has this ID, so the sweep treats it as dead.
+        let stale = root.appendingPathComponent("2147483000", isDirectory: true)
+        let locked = stale.appendingPathComponent("locked", isDirectory: true)
+        try fileManager.createDirectory(at: locked, withIntermediateDirectories: true)
+        try Data("stale".utf8).write(to: locked.appendingPathComponent("body"))
+        try fileManager.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
+        defer {
+            try? fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path)
+            try? fileManager.removeItem(at: stale)
+        }
+
+        let sweep = SpooledHTTPRequestBody.cleanupStaleTemporaryFiles()
+
+        XCTAssertGreaterThanOrEqual(sweep.failed, 1)
+        XCTAssertNotNil(sweep.firstFailure)
+        XCTAssertTrue(fileManager.fileExists(atPath: stale.path))
     }
 
     func testSpooledBodyReplaysAcrossProxyAuthenticationChallenge() async throws {
