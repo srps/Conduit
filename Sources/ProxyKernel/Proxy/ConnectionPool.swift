@@ -944,8 +944,11 @@ package final class ConnectionPool: @unchecked Sendable {
             return promise.futureResult
         }.flatMapError { error in
             promise.fail(error)
-            let level: LogLevel = ConnectionPoolError.isClientClosedDuringResponse(error) ? .info : .warning
-            self.logger.log(level, "Streaming exchange via \(proxy.endpoint) failed: \(error.displayDescription)", category: .proxy)
+            // A client hang-up is the handler's to report: it emits the
+            // coalesced `request.client_closed` and derives its log from it.
+            if !ConnectionPoolError.isClientClosedDuringResponse(error) {
+                self.logger.log(.warning, "Streaming exchange via \(proxy.endpoint) failed: \(error.displayDescription)", category: .proxy)
+            }
             connection.channel.close(mode: .all, promise: nil)
             self.lock.withLockVoid {
                 self.removeConnectionLocked(id: connection.id)
