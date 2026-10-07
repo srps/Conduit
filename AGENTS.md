@@ -63,8 +63,8 @@ Executables:
 ## Commits and pull requests
 
 - Use git. Split commits by concern. A commit that is a fix on its own must build on its own; a multi-commit feature only has to build at the branch tip.
-- A commit made with an AI tool ends with one `Co-Authored-By:` trailer naming the tool, for example `Co-Authored-By: Claude <model> <noreply@anthropic.com>`. The human committer is the author and is accountable.
-- Never put a session, conversation or transcript URL in a commit message; it only resolves for the tool account's owner. Put it in the PR description, with the tool's "generated with" line.
+- The human committer is the author and is accountable for every commit, whatever tool helped write it. Attribution trailers such as `Co-Authored-By:` are optional; reviews do not require or check them.
+- Never put a session, conversation or transcript URL in a commit message; it only resolves for the tool account's owner. Put it in the PR description if it is useful.
 
 ## References
 
