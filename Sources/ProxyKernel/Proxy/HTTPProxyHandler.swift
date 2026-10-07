@@ -358,15 +358,13 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// Strict mode sent this request to the upstream, and the upstream path
     /// failed with a 502. Probe the target directly once (per host, per
     /// cooldown) and, if it answers, say that a No-proxy entry would reach it
-    /// (#87). The request is not retried directly. Failures the pool refused
-    /// locally never reached the upstream and get no hint, and none is
-    /// probed while routing is changing under the proxy (#97): the detector
-    /// decides that from the current direct-mode cause and the orchestrator's
-    /// `RoutingTransitionSignal`.
+    /// (#87). The request is not retried directly. Only a failure that says
+    /// the upstream could not get there earns a hint; see
+    /// `strictHintApplies(to:)`. None is probed while routing is changing
+    /// under the proxy (#97): the detector decides that from the current
+    /// direct-mode cause and the orchestrator's `RoutingTransitionSignal`.
     private func hintIfStrictModeTargetIsDirectlyReachable(target: HTTPRequestTarget, error: Error) {
-        guard configProvider().strictMode,
-              !ConnectionPoolError.isPoolExhausted(error),
-              !ConnectionPoolError.isAuthHandshakeLimitExceeded(error) else { return }
+        guard configProvider().strictMode, Self.strictHintApplies(to: error) else { return }
         let host = target.host
         let port = target.port
         let eventSink = self.eventSink
@@ -386,6 +384,28 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     "If it should not use the proxy, add it to No-proxy hosts. (\(event.event): \(event.detail ?? ""))",
                 category: .proxy
             )
+        }
+    }
+
+    /// Whether a strict-mode upstream failure may suggest a No-proxy entry.
+    /// Yes for a failure that says the upstream could not reach the target:
+    /// a transport failure, a timeout, a malformed answer, or the upstream
+    /// answering 5xx (502/504 is how a proxy says it cannot get there, the
+    /// classic internal host). No when the upstream reached a decision about
+    /// the request (a 4xx such as a 403 policy deny), when authentication to
+    /// it failed, and when the request never reached it: suggesting a bypass
+    /// then points the user away from the real problem, or around a policy.
+    static func strictHintApplies(to error: Error) -> Bool {
+        guard let poolError = error as? ConnectionPoolError else { return true }
+        switch poolError {
+        case .upstreamReturnedStatus(let status, _):
+            return status >= 500
+        case .authenticationUnavailable, .authenticationRejected,
+             .noUpstreamsConfigured, .poolExhausted, .authHandshakeLimitExceeded,
+             .bodyTooLargeForReplay, .clientClosedDuringResponse:
+            return false
+        case .invalidResponse, .streamingResponseInterrupted, .upstreamResponseTimedOut:
+            return true
         }
     }
 

@@ -116,9 +116,9 @@ enum PACRoutingScenarios {
             )
         }
 
-        func connect() async throws -> String {
+        func connect(host: String = "127.0.0.1") async throws -> String {
             guard let port = server?.listeningPort else { throw Failure(description: "HTTP listener missing") }
-            let target = "127.0.0.1:\(self.target.port)"
+            let target = "\(host):\(self.target.port)"
             return try await RawHTTPAuditClient.request(
                 group: group, host: "127.0.0.1", port: port,
                 request: "CONNECT \(target) HTTP/1.1\r\nHost: \(target)\r\n\r\n"
@@ -244,6 +244,54 @@ enum PACRoutingScenarios {
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: [.init("strict mode never routes a reachable target direct; one hint on upstream failure", true)],
             notes: ["PASS: 2/2 via upstream with no probe; upstream down → 502, 1 probe, 1 hint, no retry"]
+        )
+    }
+
+    /// A strict-mode failure earns a No-proxy hint only when the upstream
+    /// could not get to the target. The upstream refusing a CONNECT by policy
+    /// (403) is its decision about the request: no probe, no hint, although
+    /// the target answers directly. The upstream answering 502 for another
+    /// host is the control: one probe, one hint. The two use different host
+    /// names, so the hint cooldown (per host) cannot hide a wrong probe.
+    @MainActor
+    static func strictHintUpstreamRefusal(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date()
+        let fixture = Fixture()
+        do {
+            try await fixture.startOrigins()
+            try await fixture.startProxy(strict: true, pacScript: nil, verbose: verbose)
+            let baseline = fixture.target.connectionCount
+            let probes = fixture.detector?.probeCount ?? 0
+
+            fixture.upstream?.connectRefusalStatus = 403
+            let denied = try await fixture.connect(host: "localhost")
+            try require(denied.hasPrefix("HTTP/1.1 502"), "CONNECT refused by policy: \(denied.prefix(60))")
+
+            fixture.upstream?.connectRefusalStatus = 502
+            let unreachable = try await fixture.connect()
+            try require(unreachable.hasPrefix("HTTP/1.1 502"), "CONNECT the upstream cannot reach: \(unreachable.prefix(60))")
+            for _ in 0..<200 where fixture.events(named: "routing.strict_direct_reachable").isEmpty {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try await fixture.waitForTargetConnections(baseline + 1)
+
+            let hints = fixture.events(named: "routing.strict_direct_reachable")
+            try require((fixture.detector?.probeCount ?? 0) == probes + 1,
+                        "probes: \((fixture.detector?.probeCount ?? 0) - probes), expected 1 (the 403 must not probe)")
+            try require(hints.count == 1, "expected one hint, got \(hints.count)")
+            try require(hints[0].detail == "host=127.0.0.1 port=\(fixture.target.port) hint=add_to_no_proxy_hosts",
+                        "the hint is not for the 502's host: \(hints[0].detail ?? "")")
+            await fixture.stop()
+        } catch {
+            await fixture.stop()
+            throw error
+        }
+        return ScenarioResult(
+            name: "strict-hint-upstream-refusal", clientCount: 2, clientsOpened: 2, clientsWithFirstByte: 2,
+            clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
+            aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [.init("an upstream policy refusal earns no hint; an upstream 502 does", true)],
+            notes: ["PASS: 403 → 502 to the client, no probe; 502 → one probe, one hint for its host"]
         )
     }
 
