@@ -34,6 +34,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     private var requestHead: HTTPRequestHead?
     private var requestBody = ByteBufferAllocator().buffer(capacity: 0)
     private var requestSpool: SpooledHTTPRequestBody?
+    /// Set when the body crosses into the spool. The spool itself arrives
+    /// asynchronously, so chunks read before it exists must queue behind its
+    /// creation instead of starting a spool of their own.
+    private var spooling = false
+    /// Bytes accepted for this body so far, in memory or spooled or queued.
+    private var storedBodyBytes = 0
     private var requestBodyWriteFuture: EventLoopFuture<Void>?
     private var bodyTooLarge = false
     private var bodyStorageError: Error?
@@ -239,6 +245,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     private func resetRequestBodyState() {
         requestSpool?.cleanup()
         requestSpool = nil
+        spooling = false
+        storedBodyBytes = 0
         requestBodyWriteFuture = nil
         requestBody.clear()
         bodyTooLarge = false
@@ -247,6 +255,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
 
     private func abandonRequestBodyStorage() {
         requestBody.clear()
+        spooling = false
+        storedBodyBytes = 0
         bodyTooLarge = false
         bodyStorageError = nil
         let pendingWrite = requestBodyWriteFuture
@@ -273,16 +283,24 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
 
         let readableBytes = buffer.readableBytes
         let config = configProvider()
-        let currentStoredBytes = requestSpool?.readableBytes ?? requestBody.readableBytes
-        guard currentStoredBytes + readableBytes <= config.maxSpooledBodyBytes else {
+        guard storedBodyBytes + readableBytes <= config.maxSpooledBodyBytes else {
             bodyTooLarge = true
             return
         }
+        storedBodyBytes += readableBytes
 
-        if let spool = requestSpool {
+        if spooling {
+            // Chained after the spool's creation, so by the time this runs
+            // the spool is set, even when this chunk was read before it was.
+            // Deciding on `requestSpool` here instead started a second spool
+            // for a chunk read in the same batch as the one that crossed the
+            // threshold, and the body lost everything before it.
             let chunk = buffer
             chainBodyStorage(context: context) { eventLoop in
-                spool.append(chunk, eventLoop: eventLoop)
+                guard let spool = self.requestSpool else {
+                    return eventLoop.makeFailedFuture(RequestBodySpoolError.spoolMissing)
+                }
+                return spool.append(chunk, eventLoop: eventLoop)
             }
             return
         }
@@ -292,6 +310,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             return
         }
 
+        spooling = true
         var initial = requestBody
         initial.writeBuffer(&buffer)
         let initialBody = initial

@@ -46,11 +46,16 @@ package enum HTTPRequestBody: @unchecked Sendable {
 /// Why a request body could not be spooled to disk.
 package enum RequestBodySpoolError: Error, LocalizedError, Equatable {
     case directoryUnavailable(path: String, reason: String)
+    /// A chunk was queued for a spool that does not exist. A bug, reported
+    /// rather than dropping the chunk.
+    case spoolMissing
 
     package var errorDescription: String? {
         switch self {
         case .directoryUnavailable(let path, let reason):
             return "The request-body spool directory \(path) is unavailable: \(reason)"
+        case .spoolMissing:
+            return "A request-body chunk was queued for a spool that does not exist."
         }
     }
 }

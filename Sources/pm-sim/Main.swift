@@ -42,6 +42,7 @@ enum PMSim {
               strict-hint-vpn-settle  Routing: no strict-mode hint during a VPN transition or flap; hint after the settle window
               client-hangup-after-response Routing: a client hang-up after the upstream answered is no upstream failure, hint or DIRECT retry
               gateway-probe-blocklist Routing: gateway mode never probes or connects to a blocked target
+              request-body-spool      Bodies: spooled bodies arrive whole; an unavailable spool closes the client with a structured cause (#81)
               direct-mode-silence     Phase 2: prove expected-direct causes log .info, not .error
               direct-failure-storm    Direct NXDOMAIN storm: no error_rate.alarm or re-probe, one log line; upstream failures still alarm
               vpn-flap-idle           idle CONNECT tunnel survives a brief VPN flap
@@ -183,6 +184,7 @@ enum PMSim {
         "strict-hint-vpn-settle",
         "client-hangup-after-response",
         "gateway-probe-blocklist",
+        "request-body-spool",
         "direct-mode-silence",
         "direct-failure-storm",
         "vpn-flap-idle",
@@ -268,6 +270,8 @@ enum PMSim {
             return [try await StrictHintSettleScenarios.run(verbose: verbose)]
         case "client-hangup-after-response":
             return [try await ClientHangUpScenarios.run(verbose: verbose)]
+        case "request-body-spool":
+            return [try await RequestBodySpoolScenarios.run(verbose: verbose)]
         case "gateway-probe-blocklist":
             return [try await PACRoutingScenarios.gatewayProbeBlocklist(verbose: verbose)]
         case "direct-mode-silence":
