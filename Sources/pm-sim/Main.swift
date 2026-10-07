@@ -40,6 +40,7 @@ enum PMSim {
               pac-unsupported-only    Routing: a PAC with no usable answer goes via the upstream, never direct
               strict-direct-reachable Routing: strict mode never goes direct to a reachable origin; hint on 502
               strict-hint-vpn-settle  Routing: no strict-mode hint during a VPN transition or flap; hint after the settle window
+              client-hangup-after-response Routing: a client hang-up after the upstream answered is no upstream failure, hint or DIRECT retry
               gateway-probe-blocklist Routing: gateway mode never probes or connects to a blocked target
               direct-mode-silence     Phase 2: prove expected-direct causes log .info, not .error
               direct-failure-storm    Direct NXDOMAIN storm: no error_rate.alarm or re-probe, one log line; upstream failures still alarm
@@ -180,6 +181,7 @@ enum PMSim {
         "pac-unsupported-only",
         "strict-direct-reachable",
         "strict-hint-vpn-settle",
+        "client-hangup-after-response",
         "gateway-probe-blocklist",
         "direct-mode-silence",
         "direct-failure-storm",
@@ -264,6 +266,8 @@ enum PMSim {
             return [try await PACRoutingScenarios.strictDirectReachable(verbose: verbose)]
         case "strict-hint-vpn-settle":
             return [try await StrictHintSettleScenarios.run(verbose: verbose)]
+        case "client-hangup-after-response":
+            return [try await ClientHangUpScenarios.run(verbose: verbose)]
         case "gateway-probe-blocklist":
             return [try await PACRoutingScenarios.gatewayProbeBlocklist(verbose: verbose)]
         case "direct-mode-silence":

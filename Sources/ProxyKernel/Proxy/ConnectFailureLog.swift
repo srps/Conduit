@@ -71,6 +71,8 @@ package final class ConnectFailureLog: @unchecked Sendable {
 
     private struct Key: Hashable {
         let event: String?
+        /// Emit `event` whatever the level; otherwise only at warning and up.
+        let eventAtAnyLevel: Bool
         let target: String
         let kind: ConnectFailureKind
     }
@@ -135,8 +137,10 @@ package final class ConnectFailureLog: @unchecked Sendable {
         }
     }
 
-    package func report(_ event: String?, level: LogLevel, target: String, error: Error, message: String) {
-        let key = Key(event: event, target: target, kind: ConnectFailureKind(error))
+    package func report(
+        _ event: String?, level: LogLevel, target: String, error: Error, message: String, eventAtAnyLevel: Bool = false
+    ) {
+        let key = Key(event: event, eventAtAnyLevel: eventAtAnyLevel, target: target, kind: ConnectFailureKind(error))
         let at = now()
         var reports: [Report] = []
         lock.withLock {
@@ -228,6 +232,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
             HTTPProxyHandler.reportConnectFailure(
                 report.key.event, level: report.level, target: report.key.target, error: report.error,
                 message: report.message, logger: logger, eventSink: eventSink,
+                eventAtAnyLevel: report.key.eventAtAnyLevel,
                 kind: report.key.kind, suppressed: report.suppressed, windowSeconds: Int(interval)
             )
         }

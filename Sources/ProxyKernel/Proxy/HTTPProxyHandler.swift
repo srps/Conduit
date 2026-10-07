@@ -582,6 +582,20 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     self.onRequestCompleted(.succeeded, exchangeResult.upstream.endpoint)
                     self.onConnectionClosed(infoID)
                     body?.cleanup()
+                case .failure(let error) where ConnectionPoolError.isClientClosedDuringResponse(error):
+                    // The upstream answered; the client hung up before the
+                    // end was written. Not an upstream failure: no 502, no
+                    // DIRECT retry of a request the upstream already served,
+                    // and no strict-mode hint.
+                    self.connectFailureLog.report(
+                        "request.client_closed", level: .info,
+                        target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
+                        message: "Client closed before the response from the upstream was complete.",
+                        eventAtAnyLevel: true
+                    )
+                    self.onRequestCompleted(.failed(.client), nil)
+                    self.onConnectionClosed(infoID)
+                    body?.cleanup()
                 case .failure(let error):
                     if Self.shouldFallbackToDirectAfterProxyExchangeFailure(
                         hasDirectFallback: hasDirectFallback,
@@ -1036,11 +1050,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         message: String,
         logger: any LogSink,
         eventSink: (@Sendable (RuntimeEvent) -> Void)?,
+        eventAtAnyLevel: Bool = false,
         kind: ConnectFailureKind? = nil,
         suppressed: Int = 0,
         windowSeconds: Int = 0
     ) {
-        if let event, level >= .warning {
+        if let event, eventAtAnyLevel || level >= .warning {
             var detail = "target=\(target) reason=\(error.displayDescription)"
             if let kind { detail += " kind=\(kind.rawValue)" }
             if suppressed > 0 { detail += " suppressed=\(suppressed) windowSeconds=\(windowSeconds)" }

@@ -122,6 +122,53 @@ final class PACRoutingTableTests: XCTestCase {
         }
     }
 
+    // MARK: - A client hang-up after the upstream answered
+
+    /// The upstream answers in full, but the client has closed before the
+    /// response's end reaches it. That is the client's failure: no strict-mode
+    /// hint probe, no DIRECT retry of a request the upstream already served,
+    /// no upstream failure event and no breaker failure.
+    func testClientHangUpAfterUpstreamAnswerIsNotAnUpstreamFailure() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let upstream = HeldEndUpstream()
+        try await upstream.start()
+        defer { upstream.stop() }
+
+        for strict in [true, false] {
+            let label = "strict=\(strict)"
+            let outcomes = NIOLockedValueBox<[RequestOutcome]>([])
+            let pac = ScriptedPAC(.entries(["PROXY 127.0.0.1:\(upstream.port)", "DIRECT"]))
+            let fixture = try await ProxyFixture.start(
+                servers: servers, strict: strict, pac: pac, upstreamPort: upstream.port,
+                onRequestCompleted: { outcome in outcomes.withLockedValue { $0.append(outcome) } }
+            )
+            let acceptedBefore = servers.origin.accepted
+
+            var socket: BlockingSocket? = try BlockingSocket(port: XCTUnwrap(fixture.server.listeningPort))
+            try socket?.send("GET http://127.0.0.1:\(servers.origin.port)/held HTTP/1.1\r\nHost: 127.0.0.1:\(servers.origin.port)\r\n\r\n")
+            let response = socket?.readUntil { $0.contains("<upstream>") } ?? ""
+            XCTAssertTrue(response.contains("<upstream>"), "\(label): \(response)")
+            socket = nil
+            for _ in 0..<500 where fixture.server.inboundConnectionCount > 0 {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(fixture.server.inboundConnectionCount, 0, "\(label): the proxy never saw the client close")
+
+            upstream.releaseEnd()
+            for _ in 0..<500 where outcomes.withLockedValue({ $0.isEmpty }) {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            XCTAssertEqual(outcomes.withLockedValue { $0 }, [.failed(.client)], label)
+            XCTAssertEqual(servers.origin.accepted, acceptedBefore, "\(label): the request was retried DIRECT")
+            XCTAssertEqual(fixture.detector.probeCount, 0, "\(label): a client hang-up triggered a strict-mode hint probe")
+            XCTAssertEqual(fixture.events(named: "upstream.exchange_failed").count, 0, label)
+            XCTAssertEqual(fixture.events(named: "request.client_closed").count, 1, label)
+            XCTAssertEqual(fixture.server.upstreamStatuses().map(\.consecutiveFailures), [0], label)
+            await fixture.stop()
+        }
+    }
+
     // MARK: - #87: strict mode and the direct-reachability shortcut
 
     private enum PACSetting: CaseIterable { case off, noUsableAnswer, explicitDirect }
@@ -445,6 +492,60 @@ private final class TaggedHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 }
 
+/// An upstream that answers a request with a chunked `<upstream>` body and
+/// holds back the terminating chunk until `releaseEnd()`, so a test can close
+/// the client in between.
+private final class HeldEndUpstream: @unchecked Sendable {
+    private var channel: Channel?
+    private let held = NIOLockedValueBox<[Channel]>([])
+
+    var port: Int { channel?.localAddress?.port ?? 0 }
+
+    func start() async throws {
+        let held = self.held
+        channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(HeldEndHandler(held: held))
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+    }
+
+    func releaseEnd() {
+        for channel in held.withLockedValue({ held in defer { held = [] }; return held }) {
+            channel.writeAndFlush(channel.allocator.buffer(string: "0\r\n\r\n"), promise: nil)
+        }
+    }
+
+    func stop() {
+        channel?.close(promise: nil)
+    }
+}
+
+private final class HeldEndHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    private let held: NIOLockedValueBox<[Channel]>
+    private var pending = ""
+
+    init(held: NIOLockedValueBox<[Channel]>) {
+        self.held = held
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        pending += buffer.readString(length: buffer.readableBytes) ?? ""
+        guard pending.contains("\r\n\r\n") else { return }
+        pending = ""
+        let body = "<upstream>"
+        let reply = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+            + String(body.utf8.count, radix: 16) + "\r\n" + body + "\r\n"
+        context.writeAndFlush(NIOAny(context.channel.allocator.buffer(string: reply)), promise: nil)
+        held.withLockedValue { $0.append(context.channel) }
+    }
+}
+
 private struct Servers {
     let origin: TaggedServer
     let upstream: TaggedServer
@@ -498,7 +599,8 @@ private final class ProxyFixture: @unchecked Sendable {
         transitions: RoutingTransitionSignal? = nil,
         settleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow,
         now: @escaping @Sendable () -> Date = { Date() },
-        onEvent: @escaping @Sendable (RuntimeEvent) -> Void = { _ in }
+        onEvent: @escaping @Sendable (RuntimeEvent) -> Void = { _ in },
+        onRequestCompleted: @escaping @Sendable (RequestOutcome) -> Void = { _ in }
     ) async throws -> ProxyFixture {
         var config = ProxyConfig.testFixture()
         config.localHost = "127.0.0.1"
@@ -553,7 +655,7 @@ private final class ProxyFixture: @unchecked Sendable {
             pacRoutingEngine: engine,
             onConnectionOpened: { _ in },
             onConnectionClosed: { _ in },
-            onRequestCompleted: { _, _ in },
+            onRequestCompleted: { outcome, _ in onRequestCompleted(outcome) },
             eventSink: sink
         )
         try await server.start()
