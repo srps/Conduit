@@ -79,7 +79,11 @@ enum RequestBodySpoolScenarios {
         // Phase 2: a file where this process's spool directory should be.
         let directory = SpooledHTTPRequestBody.processSpoolDirectory
         let fileManager = FileManager.default
-        try? fileManager.removeItem(at: directory)
+        do {
+            try fileManager.removeItem(at: directory)
+        } catch CocoaError.fileNoSuchFile {
+            // Nothing spooled since the last request cleaned up: fine.
+        }
         let blockerPlaced = fileManager.createFile(atPath: directory.path, contents: Data("blocker".utf8))
         let blocked = await send()
         try await waitUntil { !spoolFailures().isEmpty }

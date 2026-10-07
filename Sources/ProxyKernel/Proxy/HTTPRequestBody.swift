@@ -95,9 +95,10 @@ package final class SpooledHTTPRequestBody: @unchecked Sendable {
         cleanup()
     }
 
+    /// `root` defaults to the shared spool root; tests pass their own.
     @discardableResult
-    package static func cleanupStaleTemporaryFiles() -> RequestBodySpoolSweep {
-        HTTPRequestBodyFileIO.sweep(root: HTTPRequestBodyFileIO.rootDirectory)
+    package static func cleanupStaleTemporaryFiles(root: URL? = nil) -> RequestBodySpoolSweep {
+        HTTPRequestBodyFileIO.sweep(root: root ?? HTTPRequestBodyFileIO.rootDirectory)
     }
 
     /// This process's spool directory. For tests and simulator scenarios
@@ -110,9 +111,12 @@ package final class SpooledHTTPRequestBody: @unchecked Sendable {
     /// future with `RequestBodySpoolError.directoryUnavailable`.
     /// `reportFailure` hears of housekeeping that failed later: this body's
     /// file not being removed, or (once per process) the startup sweep.
+    /// `directory` defaults to this process's spool directory; tests pass
+    /// their own so fault injection never touches another spool's files.
     package static func create(
         initialBody: ByteBuffer,
         eventLoop: EventLoop,
+        directory: URL? = nil,
         reportFailure: @escaping @Sendable (RequestBodySpoolHousekeepingFailure) -> Void = { _ in }
     ) -> EventLoopFuture<SpooledHTTPRequestBody> {
         let io = HTTPRequestBodyFileIO.shared
@@ -121,7 +125,7 @@ package final class SpooledHTTPRequestBody: @unchecked Sendable {
         }
         let path: String
         do {
-            path = try io.makeTemporaryPath()
+            path = try io.makeTemporaryPath(in: directory ?? HTTPRequestBodyFileIO.processDirectory)
         } catch {
             return eventLoop.makeFailedFuture(error)
         }
@@ -245,9 +249,9 @@ private final class HTTPRequestBodyFileIO: @unchecked Sendable {
     /// Created on every call, so a directory removed under a running
     /// process comes back; a directory that cannot be created is the
     /// request's failure.
-    func makeTemporaryPath() throws -> String {
-        try Self.prepareDirectory(Self.processDirectory)
-        return Self.processDirectory.appendingPathComponent(UUID().uuidString).path
+    func makeTemporaryPath(in directory: URL) throws -> String {
+        try Self.prepareDirectory(directory)
+        return directory.appendingPathComponent(UUID().uuidString).path
     }
 
     static func prepareDirectory(_ url: URL) throws {

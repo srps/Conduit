@@ -335,6 +335,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         operation: @escaping @Sendable (EventLoop) -> EventLoopFuture<Void>
     ) {
         context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
+        // Taken now: a write can fail after `.end` has cleared `requestHead`.
+        let target = requestHead.map { SensitiveValueSanitizer.observableTarget($0.uri) } ?? "unknown"
         nonisolated(unsafe) let ctx = context
         let previous = requestBodyWriteFuture ?? ctx.eventLoop.makeSucceededVoidFuture()
         let chained = previous.flatMap {
@@ -349,8 +351,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     ctx.channel.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
                 }
             case .failure(let error):
+                // Every write queued behind a failed one fails the same
+                // way; the body's first failure is the one to report.
+                guard self.bodyStorageError == nil else { return }
                 self.bodyStorageError = error
-                let target = self.requestHead.map { SensitiveValueSanitizer.observableTarget($0.uri) } ?? "unknown"
                 self.connectFailureLog.report(
                     "request.body_spool_failed", level: .warning, target: target, error: error,
                     message: "Could not store the request body for \(target) on disk (\(error.displayDescription)); closing the client connection."
