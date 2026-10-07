@@ -108,11 +108,13 @@ package final class SpooledHTTPRequestBody: @unchecked Sendable {
     }
 
     /// Creates the spool file. A directory that cannot be created fails the
-    /// future with `RequestBodySpoolError.directoryUnavailable`.
+    /// future with `RequestBodySpoolError.directoryUnavailable`. The
+    /// directory work runs on the spool's thread pool, never the event loop.
     /// `reportFailure` hears of housekeeping that failed later: this body's
-    /// file not being removed, or (once per process) the startup sweep.
-    /// `directory` defaults to this process's spool directory; tests pass
-    /// their own so fault injection never touches another spool's files.
+    /// file not being removed, and (once per process, for a spool in the
+    /// process directory) the startup sweep. `directory` defaults to this
+    /// process's spool directory; tests pass their own so fault injection
+    /// never touches another spool's files.
     package static func create(
         initialBody: ByteBuffer,
         eventLoop: EventLoop,
@@ -120,22 +122,18 @@ package final class SpooledHTTPRequestBody: @unchecked Sendable {
         reportFailure: @escaping @Sendable (RequestBodySpoolHousekeepingFailure) -> Void = { _ in }
     ) -> EventLoopFuture<SpooledHTTPRequestBody> {
         let io = HTTPRequestBodyFileIO.shared
-        if let sweepFailure = io.takeStartupSweepFailure() {
-            reportFailure(sweepFailure)
-        }
-        let path: String
-        do {
-            path = try io.makeTemporaryPath(in: directory ?? HTTPRequestBodyFileIO.processDirectory)
-        } catch {
-            return eventLoop.makeFailedFuture(error)
-        }
         let fileIO = io.fileIO
-        return fileIO.openFile(
-            _deprecatedPath: path,
-            mode: .write,
-            flags: .allowFileCreation(posixMode: 0o600),
-            eventLoop: eventLoop
-        ).flatMap { handle in
+        return io.makeTemporaryPath(in: directory ?? HTTPRequestBodyFileIO.processDirectory, eventLoop: eventLoop).flatMap { path in
+            if directory == nil, let sweepFailure = io.takeStartupSweepFailure() {
+                reportFailure(sweepFailure)
+            }
+            return fileIO.openFile(
+                _deprecatedPath: path,
+                mode: .write,
+                flags: .allowFileCreation(posixMode: 0o600),
+                eventLoop: eventLoop
+            ).map { (path, $0) }
+        }.flatMap { path, handle in
             let spooled = SpooledHTTPRequestBody(
                 path: path,
                 fileIO: fileIO,
@@ -222,6 +220,11 @@ private final class HTTPRequestBodyFileIO: @unchecked Sendable {
     static let shared = HTTPRequestBodyFileIO()
 
     let fileIO: NonBlockingFileIO
+    private let threadPool: NIOThreadPool
+    /// The startup sweep, run first on the thread pool. Every spool waits
+    /// for it, so it never races a spool's directory and its result is in
+    /// before the first spool could report it.
+    private let sweepDone: EventLoopFuture<Void>
     static let rootDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent("Conduit-RequestBodies", isDirectory: true)
     static let processDirectory = rootDirectory
@@ -232,11 +235,25 @@ private final class HTTPRequestBodyFileIO: @unchecked Sendable {
     private init() {
         let threadPool = NIOThreadPool(numberOfThreads: NonBlockingFileIO.defaultThreadPoolSize)
         threadPool.start()
+        self.threadPool = threadPool
         self.fileIO = NonBlockingFileIO(threadPool: threadPool)
-        let sweep = Self.sweep(root: Self.rootDirectory)
-        startupSweepFailure = NIOLockedValueBox(sweep.failed == 0 ? nil : RequestBodySpoolHousekeepingFailure(
-            message: "The startup sweep could not remove \(sweep.failed) stale request-body spool entr\(sweep.failed == 1 ? "y" : "ies") under \(Self.rootDirectory.path): \(sweep.firstFailure ?? "unknown")"
-        ))
+        let failure = NIOLockedValueBox<RequestBodySpoolHousekeepingFailure?>(nil)
+        startupSweepFailure = failure
+        let swept = MultiThreadedEventLoopGroup.singleton.next().makePromise(of: Void.self)
+        sweepDone = swept.futureResult
+        threadPool.submit { state in
+            if case .active = state {
+                let sweep = Self.sweep(root: Self.rootDirectory)
+                if sweep.failed > 0 {
+                    failure.withLockedValue {
+                        $0 = RequestBodySpoolHousekeepingFailure(
+                            message: "The startup sweep could not remove \(sweep.failed) stale request-body spool entr\(sweep.failed == 1 ? "y" : "ies") under \(Self.rootDirectory.path): \(sweep.firstFailure ?? "unknown")"
+                        )
+                    }
+                }
+            }
+            swept.succeed(())
+        }
     }
 
     func takeStartupSweepFailure() -> RequestBodySpoolHousekeepingFailure? {
@@ -248,10 +265,15 @@ private final class HTTPRequestBodyFileIO: @unchecked Sendable {
 
     /// Created on every call, so a directory removed under a running
     /// process comes back; a directory that cannot be created is the
-    /// request's failure.
-    func makeTemporaryPath(in directory: URL) throws -> String {
-        try Self.prepareDirectory(directory)
-        return directory.appendingPathComponent(UUID().uuidString).path
+    /// request's failure. On the thread pool, after the startup sweep.
+    func makeTemporaryPath(in directory: URL, eventLoop: EventLoop) -> EventLoopFuture<String> {
+        let threadPool = self.threadPool
+        return sweepDone.hop(to: eventLoop).flatMap {
+            threadPool.runIfActive(eventLoop: eventLoop) {
+                try Self.prepareDirectory(directory)
+                return directory.appendingPathComponent(UUID().uuidString).path
+            }
+        }
     }
 
     static func prepareDirectory(_ url: URL) throws {
