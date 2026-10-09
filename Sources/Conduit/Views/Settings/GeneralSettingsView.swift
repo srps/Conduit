@@ -138,6 +138,14 @@ struct GeneralSettingsView: View {
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Privileged helper status: \(HelperStatusPresentation.label(for: appState.helperStatus))")
                 }
+                if let policy = appState.helperCallerPolicy {
+                    LabeledContent("Callers") {
+                        Text(HelperStatusPresentation.callerPolicyLabel(for: policy))
+                            .foregroundStyle(policy == .unenforced ? Color(nsColor: .systemOrange) : .secondary)
+                            .multilineTextAlignment(.trailing)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 if let remediation = HelperStatusPresentation.remediation(for: appState.helperStatus) {
                     Text(remediation)
                         .font(.callout)

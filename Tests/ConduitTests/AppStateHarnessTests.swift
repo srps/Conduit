@@ -980,6 +980,41 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertNotNil(appState.lastErrorMessage, "the refusal is shown, not dropped")
     }
 
+    /// Install from Settings (#121): the harness's fake lifecycle is what the
+    /// app reaches, never the real installer, and the caller policy the
+    /// install reported is recorded as an event and kept for Settings.
+    func testHelperInstallReportsTheCallerPolicyItLeft() async throws {
+        let appState = try launch()
+        func helperEvents() -> [String] {
+            appState.eventLog.events.filter { $0.event.hasPrefix("helper.") }.map { "\($0.event) \($0.detail ?? "")" }
+        }
+
+        appState.installHelper()
+        await harness.deliveries()
+        XCTAssertEqual(harness.helper.installs, 1, "the fake seam, not the bundled installer")
+        XCTAssertEqual(appState.helperCallerPolicy, .enforced)
+        XCTAssertEqual(helperEvents(), ["helper.installed caller_policy=enforced"])
+
+        harness.helper.callerPolicy = .unenforced
+        appState.installHelper()
+        await harness.deliveries()
+        XCTAssertEqual(appState.helperCallerPolicy, .unenforced)
+        XCTAssertEqual(helperEvents().last, "helper.installed caller_policy=unenforced")
+
+        harness.helper.fails = true
+        appState.installHelper()
+        await harness.deliveries()
+        XCTAssertEqual(helperEvents().last, "helper.install_failed reason=helper lifecycle refused")
+        XCTAssertNotNil(appState.lastErrorMessage)
+        XCTAssertEqual(appState.helperCallerPolicy, .unenforced, "a failed install leaves the last known policy")
+
+        harness.helper.fails = false
+        appState.uninstallHelper()
+        await harness.deliveries()
+        XCTAssertNil(appState.helperCallerPolicy)
+        XCTAssertEqual(helperEvents().last, "helper.uninstalled ")
+    }
+
     // MARK: Flags and the machine
 
     /// The login item needs no runtime and must not wait for the pass: a

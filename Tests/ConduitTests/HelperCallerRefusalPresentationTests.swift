@@ -24,12 +24,13 @@ final class HelperCallerRefusalPresentationTests: XCTestCase {
         XCTAssertEqual(HelperToolPrivilegeClient.status(forPing: .ok()), .installed)
     }
 
-    func testSettingsOffersNoReinstallForAPinRefusalAndShowsTheRemedy() {
+    /// Reinstalling from the app re-derives the pin from this build (#121),
+    /// so it is the remedy, and the note says what it will do.
+    func testSettingsOffersAReinstallThatRepinsForAPinRefusal() {
         let status = HelperToolPrivilegeClient.Status.callerNotAccepted(message: pinMessage)
-        XCTAssertNil(HelperStatusPresentation.primaryActionTitle(for: status), "reinstalling from the app never updates the pin")
+        XCTAssertEqual(HelperStatusPresentation.primaryActionTitle(for: status), "Reinstall Helper")
         let remedy = HelperStatusPresentation.remediation(for: status) ?? ""
-        XCTAssertTrue(remedy.contains("sudo ./install-helper.sh"), remedy)
-        XCTAssertTrue(remedy.contains("bundle-app.sh"), remedy)
+        XCTAssertTrue(remedy.contains("Reinstalling pins it to this build"), remedy)
         XCTAssertTrue(remedy.contains(pinMessage), "the helper's own explanation must reach the user: \(remedy)")
         XCTAssertEqual(HelperStatusPresentation.label(for: status), "Installed, but not accepting this build")
     }

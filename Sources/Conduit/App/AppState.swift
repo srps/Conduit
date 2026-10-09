@@ -57,6 +57,9 @@ final class AppState: ObservableObject {
     private(set) var pacPreviewTask: Task<Void, Never>?
     @Published private(set) var activationPreflight: ActivationPreflight = .noAdmin
     @Published private(set) var helperStatusState: HelperToolPrivilegeClient.Status = .notInstalled
+    /// The caller policy the last install from Settings reported (#121);
+    /// nil before one, and after an uninstall.
+    @Published private(set) var helperCallerPolicy: HelperPinOutcome?
 
     let runtime = RuntimePresentationAdapter()
 
@@ -1754,62 +1757,82 @@ final class AppState: ObservableObject {
         helperStatusState
     }
 
+    /// Installs from the running app through the installer it ships, which
+    /// also pins the helper to this build (#121). The policy that install
+    /// left is shown in Settings until the next install or uninstall.
     func installHelper() {
-        guard let source = HelperBinaryLocator.sourcePath else {
-            lastErrorMessage = "Helper binary not found in app bundle."
-            logStore.log(.error, "Cannot install helper: binary not found in bundle.", category: .system)
-            return
-        }
         changeHelper(
-            succeeded: "Privileged helper installed successfully.",
-            failed: "Failed to install helper",
+            "install",
             // The LaunchDaemon takes a moment to bind its socket.
-            refreshAfter: .seconds(1)
-        ) { lifecycle in try lifecycle.installHelper(from: source) }
+            refreshAfter: .seconds(1),
+            { lifecycle in try lifecycle.installHelper() },
+            succeeded: { appState, policy in
+                appState.helperCallerPolicy = policy
+                return (
+                    RuntimeEvent(kind: .lifecycle, event: "helper.installed", detail: "caller_policy=\(policy.rawValue)"),
+                    policy == .unenforced ? .warning : .notice
+                )
+            }
+        )
     }
 
     func uninstallHelper() {
         changeHelper(
-            succeeded: "Privileged helper uninstalled.",
-            failed: "Failed to uninstall helper",
-            refreshAfter: .zero
-        ) { lifecycle in try lifecycle.uninstallHelper() }
+            "uninstall",
+            refreshAfter: .zero,
+            { lifecycle in try lifecycle.uninstallHelper() },
+            succeeded: { appState, _ in
+                appState.helperCallerPolicy = nil
+                return (RuntimeEvent(kind: .lifecycle, event: "helper.uninstalled"), .notice)
+            }
+        )
     }
 
     /// An install or uninstall, off the main actor: it waits on an admin
     /// password dialog and then on `launchctl`, and run inline the window
     /// that asked for it stopped drawing until both were done. One at a
-    /// time; a second click while the dialog is up is dropped.
-    private func changeHelper(
-        succeeded: String,
-        failed: String,
+    /// time; a second click while the dialog is up is dropped. Event first,
+    /// log line derived from it.
+    private func changeHelper<Outcome: Sendable>(
+        _ operation: String,
         refreshAfter delay: Duration,
-        _ change: @escaping @Sendable (any HelperLifecycleManaging) throws -> Void
+        _ change: @escaping @Sendable (any HelperLifecycleManaging) throws -> Outcome,
+        succeeded: @escaping @MainActor (AppState, Outcome) -> (RuntimeEvent, LogLevel)
     ) {
         guard !helperChangeInFlight else { return }
         helperChangeInFlight = true
         deliveries.deliver { [weak self, helperLifecycleWork, helperLifecycle] in
-            let failure: String? = await helperLifecycleWork.run {
+            let result: Result<Outcome, HelperChangeFailure> = await helperLifecycleWork.run {
                 do {
-                    try change(helperLifecycle)
-                    return nil
+                    return .success(try change(helperLifecycle))
                 } catch {
-                    return error.localizedDescription
+                    return .failure(HelperChangeFailure(reason: error.localizedDescription))
                 }
             }
             guard let self else { return }
             self.helperChangeInFlight = false
-            if let failure {
-                self.lastErrorMessage = failure
-                self.logStore.log(.error, "\(failed): \(failure)", category: .system)
+            switch result {
+            case .failure(let failure):
+                let reason = failure.reason
+                let event = RuntimeEvent(kind: .lifecycle, event: "helper.\(operation)_failed", detail: "reason=\(reason)")
+                self.orchestrator.eventLog.append(event)
+                self.logStore.log(.error, "Helper: \(event.event) \(event.detail ?? "")", category: .system)
+                self.lastErrorMessage = reason
                 return
+            case .success(let outcome):
+                let (event, level) = succeeded(self, outcome)
+                self.orchestrator.eventLog.append(event)
+                self.logStore.log(level, "Helper: \(event.event) \(event.detail ?? "")", category: .system)
             }
-            self.logStore.log(.notice, succeeded, category: .system)
             if delay > .zero {
                 try? await Task.sleep(for: delay)
             }
             self.refreshPreflight()
         }
+    }
+
+    private struct HelperChangeFailure: Error {
+        let reason: String
     }
 
     /// Deliberately does *not* `awaitLaunchRecovery()`, unlike every other

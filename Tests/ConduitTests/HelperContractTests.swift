@@ -513,15 +513,106 @@ final class HelperContractTests: XCTestCase {
         XCTAssertNoThrow(try client.shellScript(for: .setAutoproxy, values: ["Wi-Fi", "http://mdm.corp.example/a.pac", "off"]))
     }
 
-    // MARK: - HelperBinaryLocator
+    // MARK: - Install from Settings (#121)
 
-    func testLocatorReturnsNilWhenNotBundled() {
-        // In test context there's no app bundle with the helper embedded
-        // so the locator should return nil gracefully
-        let path = HelperBinaryLocator.sourcePath
-        // Either nil or a valid path; should never crash
-        if let path {
-            XCTAssertFalse(path.isEmpty)
+    /// A stub app whose `install-helper.sh` records its arguments and prints
+    /// what the real one prints last. The rendered script runs for real,
+    /// unprivileged, so its argument passing and output routing are what is
+    /// tested, not its text.
+    private func makeStubApp(installer: String) throws -> String {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("helper-install-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: root) }
+        // A space and a quote, so quoting is exercised.
+        let app = root.appendingPathComponent("Some Where/It's Conduit.app", isDirectory: true)
+        let resources = app.appendingPathComponent("Contents/Resources", isDirectory: true)
+        let services = app.appendingPathComponent("Contents/Library/LaunchServices", isDirectory: true)
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: services, withIntermediateDirectories: true)
+        try Data().write(to: services.appendingPathComponent(HelperConstants.serviceLabel))
+        try installer.write(to: resources.appendingPathComponent("install-helper.sh"), atomically: true, encoding: .utf8)
+        return app.path
+    }
+
+    private func runUnprivileged(_ script: String) throws -> CommandResult {
+        try CommandRunner.run(launchPath: "/bin/sh", arguments: ["-c", script])
+    }
+
+    func testSettingsInstallRunsTheBundledInstallerForTheRunningApp() throws {
+        let app = try makeStubApp(installer: """
+        printf 'arg=%s\\n' "$@"
+        echo "Privileged helper installed successfully."
+        echo "caller-policy: enforced"
+        """)
+        let runner = RecordingPrivilegedScriptRunner()
+        runner.execute = { try self.runUnprivileged($0) }
+        let client = HelperToolPrivilegeClient(fallback: AppleScriptPrivilegeClient(runner: runner.run))
+
+        XCTAssertEqual(try client.installHelper(bundlePath: app), .enforced)
+        XCTAssertEqual(runner.scripts.count, 1, "one script, so one admin prompt")
+        let output = try runUnprivileged(runner.scripts[0]).standardOutput
+        XCTAssertEqual(
+            output.split(separator: "\n").filter { $0.hasPrefix("arg=") },
+            ["arg=--source", "arg=installed", "arg=--app", "arg=\(app)"],
+            "the installer is told to install from and pin to the running app"
+        )
+    }
+
+    func testSettingsInstallFailureCarriesTheInstallersReason() throws {
+        let app = try makeStubApp(installer: """
+        echo "The derived caller requirement does not accept this app; refusing to install a pin that would lock it out"
+        exit 1
+        """)
+        let runner = RecordingPrivilegedScriptRunner()
+        runner.execute = { try self.runUnprivileged($0) }
+        let client = HelperToolPrivilegeClient(fallback: AppleScriptPrivilegeClient(runner: runner.run))
+
+        XCTAssertThrowsError(try client.installHelper(bundlePath: app)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("would lock it out"), "\(error.localizedDescription)")
+        }
+        let result = try runUnprivileged(runner.scripts[0])
+        XCTAssertEqual(result.exitCode, 1)
+        XCTAssertTrue(result.standardError.contains("would lock it out"), "a failure's output goes to stderr, where osascript reports it")
+        XCTAssertEqual(result.standardOutput, "")
+    }
+
+    func testSettingsInstallWithoutAPolicyLineIsAnError() throws {
+        let app = try makeStubApp(installer: "echo done")
+        let runner = RecordingPrivilegedScriptRunner()
+        runner.execute = { try self.runUnprivileged($0) }
+        let client = HelperToolPrivilegeClient(fallback: AppleScriptPrivilegeClient(runner: runner.run))
+
+        XCTAssertThrowsError(try client.installHelper(bundlePath: app)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("caller policy"), "\(error.localizedDescription)")
+        }
+    }
+
+    func testSettingsInstallOutsideAnAppBundleNamesWhatIsMissing() throws {
+        let runner = RecordingPrivilegedScriptRunner()
+        let client = HelperToolPrivilegeClient(fallback: AppleScriptPrivilegeClient(runner: runner.run))
+        let notAnApp = FileManager.default.temporaryDirectory.appendingPathComponent("not-an-app-\(UUID().uuidString)").path
+
+        XCTAssertThrowsError(try client.installHelper(bundlePath: notAnApp)) { error in
+            XCTAssertEqual(error as? HelperInstallerError, .notBundled(notAnApp + "/Contents/Resources/install-helper.sh"))
+        }
+        XCTAssertTrue(runner.scripts.isEmpty, "no admin prompt for an install that cannot work")
+    }
+
+    func testCallerPolicyIsReadFromTheInstallersLastPolicyLine() {
+        XCTAssertEqual(HelperToolPrivilegeClient.callerPolicy(fromInstallerOutput: "a\rcaller-policy: unenforced\r"), .unenforced)
+        XCTAssertEqual(HelperToolPrivilegeClient.callerPolicy(fromInstallerOutput: "caller-policy: enforced\ncaller-policy: unchanged"), .unchanged)
+        XCTAssertNil(HelperToolPrivilegeClient.callerPolicy(fromInstallerOutput: "caller-policy: maybe"))
+        XCTAssertNil(HelperToolPrivilegeClient.callerPolicy(fromInstallerOutput: ""))
+    }
+
+    /// It used to be `try?`: a dismissed password prompt read as uninstalled.
+    func testUninstallFailureIsThrown() {
+        let runner = RecordingPrivilegedScriptRunner()
+        runner.result = CommandResult(exitCode: 1, standardOutput: "", standardError: "User canceled. (-128)")
+        let client = HelperToolPrivilegeClient(fallback: AppleScriptPrivilegeClient(runner: runner.run))
+
+        XCTAssertThrowsError(try client.uninstallHelper()) { error in
+            XCTAssertTrue(error.localizedDescription.contains("User canceled"), "\(error.localizedDescription)")
         }
     }
 }
@@ -531,9 +622,11 @@ final class HelperContractTests: XCTestCase {
 private final class RecordingPrivilegedScriptRunner: @unchecked Sendable {
     private(set) var scripts: [String] = []
     var result = CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+    /// Runs the script instead of answering with `result`.
+    var execute: ((String) throws -> CommandResult)?
 
     func run(_ script: String) throws -> CommandResult {
         scripts.append(script)
-        return result
+        return try execute?(script) ?? result
     }
 }

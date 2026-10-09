@@ -21,14 +21,15 @@ this explicit administrator installation after copying the app to Applications:
 sudo /Applications/Conduit.app/Contents/Resources/install-helper.sh --source installed
 ```
 
-To enforce caller identity, install the helper with the bundled installer
-command above: it pins the release certificate, so later releases keep working
-with it without reinstalling the helper. **Install Helper** in Settings writes
-no pin, so that helper admits the console user's processes, and a helper pinned
-earlier keeps its old pin. A helper pinned to a locally signed build only
-refuses this app until the bundled installer is run once; its summary reports
-the new pin. Locally signed builds stay admitted beside releases, because the
-pin includes the release certificate too.
+Both ways of installing the helper enforce caller identity: the command above
+and **Install Helper** in Settings, which runs the same bundled installer for
+the app it is running from. Either pins the release certificate, so later
+releases keep working without reinstalling the helper. A helper pinned to a
+locally signed build refuses this app until it is reinstalled once; Settings
+then offers **Reinstall Helper** and shows the new pin. Locally signed builds
+stay admitted beside releases, because the pin includes the release
+certificate too. The app does not have to be in Applications: the pin names
+certificates and bundle identifiers, not a path.
 
 From 0.5, Conduit updates itself: **Check for Updates…** in the Conduit menu
 or the menu bar popover, or turn on **Check for updates automatically** in
