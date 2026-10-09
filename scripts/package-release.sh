@@ -19,9 +19,10 @@ if [ -n "${CONDUIT_RELEASE_SIGNING_IDENTITY:-}" ]; then
 certificate (see docs/release-signing.md) and is not notarized. If macOS
 blocks opening it, open System Settings > Privacy & Security and choose
 Open Anyway."
-    pin_note="To enforce caller identity, install the helper with the command above: it
-pins the release certificate, so later releases keep working with it without
-reinstalling the helper. Install Helper in Settings writes no pin."
+    pin_note="Either way the helper is pinned to this app's certificate and the release
+certificate, so later releases keep working with it without reinstalling the
+helper. A helper installed from Settings before 0.5.2 has no pin: reinstall it
+once from Settings."
 else
     signing_note="This app is ad-hoc signed and is not notarized. If macOS blocks opening it,
 open System Settings > Privacy & Security and choose Open Anyway."
@@ -38,7 +39,8 @@ $signing_note
 
 No Swift or Xcode is needed. Managed macOS proxy and system DNS settings
 require the privileged helper v5. Install it in Conduit > General > Privileged
-Helper. If an older helper refuses this build, run the bundled installer:
+Helper (one admin prompt); if a helper refuses this build, Reinstall Helper
+there re-pins it. The bundled installer does the same from Terminal:
 
   sudo /Applications/Conduit.app/Contents/Resources/install-helper.sh --source installed
 
