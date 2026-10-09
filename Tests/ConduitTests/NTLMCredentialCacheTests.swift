@@ -278,6 +278,33 @@ final class NTLMCredentialCacheTests: XCTestCase {
         XCTAssertEqual(fixture.store.loads, 2, "each proxy start reads afresh")
     }
 
+    /// 0.5.1: a handshake that needs the password between the listeners
+    /// coming up and the start read raises the access prompt first. The
+    /// start read must wait for that answer, not drop it and prompt again.
+    func testWarmWaitsForAReadAHandshakeAlreadyStarted() throws {
+        let fixture = try makeFixture(pendingReadWait: 0.1)
+        fixture.store.holdLoads()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { fixture.store.releaseLoads() }
+
+        XCTAssertThrowsError(try fallbackToken(fixture), "the handshake gives up at the bound and goes without NTLM")
+        XCTAssertEqual(fixture.store.loads, 1)
+
+        let warmed = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            fixture.manager.warmCache(eventSink: { fixture.events.append($0) })
+            warmed.signal()
+        }
+        // `exists` comes after the invalidation, so the read is answered
+        // only once the start read has decided what to do with it.
+        while fixture.store.existsCalls == 0 { usleep(1_000) }
+        fixture.store.releaseLoads()
+        XCTAssertEqual(warmed.wait(timeout: .now() + 5), .success)
+
+        XCTAssertEqual(fixture.store.loads, 1, "the start read uses the answer to the prompt already up")
+        XCTAssertTrue(try fallbackToken(fixture).hasPrefix("NTLM "))
+        XCTAssertEqual(fixture.store.loads, 1)
+    }
+
     func testWarmDoesNotReadWithoutASavedPassword() throws {
         let fixture = try makeFixture(saved: false)
         fixture.manager.warmCache(eventSink: { fixture.events.append($0) })

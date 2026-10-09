@@ -71,7 +71,7 @@ enum PMSim {
               security-boundaries     Auth destinations, config rejection, and loopback listeners
               kerberos-service-ticket A TGT without a service ticket is unreachable, not a missing credential
               kerberos-fallback-flood A fallback on every handshake is one event a minute, with the GSS codes
-              ntlm-credential-cache   A burst of NTLM fallbacks reads the saved password once; a failing store is reported once
+              ntlm-credential-cache   A burst of NTLM fallbacks reads the saved password once, also across a proxy start; a failing store is reported once
               network-location-recovery  inactive-location recovery, external edits, and write races
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
               update-coordinator      Daily update checks, version-change event, and updater report validation (#111)

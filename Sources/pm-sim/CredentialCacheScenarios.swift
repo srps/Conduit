@@ -95,9 +95,13 @@ enum CredentialCacheScenarios {
         /// A burst of CONNECTs. With `held`, the store answers nothing until
         /// the read is out; then the scenario releases it, so every handshake
         /// of the burst arrives while that one read is pending or after it
-        /// has landed, however fast the runner is. Returns how many tunnels
-        /// opened, once every client has either opened or been closed.
-        func runBurst(_ label: String, held: Bool, readsBefore: Int) async throws -> (opened: Int, readStarted: Bool) {
+        /// has landed, however fast the runner is. `whileHeld` runs while
+        /// the read is out and unanswered. Returns how many tunnels opened,
+        /// once every client has either opened or been closed.
+        func runBurst(
+            _ label: String, held: Bool, readsBefore: Int,
+            whileHeld: () async -> Void = {}
+        ) async throws -> (opened: Int, readStarted: Bool) {
             if held { store.holdLoads() }
             let clients = (0..<burst).map { i in
                 FakeClient(
@@ -114,6 +118,7 @@ enum CredentialCacheScenarios {
             var readStarted = true
             if held {
                 readStarted = await eventually { store.loads > readsBefore }
+                await whileHeld()
                 store.releaseLoads()
             }
             _ = await eventually {
@@ -141,9 +146,25 @@ enum CredentialCacheScenarios {
         store.loadFailure = nil
         try manager.saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
         let recovered = try await runBurst("recovered", held: false, readsBefore: healthyReads + failingReads)
+        let readsBeforeStart = store.loads
+
+        // A proxy start whose handshakes reach the store before its start
+        // read does, as on the first start after an update: the start read
+        // waits for the answer to the prompt already up, not raise another.
+        try manager.saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
+        let warmup = NIOLockedValueBox<Task<Void, Never>?>(nil)
+        let started = try await runBurst("start", held: true, readsBefore: readsBeforeStart) {
+            let existsBefore = store.existsCalls
+            warmup.withLockedValue { $0 = manager.warmCacheInBackground(eventSink: { events.append($0) }) }
+            // `exists` comes after the start read's invalidation.
+            _ = await eventually { store.existsCalls > existsBefore }
+        }
+        await warmup.withLockedValue { $0 }?.value
+        let startReads = store.loads - readsBeforeStart
 
         return ScenarioResult(
-            name: name, clientCount: burst * 3, clientsOpened: healthy.opened + failing.opened + recovered.opened,
+            name: name, clientCount: burst * 4,
+            clientsOpened: healthy.opened + failing.opened + recovered.opened + started.opened,
             clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
             durationSeconds: Date().timeIntervalSince(start),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
@@ -156,11 +177,15 @@ enum CredentialCacheScenarios {
                       unavailable.count == 1 && unavailable.first?.detail?.contains("reason=interaction_not_allowed") == true),
                 .init("a failing store fails the handshakes, not the proxy", failing.opened == 0),
                 .init("a save after the failure is read and used",
-                      recovered.opened == burst && store.loads == healthyReads + failingReads + 1),
+                      recovered.opened == burst && readsBeforeStart == healthyReads + failingReads + 1),
+                .init("a proxy start's read waits for the prompt a handshake already raised",
+                      started.readStarted && startReads == 1),
+                .init("the burst at a proxy start falls back to NTLM and opens", started.opened == burst),
             ],
             notes: [
                 "burst=\(burst)", "healthyReads=\(healthyReads)", "failingReads=\(failingReads)",
-                "opened=\(healthy.opened)/\(failing.opened)/\(recovered.opened)",
+                "startReads=\(startReads)",
+                "opened=\(healthy.opened)/\(failing.opened)/\(recovered.opened)/\(started.opened)",
                 "unavailable=\(unavailable.compactMap(\.detail))",
             ]
         )
