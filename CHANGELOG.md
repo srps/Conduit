@@ -4,6 +4,15 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+### Fixed
+
+- The first proxy start after an update asks for the Keychain password once,
+  not twice. Each update is a new build that macOS asks about once, since the
+  app is self-signed. An NTLM handshake could raise that prompt before the
+  start read did, and the start read then dropped the answer and asked again.
+
 ## 0.5.1
 
 Bug fixes, and the first release delivered through **Check for Updates…**:
