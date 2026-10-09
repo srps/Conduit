@@ -502,6 +502,7 @@ package final class InMemorySecretStore: SecretStore, @unchecked Sendable {
     private let lock = NSLock()
     private var secrets: [String: SecretBytes] = [:]
     private var _loads = 0
+    private var _existsCalls = 0
     private var _loadFailure: (any Error)?
     private var _loadDelay: TimeInterval = 0
 
@@ -511,6 +512,9 @@ package final class InMemorySecretStore: SecretStore, @unchecked Sendable {
 
     /// How many times `load(account:)` has been called.
     package var loads: Int { lock.withLock { _loads } }
+
+    /// How many times `exists(account:)` has been called.
+    package var existsCalls: Int { lock.withLock { _existsCalls } }
 
     /// Thrown by every `load(account:)` while set.
     package var loadFailure: (any Error)? {
@@ -559,7 +563,10 @@ package final class InMemorySecretStore: SecretStore, @unchecked Sendable {
     }
 
     package func exists(account: String) throws -> Bool {
-        lock.withLock { secrets[account] != nil }
+        lock.withLock {
+            _existsCalls += 1
+            return secrets[account] != nil
+        }
     }
 
     package func delete(account: String) throws {

@@ -72,6 +72,8 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// than one: callers that need the store meanwhile wait for it instead
     /// of each asking the Keychain (and each raising its access prompt).
     private var readInFlight: String?
+    /// The `cacheGeneration` the read in flight started in.
+    private var readInFlightGeneration = 0
     /// Bumped by every invalidation, so a read that started before one does
     /// not store its now-stale answer.
     private var cacheGeneration = 0
@@ -151,7 +153,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     package func warmCache(eventSink: (@Sendable (RuntimeEvent) -> Void)?) {
         let account = accountKey(for: identityProvider())
         cacheCondition.lock()
-        invalidateLocked()
+        invalidateKeepingCurrentReadLocked(account: account)
         cacheCondition.unlock()
         do {
             guard try keychain.exists(account: account) else { return }
@@ -211,6 +213,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// so the only thread that can sit on an access prompt is its own.
     private func startReadLocked(account: String) {
         readInFlight = account
+        readInFlightGeneration = cacheGeneration
         let generation = cacheGeneration
         readQueue.async {
             let result = Result { try self.readStore(account: account) }
@@ -251,6 +254,19 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         cacheGeneration += 1
         cacheEntry = nil
         cacheCondition.broadcast()
+    }
+
+    /// Caller holds `cacheCondition`. `invalidateLocked`, except that a
+    /// read for `account` already out since the last invalidation is kept:
+    /// it is asking the store afresh, and may be sitting on the access
+    /// prompt. A handshake can start it between the listeners coming up and
+    /// `warmCache`; dropping its answer would raise the prompt a second time.
+    private func invalidateKeepingCurrentReadLocked(account: String) {
+        if readInFlight == account, readInFlightGeneration == cacheGeneration {
+            cacheEntry = nil
+        } else {
+            invalidateLocked()
+        }
     }
 
     private func invalidateCache() {
