@@ -50,6 +50,16 @@ fi
 # Ad-hoc code has no certificate: no pin, exit 2, and the reason says so.
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/pin-test.XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
+# --app (#121): the app Settings runs from, checked before root like --source.
+mkdir -p "$scratch/Some Where/Conduit.app"
+app="$scratch/Some Where/Conduit.app"
+expect "--app without a value is rejected"         "--app needs the path" --app
+expect "a relative --app is rejected"              "absolute path ending in .app" --app Conduit.app
+expect "an --app that is not an app is rejected"   "absolute path ending in .app" --app "$scratch"
+expect "a missing --app is rejected"               "No app at" --app "$scratch/Missing.app"
+expect "a second --app is rejected"                "--app given twice" --app "$app" --app "$app"
+expect "--app with --source reaches the root check" "must be run with sudo" --source installed --app "$app"
+
 cp /usr/bin/true "$scratch/adhoc"
 codesign --force --sign - "$scratch/adhoc" 2>/dev/null
 rc=0
