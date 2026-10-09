@@ -9,6 +9,9 @@ package enum KerberosMechStatus: Equatable, Sendable {
     /// The mech's own major and minor status. A minor that is a Kerberos
     /// error names the real cause SPNEGO hid behind `BAD_MECH, minor 0`.
     case status(major: OM_uint32, minor: OM_uint32)
+    /// Latest diagnostic within the probe interval; useful to logging but
+    /// insufficient to start a new recovery for the current failure.
+    case cachedStatus(major: OM_uint32, minor: OM_uint32)
     /// The diagnostic call could not be made (the name did not import).
     case probeFailed
 }
@@ -34,26 +37,54 @@ package final class KerberosMechDiagnoser: @unchecked Sendable {
     package static let shared = KerberosMechDiagnoser(probe: SystemGSSTokenProvider.probeKerberosMech(host:))
 
     private let probe: @Sendable (String) -> KerberosMechStatus
-    private let limiter: RuntimeEventRepeatGate
+    private struct Entry {
+        let probedAt: Date
+        let status: KerberosMechStatus
+    }
+    private let interval: TimeInterval
+    private let now: @Sendable () -> Date
+    private let lock = NSLock()
+    private var entries: [String: Entry] = [:]
+    private let capacity: Int
 
     package init(
         interval: TimeInterval = 60,
+        capacity: Int = RuntimeEventRepeatGate.maximumEntries,
         now: @escaping @Sendable () -> Date = { Date() },
         probe: @escaping @Sendable (String) -> KerberosMechStatus
     ) {
         self.probe = probe
-        self.limiter = RuntimeEventRepeatGate(repeatInterval: interval, now: now)
+        precondition(interval.isFinite && interval >= 0 && capacity > 0)
+        self.interval = interval
+        self.capacity = capacity
+        self.now = now
     }
 
-    /// `failure` with the mech's status attached, or `failure` unchanged when
-    /// it is not a service-ticket failure or the host was probed within the
-    /// interval.
+    /// Attach the latest probe within the interval. Independent log gates
+    /// can then report its cause without triggering another TGS request.
     package func annotate(_ failure: KerberosAuthError) -> KerberosAuthError {
-        guard case .serviceTicketUnavailable(let host, let major, let minor, nil) = failure,
-              limiter.shouldEmit(host: host, reason: "krb5_mech_probe")
+        guard case .serviceTicketUnavailable(let host, let major, let minor, nil) = failure
         else {
             return failure
         }
-        return .serviceTicketUnavailable(host: host, major: major, minor: minor, mech: probe(host))
+        lock.lock()
+        defer { lock.unlock() }
+        let current = now()
+        if let entry = entries[host], current.timeIntervalSince(entry.probedAt) < interval {
+            let status: KerberosMechStatus
+            if case .status(let major, let minor) = entry.status {
+                status = .cachedStatus(major: major, minor: minor)
+            } else {
+                status = entry.status
+            }
+            return .serviceTicketUnavailable(host: host, major: major, minor: minor, mech: status)
+        }
+        let status = probe(host)
+        if entries[host] == nil, entries.count >= capacity,
+           let oldest = entries.min(by: { $0.value.probedAt < $1.value.probedAt })?.key {
+            entries.removeValue(forKey: oldest)
+        }
+        entries[host] = Entry(probedAt: now(), status: status)
+        return .serviceTicketUnavailable(host: host, major: major, minor: minor, mech: status)
     }
 }

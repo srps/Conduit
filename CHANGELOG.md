@@ -4,6 +4,12 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+### Fixed
+
+- A confirmed Kerberos KDC-unreachable initial handshake can attempt bounded service-ticket acquisition in a fresh copy of the app/daemon, then retry once without restarting the serving runtime (#99). Failures retain NTLM fallback and emit recovery events. Cached raw-mechanism diagnostics now accompany independently rate-limited fallback logs without extra diagnostic requests. Installed corporate-SSO recurrence validation remains outstanding.
+
 ## 0.5.2
 
 An app-only update from 0.5.1 through **Check for Updates…**. The helper binary

@@ -37,6 +37,9 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
     private let gate: GSSInitiatorGate
     private let hasInitiatorCredential: @Sendable () -> Bool
     private let mechDiagnoser: KerberosMechDiagnoser
+    private let kdcRecovery: KerberosKDCRecovery?
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    private let gssAttempt: (@Sendable (String, Data?) throws -> Data?)?
 
     /// `hasInitiatorCredential` is asked only after an ambiguous failure; see
     /// `KerberosAuthError.initiatorFailure`. `mechDiagnoser` explains a
@@ -44,11 +47,17 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
     package init(
         gate: GSSInitiatorGate = .shared,
         hasInitiatorCredential: @escaping @Sendable () -> Bool = SystemGSSTokenProvider.hasDefaultInitiatorCredential,
-        mechDiagnoser: KerberosMechDiagnoser = .shared
+        mechDiagnoser: KerberosMechDiagnoser = .shared,
+        kdcRecovery: KerberosKDCRecovery? = nil,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        gssAttempt: (@Sendable (String, Data?) throws -> Data?)? = nil
     ) {
         self.gate = gate
         self.hasInitiatorCredential = hasInitiatorCredential
         self.mechDiagnoser = mechDiagnoser
+        self.kdcRecovery = kdcRecovery
+        self.eventSink = eventSink
+        self.gssAttempt = gssAttempt
     }
 
     /// One `gss_init_sec_context` against the raw Kerberos mech for
@@ -130,8 +139,20 @@ package final class SystemGSSTokenProvider: GSSTokenProvider, @unchecked Sendabl
         // else (KDC unreachable, clock skew, ...) is a network-class failure
         // that every queued handshake would otherwise re-run.
         return try gate.run(target: host, shouldCoolDown: Self.startsGateCooldown) {
-            try initiateLocked(host: host, inputToken: inputToken)
+            if let kdcRecovery {
+                return try kdcRecovery.run(host: host, inputToken: inputToken, eventSink: eventSink) {
+                    try attemptLocked(host: host, inputToken: inputToken)
+                }
+            }
+            return try attemptLocked(host: host, inputToken: inputToken)
         }
+    }
+
+    /// The override replaces only the native call sequence for fault tests;
+    /// instance locking, process gate, recovery and retry remain production.
+    private func attemptLocked(host: String, inputToken: Data?) throws -> Data? {
+        if let gssAttempt { return try gssAttempt(host, inputToken) }
+        return try initiateLocked(host: host, inputToken: inputToken)
     }
 
     /// Whether a failed initiator call starts `GSSInitiatorGate`'s cooldown
@@ -411,11 +432,12 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
         }
         var detail = "major=\(major) minor=\(Int32(bitPattern: minor))"
         switch mech {
-        case .status(let mechMajor, let mechMinor):
+        case .status(let mechMajor, let mechMinor), .cachedStatus(let mechMajor, let mechMinor):
             detail += " krb5_major=\(mechMajor) krb5_minor=\(Int32(bitPattern: mechMinor))"
             if let name = Self.kerberosErrorName(minor: mechMinor) {
                 detail += " krb5_error=\(name)"
             }
+            if case .cachedStatus = mech { detail += " krb5_probe=cached" }
         case .probeFailed:
             detail += " krb5_probe=failed"
         case nil:

@@ -294,6 +294,7 @@ enum DevLaunch {
             privilegeClient: machine,
             helperLifecycle: helper,
             credentialStore: secrets,
+            kerberosTicketRecovery: FakeKerberosTicketRecovery(),
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
             homeDirectory: home,
             resolverDirectory: resolverDirectory.path,
