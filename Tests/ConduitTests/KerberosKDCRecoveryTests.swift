@@ -206,7 +206,7 @@ final class KerberosKDCRecoveryTests: XCTestCase {
             executable, args, timeout, outputLimit in
             XCTAssertEqual(executable, "/tmp/Conduit with spaces")
             XCTAssertEqual(args, [KerberosTicketRecoveryReply.argument, "proxy.corp.example"])
-            XCTAssertEqual(timeout, 10)
+            XCTAssertEqual(timeout, 3)
             XCTAssertEqual(outputLimit, 512)
             seen.withLockedValue { $0 = true }
             return CommandResult(exitCode: 0, standardOutput: "{\"major\":1,\"minor\":0}", standardError: "ignored")

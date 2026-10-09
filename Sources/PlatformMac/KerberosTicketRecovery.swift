@@ -22,6 +22,13 @@ package enum KerberosTicketRecoveryError: Error, LocalizedError {
 /// Re-exec preserves the signed caller identity and SSO credential access.
 /// Only status codes leave the worker; stdout/stderr never enter a log.
 package struct SystemKerberosTicketRecovery: KerberosTicketRecovering {
+    /// The caller holds the process-wide GSS gate for the whole run, and
+    /// every queued handshake waits on it from a cooperative-pool thread.
+    /// A reachable KDC answers one TGS request well inside this; one that
+    /// does not is the failure the recovery cannot fix anyway.
+    package static let workerTimeout: TimeInterval = 3
+    package static let workerOutputLimit = 512
+
     private let executable: URL?
     private let run: @Sendable (String, [String], TimeInterval, Int) throws -> CommandResult
 
@@ -38,7 +45,8 @@ package struct SystemKerberosTicketRecovery: KerberosTicketRecovering {
     package func primeServiceTicket(host: String) throws {
         guard let executable else { throw KerberosTicketRecoveryError.executableUnavailable }
         // CommandRunner additionally bounds termination and pipe-drain waits.
-        let result = try run(executable.path, [KerberosTicketRecoveryReply.argument, host], 10, 512)
+        let result = try run(executable.path, [KerberosTicketRecoveryReply.argument, host],
+                             Self.workerTimeout, Self.workerOutputLimit)
         let reply: KerberosTicketRecoveryReply
         do {
             reply = try CanonicalJSON.decoder().decode(KerberosTicketRecoveryReply.self, from: Data(result.standardOutput.utf8))
