@@ -46,11 +46,11 @@ final class KerberosMechDiagnoserTests: XCTestCase {
 
         XCTAssertNotNil(mech(of: diagnoser.annotate(serviceTicketFailure(de))))
         clock.withLockedValue { $0.addTimeInterval(30) }
-        XCTAssertNil(mech(of: diagnoser.annotate(serviceTicketFailure(de))), "within the interval: no TGS request")
+        XCTAssertNotNil(mech(of: diagnoser.annotate(serviceTicketFailure(de))), "cached cause, no extra TGS request")
         XCTAssertNotNil(mech(of: diagnoser.annotate(serviceTicketFailure("rb-proxy-tr.corp.example"))),
                         "each host has its own interval")
         clock.withLockedValue { $0.addTimeInterval(29) }
-        XCTAssertNil(mech(of: diagnoser.annotate(serviceTicketFailure(de))))
+        XCTAssertNotNil(mech(of: diagnoser.annotate(serviceTicketFailure(de))))
         clock.withLockedValue { $0.addTimeInterval(1) }
         XCTAssertNotNil(mech(of: diagnoser.annotate(serviceTicketFailure(de))), "a failure that lasts is probed again")
 

@@ -411,11 +411,12 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
         }
         var detail = "major=\(major) minor=\(Int32(bitPattern: minor))"
         switch mech {
-        case .status(let mechMajor, let mechMinor):
+        case .status(let mechMajor, let mechMinor), .cachedStatus(let mechMajor, let mechMinor):
             detail += " krb5_major=\(mechMajor) krb5_minor=\(Int32(bitPattern: mechMinor))"
             if let name = Self.kerberosErrorName(minor: mechMinor) {
                 detail += " krb5_error=\(name)"
             }
+            if case .cachedStatus = mech { detail += " krb5_probe=cached" }
         case .probeFailed:
             detail += " krb5_probe=failed"
         case nil:
