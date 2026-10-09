@@ -68,6 +68,16 @@ Current gaps: Swift `String` remains unavoidable for one-shot HTTP header values
 
 Planned work: connection audit log with masked fields only; continue shrinking token lifetime at auth boundaries.
 
+### Kerberos KDC Recovery
+
+Apple's published [Heimdal negative-cache implementation](https://github.com/apple-oss-distributions/Heimdal/blob/1635de38a813f6e1dd3f8fd270683187ad4f02be/lib/gssapi/krb5/init_sec_context.c) retains failed service-ticket requests process-wide, without a TTL, until credential-cache/clock notifications. This is a source-backed explanation compatible with #99's restart recovery, not an independently reproduced diagnosis of the corporate incident.
+
+The app/daemon can request the affected ticket in a short-lived copy of the same signed executable. Worker dispatch precedes runtime composition; it accepts one bounded hostname argument, uses the existing SSO ticket cache, discards the token, and emits canonical JSON status codes only. No password/hash/token crosses the process boundary. PlatformMac owns process launch behind `KerberosTicketRecovering`; dev and both host harnesses inject a fake. Headless tools have no worker recovery collaborator.
+
+Recovery runs only for an initial-leg confirmed KDC-unreachable failure, once per minute across the factory, and holds the existing process GSS gate through priming and one retry. The worker command has a 10-second deadline and 512-byte per-stream output ceiling, plus CommandRunner's bounded termination/drain grace. Worker output is validated and never logged. Failure retains existing NTLM/no-password behavior; continuation/integrity/SPN errors are not retried by this policy. Probe causes are retained for at most the probe interval in a fixed-capacity cache so logging does not generate extra TGS requests; retained codes are labeled `krb5_probe=cached` and cannot trigger recovery.
+
+Residual validation: installed SSO credential-access policy, credential-cache notification delivery and recovery during a real recurrence require owner-run validation. A worker may find an already-cached ticket without generating a cache-change notification, or notification delivery may fail; the parent retry can therefore still fail. Such outcomes emit `auth.kerberos_recovery_failed stage=retry` and keep fallback behavior. This path does not promise to reset arbitrary process-wide framework state, and #99 stays open for that evidence.
+
 ### URL Secrets In Observability
 
 Asset: short signed-URL parameters, query credentials, and fragment values supplied by clients.

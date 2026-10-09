@@ -70,6 +70,7 @@ final class AppStateHarness {
             privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
             helperLifecycle: helper,
             credentialStore: secrets,
+            kerberosTicketRecovery: FakeKerberosTicketRecovery(),
             commandRunner: { launchPath, arguments in
                 hold.pass(launchPath, arguments)
                 return try machine.run(launchPath, arguments)

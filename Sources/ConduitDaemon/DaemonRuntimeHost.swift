@@ -186,6 +186,7 @@ final class DaemonRuntimeHost {
         vpnStatusMonitor: VPNStatusObserving? = nil,
         privilegeClient: (any PrivilegeClient)? = nil,
         credentialStore: (any SecretStore)? = nil,
+        kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
         commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil
@@ -258,6 +259,7 @@ final class DaemonRuntimeHost {
         let authenticatorProvider = credentialBasedAuthenticatorProvider(
             configProvider: orchestrator.configSnapshotProvider,
             credentialProvider: credentialManager,
+            kerberosTicketRecovery: kerberosTicketRecovery,
             outcomeHandler: { [weak orchestrator] outcome, host, reason, diagnostics in
                 orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason, diagnostics: diagnostics)
             },

@@ -1,8 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 import Darwin
 import SwiftUI
+import ProxyAuth
 
 @main
+enum ConduitMain {
+    @MainActor
+    static func main() {
+        if let status = KerberosTicketRecoveryWorker.run(arguments: Array(CommandLine.arguments.dropFirst())) {
+            exit(status)
+        }
+        ConduitApp.main()
+    }
+}
+
 struct ConduitApp: App {
     static let mainWindowID = "main"
 

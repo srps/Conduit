@@ -24,6 +24,9 @@ enum ConduitDaemon {
     static func main() async {
         signal(SIGPIPE, SIG_IGN)
         let args = Array(CommandLine.arguments.dropFirst())
+        if let status = KerberosTicketRecoveryWorker.run(arguments: args) {
+            exit(status)
+        }
 
         if args.contains("--help") || args.contains("-h") {
             printUsage()

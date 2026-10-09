@@ -3,6 +3,18 @@ import Foundation
 import ProxyKernel
 import ConduitShared
 
+/// Never launches a process or reads the user's ticket cache.
+package final class FakeKerberosTicketRecovery: KerberosTicketRecovering, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    package init() {}
+    package var calls: Int { lock.withLock { count } }
+    package func primeServiceTicket(host: String) throws {
+        lock.withLock { count += 1 }
+        throw KerberosTicketRecoveryError.executableUnavailable
+    }
+}
+
 // The doubles the platform managers and both runtime hosts are tested
 // against, and the machine the app's `--dev` launch mode runs over. They
 // live in Sources rather than Tests for the same reason

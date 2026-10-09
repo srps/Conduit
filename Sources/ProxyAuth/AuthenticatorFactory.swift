@@ -58,13 +58,15 @@ import ProxyKernel
 package func credentialBasedAuthenticatorProvider(
     configProvider: @escaping @Sendable () -> ProxyConfig,
     credentialProvider: any CredentialProvider,
+    kerberosTicketRecovery: (any KerberosTicketRecovering)? = nil,
     outcomeHandler: (@Sendable (RuntimeAuthOutcome, String, String?, String?) -> Void)? = nil,
     eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
-    kerberosTokenProvider: @escaping @Sendable () -> any GSSTokenProvider = { SystemGSSTokenProvider() },
+    kerberosTokenProvider: (@Sendable () -> any GSSTokenProvider)? = nil,
     now: @escaping @Sendable () -> Date = { Date() }
 ) -> @Sendable (UpstreamProxy) throws -> ProxyAuthenticator {
     let failureGate = RuntimeEventRepeatGate(now: now)
     let unavailableGate = RuntimeEventRepeatGate(now: now)
+    let kdcRecovery = kerberosTicketRecovery.map { KerberosKDCRecovery(recoverer: $0, now: now) }
     return { destination in
         let config = configProvider()
         guard let upstream = config.enabledUpstreams.first(where: {
@@ -88,7 +90,8 @@ package func credentialBasedAuthenticatorProvider(
         switch config.authMode {
         case .systemNegotiated:
             return NegotiateAuthenticator(
-                kerberos: KerberosAuthenticator(tokenProvider: kerberosTokenProvider()),
+                kerberos: KerberosAuthenticator(tokenProvider: kerberosTokenProvider?()
+                    ?? SystemGSSTokenProvider(kdcRecovery: kdcRecovery, eventSink: eventSink)),
                 ntlmFallbackProvider: {
                     // A failed read is reported and answered like no saved
                     // password: Kerberos' own failure goes to the request.

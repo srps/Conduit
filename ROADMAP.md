@@ -41,6 +41,7 @@ metrics do not block the first usable daemon/client slice.
 
 ### Reliability and security
 
+- [~] **Kerberos KDC recovery ([#99](https://github.com/srps/Conduit/issues/99))** — bounded independent service-ticket acquisition and one parent retry on a freshly confirmed KDC-unreachable initial leg, structured outcomes, retained probe diagnostics, unit tests and `kerberos-kdc-recovery` simulator are implemented. Installed corporate-SSO recurrence and cache-notification validation remain outstanding; see `docs/threat-model.md`. [Rel, Obs, Sim]
 - [ ] **Kerberos credential expiry** — explicit mid-session expiry/renewal/fallback contract and scenario coverage, including unavailable renewal and absent NTLM credentials. [Rel, Sec, Sim]
 - [ ] **Tunnel health probes** — bounded per-tunnel probes; failures mark warning without tearing down active sessions; add `tunnel-flap`. [Rel, Obs, Sim]
 - [ ] **Upstream selection strategies** — retain draggable priority order; optionally add automatic stable selection with measured EWMA/hysteresis behavior. [Rel, Obs, UI]

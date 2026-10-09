@@ -35,7 +35,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: true,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: RecordingPrivilegeClient(),
-            credentialStore: secrets
+            credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery()
         )
         // Recovery writes the journal under `directory`; let it land before
         // the `defer` removes it.
@@ -63,7 +63,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
             configFilePredatesLaunch: true,
             networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
             commandRunner: { path, arguments in try machine.run(path, arguments) },
             homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
         )
@@ -102,7 +102,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                                      configFilePredatesLaunch: true,
                                      networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
-                                     credentialStore: InMemorySecretStore(),
+                                     credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                                      commandRunner: { path, arguments in try machine.run(path, arguments) },
                                      homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path)
         let originalPlatform = try Data(contentsOf: environment.platformConfigFile)
@@ -142,7 +142,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: true,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(),
-            credentialStore: InMemorySecretStore()
+            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
         )
 
         XCTAssertEqual(host.status().configGeneration, 0)
@@ -177,7 +177,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: false,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
-            credentialStore: InMemorySecretStore()
+            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
         )
         // Recovery writes the journal under the state directory; let it land
         // before the `defer` removes it.
@@ -221,7 +221,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: false,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
-            credentialStore: InMemorySecretStore()
+            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
         )
         // Recovery writes the journal under the state directory; let it land
         // before the `defer` removes it.
@@ -287,7 +287,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(),
             privilegeClient: recording,
-            credentialStore: InMemorySecretStore()
+            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
         )
 
         do {
@@ -362,7 +362,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 networkLocationStoreFactory: { [locationStore] _ in locationStore },
                 networkLocationLimits: locationLimits, vpnStatusMonitor: vpn,
                 privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
-                credentialStore: secrets,
+                credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                 commandRunner: { launchPath, arguments in
                     if arguments.first == "-listallnetworkservices" { listings.passThrough() }
                     hold.pass(launchPath, arguments)
