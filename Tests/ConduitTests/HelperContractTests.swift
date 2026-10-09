@@ -605,6 +605,34 @@ final class HelperContractTests: XCTestCase {
         XCTAssertNil(HelperToolPrivilegeClient.callerPolicy(fromInstallerOutput: ""))
     }
 
+    /// A removal that fails stops the uninstall with that failure, rather
+    /// than a later step's success standing for the whole. Every command the
+    /// script runs is a stub on a PATH of its own, so nothing is removed.
+    func testUninstallStopsAtTheFirstFailedRemoval() throws {
+        let stubs = FileManager.default.temporaryDirectory.appendingPathComponent("uninstall-stubs-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: stubs, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: stubs) }
+        let log = stubs.appendingPathComponent("calls").path
+        func stub(_ name: String, _ body: String) throws {
+            let url = stubs.appendingPathComponent(name)
+            try "#!/bin/sh\necho \"\(name) $*\" >> '\(log)'\n\(body)\n".write(to: url, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        }
+        try stub("launchctl", "exit 0")
+        try stub("rmdir", "exit 0")
+        try stub("rm", "exit 1")
+
+        let result = try CommandRunner.run(
+            launchPath: "/bin/sh",
+            arguments: ["-c", "PATH=\(stubs.path.shellQuoted)\n" + HelperToolPrivilegeClient.uninstallScript]
+        )
+        let calls = try String(contentsOfFile: log, encoding: .utf8).split(separator: "\n")
+
+        XCTAssertNotEqual(result.exitCode, 0)
+        XCTAssertEqual(calls.count, 2, "bootout, then the first rm, and nothing after it: \(calls)")
+        XCTAssertTrue(calls.last?.hasPrefix("rm -f \(HelperConstants.binaryInstallPath)") ?? false, "\(calls)")
+    }
+
     /// It used to be `try?`: a dismissed password prompt read as uninstalled.
     func testUninstallFailureIsThrown() {
         let runner = RecordingPrivilegedScriptRunner()

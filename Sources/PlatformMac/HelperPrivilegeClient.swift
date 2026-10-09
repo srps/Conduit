@@ -558,14 +558,21 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     }
 
     package func uninstallHelper() throws {
-        let script = """
+        try fallback.runPrivilegedScript(Self.uninstallScript)
+    }
+
+    /// Stops at the first removal that fails, so a helper or pin left behind
+    /// is reported rather than hidden behind a later step's success; the steps
+    /// expected to fail carry their own `|| true`.
+    static var uninstallScript: String {
+        """
+        set -e
         launchctl bootout system \(HelperConstants.launchdPlistPath.shellQuoted) 2>/dev/null || true
         rm -f \(HelperConstants.binaryInstallPath.shellQuoted) \(HelperConstants.launchdPlistPath.shellQuoted) \(HelperConstants.socketPath.shellQuoted)
         rm -f \(HelperConstants.callerRequirementPath.shellQuoted)
         rmdir \(HelperConstants.callerRequirementDirectory.shellQuoted) 2>/dev/null || true
         rm -f \(HelperConstants.legacyNewsyslogConfPath.shellQuoted) \(HelperConstants.legacyLogPath.shellQuoted) \(HelperConstants.legacyLogPath.shellQuoted).*
         """
-        try fallback.runPrivilegedScript(script)
     }
 
     // MARK: - Socket Communication
