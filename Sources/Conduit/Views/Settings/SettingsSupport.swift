@@ -429,13 +429,11 @@ enum HelperStatusPresentation {
     }
 
     /// `nil` when no button here would help. Reinstalling from the app
-    /// rewrites the binary and the LaunchDaemon, never the caller pin, so for
-    /// a build the pin refuses it would be an admin prompt that fixes nothing.
+    /// re-derives the caller pin from this build (#121), so it is also the
+    /// remedy for a build the pin refuses.
     static func primaryActionTitle(for status: HelperToolPrivilegeClient.Status) -> String? {
         switch status {
-        case .callerNotAccepted:
-            return nil
-        case .installed: return "Reinstall Helper"
+        case .callerNotAccepted, .installed: return "Reinstall Helper"
         case .outdated: return "Update Helper"
         case .notInstalled: return "Install Helper"
         case .notResponding: return "Repair Helper"
@@ -445,15 +443,23 @@ enum HelperStatusPresentation {
         }
     }
 
-    /// What to do instead of a button, for a status the app cannot fix.
+    /// What the button does, for a status where that needs saying.
     static func remediation(for status: HelperToolPrivilegeClient.Status) -> String? {
         switch status {
         case .callerNotAccepted(let message):
-            return "The helper only accepts Conduit builds signed with the identity it was installed for. "
-                + "Run scripts/create-signing-identity.sh once, rebuild with ./bundle-app.sh, "
-                + "then run sudo ./install-helper.sh in Terminal. The helper said: \(message)"
+            return "The helper only accepts Conduit builds signed like the one it was installed from. "
+                + "Reinstalling pins it to this build. The helper said: \(message)"
         default:
             return nil
+        }
+    }
+
+    /// Who may use the helper, as the last install from here left it.
+    static func callerPolicyLabel(for policy: HelperPinOutcome) -> String {
+        switch policy {
+        case .enforced: return "Only Conduit builds signed like this one, or by the release certificate"
+        case .unenforced: return "Any program you run: this build is signed ad-hoc, so there is no certificate to pin"
+        case .unchanged: return "Unchanged: the installer found no app to pin"
         }
     }
 

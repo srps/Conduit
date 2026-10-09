@@ -28,11 +28,9 @@ the release certificate together:
 
 So a helper installed this way once keeps admitting later releases from
 GitHub, and a developer's locally signed builds stay admitted beside them.
-**Install Helper** in Conduit's Settings copies the helper but neither writes
-nor changes the pin: a helper installed only that way enforces no caller
-identity (it admits the console user's processes), and one pinned earlier keeps
-its old pin. Updates work either way. Only the bundled installer turns on
-enforcement for release builds. The nested helper
+**Install Helper** in Conduit's Settings runs the same bundled installer with
+`--app` set to the running app, so it writes the same pin, derived from that
+app wherever it runs from (#121). The nested helper
 and `pm-dns` are signed as `io.github.srps.Conduit.Helper` and
 `io.github.srps.Conduit.pm-dns`, which the pin refuses.
 `scripts/verify-release-signing.sh` checks all of this on every tagged build.

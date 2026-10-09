@@ -448,9 +448,10 @@ package final class FakeLoginItems: @unchecked Sendable {
 package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sendable {
     private let lock = NSLock()
     private var _status: HelperToolPrivilegeClient.Status
-    private var _installs: [String] = []
+    private var _installs = 0
     private var _uninstalls = 0
     private var _fails = false
+    private var _callerPolicy: HelperPinOutcome = .enforced
 
     package struct Refused: Error, LocalizedError {
         package var errorDescription: String? { "helper lifecycle refused" }
@@ -465,21 +466,27 @@ package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sen
         set { lock.withLock { _status = newValue } }
     }
 
-    /// The source paths of every install requested, in order.
-    package var installs: [String] { lock.withLock { _installs } }
+    package var installs: Int { lock.withLock { _installs } }
     package var uninstalls: Int { lock.withLock { _uninstalls } }
     package var fails: Bool {
         get { lock.withLock { _fails } }
         set { lock.withLock { _fails = newValue } }
     }
 
-    package func installHelper(from sourcePath: String) throws {
-        let refused: Bool = lock.withLock {
-            _installs.append(sourcePath)
+    /// What the next install reports, as the installer would have.
+    package var callerPolicy: HelperPinOutcome {
+        get { lock.withLock { _callerPolicy } }
+        set { lock.withLock { _callerPolicy = newValue } }
+    }
+
+    package func installHelper() throws -> HelperPinOutcome {
+        let (refused, policy): (Bool, HelperPinOutcome) = lock.withLock {
+            _installs += 1
             if !_fails { _status = .installed }
-            return _fails
+            return (_fails, _callerPolicy)
         }
         if refused { throw Refused() }
+        return policy
     }
 
     package func uninstallHelper() throws {

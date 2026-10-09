@@ -10,6 +10,8 @@ SOCKET_PATH="/var/run/$BUNDLE_ID.Helper.sock"
 CALLER_DIR="/Library/Application Support/$BUNDLE_ID"
 CALLER_REQ="$CALLER_DIR/helper-callers.req"
 # The app the pin is derived from: the one that calls the helper.
+# `--app` replaces it, and is where `--source installed` takes the helper
+# from: Settings passes the running app, wherever it is (#121).
 PIN_APP="/Applications/Conduit.app"
 
 # Candidate helpers. `.build/debug` and `.build/release` are the symlinks
@@ -23,7 +25,7 @@ CANDIDATES[release]="$SCRIPT_DIR/.build/release/ConduitHelper"
 CANDIDATES[debug]="$SCRIPT_DIR/.build/debug/ConduitHelper"
 
 usage() {
-    echo "Usage: sudo ./install-helper.sh [--source installed|local|release|debug]"
+    echo "Usage: sudo ./install-helper.sh [--source installed|local|release|debug] [--app <Conduit.app>]"
     echo "       ./install-helper.sh --print-caller-requirement <signed app or binary>"
 }
 
@@ -115,8 +117,34 @@ release_certificate_leaf() {
 # Arguments are checked before the root check so a typo fails without sudo.
 SOURCE=""
 PRINT_REQUIREMENT_FOR=""
+APP_GIVEN=""
 while [ $# -gt 0 ]; do
     case "$1" in
+        --app)
+            if [ $# -lt 2 ]; then
+                echo "--app needs the path of a Conduit.app"
+                usage
+                exit 1
+            fi
+            if [ -n "$APP_GIVEN" ]; then
+                echo "--app given twice"
+                usage
+                exit 1
+            fi
+            case "$2" in
+                /*.app|/*.app/) ;;
+                *) echo "--app needs an absolute path ending in .app: $2"; usage; exit 1 ;;
+            esac
+            if [ ! -d "$2" ]; then
+                echo "No app at $2"
+                exit 1
+            fi
+            APP_GIVEN=1
+            PIN_APP="${2%/}"
+            CANDIDATES[installed]="$PIN_APP/Contents/Library/LaunchServices/$BUNDLE_ID.Helper"
+            shift 2
+            continue
+            ;;
         --print-caller-requirement)
             if [ $# -lt 2 ]; then
                 echo "--print-caller-requirement needs a path"
@@ -293,6 +321,7 @@ case "$PIN_ACTION" in
         chown root:wheel "$pin_tmp"
         chmod 644 "$pin_tmp"
         mv -f "$pin_tmp" "$CALLER_REQ"
+        CALLER_POLICY="enforced"
         CALLER_STATUS="ENFORCED: only programs signed like $PIN_APP ($CALLER_REQ)"
         if [ -n "$RELEASE_LEAF" ]; then
             CALLER_STATUS="$CALLER_STATUS, or by the Conduit release certificate"
@@ -300,12 +329,14 @@ case "$PIN_ACTION" in
         ;;
     remove)
         rm -f "$CALLER_REQ"
+        CALLER_POLICY="unenforced"
         CALLER_STATUS="UNENFORCED: $CALLER_REQUIREMENT_ERROR"
         echo ""
         echo "WARNING: $CALLER_REQUIREMENT_ERROR."
         echo "WARNING: Caller identity is NOT enforced: any process running as the console user may use the helper."
         ;;
     none)
+        CALLER_POLICY="unchanged"
         CALLER_STATUS="unchanged: no app at $PIN_APP to derive a pin from"
         if [ -f "$CALLER_REQ" ]; then
             CALLER_STATUS="$CALLER_STATUS; the existing pin in $CALLER_REQ stays"
@@ -327,3 +358,5 @@ echo "  Log:    /usr/bin/log show --predicate 'subsystem == \"$BUNDLE_ID\"' --in
 echo ""
 echo "Conduit will use the helper automatically."
 echo "No more repeated admin password prompts."
+# Read by Settings (HelperToolPrivilegeClient.callerPolicy): keep the form.
+echo "caller-policy: $CALLER_POLICY"

@@ -12,6 +12,18 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   not twice. Each update is a new build that macOS asks about once, since the
   app is self-signed. An NTLM handshake could raise that prompt before the
   start read did, and the start read then dropped the answer and asked again.
+- **Install Helper** in Settings pins the helper to the app, like the bundled
+  installer. It used to copy the helper without writing the caller pin, so a
+  helper installed only from Settings admitted any program of the console user,
+  and reinstalling could not fix a pin that refused the running build. Settings
+  now runs the app's own `install-helper.sh --source installed --app <this
+  app>`, with one admin prompt. The pin is derived from the running app
+  wherever it runs from, and a pin that would not accept that app is refused.
+  "Not accepting this build" now offers **Reinstall Helper**, which re-pins;
+  Settings shows who may use the helper after an install, and
+  `helper.installed` records it. `install-helper.sh` gains `--app`. A dismissed
+  password prompt on **Uninstall Helper** is now reported instead of read as
+  success. (#121)
 
 ## 0.5.1
 

@@ -37,8 +37,11 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
         try runPrivileged(Self.abortOnFirstFailure(batchScript(for: batch)))
     }
 
-    func runPrivilegedScript(_ script: String) throws {
-        try runPrivileged(script)
+    /// Returns what the script printed, which `installHelper()` reads its
+    /// result from.
+    @discardableResult
+    func runPrivilegedScript(_ script: String) throws -> String {
+        try runPrivileged(script).standardOutput
     }
 
     /// `sh` reports only the *last* command's status, and every script rendered
@@ -70,9 +73,10 @@ package final class AppleScriptPrivilegeClient: PrivilegeClient, @unchecked Send
     /// treats any throw from here as "the write did not land", which is the
     /// answer that keeps the journal records. Do not narrow that to a type check
     /// without re-reading `SystemProxyManager.write`.
-    private func runPrivileged(_ script: String) throws {
+    @discardableResult
+    private func runPrivileged(_ script: String) throws -> CommandResult {
         let result = try runner(script)
-        guard result.exitCode != 0 else { return }
+        guard result.exitCode != 0 else { return result }
         let output = [result.standardError, result.standardOutput]
             .filter { !$0.isEmpty }
             .joined(separator: " | ")
@@ -267,9 +271,9 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         case unauthorized
         /// Reached and refusing this *build* (#46): its code signature is not
         /// the one `install-helper.sh` pinned, or the pin is not trustworthy.
-        /// Reinstalling the helper from the app does not touch the pin, so
-        /// the remedy is a signed rebuild and `sudo ./install-helper.sh`;
-        /// `message` is the helper's own explanation.
+        /// Reinstalling from the app re-derives the pin from the running
+        /// build (#121), which is the remedy; `message` is the helper's own
+        /// explanation.
         case callerNotAccepted(message: String)
     }
 
@@ -507,61 +511,68 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         }
     }
 
-    /// One-time install: copies the helper to /Library/PrivilegedHelperTools and registers
-    /// a LaunchDaemon. Requires one admin prompt via AppleScript.
-    package func installHelper(from sourcePath: String) throws {
-        let binaryDst = HelperConstants.binaryInstallPath
-        let plistDst = HelperConstants.launchdPlistPath
-        let socketPath = HelperConstants.socketPath
+    /// Installs the helper from the running app with one admin prompt, by
+    /// running the installer the app ships: the same `install-helper.sh` a
+    /// user runs in Terminal, so the two cannot drift (#121). It copies the
+    /// helper, writes the LaunchDaemon and derives the caller pin from this
+    /// app, wherever it runs from, refusing a pin that would not accept it.
+    /// Returns the caller policy the installer reported.
+    package func installHelper() throws -> HelperPinOutcome {
+        try installHelper(bundlePath: Bundle.main.bundlePath)
+    }
 
-        let plistContent = """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(HelperConstants.serviceLabel)</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>\(binaryDst)</string>
-                <string>--daemon</string>
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
-        </dict>
-        </plist>
+    /// `bundlePath` is a parameter only so a test can point it at a stub app.
+    func installHelper(bundlePath: String) throws -> HelperPinOutcome {
+        let appPath = try HelperInstallerLocator.appBundlePath(bundlePath: bundlePath)
+        let output = try fallback.runPrivilegedScript(Self.installScript(appPath: appPath))
+        guard let policy = Self.callerPolicy(fromInstallerOutput: output) else {
+            throw PrivilegeClientError.executionFailed(
+                "The helper installer finished without reporting its caller policy: \(output.isEmpty ? "no output" : output)"
+            )
+        }
+        return policy
+    }
+
+    /// The installer's output goes to stdout when it succeeds, which is
+    /// where the policy line is read from, and to stderr when it fails, which
+    /// is what `osascript` puts in its error and so in the message shown.
+    static func installScript(appPath: String) -> String {
+        let installer = appPath + "/" + HelperInstallerLocator.installerPathInBundle
+        return """
+        out="$(/bin/zsh \(installer.shellQuoted) --source installed --app \(appPath.shellQuoted) 2>&1)"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then printf '%s\\n' "$out" >&2; else printf '%s\\n' "$out"; fi
+        exit "$rc"
         """
+    }
 
-        let script = """
-        launchctl bootout system \(plistDst.shellQuoted) 2>/dev/null || true
-        rm -f \(socketPath.shellQuoted)
-        mkdir -p /Library/PrivilegedHelperTools
-        cp \(sourcePath.shellQuoted) \(binaryDst.shellQuoted)
-        chown root:wheel \(binaryDst.shellQuoted)
-        chmod 755 \(binaryDst.shellQuoted)
-        cat > \(plistDst.shellQuoted) <<'PLISTEOF'
-        \(plistContent)
-        PLISTEOF
-        chown root:wheel \(plistDst.shellQuoted)
-        chmod 644 \(plistDst.shellQuoted)
-        rm -f \(HelperConstants.legacyNewsyslogConfPath.shellQuoted)
-        launchctl bootstrap system \(plistDst.shellQuoted)
-        """
-
-        try fallback.runPrivilegedScript(script)
+    /// The installer's last `caller-policy:` line. `osascript` hands back
+    /// `do shell script` output with carriage returns, so both separators
+    /// count.
+    static func callerPolicy(fromInstallerOutput output: String) -> HelperPinOutcome? {
+        let prefix = "caller-policy: "
+        return output
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .last { $0.hasPrefix(prefix) }
+            .flatMap { HelperPinOutcome(rawValue: String($0.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces)) }
     }
 
     package func uninstallHelper() throws {
-        let script = """
+        try fallback.runPrivilegedScript(Self.uninstallScript)
+    }
+
+    /// Stops at the first removal that fails, so a helper or pin left behind
+    /// is reported rather than hidden behind a later step's success; the steps
+    /// expected to fail carry their own `|| true`.
+    static var uninstallScript: String {
+        """
+        set -e
         launchctl bootout system \(HelperConstants.launchdPlistPath.shellQuoted) 2>/dev/null || true
         rm -f \(HelperConstants.binaryInstallPath.shellQuoted) \(HelperConstants.launchdPlistPath.shellQuoted) \(HelperConstants.socketPath.shellQuoted)
         rm -f \(HelperConstants.callerRequirementPath.shellQuoted)
         rmdir \(HelperConstants.callerRequirementDirectory.shellQuoted) 2>/dev/null || true
         rm -f \(HelperConstants.legacyNewsyslogConfPath.shellQuoted) \(HelperConstants.legacyLogPath.shellQuoted) \(HelperConstants.legacyLogPath.shellQuoted).*
         """
-        try? fallback.runPrivilegedScript(script)
     }
 
     // MARK: - Socket Communication
@@ -682,20 +693,45 @@ extension HelperCommand {
 }
 
 /// Resolves the best available source path for the helper binary.
-package enum HelperBinaryLocator {
-    package static var sourcePath: String? {
-        let bundleHelperPath = Bundle.main.bundlePath
-            + "/Contents/Library/LaunchServices/\(HelperConstants.serviceLabel)"
-        if FileManager.default.fileExists(atPath: bundleHelperPath) {
-            return bundleHelperPath
-        }
+/// What an install left the helper's caller pin as (#121), in the words
+/// `install-helper.sh` prints on its `caller-policy:` line.
+package enum HelperPinOutcome: String, Sendable, Equatable {
+    /// Only programs signed like the app it was installed from, or by the
+    /// release certificate, may use the helper.
+    case enforced
+    /// The app is signed ad-hoc, so there is no certificate to pin and the
+    /// pin was removed: any program of the console user may use the helper.
+    case unenforced
+    /// There was no app to derive a pin from; whatever pin was there stays.
+    case unchanged
+}
 
-        let macOSPath = Bundle.main.bundlePath + "/Contents/MacOS/ConduitHelper"
-        if FileManager.default.fileExists(atPath: macOSPath) {
-            return macOSPath
-        }
+package enum HelperInstallerError: Error, LocalizedError, Equatable {
+    case notBundled(String)
 
-        return nil
+    package var errorDescription: String? {
+        switch self {
+        case .notBundled(let missing):
+            return "The helper can only be installed from Conduit.app: \(missing) is missing."
+        }
+    }
+}
+
+/// The running app, as the helper's install source and pin.
+package enum HelperInstallerLocator {
+    static let installerPathInBundle = "Contents/Resources/install-helper.sh"
+    static let helperPathInBundle = "Contents/Library/LaunchServices/" + HelperConstants.serviceLabel
+
+    /// The running app when it carries both the installer and the helper;
+    /// throws naming what is missing otherwise, as for `swift run Conduit`.
+    static func appBundlePath(bundlePath: String) throws -> String {
+        for relative in [installerPathInBundle, helperPathInBundle] {
+            let path = bundlePath + "/" + relative
+            guard FileManager.default.fileExists(atPath: path) else {
+                throw HelperInstallerError.notBundled(path)
+            }
+        }
+        return bundlePath
     }
 }
 
@@ -721,7 +757,7 @@ extension PrivilegeRefusal {
 /// these three calls.
 package protocol HelperLifecycleManaging: Sendable {
     var status: HelperToolPrivilegeClient.Status { get }
-    func installHelper(from sourcePath: String) throws
+    func installHelper() throws -> HelperPinOutcome
     func uninstallHelper() throws
 }
 
