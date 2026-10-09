@@ -4,6 +4,35 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## 0.5.1
+
+Bug fixes, and the first release delivered through **Check for Updates…**:
+from 0.5.0 this is an app-only update. The helper is unchanged (v5) and needs
+no reinstall.
+
+### Fixed
+
+- Plain-HTTP request bodies larger than the in-memory buffer (16 MB by default)
+  reach the upstream whole. Before, a second chunk arriving while the spool file
+  was still being created started a second spool, and the upstream received a
+  truncated body. (#129)
+- A client that hangs up after the upstream has answered is no longer counted
+  as an upstream failure. Conduit used to answer it with a strict-mode No-proxy
+  hint, a failure against the upstream's breaker and, with PAC
+  `PROXY …; DIRECT`, a second copy of the request sent DIRECT. It is now one
+  `request.client_closed` event. (#128)
+- Strict mode no longer suggests a No-proxy entry when the upstream refused the
+  request by policy (4xx) or proxy authentication failed, including a missing
+  NTLM credential or Kerberos ticket. Hints stay for transport failures,
+  timeouts, malformed responses and 5xx. Settings → Advanced says which
+  failures qualify. (#130)
+- Failures to create, write, finish or clean up a request-body spool file are
+  reported as `request.body_spool_failed` and `request.body_spool_cleanup_failed`
+  instead of being dropped. Stale spool files are swept off the event loop.
+  (#81, #129)
+- `pm-tls-check` exits 1 with an error on stderr when it cannot encode its JSON
+  report, instead of printing nothing. (#126)
+
 ## 0.5.0
 
 Conduit updates itself from GitHub Releases. Releases are Apple Silicon only
