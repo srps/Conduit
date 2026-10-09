@@ -4,7 +4,15 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.5.2
+
+An app-only update from 0.5.1 through **Check for Updates…**. The helper binary
+is unchanged (v5), but **reinstall it once** from Settings → General →
+**Reinstall Helper** (one admin prompt). A helper installed or reinstalled from
+Settings before this release has no caller pin and accepts any program you run.
+After the reinstall, Settings shows "Callers: Only Conduit builds signed like
+this one…". A helper installed with `sudo ./install-helper.sh` already has
+the pin.
 
 ### Fixed
 
@@ -12,6 +20,7 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   not twice. Each update is a new build that macOS asks about once, since the
   app is self-signed. An NTLM handshake could raise that prompt before the
   start read did, and the start read then dropped the answer and asked again.
+  (#133)
 - **Install Helper** in Settings pins the helper to the app, like the bundled
   installer. It used to copy the helper without writing the caller pin, so a
   helper installed only from Settings admitted any program of the console user,
