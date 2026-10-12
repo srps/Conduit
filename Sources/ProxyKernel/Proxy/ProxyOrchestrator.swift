@@ -705,17 +705,6 @@ package final class ProxyOrchestrator {
         if diff.routingChanged {
             emitEvent(.config, "config.routing_changed")
             await refreshPACRouting(force: true)
-            if isProxyActive {
-                do {
-                    try await reconcileLocalPACServer(reason: "routing_reload")
-                } catch {
-                    logStore.log(
-                        .warning,
-                        "Config reload: local PAC server update failed — \(error.localizedDescription).",
-                        category: .pac
-                    )
-                }
-            }
             logStore.log(.notice, "Config reload: routing rules applied (no restart).", category: .general)
         }
 
@@ -790,13 +779,7 @@ package final class ProxyOrchestrator {
         }
 
         if diff.proxyChanged && isProxyActive {
-            let needsRestart = oldConfig.proxy.host != newConfig.proxy.host
-                || oldConfig.proxy.port != newConfig.proxy.port
-                || oldConfig.proxy.gatewayMode != newConfig.proxy.gatewayMode
-                || oldConfig.proxy.socksEnabled != newConfig.proxy.socksEnabled
-                || oldConfig.proxy.socksPort != newConfig.proxy.socksPort
-
-            if needsRestart {
+            if diff.proxyListenerChanged {
                 emitEvent(.config, "config.proxy_restart")
                 logStore.log(.notice, "Config reload: proxy listener config changed, restarting proxy (preserving in-flight tunnels).", category: .proxy)
                 // Preserve dedicated CONNECT tunnels across the listener swap. The
@@ -823,20 +806,6 @@ package final class ProxyOrchestrator {
             } else {
                 emitEvent(.config, "config.proxy_limits_updated")
                 logStore.log(.notice, "Config reload: proxy limits updated (no restart).", category: .proxy)
-                if oldConfig.proxy.strictMode != newConfig.proxy.strictMode,
-                   newConfig.localPACEnabled,
-                   isProxyActive {
-                    emitEvent(.config, "config.strict_mode_pac_refresh")
-                    do {
-                        try await reconcileLocalPACServer(reason: "strict_mode_reload")
-                    } catch {
-                        logStore.log(
-                            .warning,
-                            "Config reload: local PAC strict-mode update failed — \(error.localizedDescription).",
-                            category: .pac
-                        )
-                    }
-                }
             }
         }
 
@@ -856,6 +825,21 @@ package final class ProxyOrchestrator {
                 "Config reload: upstream list changed, but proxy is not active (state=\(snapshot.runtimeStatus.state.rawValue)) — deferring connectivity refresh until next start.",
                 category: .proxy
             )
+        }
+
+        // One reconciliation point for all browser PAC dependencies. Listener
+        // replacement already rebuilt the endpoint with its actual bound port.
+        // A stopped/failed host defers policy installation to the next start.
+        if diff.localPACChanged, !diff.proxyListenerChanged, isProxyActive {
+            let event = oldConfig.proxy.strictMode != newConfig.proxy.strictMode && newConfig.localPACEnabled
+                ? "config.strict_mode_pac_refresh" : "config.local_pac_refresh"
+            emitEvent(.config, event, detail: "reason=config_reload")
+            do {
+                try await reconcileLocalPACServer(reason: "config_reload")
+            } catch {
+                // The lifecycle method emits local_pac.failed before throwing.
+                logStore.log(.warning, "Config reload: local PAC update failed — \(error.displayDescription).", category: .pac)
+            }
         }
 
         onConfigChange?(config)
