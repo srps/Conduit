@@ -12,7 +12,9 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   failures and close the failed pair immediately. Fatal read errors also abort
   instead of waiting behind an unflushable peer queue, allowing clients to see
   EOF and perform their own reconnect. Healthy VPN-transition streams remain
-  open; orderly EOF still drains queued response data. Shared relay diagnostics
+  open; orderly remote EOF still drains queued response data, including when
+  read-flow callbacks race the retired socket. Client shutdown immediately
+  releases blocked remote sockets and pool slots. Shared relay diagnostics
   include the failing operation and destination socket. The deterministic
   `vpn-existing-stream-failure` scenario reproduces both stale-socket paths on
   isolated TCP connections and verifies fresh retries.

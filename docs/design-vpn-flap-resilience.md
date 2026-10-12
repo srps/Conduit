@@ -719,8 +719,13 @@ Upstream CONNECT and transparent relays now share one event-loop-confined
 handler. Write/flow-control futures return to the source loop before accessing
 the handler context. A known failure emits `tunnel.relay_failed` with the failed
 socket and operation, then aborts only that pair. No transition closes healthy
-streams, no opaque bytes are retried, and orderly EOF retains graceful draining
-to avoid truncating queued responses. Initial transparent ClientHello data uses
+streams, no opaque bytes are retried, and orderly remote EOF retains graceful
+draining to avoid truncating queued responses. A later flow-control callback
+on that retired socket is a no-op so it cannot abort the client response drain.
+Client shutdown closes the remote immediately even when its writes are blocked;
+the fault scenario also verifies the transparent-style pool callback retires
+that dedicated slot. Setup diagnostics preserve the failed pipeline stage.
+Initial transparent ClientHello data uses
 the same observed write path once both halves are installed. This removes the
 demonstrated failure-notification bugs; detection of silent network loss still
 depends on actual I/O errors and the existing TCP keepalive policy.
