@@ -53,7 +53,7 @@ enum PMSim {
               vpn-rapid-flap-burst    6 flaps in 1.5s emit one event pair (coalesce)
               transparent-direct      intercepted SNI client relays direct on VPN-down, upstream otherwise
               vpn-reconnect-routing   intercepted client uses upstream while reconnect probe is held
-              vpn-existing-stream-failure  retired-address errors close broken tunnels; fresh retries work
+              vpn-existing-stream-failure  retired-address write and read errors close broken tunnels promptly
               browser-retained-pac    browser keeps one PAC across VPN cycle; fresh requests recover
               network-transition      Wi-Fi → VPN → captive portal → resume; recovery <5s, DoH recycled
               network-path-churn      20 identical path updates reset nothing; a gateway roam resets once
