@@ -66,3 +66,27 @@ an encrypted offline backup of the release certificate and update key exists and
 is recoverable according to `release-signing.md`; no private key belongs in this
 record. These installed/key-custody checks are owner-run acceptance evidence,
 not something unit tests or stand-in updater hosts establish.
+
+## Existing installed update evidence
+
+Read-only inspection on 2026-10-12 found two completed owner-initiated updates
+in `~/Library/Logs/Conduit/proxy.log`. The machine currently runs macOS 26.7.1
+on arm64; the serving 0.5.2 process has remained up since the second update.
+The following timestamps are UTC on 2026-10-09:
+
+| Observation | 0.5.0 → 0.5.1 | 0.5.1 → 0.5.2 |
+| --- | --- | --- |
+| `update.installing` | 14:35:22.248 | 22:18:28.340 |
+| Scoped proxy restoration before relaunch | 14:35:22.296–22.419 | 22:18:28.478–28.653 |
+| `lifecycle.version_changed` | 14:35:23.024 | 22:18:29.309 |
+| Proxy listener ready | 14:35:29.027 | 22:18:35.280 |
+| First scoped proxy reapplication | 14:35:29.077 | 22:18:35.338 |
+| DNS forwarder ready | 14:35:29.934 | 22:18:36.343 |
+| Kerberos use resumed | 14:35:29.508 | 22:18:37.484 |
+
+This records installed replacement/relaunch, proxy restoration, reapplication
+after listener readiness, and resumed corporate authentication for the earlier
+updater. It does not validate the new 0.5.3 preflight, absent/conflicting helpers,
+quarantine/Gatekeeper variants, DNS-settings restoration, destructive failure
+recovery, credential-store preservation in all modes, or macOS 27. No update or
+live-system change was performed to collect this evidence.
