@@ -56,16 +56,6 @@ extension DirectModeCause {
         allowsUnconditionalDirectRouting
     }
 
-    /// Whether the local PAC should advertise a DIRECT-only decision to browsers.
-    ///
-    /// Chromium-based browsers may resolve DIRECT targets with their own DNS
-    /// stack. While VPN is connected or reasserting, keep those clients pointed
-    /// at Conduit so the process uses macOS/VPN DNS even if the proxy is
-    /// internally relaying directly.
-    package var advertisesDirectOnlyPAC: Bool {
-        routesClientTrafficDirectly
-    }
-
     /// Whether normal upstream health checks should run while this cause is active.
     ///
     /// `.upstreamsUnreachable` is degraded-but-still-upstream-routed, so the
