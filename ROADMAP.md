@@ -1,7 +1,7 @@
 # Conduit Roadmap
 
 The execution queue and sole tracker of product-work status. Reviewed against the
-checkout on 2026-10-02. Conduit remains a macOS-native Swift corporate proxy manager;
+checkout and open issues on 2026-10-12. Conduit remains a macOS-native Swift corporate proxy manager;
 no rewrite or cross-platform port is planned.
 
 Implementation rationale, dependencies, and acceptance criteria live in
@@ -17,10 +17,47 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
+## Immediate cleanup priorities (2026-10-12)
+
+1. **Post-reconnect monitoring gap [Rel, Obs, Sim]** — reproduced after the first
+   connected/flap-recovery probe fails: the reconnect path stops the retry timer
+   but restores monitors only on success. The fix reconciles both monitors after
+   the probe; `vpn-reconnect-reprobe` uses the real 15-second cadence and preserves
+   its established CONNECT. This work is prepared locally, not installed.
+2. **Kernel boundary guardrail ([#77](https://github.com/srps/Conduit/issues/77))
+   [Sec, OSS]** — small, independent CI work: enforce the import/Process fence and
+   make the documentation agree. Prefer this to another broad file reshuffle.
+3. **Bound usable PAC routes ([#93](https://github.com/srps/Conduit/issues/93))
+   [Rel, Sec, Eff]** — real remaining collection/fallback bound. Define the cap
+   and DIRECT-at/beyond-boundary behavior before implementation; preserve retained
+   order and emit bounded truncation diagnostics.
+4. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
+   — separate identity/name, automatic fake-machine mode, scratch state and
+   ad-hoc signing. Reject installation and never share the production path.
+   This now has a practical trigger: tandem testing selected a personal signing
+   identity and generated repeated prompts, and duplicate bundle IDs made status
+   inspection ambiguous. No private-key ACL change is needed.
+5. **Sanitizer evidence ([#118](https://github.com/srps/Conduit/issues/118))
+   [Rel, Sim]** — keep the continuation-race reduction and PAC timing fixture
+   cleanup as separate acceptance tracks. No confirmed production race or broad
+   suppression is implied by the current stacks.
+
+Then implement runtime-scoped auth/link-local failure memories (#31) and spool
+ownership/budgets (#81, coordinated with path policy #82). Continue main-actor
+platform offloading with shared app/daemon seams (#47/#79), then exclusive
+mutation authority and durable owner-death recovery (#48). Those are migration
+prerequisites; named profiles/location switching (#114/#115) and broad kernel
+splitting (#85) follow correctness and ownership work.
+
+Owner acceptance is a separate lane: #99 needs a real KDC-failure recurrence;
+#111's normal 0.5.3→0.5.4 preflight/install passed, but negative paths, platform
+coverage and key-backup evidence remain. Do not add more happy-path tests merely
+to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
+
 ## Now
 
 1. [x] **Network-location-safe recovery ([#110](https://github.com/srps/Conduit/issues/110))** — active-location observation independent of path/VPN signals, stable location/service journal identity, compare-and-write helper v5, inactive-location cleanup, conservative legacy migration, and shared app/daemon reconciliation are implemented with unit and simulator coverage. External edits, renames/deletion, failed reapply, loginwindow cleanup, and stale active-location writes are covered. Shipped in 0.4.0 and validated with helper v5 and the corporate VPN client on macOS 26; macOS 27 was waived for that release and remains untested. Same-location drift repair is bounded against programs that keep rewriting proxy settings ([#116](https://github.com/srps/Conduit/issues/116)). Profile associations ([#114](https://github.com/srps/Conduit/issues/114)) and opt-in switching ([#115](https://github.com/srps/Conduit/issues/115)) follow later. See [`docs/design-network-location-recovery.md`](./docs/design-network-location-recovery.md). [Rel, Obs, UI, Sim]
-2. [~] **Secure GitHub Releases updating ([#111](https://github.com/srps/Conduit/issues/111))** — implemented for 0.5: Sparkle 2 in a nested updater process, an EdDSA-signed appcast per release, a project-held release certificate the helper pin admits ([`docs/release-signing.md`](./docs/release-signing.md)), events and simulator coverage. Candidate helper/installation preflight and fixed staging bounds are prepared for 0.5.3. Owner-installed 0.5.0→0.5.1→0.5.2 updates have logged proxy restoration, relaunch, readiness-before-reapply and resumed authentication on the current macOS 26 Apple Silicon machine (`docs/validation-0.5.3.md`). Remaining: new-preflight/negative-path/platform validation and key-backup evidence. Original scope: manual and opt-in automatic checks, release notes, and explicit Install Update and Restart. Prefer Sparkle 2 with Ed25519-authenticated archives and an embedded verification key. Preserve config/state, preflight helper identity compatibility, restore proxy/DNS before shutdown, and reapply only after readiness. Keep downloads/staging/retries bounded and recover from verification/replacement/launch failures. A brief interruption is acceptable; Developer ID/notarization and zero-downtime handoff do not gate this feature. [OSS, Rel, Sec, UI, Obs, Sim]
+2. [~] **Secure GitHub Releases updating ([#111](https://github.com/srps/Conduit/issues/111))** — implemented for 0.5: Sparkle 2 in a nested updater process, an EdDSA-signed appcast per release, a project-held release certificate the helper pin admits ([`docs/release-signing.md`](./docs/release-signing.md)), events and simulator coverage. Candidate helper/installation preflight and fixed staging bounds shipped in 0.5.3; owner-installed 0.5.3→0.5.4 logged a successful authenticated preflight and replacement. Owner-installed 0.5.0→0.5.1→0.5.2 updates have logged proxy restoration, relaunch, readiness-before-reapply and resumed authentication on the current macOS 26 Apple Silicon machine (`docs/validation-0.5.3.md`). Remaining: new-preflight/negative-path/platform validation and key-backup evidence. Original scope: manual and opt-in automatic checks, release notes, and explicit Install Update and Restart. Prefer Sparkle 2 with Ed25519-authenticated archives and an embedded verification key. Preserve config/state, preflight helper identity compatibility, restore proxy/DNS before shutdown, and reapply only after readiness. Keep downloads/staging/retries bounded and recover from verification/replacement/launch failures. A brief interruption is acceptable; Developer ID/notarization and zero-downtime handoff do not gate this feature. [OSS, Rel, Sec, UI, Obs, Sim]
 3. [~] **Owner-death recovery and one mutation authority** — app and daemon launch recovery exist. Remaining: exclusive ownership of platform mutations and durable recovery when no replacement runtime starts. Coordinate journal authority, authenticated helper sessions, and any helper-owned leases; preserve later external changes. This is a production daemon-migration gate. [Rel, Sec, Dmn, Sim]
 4. [~] **Request-body replay bounds and isolation** — per-body bounded spooling exists. Remaining: runtime-owned private spool storage, aggregate disk/queued-write budgets, replay backpressure tied to downstream completion/writability, off-event-loop cleanup, and structured failure reporting. Cover slow origins, disk failures, cancellation, and concurrent runtimes. [Rel, Sec, Eff, Sim]
 
