@@ -34,7 +34,7 @@ LOC and file counts approximate; the source-of-truth is `swift test` and `find S
 
 ## Target Dependency Graph
 
-The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. The build is the test that the kernel stayed portable — if a kernel file sneaks in an `import Security` or an `import SystemConfiguration`, `pm-proxy` fails to link.
+The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. CI enforces the kernel import and process-construction fence with [`scripts/check-kernel-imports.sh`](../scripts/check-kernel-imports.sh). Linking alone cannot catch a stray Apple-framework import; Linux portability is not a current goal.
 
 ```mermaid
 graph TD
@@ -117,7 +117,7 @@ The matrix shows **direct** dependencies declared in `Package.swift`. Transitive
 ### What each target owns
 
 - **`ConduitShared`** — zero-dependency wire contract between the app and the privileged helper. Defines `HelperCommand`, `HelperRequest`, `HelperResponse`, input validation. Imported by both sides so they can't drift.
-- **`ProxyKernel`** — portable library: proxy server, connection pool, PAC routing engine, DNS forwarder, transparent TCP proxy, tunnel forwarder, auto-recovery ladder, health checks, VPN state fusion, upstream probing, routing decisions, metadata blocklist, kernel-side abstractions. Imports Foundation, Dispatch, Darwin (libc), and SwiftNIO only. CI grep enforces no `import Security / SMAppService / UserNotifications / SystemConfiguration / Network / ServiceManagement / JavaScriptCore / GSS / CommonCrypto / Combine / AppKit / SwiftUI`.
+- **`ProxyKernel`** — portable library: proxy server, connection pool, PAC routing engine, DNS forwarder, transparent TCP proxy, tunnel forwarder, auto-recovery ladder, health checks, VPN state fusion, upstream probing, routing decisions, metadata blocklist, kernel-side abstractions. Imports only Foundation, Dispatch, NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. CI runs `scripts/check-kernel-imports.sh` to enforce this allowlist and prohibit `Process` construction.
 - **`ProxyAuth`** — opt-in capability layer. NTLM message generation (`NTLMAuth.swift`, CommonCrypto for MD4/HMAC-MD5), Kerberos/Negotiate (`KerberosAuth.swift`, GSS.framework), and `AuthenticatorFactory.swift` which assembles a `ProxyAuthenticator` from the active config + a `CredentialProvider`.
 - **`ProxyPAC`** — opt-in capability layer with the CFNetwork-backed `CFPACEvaluator` (`CFNetworkExecuteProxyAutoConfigurationScript` on a private CFRunLoop, paired with `CFPacScriptEvaluator`). This is the sole production `PacEvaluator` implementation after the CFNetwork evaluator graduated; the JavaScriptCore-backed resolver was removed.
 - **`PlatformMac`** — macOS-only glue. Keychain, `networksetup` wrappers, `SMAppService`, `SCDynamicStore`-based VPN monitor, `NWPathMonitor`, `/etc/resolver/*` writer, helper XPC client, shell runner, first-run example-corp preset injection. Only the GUI app and the `pm-vpn-check` diagnostic link this target.
@@ -402,16 +402,22 @@ Test doubles mirror the protocol surface. The platform ones live in `Sources/Pla
 
 ## CI invariants
 
-Four greps + one `otool` check enforce the module split at build time. Run from repo root; each must return 0:
+CI runs the kernel import/Process fence and its negative fixtures before building:
 
-```text
-rg '^import (Security|SMAppService|UserNotifications|SystemConfiguration|Network|ServiceManagement|JavaScriptCore|GSS|CommonCrypto|Combine|AppKit|SwiftUI)$' Sources/ProxyKernel
-rg 'Process\(' Sources/ProxyKernel
-[[ $(rg 'NIOLockedValueBox<ProxyConfig>' Sources/ -l | wc -l) -eq 1 ]]
-otool -L .build/debug/pm-proxy | rg '(Security|SystemConfiguration|UserNotifications|ServiceManagement)\.framework'
+```sh
+bash scripts/check-kernel-imports.sh
+python3 scripts/test-kernel-imports.py
 ```
 
-The `AGENTS.md` import-fence rule is documentation of intent; these greps + the dynamic-load profile are the enforcement.
+The allowlist is Foundation, Dispatch, NIO modules, Darwin/Glibc and
+`ConduitShared` for domain-name grammar. Attributed, scoped and conditional
+imports are checked too. The Process scan conservatively includes literals and
+interpolations. The script fails if no Swift sources are found. Platform
+frameworks and machine side effects belong behind protocols in `ProxyAuth`,
+`ProxyPAC` or `PlatformMac`; a successful link does not enforce that boundary.
+
+Other architecture checks, such as inspecting `pm-proxy` with `otool -L` and
+checking config-lock ownership, remain manual diagnostics, not CI guarantees.
 
 ## What's next
 

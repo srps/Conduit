@@ -67,7 +67,7 @@ curl -x http://localhost:3128 https://httpbin.org/ip
 
 ## Project Structure
 
-See [`docs/architecture.md`](docs/architecture.md) for the full module graph. The key invariant: `ProxyKernel` has **zero** Apple-framework imports beyond Foundation/Dispatch. The build enforces this - if you accidentally import `Security` or `SystemConfiguration` in a kernel file, `pm-proxy` will fail to link.
+See [`docs/architecture.md`](docs/architecture.md) for the full module graph. The kernel import allowlist is Foundation, Dispatch, NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. Apple platform frameworks belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`. CI enforces imports and prohibits `Process` construction with [`scripts/check-kernel-imports.sh`](scripts/check-kernel-imports.sh); linking alone cannot enforce this fence.
 
 ## Before You Submit
 
@@ -85,7 +85,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full module graph. Th
 
 4. **Never commit secrets.** No credentials, tokens, `.env` files, or unmasked auth headers in source or logs.
 
-5. **Respect the import fence.** `Sources/ProxyKernel/` must not import any Apple framework beyond Foundation and Dispatch. Platform-specific code belongs in `Sources/PlatformMac/`.
+5. **Respect the import fence.** Run `bash scripts/check-kernel-imports.sh`. The allowed imports are Foundation, Dispatch, NIO modules, Darwin/Glibc and `ConduitShared` for grammar. Platform capabilities belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`.
 
 ## PR Process
 

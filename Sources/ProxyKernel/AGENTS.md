@@ -4,7 +4,7 @@ The portable product library: proxy, PAC routing engine, DNS forwarding, tunnels
 
 ## Boundaries
 
-- Import only Foundation, Dispatch, the NIO modules, Darwin/Glibc and `ConduitShared`'s grammar types. Apple platform frameworks (`Security`, `GSS`, `CryptoKit`, `SystemConfiguration`, `Network`, `os`, `AppKit`, `SwiftUI` and the like) belong in `ProxyAuth`, `ProxyPAC` or `PlatformMac` behind a protocol, even though Linux portability is not a current goal. The build does not catch a stray import; #77 adds the CI check.
+- Import only Foundation, Dispatch, the NIO modules, Darwin/Glibc and `ConduitShared`'s grammar types. Apple platform frameworks (`Security`, `GSS`, `CryptoKit`, `SystemConfiguration`, `Network`, `os`, `AppKit`, `SwiftUI` and the like) belong in `ProxyAuth`, `ProxyPAC` or `PlatformMac` behind a protocol, even though Linux portability is not a current goal. CI enforces the allowlist and prohibits `Process` construction with [`scripts/check-kernel-imports.sh`](../../scripts/check-kernel-imports.sh); linking alone cannot enforce it.
 - No machine side effects: no `Process`, `networksetup`, env files, `/etc/resolver`, login items or helper calls. Those live in `PlatformMac` behind a protocol.
 - Persistence paths come from `Support/RuntimeEnvironment.swift`, not from ambient process state. Keep it about files and locations. `PM_CONFIG_DIR` is read only at the executable boundary.
 
