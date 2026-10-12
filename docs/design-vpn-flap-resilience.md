@@ -1,5 +1,38 @@
 # Design: VPN Flap Resilience and Direct-Mode UX
 
+## Browser PAC retention and reconnect routing (2026-10-12)
+
+The local PAC follows configuration, not VPN state. With enabled upstreams,
+browsers keep using the local Conduit listener while the kernel decides whether
+VPN-off traffic goes direct or VPN-connected traffic uses upstreams. A config
+with no enabled upstreams still advertises DIRECT. Explicit no-proxy patterns,
+force-proxy precedence and non-strict fallback retain their configured behavior.
+VPN transitions preserve established tunnels; they do not restart the browser,
+proxy listener or helper.
+
+Chrome retains successful PAC contexts independently of HTTP cache headers.
+[Chromium's proxy documentation](https://chromium.googlesource.com/chromium/src/+/main/net/docs/proxy.md#caching-of-successful-pac-fetches)
+describes network-change, age and manual invalidation triggers. Changing a
+DIRECT-only script behind the same URL therefore cannot guarantee immediate
+browser recovery. An isolated Chrome 154.0.8037.98 profile retained DIRECT for a
+fresh tab after the fixture's PAC changed to PROXY, with no additional PAC fetch;
+a stable PROXY script observed changed local-proxy routing without restarting.
+This proves the retention mechanism, not the exact cause of every installed
+browser incident; browser NetLog and controlled installed validation can
+separate retained PAC from DNS or connection-pool state.
+
+`pm-sim browser-retained-pac` fetches one actual local PAC, retains its evaluator,
+serves an origin off VPN, then makes DIRECT unavailable on reconnect. Two fresh
+requests must use the upstream without refetching. `vpn-reconnect-routing` gates
+the connectivity probe and verifies new intercepted traffic selects the upstream
+before that probe completes. Unit tests also require old corporate PAC answers
+to be invalidated and old DNS transports reset before handlers can observe the
+new reconnect cause. Breaker holds are reset in the same preparation step. Neither
+scenario changes host settings or uses the installed helper.
+
+The remaining sections record the original design and its implementation history.
+
+
 > **Status (2026-04-22): the design shipped (Phases 1–7).** File-path references throughout this doc use the pre-module-split layout (`Sources/ConduitCore/...`). Translation table for current paths:
 > - `Sources/ConduitCore/Network/VPNStatusMonitor.swift` → `Sources/PlatformMac/VPNStatusMonitor.swift` (relocated during the module split)
 > - `Sources/ConduitCore/Network/NetworkMonitor.swift` → `Sources/PlatformMac/NetworkMonitor.swift` (relocated during the module split)

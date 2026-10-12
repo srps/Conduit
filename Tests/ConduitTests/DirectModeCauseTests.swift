@@ -31,14 +31,6 @@ final class DirectModeCauseTests: XCTestCase {
         XCTAssertFalse(DirectModeCause.upstreamsUnreachable.routesClientTrafficDirectly)
     }
 
-    func testDirectOnlyPACOnlyForUnconditionalDirectStates() {
-        XCTAssertFalse(DirectModeCause.none.advertisesDirectOnlyPAC)
-        XCTAssertFalse(DirectModeCause.transientNetworkChange.advertisesDirectOnlyPAC)
-        XCTAssertTrue(DirectModeCause.vpnDisconnected.advertisesDirectOnlyPAC)
-        XCTAssertTrue(DirectModeCause.noUpstreamsConfigured.advertisesDirectOnlyPAC)
-        XCTAssertFalse(DirectModeCause.upstreamsUnreachable.advertisesDirectOnlyPAC)
-    }
-
     func testUpstreamHealthLoopRunsForUpstreamRoutedStates() {
         XCTAssertTrue(DirectModeCause.none.runsUpstreamHealthLoop)
         XCTAssertFalse(DirectModeCause.transientNetworkChange.runsUpstreamHealthLoop)

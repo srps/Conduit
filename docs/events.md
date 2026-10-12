@@ -180,7 +180,7 @@ exactly these semantics; do not repurpose them.
 | Event | Emitted when |
 | --- | --- |
 | `vpn.connected` | VPN observer reports an active link; reconnect probes/refresh have completed. |
-| `vpn.reconnecting` | The connected signal is about to revoke the previous routing cause, before PAC/probe awaits (`prior_cause=`, `pending_cause=`, `probe=pending`). Configured upstreams resume new-client upstream routing immediately; zero upstreams retain unconditional DIRECT. Existing streams remain open. Also emitted at cold connection and flap recovery. |
+| `vpn.reconnecting` | The connected signal is about to invalidate old corporate PAC answers and revoke the previous routing cause, before PAC/probe awaits (`prior_cause=`, `pending_cause=`, `probe=pending`). Old answers are invalidated, breaker holds reset, and DNS transports refreshed before the new cause is published. Configured upstreams resume new-client upstream routing immediately; zero upstreams retain unconditional DIRECT. The browser-facing local PAC follows configuration and remains stable across VPN changes. Existing streams remain open. Also emitted at cold connection and flap recovery. |
 | `vpn.disconnected.user` / `vpn.disconnected.lost` | Deliberate vs. lost disconnect (drives different recovery posture — see `docs/design-vpn-flap-resilience.md`). |
 | `vpn.flap.start` / `vpn.flap.recovered` | Debounced flap window opened / closed (`detail` carries durations and preserved-stream counts). |
 

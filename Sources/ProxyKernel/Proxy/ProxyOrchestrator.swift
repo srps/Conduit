@@ -421,8 +421,8 @@ package final class ProxyOrchestrator {
         mutateSnapshot(body)
     }
 
-    /// Test seam — exercises direct-mode side effects (including served local
-    /// PAC updates) without depending on live upstream reachability.
+    /// Test seam — exercises direct-mode side effects without depending on
+    /// live upstream reachability. Browser PAC policy follows config only.
     package func setDirectModeForTesting(_ cause: DirectModeCause) {
         setDirectMode(cause)
     }
@@ -504,8 +504,11 @@ package final class ProxyOrchestrator {
         return scriptConfig
     }
 
-    private func localPACScript(directRoutingAllowed: Bool) -> String {
-        PACScriptEmitter.script(for: localPACScriptConfig(), directRoutingAllowed: directRoutingAllowed)
+    private func localPACScript() -> String {
+        // Browsers retain PAC contexts independently of HTTP cache headers.
+        // Keep VPN decisions inside Conduit: a cached off-VPN DIRECT script
+        // must never strand new browser requests after the VPN reconnects.
+        PACScriptEmitter.script(for: localPACScriptConfig(), directRoutingAllowed: config.enabledUpstreams.isEmpty)
     }
 
     private static func loopbackReachableProxyHost(_ host: String) -> String {
@@ -532,7 +535,7 @@ package final class ProxyOrchestrator {
             return
         }
 
-        let script = localPACScript(directRoutingAllowed: snapshot.directModeCause.advertisesDirectOnlyPAC)
+        let script = localPACScript()
         if localPACServer.isRunning, localPACServer.listeningPort == currentConfig.localPACPort || currentConfig.localPACPort == 0 {
             localPACServer.updateScript(script)
             emitEvent(.routing, "local_pac.updated", detail: "reason=\(reason)")
@@ -560,12 +563,6 @@ package final class ProxyOrchestrator {
             $0.bindings.localPACHost = self.localPACServer.listeningHost
             $0.bindings.localPACPort = self.localPACServer.listeningPort
         }
-    }
-
-    private func refreshLocalPACForDirectModeChange(_ cause: DirectModeCause) {
-        guard config.localPACEnabled, localPACServer.isRunning else { return }
-        emitEvent(.routing, "local_pac.updated", detail: "reason=direct_mode_change cause=\(cause.rawValue)")
-        localPACServer.updateScript(localPACScript(directRoutingAllowed: cause.advertisesDirectOnlyPAC))
     }
 
     /// Reporter for runtime auth outcomes. Called from the NIO-spawned
@@ -1837,6 +1834,23 @@ package final class ProxyOrchestrator {
                                      detail: "prior_cause=\(snapshot.directModeCause.rawValue) pending_cause=\(reconnectCause.rawValue) probe=pending")
             eventLog.append(event)
             logStore.log(.notice, "VPN routing: \(event.detail ?? "")", category: .network)
+            // Invalidate old off-VPN answers before publishing the new cause
+            // to request handlers; publication can immediately admit traffic.
+            if previous != .reasserting { invalidatePACRoutes(reason: .vpnConnected) }
+            // Prepare recovery state before admitting upstream traffic too:
+            // clients must not see old breaker holds or utun-pinned DoH pools.
+            switch previous {
+            case .reasserting:
+                localProxyServer.resetCircuitsAfterFlap()
+                resetDNSTransportsForRecovery(source: "vpn_flap_recovered")
+            case .disconnected:
+                localProxyServer.resetCircuitsAfterFlap()
+                resetDNSTransportsForRecovery(source: "vpn_reconnected")
+            case .unknown, .connected:
+                if snapshot.dnsRunState == .running {
+                    resetDNSTransportsForRecovery(source: "vpn_connected")
+                }
+            }
             setDirectMode(reconnectCause)
             stopDirectModeReprobeTimer()
             // Recovery path. Two flavors based on what state we came from:
@@ -1856,14 +1870,6 @@ package final class ProxyOrchestrator {
                 let durationSeconds = flapStartedAt.map { recoveredAt.timeIntervalSince($0) } ?? 0
                 let durationMS = Int(durationSeconds * 1_000)
                 flapStartedAt = nil
-                localProxyServer.resetCircuitsAfterFlap()
-                // Recycle the DNS forwarder's DoH sessions: a real flap
-                // re-routes the underlying utun, and any in-flight DoH TCP
-                // connections were pinned to the old route. Without this,
-                // the next post-flap DoH lookup either hangs to timeout or
-                // resolves stale; corporate-DNS resolution (per-query UDP
-                // sockets) is fine on its own. Mirrors the system-wake reset.
-                resetDNSTransportsForRecovery(source: "vpn_flap_recovered")
                 let summary = await refreshConnectivityMode()
                 setDirectMode(deriveDirectModeCause(probeSummary: summary))
                 resumeNormalRoutingIfReachable(summary: summary)
@@ -1883,15 +1889,7 @@ package final class ProxyOrchestrator {
                              "VPN flap recovered after \(durationMS) ms — \(activeTunnels) active tunnel(s) preserved.",
                              category: .network)
             case .disconnected:
-                // Before anything else routes: the PAC answers are from off the VPN.
-                invalidatePACRoutes(reason: .vpnConnected)
                 async let pacRefreshed: Void = refreshPACRouting(force: true)
-                localProxyServer.resetCircuitsAfterFlap()
-                // Real-outage recovery: the VPN was fully down and is now
-                // back. Same DoH-transport recycle as the flap path —
-                // belt-and-suspenders against macOS not always invalidating
-                // URLSession's connection pool on the reconnect.
-                resetDNSTransportsForRecovery(source: "vpn_reconnected")
                 let summary = await refreshConnectivityMode()
                 setDirectMode(deriveDirectModeCause(probeSummary: summary))
                 resumeNormalRoutingIfReachable(summary: summary)
@@ -1905,11 +1903,7 @@ package final class ProxyOrchestrator {
                 // transports when the forwarder is running so a connect-while-app-
                 // is-up (or post-start VPN attach) does not reuse stale utun-pinned
                 // URLSession pools.
-                invalidatePACRoutes(reason: .vpnConnected)
                 async let pacRefreshed: Void = refreshPACRouting(force: true)
-                if snapshot.dnsRunState == .running {
-                    resetDNSTransportsForRecovery(source: "vpn_connected")
-                }
                 let summary = await refreshConnectivityMode()
                 setDirectMode(deriveDirectModeCause(probeSummary: summary))
                 resumeNormalRoutingIfReachable(summary: summary)
@@ -2464,7 +2458,6 @@ package final class ProxyOrchestrator {
     private func setDirectMode(_ cause: DirectModeCause) {
         let prior = Self.publishDirectMode(cause, to: directModeBox, stamping: routingTransitions)
         if prior != cause {
-            refreshLocalPACForDirectModeChange(cause)
             logDirectModeEntry(from: prior, to: cause)
         }
         mutateSnapshot { $0.directModeCause = cause }

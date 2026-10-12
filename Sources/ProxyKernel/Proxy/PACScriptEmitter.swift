@@ -25,11 +25,12 @@ import Foundation
 /// direct-routing / `cachedDirectReachable` branches aren't modeled — those are
 /// runtime probe outcomes that PAC (a pure function of url+host) can't know.
 /// (The reachability shortcut applies outside strict mode only.)
-/// Normal mode routes through the local proxy first. Only unconditional
-/// direct-routing states (VPN off, no upstreams configured) emit a `DIRECT`-only
-/// PAC. On VPN reassertion or probe failures, PAC-honoring clients keep sending
-/// traffic to Conduit so Chromium/Edge do not resolve split-DNS names with
-/// their browser DNS stack.
+/// The local PAC follows configuration, not VPN state. With enabled upstreams,
+/// clients keep entering Conduit off VPN as well as on it; Conduit makes the
+/// live direct/upstream decision. Browsers may retain a PAC for hours despite
+/// no-cache headers, so an off-VPN DIRECT-only script would survive reconnect.
+/// A configuration with no enabled upstreams can emit DIRECT-only. Explicit
+/// no-proxy patterns and non-strict fallback keep their configured semantics.
 ///
 /// ## Pattern semantics
 ///

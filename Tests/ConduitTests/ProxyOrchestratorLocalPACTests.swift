@@ -51,47 +51,25 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
     }
 
     @MainActor
-    func testDirectModeChangeUpdatesServedPACScript() async throws {
+    func testVPNRoutingChangesKeepServedBrowserPACStable() async throws {
         var config = ProxyConfig.testFixture()
-        config.upstreams = []
+        config.upstreams = [.init(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
         config.localPort = 0
         config.localPACEnabled = true
         config.localPACPort = 0
         config.pacRoutingEnabled = false
+        config.strictMode = true
 
         try await withStartedOrchestrator(config) { orchestrator in
             let proxyPort = try XCTUnwrap(orchestrator.snapshot.bindings.proxyPort)
             let localPACURL = try XCTUnwrap(orchestrator.snapshot.bindings.localPACURL)
-
-            var script = try await Self.fetch(localPACURL)
-            XCTAssertTrue(script.contains("return \"DIRECT\";"))
-            XCTAssertFalse(script.contains("return \"PROXY 127.0.0.1:\(proxyPort); DIRECT\";"))
-
-            orchestrator.setDirectModeForTesting(.none)
-
-            script = try await Self.fetch(localPACURL)
-            XCTAssertTrue(script.contains("return \"PROXY 127.0.0.1:\(proxyPort)\";"))
-            XCTAssertFalse(script.contains("return \"PROXY 127.0.0.1:\(proxyPort); DIRECT\";"))
-
-            orchestrator.setDirectModeForTesting(.vpnDisconnected)
-
-            script = try await Self.fetch(localPACURL)
-            XCTAssertTrue(script.contains("function FindProxyForURL(url, host) {\n  return \"DIRECT\";\n}"),
-                          "Explicit off-VPN direct mode should make PAC-honoring clients bypass Conduit.")
-            XCTAssertFalse(script.contains("return \"PROXY 127.0.0.1:\(proxyPort)\";"))
-
-            orchestrator.setDirectModeForTesting(.upstreamsUnreachable)
-
-            script = try await Self.fetch(localPACURL)
-            XCTAssertTrue(script.contains("return \"PROXY 127.0.0.1:\(proxyPort)\";"),
-                          "Probe failures while VPN is up should keep Chromium/Edge on Conduit for split-DNS resolution.")
-            XCTAssertFalse(script.contains("function FindProxyForURL(url, host) {\n  return \"DIRECT\";\n}"))
-
-            orchestrator.setDirectModeForTesting(.transientNetworkChange)
-
-            script = try await Self.fetch(localPACURL)
-            XCTAssertTrue(script.contains("return \"PROXY 127.0.0.1:\(proxyPort)\";"))
-            XCTAssertFalse(script.contains("function FindProxyForURL(url, host) {\n  return \"DIRECT\";\n}"))
+            let retained = try await Self.fetch(localPACURL)
+            XCTAssertTrue(retained.contains("return \"PROXY 127.0.0.1:\(proxyPort)\";"))
+            for cause: DirectModeCause in [.vpnDisconnected, .none, .upstreamsUnreachable, .transientNetworkChange] {
+                orchestrator.setDirectModeForTesting(cause)
+                let current = try await Self.fetch(localPACURL)
+                XCTAssertEqual(current, retained, "a browser that never refetches PAC must remain on Conduit across \(cause)")
+            }
         }
     }
 
@@ -120,7 +98,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
     @MainActor
     func testStrictModeReloadUpdatesServedPACScript() async throws {
         var config = ProxyConfig.testFixture()
-        config.upstreams = []
+        config.upstreams = [.init(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
         config.localPort = 0
         config.localPACEnabled = true
         config.localPACPort = 0
@@ -130,7 +108,6 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
         try await withStartedOrchestrator(config) { orchestrator in
             let proxyPort = try XCTUnwrap(orchestrator.snapshot.bindings.proxyPort)
             let localPACURL = try XCTUnwrap(orchestrator.snapshot.bindings.localPACURL)
-            orchestrator.setDirectModeForTesting(.none)
 
             var script = try await Self.fetch(localPACURL)
             XCTAssertTrue(script.contains("return \"PROXY 127.0.0.1:\(proxyPort)\";"))
@@ -155,6 +132,7 @@ final class ProxyOrchestratorLocalPACTests: XCTestCase {
 
         let config = URLSessionConfiguration.ephemeral
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.connectionProxyDictionary = [:]
         let session = URLSession(configuration: config)
         defer { session.invalidateAndCancel() }
 
