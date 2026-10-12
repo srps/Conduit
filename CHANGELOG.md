@@ -13,7 +13,7 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   instead of waiting behind an unflushable peer queue, allowing clients to see
   EOF and perform their own reconnect. Healthy VPN-transition streams remain
   open; orderly remote EOF still drains queued response data, including when
-  read-flow callbacks race the retired socket. Client shutdown immediately
+  client bytes or read-flow callbacks race the closed socket. Client shutdown immediately
   releases blocked remote sockets and pool slots. Shared relay diagnostics
   include the failing operation and destination socket. The deterministic
   `vpn-existing-stream-failure` scenario reproduces both stale-socket paths on

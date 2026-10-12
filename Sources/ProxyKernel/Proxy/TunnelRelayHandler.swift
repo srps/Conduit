@@ -75,10 +75,11 @@ final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendable {
         let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
         future.hop(to: context.eventLoop).whenFailure { [self] error in
             guard !closing, bound.value.channel.isActive else { return }
-            // A remote FIN can precede the client queue becoming writable.
-            // Re-enabling that retired socket's reads is then a no-op, not
-            // a reason to truncate the response still draining to the client.
-            if operation == .flowControl, destination == otherSide, !peer.isActive { return }
+            // An orderly peer close (EOF, or a write or read-flow change issued
+            // after it) is the peer's own `channelInactive` to handle; aborting
+            // here would truncate a response still draining to the client. A
+            // failed socket syscall fails the promise with an `IOError` instead.
+            if error is ChannelError, destination == otherSide, !peer.isActive { return }
             abort(context: bound.value, error: error, destination: destination, operation: operation)
         }
     }

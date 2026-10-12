@@ -10,7 +10,10 @@ final class TunnelRelayFailureTests: XCTestCase {
     /// the contract of a failed outbound promise, not a read-side exception.
     private final class RejectWrite: ChannelOutboundHandler {
         typealias OutboundIn = ByteBuffer
+        let closeBeforeFailing: Bool
+        init(closeBeforeFailing: Bool = false) { self.closeBeforeFailing = closeBeforeFailing }
         func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+            if closeBeforeFailing { context.close(promise: nil) }
             promise?.fail(IOError(errnoCode: EADDRNOTAVAIL, reason: "injected retired VPN address"))
         }
     }
@@ -35,6 +38,20 @@ final class TunnelRelayFailureTests: XCTestCase {
             let writes = held; held.removeAll()
             context.close(mode: mode, promise: promise)
             for (_, pending) in writes { pending?.fail(ChannelError.ioOnClosedChannel) }
+        }
+    }
+
+    /// A socket channel fails writes issued after close; EmbeddedChannel
+    /// accepts them, which would hide a relay aborting on an orderly close.
+    private final class FailWritesAfterClose: ChannelOutboundHandler {
+        typealias OutboundIn = ByteBuffer
+        private var closed = false
+        func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+            if closed { promise?.fail(ChannelError.ioOnClosedChannel) } else { context.write(data, promise: promise) }
+        }
+        func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
+            closed = true
+            context.close(mode: mode, promise: promise)
         }
     }
 
@@ -79,8 +96,6 @@ final class TunnelRelayFailureTests: XCTestCase {
         XCTAssertFalse(client.isActive, "fatal socket failure must bypass graceful drain")
         XCTAssertFalse(remote.isActive)
         XCTAssertEqual(events.events.count, 1)
-        // Bound cleanup even on the unfixed implementation.
-        if client.isActive { try client.close().wait() }
         _ = try client.finish(acceptAlreadyClosed: true)
         _ = try remote.finish(acceptAlreadyClosed: true)
     }
@@ -89,6 +104,7 @@ final class TunnelRelayFailureTests: XCTestCase {
         let client = try activeChannel(), remote = try activeChannel()
         let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
         try client.pipeline.addHandler(held).wait()
+        try remote.pipeline.addHandler(FailWritesAfterClose()).wait()
         try attach(client, remote, events: events)
         let response = ByteBuffer(string: "complete response tail")
         try remote.writeInbound(response)
@@ -97,6 +113,9 @@ final class TunnelRelayFailureTests: XCTestCase {
         // The client can become writable after the remote's normal EOF. Its
         // attempt to resume remote reads must not abort the queued response.
         client.pipeline.fireChannelWritabilityChanged()
+        // Nor may client bytes sent while the tail drains (an HTTP/2
+        // WINDOW_UPDATE, a TLS close_notify) that fail on the closed remote.
+        try client.writeInbound(ByteBuffer(string: "window update"))
         client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
         XCTAssertTrue(client.isActive)
         held.release()
@@ -104,6 +123,23 @@ final class TunnelRelayFailureTests: XCTestCase {
         XCTAssertEqual(try client.readOutbound(as: ByteBuffer.self), response)
         XCTAssertFalse(client.isActive)
         XCTAssertTrue(events.events.isEmpty)
+        _ = try client.finish(acceptAlreadyClosed: true)
+        _ = try remote.finish(acceptAlreadyClosed: true)
+    }
+
+    func testGenuineWriteFailureStillAbortsWhenDestinationHasClosed() throws {
+        let client = try activeChannel(), remote = try activeChannel()
+        let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
+        try client.pipeline.addHandler(held).wait()
+        try remote.pipeline.addHandler(RejectWrite(closeBeforeFailing: true)).wait()
+        try attach(client, remote, events: events)
+        try remote.writeInbound(ByteBuffer(string: "blocked response"))
+        try client.writeInbound(ByteBuffer(string: "failed client write"))
+        client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
+        XCTAssertFalse(client.isActive, "an actual write syscall failure must still abort the blocked pair")
+        XCTAssertFalse(remote.isActive)
+        XCTAssertEqual(events.events.count, 1)
+        XCTAssertTrue(events.events.first?.detail?.contains("errno=49") == true)
         _ = try client.finish(acceptAlreadyClosed: true)
         _ = try remote.finish(acceptAlreadyClosed: true)
     }
@@ -118,7 +154,6 @@ final class TunnelRelayFailureTests: XCTestCase {
         client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
         XCTAssertFalse(remote.isActive, "a departed client must not strand the upstream pool slot")
         XCTAssertTrue(events.events.isEmpty, "client cancellation is not a socket failure")
-        if remote.isActive { try remote.close().wait() }
         _ = try client.finish(acceptAlreadyClosed: true)
         _ = try remote.finish(acceptAlreadyClosed: true)
     }
