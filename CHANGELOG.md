@@ -4,7 +4,23 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.5.3
+
+A release candidate for installed VPN/Chrome recovery, Kerberos KDC recovery
+and safe update validation. App-only update; helper v5 is unchanged. This work
+does not install or restart the serving app/helper.
+
+### Added
+
+- An explicit update install choice authenticates and preflights the actual
+  candidate before Sparkle can stage installation: bounded ZIP expansion,
+  bundle/version, Apple Silicon/minimum macOS, destination permissions, code
+  signature, and the installed helper's caller policy and protocol. Failed
+  checks keep the host running and have structured outcomes (#111).
+- Preflight downloads have a 120-second resource deadline and 256 MiB ceiling;
+  extraction is limited to 16,384 entries and 1 GiB, with one staging directory
+  per host and no automatic retries. Interrupted preflight staging is replaced
+  on the next attempt. Sparkle independently verifies its installation download.
 
 ### Fixed
 
@@ -12,7 +28,7 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 - Browser PAC policy now follows configuration instead of VPN state. With enabled upstreams, a browser retaining its off-VPN PAC keeps entering Conduit, which makes the live direct/upstream decision; no enabled upstreams still advertise DIRECT. `browser-retained-pac` verifies fresh requests recover after reconnect without another PAC fetch. Old corporate PAC answers are invalidated before reconnect routing is published.
 - Adding/re-enabling the first upstream or disabling/removing the last now refreshes the served browser PAC during hot reload, without restarting the listener. Local PAC reconciliation shares one dependency decision for routing, strict mode and enabled-upstream availability.
 - CONNECT and transparent tunnel failures emit bounded `tunnel.relay_failed` diagnostics before their log: socket side, route/upstream, errno, relay age/idle time, observed bytes in each direction, and routing cause at attachment/failure. Transparent direct-connect failures also retain routing causes and dial duration.
-- A confirmed Kerberos KDC-unreachable initial handshake can attempt bounded service-ticket acquisition in a fresh copy of the app/daemon, then retry once without restarting the serving runtime (#99). Failures retain NTLM fallback and emit recovery events. Cached raw-mechanism diagnostics now accompany independently rate-limited fallback logs without extra diagnostic requests. Installed corporate-SSO recurrence validation remains outstanding.
+- A confirmed Kerberos KDC-unreachable initial handshake can attempt bounded service-ticket acquisition in a fresh copy of the app/daemon, then retry once without restarting the serving runtime (#99). Failures retain NTLM fallback and emit recovery events. Cached raw-mechanism diagnostics now accompany independently rate-limited fallback logs without extra diagnostic requests. An undiagnosed minor-zero service-ticket failure explicitly reports `krb5_probe=unavailable`; credential absence remains identified by its fallback reason. Installed corporate-SSO recurrence validation remains outstanding.
 
 ## 0.5.2
 
