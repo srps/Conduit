@@ -97,7 +97,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
 
 // MARK: - SNI Extraction + Tunnel Establishment
 
-private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
+final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
 
     private static let maxPeekBytes = 65_536
@@ -370,13 +370,14 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
     /// `pooledTunnel` distinguishes a channel the `CONNECTCoordinator` registered
     /// in the connection pool from one we dialed ourselves on the direct path.
     /// Only the former has a dedicated-tunnel entry to retire on close.
-    private func attachRelay(
+    @discardableResult
+    func attachRelay(
         context: ChannelHandlerContext,
         upstreamChannel: Channel,
         initialData: ByteBuffer,
         pooledTunnel: Bool,
         target: String, endpoint: String?
-    ) {
+    ) -> EventLoopFuture<Void> {
         let clientChannel = context.channel
         let diagnostics = TunnelRelayDiagnostics(
             target: target, transport: "transparent", route: pooledTunnel ? "upstream" : "direct", upstream: endpoint,
@@ -392,13 +393,26 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         let upstreamRelay = makeTunnelRelay(peer: clientChannel, diagnostics: diagnostics, side: .remote, onClose: onUpstreamClose)
         let clientRelay = makeTunnelRelay(peer: upstreamChannel, diagnostics: diagnostics, side: .client)
 
-        context.pipeline.removeHandler(self).flatMap {
+        let attached = context.pipeline.removeHandler(self).flatMap {
             clientChannel.pipeline.addHandler(clientRelay)
+        }.flatMapError { error in
+            diagnostics.failed(error, on: .client, operation: .setup)
+            return clientChannel.eventLoop.makeFailedFuture(error)
         }.flatMap {
-            pooledTunnel
-                ? CONNECTCoordinator.attachRelay(upstreamRelay, toUpstreamTunnel: upstreamChannel)
-                : upstreamChannel.pipeline.addHandler(upstreamRelay)
-        }.hop(to: clientChannel.eventLoop).whenComplete { result in
+            let remoteAttached: EventLoopFuture<Void>
+            if upstreamChannel.isActive {
+                remoteAttached = pooledTunnel
+                    ? CONNECTCoordinator.attachRelay(upstreamRelay, toUpstreamTunnel: upstreamChannel)
+                    : upstreamChannel.pipeline.addHandler(upstreamRelay)
+            } else {
+                remoteAttached = upstreamChannel.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel)
+            }
+            return remoteAttached.flatMapError { error in
+                diagnostics.failed(error, on: .remote, operation: .setup)
+                return upstreamChannel.eventLoop.makeFailedFuture(error)
+            }
+        }.hop(to: clientChannel.eventLoop)
+        attached.whenComplete { result in
             switch result {
             case .success:
                 // Initial ClientHello bytes take the same observed-write path
@@ -406,13 +420,13 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                 if initialData.readableBytes > 0 {
                     clientChannel.pipeline.fireChannelRead(initialData)
                 }
-            case .failure(let error):
-                diagnostics.failed(error, on: .client, operation: .setup)
+            case .failure:
                 if pooledTunnel { self.connectionPool.removeDedicatedTunnelByChannel(upstreamChannel) }
                 clientChannel.close(promise: nil)
                 upstreamChannel.close(promise: nil)
             }
         }
+        return attached
     }
 }
 
