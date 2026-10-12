@@ -1,7 +1,7 @@
 # Conduit Roadmap
 
 The execution queue and sole tracker of product-work status. Reviewed against the
-checkout and open issues on 2026-10-12. Conduit remains a macOS-native Swift corporate proxy manager;
+checkout and open issues on 2026-10-13. Conduit remains a macOS-native Swift corporate proxy manager;
 no rewrite or cross-platform port is planned.
 
 Implementation rationale, dependencies, and acceptance criteria live in
@@ -17,7 +17,7 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
-## Immediate cleanup priorities (2026-10-12)
+## Immediate cleanup priorities (2026-10-13)
 
 1. **Post-reconnect monitoring gap [Rel, Obs, Sim]** — reproduced after the first
    connected/flap-recovery probe fails: the reconnect path stops the retry timer
@@ -53,6 +53,38 @@ Owner acceptance is a separate lane: #99 needs a real KDC-failure recurrence;
 #111's normal 0.5.3→0.5.4 preflight/install passed, but negative paths, platform
 coverage and key-backup evidence remain. Do not add more happy-path tests merely
 to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
+
+## Proposed release scope
+
+**0.5.5 — reconnect recovery and bounded maintenance.** Include the reprobe fix
+above. Add #77's CI boundary check, #93's usable PAC-route bound and #118 track B's
+deterministic PAC fixture in separate reviewed changes if their acceptance gates
+are complete. Do not delay a needed recovery release for unfinished cleanup.
+For #93, document the capacity and preserve retained route order, strict-mode
+semantics and DIRECT precedence; a trailing DIRECT beyond the cap must not be
+promoted. Confirm the bound with oversized chains, boundary cases, cache/fallback
+resource checks and bounded events. Track B of #118 needs observed cache/evaluation
+completion, explicit background synchronization and normal/TSan repetition.
+It cannot close the independent continuation-race investigation in track A.
+
+**Following 0.5.x patches — runtime isolation.** #31 and #81 are patch candidates
+when delivered as focused ownership/correctness changes. For #31, pin restart and
+draining-connection lifetimes, isolate failure memories and retain process-wide
+GSS serialization. Stage #81's private spool ownership/off-loop cleanup separately
+from aggregate budgets and replay backpressure, coordinating paths with #82.
+Validate cancellation, failures, concurrent runtimes and slow-origin replay.
+Any new user-facing limit or incompatible rejection policy needs an explicit
+compatibility decision rather than being hidden in an internal refactor.
+
+**Developer tooling — #23.** Land the separate dev bundle independently; it needs
+no production version bump. Ad-hoc signing, a distinct identity, automatic fake
+mode and rejection of installation are its acceptance gates.
+
+**0.6 — user-facing capability or lifecycle changes.** Reserve a minor release for
+the production daemon/client transition, exclusive mutation authority and durable
+owner-death recovery, or profiles/location switching when ready. Refactor size
+alone does not require a minor version. This is a planning boundary, not a promise
+to bundle every daemon and profile item into the same release.
 
 ## Now
 
