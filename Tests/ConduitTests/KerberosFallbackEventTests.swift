@@ -119,7 +119,7 @@ final class KerberosFallbackEventTests: XCTestCase {
 
     func testMinorZeroCarriesTheCodesWithoutAName() {
         let error = KerberosAuthError.serviceTicketUnavailable(host: "rb-proxy-de.corp.example", major: badMech, minor: 0)
-        XCTAssertEqual(error.diagnosticDetail, "major=65536 minor=0")
+        XCTAssertEqual(error.diagnosticDetail, "major=65536 minor=0 krb5_probe=unavailable")
         XCTAssertEqual(
             KerberosAuthError.initSecContextFailed(0x000D_0000, 12345).diagnosticDetail,
             "major=851968 minor=12345",

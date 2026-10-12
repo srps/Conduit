@@ -421,12 +421,14 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
         let major: OM_uint32
         let minor: OM_uint32
         var mech: KerberosMechStatus?
+        var serviceTicketFailure = false
         switch self {
         case .importNameFailed(let codeMajor, let codeMinor),
              .initSecContextFailed(let codeMajor, let codeMinor):
             (major, minor) = (codeMajor, codeMinor)
         case .serviceTicketUnavailable(_, let ticketMajor, let ticketMinor, let mechStatus):
             (major, minor, mech) = (ticketMajor, ticketMinor, mechStatus)
+            serviceTicketFailure = true
         case .emptyToken, .noTicket:
             return nil
         }
@@ -444,6 +446,7 @@ package enum KerberosAuthError: Error, LocalizedError, CredentialFailureClassify
             if let name = Self.kerberosErrorName(minor: minor) {
                 detail += " krb5_error=\(name)"
             }
+            if serviceTicketFailure && minor == 0 { detail += " krb5_probe=unavailable" }
         }
         return detail
     }
