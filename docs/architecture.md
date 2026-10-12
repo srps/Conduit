@@ -434,3 +434,25 @@ The module split is complete. The CFNetwork PAC evaluator and `SecretBytes` ship
 - [`AGENTS.md`](../AGENTS.md) — import-fence statement, side-effects-behind-protocols rule, toolchain / test commands.
 - [`planning.md`](./planning.md) — current implementation rationale, dependencies, and acceptance criteria.
 - [`ROADMAP.md`](../ROADMAP.md) — execution queue and sole product-work status tracker, with pillar tags.
+
+## Candidate update preflight (0.5.3)
+
+`ConduitUpdater` remains the only target linking Sparkle. It also links
+`PlatformMac` for bounded archive download, static code validation and process
+launch. `PreflightingUserDriver` decorates Sparkle's user driver and intercepts an
+explicit install choice before Sparkle can stage install-on-quit.
+`UpdateInstallGate` owns the observable decision; `UpdatePreflighting` is its
+platform seam, with `SystemUpdatePreflight` and `FakeUpdatePreflight` implementations.
+No app lifecycle or helper IPC contract is duplicated in the updater.
+
+Sparkle's public API does not expose its extracted candidate. Preflight therefore
+obtains a separately bounded copy, verifies the host's Ed25519 signature, inspects
+and extracts it, checks actual code/bundle/platform/destination compatibility,
+then runs the candidate's early `UpdateHelperPreflightWorker`. That worker exists
+before app composition and only reads helper availability and issues a ping using
+the existing versioned protocol. Static validation checks the root-owned pin;
+the ping checks the helper's actual loaded policy. The updater itself is never
+admitted as a helper caller. Sparkle independently authenticates the installation
+archive against the same signature. See `release-installation.md` for bounds,
+cleanup and the old-updater transition, and `validation-0.5.3.md` for installed
+acceptance that stand-in hosts cannot establish.
