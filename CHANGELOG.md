@@ -4,6 +4,19 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+### Fixed
+
+- Established upstream CONNECT and transparent tunnels observe outbound write
+  failures and close the failed pair immediately. Fatal read errors also abort
+  instead of waiting behind an unflushable peer queue, allowing clients to see
+  EOF and perform their own reconnect. Healthy VPN-transition streams remain
+  open; orderly EOF still drains queued response data. Shared relay diagnostics
+  include the failing operation and destination socket. The deterministic
+  `vpn-existing-stream-failure` scenario reproduces both stale-socket paths on
+  isolated TCP connections and verifies fresh retries.
+
 ## 0.5.3
 
 A release candidate for installed VPN/Chrome recovery, Kerberos KDC recovery

@@ -1,0 +1,105 @@
+// SPDX-License-Identifier: Apache-2.0
+import Darwin
+import NIOCore
+import NIOEmbedded
+import XCTest
+@testable import ProxyKernel
+
+final class TunnelRelayFailureTests: XCTestCase {
+    /// Reject a syscall-like write without firing an inbound error. That is
+    /// the contract of a failed outbound promise, not a read-side exception.
+    private final class RejectWrite: ChannelOutboundHandler {
+        typealias OutboundIn = ByteBuffer
+        func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+            promise?.fail(IOError(errnoCode: EADDRNOTAVAIL, reason: "injected retired VPN address"))
+        }
+    }
+
+    private final class HoldWrites: ChannelOutboundHandler {
+        typealias OutboundIn = ByteBuffer
+        private var held: [(NIOAny, EventLoopPromise<Void>?)] = []
+        private var context: ChannelHandlerContext?
+        func handlerAdded(context: ChannelHandlerContext) { self.context = context }
+        func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+            precondition(held.count < 4, "bounded fixture writes")
+            held.append((data, promise))
+        }
+        func flush(context: ChannelHandlerContext) {}
+        func release() {
+            let context = self.context!
+            let writes = held; held.removeAll()
+            for (data, promise) in writes { context.write(data, promise: promise) }
+            context.flush()
+        }
+        func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
+            let writes = held; held.removeAll()
+            context.close(mode: mode, promise: promise)
+            for (_, pending) in writes { pending?.fail(ChannelError.ioOnClosedChannel) }
+        }
+    }
+
+    private func activeChannel() throws -> EmbeddedChannel {
+        let channel = EmbeddedChannel()
+        try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1234)).wait()
+        return channel
+    }
+
+    private func attach(_ client: EmbeddedChannel, _ remote: EmbeddedChannel, events: RuntimeEventLog) throws {
+        let diagnostics = TunnelRelayDiagnostics(target: "stream.test:443", transport: "connect", route: "upstream",
+            upstream: "proxy.test:8080", causeProvider: { .none },
+            reporter: TunnelFailureReporter(logger: DiscardingLogSink(), eventSink: { events.append($0) }))
+        try client.pipeline.addHandler(TunnelRelayHandler(peer: remote, diagnostics: diagnostics, side: .client)).wait()
+        try remote.pipeline.addHandler(TunnelRelayHandler(peer: client, diagnostics: diagnostics, side: .remote)).wait()
+    }
+
+    func testFailedWriteClosesBothHalvesAndReportsTheDestinationSocket() throws {
+        let client = try activeChannel(), remote = try activeChannel()
+        let events = RuntimeEventLog(capacity: 4)
+        try remote.pipeline.addHandler(RejectWrite()).wait()
+        try attach(client, remote, events: events)
+        try client.writeInbound(ByteBuffer(string: "opaque TLS bytes"))
+        client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
+        XCTAssertFalse(client.isActive, "the browser must learn the established tunnel is unusable")
+        XCTAssertFalse(remote.isActive)
+        XCTAssertEqual(events.events.count, 1)
+        XCTAssertTrue(events.events.first?.detail?.contains("side=remote") == true)
+        XCTAssertTrue(events.events.first?.detail?.contains("operation=write") == true)
+        _ = try client.finish(acceptAlreadyClosed: true)
+        _ = try remote.finish(acceptAlreadyClosed: true)
+    }
+
+    func testFatalReadDoesNotWaitForTheOtherSocketsBlockedWrites() throws {
+        let client = try activeChannel(), remote = try activeChannel()
+        let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
+        try client.pipeline.addHandler(held).wait()
+        try attach(client, remote, events: events)
+        try remote.writeInbound(ByteBuffer(string: "queued response"))
+        remote.pipeline.fireErrorCaught(IOError(errnoCode: EADDRNOTAVAIL, reason: "injected VPN address loss"))
+        client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
+        XCTAssertFalse(client.isActive, "fatal socket failure must bypass graceful drain")
+        XCTAssertFalse(remote.isActive)
+        XCTAssertEqual(events.events.count, 1)
+        // Bound cleanup even on the unfixed implementation.
+        if client.isActive { try client.close().wait() }
+        _ = try client.finish(acceptAlreadyClosed: true)
+        _ = try remote.finish(acceptAlreadyClosed: true)
+    }
+
+    func testOrderlyEOFStillDrainsTheCompleteQueuedResponse() throws {
+        let client = try activeChannel(), remote = try activeChannel()
+        let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
+        try client.pipeline.addHandler(held).wait()
+        try attach(client, remote, events: events)
+        let response = ByteBuffer(string: "complete response tail")
+        try remote.writeInbound(response)
+        try remote.close().wait()
+        XCTAssertTrue(client.isActive, "a normal FIN must preserve pending response data")
+        held.release()
+        client.embeddedEventLoop.run()
+        XCTAssertEqual(try client.readOutbound(as: ByteBuffer.self), response)
+        XCTAssertFalse(client.isActive)
+        XCTAssertTrue(events.events.isEmpty)
+        _ = try client.finish(acceptAlreadyClosed: true)
+        _ = try remote.finish(acceptAlreadyClosed: true)
+    }
+}

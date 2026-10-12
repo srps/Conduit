@@ -697,6 +697,32 @@ A third pass — first user report on a real enterprise corporate VPN — found 
 
 Test count went from 721 → 724; full suite green (722 + 2 new `knowsAbout` tests, with the 2-test rename net-zero on count). The three pm-sim flap scenarios (`vpn-flap-long-outage`, `vpn-rapid-flap-burst`, `vpn-user-disconnect`) still PASS.
 
+## Established socket failure recovery
+
+The 0.5.3 usage cycle produced address-unavailable and timeout errors on
+upstream sockets opened before the VPN disconnect, while new browser tabs
+recovered. An established TCP/TLS stream cannot be moved to a replacement
+socket by replaying its opaque bytes. Conduit must preserve healthy channels
+during control-plane changes and promptly surface a known data-path failure.
+
+`vpn-existing-stream-failure` models a retired VPN address with an outbound
+write rejection that never fires an inbound error, plus a fatal read error
+while the client-facing write queue is blocked. Before the fix, upstream CONNECT
+discarded write promises and waited for a zero-byte flush before closing after
+fatal reads. The browser therefore kept an unusable tunnel open; a fresh CONNECT
+worked. Both failure assertions failed deterministically on real isolated TCP
+sockets, while the healthy-stream assertion passed.
+
+Upstream CONNECT and transparent relays now share one event-loop-confined
+handler. Write/flow-control futures return to the source loop before accessing
+the handler context. A known failure emits `tunnel.relay_failed` with the failed
+socket and operation, then aborts only that pair. No transition closes healthy
+streams, no opaque bytes are retried, and orderly EOF retains graceful draining
+to avoid truncating queued responses. Initial transparent ClientHello data uses
+the same observed write path once both halves are installed. This removes the
+demonstrated failure-notification bugs; detection of silent network loss still
+depends on actual I/O errors and the existing TCP keepalive policy.
+
 ## Backward Compatibility
 
 The proxy has a single user (the project author). There are no external NDJSON consumers. Snapshots are runtime-only — never persisted to disk. So "back-compat" here means "in-process callers compile cleanly," not "old wire payloads must decode."
