@@ -97,7 +97,7 @@ enum TunnelFailureScenarios {
         let pairs = NIOLockedValueBox<[Pair]>([])
         let listener = try await listener(group: group, coordinator: coordinator, pool: pool, pairs: pairs, reporter: reporter)
         ScenarioCleanup.register { do { try await listener.close().get() } catch { logger.log(.warning, "fixture listener close: \(error)", category: .proxy) } }
-        return try await exercise(listener: listener, group: group, pairs: pairs, events: events, started: started)
+        return try await exercise(listener: listener, group: group, pool: pool, pairs: pairs, events: events, started: started)
     }
 
     private static func listener(group: EventLoopGroup, coordinator: CONNECTCoordinator, pool: ConnectionPool,
@@ -109,15 +109,17 @@ enum TunnelFailureScenarios {
                 let diagnostics = TunnelRelayDiagnostics(target: "stream.test:443", transport: "connect", route: "upstream",
                     upstream: tunnel.endpoint, causeProvider: { .none }, reporter: reporter)
                 return local.pipeline.addHandler(localWrites).flatMap {
-                    local.pipeline.addHandler(makeTunnelRelay(peer: remote, diagnostics: diagnostics, side: .client,
-                        onClose: { pool.removeDedicatedTunnelByChannel(remote) }))
+                    local.pipeline.addHandler(makeTunnelRelay(peer: remote, diagnostics: diagnostics, side: .client))
                 }.flatMap {
                     remote.pipeline.addHandler(remoteWrites)
                 }.flatMap {
-                    CONNECTCoordinator.attachRelay(makeTunnelRelay(peer: local, diagnostics: diagnostics, side: .remote), toUpstreamTunnel: remote)
+                    // Transparent tunnels retire their pool entry on remote
+                    // close, so cancellation must close that socket promptly.
+                    CONNECTCoordinator.attachRelay(makeTunnelRelay(peer: local, diagnostics: diagnostics, side: .remote,
+                        onClose: { pool.removeDedicatedTunnelByChannel(remote) }), toUpstreamTunnel: remote)
                 }.map {
                     pairs.withLockedValue {
-                        precondition($0.count < 3, "bounded established fixture tunnels")
+                        precondition($0.count < 4, "bounded established fixture tunnels")
                         $0.append(Pair(local: local, remote: remote, localWrites: localWrites, remoteWrites: remoteWrites))
                     }
                 }
@@ -126,9 +128,9 @@ enum TunnelFailureScenarios {
     }
 
     @MainActor
-    private static func exercise(listener: Channel, group: EventLoopGroup, pairs: NIOLockedValueBox<[Pair]>,
+    private static func exercise(listener: Channel, group: EventLoopGroup, pool: ConnectionPool, pairs: NIOLockedValueBox<[Pair]>,
                                  events: RuntimeEventLog, started: Date) async throws -> ScenarioResult {
-        var clients: [Channel] = [], captures: [Capture] = [] // exactly three, never network-sized
+        var clients: [Channel] = [], captures: [Capture] = [] // two baseline streams, never network-sized
         for index in 0..<2 {
             let capture = Capture()
             let client = try await ClientBootstrap(group: group).channelInitializer { $0.pipeline.addHandler(capture) }
@@ -159,14 +161,30 @@ enum TunnelFailureScenarios {
         ScenarioCleanup.register { do { try await retry.close().get() } catch ChannelError.alreadyClosed {} catch { reportCleanupFailure(error) } }
         try await retry.writeAndFlush(ByteBuffer(string: "retry")).get()
         let retryWorks = try await until { retryCapture.received == "retry" }
+        let cancelCapture = Capture()
+        let cancel = try await ClientBootstrap(group: group).channelInitializer { $0.pipeline.addHandler(cancelCapture) }
+            .connect(to: listener.localAddress!).get()
+        ScenarioCleanup.register { do { try await cancel.close().get() } catch ChannelError.alreadyClosed {} catch { reportCleanupFailure(error) } }
+        try await cancel.writeAndFlush(ByteBuffer(string: "cancel")).get()
+        guard try await until({ cancelCapture.received == "cancel" && pairs.withLockedValue { $0.count == 4 } }) else {
+            throw ScenarioExecutionError(message: "cancellation CONNECT echo missing")
+        }
+        let canceled = pairs.withLockedValue { $0[3] }
+        canceled.remoteWrites.set(.hold)
+        try await cancel.writeAndFlush(ByteBuffer(string: "queued")).get()
+        guard try await until({ canceled.remoteWrites.pending > 0 }) else { throw ScenarioExecutionError(message: "upstream write gate was not reached") }
+        try await cancel.close().get()
+        let canceledClosed = try await closes(canceled.remote)
+        let canceledRetired = try await until { !pool.allConnectionSnapshot.contains { $0.channel === canceled.remote } }
         let failures = events.events.filter { $0.event == "tunnel.relay_failed" }
-        return ScenarioResult(name: "vpn-existing-stream-failure", clientCount: 3, clientsOpened: 3, clientsWithFirstByte: 3,
-            clientsClosedEarly: 2, totalBytes: 27, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+        return ScenarioResult(name: "vpn-existing-stream-failure", clientCount: 4, clientsOpened: 4, clientsWithFirstByte: 4,
+            clientsClosedEarly: 3, totalBytes: 33, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: 5, maxBytes: 11, medianBytes: 11, earliestClose: nil, latestClose: nil, assertions: [
                 .init("established tunnels exchange data before fault injection", healthy),
                 .init("failed write closes the browser socket within one second", writeClosed),
                 .init("fatal read bypasses blocked response drain", readClosed),
                 .init("a fresh CONNECT retry exchanges data after both failures", retryWorks),
+                .init("client cancellation closes a blocked upstream and retires its pool slot", canceledClosed && canceledRetired),
                 .init("each broken tunnel emits exactly one structured failure", failures.count == 2),
             ], notes: ["Explicit socket faults; no real VPN, proxy settings, helper or credentials touched"])
     }
