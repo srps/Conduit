@@ -52,20 +52,21 @@ enum ReconnectReprobeScenarios {
         let attempts = state.withLockedValue { $0.attempts }
         let connectedEvents = orchestrator.eventLog.events.filter { $0.event == "vpn.connected" }.count
         state.withLockedValue { $0.reachable = true }
-        let recovered = try await until(timeout: 22) { orchestrator.snapshot.directModeCause == .none }
+        let recovered = try await until(timeout: 22) {
+            orchestrator.snapshot.directModeCause == .none && orchestrator.eventLog.events.contains {
+                $0.event == "connectivity.reprobe_completed" && $0.detail?.contains("reachable=true cause=none") == true
+            }
+        }
         let metrics = client.metrics
         let retried = state.withLockedValue { $0.attempts } > attempts
         let sameVPNReport = connectedEvents == orchestrator.eventLog.events.filter { $0.event == "vpn.connected" }.count
-        let retryEvent = orchestrator.eventLog.events.contains {
-            $0.event == "connectivity.reprobe_completed" && $0.detail?.contains("reachable=true cause=none") == true
-        }
         return ScenarioResult(name: "vpn-reconnect-reprobe", clientCount: 1, clientsOpened: 1,
             clientsWithFirstByte: metrics.firstByteAt == nil ? 0 : 1, clientsClosedEarly: metrics.closedAt == nil ? 0 : 1,
             totalBytes: metrics.bytesReceived, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: metrics.bytesReceived, maxBytes: metrics.bytesReceived, medianBytes: metrics.bytesReceived,
             earliestClose: nil, latestClose: nil, assertions: [
                 .init("failed first probe degrades health without allowing strict DIRECT", degraded == .upstreamsUnreachable && !degraded.routesClientTrafficDirectly),
-                .init("production retry restores reachable state without another VPN report", recovered && retried && sameVPNReport && retryEvent),
+                .init("production retry restores reachable state without another VPN report", recovered && retried && sameVPNReport),
                 .init("the established CONNECT keeps exchanging bytes on the same listener", metrics.closedAt == nil && metrics.bytesReceived > before && orchestrator.snapshot.bindings.proxyPort == port),
             ], notes: ["Real 15-second retry cadence; injected probe outcomes; no real VPN, helper, settings or credentials"])
     }
