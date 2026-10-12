@@ -4,7 +4,10 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.5.4
+
+VPN reconnect and Chrome stream recovery fixes from #138. App-only update
+from 0.5.3; helper v5 is unchanged and needs no reinstall.
 
 ### Fixed
 
@@ -13,11 +16,23 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   instead of waiting behind an unflushable peer queue, allowing clients to see
   EOF and perform their own reconnect. Healthy VPN-transition streams remain
   open; orderly remote EOF still drains queued response data, including when
-  client bytes or read-flow callbacks race the closed socket. Client shutdown immediately
-  releases blocked remote sockets and pool slots. Shared relay diagnostics
+  client bytes or read-flow callbacks race the closed socket. Client shutdown
+  immediately releases blocked remote sockets and pool slots. Shared relay diagnostics
   include the failing operation and destination socket. The deterministic
   `vpn-existing-stream-failure` scenario reproduces both stale-socket paths on
   isolated TCP connections.
+
+### Testing this release
+
+- Keep Chrome open with an active download or streaming page, disconnect and
+  reconnect VPN, then check both the existing page and fresh tabs without
+  restarting Chrome or Conduit. Healthy connections should continue; a broken
+  tunnel should close promptly so Chrome can retry or the page can be reloaded.
+  Conduit cannot replay or resume an encrypted stream whose TCP socket failed.
+- Repeat with a slow download and after closing its tab. Response tails should
+  arrive intact, and canceled tabs should not leave blocked upstream sockets.
+  Record VPN-cycle times and any stalls so they can be compared with Conduit's
+  tunnel failure events. See [the usage test plan](docs/vpn-recovery-validation.md).
 
 ## 0.5.3
 
