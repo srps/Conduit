@@ -90,3 +90,38 @@ updater. It does not validate the new 0.5.3 preflight, absent/conflicting helper
 quarantine/Gatekeeper variants, DNS-settings restoration, destructive failure
 recovery, credential-store preservation in all modes, or macOS 27. No update or
 live-system change was performed to collect this evidence.
+
+## 0.5.3 → 0.5.4 and Chrome usage evidence
+
+Read-only log inspection on 2026-10-12 confirms the owner-initiated update using
+0.5.3's new preflight. Times below are UTC, from the installed app's log:
+
+| Observation | Time |
+| --- | --- |
+| Candidate preflight started | 18:51:13.958 |
+| Candidate preflight passed | 18:51:17.273 |
+| Install requested | 18:51:20.575 |
+| Scoped proxy restoration before relaunch | 18:51:20.688–20.900 |
+| Proxy variables and managed resolver/intercept files cleared | 18:51:21.006–21.049 |
+| Version changed to 0.5.4 | 18:51:21.703 |
+| Proxy / PAC listeners ready | 18:51:24.750 / 24.755 |
+| DNS forwarder / transparent listener ready | 18:51:25.573 / 25.594 |
+
+The loaded helper remained v5 with its original process. Published ZIP/DMG
+checksums, update signature, release certificate, hardened runtime, bundle seal
+and derived caller pin were independently verified without installation or
+private-key use. This is positive installed-preflight/relaunch evidence for #111;
+its negative paths, key-custody evidence and full platform matrix remain open.
+
+After cycling VPN with Chrome kept open, the owner reported fresh tabs and
+existing pages/streams were "all good". Logs show reconnect revoking VPN-off
+routing before PAC/probe awaits, stable local PAC settings, old direct sockets
+reporting timeouts, and fresh upstream traffic. This is one usage pass, not a
+long-duration or all-path recovery claim. No real KDC-recovery recurrence was
+observed, so #99 remains an acceptance item.
+
+The same cycle exposed a monitoring gap: the first reconnect probe failed and
+`upstreamsUnreachable` persisted despite subsequent upstream traffic. Its
+production-timer simulator and fix are tracked in the immediate roadmap queue;
+this usage observation does not establish that every probe failure was caused
+by VPN route-settling timing.
