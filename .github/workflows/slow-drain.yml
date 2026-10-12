@@ -9,6 +9,7 @@ on:
       - "Sources/pm-sim/FakeUpstreamProxy.swift"
       - "Sources/pm-sim/Scenarios.swift"
       - "Sources/ProxyKernel/Proxy/CONNECTHandler.swift"
+      - "Sources/ProxyKernel/Proxy/TunnelRelayHandler.swift"
 permissions:
   contents: read
 jobs:

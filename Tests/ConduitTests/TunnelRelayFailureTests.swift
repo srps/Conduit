@@ -94,11 +94,31 @@ final class TunnelRelayFailureTests: XCTestCase {
         try remote.writeInbound(response)
         try remote.close().wait()
         XCTAssertTrue(client.isActive, "a normal FIN must preserve pending response data")
+        // The client can become writable after the remote's normal EOF. Its
+        // attempt to resume remote reads must not abort the queued response.
+        client.pipeline.fireChannelWritabilityChanged()
+        client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
+        XCTAssertTrue(client.isActive)
         held.release()
         client.embeddedEventLoop.run()
         XCTAssertEqual(try client.readOutbound(as: ByteBuffer.self), response)
         XCTAssertFalse(client.isActive)
         XCTAssertTrue(events.events.isEmpty)
+        _ = try client.finish(acceptAlreadyClosed: true)
+        _ = try remote.finish(acceptAlreadyClosed: true)
+    }
+
+    func testClientShutdownDoesNotWaitForBlockedUpstreamWrites() throws {
+        let client = try activeChannel(), remote = try activeChannel()
+        let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
+        try remote.pipeline.addHandler(held).wait()
+        try attach(client, remote, events: events)
+        try client.writeInbound(ByteBuffer(string: "queued client bytes"))
+        try client.close().wait()
+        client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
+        XCTAssertFalse(remote.isActive, "a departed client must not strand the upstream pool slot")
+        XCTAssertTrue(events.events.isEmpty, "client cancellation is not a socket failure")
+        if remote.isActive { try remote.close().wait() }
         _ = try client.finish(acceptAlreadyClosed: true)
         _ = try remote.finish(acceptAlreadyClosed: true)
     }

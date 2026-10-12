@@ -50,10 +50,17 @@ final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendable {
 
     func channelInactive(context: ChannelHandlerContext) {
         if !notifiedClose { notifiedClose = true; onClose?() }
-        // Drain peer's outbound queue before closing. `close(mode: .all)` fails all
-        // buffered writes, which truncates streamed responses when the upstream FINs
-        // while we still have hundreds of KB queued for the client under backpressure.
-        if !closing { closing = true; gracefulClosePeer() }
+        if !closing {
+            closing = true
+            if side == .client {
+                // The recipient is gone. Retire the remote socket and its
+                // pool slot even if client-to-remote writes cannot drain.
+                peer.close(mode: .all, promise: nil)
+            } else {
+                // Preserve queued response bytes after an orderly remote FIN.
+                gracefulClosePeer()
+            }
+        }
         context.fireChannelInactive()
     }
 
@@ -68,6 +75,10 @@ final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendable {
         let bound = NIOLoopBound(context, eventLoop: context.eventLoop)
         future.hop(to: context.eventLoop).whenFailure { [self] error in
             guard !closing, bound.value.channel.isActive else { return }
+            // A remote FIN can precede the client queue becoming writable.
+            // Re-enabling that retired socket's reads is then a no-op, not
+            // a reason to truncate the response still draining to the client.
+            if operation == .flowControl, destination == otherSide, !peer.isActive { return }
             abort(context: bound.value, error: error, destination: destination, operation: operation)
         }
     }
