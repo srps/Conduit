@@ -89,6 +89,7 @@ exactly these semantics; do not repurpose them.
 ### routing
 | Event | Emitted when |
 | --- | --- |
+| `transparent_proxy.direct_failed` | An intercepted client's direct origin lookup/connect failed (`host=`, `started_cause=`, `current_cause=`, monotonic `dial_ms=` including lookup, `error=`). Emitted before its log. The paired causes distinguish an off-VPN attempt that outlived reconnection from an attempt started under the current state. |
 | `direct_mode.entered` | Routing flipped to direct (`detail` carries the cause). |
 | `local_pac.starting` / `started` / `stopping` / `stopped` / `restarting` / `updated` / `failed` | Local PAC server lifecycle; `detail: reason=…`. |
 | `pac.refreshed` | The routing engine installed a freshly fetched PAC (`url=`, credentials stripped). The first install after a `pac.routes_invalidated` adds `after=` with its reason and logs at notice, so the app's `proxy.log` shows the reload. A different script drops every cached answer. The same script as the one loaded ends the detail with `script=unchanged` and keeps them: each is served on its next use and evaluated again in the background. |
@@ -129,6 +130,7 @@ exactly these semantics; do not repurpose them.
 ### connection
 | Event | Emitted when |
 | --- | --- |
+| `tunnel.relay_failed` | First observed error on either half of an established upstream CONNECT or transparent tunnel. `target=`, `transport=connect\|transparent`, `route=upstream\|direct`, `upstream=` endpoint or `none`, `side=client\|remote` identifies the socket reporting the error (remote is the upstream proxy or direct origin), `errno=` or `none`, monotonic `age_ms=`/`idle_ms=`, `client_bytes=`/`remote_bytes=` observed inbound byte counts, `started_cause=` at relay attachment and `current_cause=` at failure. Counts measure reads, not acknowledged delivery; no payload is recorded. Emitted before the warning log, once per tunnel, coalesced per listener/coordinator by target/transport/route/side/errno for 60 s with `suppressed=`. Uses the existing 64-key repeat gate; eviction may lose held counts, and quiet windows have no timer flush. Resets alone do not establish a routing defect or application failure. |
 | `streaming.response_interrupted` | Upstream died mid-streamed-response; the client connection is closed rather than silently truncated (`uri=`, `upstream=`, `cause=`). |
 | `upstream.response_timeout` | Upstream exceeded `upstreamResponseTimeout` for a response. |
 | `upstream.tunnel_failed` / `upstream.exchange_failed` | A CONNECT tunnel or an HTTP exchange through the upstream failed and the client got a 502 (`target=`, `reason=`). Emitted before the error log line. Not emitted for a failure the cause makes expected (a transient path change), which is logged at info, nor for a request the pool refused locally, which never reached the upstream: exhaustion is `connection.pool_exhausted`, a handshake-limit refusal is `auth.handshake_rejected`. Coalesced like `direct.connect_failed`. |

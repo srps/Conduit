@@ -12,7 +12,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// (log severity, telemetry) without a separate state lookup. Reads from the
     /// orchestrator's `directModeBox`. See `DirectModeCause` and Phase 2 of
     /// `docs/design-vpn-flap-resilience.md`.
-    private let directModeProvider: () -> (Bool, DirectModeCause)
+    private let directModeProvider: @Sendable () -> (Bool, DirectModeCause)
     private let authenticatorProvider: (UpstreamProxy) throws -> ProxyAuthenticator
     private let directConnectDetector: DirectConnectDetector
     private let pacRoutingEngine: PACRoutingEngine?
@@ -126,7 +126,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     package init(
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
-        directModeProvider: @escaping () -> (Bool, DirectModeCause),
+        directModeProvider: @escaping @Sendable () -> (Bool, DirectModeCause),
         authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         directConnectDetector: DirectConnectDetector,
         pacRoutingEngine: PACRoutingEngine?,
@@ -203,7 +203,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             logger: logger,
             authHandshakeLimiter: authHandshakeLimiter,
             authLimitProvider: authHandshakeLimits,
-            eventSink: eventSink
+            eventSink: eventSink,
+            directModeProvider: { [directModeProvider] in directModeProvider().1 }
         )
 
         let config = configProvider()
