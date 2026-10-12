@@ -83,7 +83,7 @@ final class PreflightingUserDriver: NSObject, SPUUserDriver {
         downloaded = 0
         cancelDownload = cancellation
         downloadTimeout = Task { [weak self] in
-            do { try await Task.sleep(for: .seconds(SystemUpdatePreflight.downloadTimeout)) }
+            do { try await Task.sleep(for: .seconds(UpdatePreflightLimits.downloadTimeout)) }
             catch { return }  // cancelled at extraction/dismissal
             self?.abortDownload(reason: "update_download_timeout")
         }
@@ -99,12 +99,12 @@ final class PreflightingUserDriver: NSObject, SPUUserDriver {
         cancelDownload()
     }
     func showDownloadDidReceiveExpectedContentLength(_ length: UInt64) {
-        if length > SystemUpdatePreflight.archiveLimit { abortDownload(reason: "update_download_limit") }
+        if length > UpdatePreflightLimits.archiveBytes { abortDownload(reason: "update_download_limit") }
         else { driver.showDownloadDidReceiveExpectedContentLength(length) }
     }
     func showDownloadDidReceiveData(ofLength length: UInt64) {
         let (sum, overflow) = downloaded.addingReportingOverflow(length)
-        if overflow || sum > SystemUpdatePreflight.archiveLimit { abortDownload(reason: "update_download_limit") }
+        if overflow || sum > UpdatePreflightLimits.archiveBytes { abortDownload(reason: "update_download_limit") }
         else { downloaded = sum; driver.showDownloadDidReceiveData(ofLength: length) }
     }
     func showDownloadDidStartExtractingUpdate() { finishDownload(); driver.showDownloadDidStartExtractingUpdate() }

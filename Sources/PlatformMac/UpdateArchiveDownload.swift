@@ -25,7 +25,7 @@ private final class UpdateDownloadDelegate: NSObject, URLSessionDownloadDelegate
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        if totalBytesWritten > SystemUpdatePreflight.archiveLimit || totalBytesExpectedToWrite > SystemUpdatePreflight.archiveLimit {
+        if totalBytesWritten > UpdatePreflightLimits.archiveBytes || totalBytesExpectedToWrite > UpdatePreflightLimits.archiveBytes {
             lock.withLock { failure = UpdatePreflightError("update_download_limit") }
             downloadTask.cancel()
         }
@@ -38,7 +38,7 @@ private final class UpdateDownloadDelegate: NSObject, URLSessionDownloadDelegate
                 throw UpdatePreflightError("update_download_response_invalid")
             }
             let size = try location.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? Int.max
-            guard size <= SystemUpdatePreflight.archiveLimit else { throw UpdatePreflightError("update_download_limit") }
+            guard size <= UpdatePreflightLimits.archiveBytes else { throw UpdatePreflightError("update_download_limit") }
             try FileManager.default.moveItem(at: location, to: destination)
         } catch { lock.withLock { failure = error } }
     }
@@ -68,7 +68,7 @@ package enum UpdateArchiveDownload {
         guard allowed(url) else { throw UpdatePreflightError("update_url_rejected") }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = SystemUpdatePreflight.downloadTimeout
+        configuration.timeoutIntervalForResource = UpdatePreflightLimits.downloadTimeout
         // At most one task/download/session per preflight; no shared cache.
         let taskBox = DownloadTaskBox()
         try await withTaskCancellationHandler {
