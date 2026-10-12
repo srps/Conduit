@@ -4,7 +4,7 @@ import NIOConcurrencyHelpers
 import NIOCore
 import NIOPosix
 
-package struct ProbeResult: Identifiable {
+package struct ProbeResult: Identifiable, Sendable {
     package     let id: UUID
     package     let proxy: UpstreamProxy
     package     let latencyMS: Int
@@ -18,8 +18,10 @@ package struct ProbeResult: Identifiable {
     }
 }
 
-package struct UpstreamProbeSummary {
+package struct UpstreamProbeSummary: Sendable {
     package let results: [ProbeResult]
+
+    package init(results: [ProbeResult]) { self.results = results }
 
     package var hasReachableUpstream: Bool {
         results.contains { $0.reachable }
