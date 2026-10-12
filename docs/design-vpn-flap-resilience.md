@@ -711,7 +711,9 @@ while the client-facing write queue is blocked. Before the fix, upstream CONNECT
 discarded write promises and waited for a zero-byte flush before closing after
 fatal reads. The browser therefore kept an unusable tunnel open; a fresh CONNECT
 worked. Both failure assertions failed deterministically on real isolated TCP
-sockets, while the healthy-stream assertion passed.
+sockets, while the baseline data exchange passed. This scenario exercises
+data-path failure recovery; `vpn-flap-idle` and `vpn-flap-stream` separately
+verify stream preservation through the production orchestrator's VPN transitions.
 
 Upstream CONNECT and transparent relays now share one event-loop-confined
 handler. Write/flow-control futures return to the source loop before accessing

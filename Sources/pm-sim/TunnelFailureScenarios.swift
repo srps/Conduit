@@ -88,11 +88,6 @@ enum TunnelFailureScenarios {
         var config = ProxyConfig()
         config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
         config.upstreams = [UpstreamProxy(name: "Retired address", host: "127.0.0.1", port: upstream.port, priority: 0)]
-        let cause = NIOLockedValueBox(DirectModeCause.none)
-        let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
-            connectivityProbe: { targets in UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) }) })
-        orchestrator.onSnapshotChange = { snapshot in cause.withLockedValue { $0 = snapshot.directModeCause } }
-        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
         let frozenConfig = config
         let pool = ConnectionPool(group: group, logger: logger, configProvider: { frozenConfig }, authenticatorProvider: { _ in MockAuthenticator() })
         ScenarioCleanup.register { pool.closeAll() }
@@ -100,20 +95,19 @@ enum TunnelFailureScenarios {
         let events = RuntimeEventLog(capacity: 16)
         let reporter = TunnelFailureReporter(logger: logger, eventSink: { events.append($0) })
         let pairs = NIOLockedValueBox<[Pair]>([])
-        let listener = try await listener(group: group, coordinator: coordinator, pool: pool, pairs: pairs, cause: cause, reporter: reporter)
+        let listener = try await listener(group: group, coordinator: coordinator, pool: pool, pairs: pairs, reporter: reporter)
         ScenarioCleanup.register { do { try await listener.close().get() } catch { logger.log(.warning, "fixture listener close: \(error)", category: .proxy) } }
-        return try await exercise(listener: listener, group: group, pairs: pairs, orchestrator: orchestrator,
-                                  events: events, started: started)
+        return try await exercise(listener: listener, group: group, pairs: pairs, events: events, started: started)
     }
 
     private static func listener(group: EventLoopGroup, coordinator: CONNECTCoordinator, pool: ConnectionPool,
-                                 pairs: NIOLockedValueBox<[Pair]>, cause: NIOLockedValueBox<DirectModeCause>,
+                                 pairs: NIOLockedValueBox<[Pair]>,
                                  reporter: TunnelFailureReporter) async throws -> Channel {
         try await ServerBootstrap(group: group).childChannelInitializer { local in
             coordinator.connectUpstreamTunnel(target: "stream.test:443").hop(to: local.eventLoop).flatMap { tunnel in
                 let remote = tunnel.channel, localWrites = WriteFault(), remoteWrites = WriteFault()
                 let diagnostics = TunnelRelayDiagnostics(target: "stream.test:443", transport: "connect", route: "upstream",
-                    upstream: tunnel.endpoint, causeProvider: { cause.withLockedValue { $0 } }, reporter: reporter)
+                    upstream: tunnel.endpoint, causeProvider: { .none }, reporter: reporter)
                 return local.pipeline.addHandler(localWrites).flatMap {
                     local.pipeline.addHandler(makeTunnelRelay(peer: remote, diagnostics: diagnostics, side: .client,
                         onClose: { pool.removeDedicatedTunnelByChannel(remote) }))
@@ -133,7 +127,7 @@ enum TunnelFailureScenarios {
 
     @MainActor
     private static func exercise(listener: Channel, group: EventLoopGroup, pairs: NIOLockedValueBox<[Pair]>,
-                                 orchestrator: ProxyOrchestrator, events: RuntimeEventLog, started: Date) async throws -> ScenarioResult {
+                                 events: RuntimeEventLog, started: Date) async throws -> ScenarioResult {
         var clients: [Channel] = [], captures: [Capture] = [] // exactly three, never network-sized
         for index in 0..<2 {
             let capture = Capture()
@@ -146,8 +140,6 @@ enum TunnelFailureScenarios {
                 throw ScenarioExecutionError(message: "initial CONNECT echo missing")
             }
         }
-        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
-        await orchestrator.handleVPNStateChange(.connected)
         for client in clients { try await client.writeAndFlush(ByteBuffer(string: "after")).get() }
         let healthy = try await until { captures.allSatisfy { $0.received == "beforeafter" } }
         let old = pairs.withLockedValue { $0 }
@@ -171,7 +163,7 @@ enum TunnelFailureScenarios {
         return ScenarioResult(name: "vpn-existing-stream-failure", clientCount: 3, clientsOpened: 3, clientsWithFirstByte: 3,
             clientsClosedEarly: 2, totalBytes: 27, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: 5, maxBytes: 11, medianBytes: 11, earliestClose: nil, latestClose: nil, assertions: [
-                .init("healthy established streams still echo across VPN cycle", healthy),
+                .init("established tunnels exchange data before fault injection", healthy),
                 .init("failed write closes the browser socket within one second", writeClosed),
                 .init("fatal read bypasses blocked response drain", readClosed),
                 .init("a fresh CONNECT retry exchanges data after both failures", retryWorks),
