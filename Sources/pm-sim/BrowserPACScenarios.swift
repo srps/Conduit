@@ -53,9 +53,12 @@ enum BrowserPACScenarios {
         sessionConfig.connectionProxyDictionary = [:]
         let session = URLSession(configuration: sessionConfig)
         defer { session.invalidateAndCancel() }
-        let (data, responseHead) = try await session.data(for: URLRequest(url: pacURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 3))
-        guard (responseHead as? HTTPURLResponse)?.statusCode == 200 else { throw ScenarioExecutionError(message: "PAC response was not 200") }
-        let retainedScript = String(decoding: data, as: UTF8.self)
+        func fetchScript() async throws -> String {
+            let (data, responseHead) = try await session.data(for: URLRequest(url: pacURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: 3))
+            guard (responseHead as? HTTPURLResponse)?.statusCode == 200 else { throw ScenarioExecutionError(message: "PAC response was not 200") }
+            return String(decoding: data, as: UTF8.self)
+        }
+        let retainedScript = try await fetchScript()
         let evaluator = CFPACEvaluator()
         let retained = try evaluator.makeEvaluator(pacScript: retainedScript)
         let target = URL(string: "http://127.0.0.1:\(originPort)/browser-fixture")!
@@ -81,20 +84,44 @@ enum BrowserPACScenarios {
         let after: String
         do { after = try await freshRequest() }
         catch { after = "fresh cached-PAC request failed: \(error.displayDescription)" }
-        let afterAgain: String
-        do { afterAgain = try await freshRequest() }
-        catch { afterAgain = "second cached-PAC request failed: \(error.displayDescription)" }
+
+        // Configuration changes are a distinct phase: the served policy must
+        // reflect disabling/re-enabling the last upstream without a restart.
+        let reloaded = try await reloadAvailability(orchestrator, evaluator: evaluator, target: target, fetchScript: fetchScript)
+        let afterReload: String
+        do { afterReload = try await freshRequest() }
+        catch { afterReload = "post-reload request failed: \(error.displayDescription)" }
         let assertions: [ScenarioAssertion] = [
             .init("off-VPN request reaches origin", offVPN.contains("X-Route: direct")),
-            .init("retained PAC keeps browser on the local proxy", retainedScript.contains("PROXY 127.0.0.1:")),
             .init("fresh tab recovers through upstream without PAC refetch", after.contains("X-Route: upstream")),
-            .init("second fresh tab also recovers", afterAgain.contains("X-Route: upstream")),
+            .init("last upstream disabled: served PAC selects DIRECT", reloaded.disabled == [.direct]),
+            .init("upstream re-enabled: served PAC selects local proxy", reloaded.restored == [.proxy(host: "127.0.0.1", port: reloaded.proxyPort)]),
+            .init("traffic recovers after configuration reload", afterReload.contains("X-Route: upstream")),
         ]
         return ScenarioResult(name: "browserRetainedPAC", clientCount: 3, clientsOpened: 3,
-                              clientsWithFirstByte: [offVPN, after, afterAgain].filter { $0.contains("HTTP/1.1 200") }.count,
+                              clientsWithFirstByte: [offVPN, after, afterReload].filter { $0.contains("HTTP/1.1 200") }.count,
                               clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
                               aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0,
                               earliestClose: nil, latestClose: nil, assertions: assertions,
-                              notes: ["one PAC fetch, one retained evaluator; no refetch across reconnect", after, afterAgain])
+                              notes: ["one retained evaluator across VPN reconnect; served PAC then checked after explicit config reloads", after, afterReload])
     }
+
+    @MainActor
+    private static func reloadAvailability(
+        _ orchestrator: ProxyOrchestrator, evaluator: any PacEvaluator,
+        target: URL, fetchScript: () async throws -> String
+    ) async throws -> (disabled: [PACRoute], restored: [PACRoute], proxyPort: Int) {
+        let enabledConfig = orchestrator.config
+        var disabledConfig = enabledConfig
+        disabledConfig.upstreams[0].enabled = false
+        await orchestrator.applyConfigChange(disabledConfig)
+        let disabledScript = try await fetchScript()
+        let disabled = evaluator.routeChain(for: try evaluator.makeEvaluator(pacScript: disabledScript).resolveProxyChain(for: target)).routes
+        await orchestrator.applyConfigChange(enabledConfig)
+        let restoredScript = try await fetchScript()
+        let restored = evaluator.routeChain(for: try evaluator.makeEvaluator(pacScript: restoredScript).resolveProxyChain(for: target)).routes
+        guard let proxyPort = orchestrator.snapshot.bindings.proxyPort else { throw ScenarioExecutionError(message: "proxy listener lost during reload") }
+        return (disabled, restored, proxyPort)
+    }
+
 }

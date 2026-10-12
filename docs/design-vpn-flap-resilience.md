@@ -22,8 +22,9 @@ browser incident; browser NetLog and controlled installed validation can
 separate retained PAC from DNS or connection-pool state.
 
 `pm-sim browser-retained-pac` fetches one actual local PAC, retains its evaluator,
-serves an origin off VPN, then makes DIRECT unavailable on reconnect. Two fresh
-requests must use the upstream without refetching. `vpn-reconnect-routing` gates
+serves an origin off VPN, then makes DIRECT unavailable on reconnect. Fresh requests must use the upstream without replacing that retained browser
+context. A configuration phase checks served policy when the last upstream is
+disabled and restored, without a listener restart. `vpn-reconnect-routing` gates
 the connectivity probe and verifies new intercepted traffic selects the upstream
 before that probe completes. Unit tests also require old corporate PAC answers
 to be invalidated and old DNS transports reset before handlers can observe the
