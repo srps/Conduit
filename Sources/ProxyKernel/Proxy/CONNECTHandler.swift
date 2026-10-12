@@ -20,6 +20,8 @@ package final class CONNECTCoordinator: @unchecked Sendable {
     private let authHandshakeLimiter: AuthHandshakeLimiter
     private let authLimitProvider: @Sendable () -> AuthHandshakeLimiter.Limits
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    private let tunnelFailureReporter: TunnelFailureReporter
+    private let directModeProvider: @Sendable () -> DirectModeCause
 
     package init(
         pool: ConnectionPool,
@@ -29,7 +31,8 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         authLimitProvider: @escaping @Sendable () -> AuthHandshakeLimiter.Limits = {
             AuthHandshakeLimiter.Limits(total: 512, perSource: 128)
         },
-        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        directModeProvider: @escaping @Sendable () -> DirectModeCause = { .none }
     ) {
         self.pool = pool
         self.authenticatorProvider = authenticatorProvider
@@ -37,6 +40,8 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         self.authHandshakeLimiter = authHandshakeLimiter
         self.authLimitProvider = authLimitProvider
         self.eventSink = eventSink
+        self.directModeProvider = directModeProvider
+        self.tunnelFailureReporter = TunnelFailureReporter(logger: logger, eventSink: eventSink)
     }
 
     /// Establish CONNECT tunnel to upstream proxy, returning the raw tunnel channel.
@@ -189,6 +194,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
                     clientContext: ctx,
                     upstreamChannel: upstreamChannel,
                     target: requestHead.uri,
+                    endpoint: endpoint,
                     onTunnelClosed: { pool.removeDedicatedTunnelByChannel(upstreamChannel); onTunnelClosed() }
                 ).map { (endpoint: endpoint, authMethod: authMethod) }
             }
@@ -198,9 +204,14 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         clientContext: ChannelHandlerContext,
         upstreamChannel: Channel,
         target: String,
+        endpoint: String,
         onTunnelClosed: @Sendable @escaping () -> Void
     ) -> EventLoopFuture<Void> {
         let clientChannel = clientContext.channel
+        let diagnostics = TunnelRelayDiagnostics(
+            target: target, transport: "connect", route: "upstream", upstream: endpoint,
+            causeProvider: directModeProvider, reporter: tunnelFailureReporter
+        )
 
         var responseHead = HTTPResponseHead(version: .http1_1, status: .ok)
         responseHead.headers.add(name: "Content-Length", value: "0")
@@ -217,9 +228,9 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverEncoder)
         }.flatMap {
             let clientRelay = TunnelRelayHandler(
-                peer: upstreamChannel, target: target, logger: self.logger, onClose: onTunnelClosed
+                peer: upstreamChannel, diagnostics: diagnostics, side: .client, onClose: onTunnelClosed
             )
-            let upstreamRelay = TunnelRelayHandler(peer: clientChannel, target: target, logger: self.logger)
+            let upstreamRelay = TunnelRelayHandler(peer: clientChannel, diagnostics: diagnostics, side: .remote)
             return clientChannel.pipeline.addHandler(clientRelay).flatMap {
                 Self.attachRelay(upstreamRelay, toUpstreamTunnel: upstreamChannel)
             }
@@ -677,25 +688,25 @@ enum RawConnectResponseParser {
     }
 }
 
-private final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendable {
+final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
 
     private let peer: Channel
-    /// The CONNECT authority this relay serves, so a failure names what was
-    /// being reached rather than only which side of the relay noticed.
-    private let target: String
-    private let logger: any LogSink
+    /// Shared across both event loops so a tunnel reports its first failure once.
+    private let diagnostics: TunnelRelayDiagnostics
+    private let side: TunnelRelayDiagnostics.Side
     private let onClose: (() -> Void)?
 
-    init(peer: Channel, target: String, logger: any LogSink, onClose: (() -> Void)? = nil) {
+    init(peer: Channel, diagnostics: TunnelRelayDiagnostics, side: TunnelRelayDiagnostics.Side, onClose: (() -> Void)? = nil) {
         self.peer = peer
-        self.target = target
-        self.logger = logger
+        self.diagnostics = diagnostics
+        self.side = side
         self.onClose = onClose
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let buffer = unwrapInboundIn(data)
+        diagnostics.read(buffer.readableBytes, from: side)
         peer.writeAndFlush(buffer, promise: nil)
         if !peer.isWritable {
             context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
@@ -719,13 +730,7 @@ private final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendab
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        // `displayDescription`, not `localizedDescription`: for a
-        // `NIOCore.IOError` the latter is the generic Foundation bridge
-        // string ("The operation couldn't be completed. (NIOCore.IOError
-        // error 1.)") with the errno and reason dropped — the one captured
-        // occurrence of this line in a real log was unactionable for
-        // exactly that reason.
-        logger.log(.warning, "Tunnel relay error for \(SensitiveValueSanitizer.observableTarget(target)): \(error.displayDescription)", category: .proxy)
+        diagnostics.failed(error, on: side)
         gracefulClosePeer()
         context.close(promise: nil)
     }

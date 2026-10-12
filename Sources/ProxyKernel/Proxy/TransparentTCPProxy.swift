@@ -13,6 +13,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
     private let strictModeProvider: @Sendable () -> Bool
     private let gatewayModeProvider: @Sendable () -> Bool
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    private let tunnelFailureReporter: TunnelFailureReporter
     private var listener: Channel?
 
     package private(set) var listeningPort: Int?
@@ -42,6 +43,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         self.strictModeProvider = strictModeProvider
         self.gatewayModeProvider = gatewayModeProvider
         self.eventSink = eventSink
+        self.tunnelFailureReporter = TunnelFailureReporter(logger: logger, eventSink: eventSink)
     }
 
     package func start(host: String, port: Int) async throws {
@@ -53,6 +55,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         let strictModeProvider = strictModeProvider
         let gatewayModeProvider = gatewayModeProvider
         let eventSink = eventSink
+        let tunnelFailureReporter = tunnelFailureReporter
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
@@ -66,7 +69,8 @@ package final class TransparentTCPProxy: @unchecked Sendable {
                         directModeProvider: directModeProvider,
                         strictModeProvider: strictModeProvider,
                         gatewayModeProvider: gatewayModeProvider,
-                        eventSink: eventSink
+                        eventSink: eventSink,
+                        tunnelFailureReporter: tunnelFailureReporter
                     )
                 )
             }
@@ -108,6 +112,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
     private let gatewayModeProvider: @Sendable () -> Bool
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private var accumulated = ByteBuffer()
+    private let tunnelFailureReporter: TunnelFailureReporter
     private var resolved = false
     private var clientGone = false
 
@@ -119,7 +124,8 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         directModeProvider: @escaping @Sendable () -> DirectModeCause,
         strictModeProvider: @escaping @Sendable () -> Bool,
         gatewayModeProvider: @escaping @Sendable () -> Bool,
-        eventSink: (@Sendable (RuntimeEvent) -> Void)?
+        eventSink: (@Sendable (RuntimeEvent) -> Void)?,
+        tunnelFailureReporter: TunnelFailureReporter
     ) {
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
@@ -129,6 +135,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         self.strictModeProvider = strictModeProvider
         self.gatewayModeProvider = gatewayModeProvider
         self.eventSink = eventSink
+        self.tunnelFailureReporter = tunnelFailureReporter
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -210,7 +217,8 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                         context: ctx,
                         upstreamChannel: upstreamChannel,
                         initialData: bufferedData,
-                        pooledTunnel: true
+                        pooledTunnel: true,
+                        target: target, endpoint: endpoint
                     )
 
                 case .failure(let error):
@@ -268,6 +276,8 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         // Every use is on the context's event loop.
         nonisolated(unsafe) let ctx = context
         let eventLoop = ctx.eventLoop
+        let started = DispatchTime.now().uptimeNanoseconds
+        let startedCause = directModeProvider()
         originResolver.resolveOrigin(host: host, port: 443, on: eventLoop)
             .flatMap { address in
                 ClientBootstrap(group: eventLoop)
@@ -292,16 +302,17 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                         context: ctx,
                         upstreamChannel: originChannel,
                         initialData: initialData,
-                        pooledTunnel: false
+                        pooledTunnel: false,
+                        target: "\(host):443", endpoint: nil
                     )
 
                 case .failure(let error):
                     // Covers the `OriginResolverError.selfReferential` trip, so
                     // a resolver answer that points back at this listener is
                     // visible to the event stream and not just the log.
-                    self.emitEvent(
+                    let event = self.emitEvent(
                         "transparent_proxy.direct_failed",
-                        detail: "host=\(host) error=\(error.displayDescription)"
+                        detail: "host=\(host) started_cause=\(startedCause.rawValue) current_cause=\(self.directModeProvider().rawValue) dial_ms=\((DispatchTime.now().uptimeNanoseconds - started) / 1_000_000) error=\(error.displayDescription)"
                     )
                     // The origin lookup goes over DoH on every route we have
                     // (direct, via upstream, via our own listener). It runs
@@ -316,7 +327,7 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
                     }
                     self.logger.log(
                         level,
-                        "Transparent proxy: direct relay to \(host) failed — \(error.displayDescription)",
+                        "Transparent proxy: direct relay failed — \(event.detail ?? "")",
                         category: .proxy
                     )
                     ctx.close(promise: nil)
@@ -338,8 +349,11 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
     /// same cause — so per-connection copies add no signal. This mirrors
     /// `auth.handshake_rejected` and `upstream.circuit_opened`, which event the
     /// exceptional outcome rather than the successful one.
-    private func emitEvent(_ event: String, detail: String) {
-        eventSink?(RuntimeEvent(kind: .routing, event: event, detail: detail))
+    @discardableResult
+    private func emitEvent(_ name: String, detail: String) -> RuntimeEvent {
+        let event = RuntimeEvent(kind: .routing, event: name, detail: detail)
+        eventSink?(event)
+        return event
     }
 
     func channelInactive(context: ChannelHandlerContext) {
@@ -360,9 +374,15 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         context: ChannelHandlerContext,
         upstreamChannel: Channel,
         initialData: ByteBuffer,
-        pooledTunnel: Bool
+        pooledTunnel: Bool,
+        target: String, endpoint: String?
     ) {
         let clientChannel = context.channel
+        let diagnostics = TunnelRelayDiagnostics(
+            target: target, transport: "transparent", route: pooledTunnel ? "upstream" : "direct", upstream: endpoint,
+            causeProvider: directModeProvider, reporter: tunnelFailureReporter
+        )
+        diagnostics.read(initialData.readableBytes, from: .client)
 
         var onUpstreamClose: (@Sendable () -> Void)?
         if pooledTunnel {
@@ -373,9 +393,11 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
         let upstreamRelay = TransparentPeerRelay(
             peer: clientChannel,
             connectionPool: pooledTunnel ? connectionPool : nil,
-            onClose: onUpstreamClose
+            onClose: onUpstreamClose,
+            diagnostics: diagnostics, side: .remote
         )
-        let clientRelay = TransparentPeerRelay(peer: upstreamChannel, connectionPool: nil, onClose: nil)
+        let clientRelay = TransparentPeerRelay(peer: upstreamChannel, connectionPool: nil, onClose: nil,
+                                              diagnostics: diagnostics, side: .client)
 
         context.pipeline.removeHandler(self).whenComplete { _ in
             clientChannel.pipeline.addHandler(clientRelay).whenComplete { _ in
@@ -399,15 +421,22 @@ private final class TransparentPeerRelay: ChannelInboundHandler, @unchecked Send
     let peer: Channel
     private let connectionPool: ConnectionPool?
     private let onClose: (@Sendable () -> Void)?
+    private let diagnostics: TunnelRelayDiagnostics
+    private let side: TunnelRelayDiagnostics.Side
 
-    init(peer: Channel, connectionPool: ConnectionPool?, onClose: (@Sendable () -> Void)?) {
+    init(peer: Channel, connectionPool: ConnectionPool?, onClose: (@Sendable () -> Void)?,
+         diagnostics: TunnelRelayDiagnostics, side: TunnelRelayDiagnostics.Side) {
         self.peer = peer
         self.connectionPool = connectionPool
         self.onClose = onClose
+        self.diagnostics = diagnostics
+        self.side = side
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        peer.writeAndFlush(unwrapInboundIn(data), promise: nil)
+        let buffer = unwrapInboundIn(data)
+        diagnostics.read(buffer.readableBytes, from: side)
+        peer.writeAndFlush(buffer, promise: nil)
         if !peer.isWritable {
             context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
         }
@@ -427,6 +456,7 @@ private final class TransparentPeerRelay: ChannelInboundHandler, @unchecked Send
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
+        diagnostics.failed(error, on: side)
         onClose?()
         peer.close(mode: .all, promise: nil)
         context.close(promise: nil)
