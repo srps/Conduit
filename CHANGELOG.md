@@ -17,7 +17,7 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   releases blocked remote sockets and pool slots. Shared relay diagnostics
   include the failing operation and destination socket. The deterministic
   `vpn-existing-stream-failure` scenario reproduces both stale-socket paths on
-  isolated TCP connections and verifies fresh retries.
+  isolated TCP connections.
 
 ## 0.5.3
 

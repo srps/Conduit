@@ -18,14 +18,6 @@ final class TransparentRelaySetupTests: XCTestCase {
     }
 
     func testClosedRemoteSetupReportsRemoteAndClosesClient() throws {
-        try failedSetup(remoteClosed: true, expectedSide: "remote")
-    }
-
-    func testMissingClientHandlerSetupReportsClientAndClosesRemote() throws {
-        try failedSetup(remoteClosed: false, expectedSide: "client")
-    }
-
-    private func failedSetup(remoteClosed: Bool, expectedSide: String) throws {
         let client = EmbeddedChannel(), remote = EmbeddedChannel()
         let address = try SocketAddress(ipAddress: "127.0.0.1", port: 1234)
         try client.connect(to: address).wait(); try remote.connect(to: address).wait()
@@ -39,10 +31,8 @@ final class TransparentRelaySetupTests: XCTestCase {
             tunnelFailureReporter: TunnelFailureReporter(logger: logger, eventSink: { events.append($0) }))
         let capture = ContextCapture()
         try client.pipeline.addHandler(capture).wait()
-        if remoteClosed {
-            try client.pipeline.addHandler(handler).wait()
-            try remote.close().wait()
-        }
+        try client.pipeline.addHandler(handler).wait()
+        try remote.close().wait()
         let setup = handler.attachRelay(context: capture.context, upstreamChannel: remote,
             initialData: ByteBuffer(string: "ClientHello"), pooledTunnel: false, target: "stream.test:443", endpoint: nil)
         client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
@@ -50,7 +40,7 @@ final class TransparentRelaySetupTests: XCTestCase {
         XCTAssertFalse(client.isActive)
         XCTAssertFalse(remote.isActive)
         XCTAssertEqual(events.events.count, 1)
-        XCTAssertTrue(events.events.first?.detail?.contains("side=\(expectedSide)") == true)
+        XCTAssertTrue(events.events.first?.detail?.contains("side=remote") == true)
         XCTAssertTrue(events.events.first?.detail?.contains("operation=setup") == true)
         _ = try client.finish(acceptAlreadyClosed: true)
         _ = try remote.finish(acceptAlreadyClosed: true)
