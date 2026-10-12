@@ -1163,6 +1163,10 @@ package final class ProxyOrchestrator {
 
     private let resolverManager: (any TunnelResolverApplying)?
 
+    /// Optional probe seam for deterministic network-transition simulations.
+    /// Installed hosts use the proxy-semantic network prober below.
+    private let connectivityProbe: (@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)?
+
     package init(
         config: ProxyConfig,
         logger: any LogSink = DiscardingLogSink(),
@@ -1176,8 +1180,10 @@ package final class ProxyOrchestrator {
             TCPAcceptProbe.accepts(host: host, port: port)
         },
         authFallbackEventGate: RuntimeEventRepeatGate = RuntimeEventRepeatGate(),
-        strictHintSettleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow
+        strictHintSettleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow,
+        connectivityProbe: (@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)? = nil
     ) {
+        self.connectivityProbe = connectivityProbe
         self.relayAcceptProbe = relayAcceptProbe
         self.authFallbackEventGate = authFallbackEventGate
         self.strictHintSettleWindow = strictHintSettleWindow
@@ -1822,6 +1828,17 @@ package final class ProxyOrchestrator {
             logStore.log(.notice, "VPN flap detected — preserving active streams, holding routing decisions.", category: .network)
 
         case .connected:
+            // Revoke VPN-off DIRECT before the first await. Otherwise clients
+            // arriving while PAC/probes refresh dial origins on the new VPN
+            // under the old off-VPN permission and can hang until timeout.
+            // This only changes new routing; established tunnels stay open.
+            let reconnectCause = deriveDirectModeCause(probeSummary: nil)
+            let event = RuntimeEvent(kind: .vpn, event: "vpn.reconnecting",
+                                     detail: "prior_cause=\(snapshot.directModeCause.rawValue) pending_cause=\(reconnectCause.rawValue) probe=pending")
+            eventLog.append(event)
+            logStore.log(.notice, "VPN routing: \(event.detail ?? "")", category: .network)
+            setDirectMode(reconnectCause)
+            stopDirectModeReprobeTimer()
             // Recovery path. Two flavors based on what state we came from:
             //   .reasserting → .connected: flap recovered. Hot path; reset
             //                              breakers, reprobe once for sanity.
@@ -2258,8 +2275,13 @@ package final class ProxyOrchestrator {
     }
 
     private func refreshConnectivityMode() async -> UpstreamProbeSummary {
-        let prober = UpstreamProber(group: MultiThreadedEventLoopGroup.singleton, logger: logStore)
-        let summary = await prober.summarize(config.upstreams)
+        let summary: UpstreamProbeSummary
+        if let connectivityProbe {
+            summary = await connectivityProbe(config.upstreams)
+        } else {
+            let prober = UpstreamProber(group: MultiThreadedEventLoopGroup.singleton, logger: logStore)
+            summary = await prober.summarize(config.upstreams)
+        }
         setDirectMode(deriveDirectModeCause(probeSummary: summary))
         refreshUpstreamStatuses()
         return summary

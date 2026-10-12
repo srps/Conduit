@@ -8,6 +8,7 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 ### Fixed
 
+- VPN reconnection revokes the old VPN-off DIRECT permission before PAC refresh or upstream probes await, so new intercepted/proxy-aware connections do not inherit stale routing. Existing tunnels remain open. `vpn-reconnect-routing` deterministically holds the probe and verifies an intercepted ClientHello uses the upstream before it completes.
 - CONNECT and transparent tunnel failures emit bounded `tunnel.relay_failed` diagnostics before their log: socket side, route/upstream, errno, relay age/idle time, observed bytes in each direction, and routing cause at attachment/failure. Transparent direct-connect failures also retain routing causes and dial duration.
 - A confirmed Kerberos KDC-unreachable initial handshake can attempt bounded service-ticket acquisition in a fresh copy of the app/daemon, then retry once without restarting the serving runtime (#99). Failures retain NTLM fallback and emit recovery events. Cached raw-mechanism diagnostics now accompany independently rate-limited fallback logs without extra diagnostic requests. Installed corporate-SSO recurrence validation remains outstanding.
 

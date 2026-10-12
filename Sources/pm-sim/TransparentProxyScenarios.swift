@@ -43,6 +43,88 @@ enum TransparentProxyScenarios {
 
     private static let interceptedHost = "api2.cursor.sh"
 
+    /// Pause the reconnect probe explicitly, then send a real intercepted
+    /// ClientHello while routing is unsettled. Echo alone cannot distinguish
+    /// DIRECT from upstream, so also assert the upstream CONNECT count.
+    @MainActor
+    static func vpnReconnectRouting(verbose: Bool) async throws -> ScenarioResult {
+        let start = Date()
+        let group = MultiThreadedEventLoopGroup.singleton
+        let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
+        let origin = FakeOrigin(group: group, behavior: .echo)
+        try await origin.start()
+        ScenarioCleanup.register { await origin.stop() }
+        let upstream = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: origin.port)
+        try await upstream.start()
+        ScenarioCleanup.register { await upstream.stop() }
+        let entered = group.next().makePromise(of: Void.self)
+        let release = group.next().makePromise(of: Void.self)
+        let phase = NIOLockedValueBox(0)
+        let cause = NIOLockedValueBox(DirectModeCause.none)
+        var config = ProxyConfig()
+        config.localPort = 0
+        config.routing.pacRoutingEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Reconnect", host: "127.0.0.1", port: upstream.port, priority: 0)]
+        let orchestrator = ProxyOrchestrator(config: config, logger: logger, connectivityProbe: { targets in
+            let current = phase.withLockedValue { value in
+                let current = value
+                if value == 2 { value = 3 }
+                return current
+            }
+            if current == 2 {
+                entered.succeed(())
+                do { try await release.futureResult.get() }
+                catch { preconditionFailure("reconnect gate failed: \(error)") }
+            }
+            return UpstreamProbeSummary(results: targets.map {
+                ProbeResult(proxy: $0, latencyMS: 0, reachable: current != 1)
+            })
+        })
+        orchestrator.onSnapshotChange = { snapshot in cause.withLockedValue { $0 = snapshot.directModeCause } }
+        ScenarioCleanup.register { await orchestrator.stopProxy() }
+        try await orchestrator.startProxy()
+        phase.withLockedValue { $0 = 1 }
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        let disconnected = cause.withLockedValue { $0 == .vpnDisconnected }
+        phase.withLockedValue { $0 = 2 }
+        let reconnect = Task { await orchestrator.handleVPNStateChange(.connected) }
+        try await entered.futureResult.get()
+        let pendingCause = cause.withLockedValue { $0 }
+        let hello = TLSClientHello.bytes(hostname: interceptedHost)
+        let before = upstream.connectCount
+        let result: ProbeOutcome
+        do {
+            result = try await probe(
+                group: group, logger: logger,
+                resolver: StubOriginResolver(host: "127.0.0.1", port: origin.port),
+                upstreamPort: upstream.port, causeProvider: { cause.withLockedValue { $0 } },
+                strictMode: true, hello: hello
+            )
+        } catch {
+            release.succeed(())
+            await reconnect.value
+            throw error
+        }
+        let throughUpstream = upstream.connectCount - before == 1
+        release.succeed(())
+        await reconnect.value
+        let assertions: [ScenarioAssertion] = [
+            .init("VPN-off state routes directly", disconnected),
+            .init("pending reconnect revokes unconditional DIRECT", !pendingCause.routesClientTrafficDirectly),
+            .init("intercepted client uses upstream before probe completes", throughUpstream),
+            .init("ClientHello delivered intact", result.echoedHello),
+            .init("reconnect settles to upstream routing", cause.withLockedValue { $0 == .none }),
+        ]
+        return ScenarioResult(
+            name: "vpnReconnectRouting", clientCount: 1, clientsOpened: 1,
+            clientsWithFirstByte: result.echoedHello ? 1 : 0, clientsClosedEarly: result.closedWithoutData ? 1 : 0,
+            totalBytes: result.bytesRead, durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil, assertions: assertions,
+            notes: ["pendingCause=\(pendingCause) upstreamCONNECTs=\(upstream.connectCount - before)"]
+        )
+    }
+
     @MainActor
     static func transparentDirectRouting(verbose: Bool) async throws -> ScenarioResult {
         let name = "transparentDirectRouting"
@@ -221,6 +303,7 @@ enum TransparentProxyScenarios {
             configProvider: { capturedConfig },
             authenticatorProvider: { _ in MockAuthenticator() }
         )
+        ScenarioCleanup.register { pool.closeAll() }
         let coordinator = CONNECTCoordinator(
             pool: pool,
             authenticatorProvider: { _ in MockAuthenticator() },

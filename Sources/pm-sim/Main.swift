@@ -52,6 +52,7 @@ enum PMSim {
               vpn-user-disconnect     user-initiated disconnect is fast-path (no probe cycle)
               vpn-rapid-flap-burst    6 flaps in 1.5s emit one event pair (coalesce)
               transparent-direct      intercepted SNI client relays direct on VPN-down, upstream otherwise
+              vpn-reconnect-routing   intercepted client uses upstream while reconnect probe is held
               network-transition      Wi-Fi → VPN → captive portal → resume; recovery <5s, DoH recycled
               network-path-churn      20 identical path updates reset nothing; a gateway roam resets once
               vpn-pac-refresh         VPN connect/disconnect drops cached PAC answers; first request uses the new PAC
@@ -196,6 +197,7 @@ enum PMSim {
         "vpn-user-disconnect",
         "vpn-rapid-flap-burst",
         "transparent-direct",
+        "vpn-reconnect-routing",
         "network-transition",
         "network-path-churn",
         "vpn-pac-refresh",
@@ -294,6 +296,8 @@ enum PMSim {
             return [try await VPNFlapScenarios.vpnUserDisconnectFastPath(verbose: verbose)]
         case "vpn-rapid-flap-burst":
             return [try await VPNFlapScenarios.vpnRapidFlapBurst(verbose: verbose)]
+        case "vpn-reconnect-routing":
+            return [try await TransparentProxyScenarios.vpnReconnectRouting(verbose: verbose)]
         case "transparent-direct":
             return [try await TransparentProxyScenarios.transparentDirectRouting(verbose: verbose)]
         case "network-transition":
