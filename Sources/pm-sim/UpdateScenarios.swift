@@ -10,6 +10,33 @@ import ProxyKernel
 /// build that cannot update itself. The updater process and Sparkle are
 /// covered end to end by scripts/test-updater-e2e.sh.
 enum UpdateScenarios {
+    @MainActor
+    static func preflight() async throws -> ScenarioResult {
+        let start = Date()
+        let candidate = UpdateCandidate(archive: URL(string: "https://example.invalid/update.zip")!, version: "0.5.3",
+                                        length: 1, signature: "fixture", publicKey: "fixture",
+                                        host: URL(fileURLWithPath: "/tmp/Conduit.app"))
+        var events: [RuntimeEvent] = []
+        var installs = 0
+        let refused = UpdateInstallGate(preflight: FakeUpdatePreflight(failure: "helper_rejects_candidate_identity")) { events.append($0) }
+        do {
+            try await refused.run(candidate) { installs += 1 }
+            throw UpdatePreflightError("refused_update_installed")
+        } catch let error as UpdatePreflightError where error.reason == "helper_rejects_candidate_identity" {
+            // The serving version and machine ownership remain with the host.
+        }
+        let afterRefusal = installs
+        let accepted = UpdateInstallGate(preflight: FakeUpdatePreflight()) { events.append($0) }
+        try await accepted.run(candidate) { installs += 1 }
+        return ScenarioResult(name: "update-preflight", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
+            clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(start), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+            ScenarioAssertion("helper incompatibility never permits host shutdown", afterRefusal == 0),
+            ScenarioAssertion("a compatible retry permits exactly one install", installs == 1),
+            ScenarioAssertion("structured preflight outcomes precede installation", events.map(\.event) == [
+                "update.preflight_started", "update.preflight_failed", "update.preflight_started", "update.preflight_passed"]),
+        ], notes: [])
+    }
     /// Advances a virtual clock by each requested sleep, for a fixed number
     /// of sleeps, then parks until cancelled.
     private final class VirtualClock: @unchecked Sendable {

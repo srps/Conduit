@@ -156,6 +156,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <string>$APP_NAME</string>
     <key>CFBundleDisplayName</key>
     <string>Conduit</string>
+    <key>ConduitUpdatePreflightVersion</key>
+    <integer>1</integer>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>

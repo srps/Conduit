@@ -126,8 +126,8 @@ if $SIGNED; then
 fi
 
 
-make_host() { # <dir> <version>
-    local app="$1/E2EHost.app" version="$2"
+make_host() { # <dir> <version> [minimum OS]
+    local app="$1/E2EHost.app" version="$2" minimum_os="${3:-26.0}"
     local updater="$app/Contents/Helpers/Conduit Updater.app"
     mkdir -p "$app/Contents/MacOS" "$updater/Contents/MacOS" "$updater/Contents/Frameworks"
     cp "$WORK/src/E2EHost" "$app/Contents/MacOS/E2EHost"
@@ -140,7 +140,7 @@ make_host() { # <dir> <version>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
 <key>CFBundleVersion</key><string>$version</string>
-<key>LSMinimumSystemVersion</key><string>26.0</string>
+<key>LSMinimumSystemVersion</key><string>$minimum_os</string>
 <key>SUFeedURL</key><string>$FEED</string>
 <key>SUPublicEDKey</key><string>$ED_PUBLIC</string>
 <key>SUEnableAutomaticChecks</key><false/>
@@ -256,7 +256,36 @@ fi
 pkill -f "$WORK/installed/E2EHost.app/Contents/MacOS" || true
 wait_for 10 host_gone || { echo "FAIL  the 1.0.0 host did not exit after the first case" >&2; exit 1; }
 
-# 2. A correctly signed archive installs: quit, replace, relaunch. Three
+# 2. An authenticated candidate's own minimum OS (not just the appcast)
+# refuses before staging an install-on-quit or terminating the serving host.
+make_host "$WORK/too-new" 2.0.0 999.0
+( cd "$WORK/too-new" && ditto -c -k --sequesterRsrc --keepParent E2EHost.app "$WORK/feed/too-new.zip" )
+new_signature="$(print -rn -- "$ED_PRIVATE" | "$SIGN_UPDATE" --ed-key-file - -p "$WORK/feed/too-new.zip")"
+make_feed too-new.zip "$new_signature" "$(stat -f %z "$WORK/feed/too-new.zip")"
+run_update
+if wait_for 30 updater_gone && [ "$(installed_version)" = 1.0.0 ] && ! grep -qs "^terminated 1.0.0" "$HOST_LOG"; then
+    ok "a signed candidate requiring a newer OS leaves the running host intact"
+else
+    fail "candidate OS preflight failed to protect the serving host"
+fi
+pkill -f "$WORK/installed/E2EHost.app/Contents/MacOS" || true
+wait_for 10 host_gone || exit 1
+
+# 3. An unwritable destination is rejected before the host quits.
+GOOD_SIGNATURE="$(print -rn -- "$ED_PRIVATE" | "$SIGN_UPDATE" --ed-key-file - -p "$WORK/feed/E2EHost-2.0.0.zip")"
+make_feed E2EHost-2.0.0.zip "$GOOD_SIGNATURE" "$LENGTH"
+chmod 0555 "$WORK/installed/E2EHost.app"
+run_update
+if wait_for 30 updater_gone && [ "$(installed_version)" = 1.0.0 ] && ! grep -qs "^terminated 1.0.0" "$HOST_LOG"; then
+    ok "an unwritable destination leaves the running host intact"
+else
+    fail "destination preflight failed to protect the serving host"
+fi
+chmod 0755 "$WORK/installed/E2EHost.app"
+pkill -f "$WORK/installed/E2EHost.app/Contents/MacOS" || true
+wait_for 10 host_gone || exit 1
+
+# 4. A correctly signed archive installs: quit, replace, relaunch. Three
 # updaters start at once; their lock must leave exactly one installing.
 GOOD_SIGNATURE="$(print -rn -- "$ED_PRIVATE" | "$SIGN_UPDATE" --ed-key-file - -p "$WORK/feed/E2EHost-2.0.0.zip")"
 make_feed E2EHost-2.0.0.zip "$GOOD_SIGNATURE" "$LENGTH"

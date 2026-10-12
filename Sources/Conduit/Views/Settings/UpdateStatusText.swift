@@ -14,6 +14,12 @@ enum UpdateStatusText {
             return "Installing version \(value(of: "version", in: detail) ?? "?")"
         case .failed:
             return "Check failed: \(value(of: "reason", in: detail) ?? detail)"
+        case .preflightStarted:
+            return "Checking update compatibility…"
+        case .preflightPassed:
+            return "Update compatibility checks passed"
+        case .preflightFailed:
+            return "Update blocked: \(value(of: "reason", in: detail) ?? detail)"
         }
     }
 

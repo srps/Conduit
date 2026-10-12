@@ -96,7 +96,7 @@ let package = Package(
         // own Contents/Frameworks, hence the rpath.
         .executableTarget(
             name: "ConduitUpdater",
-            dependencies: ["ConduitShared", .product(name: "Sparkle", package: "Sparkle")],
+            dependencies: ["ConduitShared", "PlatformMac", .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/ConduitUpdater",
             exclude: ["AGENTS.md"],
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]

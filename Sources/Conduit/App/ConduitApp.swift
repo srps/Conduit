@@ -2,11 +2,15 @@
 import Darwin
 import SwiftUI
 import ProxyAuth
+import PlatformMac
 
 @main
 enum ConduitMain {
     @MainActor
     static func main() {
+        if let status = UpdateHelperPreflightWorker.run(arguments: Array(CommandLine.arguments.dropFirst())) {
+            exit(status)
+        }
         if let status = KerberosTicketRecoveryWorker.run(arguments: Array(CommandLine.arguments.dropFirst())) {
             exit(status)
         }
