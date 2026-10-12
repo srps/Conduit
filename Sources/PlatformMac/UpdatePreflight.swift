@@ -30,19 +30,25 @@ package protocol UpdatePreflighting: Sendable {
     func check(_ candidate: UpdateCandidate) async throws
 }
 
-package struct SystemUpdatePreflight: UpdatePreflighting {
-    package static let archiveLimit = 256 * 1_024 * 1_024
-    package static let expandedLimit = 1_024 * 1_024 * 1_024
-    package static let entryLimit = 16_384
+package enum UpdatePreflightLimits {
+    package static let archiveBytes = 256 * 1_024 * 1_024
+    package static let expandedBytes = 1_024 * 1_024 * 1_024
+    package static let archiveEntries = 16_384
     package static let downloadTimeout: TimeInterval = 120
+}
+
+/// Composition roots receive the protocol, not the platform implementation.
+package func systemUpdatePreflight() -> any UpdatePreflighting { SystemUpdatePreflight() }
+
+struct SystemUpdatePreflight: UpdatePreflighting {
     private let run: @Sendable (String, [String]) throws -> CommandResult
 
-    package init(run: @escaping @Sendable (String, [String]) throws -> CommandResult = {
+    init(run: @escaping @Sendable (String, [String]) throws -> CommandResult = {
         try CommandRunner.run(launchPath: $0, arguments: $1, timeout: 30, maxOutputBytes: 4_096)
     }) { self.run = run }
 
-    package func check(_ candidate: UpdateCandidate) async throws {
-        guard candidate.length > 0, candidate.length <= Self.archiveLimit,
+    func check(_ candidate: UpdateCandidate) async throws {
+        guard candidate.length > 0, candidate.length <= UpdatePreflightLimits.archiveBytes,
               UpdateArchiveDownload.allowed(candidate.archive) else {
             throw UpdatePreflightError("invalid_update_archive")
         }
@@ -79,9 +85,9 @@ package struct SystemUpdatePreflight: UpdatePreflighting {
                                                attributes: [.posixPermissions: 0o700])
     }
 
-    package static func authenticate(_ archive: URL, candidate: UpdateCandidate) throws {
+    static func authenticate(_ archive: URL, candidate: UpdateCandidate) throws {
         let bytes = try Data(contentsOf: archive, options: .mappedIfSafe)
-        guard bytes.count == candidate.length, bytes.count <= archiveLimit,
+        guard bytes.count == candidate.length, bytes.count <= UpdatePreflightLimits.archiveBytes,
               let signature = Data(base64Encoded: candidate.signature), signature.count == 64,
               let keyBytes = Data(base64Encoded: candidate.publicKey),
               let key = try? Curve25519.Signing.PublicKey(rawRepresentation: keyBytes),
@@ -134,16 +140,16 @@ package struct SystemUpdatePreflight: UpdatePreflighting {
         }
     }
 
-    package static func validateArchiveSummary(_ summary: String) throws {
+    static func validateArchiveSummary(_ summary: String) throws {
         let fields = summary.split(whereSeparator: \.isWhitespace)
         guard fields.count >= 5, fields[1] == "files,", fields[3] == "bytes", fields[4] == "uncompressed,",
-              let entries = Int(fields[0]), (1...entryLimit).contains(entries),
-              let expanded = UInt64(fields[2]), expanded <= expandedLimit else {
+              let entries = Int(fields[0]), (1...UpdatePreflightLimits.archiveEntries).contains(entries),
+              let expanded = UInt64(fields[2]), expanded <= UpdatePreflightLimits.expandedBytes else {
             throw UpdatePreflightError("update_expansion_limit")
         }
     }
 
-    package static func validateSignature(_ app: URL, helperPolicy: HelperCallerPolicy) throws {
+    static func validateSignature(_ app: URL, helperPolicy: HelperCallerPolicy) throws {
         var code: SecStaticCode?
         guard SecStaticCodeCreateWithPath(app as CFURL, [], &code) == errSecSuccess, let code,
               SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode), nil) == errSecSuccess else {

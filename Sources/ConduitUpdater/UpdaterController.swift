@@ -94,7 +94,7 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         #if DEBUG
         if autoInstall { driver = AutoInstallUserDriver() }
         #endif
-        driver = PreflightingUserDriver(driver: driver, host: host, preflight: SystemUpdatePreflight()) { [weak self] report, detail in
+        driver = PreflightingUserDriver(driver: driver, host: host, preflight: systemUpdatePreflight()) { [weak self] report, detail in
             self?.report(report, detail: detail)
         }
         userDriver = driver
