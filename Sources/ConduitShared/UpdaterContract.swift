@@ -40,6 +40,9 @@ package enum UpdaterContract {
         case failed = "update.failed"
         /// The user chose to install; Sparkle is about to quit the host (`version=`).
         case installing = "update.installing"
+        case preflightStarted = "update.preflight_started"
+        case preflightPassed = "update.preflight_passed"
+        case preflightFailed = "update.preflight_failed"
     }
 
     package enum Key {

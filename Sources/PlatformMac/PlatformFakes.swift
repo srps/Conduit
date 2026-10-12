@@ -3,6 +3,14 @@ import Foundation
 import ProxyKernel
 import ConduitShared
 
+package struct FakeUpdatePreflight: UpdatePreflighting {
+    package let failure: String?
+    package init(failure: String? = nil) { self.failure = failure }
+    package func check(_ candidate: UpdateCandidate) async throws {
+        if let failure { throw UpdatePreflightError(failure) }
+    }
+}
+
 // The doubles the platform managers and both runtime hosts are tested
 // against, and the machine the app's `--dev` launch mode runs over. They
 // live in Sources rather than Tests for the same reason

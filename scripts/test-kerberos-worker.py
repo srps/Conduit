@@ -19,4 +19,9 @@ with tempfile.TemporaryDirectory(prefix="conduit-worker-") as scratch:
             assert result.returncode == 64, (binary, result.returncode, result.stderr)
             assert not result.stdout, (binary, result.stdout)
             assert not state.exists(), (binary, state)
+        if pathlib.Path(binary).name == "Conduit":
+            result = subprocess.run([binary, "--conduit-update-helper-preflight", "--dev", "--dev-state-dir", str(state)],
+                                    capture_output=True, timeout=5)
+            assert result.returncode == 64, (binary, result.returncode, result.stderr)
+            assert not state.exists(), (binary, state)
 print("Kerberos worker entry points reject malformed requests without runtime startup")

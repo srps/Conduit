@@ -3,6 +3,7 @@ import ConduitShared
 import CryptoKit
 import os
 import Sparkle
+import PlatformMac
 
 private let logger = Logger(subsystem: "io.github.srps.Conduit", category: "updater")
 
@@ -93,6 +94,9 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
         #if DEBUG
         if autoInstall { driver = AutoInstallUserDriver() }
         #endif
+        driver = PreflightingUserDriver(driver: driver, host: host, preflight: SystemUpdatePreflight()) { [weak self] report, detail in
+            self?.report(report, detail: detail)
+        }
         userDriver = driver
         let updater = SPUUpdater(hostBundle: host, applicationBundle: host, userDriver: driver, delegate: self)
         self.updater = updater
@@ -171,14 +175,14 @@ final class UpdaterController: NSObject, NSApplicationDelegate, SPUUpdaterDelega
     }
 
     private func report(_ report: UpdaterContract.Report, detail: String?) {
-        if report == .failed { reportedFailure = true }
+        if report == .failed || report == .preflightFailed { reportedFailure = true }
         guard let host = hostBundle, let identifier = host.bundleIdentifier else { return }
-        logger.notice("\(report.rawValue, privacy: .public) \(detail ?? "", privacy: .public)")
         DistributedNotificationCenter.default().postNotificationName(
             UpdaterContract.reportNotification(hostIdentifier: identifier), object: nil,
             userInfo: UpdaterContract.reportUserInfo(report, detail: detail, hostPath: host.bundlePath),
             deliverImmediately: true
         )
+        logger.notice("\(report.rawValue, privacy: .public) \(detail ?? "", privacy: .public)")
     }
 
     private nonisolated static func describe(_ error: any Error) -> String {
