@@ -227,10 +227,10 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         }.flatMap {
             clientChannel.pipeline.removeHandler(name: ProxyPipelineNames.serverEncoder)
         }.flatMap {
-            let clientRelay = TunnelRelayHandler(
+            let clientRelay = makeTunnelRelay(
                 peer: upstreamChannel, diagnostics: diagnostics, side: .client, onClose: onTunnelClosed
             )
-            let upstreamRelay = TunnelRelayHandler(peer: clientChannel, diagnostics: diagnostics, side: .remote)
+            let upstreamRelay = makeTunnelRelay(peer: clientChannel, diagnostics: diagnostics, side: .remote)
             return clientChannel.pipeline.addHandler(clientRelay).flatMap {
                 Self.attachRelay(upstreamRelay, toUpstreamTunnel: upstreamChannel)
             }
@@ -685,66 +685,5 @@ enum RawConnectResponseParser {
             offset = line.upperBound
         }
         return nil
-    }
-}
-
-final class TunnelRelayHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = ByteBuffer
-
-    private let peer: Channel
-    /// Shared across both event loops so a tunnel reports its first failure once.
-    private let diagnostics: TunnelRelayDiagnostics
-    private let side: TunnelRelayDiagnostics.Side
-    private let onClose: (() -> Void)?
-
-    init(peer: Channel, diagnostics: TunnelRelayDiagnostics, side: TunnelRelayDiagnostics.Side, onClose: (() -> Void)? = nil) {
-        self.peer = peer
-        self.diagnostics = diagnostics
-        self.side = side
-        self.onClose = onClose
-    }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let buffer = unwrapInboundIn(data)
-        diagnostics.read(buffer.readableBytes, from: side)
-        peer.writeAndFlush(buffer, promise: nil)
-        if !peer.isWritable {
-            context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
-        }
-    }
-
-    func channelWritabilityChanged(context: ChannelHandlerContext) {
-        if context.channel.isWritable {
-            peer.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
-        }
-        context.fireChannelWritabilityChanged()
-    }
-
-    func channelInactive(context: ChannelHandlerContext) {
-        onClose?()
-        // Drain peer's outbound queue before closing. `close(mode: .all)` fails all
-        // buffered writes, which truncates streamed responses when the upstream FINs
-        // while we still have hundreds of KB queued for the client under backpressure.
-        gracefulClosePeer()
-        context.fireChannelInactive()
-    }
-
-    func errorCaught(context: ChannelHandlerContext, error: Error) {
-        diagnostics.failed(error, on: side)
-        gracefulClosePeer()
-        context.close(promise: nil)
-    }
-
-    private func gracefulClosePeer() {
-        let peer = self.peer
-        guard peer.isActive else {
-            peer.close(mode: .all, promise: nil)
-            return
-        }
-        // Write 0 bytes then flush; the future fires when all previously-queued writes
-        // have been dispatched to the kernel send buffer. Then close cleanly.
-        peer.writeAndFlush(peer.allocator.buffer(capacity: 0)).whenComplete { _ in
-            peer.close(mode: .all, promise: nil)
-        }
     }
 }

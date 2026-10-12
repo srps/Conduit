@@ -31,6 +31,7 @@ package final class TunnelFailureReporter: Sendable {
 /// from each peer, not proof of delivery; neither payloads nor TLS are inspected.
 package final class TunnelRelayDiagnostics: @unchecked Sendable {
     package enum Side: String { case client, remote }
+    package enum Operation: String { case read, write, flowControl = "flow_control", setup }
     private let lock = NSLock()
     private var clientBytes: UInt64 = 0
     private var remoteBytes: UInt64 = 0
@@ -71,7 +72,7 @@ package final class TunnelRelayDiagnostics: @unchecked Sendable {
         if bytes > 0 { lastRead = now() }
     }
 
-    package func failed(_ error: Error, on side: Side) {
+    package func failed(_ error: Error, on side: Side, operation: Operation = .read) {
         let at = now()
         lock.lock()
         guard !reported else { lock.unlock(); return }
@@ -81,8 +82,8 @@ package final class TunnelRelayDiagnostics: @unchecked Sendable {
         let cause = causeProvider()
         let code = (error as? IOError).map { String($0.errnoCode) } ?? "none"
         reporter.report(
-            target: target, key: "\(transport):\(route):\(side.rawValue):\(code)",
-            fields: "transport=\(transport) route=\(route) upstream=\(upstream) side=\(side.rawValue) errno=\(code) age_ms=\(Self.milliseconds(at, since: started)) idle_ms=\(Self.milliseconds(at, since: last)) client_bytes=\(client) remote_bytes=\(remote) started_cause=\(startedCause.rawValue) current_cause=\(cause.rawValue)",
+            target: target, key: "\(transport):\(route):\(side.rawValue):\(operation.rawValue):\(code)",
+            fields: "transport=\(transport) route=\(route) upstream=\(upstream) side=\(side.rawValue) operation=\(operation.rawValue) errno=\(code) age_ms=\(Self.milliseconds(at, since: started)) idle_ms=\(Self.milliseconds(at, since: last)) client_bytes=\(client) remote_bytes=\(remote) started_cause=\(startedCause.rawValue) current_cause=\(cause.rawValue)",
             error: error
         )
     }

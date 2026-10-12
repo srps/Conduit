@@ -53,6 +53,7 @@ enum PMSim {
               vpn-rapid-flap-burst    6 flaps in 1.5s emit one event pair (coalesce)
               transparent-direct      intercepted SNI client relays direct on VPN-down, upstream otherwise
               vpn-reconnect-routing   intercepted client uses upstream while reconnect probe is held
+              vpn-existing-stream-failure  retired-address errors close broken tunnels; healthy streams and retries work
               browser-retained-pac    browser keeps one PAC across VPN cycle; fresh requests recover
               network-transition      Wi-Fi → VPN → captive portal → resume; recovery <5s, DoH recycled
               network-path-churn      20 identical path updates reset nothing; a gateway roam resets once
@@ -200,6 +201,7 @@ enum PMSim {
         "vpn-rapid-flap-burst",
         "transparent-direct",
         "vpn-reconnect-routing",
+        "vpn-existing-stream-failure",
         "browser-retained-pac",
         "network-transition",
         "network-path-churn",
@@ -302,6 +304,8 @@ enum PMSim {
             return [try await VPNFlapScenarios.vpnRapidFlapBurst(verbose: verbose)]
         case "vpn-reconnect-routing":
             return [try await TransparentProxyScenarios.vpnReconnectRouting(verbose: verbose)]
+        case "vpn-existing-stream-failure":
+            return [try await TunnelFailureScenarios.vpnExistingStreamFailure(verbose: verbose)]
         case "browser-retained-pac":
             return [try await BrowserPACScenarios.retainedPAC(verbose: verbose)]
         case "transparent-direct":

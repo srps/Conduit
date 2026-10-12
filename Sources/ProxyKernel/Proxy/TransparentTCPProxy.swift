@@ -382,7 +382,6 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
             target: target, transport: "transparent", route: pooledTunnel ? "upstream" : "direct", upstream: endpoint,
             causeProvider: directModeProvider, reporter: tunnelFailureReporter
         )
-        diagnostics.read(initialData.readableBytes, from: .client)
 
         var onUpstreamClose: (@Sendable () -> Void)?
         if pooledTunnel {
@@ -390,76 +389,30 @@ private final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannel
             onUpstreamClose = { pool.removeDedicatedTunnelByChannel(upstreamChannel) }
         }
 
-        let upstreamRelay = TransparentPeerRelay(
-            peer: clientChannel,
-            connectionPool: pooledTunnel ? connectionPool : nil,
-            onClose: onUpstreamClose,
-            diagnostics: diagnostics, side: .remote
-        )
-        let clientRelay = TransparentPeerRelay(peer: upstreamChannel, connectionPool: nil, onClose: nil,
-                                              diagnostics: diagnostics, side: .client)
+        let upstreamRelay = makeTunnelRelay(peer: clientChannel, diagnostics: diagnostics, side: .remote, onClose: onUpstreamClose)
+        let clientRelay = makeTunnelRelay(peer: upstreamChannel, diagnostics: diagnostics, side: .client)
 
-        context.pipeline.removeHandler(self).whenComplete { _ in
-            clientChannel.pipeline.addHandler(clientRelay).whenComplete { _ in
-                let attached = pooledTunnel
-                    ? CONNECTCoordinator.attachRelay(upstreamRelay, toUpstreamTunnel: upstreamChannel)
-                    : upstreamChannel.pipeline.addHandler(upstreamRelay)
-                attached.whenComplete { _ in
-                    if initialData.readableBytes > 0 {
-                        upstreamChannel.writeAndFlush(initialData, promise: nil)
-                    }
+        context.pipeline.removeHandler(self).flatMap {
+            clientChannel.pipeline.addHandler(clientRelay)
+        }.flatMap {
+            pooledTunnel
+                ? CONNECTCoordinator.attachRelay(upstreamRelay, toUpstreamTunnel: upstreamChannel)
+                : upstreamChannel.pipeline.addHandler(upstreamRelay)
+        }.hop(to: clientChannel.eventLoop).whenComplete { result in
+            switch result {
+            case .success:
+                // Initial ClientHello bytes take the same observed-write path
+                // as all later data, once both halves are installed.
+                if initialData.readableBytes > 0 {
+                    clientChannel.pipeline.fireChannelRead(initialData)
                 }
+            case .failure(let error):
+                diagnostics.failed(error, on: .client, operation: .setup)
+                if pooledTunnel { self.connectionPool.removeDedicatedTunnelByChannel(upstreamChannel) }
+                clientChannel.close(promise: nil)
+                upstreamChannel.close(promise: nil)
             }
         }
-    }
-}
-
-// MARK: - Bidirectional Relay
-
-private final class TransparentPeerRelay: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = ByteBuffer
-    let peer: Channel
-    private let connectionPool: ConnectionPool?
-    private let onClose: (@Sendable () -> Void)?
-    private let diagnostics: TunnelRelayDiagnostics
-    private let side: TunnelRelayDiagnostics.Side
-
-    init(peer: Channel, connectionPool: ConnectionPool?, onClose: (@Sendable () -> Void)?,
-         diagnostics: TunnelRelayDiagnostics, side: TunnelRelayDiagnostics.Side) {
-        self.peer = peer
-        self.connectionPool = connectionPool
-        self.onClose = onClose
-        self.diagnostics = diagnostics
-        self.side = side
-    }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let buffer = unwrapInboundIn(data)
-        diagnostics.read(buffer.readableBytes, from: side)
-        peer.writeAndFlush(buffer, promise: nil)
-        if !peer.isWritable {
-            context.channel.setOption(ChannelOptions.autoRead, value: false).whenFailure { _ in }
-        }
-    }
-
-    func channelWritabilityChanged(context: ChannelHandlerContext) {
-        if context.channel.isWritable {
-            peer.setOption(ChannelOptions.autoRead, value: true).whenFailure { _ in }
-        }
-        context.fireChannelWritabilityChanged()
-    }
-
-    func channelInactive(context: ChannelHandlerContext) {
-        onClose?()
-        peer.close(mode: .all, promise: nil)
-        context.fireChannelInactive()
-    }
-
-    func errorCaught(context: ChannelHandlerContext, error: Error) {
-        diagnostics.failed(error, on: side)
-        onClose?()
-        peer.close(mode: .all, promise: nil)
-        context.close(promise: nil)
     }
 }
 
