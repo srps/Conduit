@@ -1690,7 +1690,7 @@ package final class ProxyOrchestrator {
             }
             reconcileConnectivityMonitors(for: cause)
         } else {
-            resumeNormalRoutingIfReachable(summary: summary)
+            resumeConnectivityMonitoring(summary: summary)
         }
     }
 
@@ -1718,7 +1718,7 @@ package final class ProxyOrchestrator {
         flapStartedAt = nil
         localProxyServer.resetCircuitsAfterFlap()
         setDirectMode(deriveDirectModeCause(probeSummary: summary))
-        resumeNormalRoutingIfReachable(summary: summary)
+        resumeConnectivityMonitoring(summary: summary)
         mutateSnapshot {
             $0.runtimeStatus.metrics.vpnFlapCount += 1
             $0.runtimeStatus.metrics.vpnFlapTotalDuration += durationSeconds
@@ -1856,7 +1856,7 @@ package final class ProxyOrchestrator {
                 flapStartedAt = nil
                 let summary = await refreshConnectivityMode()
                 setDirectMode(deriveDirectModeCause(probeSummary: summary))
-                resumeNormalRoutingIfReachable(summary: summary)
+                resumeConnectivityMonitoring(summary: summary)
                 // Phase 7: telemetry update. Only super-min-visible flaps reach
                 // this branch (the fuser absorbs sub-window blips), so every
                 // increment here corresponds to a user-visible flap event —
@@ -1876,7 +1876,7 @@ package final class ProxyOrchestrator {
                 async let pacRefreshed: Void = refreshPACRouting(force: true)
                 let summary = await refreshConnectivityMode()
                 setDirectMode(deriveDirectModeCause(probeSummary: summary))
-                resumeNormalRoutingIfReachable(summary: summary)
+                resumeConnectivityMonitoring(summary: summary)
                 await pacRefreshed
                 emitEvent(.vpn, "vpn.connected")
                 logStore.log(.notice, "VPN reconnected — re-probing upstreams.", category: .network)
@@ -1890,7 +1890,7 @@ package final class ProxyOrchestrator {
                 async let pacRefreshed: Void = refreshPACRouting(force: true)
                 let summary = await refreshConnectivityMode()
                 setDirectMode(deriveDirectModeCause(probeSummary: summary))
-                resumeNormalRoutingIfReachable(summary: summary)
+                resumeConnectivityMonitoring(summary: summary)
                 await pacRefreshed
                 emitEvent(.vpn, "vpn.connected")
             }
@@ -1965,19 +1965,20 @@ package final class ProxyOrchestrator {
         pacRoutingEngine?.invalidateRoutes(reason: reason)
     }
 
-    /// Helper for VPN-recovery transitions: if the post-recovery probe found
-    /// any reachable upstream, transition the runtime status back to .running
-    /// and resume the health-check loop.
-    private func resumeNormalRoutingIfReachable(summary: UpstreamProbeSummary) {
-        guard summary.hasReachableUpstream else { return }
-        stopDirectModeReprobeTimer()
-        mutateSnapshot {
-            $0.runtimeStatus.activeUpstream = summary.bestReachableUpstream?.endpoint ?? $0.runtimeStatus.activeUpstream
-            if $0.runtimeStatus.state != .running {
-                $0.runtimeStatus.state = .running
+    /// Reconcile monitoring after a recovery probe, including a failed first
+    /// probe while the VPN's routes are still settling. Failure must retain
+    /// the fast retry cadence instead of leaving both monitors stopped.
+    private func resumeConnectivityMonitoring(summary: UpstreamProbeSummary) {
+        guard isProxyActive else { return }
+        if summary.hasReachableUpstream {
+            mutateSnapshot {
+                $0.runtimeStatus.activeUpstream = summary.bestReachableUpstream?.endpoint ?? $0.runtimeStatus.activeUpstream
+                if $0.runtimeStatus.state != .running {
+                    $0.runtimeStatus.state = .running
+                }
             }
         }
-        startHealthLoop()
+        reconcileConnectivityMonitors(for: snapshot.directModeCause)
     }
 
     /// Tier C network-change admission. `NWPathMonitor` reports updates in
@@ -2322,6 +2323,11 @@ package final class ProxyOrchestrator {
     private func startDirectModeReprobeTimer() {
         stopDirectModeReprobeTimer()
         let interval = Self.directReprobeInterval(for: snapshot.directModeCause)
+        let scheduled = RuntimeEvent(kind: .health, event: "connectivity.reprobe_scheduled",
+            detail: "cause=\(snapshot.directModeCause.rawValue) interval_seconds=\(Int(interval))")
+        eventLog.append(scheduled)
+        logStore.log(snapshot.directModeCause.isExpected ? .info : .notice,
+                     "Connectivity retry scheduled: \(scheduled.detail ?? "")", category: .network)
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + interval, repeating: interval)
         timer.setEventHandler { [weak self] in
@@ -2332,8 +2338,16 @@ package final class ProxyOrchestrator {
                 return
             }
             Task { @MainActor in
-                self.logStore.log(.debug, "Direct-mode re-probe: checking upstreams…", category: .network)
+                let started = RuntimeEvent(kind: .health, event: "connectivity.reprobe_started",
+                    detail: "cause=\(self.snapshot.directModeCause.rawValue)")
+                self.eventLog.append(started)
+                self.logStore.log(.debug, "Connectivity retry started: \(started.detail ?? "")", category: .network)
                 let summary = await self.refreshConnectivityMode()
+                let completed = RuntimeEvent(kind: .health, event: "connectivity.reprobe_completed",
+                    detail: "reachable=\(summary.hasReachableUpstream) cause=\(self.snapshot.directModeCause.rawValue)")
+                self.eventLog.append(completed)
+                self.logStore.log(summary.hasReachableUpstream ? .notice : .debug,
+                                  "Connectivity retry completed: \(completed.detail ?? "")", category: .network)
                 if !self.snapshot.directModeCause.isDirect, summary.hasReachableUpstream {
                     self.logStore.log(.notice, "Upstreams reachable again — exiting direct mode.", category: .network)
                     self.stopDirectModeReprobeTimer()

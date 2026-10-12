@@ -4,6 +4,17 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## Unreleased
+
+### Fixed
+
+- A failed first upstream probe after VPN reconnect or flap recovery now resumes
+  connectivity monitoring instead of leaving health and retry loops stopped.
+  The existing 15-second retry detects recovery without another VPN signal or
+  an app restart. Strict upstream routing and established streams are retained.
+  Structured retry scheduling/start/completion events make the recovery visible;
+  `vpn-reconnect-reprobe` exercises the production timer and a live CONNECT.
+
 ## 0.5.4
 
 VPN reconnect and Chrome stream recovery fixes from #138. App-only update
