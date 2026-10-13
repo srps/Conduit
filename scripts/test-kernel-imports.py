@@ -19,6 +19,11 @@ with tempfile.TemporaryDirectory(prefix='conduit-import-fence-') as directory:
         ('import 模块', False),
         ('let child = Foundation.Process ()', False),
         ('let child = Process.init()', False),
+        ('let child = Process /* explanation */ ()', False),
+        ('let child = Process // explanation\n    ()', False),
+        ('let child = Process /* a */ . /* b */ init()', False),
+        ('let text = "Process (" // literal stays fenced', False),
+        ('let url = "http://example"; let n = 1 // Process() in a comment', True),
     ]
     for code, accepted in cases:
         source.write_text(code)

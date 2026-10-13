@@ -9,11 +9,12 @@ files = sorted(root.rglob('*.swift'))
 if not files:
     sys.exit(f'No Swift sources found in {root}')
 
-# Ignore comments and literals when finding imports. Keep newlines for locations.
-# Nested Swift block comments and raw/multiline strings are handled explicitly.
+# Blank comments, and literals unless `keep_literals`, keeping newlines for
+# locations. Nested Swift block comments and raw/multiline strings are handled
+# explicitly.
 literal_start = re.compile(r'(\#*)("""|")')
 
-def code_only(source):
+def code_only(source, keep_literals=False):
     chars = list(source)
     index = 0
     def erase(start, end):
@@ -51,6 +52,8 @@ def code_only(source):
                 else:
                     index += 1
             index = min(len(source), index + len(closing))
+            if keep_literals:
+                continue
         erase(start, index)
     return ''.join(chars)
 
@@ -71,10 +74,12 @@ for file in files:
             line = code.count('\n', 0, match.start()) + 1
             print(f'{file}:{line}: forbidden kernel import: {module}', file=sys.stderr)
             failed = True
-    # Conservative source fence, including literals/interpolations: process
-    # creation belongs behind a platform protocol, never in the kernel.
-    for match in re.finditer(r'\bProcess\s*(?:\.\s*init\s*)?\(', source):
-        line = source.count('\n', 0, match.start()) + 1
+    # Conservative fence, including literals/interpolations: process creation
+    # belongs behind a platform protocol, never in the kernel. Comments are
+    # blanked so `Process /* why */ ()` cannot split the match.
+    uncommented = code_only(source, keep_literals=True)
+    for match in re.finditer(r'\bProcess\s*(?:\.\s*init\s*)?\(', uncommented):
+        line = uncommented.count('\n', 0, match.start()) + 1
         print(f'{file}:{line}: forbidden kernel Process construction', file=sys.stderr)
         failed = True
 if failed:
