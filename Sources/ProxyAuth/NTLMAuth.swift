@@ -303,13 +303,13 @@ extension Data {
 
     func uint16LE(at offset: Int) -> UInt16 {
         withUnsafeBytes { raw in
-            raw.load(fromByteOffset: offset, as: UInt16.self).littleEndian
+            raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self).littleEndian
         }
     }
 
     func uint32LE(at offset: Int) -> UInt32 {
         withUnsafeBytes { raw in
-            raw.load(fromByteOffset: offset, as: UInt32.self).littleEndian
+            raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self).littleEndian
         }
     }
 

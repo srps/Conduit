@@ -71,6 +71,11 @@ Planned work: Keychain accessibility/caller audit as part of the security-harden
 
 Asset: Kerberos, NTLM, bearer, and proxy authorization tokens while live in process memory.
 
+NTLM fixed-width wire fields use unaligned integer loads because `Data` storage
+has no integer-alignment contract. Existing header-length and offset validation
+still precedes decoding. A regression exercises a deliberately unaligned base
+address and verifies security-buffer lengths, offsets and payload extraction.
+
 Boundary: token strings exist briefly in auth handlers and HTTP headers; logs/events are the durable exfiltration risk.
 
 Existing controls: credential hashes use `SecretBytes` with redacted description and zero-on-deinit; `LogSink` and `RuntimeEvent` detail sanitization masks auth/cookie headers, bearer tokens, and long base64-like tokens.
