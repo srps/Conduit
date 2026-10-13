@@ -5,7 +5,10 @@ package struct ConfigDiff: Sendable {
     package let proxyChanged: Bool
     package let authChanged: Bool
     package let upstreamsChanged: Bool
+    /// Routing inputs other than `pacUsableRouteLimit`, which is applied
+    /// when each PAC answer is handed out and needs no PAC refresh.
     package let routingChanged: Bool
+    package let pacRouteLimitChanged: Bool
     package let dnsChanged: Bool
     package let tunnelsChanged: Bool
     package let healthChanged: Bool
@@ -16,7 +19,7 @@ package struct ConfigDiff: Sendable {
     package let localPACChanged: Bool
 
     package var hasChanges: Bool {
-        proxyChanged || authChanged || upstreamsChanged || routingChanged
+        proxyChanged || authChanged || upstreamsChanged || routingChanged || pacRouteLimitChanged
             || dnsChanged || tunnelsChanged || healthChanged || loggingChanged
     }
 
@@ -24,7 +27,10 @@ package struct ConfigDiff: Sendable {
         proxyChanged = old.proxy != new.proxy
         authChanged = old.auth != new.auth
         upstreamsChanged = old.upstreams != new.upstreams
-        routingChanged = old.routing != new.routing
+        var oldRouting = old.routing
+        oldRouting.pacUsableRouteLimit = new.routing.pacUsableRouteLimit
+        routingChanged = oldRouting != new.routing
+        pacRouteLimitChanged = old.routing.pacUsableRouteLimit != new.routing.pacUsableRouteLimit
         dnsChanged = old.dns != new.dns
         tunnelsChanged = old.tunnels != new.tunnels
         healthChanged = old.health != new.health
