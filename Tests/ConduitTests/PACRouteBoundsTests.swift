@@ -169,4 +169,68 @@ final class PACRouteBoundsTests: XCTestCase {
         }
         func routeChain(for entries: [String]) -> PACChain { CFPACEvaluator().routeChain(for: entries) }
     }
+
+    func testAnOlderConfigReaderCannotGiveANewRequestAnOversizedCachedChain() async throws {
+        try await verifyOlderReaderRace(asynchronous: false)
+    }
+
+    func testAnOlderConfigReaderCannotGiveAnAsyncRequestAnOversizedCachedChain() async throws {
+        try await verifyOlderReaderRace(asynchronous: true)
+    }
+
+    private func verifyOlderReaderRace(asynchronous: Bool) async throws {
+        var initial = ProxyConfig()
+        initial.pacRoutingEnabled = true; initial.pacURL = "https://pac.example/script"
+        initial.pacUsableRouteLimit = 100
+        let config = NIOLockedValueBox(initial)
+        let holdConfig = NIOLockedValueBox(false)
+        let configHeld = DispatchSemaphore(value: 0), releaseConfig = DispatchSemaphore(value: 0)
+        let holdClock = NIOLockedValueBox(false)
+        let gateTimedOut = NIOLockedValueBox(false)
+        let clockHeld = DispatchSemaphore(value: 0), releaseClock = DispatchSemaphore(value: 0)
+        defer { releaseConfig.signal(); releaseClock.signal() }
+        let engine = PACRoutingEngine(configProvider: {
+            let snapshot = config.withLockedValue { $0 }
+            let hold = holdConfig.withLockedValue { value in defer { value = false }; return value }
+            if hold {
+                configHeld.signal()
+                if releaseConfig.wait(timeout: .now() + 5) == .timedOut { gateTimedOut.withLockedValue { $0 = true } }
+            }
+            return snapshot
+        }, resolver: LargePAC(), now: {
+            let hold = holdClock.withLockedValue { value in defer { value = false }; return value }
+            if hold {
+                clockHeld.signal()
+                if releaseClock.wait(timeout: .now() + 5) == .timedOut { gateTimedOut.withLockedValue { $0 = true } }
+            }
+            return Date(timeIntervalSince1970: 1_000)
+        })
+        try await engine.refresh(force: true)
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
+        let older = loop.makePromise(of: PACDecision.self)
+        holdConfig.withLockedValue { $0 = true }
+        DispatchQueue.global().async {
+            older.succeed(engine.decision(for: "https://target.example/", host: "target.example"))
+        }
+        XCTAssertEqual(configHeld.wait(timeout: .now() + 3), .success)
+        config.withLockedValue { $0.pacUsableRouteLimit = 2 }
+        let newer = loop.makePromise(of: PACDecision.self)
+        holdClock.withLockedValue { $0 = true }
+        DispatchQueue.global().async {
+            if asynchronous {
+                engine.decisionFuture(for: "https://target.example/", host: "target.example", on: loop).cascade(to: newer)
+            } else {
+                newer.succeed(engine.decision(for: "https://target.example/", host: "target.example"))
+            }
+        }
+        XCTAssertEqual(clockHeld.wait(timeout: .now() + 3), .success)
+        releaseConfig.signal()
+        let oldAnswer = try await older.futureResult.get()
+        XCTAssertEqual(oldAnswer.routes.count, 100)
+        releaseClock.signal()
+        let newAnswer = try await newer.futureResult.get()
+        XCTAssertEqual(newAnswer, .noUsableAnswer(.superseded, rejected: []),
+                       "a request admitted with cap 2 must not consume the older reader's 100-route cache entry")
+        XCTAssertFalse(gateTimedOut.withLockedValue { $0 })
+    }
 }

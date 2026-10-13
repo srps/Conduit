@@ -9,7 +9,7 @@ review; they have not replaced the installed 0.5.4 app or privileged helper.
   fixtures cover attributed, conditional, scoped, escaped and Unicode imports,
   comment/literal masking, process construction and missing sources.
 - **#93:** `pacUsableRouteLimit` defaults to 32, validates 1–128 and persists in
-  the flat config. Six regressions cover mixed/rejected and oversized chains,
+  the flat config. Eight regressions cover mixed/rejected and oversized chains,
   DIRECT boundaries, native CFNetwork normalization, config compatibility,
   cached/in-flight policy changes and coalesced count-only events. The real
   `pac-route-bounds` CONNECT scenario limits attempts to two, excludes the
@@ -57,3 +57,17 @@ Sanitizer outputs use separate build trees. Serving processes remained the
 installed app and helper; no installation, real VPN cycle, system proxy/DNS
 mutation or helper replacement was performed. Installed-use acceptance follows
 the eventual signed 0.5.5 release.
+
+## Pre-PR regression review
+
+The review reproduced a cap/cache race with deterministic gates: an older reader
+held a cap-100 configuration, a newer cap-2 request reconciled its policy and
+paused before cache lookup, then the older reader populated the shared cache
+under cap 100. The newer request returned 100 routes before the fix.
+
+Policy reconciliation now returns the admitted generation. Cache lookup,
+foreground evaluation admission and background revalidation check that same
+generation; a superseded request gets the existing configured-upstreams-only
+answer rather than another policy's chain. Both synchronous and asynchronous
+cache paths have gated regressions, with explicit failure on gate timeout.
+Eight route-bound regressions passed under TSan after this correction.
