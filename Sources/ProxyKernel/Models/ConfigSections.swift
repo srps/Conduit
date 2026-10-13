@@ -91,6 +91,9 @@ package struct RoutingSection: Codable, Equatable, Sendable {
     /// only when `localPACEnabled` is true (idle port is harmless).
     package var localPACPort: Int
     package var pacRoutingEnabled: Bool
+    /// First usable PAC routes retained in script order. File-only setting,
+    /// validated to 1...128; a DIRECT beyond this cap is never promoted.
+    package var pacUsableRouteLimit: Int
     package var noProxyHosts: [String]
     package var forceProxyHosts: [String]
 
@@ -99,6 +102,7 @@ package struct RoutingSection: Codable, Equatable, Sendable {
         localPACEnabled: Bool = false,
         localPACPort: Int = 63145,
         pacRoutingEnabled: Bool = true,
+        pacUsableRouteLimit: Int = ProxyConfig.defaultPACUsableRouteLimit,
         noProxyHosts: [String] = ["localhost", "127.0.0.1", "127.0.0.*", "::1", "[::1]", "*.local", "10.*", "192.168.*", "172.16.*"],
         forceProxyHosts: [String] = []
     ) {
@@ -106,6 +110,7 @@ package struct RoutingSection: Codable, Equatable, Sendable {
         self.localPACEnabled = localPACEnabled
         self.localPACPort = localPACPort
         self.pacRoutingEnabled = pacRoutingEnabled
+        self.pacUsableRouteLimit = pacUsableRouteLimit
         self.noProxyHosts = noProxyHosts
         self.forceProxyHosts = forceProxyHosts
     }

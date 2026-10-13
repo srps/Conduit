@@ -65,9 +65,15 @@ package protocol PacEvaluator: Sendable {
     /// plus every entry that could not be used, reported rather than dropped
     /// (see `PACChain.classify`).
     func routeChain(for entries: [String]) -> PACChain
+    /// Apply the validated runtime policy, within PACChain's hard ceiling.
+    func routeChain(for entries: [String], limit: Int) -> PACChain
 }
 
 extension PacEvaluator {
+    package func routeChain(for entries: [String], limit: Int) -> PACChain {
+        routeChain(for: entries).limited(to: limit)
+    }
+
     /// Convenience: build an evaluator and resolve a single URL in one call.
     /// Used by AppState's "Test PAC URL" preview path; not on the hot
     /// `PACRoutingEngine` route — that path caches the evaluator across

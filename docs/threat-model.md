@@ -24,6 +24,17 @@ Boundary: PAC text is remote input. It enters through `CFPACEvaluator` and is co
 
 Existing controls: PAC execution uses macOS CFNetwork rather than JavaScriptCore; PAC routing has evaluation timeout behavior, route cache bounds, and a local PAC serving layer that keeps browsers pointed at a stable loopback PAC.
 
+Usable chains retain only the first `pacUsableRouteLimit` PROXY/DIRECT entries
+(default 32, validated 1–128), in original order. PACChain constructors enforce
+the 128-route ceiling even for alternative adapters; the engine applies the
+configured lower limit before caching or routing. Excess entries cannot promote
+DIRECT or bypass strict mode. The 512-key cache retains at most 512 × configured
+limit routes. Policy changes supersede cached/in-flight answers. Truncation
+diagnostics use counts only and one global rate-limit slot per engine, so a PAC
+cannot allocate a per-endpoint diagnostic table or log its raw text. Native
+evaluation output is still transient input; this bound covers retained chains
+and fallback attempts, not CFNetwork's own internal evaluation allocations.
+
 Fetch bounds: HTTPS and regular-file PAC reads enforce the shared 256 KiB ceiling during accumulation; HTTPS rejects unsuccessful status responses and cancels incomplete transfers. Refresh failures retain the previous evaluator. Candidate evaluation checks basic script validity before installation, within the existing evaluation timeout; it cannot validate every script branch.
 
 Current gaps: PAC source authenticity is still inherited from the configured URL and the corporate network. Audit logging of PAC decisions is planned but not shipped.

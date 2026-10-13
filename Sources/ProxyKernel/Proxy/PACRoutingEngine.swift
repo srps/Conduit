@@ -11,6 +11,7 @@ package enum PACRouteInvalidationReason: String, Sendable {
     /// A material network-path change (#101's fields: status, interfaces,
     /// gateways, address families, DNS) other than the first path seen.
     case networkChanged = "network_changed"
+    case routeLimitChanged = "route_limit_changed"
 
     /// Whether the loaded script goes with the answers. A VPN transition
     /// moves to a network whose PAC server may hand out another script. A
@@ -19,7 +20,7 @@ package enum PACRouteInvalidationReason: String, Sendable {
     /// forced refetch that follows replaces the script only if it can reach
     /// the PAC server. Dropping it would leave every request without PAC
     /// routes on an unsatisfied path or while the fetch backs off.
-    var dropsScript: Bool { self != .networkChanged }
+    var dropsScript: Bool { self == .vpnConnected || self == .vpnDisconnected }
 }
 
 package final class PACRoutingEngine: @unchecked Sendable {
@@ -111,6 +112,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// started under an older generation computed its answer on a network
     /// that is gone: it is not cached, not handed out, and not installed.
     private var routeGeneration: UInt64 = 0
+    private var currentRouteLimit = ProxyConfig.defaultPACUsableRouteLimit
     /// Requests waiting on an evaluation already running for the same cache
     /// key. proxy.log showed six identical "PAC evaluation took 1049ms"
     /// lines with the same millisecond timestamp: a burst of connections
@@ -132,6 +134,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     /// Per-host limit for `pac.evaluation_slow` and `pac.revalidation_failed`
     /// (64 host/reason pairs).
     private let evaluationReportGate: RuntimeEventRepeatGate
+    private let truncationReportGate: RuntimeEventRepeatGate
     /// Drives the route cache and the evaluation timing, so tests can move
     /// time. The refresh interval and fetch backoff use the wall clock.
     private let now: @Sendable () -> Date
@@ -153,6 +156,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     ) {
         self.now = now
         self.evaluationReportGate = RuntimeEventRepeatGate(repeatInterval: Self.slowEvaluationReportInterval, now: now)
+        self.truncationReportGate = RuntimeEventRepeatGate(repeatInterval: 60, now: now)
         self.configProvider = configProvider
         self.resolver = resolver
         self.logger = logger
@@ -200,6 +204,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             clearCachedEvaluator()
             return nil
         }
+        reconcileRouteLimit(config.pacUsableRouteLimit)
 
         let decision: RefreshDecision = lock.withLock {
             if let runningRefresh { return .alreadyRunning(runningRefresh) }
@@ -423,6 +428,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     package func decision(for url: String, host: String) -> PACDecision {
         let config = configProvider()
         guard config.pacRoutingEnabled, !config.pacURL.isEmpty else { return .notConsulted }
+        reconcileRouteLimit(config.pacUsableRouteLimit)
         guard let requestURL = URL(string: url) else {
             return answer(.noUsableAnswer(.evaluationFailed, rejected: []), host: host)
         }
@@ -440,8 +446,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
             break
         }
 
-        let (evaluator, evaluatedURL, generation, version) = lock.withLock {
-            (jsEvaluator, cachedPACURL, routeGeneration, scriptVersion)
+        let (evaluator, evaluatedURL, generation, version, limit) = lock.withLock {
+            (jsEvaluator, cachedPACURL, routeGeneration, scriptVersion, currentRouteLimit)
         }
         guard let evaluator else { return answer(.noUsableAnswer(.notLoaded, rejected: []), host: host) }
 
@@ -464,7 +470,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
         switch result {
         case .success(let rawChain):
-            let chain = resolver.routeChain(for: rawChain)
+            let chain = classifyRoutes(rawChain, limit: limit)
             let stored = storeCachedChain(
                 chain, forKey: cacheKey, evaluatedWith: evaluatedURL, generation: generation, scriptVersion: version
             )
@@ -512,11 +518,43 @@ package final class PACRoutingEngine: @unchecked Sendable {
         return .evaluationFailed
     }
 
+    /// One global rate-limit slot; never key diagnostics by untrusted PAC text.
+    private func classifyRoutes(_ entries: [String], limit: Int) -> PACChain {
+        let chain = resolver.routeChain(for: entries, limit: limit).limited(to: limit)
+        if chain.droppedRouteCount > 0,
+           let suppressed = truncationReportGate.admit(host: "", reason: "routes_truncated") {
+            let event = RuntimeEvent(kind: .routing, event: "pac.routes_truncated",
+                detail: "retained=\(chain.routes.count) dropped=\(chain.droppedRouteCount) limit=\(limit) suppressed=\(suppressed)")
+            eventSink?(event)
+            logger?.log(.warning, "PAC routes truncated: \(event.detail ?? "")", category: .pac)
+        }
+        return chain
+    }
+
+    private func reconcileRouteLimit(_ limit: Int) {
+        precondition((1...ProxyConfig.maximumPACUsableRouteLimit).contains(limit))
+        let dropped = lock.withLock { () -> Int? in
+            guard currentRouteLimit != limit else { return nil }
+            currentRouteLimit = limit
+            routeGeneration &+= 1
+            let count = routeCache.count
+            routeCache.removeAll()
+            routeCacheOrder.removeAll()
+            return count
+        }
+        guard let dropped else { return }
+        let event = RuntimeEvent(kind: .routing, event: "pac.routes_invalidated",
+            detail: "reason=route_limit_changed routes=\(dropped) script=kept fetch=idle limit=\(limit)")
+        eventSink?(event)
+        logger?.log(.notice, "PAC route limit changed: \(event.detail ?? "")", category: .pac)
+    }
+
     package func decisionFuture(for url: String, host: String, on eventLoop: EventLoop) -> EventLoopFuture<PACDecision> {
         let config = configProvider()
         guard config.pacRoutingEnabled, !config.pacURL.isEmpty else {
             return eventLoop.makeSucceededFuture(.notConsulted)
         }
+        reconcileRouteLimit(config.pacUsableRouteLimit)
         guard let requestURL = URL(string: url) else {
             return eventLoop.makeSucceededFuture(answer(.noUsableAnswer(.evaluationFailed, rejected: []), host: host))
         }
@@ -543,7 +581,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             // only (`EvaluationJob.pendingKey`).
             let job = EvaluationJob(
                 requestURL: requestURL, host: host, cacheKey: cacheKey, generation: routeGeneration,
-                evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion
+                evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion, routeLimit: currentRouteLimit
             )
             guard let waiters = pendingEvaluations[job.pendingKey] else {
                 guard queuedEvaluations < queuedEvaluationLimit else {
@@ -591,6 +629,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
         let evaluator: any PacScriptEvaluating
         let evaluatedURL: String
         let scriptVersion: UInt64
+        let routeLimit: Int
 
         /// Requests join a running evaluation only under the same generation
         /// and script: one admitted after an invalidation or a changed
@@ -607,7 +646,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             guard let evaluator = jsEvaluator else { return nil }
             let job = EvaluationJob(
                 requestURL: requestURL, host: host, cacheKey: cacheKey, generation: routeGeneration,
-                evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion
+                evaluator: evaluator, evaluatedURL: cachedPACURL, scriptVersion: scriptVersion, routeLimit: currentRouteLimit
             )
             guard pendingEvaluations[job.pendingKey] == nil, queuedEvaluations < queuedEvaluationLimit else { return nil }
             queuedEvaluations += 1
@@ -651,7 +690,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
             completion.complete {
                 switch result {
                 case .success(let rawChain):
-                    let chain = self.resolver.routeChain(for: rawChain)
+                    let chain = self.classifyRoutes(rawChain, limit: job.routeLimit)
                     self.reportIfSlow(elapsed, host: host)
                     // A result from a PAC the configuration no longer names,
                     // or from before an invalidation, is neither cached nor

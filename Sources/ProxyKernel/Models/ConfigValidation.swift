@@ -113,6 +113,10 @@ extension ProxyConfig {
         validatePort("dns.forwarderPort", dns.forwarderPort, into: &errors)
         validatePort("dns.transparentProxyPort", dns.transparentProxyPort, into: &errors)
         validatePort("routing.localPACPort", routing.localPACPort, into: &errors)
+        validateMinimum("routing.pacUsableRouteLimit", routing.pacUsableRouteLimit, min: 1, into: &errors)
+        if routing.pacUsableRouteLimit > Self.maximumPACUsableRouteLimit {
+            errors.append(.conflict(description: "routing.pacUsableRouteLimit must be at most \(Self.maximumPACUsableRouteLimit)"))
+        }
 
         validateMinimum("proxy.maxConnections", proxy.maxConnections, min: 1, into: &errors)
         validateMinimum("proxy.inboundConnectionMaxLimit", proxy.inboundConnectionMaxLimit, min: 1, into: &errors)

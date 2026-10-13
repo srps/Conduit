@@ -44,7 +44,8 @@ enum PACRoutingScenarios {
 
         /// A proxy over the running origins. `pacScript` nil turns PAC off;
         /// otherwise the real CFNetwork evaluator runs it.
-        func startProxy(strict: Bool, pacScript: String?, verbose: Bool) async throws {
+        func startProxy(strict: Bool, pacScript: String?, verbose: Bool,
+                        routeLimit: Int = ProxyConfig.defaultPACUsableRouteLimit) async throws {
             await server?.stop()
             var config = GenericDefaults.shared.makeConfig()
             config.localHost = "127.0.0.1"
@@ -54,6 +55,7 @@ enum PACRoutingScenarios {
             config.localPACEnabled = false
             config.strictMode = strict
             config.pacRoutingEnabled = pacScript != nil
+            config.pacUsableRouteLimit = routeLimit
             config.pacURL = pacScript != nil ? "https://pac.example.test/scenario.pac" : ""
             config.noProxyHosts = []
             config.forceProxyHosts = []
@@ -138,6 +140,43 @@ enum PACRoutingScenarios {
         func events(named name: String) -> [RuntimeEvent] {
             events.events.filter { $0.event == name }
         }
+    }
+
+    /// A healthy third proxy and a later DIRECT must stay outside a two-route
+    /// cap. Raising the policy to three admits the healthy proxy in place.
+    @MainActor
+    static func routeBounds(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date()
+        let fixture = Fixture()
+        ScenarioCleanup.register { await fixture.stop() }
+        try await fixture.startOrigins()
+        let refusing = FakeUpstreamProxy(group: fixture.group, originHost: "127.0.0.1",
+            originPort: fixture.relayed.port, requireAuth: false)
+        try await refusing.start()
+        refusing.connectRefusalStatus = 503
+        ScenarioCleanup.register { await refusing.stop() }
+        let refused = "PROXY 127.0.0.1:\(refusing.port)"
+        let healthy = "PROXY 127.0.0.1:\(fixture.upstream!.port)"
+        let entries = [refused, refused, healthy] + Array(repeating: refused, count: 2_000) + ["DIRECT"]
+        let script = "function FindProxyForURL(url, host) { return '\(entries.joined(separator: ";"))'; }"
+        try await fixture.startProxy(strict: false, pacScript: script, verbose: verbose, routeLimit: 2)
+        let denied = try await fixture.connect()
+        let attempts = refusing.connectAttemptCount
+        let excludedHealthy = fixture.upstream!.connectCount == 0
+        let noDirect = fixture.target.connectionCount == 0
+        try await fixture.startProxy(strict: false, pacScript: script, verbose: verbose, routeLimit: 3)
+        let recovered = try await fixture.connect()
+        let reports = fixture.events(named: "pac.routes_truncated")
+        return ScenarioResult(name: "pac-route-bounds", clientCount: 2, clientsOpened: 2,
+            clientsWithFirstByte: 2, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("fallback attempts obey the configured cap", !denied.hasPrefix("HTTP/1.1 200") && attempts == 2 && excludedHealthy),
+                .init("DIRECT beyond the bound is never promoted", noDirect && fixture.target.connectionCount == 0),
+                .init("raising the cap retains the next proxy in order", recovered.hasPrefix("HTTP/1.1 200") && fixture.upstream!.connectCount == 1),
+                .init("truncation reports contain counts without PAC text", reports.count == 2 && reports.allSatisfy { $0.detail?.contains("dropped=") == true && $0.detail?.contains("127.0.0.1") == false }),
+            ], notes: ["2,004 native directives; two refusing entries before a healthy proxy; final DIRECT excluded"])
     }
 
     /// A PAC whose every answer is unusable (CFNetwork drops `HTTPS`, `SOCKS5`
