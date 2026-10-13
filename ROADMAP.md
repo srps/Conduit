@@ -19,32 +19,19 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 
 ## Immediate cleanup priorities (2026-10-13)
 
-1. **Post-reconnect monitoring gap [Rel, Obs, Sim]** — reproduced after the first
-   connected/flap-recovery probe fails: the reconnect path stops the retry timer
-   but restores monitors only on success. The fix reconciles both monitors after
-   the probe; `vpn-reconnect-reprobe` uses the real 15-second cadence and preserves
-   its established CONNECT. Merged in #140; awaiting the 0.5.5 release, not installed.
-2. **Kernel boundary guardrail ([#77](https://github.com/srps/Conduit/issues/77))
-   [Sec, OSS]** — implemented in the 0.5.5 maintenance branch: the allowlist and
-   Process fence run before the CI build, with negative fixtures and consistent
-   architecture/contributor guidance. Awaiting review.
-3. **Bound usable PAC routes ([#93](https://github.com/srps/Conduit/issues/93))
-   [Rel, Sec, Eff]** — implemented in the 0.5.5 maintenance branch: configurable
-   `pacUsableRouteLimit` defaults to 32 and validates 1–128. A hard chain ceiling,
-   limit applied when each answer is handed out, retained order and count-only coalesced
-   diagnostics are covered by native tests and `pac-route-bounds`. Awaiting review.
-4. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
+In 0.5.5, awaiting install: the post-reconnect monitoring fix (#140), the
+compiler-backed kernel import/Process fence (#77), the configurable usable PAC
+route bound (#93) and #118 track B's deterministic `pac-slow-host` (all #141).
+
+1. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
    — separate identity/name, automatic fake-machine mode, scratch state and
    ad-hoc signing. Reject installation and never share the production path.
    This now has a practical trigger: tandem testing selected a personal signing
    identity and generated repeated prompts, and duplicate bundle IDs made status
    inspection ambiguous. No private-key ACL change is needed.
-5. **Sanitizer evidence ([#118](https://github.com/srps/Conduit/issues/118))
-   [Rel, Sim]** — track B is implemented in the maintenance branch: evaluator
-   gates and event-loop completion markers replace request-duration heuristics;
-   background publication is joined before clock advance. Validation is recorded
-   in PR #141. Track A remains open independently; no continuation
-   race fix or new suppression is claimed.
+2. **Sanitizer continuation race ([#118](https://github.com/srps/Conduit/issues/118))
+   [Rel, Sim]** — track A remains open; track B shipped in 0.5.5. No
+   continuation race fix or new suppression is claimed.
 
 Then implement runtime-scoped auth/link-local failure memories (#31) and spool
 ownership/budgets (#81, coordinated with path policy #82). Continue main-actor
@@ -60,16 +47,8 @@ to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
 
 ## Proposed release scope
 
-**0.5.5 — reconnect recovery and bounded maintenance.** Include the reprobe fix
-above. #77's CI boundary check, #93's configurable usable PAC-route bound and
-#118 track B's deterministic PAC fixture are implemented in separate maintenance
-commits awaiting review. Do not delay a needed recovery release for unfinished cleanup.
-For #93, document the capacity and preserve retained route order, strict-mode
-semantics and DIRECT precedence; a trailing DIRECT beyond the cap must not be
-promoted. Confirm the bound with oversized chains, boundary cases, cache/fallback
-resource checks and bounded events. Track B of #118 needs observed cache/evaluation
-completion, explicit background synchronization and normal/TSan repetition.
-It cannot close the independent continuation-race investigation in track A.
+**0.5.5 — reconnect recovery and bounded maintenance.** Contents are listed
+above and in [`CHANGELOG.md`](./CHANGELOG.md); app-only update from 0.5.4.
 
 **Following 0.5.x patches — runtime isolation.** #31 and #81 are patch candidates
 when delivered as focused ownership/correctness changes. For #31, pin restart and
