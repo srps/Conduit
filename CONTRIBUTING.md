@@ -67,7 +67,7 @@ curl -x http://localhost:3128 https://httpbin.org/ip
 
 ## Project Structure
 
-See [`docs/architecture.md`](docs/architecture.md) for the full module graph. The kernel import allowlist is Foundation, Dispatch, NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. Apple platform frameworks belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`. CI enforces imports and prohibits `Process` construction with [`scripts/check-kernel-imports.sh`](scripts/check-kernel-imports.sh); linking alone cannot enforce this fence.
+See [`docs/architecture.md`](docs/architecture.md) for the full module graph. The kernel import allowlist is Foundation, Dispatch, the linked NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. Apple platform frameworks belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`. CI enforces imports and prohibits `Process` construction with [`scripts/check-kernel-imports.py`](scripts/check-kernel-imports.py); linking alone cannot enforce this fence.
 
 ## Before You Submit
 
@@ -85,7 +85,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full module graph. Th
 
 4. **Never commit secrets.** No credentials, tokens, `.env` files, or unmasked auth headers in source or logs.
 
-5. **Respect the import fence.** Run `bash scripts/check-kernel-imports.sh`. The allowed imports are Foundation, Dispatch, NIO modules, Darwin/Glibc and `ConduitShared` for grammar. Platform capabilities belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`.
+5. **Respect the import fence.** Run `python3 scripts/check-kernel-imports.py`. The allowed imports are Foundation, Dispatch, the linked NIO modules, Darwin/Glibc and `ConduitShared` for grammar. Platform capabilities belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`.
 
 ## PR Process
 

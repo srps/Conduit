@@ -1,13 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-set -euo pipefail
-kernel_dir="${1:-$(cd "$(dirname "$0")/.." && pwd)/Sources/ProxyKernel}"
-python3 - "$kernel_dir" <<'PY'
 import re
 import sys
 from pathlib import Path
 
-root = Path(sys.argv[1])
+root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / 'Sources' / 'ProxyKernel'
 files = sorted(root.rglob('*.swift'))
 if not files:
     sys.exit(f'No Swift sources found in {root}')
@@ -57,7 +54,12 @@ def code_only(source):
         erase(start, index)
     return ''.join(chars)
 
-allowed = {'Foundation', 'Dispatch', 'Darwin', 'Glibc', 'ConduitShared'}
+# The NIO products ProxyKernel links in Package.swift, by name: a prefix
+# match would admit NIOTransportServices, which brings in Network.
+allowed = {
+    'Foundation', 'Dispatch', 'Darwin', 'Glibc', 'ConduitShared',
+    'NIOCore', 'NIOPosix', 'NIOHTTP1', 'NIOConcurrencyHelpers',
+}
 imports = re.compile(r'\bimport\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?([^\s.;{}]+)')
 failed = False
 for file in files:
@@ -65,7 +67,7 @@ for file in files:
     code = code_only(source)
     for match in imports.finditer(code):
         module = match.group(1).strip('`')
-        if module not in allowed and not module.startswith('NIO'):
+        if module not in allowed:
             line = code.count('\n', 0, match.start()) + 1
             print(f'{file}:{line}: forbidden kernel import: {module}', file=sys.stderr)
             failed = True
@@ -78,4 +80,3 @@ for file in files:
 if failed:
     sys.exit(1)
 print(f'Kernel import/Process fence passed ({len(files)} Swift files)')
-PY

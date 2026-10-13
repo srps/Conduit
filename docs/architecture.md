@@ -34,7 +34,7 @@ LOC and file counts approximate; the source-of-truth is `swift test` and `find S
 
 ## Target Dependency Graph
 
-The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. CI enforces the kernel import and process-construction fence with [`scripts/check-kernel-imports.sh`](../scripts/check-kernel-imports.sh). Linking alone cannot catch a stray Apple-framework import; Linux portability is not a current goal.
+The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. CI enforces the kernel import and process-construction fence with [`scripts/check-kernel-imports.py`](../scripts/check-kernel-imports.py). Linking alone cannot catch a stray Apple-framework import; Linux portability is not a current goal.
 
 ```mermaid
 graph TD
@@ -117,7 +117,7 @@ The matrix shows **direct** dependencies declared in `Package.swift`. Transitive
 ### What each target owns
 
 - **`ConduitShared`** — zero-dependency wire contract between the app and the privileged helper. Defines `HelperCommand`, `HelperRequest`, `HelperResponse`, input validation. Imported by both sides so they can't drift.
-- **`ProxyKernel`** — portable library: proxy server, connection pool, PAC routing engine, DNS forwarder, transparent TCP proxy, tunnel forwarder, auto-recovery ladder, health checks, VPN state fusion, upstream probing, routing decisions, metadata blocklist, kernel-side abstractions. Imports only Foundation, Dispatch, NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. CI runs `scripts/check-kernel-imports.sh` to enforce this allowlist and prohibit `Process` construction.
+- **`ProxyKernel`** — portable library: proxy server, connection pool, PAC routing engine, DNS forwarder, transparent TCP proxy, tunnel forwarder, auto-recovery ladder, health checks, VPN state fusion, upstream probing, routing decisions, metadata blocklist, kernel-side abstractions. Imports only Foundation, Dispatch, NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. CI runs `scripts/check-kernel-imports.py` to enforce this allowlist and prohibit `Process` construction.
 - **`ProxyAuth`** — opt-in capability layer. NTLM message generation (`NTLMAuth.swift`, CommonCrypto for MD4/HMAC-MD5), Kerberos/Negotiate (`KerberosAuth.swift`, GSS.framework), and `AuthenticatorFactory.swift` which assembles a `ProxyAuthenticator` from the active config + a `CredentialProvider`.
 - **`ProxyPAC`** — opt-in capability layer with the CFNetwork-backed `CFPACEvaluator` (`CFNetworkExecuteProxyAutoConfigurationScript` on a private CFRunLoop, paired with `CFPacScriptEvaluator`). This is the sole production `PacEvaluator` implementation after the CFNetwork evaluator graduated; the JavaScriptCore-backed resolver was removed.
 - **`PlatformMac`** — macOS-only glue. Keychain, `networksetup` wrappers, `SMAppService`, `SCDynamicStore`-based VPN monitor, `NWPathMonitor`, `/etc/resolver/*` writer, helper XPC client, shell runner, first-run example-corp preset injection. Only the GUI app and the `pm-vpn-check` diagnostic link this target.
@@ -405,7 +405,7 @@ Test doubles mirror the protocol surface. The platform ones live in `Sources/Pla
 CI runs the kernel import/Process fence and its negative fixtures before building:
 
 ```sh
-bash scripts/check-kernel-imports.sh
+python3 scripts/check-kernel-imports.py
 python3 scripts/test-kernel-imports.py
 ```
 
