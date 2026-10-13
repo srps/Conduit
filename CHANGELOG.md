@@ -4,22 +4,13 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
-## Unreleased
+## 0.5.5
+
+VPN reconnect monitoring recovery (#140) and bounded PAC fallback chains
+(#141). App-only update from 0.5.4; helper v5 is unchanged and needs no
+reinstall.
 
 ### Fixed
-
-- PAC routing now caps usable fallback entries with file-only `pacUsableRouteLimit`
-  (default 32, validated 1–128). Excess routes are counted, never reordered or
-  promoted into DIRECT, and diagnosed with coalesced `pac.routes_truncated`
-  events. The cache keeps chains at the 128-route ceiling and each answer is
-  trimmed to the limit configured when it is handed out, so changing the limit
-  takes effect at once without invalidating answers or refetching the PAC.
-- `pac-slow-host` now observes gated evaluation and cache completion directly,
-  joins background publication before clock advance, and treats deadline expiry
-  as a failure instead of classifying cache misses from elapsed request time.
-- NTLM fixed-width wire reads now tolerate unaligned `Data` storage. The
-  sanitizer run exposed an alignment trap in the existing security-buffer
-  regression; unaligned loads preserve endian and range-check behavior.
 
 - A failed first upstream probe after VPN reconnect or flap recovery now resumes
   connectivity monitoring instead of leaving health and retry loops stopped.
@@ -27,11 +18,35 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
   an app restart. Strict upstream routing and established streams are retained.
   Structured retry scheduling/start/completion events make the recovery visible;
   `vpn-reconnect-reprobe` exercises the production timer and a live CONNECT.
+- PAC routing now caps usable fallback entries with file-only `pacUsableRouteLimit`
+  (default 32, validated 1–128). Excess routes are counted, never reordered or
+  promoted into DIRECT, and diagnosed with coalesced `pac.routes_truncated`
+  events. The cache keeps chains at the 128-route ceiling and each answer is
+  trimmed to the limit configured when it is handed out, so changing the limit
+  takes effect at once without invalidating answers or refetching the PAC; a
+  limit-only config reload emits `config.pac_route_limit_changed`.
+- NTLM fixed-width wire reads now tolerate unaligned `Data` storage. The
+  sanitizer run exposed an alignment trap in the existing security-buffer
+  regression; unaligned loads preserve endian and range-check behavior.
 
 ### Changed
 
-- CI enforces the ProxyKernel import allowlist and Process-construction fence;
-  architecture and contributor guidance now describe the actual check.
+- CI enforces the ProxyKernel import allowlist and `Process` ban with the
+  compiler: imports come from `swiftc -emit-imported-modules` under debug and
+  release conditions, naming `Process` in the kernel does not compile, and the
+  built kernel object must not reference `NSTask`. The release workflow runs the
+  check on the release build.
+- `pac-slow-host` now observes gated evaluation and cache completion directly,
+  joins background publication before clock advance, and treats deadline expiry
+  as a failure instead of classifying cache misses from elapsed request time.
+
+### Testing this release
+
+- With the upstream proxy unreachable for the first probe after a VPN reconnect
+  (for example, reconnect before the corporate network is fully up), Conduit
+  should recover on its own within about 15 seconds of the upstream becoming
+  reachable, without another VPN cycle or an app restart. The event log shows
+  the retry being scheduled, started and completed.
 
 ## 0.5.4
 
