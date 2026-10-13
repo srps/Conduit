@@ -19,31 +19,42 @@ enum PACRevalidationScenarios {
         func advance(_ seconds: TimeInterval) { box.withLockedValue { $0 += seconds } }
     }
 
-    /// Takes `wallSeconds` of real time, so a request that waits for it shows,
-    /// and `simulatedSeconds` of the engine's clock, so it counts as slow.
+    /// Every evaluation waits on an explicit gate. Simulated work costs 0.9 s;
+    /// no wall-clock measurement decides whether a request used the cache.
     private final class SlowPAC: PacEvaluator, PacScriptEvaluating, @unchecked Sendable {
-        static let wallSeconds: TimeInterval = 0.2
         static let simulatedSeconds: TimeInterval = 0.9
         private let clock: Clock
         private let count = NIOLockedValueBox(0)
+        let release = DispatchSemaphore(value: 0)
         init(clock: Clock) { self.clock = clock }
 
         var evaluations: Int { count.withLockedValue { $0 } }
         func fetchPAC(from _: String) async throws -> String { "slow script" }
         func makeEvaluator(pacScript _: String) throws -> any PacScriptEvaluating { self }
         func resolveProxyChain(for _: URL) throws -> [String] {
-            count.withLockedValue { $0 += 1 }
-            Thread.sleep(forTimeInterval: Self.wallSeconds)
+            let evaluation = count.withLockedValue { $0 += 1; return $0 }
+            guard release.wait(timeout: .now() + 10) == .success else {
+                throw ScenarioExecutionError(message: "PAC evaluator gate was never released")
+            }
             clock.advance(Self.simulatedSeconds)
-            return ["PROXY corp.example:8080"]
+            return ["PROXY corp.example:\(10_000 + evaluation)"]
         }
         func routeChain(for entries: [String]) -> PACChain { CFPACEvaluator().routeChain(for: entries) }
+    }
+
+    private static func requireCompletion(_ condition: () -> Bool, _ message: String) async throws {
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        guard condition() else { throw ScenarioExecutionError(message: message) }
     }
 
     static func slowHost(verbose: Bool) async throws -> ScenarioResult {
         let started = Date()
         let clock = Clock()
         let pac = SlowPAC(clock: clock)
+        defer { pac.release.signal() }
         let events = RuntimeEventLog(capacity: 256)
         var config = GenericDefaults.shared.makeConfig()
         config.pacRoutingEnabled = true
@@ -53,6 +64,7 @@ enum PACRevalidationScenarios {
             configProvider: { fixed }, resolver: pac,
             logger: ConsoleLogSink(minLevel: verbose ? .debug : .error),
             refreshInterval: 3600,
+            evalTimeoutSeconds: 10,
             eventSink: { events.append($0) },
             now: { clock.now }
         )
@@ -65,22 +77,36 @@ enum PACRevalidationScenarios {
         let steps = Int(duration / interval)
         var waited: [Int] = []
         var unrouted = 0
+        var background = 0
+        var correctVersions = true
+        var peakPending = 0
+        let loop = MultiThreadedEventLoopGroup.singleton.next()
         for step in 0..<steps {
             if step == steps / 2 {
                 engine.invalidateRoutes(reason: .networkChanged)
             }
-            let requestStarted = Date()
-            let decision = try await engine.decisionFuture(
-                for: url, host: host, on: MultiThreadedEventLoopGroup.singleton.next()
-            ).get()
-            // A cache hit returns in microseconds; a request that ran the
-            // script took at least its 200 ms.
-            if Date().timeIntervalSince(requestStarted) >= SlowPAC.wallSeconds / 2 { waited.append(step) }
-            if decision.routes.isEmpty { unrouted += 1 }
-            // Let a background re-evaluation land before simulated time moves.
-            for _ in 0..<200 where engine.pendingEvaluationCount() > 0 {
-                try await Task.sleep(for: .milliseconds(10))
+            let before = pac.evaluations
+            let completed = NIOLockedValueBox(false)
+            let future = engine.decisionFuture(for: url, host: host, on: loop)
+            future.whenComplete { _ in completed.withLockedValue { $0 = true } }
+            // The marker runs after an already-completed future's callback.
+            // A miss cannot complete here: its evaluator gate is still held.
+            let cacheHit = try await loop.submit { completed.withLockedValue { $0 } }.get()
+            if !cacheHit { waited.append(step) }
+            let pending = engine.pendingEvaluationCount()
+            peakPending = max(peakPending, pending)
+            if pending > 0 {
+                try await requireCompletion({ pac.evaluations == before + 1 }, "PAC evaluation did not reach its gate")
+                if cacheHit { background += 1 }
+                pac.release.signal()
             }
+            let decision = try await future.get()
+            if decision.routes.isEmpty { unrouted += 1 }
+            let expected = before + (cacheHit ? 0 : 1)
+            correctVersions = correctVersions && decision.routes == [.proxy(host: "corp.example", port: 10_000 + expected)]
+            // Pending is removed only after caching the completed answer.
+            // A deadline bounds a hang; expiry throws and cannot pass.
+            try await requireCompletion({ engine.pendingEvaluationCount() == 0 }, "PAC background result was not published")
             clock.advance(interval)
         }
 
@@ -95,7 +121,7 @@ enum PACRevalidationScenarios {
         let evaluationBound = 2 + Int((duration / PACRoutingEngine.routeRevalidationAge).rounded(.up))
         let reportBound = 1 + Int((duration / PACRoutingEngine.slowEvaluationReportInterval).rounded(.up))
         let notes = [
-            "requests=\(steps) waited_steps=\(waited) evaluations=\(evaluations) bound=\(evaluationBound)",
+            "requests=\(steps) foreground_steps=\(waited) evaluations=\(evaluations) background=\(background) bound=\(evaluationBound)",
             "pac.evaluation_slow=\(slow.count) suppressed=\(suppressed) unrouted=\(unrouted)",
         ]
 
@@ -109,6 +135,8 @@ enum PACRevalidationScenarios {
                       waited == [0, steps / 2]),
                 .init("evaluations bounded by one per revalidation age", evaluations <= evaluationBound),
                 .init("the answer in use was re-evaluated in the background", evaluations > 2),
+                .init("cache hits complete while the evaluator is gated and use the published answer", correctVersions && background == evaluations - 2),
+                .init("one evaluation is pending and all background results are joined before clock advance", peakPending == 1 && engine.pendingEvaluationCount() == 0),
                 .init("slow evaluations reported at most once per host per ten minutes",
                       !slow.isEmpty && slow.count <= reportBound),
                 .init("each report counts the slow evaluations it held back",
