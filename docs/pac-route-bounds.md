@@ -3,9 +3,9 @@
 `pacUsableRouteLimit` is a file-only integer in the existing flat Conduit JSON
 configuration. It defaults to **32**, including when absent from an older file,
 and validation accepts **1–128**. Invalid values reject configuration at the
-normal validation boundary. A policy change drops cached answers and supersedes
-evaluations in flight; new requests use the new limit without replacing listeners
-or closing established streams.
+normal validation boundary. A change takes effect on the next request without
+replacing listeners, closing established streams, dropping cached answers or
+refetching the PAC.
 
 ```json
 {
@@ -16,9 +16,11 @@ or closing established streams.
 The engine retains the first N usable directives in their original order. Both
 PROXY and DIRECT consume one slot. Unsupported and invalid directives do not
 consume slots; their existing rejection accounting remains bounded separately.
-Excess usable routes are counted but never cached or attempted. PACChain itself
-enforces the hard ceiling even for alternative adapters and direct constructors.
-The 512-key cache therefore retains at most 512 × N usable routes, with N ≤ 128.
+Excess usable routes are counted but never attempted. PACChain itself enforces
+the 128-route ceiling even for alternative adapters and direct constructors, and
+the cache keeps chains at that ceiling: each answer is trimmed to N when it is
+handed out, so raising N uses routes already cached. The 512-key cache therefore
+retains at most 512 × 128 usable routes.
 
 | DIRECT position | Policy |
 | --- | --- |

@@ -461,10 +461,6 @@ package final class CFPACEvaluator: PacEvaluator, @unchecked Sendable {
         PACChain.classify(entries, parse: parseRoute)
     }
 
-    package func routeChain(for entries: [String], limit: Int) -> PACChain {
-        PACChain.classify(entries, limit: limit, parse: parseRoute)
-    }
-
     /// Parse one directive in the forms `parseProxyList` produces: `DIRECT`,
     /// `PROXY host:port` and `SOCKS host:port`, with a non-empty host and a
     /// port in 1–65535. Chrome-style `HTTP`/`HTTPS`/`SOCKS4`/`SOCKS5` are not

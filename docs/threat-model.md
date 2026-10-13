@@ -26,10 +26,10 @@ Existing controls: PAC execution uses macOS CFNetwork rather than JavaScriptCore
 
 Usable chains retain only the first `pacUsableRouteLimit` PROXY/DIRECT entries
 (default 32, validated 1–128), in original order. PACChain constructors enforce
-the 128-route ceiling even for alternative adapters; the engine applies the
-configured lower limit before caching or routing. Excess entries cannot promote
-DIRECT or bypass strict mode. The 512-key cache retains at most 512 × configured
-limit routes. Policy changes supersede cached/in-flight answers. Truncation
+the 128-route ceiling even for alternative adapters; the engine caches chains at
+that ceiling and applies the configured lower limit to every answer it hands out.
+Excess entries cannot promote DIRECT or bypass strict mode. The 512-key cache
+retains at most 512 × 128 routes, whatever the configured limit. Truncation
 diagnostics use counts only and one global rate-limit slot per engine, so a PAC
 cannot allocate a per-endpoint diagnostic table or log its raw text. Native
 evaluation output is still transient input; this bound covers retained chains

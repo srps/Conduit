@@ -11,8 +11,9 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 - PAC routing now caps usable fallback entries with file-only `pacUsableRouteLimit`
   (default 32, validated 1–128). Excess routes are counted, never reordered or
   promoted into DIRECT, and diagnosed with coalesced `pac.routes_truncated`
-  events. Changing the limit invalidates cached and in-flight answers; concurrent
-  lookups cannot consume a chain from a different admitted policy generation.
+  events. The cache keeps chains at the 128-route ceiling and each answer is
+  trimmed to the limit configured when it is handed out, so changing the limit
+  takes effect at once without invalidating answers or refetching the PAC.
 - `pac-slow-host` now observes gated evaluation and cache completion directly,
   joins background publication before clock advance, and treats deadline expiry
   as a failure instead of classifying cache misses from elapsed request time.

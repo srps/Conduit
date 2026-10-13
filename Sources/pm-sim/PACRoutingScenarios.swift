@@ -163,7 +163,6 @@ enum PACRoutingScenarios {
         let denied = try await fixture.connect()
         let attempts = refusing.connectAttemptCount
         let excludedHealthy = fixture.upstream!.connectCount == 0
-        let noDirect = fixture.target.connectionCount == 0
         try await fixture.startProxy(strict: false, pacScript: script, verbose: verbose, routeLimit: 3)
         let recovered = try await fixture.connect()
         let reports = fixture.events(named: "pac.routes_truncated")
@@ -173,7 +172,7 @@ enum PACRoutingScenarios {
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: [
                 .init("fallback attempts obey the configured cap", !denied.hasPrefix("HTTP/1.1 200") && attempts == 2 && excludedHealthy),
-                .init("DIRECT beyond the bound is never promoted", noDirect && fixture.target.connectionCount == 0),
+                .init("DIRECT beyond the bound is never promoted under either cap", fixture.target.connectionCount == 0),
                 .init("raising the cap retains the next proxy in order", recovered.hasPrefix("HTTP/1.1 200") && fixture.upstream!.connectCount == 1),
                 .init("truncation reports contain counts without PAC text", reports.count == 2 && reports.allSatisfy { $0.detail?.contains("dropped=") == true && $0.detail?.contains("127.0.0.1") == false }),
             ], notes: ["2,004 native directives; two refusing entries before a healthy proxy; final DIRECT excluded"])

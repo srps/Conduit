@@ -133,11 +133,9 @@ package struct PACChain: Equatable, Sendable {
     /// explicit choice: it is used only where direct fallback is allowed.
     package var leadingDirectPromoted: Bool
 
-    package init(routes: [PACRoute], rejected: PACRejections = [], leadingDirectPromoted: Bool = false,
-                 limit: Int = ProxyConfig.maximumPACUsableRouteLimit) {
-        precondition((1...ProxyConfig.maximumPACUsableRouteLimit).contains(limit))
-        self.routes = Array(routes.prefix(limit))
-        self.droppedRouteCount = max(0, routes.count - limit)
+    package init(routes: [PACRoute], rejected: PACRejections = [], leadingDirectPromoted: Bool = false) {
+        self.routes = Array(routes.prefix(ProxyConfig.maximumPACUsableRouteLimit))
+        self.droppedRouteCount = max(0, routes.count - ProxyConfig.maximumPACUsableRouteLimit)
         self.rejected = rejected
         self.leadingDirectPromoted = leadingDirectPromoted
     }
@@ -147,16 +145,19 @@ package struct PACChain: Equatable, Sendable {
     private static let knownKeywords: Set<String> = ["DIRECT", "PROXY", "SOCKS"]
     private static let maxTypeLength = 16
 
+    /// The first `limit` routes; the rest count as dropped. `limit` is at
+    /// least 1, so a chain with routes keeps at least one.
     package func limited(to limit: Int) -> PACChain {
-        precondition((1...ProxyConfig.maximumPACUsableRouteLimit).contains(limit))
+        precondition(limit >= 1)
         guard routes.count > limit else { return self }
-        var chain = PACChain(routes: routes, rejected: rejected, leadingDirectPromoted: leadingDirectPromoted, limit: limit)
-        chain.droppedRouteCount += droppedRouteCount
+        var chain = self
+        chain.droppedRouteCount += routes.count - limit
+        chain.routes.removeLast(routes.count - limit)
         return chain
     }
 
-    private mutating func append(_ route: PACRoute, limit: Int) {
-        if routes.count < limit {
+    private mutating func append(_ route: PACRoute) {
+        if routes.count < ProxyConfig.maximumPACUsableRouteLimit {
             routes.append(route)
         } else {
             droppedRouteCount += 1
@@ -165,9 +166,7 @@ package struct PACChain: Equatable, Sendable {
 
     /// Split raw directives into usable routes and rejected entries.
     /// `parse` is the adapter's strict single-entry parser.
-    package static func classify(_ entries: [String], limit: Int = ProxyConfig.maximumPACUsableRouteLimit,
-                                 parse: (String) -> PACRoute?) -> PACChain {
-        precondition((1...ProxyConfig.maximumPACUsableRouteLimit).contains(limit))
+    package static func classify(_ entries: [String], parse: (String) -> PACRoute?) -> PACChain {
         var chain = PACChain(routes: [])
         for entry in entries {
             switch parse(entry) {
@@ -175,9 +174,9 @@ package struct PACChain: Equatable, Sendable {
                 if chain.routes.isEmpty, !chain.rejected.isEmpty {
                     chain.leadingDirectPromoted = true
                 }
-                chain.append(.direct, limit: limit)
+                chain.append(.direct)
             case .proxy(let host, let port):
-                chain.append(.proxy(host: host, port: port), limit: limit)
+                chain.append(.proxy(host: host, port: port))
             case .socks:
                 chain.rejected.append(PACRejectedEntry(type: "SOCKS", reason: .unsupported))
             case nil:
@@ -250,6 +249,12 @@ package enum PACDecision: Equatable, Sendable {
         } else {
             self = .routes(chain)
         }
+    }
+
+    /// Trimmed to the first `limit` usable routes (see `PACChain.limited`).
+    package func limited(to limit: Int) -> PACDecision {
+        guard case .routes(let chain) = self else { return self }
+        return .routes(chain.limited(to: limit))
     }
 
     /// Usable routes, or none.
