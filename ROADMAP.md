@@ -31,7 +31,7 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 3. **Bound usable PAC routes ([#93](https://github.com/srps/Conduit/issues/93))
    [Rel, Sec, Eff]** — implemented in the 0.5.5 maintenance branch: configurable
    `pacUsableRouteLimit` defaults to 32 and validates 1–128. A hard chain ceiling,
-   cached/in-flight policy invalidation, retained order and count-only coalesced
+   limit applied when each answer is handed out, retained order and count-only coalesced
    diagnostics are covered by native tests and `pac-route-bounds`. Awaiting review.
 4. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
    — separate identity/name, automatic fake-machine mode, scratch state and
@@ -43,7 +43,7 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
    [Rel, Sim]** — track B is implemented in the maintenance branch: evaluator
    gates and event-loop completion markers replace request-duration heuristics;
    background publication is joined before clock advance. Validation is recorded
-   in `docs/validation-0.5.5.md`. Track A remains open independently; no continuation
+   in PR #141. Track A remains open independently; no continuation
    race fix or new suppression is claimed.
 
 Then implement runtime-scoped auth/link-local failure memories (#31) and spool
