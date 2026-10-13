@@ -71,3 +71,10 @@ generation; a superseded request gets the existing configured-upstreams-only
 answer rather than another policy's chain. Both synchronous and asynchronous
 cache paths have gated regressions, with explicit failure on gate timeout.
 Eight route-bound regressions passed under TSan after this correction.
+
+After the pre-PR race correction, the full normal suite passed **2,068 tests**
+(3 skipped), all **64 normal simulator outcomes** passed, and all workflow
+Python/shell checks passed again. The eight route-bound tests passed under TSan.
+The explicit build and performance checks complete the reviewed branch's local
+pre-push validation; updater code, dependencies and packaging scripts remain the
+same as the already-passed stand-in E2E runs above.
