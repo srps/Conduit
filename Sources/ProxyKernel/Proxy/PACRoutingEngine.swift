@@ -11,6 +11,7 @@ package enum PACRouteInvalidationReason: String, Sendable {
     /// A material network-path change (#101's fields: status, interfaces,
     /// gateways, address families, DNS) other than the first path seen.
     case networkChanged = "network_changed"
+    /// The configured usable-route admission limit changed.
     case routeLimitChanged = "route_limit_changed"
 
     /// Whether the loaded script goes with the answers. A VPN transition
@@ -108,9 +109,8 @@ package final class PACRoutingEngine: @unchecked Sendable {
     }
     private var routeCache: [String: RouteCacheEntry] = [:]
     private var routeCacheOrder: [String] = []
-    /// Bumped by `invalidateRoutes(reason:)`. An evaluation or fetch that
-    /// started under an older generation computed its answer on a network
-    /// that is gone: it is not cached, not handed out, and not installed.
+    /// Bumped by network invalidation or a route-limit change. Answers from
+    /// an older generation are not cached, handed out or installed.
     private var routeGeneration: UInt64 = 0
     private var currentRouteLimit = ProxyConfig.defaultPACUsableRouteLimit
     /// Requests waiting on an evaluation already running for the same cache
@@ -533,18 +533,19 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
     private func reconcileRouteLimit(_ limit: Int) {
         precondition((1...ProxyConfig.maximumPACUsableRouteLimit).contains(limit))
-        let dropped = lock.withLock { () -> Int? in
+        let invalidation = lock.withLock { () -> (routes: Int, script: String, fetch: String)? in
             guard currentRouteLimit != limit else { return nil }
             currentRouteLimit = limit
             routeGeneration &+= 1
+            pendingInvalidation = .routeLimitChanged
             let count = routeCache.count
             routeCache.removeAll()
             routeCacheOrder.removeAll()
-            return count
+            return (count, jsEvaluator == nil ? "none" : "kept", runningRefresh == nil ? "idle" : "restarted")
         }
-        guard let dropped else { return }
+        guard let invalidation else { return }
         let event = RuntimeEvent(kind: .routing, event: "pac.routes_invalidated",
-            detail: "reason=route_limit_changed routes=\(dropped) script=kept fetch=idle limit=\(limit)")
+            detail: "reason=\(PACRouteInvalidationReason.routeLimitChanged.rawValue) routes=\(invalidation.routes) script=\(invalidation.script) fetch=\(invalidation.fetch) limit=\(limit)")
         eventSink?(event)
         logger?.log(.notice, "PAC route limit changed: \(event.detail ?? "")", category: .pac)
     }

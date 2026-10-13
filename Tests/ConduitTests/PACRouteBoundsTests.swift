@@ -96,6 +96,9 @@ final class PACRouteBoundsTests: XCTestCase {
         let engine = PACRoutingEngine(configProvider: { config.withLockedValue { $0 } }, resolver: pac,
             eventSink: { events.append($0) }, now: { clock.withLockedValue { $0 } })
         try await engine.refresh(force: true)
+        XCTAssertTrue(events.events.contains {
+            $0.event == "pac.refreshed" && $0.detail?.contains("after=route_limit_changed") == true
+        })
         let loop = MultiThreadedEventLoopGroup.singleton.next()
         let first = try await engine.decisionFuture(for: "https://target.example/1", host: "target.example", on: loop).get()
         XCTAssertEqual(first.routes.count, 2)
@@ -114,6 +117,12 @@ final class PACRouteBoundsTests: XCTestCase {
         XCTAssertEqual(reports.map(\.detail), [
             "retained=2 dropped=1999 limit=2 suppressed=0",
             "retained=1 dropped=2000 limit=1 suppressed=2",
+        ])
+        let invalidations = events.events.filter { $0.event == "pac.routes_invalidated" }
+        XCTAssertEqual(invalidations.map(\.detail), [
+            "reason=route_limit_changed routes=0 script=none fetch=idle limit=2",
+            "reason=route_limit_changed routes=2 script=kept fetch=idle limit=100",
+            "reason=route_limit_changed routes=1 script=kept fetch=idle limit=1",
         ])
     }
 
