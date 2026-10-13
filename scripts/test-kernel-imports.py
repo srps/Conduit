@@ -24,6 +24,12 @@ with tempfile.TemporaryDirectory(prefix='conduit-import-fence-') as directory:
         ('let child = Process /* a */ . /* b */ init()', False),
         ('let text = "Process (" // literal stays fenced', False),
         ('let url = "http://example"; let n = 1 // Process() in a comment', True),
+        ('let r = #/a/*b/#\nimport Foundation', True),
+        ('let r = #/a/*b/#\nimport Security', False),
+        ('let r = ##/a/#b/##\nlet child = Process()', False),
+        ('let r = #/\n  a/*b\n/#\nimport Security', False),
+        ('/* never closed\nimport Security', False),
+        ('let text = "never closed\nimport Security', False),
     ]
     for code, accepted in cases:
         source.write_text(code)
