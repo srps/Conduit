@@ -30,6 +30,11 @@ with tempfile.TemporaryDirectory(prefix='conduit-import-fence-') as directory:
         ('let r = #/\n  a/*b\n/#\nimport Security', False),
         ('/* never closed\nimport Security', False),
         ('let text = "never closed\nimport Security', False),
+        ('let r = #/\n  a \\/# /*\n/#\nlet child = Process()\n// */', False),
+        ('let child = Process.self.init()', False),
+        ('let child = `Process`()', False),
+        ('typealias Child = Process', False),
+        ('let info = ProcessInfo.processInfo', True),
     ]
     for code, accepted in cases:
         source.write_text(code)
@@ -37,4 +42,4 @@ with tempfile.TemporaryDirectory(prefix='conduit-import-fence-') as directory:
         assert (result.returncode == 0) == accepted, (code, result.stdout, result.stderr)
     source.unlink()
     assert subprocess.run([sys.executable, str(script), directory], capture_output=True).returncode != 0
-print('PASS: kernel allowlist, scoped/attributed imports, comments/literals, Process and missing sources')
+print('PASS: kernel allowlist, scoped/attributed imports, comments/literals/regexes, Process references and missing sources')

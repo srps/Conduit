@@ -53,12 +53,13 @@ def code_only(source, keep_literals=False):
             hashes, quotes, regex_hashes = literal.groups()
             index += len(literal.group())
             if regex_hashes:
-                # Extended regex: no escape can hide the closing delimiter.
-                closing, escape = '/' + regex_hashes, None
+                # Extended regex: a backslash escapes the next character,
+                # including the `/` of an apparent closing delimiter.
+                closing, escape = '/' + regex_hashes, '\\'
             else:
                 closing, escape = quotes + hashes, '\\' + hashes
             while index < len(source) and not source.startswith(closing, index):
-                if escape and source.startswith(escape, index):
+                if source.startswith(escape, index):
                     index += len(escape) + 1
                 else:
                     index += 1
@@ -94,12 +95,12 @@ for file in files:
             line = code.count('\n', 0, match.start()) + 1
             print(f'{file}:{line}: forbidden kernel import: {module}', file=sys.stderr)
             failed = True
-    # Conservative fence, including literals/interpolations: process creation
-    # belongs behind a platform protocol, never in the kernel. Comments are
-    # blanked so `Process /* why */ ()` cannot split the match.
-    for match in re.finditer(r'\bProcess\s*(?:\.\s*init\s*)?\(', uncommented):
+    # The kernel never names `Process` at all, so no spelling of a
+    # construction (`.init`, `.self.init`, backticks, a typealias) gets past.
+    # Literals are checked too, for interpolations; comments are not.
+    for match in re.finditer(r'\bProcess\b', uncommented):
         line = uncommented.count('\n', 0, match.start()) + 1
-        print(f'{file}:{line}: forbidden kernel Process construction', file=sys.stderr)
+        print(f'{file}:{line}: forbidden kernel Process reference', file=sys.stderr)
         failed = True
 if failed:
     sys.exit(1)

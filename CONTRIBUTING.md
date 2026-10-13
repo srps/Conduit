@@ -67,7 +67,7 @@ curl -x http://localhost:3128 https://httpbin.org/ip
 
 ## Project Structure
 
-See [`docs/architecture.md`](docs/architecture.md) for the full module graph. The kernel import allowlist is Foundation, Dispatch, the linked NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. Apple platform frameworks belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`. CI enforces imports and prohibits `Process` construction with [`scripts/check-kernel-imports.py`](scripts/check-kernel-imports.py); linking alone cannot enforce this fence.
+See [`docs/architecture.md`](docs/architecture.md) for the full module graph. The kernel import allowlist is Foundation, Dispatch, the linked NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. Apple platform frameworks belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`. CI enforces imports and rejects any reference to `Process` with [`scripts/check-kernel-imports.py`](scripts/check-kernel-imports.py); linking alone cannot enforce this fence.
 
 ## Before You Submit
 
