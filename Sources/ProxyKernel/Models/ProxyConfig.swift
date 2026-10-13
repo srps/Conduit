@@ -2,6 +2,9 @@
 import Foundation
 
 package struct ProxyConfig: Codable, Equatable {
+    package static let defaultPACUsableRouteLimit = 32
+    package static let maximumPACUsableRouteLimit = 128
+
     /// Bump this whenever a persisted config needs rewriting on load, and add
     /// the matching transform to `ProxyConfigPersistence.migrate(_:from:)`.
     ///
@@ -168,6 +171,11 @@ package struct ProxyConfig: Codable, Equatable {
     package var pacRoutingEnabled: Bool {
         get { routing.pacRoutingEnabled }
         set { routing.pacRoutingEnabled = newValue }
+    }
+
+    package var pacUsableRouteLimit: Int {
+        get { routing.pacUsableRouteLimit }
+        set { routing.pacUsableRouteLimit = newValue }
     }
 
     package var noProxyHosts: [String] {
@@ -401,7 +409,7 @@ package struct ProxyConfig: Codable, Equatable {
         case authMode, username, domain, workstation
         case pendingAuthHandshakeGlobalLimit, pendingAuthHandshakesPerSource
         case upstreams
-        case pacURL, localPACEnabled, localPACPort, pacRoutingEnabled
+        case pacURL, localPACEnabled, localPACPort, pacRoutingEnabled, pacUsableRouteLimit
         case dnsEntries, noProxyHosts, forceProxyHosts
         case healthCheckURL, healthCheckIntervalSeconds
         case stalledConnectionTimeoutSeconds
@@ -463,6 +471,7 @@ package struct ProxyConfig: Codable, Equatable {
             localPACEnabled: try c.decodeIfPresent(Bool.self, forKey: .localPACEnabled) ?? g.routing.localPACEnabled,
             localPACPort: try c.decodeIfPresent(Int.self, forKey: .localPACPort) ?? g.routing.localPACPort,
             pacRoutingEnabled: try c.decodeIfPresent(Bool.self, forKey: .pacRoutingEnabled) ?? g.routing.pacRoutingEnabled,
+            pacUsableRouteLimit: try c.decodeIfPresent(Int.self, forKey: .pacUsableRouteLimit) ?? g.routing.pacUsableRouteLimit,
             noProxyHosts: try c.decodeIfPresent([String].self, forKey: .noProxyHosts) ?? g.routing.noProxyHosts,
             forceProxyHosts: try c.decodeIfPresent([String].self, forKey: .forceProxyHosts) ?? g.routing.forceProxyHosts
         )
@@ -549,6 +558,7 @@ package struct ProxyConfig: Codable, Equatable {
         try c.encode(routing.localPACEnabled, forKey: .localPACEnabled)
         try c.encode(routing.localPACPort, forKey: .localPACPort)
         try c.encode(routing.pacRoutingEnabled, forKey: .pacRoutingEnabled)
+        try c.encode(routing.pacUsableRouteLimit, forKey: .pacUsableRouteLimit)
         try c.encode(routing.noProxyHosts, forKey: .noProxyHosts)
         try c.encode(routing.forceProxyHosts, forKey: .forceProxyHosts)
 

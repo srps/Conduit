@@ -60,6 +60,7 @@ enum PMSim {
               network-path-churn      20 identical path updates reset nothing; a gateway roam resets once
               vpn-pac-refresh         VPN connect/disconnect drops cached PAC answers; first request uses the new PAC
               pac-slow-host           slow PAC host: answered from cache, re-evaluated in the background, warning rate-limited
+              pac-route-bounds        configurable PAC cap bounds real fallback attempts without promoting DIRECT
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
               websocket-upgrade       101 upgrade relayed, frames flow both ways
               connect-early-direct    CONNECT with early bytes through a direct tunnel
@@ -209,6 +210,7 @@ enum PMSim {
         "network-path-churn",
         "vpn-pac-refresh",
         "pac-slow-host",
+        "pac-route-bounds",
         "upstream-flap",
         "websocket-upgrade",
         "connect-early-direct",
@@ -322,6 +324,8 @@ enum PMSim {
             return [try await VPNPACScenarios.refreshOnTransition(verbose: verbose)]
         case "pac-slow-host":
             return [try await PACRevalidationScenarios.slowHost(verbose: verbose)]
+        case "pac-route-bounds":
+            return [try await PACRoutingScenarios.routeBounds(verbose: verbose)]
         case "upstream-flap":
             return [try await UpstreamFlapScenarios.upstreamFlap(verbose: verbose)]
         case "websocket-upgrade":

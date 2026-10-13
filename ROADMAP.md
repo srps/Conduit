@@ -23,14 +23,16 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
    connected/flap-recovery probe fails: the reconnect path stops the retry timer
    but restores monitors only on success. The fix reconciles both monitors after
    the probe; `vpn-reconnect-reprobe` uses the real 15-second cadence and preserves
-   its established CONNECT. This work is prepared locally, not installed.
+   its established CONNECT. Merged in #140; awaiting the 0.5.5 release, not installed.
 2. **Kernel boundary guardrail ([#77](https://github.com/srps/Conduit/issues/77))
-   [Sec, OSS]** — small, independent CI work: enforce the import/Process fence and
-   make the documentation agree. Prefer this to another broad file reshuffle.
+   [Sec, OSS]** — implemented in the 0.5.5 maintenance branch: the allowlist and
+   Process fence run before the CI build, with negative fixtures and consistent
+   architecture/contributor guidance. Awaiting review.
 3. **Bound usable PAC routes ([#93](https://github.com/srps/Conduit/issues/93))
-   [Rel, Sec, Eff]** — real remaining collection/fallback bound. Define the cap
-   and DIRECT-at/beyond-boundary behavior before implementation; preserve retained
-   order and emit bounded truncation diagnostics.
+   [Rel, Sec, Eff]** — implemented in the 0.5.5 maintenance branch: configurable
+   `pacUsableRouteLimit` defaults to 32 and validates 1–128. A hard chain ceiling,
+   limit applied when each answer is handed out, retained order and count-only coalesced
+   diagnostics are covered by native tests and `pac-route-bounds`. Awaiting review.
 4. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
    — separate identity/name, automatic fake-machine mode, scratch state and
    ad-hoc signing. Reject installation and never share the production path.
@@ -38,9 +40,11 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
    identity and generated repeated prompts, and duplicate bundle IDs made status
    inspection ambiguous. No private-key ACL change is needed.
 5. **Sanitizer evidence ([#118](https://github.com/srps/Conduit/issues/118))
-   [Rel, Sim]** — keep the continuation-race reduction and PAC timing fixture
-   cleanup as separate acceptance tracks. No confirmed production race or broad
-   suppression is implied by the current stacks.
+   [Rel, Sim]** — track B is implemented in the maintenance branch: evaluator
+   gates and event-loop completion markers replace request-duration heuristics;
+   background publication is joined before clock advance. Validation is recorded
+   in PR #141. Track A remains open independently; no continuation
+   race fix or new suppression is claimed.
 
 Then implement runtime-scoped auth/link-local failure memories (#31) and spool
 ownership/budgets (#81, coordinated with path policy #82). Continue main-actor
@@ -57,9 +61,9 @@ to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
 ## Proposed release scope
 
 **0.5.5 — reconnect recovery and bounded maintenance.** Include the reprobe fix
-above. Add #77's CI boundary check, #93's usable PAC-route bound and #118 track B's
-deterministic PAC fixture in separate reviewed changes if their acceptance gates
-are complete. Do not delay a needed recovery release for unfinished cleanup.
+above. #77's CI boundary check, #93's configurable usable PAC-route bound and
+#118 track B's deterministic PAC fixture are implemented in separate maintenance
+commits awaiting review. Do not delay a needed recovery release for unfinished cleanup.
 For #93, document the capacity and preserve retained route order, strict-mode
 semantics and DIRECT precedence; a trailing DIRECT beyond the cap must not be
 promoted. Confirm the bound with oversized chains, boundary cases, cache/fallback

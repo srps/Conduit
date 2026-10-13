@@ -708,6 +708,13 @@ package final class ProxyOrchestrator {
             logStore.log(.notice, "Config reload: routing rules applied (no restart).", category: .general)
         }
 
+        if diff.pacRouteLimitChanged {
+            // Read by the PAC engine on every answer; nothing to refresh.
+            let detail = "limit=\(newConfig.pacUsableRouteLimit)"
+            emitEvent(.config, "config.pac_route_limit_changed", detail: detail)
+            logStore.log(.notice, "Config reload: PAC route limit updated (\(detail)).", category: .pac)
+        }
+
         if diff.dnsChanged && snapshot.dnsRunState == .running {
             emitEvent(.config, "config.dns_restart")
             logStore.log(.notice, "Config reload: DNS config changed, restarting DNS forwarder.", category: .network)

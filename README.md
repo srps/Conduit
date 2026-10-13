@@ -82,7 +82,7 @@ Every change is measured against these axes. A proposed feature either lands und
 
 - Fetches and caches corporate PAC files (supports `http://` PAC URLs via ATS-safe curl fallback)
 - Evaluates `FindProxyForURL()` through macOS CFNetwork (Safari-parity, OS-patched PAC engine)
-- Respects full PAC fallback chains (`PROXY -> PROXY -> DIRECT`): if the upstream proxy fails, automatically falls back to DIRECT when the PAC chain allows it
+- Preserves PAC fallback-chain order (`PROXY -> PROXY -> DIRECT`) within the configurable usable-route cap (default 32, range 1–128); DIRECT is used only when policy permits and retained in the chain. See [PAC route admission](docs/pac-route-bounds.md).
 - Native PAC DNS resolution: `dnsResolve()`, `myIpAddress()`, and `isResolvable()` implemented via Swift callbacks with per-evaluation DNS cache. `isInNet()` subnet checks work correctly for hostnames
 - PAC helper functions: `isPlainHostName`, `localHostOrDomainIs`, `dnsDomainLevels`, `shExpMatch`, `dnsDomainIs` with proper semantics
 - Upstream PAC routing toggle: enable/disable PAC-based internal routing without clearing the PAC URL

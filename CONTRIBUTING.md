@@ -67,7 +67,7 @@ curl -x http://localhost:3128 https://httpbin.org/ip
 
 ## Project Structure
 
-See [`docs/architecture.md`](docs/architecture.md) for the full module graph. The key invariant: `ProxyKernel` has **zero** Apple-framework imports beyond Foundation/Dispatch. The build enforces this - if you accidentally import `Security` or `SystemConfiguration` in a kernel file, `pm-proxy` will fail to link.
+See [`docs/architecture.md`](docs/architecture.md) for the full module graph. The kernel import allowlist is Foundation, Dispatch, the linked NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. Apple platform frameworks belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`. CI enforces imports with [`scripts/check-kernel-imports.py`](scripts/check-kernel-imports.py), which asks the Swift compiler what each file imports in debug and release; linking alone cannot enforce this fence. Naming `Process` in the kernel does not compile, and the script rejects a qualified `Foundation.Process` in the built object.
 
 ## Before You Submit
 
@@ -85,7 +85,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the full module graph. Th
 
 4. **Never commit secrets.** No credentials, tokens, `.env` files, or unmasked auth headers in source or logs.
 
-5. **Respect the import fence.** `Sources/ProxyKernel/` must not import any Apple framework beyond Foundation and Dispatch. Platform-specific code belongs in `Sources/PlatformMac/`.
+5. **Respect the import fence.** After `swift build`, run `DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" python3 scripts/check-kernel-imports.py`. The allowed imports are Foundation, Dispatch, the linked NIO modules, Darwin/Glibc and `ConduitShared` for grammar. Platform capabilities belong behind protocols in `ProxyAuth`, `ProxyPAC` or `PlatformMac`.
 
 ## PR Process
 

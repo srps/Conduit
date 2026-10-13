@@ -43,6 +43,23 @@ final class ConfigHotReloadTests: XCTestCase {
                        "Routing change should not change the bound port (no restart)")
     }
 
+    @MainActor
+    func testPACRouteLimitChangeDoesNotRefreshPACRouting() async throws {
+        let orchestrator = try await makeRunningOrchestrator()
+        defer { Task { await orchestrator.stopProxy() } }
+
+        let oldConfig = orchestrator.config
+        var newConfig = oldConfig
+        newConfig.pacUsableRouteLimit = 7
+        await orchestrator.applyConfigChange(newConfig)
+
+        let events = orchestrator.eventLog.events
+        XCTAssertEqual(orchestrator.config.pacUsableRouteLimit, 7)
+        XCTAssertTrue(events.contains { $0.event == "config.pac_route_limit_changed" && $0.detail == "limit=7" })
+        XCTAssertFalse(events.contains { $0.event == "config.routing_changed" })
+        XCTAssertFalse(ConfigDiff(old: oldConfig, new: newConfig).localPACChanged)
+    }
+
     // MARK: - Logging change is immediate
 
     @MainActor

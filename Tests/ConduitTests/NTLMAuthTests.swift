@@ -236,6 +236,24 @@ final class NTLMAuthTests: XCTestCase {
         XCTAssertEqual(truncated.securityBufferData(offsetFieldAt: 0), Data())
     }
 
+    func testUnalignedSecurityBufferStorageDecodesLengthOffsetAndPayload() {
+        let storage = UnsafeMutableRawPointer.allocate(byteCount: 65, alignment: 8)
+        defer { storage.deallocate() }
+        storage.initializeMemory(as: UInt8.self, repeating: 0, count: 65)
+        let bytes = storage.advanced(by: 1)
+        let headerAndPayload: [UInt8] = [4, 0, 4, 0, 8, 0, 0, 0, 0xAA, 0xBB, 0xCC, 0xDD]
+        headerAndPayload.withUnsafeBytes { raw in
+            bytes.copyMemory(from: raw.baseAddress!, byteCount: raw.count)
+        }
+        let data = Data(bytesNoCopy: bytes, count: 64, deallocator: .none)
+        XCTAssertEqual(data.withUnsafeBytes { Int(bitPattern: $0.baseAddress!) % 4 }, 1,
+                       "fixture must exercise an unaligned base, including aligned wire offsets")
+        XCTAssertEqual(data.uint16LE(at: 0), 4)
+        XCTAssertEqual(data.uint16LE(at: 2), 4)
+        XCTAssertEqual(data.uint32LE(at: 4), 8)
+        XCTAssertEqual(data.securityBufferData(offsetFieldAt: 0), Data([0xAA, 0xBB, 0xCC, 0xDD]))
+    }
+
     // MARK: - Helpers
 
     private func testCredentials() -> ProxyCredentials {
