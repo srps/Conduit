@@ -4,7 +4,7 @@ The portable product library: proxy, PAC routing engine, DNS forwarding, tunnels
 
 ## Boundaries
 
-- Import only Foundation, Dispatch, the NIO modules, Darwin/Glibc and `ConduitShared`'s grammar types. Apple platform frameworks (`Security`, `GSS`, `CryptoKit`, `SystemConfiguration`, `Network`, `os`, `AppKit`, `SwiftUI` and the like) belong in `ProxyAuth`, `ProxyPAC` or `PlatformMac` behind a protocol, even though Linux portability is not a current goal. CI enforces the allowlist and rejects any reference to `Process` with [`scripts/check-kernel-imports.py`](../../scripts/check-kernel-imports.py); linking alone cannot enforce it.
+- Import only Foundation, Dispatch, the NIO modules, Darwin/Glibc and `ConduitShared`'s grammar types. Apple platform frameworks (`Security`, `GSS`, `CryptoKit`, `SystemConfiguration`, `Network`, `os`, `AppKit`, `SwiftUI` and the like) belong in `ProxyAuth`, `ProxyPAC` or `PlatformMac` behind a protocol, even though Linux portability is not a current goal. CI enforces the allowlist with [`scripts/check-kernel-imports.py`](../../scripts/check-kernel-imports.py), which asks the compiler for each file's imports in debug and release; linking alone cannot enforce it. `Support/ProcessUnavailable.swift` makes naming `Process` a compile error, and the same script rejects a qualified `Foundation.Process` in the built object.
 - No machine side effects: no `Process`, `networksetup`, env files, `/etc/resolver`, login items or helper calls. Those live in `PlatformMac` behind a protocol.
 - Persistence paths come from `Support/RuntimeEnvironment.swift`, not from ambient process state. Keep it about files and locations. `PM_CONFIG_DIR` is read only at the executable boundary.
 

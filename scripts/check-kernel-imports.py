@@ -1,18 +1,37 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""ProxyKernel import and Process fence.
+"""ProxyKernel import and Process fence. Run after `swift build`.
 
-The Swift compiler does the parsing: `-emit-imported-modules` lists what each
-file imports with `#if` evaluated for the build target, and `-dump-parse`
-shows every identifier outside comments and string text. A file the compiler
-cannot parse fails the fence. Needs `xcrun swiftc` (set DEVELOPER_DIR).
+The compiler does the parsing, so no Swift syntax can hide code from it:
+
+- Imports: `swiftc -frontend -emit-imported-modules` lists each file's
+  imports with `#if` evaluated, once per configuration SwiftPM builds.
+- Process: `Sources/ProxyKernel/Support/ProcessUnavailable.swift` makes an
+  unqualified `Process` a compile error. A qualified `Foundation.Process`
+  still compiles, so the built kernel object must not reference NSTask.
+
+A file the compiler cannot parse fails. Needs `xcrun` (set DEVELOPER_DIR).
+Usage: check-kernel-imports.py [SOURCE_DIR] [--configuration debug|release]
+                               [--objects OBJECT...]
+Without --objects, checks the kernel object of that configuration's build.
 """
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / 'Sources' / 'ProxyKernel'
+repository = Path(__file__).resolve().parent.parent
+arguments = sys.argv[1:]
+objects = None
+configuration = 'debug'
+if '--objects' in arguments:
+    split = arguments.index('--objects')
+    arguments, objects = arguments[:split], [Path(o) for o in arguments[split + 1:]]
+if '--configuration' in arguments:
+    split = arguments.index('--configuration')
+    configuration = arguments[split + 1]
+    del arguments[split:split + 2]
+root = Path(arguments[0]) if arguments else repository / 'Sources' / 'ProxyKernel'
 files = sorted(root.rglob('*.swift'))
 if not files:
     sys.exit(f'No Swift sources found in {root}')
@@ -23,40 +42,43 @@ allowed = {
     'Foundation', 'Dispatch', 'Darwin', 'Glibc', 'ConduitShared',
     'NIOCore', 'NIOPosix', 'NIOHTTP1', 'NIOConcurrencyHelpers',
 }
-# The package builds in Swift 6 mode, which changes what parses as a regex.
-language_mode = ['-swift-version', '6']
-# Any identifier `Process` (`name=`, `field=`, `id=`, a declaration or a
-# module selector), but not a string's `value=`.
-process_reference = re.compile(r'(?<!value=)"(?:\w+::)?Process"')
-dump_location = re.compile(r'range=\[[^\]]*?:(\d+):\d+')
-
-def compile_step(arguments, file):
-    command = ['xcrun', 'swiftc'] + arguments + language_mode + [str(file)]
-    result = subprocess.run(command, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f'{file}: the compiler could not parse it\n{result.stderr}', file=sys.stderr)
-        return None
-    return result.stdout
+# The compilation conditions of SwiftPM's debug and release builds, in the
+# package's Swift 6 language mode.
+configurations = {
+    'debug': ['-D', 'SWIFT_PACKAGE', '-D', 'DEBUG'],
+    'release': ['-D', 'SWIFT_PACKAGE'],
+}
+if '.define(' in (repository / 'Package.swift').read_text():
+    sys.exit('Package.swift defines compilation conditions; add them to the fence configurations')
 
 failed = False
 for file in files:
-    imported = compile_step(['-frontend', '-emit-imported-modules', '-o', '-'], file)
-    dump = compile_step(['-dump-parse'], file)
-    if imported is None or dump is None:
-        failed = True
-        continue
-    for module in imported.split():
-        if module not in allowed:
-            print(f'{file}: forbidden kernel import: {module}', file=sys.stderr)
+    for name, defines in configurations.items():
+        command = ['xcrun', 'swiftc', '-frontend', '-emit-imported-modules', '-swift-version', '6',
+                   *defines, '-o', '-', str(file)]
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f'{file}: the compiler could not parse it ({name})\n{result.stderr}', file=sys.stderr)
             failed = True
-    # The kernel never names Process, so no spelling of a construction
-    # (`.init`, `.self.init`, backticks, `Foundation::`, a typealias) passes.
-    for match in process_reference.finditer(dump):
-        # The dump gives ranges per declaration or statement, not per name.
-        lines = dump_location.findall(dump, 0, match.start())
-        near = f' near line {lines[-1]}' if lines else ''
-        print(f'{file}: forbidden kernel Process reference{near}', file=sys.stderr)
+            continue
+        for module in result.stdout.split():
+            if module not in allowed:
+                print(f'{file}: forbidden kernel import ({name}): {module}', file=sys.stderr)
+                failed = True
+
+if objects is None:
+    bin_path = subprocess.run(['xcrun', 'swift', 'build', '-c', configuration, '--show-bin-path'], cwd=repository,
+                              capture_output=True, text=True, check=True).stdout.strip()
+    objects = [Path(bin_path) / 'ProxyKernel.o'] + sorted(Path(bin_path).glob('ProxyKernel.build/*.o'))
+    objects = [o for o in objects if o.exists()]
+    if not objects:
+        sys.exit(f'No ProxyKernel object files under {bin_path}; run swift build -c {configuration} first')
+for obj in objects:
+    undefined = subprocess.run(['nm', '-u', str(obj)], capture_output=True, text=True, check=True).stdout
+    if '_OBJC_CLASS_$_NSTask' in undefined.split():
+        print(f'{obj}: the kernel references Foundation.Process (NSTask)', file=sys.stderr)
         failed = True
+
 if failed:
     sys.exit(1)
-print(f'Kernel import/Process fence passed ({len(files)} Swift files)')
+print(f'Kernel import/Process fence passed ({len(files)} Swift files, {len(objects)} object files)')
