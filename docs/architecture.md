@@ -34,7 +34,7 @@ LOC and file counts approximate; the source-of-truth is `swift test` and `find S
 
 ## Target Dependency Graph
 
-The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. CI enforces the kernel import and process-construction fence with [`scripts/check-kernel-imports.py`](../scripts/check-kernel-imports.py). Linking alone cannot catch a stray Apple-framework import; Linux portability is not a current goal.
+The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. CI enforces the kernel import and `Process` fence, parsed by the Swift compiler, with [`scripts/check-kernel-imports.py`](../scripts/check-kernel-imports.py). Linking alone cannot catch a stray Apple-framework import; Linux portability is not a current goal.
 
 ```mermaid
 graph TD
@@ -402,9 +402,10 @@ Test doubles mirror the protocol surface. The platform ones live in `Sources/Pla
 
 ## CI invariants
 
-CI runs the kernel import/Process fence and its negative fixtures before building:
+CI runs the kernel import/Process fence and its negative fixtures before building. Both call `xcrun swiftc`:
 
 ```sh
+export DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"
 python3 scripts/check-kernel-imports.py
 python3 scripts/test-kernel-imports.py
 ```

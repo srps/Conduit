@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
+"""ProxyKernel import and Process fence.
+
+The Swift compiler does the parsing: `-emit-imported-modules` lists what each
+file imports with `#if` evaluated for the build target, and `-dump-parse`
+shows every identifier outside comments and string text. A file the compiler
+cannot parse fails the fence. Needs `xcrun swiftc` (set DEVELOPER_DIR).
+"""
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -9,98 +17,45 @@ files = sorted(root.rglob('*.swift'))
 if not files:
     sys.exit(f'No Swift sources found in {root}')
 
-# Blank comments, and literals unless `keep_literals`, keeping newlines for
-# locations. Nested block comments, raw/multiline strings and extended regex
-# literals (`#/…/#`) are handled explicitly. A comment or literal still open at
-# the end of the file fails the fence: an unrecognised construct must not
-# blank the code after it.
-literal_start = re.compile(r'(\#*)("""|")|(\#+)/')
-
-class Unterminated(Exception):
-    pass
-
-def code_only(source, keep_literals=False):
-    chars = list(source)
-    index = 0
-    def erase(start, end):
-        for pos in range(start, end):
-            if chars[pos] != '\n':
-                chars[pos] = ' '
-    while index < len(source):
-        start = index
-        if source.startswith('//', index):
-            end = source.find('\n', index)
-            index = len(source) if end < 0 else end
-        elif source.startswith('/*', index):
-            index += 2
-            depth = 1
-            while index < len(source) and depth:
-                if source.startswith('/*', index):
-                    depth += 1
-                    index += 2
-                elif source.startswith('*/', index):
-                    depth -= 1
-                    index += 2
-                else:
-                    index += 1
-            if depth:
-                raise Unterminated(source.count('\n', 0, start) + 1, 'block comment')
-        else:
-            literal = literal_start.match(source, index)
-            if not literal:
-                index += 1
-                continue
-            hashes, quotes, regex_hashes = literal.groups()
-            index += len(literal.group())
-            if regex_hashes:
-                # Extended regex: a backslash escapes the next character,
-                # including the `/` of an apparent closing delimiter.
-                closing, escape = '/' + regex_hashes, '\\'
-            else:
-                closing, escape = quotes + hashes, '\\' + hashes
-            while index < len(source) and not source.startswith(closing, index):
-                if source.startswith(escape, index):
-                    index += len(escape) + 1
-                else:
-                    index += 1
-            if index >= len(source):
-                raise Unterminated(source.count('\n', 0, start) + 1, 'literal')
-            index += len(closing)
-            if keep_literals:
-                continue
-        erase(start, index)
-    return ''.join(chars)
-
 # The NIO products ProxyKernel links in Package.swift, by name: a prefix
 # match would admit NIOTransportServices, which brings in Network.
 allowed = {
     'Foundation', 'Dispatch', 'Darwin', 'Glibc', 'ConduitShared',
     'NIOCore', 'NIOPosix', 'NIOHTTP1', 'NIOConcurrencyHelpers',
 }
-imports = re.compile(r'\bimport\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?([^\s.;{}]+)')
+# The package builds in Swift 6 mode, which changes what parses as a regex.
+language_mode = ['-swift-version', '6']
+# Any identifier `Process` (`name=`, `field=`, `id=`, a declaration or a
+# module selector), but not a string's `value=`.
+process_reference = re.compile(r'(?<!value=)"(?:\w+::)?Process"')
+dump_location = re.compile(r'range=\[[^\]]*?:(\d+):\d+')
+
+def compile_step(arguments, file):
+    command = ['xcrun', 'swiftc'] + arguments + language_mode + [str(file)]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f'{file}: the compiler could not parse it\n{result.stderr}', file=sys.stderr)
+        return None
+    return result.stdout
+
 failed = False
 for file in files:
-    source = file.read_text()
-    try:
-        code = code_only(source)
-        uncommented = code_only(source, keep_literals=True)
-    except Unterminated as error:
-        line, construct = error.args
-        print(f'{file}:{line}: unterminated {construct}; cannot check the rest of the file', file=sys.stderr)
+    imported = compile_step(['-frontend', '-emit-imported-modules', '-o', '-'], file)
+    dump = compile_step(['-dump-parse'], file)
+    if imported is None or dump is None:
         failed = True
         continue
-    for match in imports.finditer(code):
-        module = match.group(1).strip('`')
+    for module in imported.split():
         if module not in allowed:
-            line = code.count('\n', 0, match.start()) + 1
-            print(f'{file}:{line}: forbidden kernel import: {module}', file=sys.stderr)
+            print(f'{file}: forbidden kernel import: {module}', file=sys.stderr)
             failed = True
-    # The kernel never names `Process` at all, so no spelling of a
-    # construction (`.init`, `.self.init`, backticks, a typealias) gets past.
-    # Literals are checked too, for interpolations; comments are not.
-    for match in re.finditer(r'\bProcess\b', uncommented):
-        line = uncommented.count('\n', 0, match.start()) + 1
-        print(f'{file}:{line}: forbidden kernel Process reference', file=sys.stderr)
+    # The kernel never names Process, so no spelling of a construction
+    # (`.init`, `.self.init`, backticks, `Foundation::`, a typealias) passes.
+    for match in process_reference.finditer(dump):
+        # The dump gives ranges per declaration or statement, not per name.
+        lines = dump_location.findall(dump, 0, match.start())
+        near = f' near line {lines[-1]}' if lines else ''
+        print(f'{file}: forbidden kernel Process reference{near}', file=sys.stderr)
         failed = True
 if failed:
     sys.exit(1)

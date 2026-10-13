@@ -20,6 +20,8 @@ jobs:
     steps:
     - uses: actions/checkout@v6
     - name: Kernel import and process fence
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
       run: |
         python3 scripts/check-kernel-imports.py
         python3 scripts/test-kernel-imports.py

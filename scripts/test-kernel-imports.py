@@ -8,33 +8,32 @@ from pathlib import Path
 script = Path(__file__).with_name('check-kernel-imports.py')
 with tempfile.TemporaryDirectory(prefix='conduit-import-fence-') as directory:
     source = Path(directory) / 'Fixture.swift'
+    # The compiler decides what is code; these pin the cases that broke the
+    # earlier hand-written lexer, plus the allowlist and Process spellings.
     cases = [
         ('import Foundation\nimport Dispatch\nimport NIOHTTP1\nimport Darwin\nimport Glibc\nimport ConduitShared\n', True),
         ('/* import Security /* nested */ */\nlet text = #"import Network"#\nimport Foundation', True),
         ('#if os(macOS)\n  @preconcurrency import Security\n#endif', False),
+        ('#if NEVER\nimport Security\n#endif\nimport Foundation', True),
         ('@_exported import struct Security.SecKey', False),
         ('import UnlistedModule', False),
         ('import NIOTransportServices', False),
         ('import `Security`', False),
         ('import 模块', False),
         ('let child = Foundation.Process ()', False),
-        ('let child = Process.init()', False),
+        ('let child = Foundation::Process()', False),
         ('let child = Process /* explanation */ ()', False),
-        ('let child = Process // explanation\n    ()', False),
         ('let child = Process /* a */ . /* b */ init()', False),
-        ('let text = "Process (" // literal stays fenced', False),
-        ('let url = "http://example"; let n = 1 // Process() in a comment', True),
-        ('let r = #/a/*b/#\nimport Foundation', True),
-        ('let r = #/a/*b/#\nimport Security', False),
-        ('let r = ##/a/#b/##\nlet child = Process()', False),
-        ('let r = #/\n  a/*b\n/#\nimport Security', False),
-        ('/* never closed\nimport Security', False),
-        ('let text = "never closed\nimport Security', False),
-        ('let r = #/\n  a \\/# /*\n/#\nlet child = Process()\n// */', False),
         ('let child = Process.self.init()', False),
         ('let child = `Process`()', False),
         ('typealias Child = Process', False),
+        ('let text = "\\(Process())"', False),
+        ('let text = "Process (" // Process() in a comment', True),
         ('let info = ProcessInfo.processInfo', True),
+        ('let r = #/a/*b/#\nimport Security', False),
+        ('let r = #/\n  a \\/# /*\n/#\nlet child = Process()\n// */', False),
+        ('/* never closed\nimport Security', False),
+        ('let text = "never closed\nimport Security', False),
     ]
     for code, accepted in cases:
         source.write_text(code)
@@ -42,4 +41,4 @@ with tempfile.TemporaryDirectory(prefix='conduit-import-fence-') as directory:
         assert (result.returncode == 0) == accepted, (code, result.stdout, result.stderr)
     source.unlink()
     assert subprocess.run([sys.executable, str(script), directory], capture_output=True).returncode != 0
-print('PASS: kernel allowlist, scoped/attributed imports, comments/literals/regexes, Process references and missing sources')
+print('PASS: compiler-parsed kernel imports, Process references, parse failures and missing sources')
