@@ -40,6 +40,24 @@ final class ConnectFailureEventTests: XCTestCase {
         )
     }
 
+    /// #146: the line names the target the coalescer keys on, and the
+    /// upstream when one is known, with the query cut by the sanitizer.
+    func testExchangeFailureMessageNamesTargetAndUpstream() {
+        let target = SensitiveValueSanitizer.observableTarget("http://example.test/path?token=secret")
+        XCTAssertEqual(
+            HTTPProxyHandler.exchangeFailureMessage(
+                target: target, upstream: "upstream.example:8080", error: ConnectionPoolError.upstreamResponseTimedOut
+            ),
+            "Proxy exchange for http://example.test/path?<redacted> via upstream.example:8080 failed: Timed out waiting for the upstream proxy to respond."
+        )
+        XCTAssertEqual(
+            HTTPProxyHandler.exchangeFailureMessage(
+                target: "http://example.test/", upstream: nil, error: ConnectionPoolError.noUpstreamsConfigured
+            ),
+            "Proxy exchange for http://example.test/ failed: No upstream proxy servers are enabled."
+        )
+    }
+
     func testAnEventOfNilIsLoggedButNotEmitted() {
         let logger = RecordingLogSink(minLevel: .info)
         let events = NIOLockedValueBox<[RuntimeEvent]>([])

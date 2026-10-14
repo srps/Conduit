@@ -347,6 +347,67 @@ final class PACRoutingTableTests: XCTestCase {
         XCTAssertEqual(servers.origin.accepted, 0)
         await fixture.stop()
     }
+
+    // MARK: - #146: one report per failed exchange, naming the target
+
+    /// The upstream takes the request and closes without answering. The
+    /// pool leaves the report to the handler, so the failure is one line,
+    /// derived from `upstream.exchange_failed`, that names the target.
+    func testFailedExchangeIsReportedOnceAndNamesTheTarget() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let upstream = SilentCloseUpstream()
+        try await upstream.start()
+        defer { upstream.stop() }
+        let logger = RecordingLogSink(minLevel: .info)
+        let fixture = try await ProxyFixture.start(
+            servers: servers, strict: true, pac: nil, upstreamPort: upstream.port, logger: logger
+        )
+
+        XCTAssertEqual(try fixture.request(.http, target: servers.origin.port), .badGateway)
+        let target = "http://127.0.0.1:\(servers.origin.port)/table"
+        let lines = logger.entries().filter { $0.message.localizedCaseInsensitiveContains("exchange") }
+        XCTAssertEqual(lines.count, 1, "\(lines.map(\.message))")
+        XCTAssertTrue(lines.first?.message.hasPrefix("Proxy exchange for \(target) via 127.0.0.1:\(upstream.port) failed: ") ?? false,
+                      "\(lines.map(\.message))")
+        XCTAssertEqual(fixture.events(named: "upstream.exchange_failed").count, 1)
+        XCTAssertEqual(servers.origin.accepted, 0)
+        await fixture.stop()
+    }
+}
+
+/// Reads one request head, then closes without a response.
+private final class SilentCloseUpstream: @unchecked Sendable {
+    private var channel: Channel?
+
+    var port: Int { channel?.localAddress?.port ?? 0 }
+
+    func start() async throws {
+        channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(SilentCloseHandler())
+            }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+    }
+
+    func stop() {
+        channel?.close(promise: nil)
+    }
+}
+
+private final class SilentCloseHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+
+    private var pending = ""
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        pending += buffer.readString(length: buffer.readableBytes) ?? ""
+        guard pending.contains("\r\n\r\n") else { return }
+        context.close(promise: nil)
+    }
 }
 
 // MARK: - Paths and listeners
@@ -599,6 +660,7 @@ private final class ProxyFixture: @unchecked Sendable {
         transitions: RoutingTransitionSignal? = nil,
         settleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow,
         now: @escaping @Sendable () -> Date = { Date() },
+        logger: any LogSink = DiscardingLogSink(),
         onEvent: @escaping @Sendable (RuntimeEvent) -> Void = { _ in },
         onRequestCompleted: @escaping @Sendable (RequestOutcome) -> Void = { _ in }
     ) async throws -> ProxyFixture {
@@ -647,7 +709,7 @@ private final class ProxyFixture: @unchecked Sendable {
             now: now, routingTransitions: transitions, strictHintSettleWindow: settleWindow, eventSink: sink
         )
         let server = LocalProxyServer(
-            logger: DiscardingLogSink(),
+            logger: logger,
             configProvider: { fixed },
             directModeProvider: { directMode.withLockedValue { ($0.isDirect, $0) } },
             authenticatorProvider: { _ in TableAuthenticator() },
