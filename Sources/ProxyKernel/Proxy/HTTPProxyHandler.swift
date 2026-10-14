@@ -632,13 +632,18 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let upstreamFailureLevel = Self.upstreamFailureLogLevel(for: directCause)
         nonisolated(unsafe) let ctx = context
         let clientEL = ctx.eventLoop
-        pool.streamingExchange(
+        let attempt = pool.startStreamingExchange(
             head: head,
             requestBody: body,
             clientChannel: ctx.channel,
             authSource: authSource,
             forcedProxy: pacPlan.proxyChain.first
         )
+        // The upstream this exchange dials, fixed at selection: the pool's
+        // last selection may belong to a concurrent request by the time a
+        // failure is reported.
+        let exchangeUpstream = attempt.upstream?.endpoint
+        attempt.result
             .hop(to: clientEL)
             .whenComplete { result in
                 switch result {
@@ -665,11 +670,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     body?.cleanup()
                 case .failure(let error):
                     // The only report of this failure: the pool leaves it to
-                    // its caller. The upstream is the PAC-forced one or the
-                    // pool's last selection, which is the one just tried.
+                    // its caller.
                     let observedTarget = SensitiveValueSanitizer.observableTarget(head.uri)
-                    let upstream = pacPlan.proxyChain.first?.endpoint ?? self.pool.activeUpstream()
-                    let message = Self.exchangeFailureMessage(target: observedTarget, upstream: upstream, error: error)
+                    let message = Self.exchangeFailureMessage(target: observedTarget, upstream: exchangeUpstream, error: error)
                     if Self.shouldFallbackToDirectAfterProxyExchangeFailure(
                         hasDirectFallback: hasDirectFallback,
                         error: error

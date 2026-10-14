@@ -134,6 +134,13 @@ package struct StreamingExchangeResult {
     }
 }
 
+/// An exchange in flight and the upstream it was given; `nil` only when no
+/// upstream is enabled, and then `result` fails with `noUpstreamsConfigured`.
+package struct StreamingExchangeAttempt {
+    package let upstream: UpstreamProxy?
+    package let result: EventLoopFuture<StreamingExchangeResult>
+}
+
 package final class PooledUpstreamConnection: @unchecked Sendable {
     package let id = UUID()
     package let proxy: UpstreamProxy
@@ -257,18 +264,39 @@ package final class ConnectionPool: @unchecked Sendable {
         authSource: String? = nil,
         forcedProxy: UpstreamProxy? = nil
     ) -> EventLoopFuture<StreamingExchangeResult> {
+        startStreamingExchange(
+            head: head,
+            requestBody: requestBody,
+            clientChannel: clientChannel,
+            authSource: authSource,
+            forcedProxy: forcedProxy
+        ).result
+    }
+
+    /// Starts an exchange and says which upstream it dials. A caller that
+    /// reports the failure names `upstream`: `activeUpstream()` is the
+    /// pool-wide last selection, which a concurrent request can move.
+    package func startStreamingExchange(
+        head: HTTPRequestHead,
+        requestBody: HTTPRequestBody?,
+        clientChannel: Channel,
+        authSource: String? = nil,
+        forcedProxy: UpstreamProxy? = nil
+    ) -> StreamingExchangeAttempt {
         let config = configProvider()
         guard let proxy = forcedProxy ?? selectProxy(from: config) else {
-            return group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
+            return StreamingExchangeAttempt(
+                upstream: nil, result: group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
+            )
         }
 
-        return streamingExchange(
+        return StreamingExchangeAttempt(upstream: proxy, result: streamingExchange(
             head: head,
             requestBody: requestBody,
             clientChannel: clientChannel,
             authSource: authSource,
             proxy: proxy
-        )
+        ))
     }
 
     private func streamingExchange(
