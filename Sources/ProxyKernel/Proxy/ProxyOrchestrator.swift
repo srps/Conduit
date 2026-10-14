@@ -970,9 +970,13 @@ package final class ProxyOrchestrator {
     /// so a handler resuming from an await can tell a newer report ran.
     private var vpnTransitionGeneration: UInt64 = 0
 
-    private(set) lazy var directTunnels = DirectTunnelRegistry(capacity: { [configBox] in
-        configBox.current.inboundConnectionMaxLimit
-    })
+    private(set) lazy var directTunnels = DirectTunnelRegistry(
+        capacity: { [configBox] in configBox.current.inboundConnectionMaxLimit },
+        retirementLog: ConnectFailureLog(
+            logger: logStore, eventSink: { [eventLog] event in eventLog.append(event) },
+            scheduleFlush: ConnectFailureLog.eventLoopScheduler(MultiThreadedEventLoopGroup.singleton)
+        )
+    )
     /// Mirror of `snapshot.vpnState == .connected` for the DNS forwarder's
     /// `@Sendable` DoH transport preference (NIO handlers cannot read MainActor
     /// snapshot). Updated in `handleVPNStateChange`.
@@ -2032,7 +2036,7 @@ package final class ProxyOrchestrator {
         let direct = directTunnels.closeTunnels(orphanedFrom: assigned)
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
-            detail: "transition=disconnected phase=addresses reason=\(Self.label(reason)) upstream_closed=\(upstream.closed) upstream_late_closed=\(upstream.lateClosed) direct_closed=\(direct.closed) direct_late_closed=\(direct.lateClosed) untracked=\(direct.untracked) addresses=checked"
+            detail: "transition=disconnected phase=addresses reason=\(Self.label(reason)) upstream_closed=\(upstream) direct_closed=\(direct.closed) untracked=\(direct.untracked) addresses=checked"
         )
         eventLog.append(event)
         logStore.log(direct.untracked > 0 ? .warning : .notice,
@@ -2054,10 +2058,10 @@ package final class ProxyOrchestrator {
         }
         let upstream = routesDirect
             ? localProxyServer.closeUpstreamChannelsAfterVPNDisconnect() + tunnelConnectionPool.closeConnections(migrating: .all)
-            : ConnectionPool.MigrationSweep(closed: 0, lateClosed: 0)
+            : 0
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
-            detail: "transition=disconnected phase=routing reason=\(Self.label(reason)) routing=\(routesDirect ? "direct" : "upstream") upstream_closed=\(upstream.closed) upstream_late_closed=\(upstream.lateClosed)"
+            detail: "transition=disconnected phase=routing reason=\(Self.label(reason)) routing=\(routesDirect ? "direct" : "upstream") upstream_closed=\(upstream)"
         )
         eventLog.append(event)
         logStore.log(.notice, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
@@ -2078,7 +2082,7 @@ package final class ProxyOrchestrator {
         guard let result = directTunnels.closeTunnelsOpenedWhileVPNDown() else { return }
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
-            detail: "transition=reconnected route=direct closed=\(result.closed) late_closed=\(result.lateClosed) untracked=\(result.untracked)"
+            detail: "transition=reconnected route=direct closed=\(result.closed) untracked=\(result.untracked)"
         )
         eventLog.append(event)
         logStore.log(result.untracked > 0 ? .warning : .notice,

@@ -302,8 +302,7 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                         originChannel.close(mode: .all, promise: nil)
                         return
                     }
-                    if let dial, self.directTunnels?.register(originChannel, dial: dial) == .retired {
-                        self.logger.log(.info, "Transparent proxy: direct relay for \(host): \(DirectTunnelRegistry.retiredMessage)", category: .proxy)
+                    if let dial, self.directTunnels?.register(originChannel, dial: dial, target: host) == .retired {
                         ctx.close(promise: nil)
                         return
                     }

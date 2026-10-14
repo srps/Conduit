@@ -33,7 +33,9 @@ package enum LocalAddresses {
 ///
 /// A dial outlives the instant it starts: `beginDial()` captures the outage
 /// flag and the sweep epoch together, and `register` retires a tunnel a
-/// sweep run during the dial would have closed (`TransitionSweeps`).
+/// sweep run during the dial would have closed (`TransitionSweeps`). Each
+/// retirement is reported when it happens, as `connection.late_dial_retired`
+/// through `retirementLog`, which coalesces a burst per target.
 ///
 /// Bounded: at most `capacity()` entries, read per registration from the
 /// inbound-connection limit every tracked tunnel already counts against, and
@@ -47,7 +49,7 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
         /// The registry was full; the tunnel is left to its own timeout.
         case untracked
         /// A sweep that ran during the dial would have closed it; it is
-        /// closed now and counted as `lateClosed` in the next sweep.
+        /// closed now and reported as `connection.late_dial_retired`.
         case retired
     }
 
@@ -57,13 +59,11 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
         package let whileVPNDown: Bool
     }
 
-    /// One sweep's outcome. `lateClosed` counts tunnels retired on
-    /// registration since the previous sweep; `untracked` those that found
-    /// the registry full.
+    /// One sweep's outcome. `untracked` counts tunnels that found the
+    /// registry full since the previous sweep.
     package struct Sweep: Equatable, Sendable {
         package var closed: Int
         package var untracked: Int
-        package var lateClosed: Int
     }
 
     private enum Rule {
@@ -74,6 +74,13 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
             switch self {
             case .openedWhileVPNDown: return dial.whileVPNDown
             case .orphanedFrom(let assigned): return LocalAddresses.isOrphaned(channel, assigned: assigned)
+            }
+        }
+
+        var retirement: LateDialRetired {
+            switch self {
+            case .openedWhileVPNDown: return LateDialRetired("the DIRECT dial began off the VPN and the reconnect sweep ran during it")
+            case .orphanedFrom: return LateDialRetired("the DIRECT dial completed on an address the disconnect sweep found gone")
             }
         }
     }
@@ -89,13 +96,14 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
     private let lock = NIOLock()
     private var entries: [ObjectIdentifier: Entry] = [:]
     private var untracked = 0
-    private var lateClosed = 0
     private var vpnDown = false
     private var sweeps = TransitionSweeps<Rule>()
     private let capacity: @Sendable () -> Int
+    private let retirementLog: ConnectFailureLog
 
-    package init(capacity: @escaping @Sendable () -> Int) {
+    package init(capacity: @escaping @Sendable () -> Int, retirementLog: ConnectFailureLog) {
         self.capacity = capacity
+        self.retirementLog = retirementLog
     }
 
     /// Capture before a direct dial starts; pass to `register`.
@@ -109,21 +117,23 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
     }
 
     /// Track `channel` until it closes, unless a sweep that ran since the
-    /// dial began would have closed it: then close it now.
+    /// dial began would have closed it: then close it now and report it.
+    /// `target` is the sanitized `host:port` the dial reached.
     @discardableResult
-    package func register(_ channel: Channel, dial: Dial) -> Registration {
+    package func register(_ channel: Channel, dial: Dial, target: String) -> Registration {
         let key = ObjectIdentifier(channel)
-        let registration: Registration = lock.withLock {
-            if sweeps.retires(since: dial.epoch, { $0.selects(dial, channel: channel) }) {
-                lateClosed += 1
-                return .retired
+        let (registration, reason): (Registration, LateDialRetired?) = lock.withLock {
+            switch sweeps.retirement(since: dial.epoch, { $0.selects(dial, channel: channel) }) {
+            case .sweep(let rule): return (.retired, rule.retirement)
+            case .forgotten: return (.retired, LateDialRetired.forgotten)
+            case nil: break
             }
             guard entries.count < max(1, capacity()) else {
                 untracked += 1
-                return .untracked
+                return (.untracked, nil)
             }
             entries[key] = Entry(channel: channel, dial: dial)
-            return .tracked
+            return (.tracked, nil)
         }
         switch registration {
         case .tracked:
@@ -133,6 +143,12 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
             }
         case .retired:
             channel.close(mode: .all, promise: nil)
+            if let reason {
+                retirementLog.report(
+                    LateDialRetired.event, level: .notice, target: target, error: reason,
+                    message: "Direct tunnel to \(target) retired: \(reason)", eventAtAnyLevel: true
+                )
+            }
         case .untracked:
             break
         }
@@ -151,11 +167,11 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
     /// Close every tracked tunnel whose local address is not in `assigned`:
     /// the VPN took it, so the socket is not expected to resume.
     package func closeTunnels(orphanedFrom assigned: Set<String>) -> Sweep {
-        sweep(.orphanedFrom(assigned), endingOutage: false) ?? Sweep(closed: 0, untracked: 0, lateClosed: 0)
+        sweep(.orphanedFrom(assigned), endingOutage: false) ?? Sweep(closed: 0, untracked: 0)
     }
 
     private func sweep(_ rule: Rule, endingOutage: Bool) -> Sweep? {
-        let swept: (channels: [Channel], untracked: Int, late: Int)? = lock.withLock {
+        let swept: (channels: [Channel], untracked: Int)? = lock.withLock {
             if endingOutage {
                 guard vpnDown else { return nil }
                 vpnDown = false
@@ -163,14 +179,13 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
             sweeps.record(rule)
             let matching = entries.filter { rule.selects($0.value.dial, channel: $0.value.channel) }
             for key in matching.keys { entries.removeValue(forKey: key) }
-            let counts = (untracked, lateClosed)
+            let missed = untracked
             untracked = 0
-            lateClosed = 0
             // One that closed on its own may not have left yet; it needs no close.
-            return (matching.values.map(\.channel).filter(\.isActive), counts.0, counts.1)
+            return (matching.values.map(\.channel).filter(\.isActive), missed)
         }
         guard let swept else { return nil }
         for channel in swept.channels { channel.close(mode: .all, promise: nil) }
-        return Sweep(closed: swept.channels.count, untracked: swept.untracked, lateClosed: swept.late)
+        return Sweep(closed: swept.channels.count, untracked: swept.untracked)
     }
 }

@@ -43,7 +43,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         XCTAssertTrue(atProbe[0].hasPrefix("transition=disconnected phase=addresses reason=user "), atProbe[0])
         let after = migrations(orchestrator.eventLog.events)
         XCTAssertEqual(after.count, 2)
-        XCTAssertEqual(after.last, "transition=disconnected phase=routing reason=user routing=direct upstream_closed=0 upstream_late_closed=0")
+        XCTAssertEqual(after.last, "transition=disconnected phase=routing reason=user routing=direct upstream_closed=0")
         await orchestrator.stopProxy()
     }
 
@@ -70,7 +70,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.connected)
         XCTAssertFalse(orchestrator.directTunnels.beginDial().whileVPNDown)
         XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
-                       "transition=reconnected route=direct closed=0 late_closed=0 untracked=0")
+                       "transition=reconnected route=direct closed=0 untracked=0")
         await orchestrator.stopProxy()
     }
 
@@ -130,7 +130,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
         let offVPN = EmbeddedChannel()
         try await offVPN.connect(to: SocketAddress(ipAddress: "192.0.2.10", port: 443)).get()
-        XCTAssertEqual(orchestrator.directTunnels.register(offVPN, dial: orchestrator.directTunnels.beginDial()), .tracked)
+        XCTAssertEqual(orchestrator.directTunnels.register(offVPN, dial: orchestrator.directTunnels.beginDial(), target: "origin.test:443"), .tracked)
         await orchestrator.stopProxy(scope: .allButDedicated)
 
         await orchestrator.handleVPNStateChange(.connected)
@@ -138,7 +138,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         XCTAssertFalse(offVPN.isActive)
         XCTAssertFalse(orchestrator.directTunnels.beginDial().whileVPNDown)
         XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
-                       "transition=reconnected route=direct closed=1 late_closed=0 untracked=0")
+                       "transition=reconnected route=direct closed=1 untracked=0")
     }
 
     /// On-prem: the probe finds the upstream, so the routing phase closes nothing.
@@ -157,7 +157,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
 
         XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
-                       "transition=disconnected phase=routing reason=lost routing=upstream upstream_closed=0 upstream_late_closed=0")
+                       "transition=disconnected phase=routing reason=lost routing=upstream upstream_closed=0")
         await orchestrator.stopProxy()
     }
 }

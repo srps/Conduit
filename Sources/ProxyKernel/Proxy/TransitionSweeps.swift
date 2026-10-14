@@ -34,10 +34,30 @@ package struct TransitionSweeps<Rule> {
         return sweeps.filter { $0.epoch > dialEpoch }.map(\.rule)
     }
 
-    /// Whether a dial that began at `dialEpoch` should be retired: a sweep it
-    /// straddled selects it, or it is older than the remembered history.
-    package func retires(since dialEpoch: UInt64, _ selects: (Rule) -> Bool) -> Bool {
-        guard let missed = missed(since: dialEpoch) else { return true }
-        return missed.contains(where: selects)
+    /// Why a dial that began at `dialEpoch` is retired: the first sweep it
+    /// straddled that selects it, or `.forgotten` when it is older than the
+    /// remembered history. `nil` keeps it.
+    package func retirement(since dialEpoch: UInt64, _ selects: (Rule) -> Bool) -> TransitionRetirement<Rule>? {
+        guard let missed = missed(since: dialEpoch) else { return .forgotten }
+        return missed.first(where: selects).map(TransitionRetirement.sweep)
     }
+}
+
+package enum TransitionRetirement<Rule> {
+    case sweep(Rule)
+    case forgotten
+}
+
+/// The error a late-dial retirement reports through `ConnectFailureLog`, as
+/// `connection.late_dial_retired` (#148). Its description is the event's
+/// `reason=`.
+package struct LateDialRetired: Error, CustomStringConvertible, Sendable {
+    package let description: String
+
+    package init(_ description: String) {
+        self.description = description
+    }
+
+    package static let event = "connection.late_dial_retired"
+    package static let forgotten = LateDialRetired("the dial outlived the remembered VPN transition sweeps")
 }
