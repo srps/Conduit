@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import NIOPosix
 import ProxyKernel
 
@@ -7,6 +8,37 @@ import ProxyKernel
 /// connect, so each health check fails as unreachable. The ladder must not
 /// re-authenticate against an upstream that never answered, and its
 /// exhaustion line must not send the user to re-enter a password.
+/// Holds the first caller of `holdOnce` until `release`; later callers pass.
+private final class ProbeHold: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var released = false
+
+    var isHolding: Bool { lock.withLock { waiter != nil } }
+
+    func holdOnce() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let resumeNow = lock.withLock { () -> Bool in
+                guard !used, !released else { return true }
+                used = true
+                waiter = continuation
+                return false
+            }
+            if resumeNow { continuation.resume() }
+        }
+    }
+
+    func release() {
+        let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            released = true
+            defer { waiter = nil }
+            return waiter
+        }
+        continuation?.resume()
+    }
+}
+
 enum RecoveryLadderScenarios {
     @MainActor
     private static func until(timeout: TimeInterval, _ condition: () -> Bool) async throws -> Bool {
@@ -31,10 +63,17 @@ enum RecoveryLadderScenarios {
         let logger = RecordingLogSink(minLevel: verbose ? .debug : .info)
         // The reachability probe says yes so the health loop, not direct
         // mode, owns the outage: that is the path that starts the ladder.
+        // The first probe after exhaustion is held until released, so a VPN
+        // report can supersede it.
+        let log = NIOLockedValueBox<RuntimeEventLog?>(nil)
+        let heldProbe = ProbeHold()
         let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
             connectivityProbe: { targets in
-                UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
+                let exhausted = log.withLockedValue { $0 }?.events.contains { $0.event == "recovery.exhausted" } ?? false
+                if exhausted { await heldProbe.holdOnce() }
+                return UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
             })
+        log.withLockedValue { $0 = orchestrator.eventLog }
         try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
 
         func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
@@ -44,6 +83,14 @@ enum RecoveryLadderScenarios {
         let entries = logger.entries()
         let reauthRan = entries.contains { $0.message.contains("Re-authenticate") && !$0.message.hasPrefix("Recovery step skipped") }
         let errorLine = entries.last { $0.level == .error && $0.message.hasPrefix("Automatic recovery exhausted") }?.message ?? ""
+
+        // A VPN report lands while the post-exhaustion probe is out: the
+        // cooldown the ladder earned on the old network is dropped (#155).
+        let probeHeld = try await until(timeout: 5) { heldProbe.isHolding }
+        await orchestrator.handleVPNStateChange(.connected)
+        heldProbe.release()
+        let cleared = try await until(timeout: 5) { !events("recovery.cooldown_cleared").isEmpty }
+        let clearedDetail = events("recovery.cooldown_cleared").first?.detail
 
         return ScenarioResult(name: "recovery-unreachable-ladder", clientCount: 0, clientsOpened: 0,
             clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
@@ -55,6 +102,8 @@ enum RecoveryLadderScenarios {
                 .init("the exhaustion line says no upstream answered and does not blame the password",
                       errorLine.contains("no upstream proxy answered") && !errorLine.localizedCaseInsensitiveContains("password")),
                 .init("the cooldown still follows exhaustion", !events("recovery.cooldown_started").isEmpty),
+                .init("a VPN report superseding the post-exhaustion probe clears the cooldown",
+                      probeHeld && cleared && clearedDetail == "reason=superseded"),
             ], notes: ["refusing loopback upstream on port \(deadPort); injected reachable probe; no credentials, helper or settings"])
     }
 }

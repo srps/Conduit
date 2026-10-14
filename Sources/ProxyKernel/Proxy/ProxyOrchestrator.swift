@@ -2412,7 +2412,12 @@ package final class ProxyOrchestrator {
             } else {
                 guard let connSummary = await self.refreshConnectivityMode() else {
                     // A VPN report during the probe owns routing now; leave
-                    // `.recovering` for the state its routing implies.
+                    // `.recovering` for the state its routing implies. The
+                    // cooldown was earned on the old network: a failure on
+                    // the new route must start the ladder at once.
+                    self.recoveryGate.reset()
+                    self.emitEvent(.health, "recovery.cooldown_cleared", detail: "reason=superseded")
+                    self.logStore.log(.notice, "Automatic recovery cooldown cleared: a VPN transition superseded the exhausted ladder.", category: .network)
                     let cause = self.snapshot.directModeCause
                     self.mutateSnapshot {
                         guard $0.runtimeStatus.state == .recovering else { return }
