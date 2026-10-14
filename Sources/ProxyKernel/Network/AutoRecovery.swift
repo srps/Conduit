@@ -57,11 +57,23 @@ package final class AutoRecovery: @unchecked Sendable {
     /// re-authenticating cannot help (no upstream answered to challenge), so
     /// that step is skipped. The exhaustion line names the last failure
     /// rather than always suggesting a changed password (#147).
-    package func recover(trigger: HealthCheckFailure? = nil) async -> Bool {
+    ///
+    /// `isCurrent` is asked before each step and after each step's outcome:
+    /// once it says no (a VPN transition made the triggering evidence
+    /// stale), the ladder stops with `recovery.abandoned` and returns `false`
+    /// without declaring exhaustion (#155). The ladder runs on the main
+    /// actor, where the orchestrator advances its routing generation, so a
+    /// check and the outcome it allows happen in one turn.
+    @MainActor
+    package func recover(
+        trigger: HealthCheckFailure? = nil,
+        isCurrent: @MainActor () -> Bool = { true }
+    ) async -> Bool {
         guard let service else { return false }
         var latestFailure = trigger
 
         for step in RecoveryStep.allCases {
+            guard isCurrent() else { return abandon(at: "next_step=\(step.rawValue)") }
             if step == .reauthenticate, case .unreachable(let detail) = latestFailure {
                 emit("recovery.step_skipped", detail: "step=\(step.rawValue) reason=upstream_unreachable summary=\(detail)")
                 logger.log(.notice, "Recovery step skipped: \(step.description) (no upstream answered: \(detail)).", category: .network)
@@ -86,6 +98,8 @@ package final class AutoRecovery: @unchecked Sendable {
                 }
 
                 let health = await service.performHealthCheck()
+                // The step's outcome is stale evidence once a transition ran.
+                guard isCurrent() else { return abandon(at: "after_step=\(step.rawValue)") }
                 if health.healthy {
                     let suffix = detail.map { " (\($0))" } ?? ""
                     logger.log(.notice, "Recovery step succeeded: \(step.description)\(suffix).", category: .network)
@@ -95,6 +109,7 @@ package final class AutoRecovery: @unchecked Sendable {
                 let suffix = detail.map { " \($0);" } ?? ""
                 logger.log(.warning, "Recovery step completed but health check still failing: \(step.description).\(suffix) \(health.summary)", category: .network)
             } catch {
+                guard isCurrent() else { return abandon(at: "after_step=\(step.rawValue)") }
                 logger.log(.warning, "Recovery step failed: \(step.description) (\(error.displayDescription)).", category: .network)
             }
         }
@@ -102,6 +117,12 @@ package final class AutoRecovery: @unchecked Sendable {
         let exhausted = Self.exhaustion(for: latestFailure)
         emit("recovery.exhausted", detail: "failure=\(exhausted.failure) summary=\(latestFailure?.summary ?? "unknown")")
         logger.log(.error, exhausted.message, category: .network)
+        return false
+    }
+
+    private func abandon(at position: String) -> Bool {
+        emit("recovery.abandoned", detail: "reason=superseded \(position)")
+        logger.log(.notice, "Recovery stopped: a VPN transition owns routing now (\(position)).", category: .network)
         return false
     }
 

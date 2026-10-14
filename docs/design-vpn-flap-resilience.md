@@ -21,7 +21,7 @@ that, recovery means reconnecting, even if the network later returns. The
 per-subsystem sweep bookkeeping below is an interim model with known windows
 (listener restarts, CONNECT failover, routing decisions captured before an
 async step); #156 replaces it with a runtime-wide routing-token/lease
-authority, and #155 covers stale probe results. In
+authority. In
 practice a stranded socket almost never comes back, and keeping it only makes
 the client wait out a 60 s+ timeout (a day of logs showed ~18 upstream
 tunnels dying over two minutes with `EADDRNOTAVAIL`/`ETIMEDOUT` after a
@@ -37,10 +37,26 @@ connections must migrate and work as soon as possible.
     budget (3 s) when the upstreams are gone.
   - `phase=routing`, once the probe settles the cause: routing DIRECT closes
     every remaining upstream channel, since the proxies are behind the VPN.
-    Routing via a still-reachable upstream (on-prem) keeps them. The handler
-    captures a VPN transition generation before its probe; if a newer report
-    (a reconnect) ran during the await, it sweeps nothing and reports
-    `skipped=superseded`, since the channels now belong to the new routing.
+    Routing via a still-reachable upstream (on-prem) keeps them. If a newer
+    report (a reconnect) ran during the probe, the handler sweeps nothing and
+    reports `skipped=superseded`, since the channels now belong to the new
+    routing.
+- **Stale evidence never commits** (#155). Every VPN state change advances a
+  routing generation. A connectivity probe captures it first; a result that
+  returns after it moved measured a network that is gone, and is dropped
+  (`connectivity.probe_superseded by=transition`) without changing the cause,
+  status or monitors, sweeping, or reporting the VPN outcome: the newer
+  transition's handler owns all of that. Probes also overlap within one state
+  (a VPN handler, the retry timer, the error-rate alarm, wake); one finishing
+  after a later-started one committed yields to it (`by=newer_probe`) and its
+  caller proceeds on the newer result. Health-check results and recovery
+  ladder steps are fenced by the same generation (`health.result_superseded`,
+  `recovery.abandoned`). Startup reprobes when a report supersedes its probe,
+  since the stopped listener's VPN handler reacts to nothing. Hosts stamp each
+  VPN report on the monitor's callback (`VPNObservationSequencer`): their
+  deliveries are separate main-actor tasks, so an older report that lands
+  after a newer one is dropped (`vpn.observation_stale`), except that a
+  dropped disconnect still runs its address phase.
   - An exchange whose connection a sweep closed fails as
     `vpnTransitionDuringConnect`, a local failure: the pool does not retry an
     idempotent request on a fresh upstream connection (routing may have gone

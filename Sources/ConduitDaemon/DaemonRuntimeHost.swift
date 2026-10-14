@@ -162,6 +162,11 @@ final class DaemonRuntimeHost {
     /// shared with `AppState`). Fed by `handleVPNStateChange`; every
     /// resolver-file apply path consults `entriesWanted`.
     private var splitDNSGate = SplitDNSVPNGate()
+    /// Stamps VPN reports on the monitor's callback; the split-DNS gate
+    /// and the orchestrator each apply only reports newer than the last
+    /// they applied, since deliveries can land out of order (#155).
+    private let vpnSequencer = VPNObservationSequencer()
+    private var splitDNSGateOrder = VPNObservationOrder()
     /// Launch-time crash recovery for the system-proxy, system-DNS and
     /// resolver-file surfaces. Started by `init` and joined by
     /// `awaitLaunchRecovery()` — see `LaunchRecovery` for why it is neither
@@ -294,10 +299,11 @@ final class DaemonRuntimeHost {
         // name to the one delivered before it. Same shape as `AppState`.
         // Weak on both: the monitor stores this closure, so a strong capture
         // of the monitor would keep a stopped host's observer alive forever.
-        self.vpnStatusMonitor.setOnChange { [weak self, deliveries, weak monitor = self.vpnStatusMonitor] state in
+        self.vpnStatusMonitor.setOnChange { [weak self, deliveries, vpnSequencer, weak monitor = self.vpnStatusMonitor] state in
             let interfaceName = monitor?.connectedInterfaceName
+            let sequence = vpnSequencer.next()
             deliveries.deliver {
-                await self?.handleVPNStateChange(state, interfaceName: interfaceName)
+                await self?.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
             }
         }
         reconciler.host = self
@@ -872,7 +878,7 @@ final class DaemonRuntimeHost {
         )
     }
 
-    private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?) async {
+    private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?, sequence: UInt64) async {
         // Gate update and reconcile must stay on the same side of any await:
         // reconcileEntryFiles reads the gate's current state, and a second
         // VPN transition interleaving at a suspension point would make this
@@ -882,7 +888,9 @@ final class DaemonRuntimeHost {
         // as a guard: it gates *applying* files, never removing them, because
         // a runtime that died with its files applied is exactly the case that
         // strands them against unreachable servers.
-        let entriesWantedChanged = splitDNSGate.update(state)
+        // A report older than one the gate already took is not the tunnel's
+        // state; the orchestrator still sees it and drops it itself.
+        let entriesWantedChanged = splitDNSGateOrder.admit(sequence) ? splitDNSGate.update(state) : false
         if platformConfig.manageDNSResolvers, entriesWantedChanged {
             splitDNSGate.reconcileEntryFiles(
                 config: config,
@@ -893,7 +901,7 @@ final class DaemonRuntimeHost {
         }
 
         deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
-        await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
+        await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
         await reconcileSystemDNSIfRunning()
     }
 

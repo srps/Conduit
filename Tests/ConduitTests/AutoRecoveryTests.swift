@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import XCTest
 @testable import ProxyKernel
 
@@ -38,6 +39,50 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(service.reauthenticateCallCount, 1)
         XCTAssertEqual(service.switchUpstreamCallCount, 1)
         XCTAssertEqual(service.recycleListenerCallCount, 0)
+    }
+
+    /// #155: a VPN transition during the ladder makes its trigger stale. The
+    /// ladder stops before the next step and does not declare exhaustion.
+    @MainActor func testALadderAVPNTransitionSupersedesStopsWithoutExhaustion() async {
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.healthResults = [.unhealthy(summary: "still failing after close")]
+        let current = NIOLockedValueBox(true)
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink(), eventSink: events.record)
+        service.onCloseStalled = { current.withLockedValue { $0 = false } }
+
+        let result = await recovery.recover(isCurrent: { current.withLockedValue { $0 } })
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.closeStalledCallCount, 1)
+        XCTAssertEqual(service.reauthenticateCallCount, 0)
+        XCTAssertEqual(service.switchUpstreamCallCount, 0)
+        XCTAssertEqual(events.names, ["recovery.abandoned"])
+        XCTAssertEqual(events.details, ["reason=superseded after_step=closeStalledConnections"])
+    }
+
+    /// A transition during the last step: neither its success nor its
+    /// failure is accepted, and exhaustion is not declared.
+    @MainActor func testATransitionDuringTheLastStepAbandonsInsteadOfConcluding() async {
+        for (healthy, recycleSucceeds) in [(true, true), (false, true), (false, false)] {
+            let events = EventRecorder()
+            let service = MockRecoverableService()
+            service.recycleListenerShouldSucceed = recycleSucceeds
+            service.healthResults = recycleSucceeds
+                ? [healthy ? .healthy(summary: "ok") : .unhealthy(summary: "still failing")]
+                : []
+            let current = NIOLockedValueBox(true)
+            service.onRecycleListener = { current.withLockedValue { $0 = false } }
+            let recovery = AutoRecovery(service: service, logger: DiscardingLogSink(), eventSink: events.record)
+
+            let result = await recovery.recover(isCurrent: { current.withLockedValue { $0 } })
+
+            XCTAssertFalse(result, "healthy=\(healthy) recycleSucceeds=\(recycleSucceeds)")
+            XCTAssertEqual(service.recycleListenerCallCount, 1)
+            XCTAssertEqual(events.names, ["recovery.abandoned"])
+            XCTAssertEqual(events.details, ["reason=superseded after_step=recycleListener"])
+        }
     }
 
     @MainActor func testRecoveryReturnsFalseWhenAllStepsFail() async {
@@ -177,9 +222,12 @@ private final class MockRecoverableService: RecoverableProxyService {
     var switchUpstreamCallCount = 0
     var recycleListenerCallCount = 0
     var healthCheckCallCount = 0
+    var onCloseStalled: () -> Void = {}
+    var onRecycleListener: () -> Void = {}
 
     func closeStalledConnections() async throws -> Int {
         closeStalledCallCount += 1
+        onCloseStalled()
         if !closeStalledShouldSucceed { throw TestError.simulated }
         return closeStalledClosedCount
     }
@@ -197,6 +245,7 @@ private final class MockRecoverableService: RecoverableProxyService {
 
     func recycleListener() async throws {
         recycleListenerCallCount += 1
+        onRecycleListener()
         if !recycleListenerShouldSucceed { throw TestError.simulated }
     }
 
