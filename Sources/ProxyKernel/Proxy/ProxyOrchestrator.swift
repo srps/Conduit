@@ -989,16 +989,26 @@ package final class ProxyOrchestrator {
 
     /// Every outbound socket a routing decision opens, for the whole
     /// runtime: both pools, every listener, the transparent proxy. A
-    /// confirmed VPN transition closes what it stranded through it and
-    /// retires setup that straddled it (#148, #156). Bounded by what admits
-    /// those sockets; see `TransitionAuthority.capacity(for:)`.
-    private(set) lazy var transitions = TransitionAuthority(
-        capacity: { [configBox] in TransitionAuthority.capacity(for: configBox.current) },
+    /// confirmed VPN transition closes the ones whose path it removed
+    /// (#148, #156). Bounded by what admits those sockets; see
+    /// `OutboundSocketRegistry.capacity(for:)`.
+    private(set) lazy var sockets = OutboundSocketRegistry(
+        capacity: { [configBox] in OutboundSocketRegistry.capacity(for: configBox.current) },
+        paths: socketPaths,
         retirementLog: ConnectFailureLog(
             logger: logStore, eventSink: { [eventLog] event in eventLog.append(event) },
             scheduleFlush: ConnectFailureLog.eventLoopScheduler(MultiThreadedEventLoopGroup.singleton)
         )
     )
+    private let socketPaths: any SocketPathChecking
+    /// When a confirmed transition sweeps again, after its first sweep:
+    /// routes keep settling after the VPN report (#156).
+    private let strandedResweepDelays: [Duration]
+    /// The sweeps of the last confirmed transition still to run.
+    private var strandedSweeps: Task<Void, Never>?
+    /// The confirmed transition whose sweeps have not all run: a flap holds
+    /// them, and its recovery runs the re-sweeps.
+    private var strandedSweepsOwed: String?
     /// Mirror of `snapshot.vpnState == .connected` for the DNS forwarder's
     /// `@Sendable` DoH transport preference (NIO handlers cannot read MainActor
     /// snapshot). Updated in `handleVPNStateChange`.
@@ -1118,7 +1128,7 @@ package final class ProxyOrchestrator {
         },
         eventSink: { [eventLog] event in eventLog.append(event) },
         portHolderProbe: portHolderProbe,
-        transitions: transitions
+        sockets: sockets
     )
 
     private lazy var localPACServer = LocalPACServer(logger: logStore)
@@ -1145,7 +1155,7 @@ package final class ProxyOrchestrator {
         authenticatorProvider: lateBoundAuthenticatorProvider,
         authHandshakeLimiter: tunnelAuthHandshakeLimiter,
         eventSink: { [eventLog] event in eventLog.append(event) },
-        transitions: transitions
+        sockets: sockets
     )
 
     private lazy var tunnelCoordinator = CONNECTCoordinator(
@@ -1213,9 +1223,13 @@ package final class ProxyOrchestrator {
         },
         authFallbackEventGate: RuntimeEventRepeatGate = RuntimeEventRepeatGate(),
         strictHintSettleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow,
-        connectivityProbe: (@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)? = nil
+        connectivityProbe: (@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)? = nil,
+        socketPaths: any SocketPathChecking = SystemSocketPaths(),
+        strandedResweepDelays: [Duration] = [.seconds(2), .seconds(10)]
     ) {
         self.connectivityProbe = connectivityProbe
+        self.socketPaths = socketPaths
+        self.strandedResweepDelays = strandedResweepDelays
         self.relayAcceptProbe = relayAcceptProbe
         self.authFallbackEventGate = authFallbackEventGate
         self.strictHintSettleWindow = strictHintSettleWindow
@@ -1857,12 +1871,7 @@ package final class ProxyOrchestrator {
             )
             eventLog.append(event)
             logStore.log(.info, "VPN report dropped as stale: \(event.detail ?? "")", category: .network)
-            // A disconnect still stranded the sockets on the addresses it
-            // took, whatever came after it; the address phase needs no
-            // routing verdict and closes only sockets whose address is gone.
-            if case .disconnected(let reason) = state {
-                migrateOrphanedTunnelsAfterVPNDisconnect(reason: reason, stale: true)
-            }
+            // The newer state that was applied runs its own sweeps.
             return
         }
         let shownInterface = state == .connected ? interfaceName : nil
@@ -1888,23 +1897,24 @@ package final class ProxyOrchestrator {
             $0.vpnState = state
             $0.vpnInterfaceName = shownInterface
         }
-        // A confirmed disconnect begins the outage: setup that started
-        // before it is retired on arrival, and DIRECT dials from now on are
-        // marked as leaving off the VPN, whatever the direct-mode cause says.
-        // Sockets whose local address left with the VPN are dead whatever
-        // the probe decides; close them before the first await (#148, #156).
-        // With the listener stopped (a config restart in flight) both still
-        // run: preserved tunnels outlive the restart, and the routing phase
-        // waits for the start probe.
+        // A confirmed transition closes the sockets whose path it removed,
+        // whatever the probe decides, now and again as routes settle
+        // (#148, #156). A flap holds the pending sweeps: a route missing
+        // mid-flap is not a gone path. With the listener stopped (a config
+        // restart in flight) the sweeps still run, since preserved tunnels
+        // outlive the restart, and the routing phase waits for the start probe.
         switch state {
-        case .disconnected(let reason):
-            transitions.beginOutage()
-            migrateOrphanedTunnelsAfterVPNDisconnect(reason: reason, stale: false)
+        case .disconnected:
             disconnectRoutingPending = !isProxyActive
-        case .connected where !isProxyActive:
+            startStrandedSweeps(transition: "disconnected")
+        case .connected where previous == .reasserting:
             disconnectRoutingPending = false
-            migrateDirectTunnelsAfterVPNReconnect()
-        case .connected, .reasserting, .unknown: break
+            resumeStrandedSweeps()
+        case .connected:
+            disconnectRoutingPending = false
+            startStrandedSweeps(transition: "connected")
+        case .reasserting, .unknown:
+            holdStrandedSweeps()
         }
 
         // Reactions are skipped while the proxy listener is stopped — there's
@@ -1969,9 +1979,6 @@ package final class ProxyOrchestrator {
             }
             setDirectMode(reconnectCause)
             stopDirectModeReprobeTimer()
-            // New routing is already on the VPN; DIRECT tunnels dialed while
-            // it was down would stall on the old path.
-            migrateDirectTunnelsAfterVPNReconnect()
             // Recovery path. Two flavors based on what state we came from:
             //   .reasserting → .connected: flap recovered. Hot path; reset
             //                              breakers, reprobe once for sanity.
@@ -2108,41 +2115,64 @@ package final class ProxyOrchestrator {
         }
     }
 
-    /// A confirmed disconnect (never a flap: `.reasserting` keeps every
-    /// stream) migrates in two phases, each one `vpn.tunnels_migrated`
-    /// event. Clients get an EOF at once and reconnect along the new routing
-    /// instead of stalling into a 60 s+ timeout (#148).
-    ///
-    /// `phase=addresses` runs before the connectivity probe: any upstream
-    /// channel or DIRECT tunnel whose local address is no longer assigned is
-    /// dead whatever the probe decides, and the probe can take its whole
-    /// connect budget. `phase=routing` runs once the probe settles the cause.
-    /// A `stale` report was dropped for a newer one: its sweep closes only
-    /// sockets whose address is gone, and retires no setup the newer state
-    /// started (#156).
-    private func migrateOrphanedTunnelsAfterVPNDisconnect(reason: VPNDisconnectReason, stale: Bool) {
-        let assigned: Set<String>
-        do {
-            assigned = try LocalAddresses.assigned()
-        } catch {
-            // Without the address list only the routing phase can act.
-            let event = RuntimeEvent(
-                kind: .vpn, event: "vpn.tunnels_migrated",
-                detail: "transition=disconnected phase=addresses reason=\(Self.label(reason)) addresses=unavailable error=\(error.displayDescription)"
-            )
-            eventLog.append(event)
-            logStore.log(.warning, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
-            return
+    /// A confirmed transition (never a flap: `.reasserting` keeps every
+    /// stream) closes every tracked socket whose path it removed: its local
+    /// address is gone, or the kernel would now reach its peer through
+    /// another interface. Clients get an EOF at once and reconnect along the
+    /// new routing instead of stalling into a 60 s+ timeout (#148, #156).
+    /// Each pass is one `vpn.tunnels_migrated phase=paths` event; a later
+    /// pass reports only when it found something.
+    private func startStrandedSweeps(transition: String) {
+        strandedSweepsOwed = transition
+        runStrandedSweeps(transition: transition, immediately: true)
+    }
+
+    private func holdStrandedSweeps() {
+        strandedSweeps?.cancel()
+        strandedSweeps = nil
+    }
+
+    /// A flap recovered: the transition before it still owes its re-sweeps.
+    private func resumeStrandedSweeps() {
+        guard let transition = strandedSweepsOwed else { return }
+        runStrandedSweeps(transition: transition, immediately: false)
+    }
+
+    private func runStrandedSweeps(transition: String, immediately: Bool) {
+        strandedSweeps?.cancel()
+        let delays = (immediately ? [Duration.zero] : []) + strandedResweepDelays
+        strandedSweeps = Task { @MainActor [weak self] in
+            var waited = Duration.zero
+            for (pass, delay) in delays.enumerated() {
+                if delay > waited {
+                    do {
+                        try await Task.sleep(for: delay - waited)
+                    } catch {
+                        // Cancelled: a newer VPN report owns the sweeps.
+                        return
+                    }
+                    waited = delay
+                }
+                guard let self, !Task.isCancelled else { return }
+                await self.sweepStrandedSockets(transition: transition, pass: immediately ? pass : pass + 1)
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.strandedSweepsOwed = nil
         }
-        let closed = transitions.closeOrphaned(from: assigned, retiringSetup: !stale)
-        // `untracked` stays for readers of #148's format: every socket is
-        // tracked or refused since #156, so it is always 0.
+    }
+
+    private func sweepStrandedSockets(transition: String, pass: Int) async {
+        let sockets = self.sockets
+        // Off the main actor: it checks every tracked socket's path.
+        let swept = await Task.detached { sockets.closeStranded() }.value
+        guard pass == 0 || swept != OutboundSocketRegistry.Sweep() else { return }
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
-            detail: "transition=disconnected phase=addresses reason=\(Self.label(reason)) upstream_closed=\(closed.upstream) direct_closed=\(closed.direct) untracked=0 addresses=checked"
+            detail: "transition=\(transition) phase=paths pass=\(pass) upstream_closed=\(swept.upstream) direct_closed=\(swept.direct) unchecked=\(swept.unknown)"
         )
         eventLog.append(event)
-        logStore.log(.notice, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
+        // A socket the check could not judge is left to its timeouts.
+        logStore.log(swept.unknown > 0 ? .warning : .notice, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
     }
 
     /// Routing DIRECT after the probe: every remaining upstream channel goes.
@@ -2158,7 +2188,7 @@ package final class ProxyOrchestrator {
             logStore.log(.notice, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
             return
         }
-        let upstream = routesDirect ? transitions.closeUpstream() : 0
+        let upstream = routesDirect ? sockets.closeUpstream() : 0
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
             detail: "transition=disconnected phase=routing reason=\(Self.label(reason)) routing=\(routesDirect ? "direct" : "upstream") upstream_closed=\(upstream)"
@@ -2185,19 +2215,6 @@ package final class ProxyOrchestrator {
         case .networkLost: return "lost"
         case .unknown: return "unknown"
         }
-    }
-
-    /// A reconnect after a confirmed disconnect: close the DIRECT tunnels
-    /// opened while the VPN was down so their clients reconnect along the
-    /// VPN's routing. Tunnels PAC sent DIRECT while connected stay (#148).
-    private func migrateDirectTunnelsAfterVPNReconnect() {
-        guard let closed = transitions.endOutage() else { return }
-        let event = RuntimeEvent(
-            kind: .vpn, event: "vpn.tunnels_migrated",
-            detail: "transition=reconnected route=direct closed=\(closed) untracked=0"
-        )
-        eventLog.append(event)
-        logStore.log(.notice, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
     }
 
     /// A VPN coming up or going down for good changes the network the PAC was

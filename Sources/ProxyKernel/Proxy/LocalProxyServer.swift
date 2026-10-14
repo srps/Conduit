@@ -28,9 +28,9 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// it, so a host that fails a thousand times is one line and a summary
     /// per interval (#100). Bounded by `ConnectFailureLog.defaultCapacity`.
     private let connectFailureLog: ConnectFailureLog
-    /// The runtime's VPN-transition registry; every pool this listener
+    /// The runtime's outbound socket registry; every pool this listener
     /// builds tracks its sockets there (#156).
-    private let transitions: TransitionAuthority
+    private let sockets: OutboundSocketRegistry
     private let socksHandshakeTimeout: TimeAmount
     /// Count of accept sockets this server has successfully bound. Lets callers
     /// (and tests) distinguish "the listener was preserved" from "the listener
@@ -141,10 +141,10 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         bindRetryLimit: Int = 10,
         socksHandshakeTimeout: TimeAmount = .seconds(10),
         portHolderProbe: (any ListenerPortHolderProbing)? = nil,
-        transitions: TransitionAuthority = .standalone()
+        sockets: OutboundSocketRegistry = .standalone()
     ) {
         precondition(socksHandshakeTimeout.nanoseconds > 0)
-        self.transitions = transitions
+        self.sockets = sockets
         self.socksHandshakeTimeout = socksHandshakeTimeout
         self.bindRetryLimit = max(1, bindRetryLimit)
         self.portHolderProbe = portHolderProbe
@@ -201,7 +201,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             authenticatorProvider: authenticatorProvider,
             authHandshakeLimiter: authHandshakeLimiter,
             eventSink: eventSink,
-            transitions: transitions
+            sockets: sockets
         )
         let coordinator = CONNECTCoordinator(
             pool: pool,

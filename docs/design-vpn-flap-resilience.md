@@ -10,129 +10,114 @@ force-proxy precedence and non-strict fallback retain their configured behavior.
 A flap preserves established tunnels; no VPN transition restarts the browser,
 proxy listener or helper.
 
-## Confirmed transitions migrate stranded tunnels (#148, 2026-10-14)
+## Confirmed transitions migrate stranded tunnels (#148, #156, 2026-10-15)
 
 Preservation is for a flap: the VPN may return and macOS resumes the stream.
 "Confirmed" is the classifier's verdict, not proof the path is gone: removal of
 both utun address keys is labelled user-initiated, and an outage past the grace
-window is `.networkLost`, even if the same path would come back. The policy is
-therefore: streams are preserved until the classifier declares an outage; after
-that, recovery means reconnecting, even if the network later returns. The
-per-subsystem sweep bookkeeping below is an interim model with known windows
-(listener restarts, CONNECT failover, routing decisions captured before an
-async step); #156 replaces it with a runtime-wide routing-token/lease
-authority. In
-practice a stranded socket almost never comes back, and keeping it only makes
-the client wait out a 60 s+ timeout (a day of logs showed ~18 upstream
-tunnels dying over two minutes with `EADDRNOTAVAIL`/`ETIMEDOUT` after a
-user-initiated disconnect, and DIRECT tunnels opened off the VPN dying a minute
-after it came back). The owner's call: when the VPN is disconnected or connected,
+window is `.networkLost`, even if the same path would come back. In practice a
+stranded socket almost never comes back, and keeping it only makes the client
+wait out a 60 s+ timeout (a day of logs showed ~18 upstream tunnels dying over
+two minutes with `EADDRNOTAVAIL`/`ETIMEDOUT` after a user-initiated
+disconnect, and DIRECT tunnels opened off the VPN dying a minute after it came
+back). The owner's call: when the VPN is disconnected or connected,
 connections must migrate and work as soon as possible.
 
-- **Confirmed disconnect** (`.disconnected(_)`), in two phases:
-  - `phase=addresses`, before the first await: every upstream channel (the
-    listener's pool and the tunnel pool, dedicated tunnels included) and every
-    DIRECT tunnel whose local address is no longer assigned closes. Those are
-    dead whatever the probe decides, and the probe can take its whole connect
-    budget (3 s) when the upstreams are gone.
-  - `phase=routing`, once the probe settles the cause: routing DIRECT closes
-    every remaining upstream channel, since the proxies are behind the VPN.
-    Routing via a still-reachable upstream (on-prem) keeps them. If a newer
-    report (a reconnect) ran during the probe, the handler sweeps nothing and
-    reports `skipped=superseded`, since the channels now belong to the new
-    routing.
-- **Stale evidence never commits** (#155). Every VPN state change advances a
-  routing generation. A connectivity probe captures it first; a result that
-  returns after it moved measured a network that is gone, and is dropped
-  (`connectivity.probe_superseded by=transition`) without changing the cause,
-  status or monitors, sweeping, or reporting the VPN outcome: the newer
-  transition's handler owns all of that. Probes also overlap within one state
-  (a VPN handler, the retry timer, the error-rate alarm, wake); one finishing
-  after a later-started one committed yields to it (`by=newer_probe`) and its
-  caller proceeds on the newer result. Health-check results and recovery
-  ladder steps are fenced by the same generation (`health.result_superseded`,
-  `recovery.abandoned`). Startup reprobes when a report supersedes its probe,
-  since the stopped listener's VPN handler reacts to nothing. Hosts stamp each
-  VPN report on the monitor's callback (`VPNObservationSequencer`): their
-  deliveries are separate main-actor tasks, so an older report that lands
-  after a newer one is dropped (`vpn.observation_stale`), except that a
-  dropped disconnect still runs its address phase.
-  - An exchange whose connection a sweep closed fails as
-    `vpnTransitionDuringConnect`, a local failure: the pool does not retry an
-    idempotent request on a fresh upstream connection (routing may have gone
-    DIRECT), and no breaker or upstream failure event sees it.
-- **Reconnect after a disconnect**: before the first await, alongside the
-  routing revocation, close the DIRECT tunnels dialed while the VPN was down.
-  The registry records that from the VPN state, not the direct-mode cause:
-  while the probe is pending, or on-prem with a reachable upstream, the cause
-  is `.none`, yet a no-proxy or PAC-DIRECT dial still leaves on the off-VPN
-  path. The orchestrator begins the outage on a confirmed disconnect; the
-  reconnect sweep ends it under the registry lock, after the new cause is
-  published. Tunnels PAC or no-proxy sent DIRECT while connected stay.
-- **Listener stopped** (a config restart in flight): the restart preserves
-  dedicated and DIRECT tunnels, so a disconnect still begins the outage and
-  runs its address phase, and a reconnect still sweeps. A disconnect's routing
-  phase needs a routing verdict; it runs once the start probe commits one.
-- **Flap** (`.reasserting` → `.connected`): unchanged, nothing closes.
+### Judge sockets by their path, not by when they were routed
 
-Each phase or reconnect emits one `vpn.tunnels_migrated` event and the log line
-derives from it. An orderly close produces no per-tunnel `tunnel.relay_failed`
-lines.
-
-### One registry for every socket a routing decision opens (#156)
-
-`TransitionAuthority`, owned by the orchestrator, outlives listener restarts
+`OutboundSocketRegistry`, owned by the orchestrator, outlives listener restarts
 and pool replacement, and tracks every outbound socket a routing decision
 opens: pooled upstream connections (health-check and prewarm dials included,
 since they can serve clients later), dedicated CONNECT tunnels, and DIRECT
 origin sockets from the HTTP (CONNECT, plain HTTP, upgrades), SOCKS5 and
 transparent-proxy paths. A configured direct tunnel is not a routing decision
-and stays out. Each entry records its route (upstream or DIRECT) and whether
-it was dialed during an outage; the sweeps are predicates over those entries
-and the socket's local address.
+and stays out.
 
-Every confirmed transition advances one generation. An operation captures a
-`RoutingStamp` before its first asynchronous step: an HTTP request at its
-`.end`, before it reads the direct-mode cause; a SOCKS5 request before its
-routing step; an intercepted connection after its SNI, before it reads the
-cause. The stamp travels through PAC, DNS, retries and DIRECT fallbacks; a
-retry never takes a fresh one. When the generation has moved, no dial
-starts and no idle pooled connection is reused, and a socket whose setup
-straddled a transition is closed when it registers: it was routed for a
-network that is gone. The client gets a 502, a
-SOCKS failure or an EOF and retries along the new routing. The request fails
-locally (`vpnTransitionDuringConnect`): no retry on another upstream, no
-DIRECT fallback on the stale routing, no breaker signal, no `upstream.*_failed`
-event. A socket registered before a transition is judged only by that
-transition's predicate, so a socket the predicate keeps finishes its setup.
+A socket's path is gone when its local address is no longer assigned, or when
+the kernel would now reach its peer through a different interface
+(`SocketPathChecking`; `SystemSocketPaths` connects a UDP socket to the peer
+and reads the source address the kernel picks, without sending a packet).
+That covers both observed failures: a VPN going down takes its address, and a
+full-tunnel VPN coming up moves the route to every origin onto the tunnel. It
+keeps what still works: a split-tunnel VPN that leaves an origin on Wi-Fi, an
+on-prem upstream still reached over the LAN, IPv6 preferring a newer address
+on the same interface.
 
-This is deliberately conservative. A request that waited on PAC across a
-disconnect fails once even when its upstream is on-prem and still reachable,
-and a DIRECT dial started between a disconnect's two phases is retired by the
-second; both are bounded setup failures a client retries. No request that
-was already registered is touched for a transition whose predicate keeps it.
+- **Every confirmed transition** (`.disconnected(_)`, and `.connected` from
+  anything but `.reasserting`, including the first report after startup)
+  sweeps every tracked socket at once, without waiting for the connectivity
+  probe, and again 2 s and 10 s later: routes keep settling after the VPN
+  report.
+- **Registration**: a socket is checked when it connects. One that connected
+  over a path a transition has since removed is closed on arrival
+  (`connection.late_dial_retired`). Between the two, a dial that straddles a
+  transition is judged whenever it completes, however long its connect took.
+- **Routing phase** (a disconnect only): once the probe settles the cause,
+  routing DIRECT closes every remaining upstream socket, since the proxies
+  are behind the VPN even when the source address did not change. Routing via
+  a still-reachable upstream (on-prem) keeps them. A probe a newer report
+  superseded sweeps nothing (`skipped=superseded`).
+- **Flap** (`.reasserting`): nothing is swept, and pending re-sweeps wait: a
+  route missing mid-flap is not a gone path. The recovery runs the re-sweeps
+  the last confirmed transition still owed.
+- **Listener stopped** (a config restart in flight): the restart preserves
+  dedicated and DIRECT tunnels, so the path sweeps still run; the routing
+  phase runs once the start probe commits a verdict.
 
-A stale disconnect report (dropped for a newer one) still closes sockets on
-gone addresses, but does not advance the generation: setup begun under the
-newer state stands.
+A routing decision taken before a transition is not revoked: it dials, and
+its socket either works on the new path or fails, and the client retries
+along the new routing. The orchestrator learns of a VPN change only after the
+network changed, so no ordering against its view could say whether a socket
+works; #158's routing stamps tried, and every review found another
+interleaving. The path is the fact that decides.
 
-A sweep retires its entries' tickets under the lock and closes outside it.
-The pool keeps the ticket beside its connection: an exchange or handshake
-that then fails failed because of the sweep, and a CONNECT handshake whose
-socket closes fails at once (`handlerRemoved`) instead of after the response
-timeout. A closed socket leaves the pool when it closes, not when next picked.
+It is evidence, not proof: a recreated tunnel with the same address, or a
+changed NAT behind an unchanged interface, looks current, and those sockets
+fall back to TCP keepalive and response timeouts. A socket the check cannot
+judge (the interface list or route lookup failed) is left alone and counted
+as `unchecked=`.
+
+A sweep checks outside the registry lock, retires each socket's ticket under
+it, and closes outside it. The pool and the DIRECT HTTP relay keep the ticket
+beside their socket: an exchange or handshake that then fails failed because
+of the sweep, so it fails locally (`vpnTransitionDuringConnect`): no retry on
+another upstream, no DIRECT fallback, no breaker signal, no
+`upstream.*_failed` event. A CONNECT handshake whose socket closes fails at
+once (`handlerRemoved`) instead of after the response timeout. A closed
+socket leaves the pool when it closes, not when next picked, and a dial that
+completes after its pool was released is closed (#159).
 
 Bounded: the capacity is what admits those sockets, the HTTP/SOCKS inbound
 budget and the transparent proxy's (each `inboundConnectionMaxLimit`), the
 tunnel sessions, and both pools' `maxConnections`. A socket that finds it
 full is closed and its request fails locally (`connection.tracking_full`), so
-no socket is ever left untracked and stranded.
+no socket is ever left untracked and stranded. Sweeps run off the main actor;
+the route lookup is shared per peer address within a sweep.
 
-Each retirement is reported when it happens, as
-`connection.late_dial_retired`, not deferred to the next
-`vpn.tunnels_migrated` (the next transition may never come). It reports
-through a `ConnectFailureLog`, so a burst of retirements for one target is
-one event and a `suppressed=N` summary, and the tracked targets are bounded.
+### Stale evidence never commits (#155)
+
+Every VPN state change advances a routing generation inside the
+orchestrator. A connectivity probe captures it first; a result that returns
+after it moved measured a network that is gone, and is dropped
+(`connectivity.probe_superseded by=transition`) without changing the cause,
+status or monitors, sweeping, or reporting the VPN outcome: the newer
+transition's handler owns all of that. Probes also overlap within one state
+(a VPN handler, the retry timer, the error-rate alarm, wake); one finishing
+after a later-started one committed yields to it (`by=newer_probe`) and its
+caller proceeds on the newer result. Health-check results and recovery
+ladder steps are fenced by the same generation (`health.result_superseded`,
+`recovery.abandoned`). Startup reprobes when a report supersedes its probe,
+since the stopped listener's VPN handler reacts to nothing. Hosts stamp each
+VPN report on the monitor's callback (`VPNObservationSequencer`): their
+deliveries are separate main-actor tasks, so an older report that lands
+after a newer one is dropped (`vpn.observation_stale`); the newer state runs
+its own sweeps. The generation is control-plane only: no request carries it.
+
+Each sweep pass or routing phase emits one `vpn.tunnels_migrated` event and
+the log line derives from it. An orderly close produces no per-tunnel
+`tunnel.relay_failed` lines. Each retirement at registration is reported when
+it happens, as `connection.late_dial_retired`, through a `ConnectFailureLog`,
+so a burst for one target is one event and a `suppressed=N` summary.
 
 Not changed: during the grace window new CONNECTs still go to the upstream
 even if its name no longer resolves. Routing DIRECT there would bypass upstream

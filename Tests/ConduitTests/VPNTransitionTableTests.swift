@@ -686,14 +686,19 @@ final class VPNTransitionTableTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
 
         // Snapshot still mirrors the state (UI cares even when proxy is
-        // stopped) but no routing reaction fired. The disconnect's address
-        // phase is the exception: sockets a restart preserved still strand
-        // on the gone address (#156).
+        // stopped) but no routing reaction fired. The path sweeps are the
+        // exception: sockets a restart preserved still strand (#156).
         XCTAssertEqual(orchestrator.snapshot.vpnState, .disconnected(reason: .userInitiated))
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !vpnEvents(in: orchestrator.eventLog, since: cutoff).contains(where: {
+            $0.detail?.hasPrefix("transition=disconnected phase=paths pass=0 ") ?? false
+        }), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
         let fired = vpnEvents(in: orchestrator.eventLog, since: cutoff)
-        XCTAssertEqual(fired.map(\.event), ["vpn.tunnels_migrated"],
-                       "VPN events must not fire while proxy is stopped (no listener to react)")
-        XCTAssertTrue(fired.first?.detail?.hasPrefix("transition=disconnected phase=addresses reason=user ") ?? false)
+        XCTAssertFalse(fired.isEmpty)
+        XCTAssertTrue(fired.allSatisfy { $0.event == "vpn.tunnels_migrated" && ($0.detail?.contains("phase=paths") ?? false) },
+                      "VPN events must not fire while proxy is stopped (no listener to react): \(fired.compactMap(\.detail))")
     }
 }
 

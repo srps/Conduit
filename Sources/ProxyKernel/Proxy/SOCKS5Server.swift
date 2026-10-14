@@ -131,8 +131,6 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private enum State { case greeting, request, routing, relaying }
     private var state: State = .greeting
-    /// The routing the request captured before PAC and dialing (#156).
-    private var routingStamp: RoutingStamp?
     private let handshakeTimeout: TimeAmount
     private var handshakeDeadline: Scheduled<Void>?
     private var connectionID: UUID?
@@ -350,9 +348,6 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             return false
         }
 
-        // Before the routing state it qualifies: a confirmed VPN transition
-        // after this point retires the request's dials (#156).
-        routingStamp = connectCoordinator.transitionAuthority.stamp()
         let (isDirectMode, directCause) = directModeProvider()
         let directModeBypass = isDirectMode && directCause.routesClientTrafficDirectly
         let currentConfig = configProvider()
@@ -464,26 +459,11 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let group = self.group
         let logger = self.logger
         let gatewayMode = self.gatewayMode
-        let transitions = connectCoordinator.transitionAuthority
-        guard let stamp = routingStamp else {
-            // Routing always stamps first; a missing stamp is a bug.
-            assertionFailure("SOCKS5 direct dial without a routing stamp")
-            sendReply(context: context, rep: 0x05)
-            return
-        }
-        if transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") != nil {
-            sendReply(context: context, rep: 0x05)
-            return
-        }
+        let sockets = connectCoordinator.socketRegistry
 
         // Same direct-dial policy as `HTTPProxyHandler`: link-local literals
         // get a short budget and a remembered timeout fails the next attempt at once.
         LinkLocalConnectPolicy.dial(host: host, port: Int(port), on: clientEL, eventSink: eventSink) { connectTimeout in
-            // Rechecked right before each connect: a joiner may run after
-            // waiting on another dial (#156).
-            if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") {
-                return clientEL.makeFailedFuture(refusal)
-            }
             let makeBootstrap: @Sendable () -> ClientBootstrap = {
                 ClientBootstrap(group: group)
                     .resolver(AddressFamilyAwareResolver(group: group))
@@ -508,9 +488,6 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                         port: Int(port),
                         on: clientEL,
                         ipv4Reconnect: { address in
-                            if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") {
-                                return clientEL.makeFailedFuture(refusal)
-                            }
                             logger.log(.info, "SOCKS5: half-open fallback reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
                             return makeBootstrap().connect(to: address).hop(to: clientEL)
                         }
@@ -528,7 +505,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                     channel.close(promise: nil)
                     throw MetadataBlocklist.BlockedAddressError(host: host, resolvedIP: ip)
                 }
-                try transitions.register(channel, route: .direct, stamp: stamp, target: "\(host):\(port)")
+                try sockets.register(channel, route: .direct, target: "\(host):\(port)")
                 return channel
             }
             .whenComplete { result in
@@ -556,7 +533,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let clientEL = ctx.eventLoop
         let target = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
         let authSource = context.remoteAddress?.ipAddress
-        connectCoordinator.connectUpstreamTunnel(target: target, authSource: authSource, proxyChain: proxyChain, stamp: routingStamp)
+        connectCoordinator.connectUpstreamTunnel(target: target, authSource: authSource, proxyChain: proxyChain)
             .hop(to: clientEL)
             .whenComplete { result in
                 switch result {
