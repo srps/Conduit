@@ -194,6 +194,11 @@ final class AppState: ObservableObject {
     /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
     /// every resolver-file apply path consults `entriesWanted`.
     private var splitDNSGate = SplitDNSVPNGate()
+    /// Stamps VPN reports on the monitor's callback; the split-DNS gate
+    /// and the orchestrator each apply only reports newer than the last
+    /// they applied, since deliveries can land out of order (#155).
+    private let vpnSequencer = VPNObservationSequencer()
+    private var splitDNSGateOrder = VPNObservationOrder()
     /// Launch-time crash recovery for the system-proxy and system-DNS surfaces.
     /// Started by `init` and joined by `awaitLaunchRecovery()` — see
     /// `LaunchRecovery` for why it is neither inline nor unordered.
@@ -459,10 +464,11 @@ final class AppState: ObservableObject {
         // tasks run, and a connected state could carry a later tunnel's name.
         // Weak on both: the monitor stores this closure, so a strong capture
         // of the monitor would keep a stopped host's observer alive forever.
-        self.vpnStatusMonitor.setOnChange { [weak self, deliveries, weak monitor = self.vpnStatusMonitor] state in
+        self.vpnStatusMonitor.setOnChange { [weak self, deliveries, vpnSequencer, weak monitor = self.vpnStatusMonitor] state in
             let interfaceName = monitor?.connectedInterfaceName
+            let sequence = vpnSequencer.next()
             deliveries.deliver {
-                self?.handleVPNStateChange(state, interfaceName: interfaceName)
+                self?.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
             }
         }
         $config
@@ -2094,13 +2100,15 @@ final class AppState: ObservableObject {
     /// Tier B observer reports a new VPN state. Phase 4 implements the
     /// transition table in the orchestrator (direct-mode flips, breaker
     /// reset, flap recovery, slow reprobe cadence, vpn.* events).
-    private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?) {
+    private func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String?, sequence: UInt64) {
         guard !rejectUnavailableConfiguration() else { return }
-        let entriesWantedChanged = splitDNSGate.update(state)
+        // A report older than one the gate already took is not the tunnel's
+        // state; the orchestrator still sees it and drops it itself.
+        let entriesWantedChanged = splitDNSGateOrder.admit(sequence) ? splitDNSGate.update(state) : false
 
         deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         deliveries.deliver { [orchestrator] in
-            await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName)
+            await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
         }
 
         if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {

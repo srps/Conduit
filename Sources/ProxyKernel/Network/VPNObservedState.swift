@@ -70,4 +70,15 @@ extension VPNObservedState {
         if case .reasserting = self { return true }
         return false
     }
+
+    /// The compact form events carry: `connected`, `reasserting`,
+    /// `disconnected` or `unknown`.
+    package var eventLabel: String {
+        switch self {
+        case .unknown: return "unknown"
+        case .connected: return "connected"
+        case .reasserting: return "reasserting"
+        case .disconnected: return "disconnected"
+        }
+    }
 }

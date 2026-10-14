@@ -963,13 +963,26 @@ package final class ProxyOrchestrator {
     /// via `setDirectMode(_:)`.
     private let directModeBox = NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>((false, .none))
 
+    /// Advances on every VPN state change `handleVPNStateChange` acts on. A
+    /// connectivity probe captures it first and commits nothing if it
+    /// moved: the probe measured a network that is gone, and the newer
+    /// transition owns routing now (#155).
+    private var routingGeneration: UInt64 = 0
+
+    /// The VPN observations `handleVPNStateChange` applied, by host stamp.
+    /// An older observation that arrives after a newer one is dropped.
+    private var vpnObservations = VPNObservationOrder()
+
+    /// Probes started, and the latest-started one that committed. Probes
+    /// overlap (a VPN handler, the retry timer, the error-rate alarm); one
+    /// that finishes after a later-started one committed is older evidence
+    /// and yields to it (#155).
+    private var probeSerial: UInt64 = 0
+    private var committedProbe: (serial: UInt64, summary: UpstreamProbeSummary)?
+
     /// Direct tunnels and whether each was dialed during a confirmed VPN
     /// outage; a reconnect retires those (#148). Bounded by the
     /// inbound-connection limit every tracked tunnel already counts against.
-    /// Advances on every VPN state change `handleVPNStateChange` acts on,
-    /// so a handler resuming from an await can tell a newer report ran.
-    private var vpnTransitionGeneration: UInt64 = 0
-
     private(set) lazy var directTunnels = DirectTunnelRegistry(
         capacity: { [configBox] in configBox.current.inboundConnectionMaxLimit },
         retirementLog: ConnectFailureLog(
@@ -1246,7 +1259,10 @@ package final class ProxyOrchestrator {
         }
 
         do {
-            let summary = await refreshConnectivityMode()
+            // A VPN report during startup supersedes the probe; the listener
+            // is not up yet, so that report reacts to nothing and this probe
+            // is still the one that decides routing. Probe again under it.
+            let summary = await refreshConnectivityModeForStart()
             await refreshPACRouting(force: true)
 
             try await localProxyServer.start()
@@ -1700,8 +1716,8 @@ package final class ProxyOrchestrator {
         // the upstream rotated DNS while we were asleep). Tier B will catch
         // any utun changes independently; this probe covers the upstream side.
         await refreshPACRouting(force: true)
-        let summary = await refreshConnectivityMode()
-        guard isProxyActive else { return }
+        // nil: a VPN report during the probe owns routing now.
+        guard let summary = await refreshConnectivityMode(), isProxyActive else { return }
         let cause = snapshot.directModeCause
         if cause.isDirect {
             if cause == .transientNetworkChange, summary.hasReachableUpstream {
@@ -1785,7 +1801,27 @@ package final class ProxyOrchestrator {
     ///
     /// `interfaceName` is the utun the observer says carries a `.connected`
     /// verdict; it is stored for display and ignored for any other state.
-    package func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String? = nil) async {
+    ///
+    /// `sequence` is the host's `VPNObservationSequencer` stamp, taken when
+    /// the monitor reported. Hosts deliver each report in its own task, so
+    /// an older report can arrive after a newer one; it is dropped with
+    /// `vpn.observation_stale` rather than applied over the newer state.
+    package func handleVPNStateChange(_ state: VPNObservedState, interfaceName: String? = nil, sequence: UInt64? = nil) async {
+        if let sequence, !vpnObservations.admit(sequence) {
+            let event = RuntimeEvent(
+                kind: .vpn, event: "vpn.observation_stale",
+                detail: "state=\(state.eventLabel) sequence=\(sequence) applied=\(vpnObservations.applied)"
+            )
+            eventLog.append(event)
+            logStore.log(.info, "VPN report dropped as stale: \(event.detail ?? "")", category: .network)
+            // A disconnect still stranded the sockets on the addresses it
+            // took, whatever came after it; the address phase needs no
+            // routing verdict and closes only sockets whose address is gone.
+            if case .disconnected(let reason) = state {
+                migrateOrphanedTunnelsAfterVPNDisconnect(reason: reason)
+            }
+            return
+        }
         let shownInterface = state == .connected ? interfaceName : nil
         let previous = snapshot.vpnState
         guard previous != state else {
@@ -1801,8 +1837,8 @@ package final class ProxyOrchestrator {
         // the strict-mode hint's settle window after (#97).
         routingTransitions.begin()
         defer { routingTransitions.end() }
-        vpnTransitionGeneration &+= 1
-        let generation = vpnTransitionGeneration
+        routingGeneration &+= 1
+        let generation = routingGeneration
 
         vpnConnectedForDNSBox.withLockedValue { $0 = state == .connected }
         mutateSnapshot {
@@ -1901,8 +1937,8 @@ package final class ProxyOrchestrator {
                 let durationSeconds = flapStartedAt.map { recoveredAt.timeIntervalSince($0) } ?? 0
                 let durationMS = Int(durationSeconds * 1_000)
                 flapStartedAt = nil
-                let summary = await refreshConnectivityMode()
-                setDirectMode(deriveDirectModeCause(probeSummary: summary))
+                // nil: a newer VPN report owns routing and reports its own outcome.
+                guard let summary = await refreshConnectivityMode() else { return }
                 resumeConnectivityMonitoring(summary: summary)
                 // Phase 7: telemetry update. Only super-min-visible flaps reach
                 // this branch (the fuser absorbs sub-window blips), so every
@@ -1922,9 +1958,11 @@ package final class ProxyOrchestrator {
             case .disconnected:
                 async let pacRefreshed: Void = refreshPACRouting(force: true)
                 let summary = await refreshConnectivityMode()
-                setDirectMode(deriveDirectModeCause(probeSummary: summary))
-                resumeConnectivityMonitoring(summary: summary)
+                if let summary { resumeConnectivityMonitoring(summary: summary) }
                 await pacRefreshed
+                // A newer VPN report (during the probe or the PAC refresh)
+                // owns routing and reports its own outcome.
+                guard summary != nil, generation == routingGeneration else { return }
                 emitEvent(.vpn, "vpn.connected")
                 logStore.log(.notice, "VPN reconnected — re-probing upstreams.", category: .network)
             case .unknown, .connected:
@@ -1936,9 +1974,11 @@ package final class ProxyOrchestrator {
                 // URLSession pools.
                 async let pacRefreshed: Void = refreshPACRouting(force: true)
                 let summary = await refreshConnectivityMode()
-                setDirectMode(deriveDirectModeCause(probeSummary: summary))
-                resumeConnectivityMonitoring(summary: summary)
+                if let summary { resumeConnectivityMonitoring(summary: summary) }
                 await pacRefreshed
+                // A newer VPN report (during the probe or the PAC refresh)
+                // owns routing and reports its own outcome.
+                guard summary != nil, generation == routingGeneration else { return }
                 emitEvent(.vpn, "vpn.connected")
             }
 
@@ -1956,7 +1996,14 @@ package final class ProxyOrchestrator {
             async let pacRefreshed: Void = refreshPACRouting(force: true)
             flapStartedAt = nil
             healthChecker.stop()
-            let summary = await refreshConnectivityMode()
+            guard let summary = await refreshConnectivityMode() else {
+                // A newer VPN report ran during the probe and owns routing
+                // now; sweeping on this stale verdict would close channels
+                // it set up, and its own handler reports the outcome.
+                migrateUpstreamChannelsAfterVPNDisconnect(reason: reason, routesDirect: false, superseded: true)
+                await pacRefreshed
+                return
+            }
             let cause = snapshot.directModeCause
             mutateSnapshot {
                 if cause.routesClientTrafficDirectly {
@@ -1970,12 +2017,11 @@ package final class ProxyOrchestrator {
                     $0.runtimeStatus.state = .running
                 }
             }
-            // A newer VPN report that ran during the probe owns routing now;
-            // sweeping on this stale verdict would close channels it set up.
-            migrateUpstreamChannelsAfterVPNDisconnect(reason: reason, routesDirect: cause.routesClientTrafficDirectly,
-                                                      superseded: generation != vpnTransitionGeneration)
+            migrateUpstreamChannelsAfterVPNDisconnect(reason: reason, routesDirect: cause.routesClientTrafficDirectly, superseded: false)
             reconcileConnectivityMonitors(for: cause)
             await pacRefreshed
+            // A newer VPN report during the PAC refresh reports its own outcome.
+            guard generation == routingGeneration else { return }
             switch reason {
             case .userInitiated:
                 emitEvent(.vpn, "vpn.disconnected.user")
@@ -2249,16 +2295,29 @@ package final class ProxyOrchestrator {
         // failed-recovery path is what turned one failure into a ladder
         // every 1.5 s (see `RecoveryGate`).
         guard !healthChecker.isRunning else { return }
+        // Each check applies its own result on the main actor, judged by the
+        // routing generation it started under: one that straddled a VPN
+        // transition measured the old network, and the transition's own
+        // probe decides routing (#155).
         healthChecker.start(interval: config.healthCheckIntervalSeconds) { [weak self] in
             guard let self else {
                 return .unhealthy(.unreachable(detail: "ProxyOrchestrator deallocated"), responseTimeMS: 0)
             }
-            return await self.localProxyServer.performHealthCheck()
-        } onResult: { [weak self] result in
-            Task { @MainActor in
-                self?.applyHealthCheckResult(result)
-            }
+            let generation = await MainActor.run { self.routingGeneration }
+            let result = await self.localProxyServer.performHealthCheck()
+            await MainActor.run { self.applyHealthCheckResult(result, startedUnder: generation) }
+            return result
+        } onResult: { _ in }
+    }
+
+    private func applyHealthCheckResult(_ result: HealthCheckResult, startedUnder generation: UInt64) {
+        guard generation == routingGeneration else {
+            let event = RuntimeEvent(kind: .health, event: "health.result_superseded", detail: "healthy=\(result.healthy)")
+            eventLog.append(event)
+            logStore.log(.info, "Health check result dropped: \(event.detail ?? "")", category: .network)
+            return
         }
+        applyHealthCheckResult(result)
     }
 
     private func applyHealthCheckResult(_ result: HealthCheckResult) {
@@ -2321,9 +2380,23 @@ package final class ProxyOrchestrator {
             break
         }
 
+        let generation = routingGeneration
         Task { @MainActor in
             self.mutateSnapshot { $0.runtimeStatus.state = .recovering }
-            let recovered = await self.autoRecovery.recover(trigger: result.failure)
+            let recovered = await self.autoRecovery.recover(trigger: result.failure) {
+                self.routingGeneration == generation
+            }
+            guard generation == self.routingGeneration else {
+                // A VPN transition ran during the ladder and owns routing;
+                // its failure evidence is stale, so no cooldown either.
+                self.recoveryGate.end(recovered: true)
+                let cause = self.snapshot.directModeCause
+                self.mutateSnapshot {
+                    guard $0.runtimeStatus.state == .recovering else { return }
+                    $0.runtimeStatus.state = cause.routesClientTrafficDirectly ? .running : .degraded
+                }
+                return
+            }
             self.recoveryGate.end(recovered: recovered)
             if !recovered {
                 let seconds = Int(self.recoveryGate.cooldown)
@@ -2337,7 +2410,16 @@ package final class ProxyOrchestrator {
                 }
                 self.onEvent?(.proxyRecovered(activeUpstream: self.snapshot.runtimeStatus.activeUpstream))
             } else {
-                let connSummary = await self.refreshConnectivityMode()
+                guard let connSummary = await self.refreshConnectivityMode() else {
+                    // A VPN report during the probe owns routing now; leave
+                    // `.recovering` for the state its routing implies.
+                    let cause = self.snapshot.directModeCause
+                    self.mutateSnapshot {
+                        guard $0.runtimeStatus.state == .recovering else { return }
+                        $0.runtimeStatus.state = cause.routesClientTrafficDirectly ? .running : .degraded
+                    }
+                    return
+                }
                 if self.snapshot.directModeCause.isDirect {
                     let cause = self.snapshot.directModeCause
                     self.mutateSnapshot {
@@ -2388,7 +2470,32 @@ package final class ProxyOrchestrator {
         }
     }
 
-    private func refreshConnectivityMode() async -> UpstreamProbeSummary {
+    /// Startup's probe: retried while VPN reports keep superseding it, then
+    /// committed as the probe-less conservative cause, which the health
+    /// loop or retry timer corrects once the reports settle.
+    private func refreshConnectivityModeForStart() async -> UpstreamProbeSummary {
+        for _ in 0..<Self.startupProbeAttempts {
+            if let summary = await refreshConnectivityMode() { return summary }
+        }
+        setDirectMode(deriveDirectModeCause(probeSummary: nil))
+        refreshUpstreamStatuses()
+        return UpstreamProbeSummary(results: [])
+    }
+
+    private static let startupProbeAttempts = 3
+
+    /// Probe the upstreams and commit the direct-mode cause the result
+    /// derives, unless a newer transition took over routing while the probe
+    /// ran (#155). Then the result describes a network that is gone: it is
+    /// dropped with `connectivity.probe_superseded` and `nil` is returned,
+    /// and the caller leaves status, monitors and events to the newer owner.
+    /// A result a later-started probe already overtook is dropped too, and
+    /// the caller gets that probe's committed summary instead.
+    private func refreshConnectivityMode() async -> UpstreamProbeSummary? {
+        let generation = routingGeneration
+        probeSerial &+= 1
+        let serial = probeSerial
+        let probedUnder = snapshot.vpnState
         let summary: UpstreamProbeSummary
         if let connectivityProbe {
             summary = await connectivityProbe(config.upstreams)
@@ -2396,9 +2503,28 @@ package final class ProxyOrchestrator {
             let prober = UpstreamProber(group: MultiThreadedEventLoopGroup.singleton, logger: logStore)
             summary = await prober.summarize(config.upstreams)
         }
+        guard generation == routingGeneration else {
+            reportSupersededProbe(by: "transition", probedUnder: probedUnder, summary: summary)
+            return nil
+        }
+        if let newer = committedProbe, newer.serial > serial {
+            // Same network, fresher evidence already committed: answer with it.
+            reportSupersededProbe(by: "newer_probe", probedUnder: probedUnder, summary: summary)
+            return newer.summary
+        }
+        committedProbe = (serial, summary)
         setDirectMode(deriveDirectModeCause(probeSummary: summary))
         refreshUpstreamStatuses()
         return summary
+    }
+
+    private func reportSupersededProbe(by: String, probedUnder: VPNObservedState, summary: UpstreamProbeSummary) {
+        let event = RuntimeEvent(
+            kind: .health, event: "connectivity.probe_superseded",
+            detail: "by=\(by) probed_vpn=\(probedUnder.eventLabel) current_vpn=\(snapshot.vpnState.eventLabel) reachable=\(summary.hasReachableUpstream)"
+        )
+        eventLog.append(event)
+        logStore.log(.info, "Connectivity probe result dropped: \(event.detail ?? "")", category: .network)
     }
 
     /// Derive the effective `DirectModeCause` from the union of VPN state and
@@ -2477,7 +2603,8 @@ package final class ProxyOrchestrator {
                     detail: "cause=\(self.snapshot.directModeCause.rawValue)")
                 self.eventLog.append(started)
                 self.logStore.log(.debug, "Connectivity retry started: \(started.detail ?? "")", category: .network)
-                let summary = await self.refreshConnectivityMode()
+                // nil: a VPN report during the probe owns routing now.
+                guard let summary = await self.refreshConnectivityMode() else { return }
                 let completed = RuntimeEvent(kind: .health, event: "connectivity.reprobe_completed",
                     detail: "reachable=\(summary.hasReachableUpstream) cause=\(self.snapshot.directModeCause.rawValue)")
                 self.eventLog.append(completed)
@@ -2558,7 +2685,8 @@ package final class ProxyOrchestrator {
 
         Task { @MainActor in
             defer { self.errorRateReprobeScheduled = false }
-            let summary = await self.refreshConnectivityMode()
+            // nil: a VPN report during the probe owns routing now.
+            guard let summary = await self.refreshConnectivityMode() else { return }
             if self.snapshot.directModeCause.isDirect {
                 let cause = self.snapshot.directModeCause
                 self.mutateSnapshot {
