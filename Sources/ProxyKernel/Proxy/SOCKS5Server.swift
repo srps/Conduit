@@ -20,6 +20,7 @@ final class SOCKS5Server: @unchecked Sendable {
     private let onConnectionClosed: @Sendable (UUID) -> Void
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private let inboundBudget: InboundConnectionBudget
+    private let directTunnels: DirectTunnelRegistry?
     private let handshakeTimeout: TimeAmount
     private var serverChannel: Channel?
 
@@ -44,9 +45,11 @@ final class SOCKS5Server: @unchecked Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void = { _ in },
         onConnectionClosed: @Sendable @escaping (UUID) -> Void = { _ in },
-        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in }
+        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in },
+        directTunnels: DirectTunnelRegistry? = nil
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
+        self.directTunnels = directTunnels
         self.inboundBudget = inboundBudget
         self.handshakeTimeout = handshakeTimeout
         self.group = group
@@ -96,7 +99,8 @@ final class SOCKS5Server: @unchecked Sendable {
                             eventSink: self.eventSink,
                             onConnectionOpened: self.onConnectionOpened,
                             onConnectionClosed: self.onConnectionClosed,
-                            onConnectionActivity: self.onConnectionActivity
+                            onConnectionActivity: self.onConnectionActivity,
+                            directTunnels: self.directTunnels
                         )
                     )
                 }
@@ -129,6 +133,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     private let onConnectionOpened: @Sendable (ActiveConnectionInfo) -> Void
     private let onConnectionClosed: @Sendable (UUID) -> Void
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
+    private let directTunnels: DirectTunnelRegistry?
     private enum State { case greeting, request, routing, relaying }
     private var state: State = .greeting
     private let handshakeTimeout: TimeAmount
@@ -148,9 +153,11 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
-        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void
+        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void,
+        directTunnels: DirectTunnelRegistry? = nil
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
+        self.directTunnels = directTunnels
         self.handshakeTimeout = handshakeTimeout
         self.connectCoordinator = connectCoordinator
         self.logger = logger
@@ -459,6 +466,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let group = self.group
         let logger = self.logger
         let gatewayMode = self.gatewayMode
+        let startedCause = directModeProvider().1
 
         // Same direct-dial policy as `HTTPProxyHandler`: link-local literals
         // get a short budget and a remembered timeout fails the next attempt at once.
@@ -509,6 +517,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
+                    self.directTunnels?.register(upstream, startedCause: startedCause)
                     self.attachRelay(context: ctx, upstream: upstream, isUpstreamTunnel: false)
                 case .failure(let error):
                     // A blocked rebinding peer is a policy denial (0x02, not

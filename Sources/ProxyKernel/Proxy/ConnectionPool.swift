@@ -10,7 +10,8 @@ import NIOPosix
 /// Designed to support the VPN-flap-resilience design (`docs/design-vpn-flap-resilience.md`):
 /// control-plane transitions (direct-mode flips, listener recycling) must NOT close active
 /// upstream channels, because macOS preserves their TCP state across VPN flaps and the kernel
-/// will resume delivery once the path returns. Only explicit shutdown should call `.all`.
+/// will resume delivery once the path returns. Only explicit shutdown and a confirmed VPN
+/// disconnect that routes DIRECT (#148: the channels left with the VPN) call `.all`.
 package enum CloseScope: Sendable, Equatable {
     /// Close only idle pooled connections (those not currently in use). Preserves
     /// every connection that is mid-exchange or marked as a dedicated CONNECT tunnel.
@@ -23,7 +24,8 @@ package enum CloseScope: Sendable, Equatable {
     case allButDedicated
 
     /// Close every connection in the pool, including dedicated CONNECT tunnels.
-    /// Use only for final shutdown / process termination paths.
+    /// Use only for final shutdown / process termination paths, and for a
+    /// confirmed VPN disconnect that routes DIRECT (#148).
     case all
 }
 
@@ -552,10 +554,11 @@ package final class ConnectionPool: @unchecked Sendable {
     /// New control-plane callers (listener recycle, proxy-config restart) should pass
     /// `.allButDedicated` or `.idleOnly` to avoid tearing down active client-owned tunnels.
     /// See `docs/design-vpn-flap-resilience.md` for the policy.
-    package func closeAll(scope: CloseScope = .all) {
+    @discardableResult
+    package func closeAll(scope: CloseScope = .all) -> Int {
         let snapshot = lock.withLock { Array(allConnections.values) }
         let closeIDs = Self.connectionIDsToClose(from: snapshot, scope: scope)
-        guard !closeIDs.isEmpty else { return }
+        guard !closeIDs.isEmpty else { return 0 }
 
         for connection in snapshot where closeIDs.contains(connection.id) {
             connection.channel.close(mode: .all, promise: nil)
@@ -564,6 +567,30 @@ package final class ConnectionPool: @unchecked Sendable {
         lock.withLockVoid {
             removeConnectionsLocked(ids: closeIDs)
         }
+        return closeIDs.count
+    }
+
+    /// Close the connections `shouldClose` selects, dedicated tunnels
+    /// included. For a confirmed VPN disconnect: a socket whose local
+    /// address left with the VPN cannot resume (#148).
+    @discardableResult
+    package func closeConnections(where shouldClose: (PooledUpstreamConnection) -> Bool) -> Int {
+        let snapshot = lock.withLock { Array(allConnections.values) }
+        let selected = snapshot.filter(shouldClose)
+        guard !selected.isEmpty else { return 0 }
+        for connection in selected {
+            connection.channel.close(mode: .all, promise: nil)
+        }
+        lock.withLockVoid {
+            removeConnectionsLocked(ids: Set(selected.map(\.id)))
+        }
+        return selected.count
+    }
+
+    /// Close the connections whose local address is not in `assigned`.
+    @discardableResult
+    package func closeConnections(orphanedFrom assigned: Set<String>) -> Int {
+        closeConnections { LocalAddresses.isOrphaned($0.channel, assigned: assigned) }
     }
 
     /// Pure filter exposed for unit testing: returns the IDs of connections that
