@@ -44,42 +44,36 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         self.tunnelFailureReporter = TunnelFailureReporter(logger: logger, eventSink: eventSink)
     }
 
-    /// The runtime's transition registry, for a caller dialing DIRECT
+    /// The runtime's outbound socket registry, for a caller dialing DIRECT
     /// beside this coordinator (#156).
-    package var transitionAuthority: TransitionAuthority { pool.transitionAuthority }
+    package var socketRegistry: OutboundSocketRegistry { pool.socketRegistry }
 
     /// Establish CONNECT tunnel to upstream proxy, returning the raw tunnel channel.
     /// Uses the configured ProxyAuthenticator for 407 challenge-response.
-    /// Retries with the next upstream on connection failure. `stamp` is the
-    /// routing the client operation captured when it started; every attempt
-    /// dials under it, so none starts after a confirmed VPN transition (#156).
+    /// Retries with the next upstream on connection failure.
     package func connectUpstreamTunnel(
         target: String,
         authSource: String? = nil,
-        proxyChain: [UpstreamProxy] = [],
-        stamp: RoutingStamp? = nil
+        proxyChain: [UpstreamProxy] = []
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
-        let stamp = stamp ?? pool.routingStamp()
         if !proxyChain.isEmpty {
-            return attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: 0, stamp: stamp)
+            return attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: 0)
         }
         let maxRetries = pool.enabledUpstreamCount
-        return attemptTunnel(target: target, authSource: authSource, attempt: 1, maxRetries: maxRetries, stamp: stamp)
+        return attemptTunnel(target: target, authSource: authSource, attempt: 1, maxRetries: maxRetries)
     }
 
     private func attemptTunnel(
         target: String,
         authSource: String?,
         proxyChain: [UpstreamProxy],
-        index: Int,
-        stamp: RoutingStamp
+        index: Int
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let forcedProxy = proxyChain[index]
         return attemptTunnel(
             target: target,
             authSource: authSource,
-            forcedProxy: forcedProxy,
-            stamp: stamp
+            forcedProxy: forcedProxy
         ).flatMapError { [weak self] error in
             // Local refusals end here: another upstream would not help, and
             // after a VPN-transition sweep routing may have left the upstreams.
@@ -94,7 +88,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             }
             let next = proxyChain[index + 1].endpoint
             self.logger.log(.warning, "PAC upstream \(forcedProxy.endpoint) failed for \(SensitiveValueSanitizer.observableTarget(target)), trying \(next).", category: .proxy)
-            return self.attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: index + 1, stamp: stamp)
+            return self.attemptTunnel(target: target, authSource: authSource, proxyChain: proxyChain, index: index + 1)
         }
     }
 
@@ -102,10 +96,9 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         target: String,
         authSource: String?,
         attempt: Int,
-        maxRetries: Int,
-        stamp: RoutingStamp
+        maxRetries: Int
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
-        return attemptTunnel(target: target, authSource: authSource, forcedProxy: nil, stamp: stamp).flatMapError { [weak self] error -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+        return attemptTunnel(target: target, authSource: authSource, forcedProxy: nil).flatMapError { [weak self] error -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             // Local refusals end here: another upstream would not help, and
             // after a VPN-transition sweep routing may have left the upstreams.
             if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) || ConnectionPoolError.isVPNTransitionDuringConnect(error)
@@ -119,19 +112,18 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             }
             let next = self.pool.switchToNextUpstream() ?? "unknown"
             self.logger.log(.warning, "Upstream failed for \(SensitiveValueSanitizer.observableTarget(target)), switching to \(next) (attempt \(attempt + 1)/\(maxRetries)).", category: .proxy)
-            return self.attemptTunnel(target: target, authSource: authSource, attempt: attempt + 1, maxRetries: maxRetries, stamp: stamp)
+            return self.attemptTunnel(target: target, authSource: authSource, attempt: attempt + 1, maxRetries: maxRetries)
         }
     }
 
     private func attemptTunnel(
         target: String,
         authSource: String?,
-        forcedProxy: UpstreamProxy?,
-        stamp: RoutingStamp
+        forcedProxy: UpstreamProxy?
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let pool = self.pool
         let start = Date()
-        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target, stamp: stamp).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
@@ -199,14 +191,13 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         requestHead: HTTPRequestHead,
         clientContext: ChannelHandlerContext,
         proxyChain: [UpstreamProxy] = [],
-        stamp: RoutingStamp? = nil,
         onTunnelClosed: @Sendable @escaping () -> Void
     ) -> EventLoopFuture<(endpoint: String, authMethod: String?)> {
         nonisolated(unsafe) let ctx = clientContext
         let clientEL = ctx.eventLoop
         let pool = self.pool
         let authSource = clientContext.remoteAddress?.ipAddress
-        return connectUpstreamTunnel(target: requestHead.uri, authSource: authSource, proxyChain: proxyChain, stamp: stamp)
+        return connectUpstreamTunnel(target: requestHead.uri, authSource: authSource, proxyChain: proxyChain)
             .hop(to: clientEL)
             .flatMap { [weak self] (upstreamChannel, endpoint, authMethod) in
                 guard let self else {

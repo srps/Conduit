@@ -6,71 +6,164 @@ import NIOEmbedded
 import XCTest
 @testable import ProxyKernel
 
-/// #148, #156: the order of a confirmed disconnect's two migration phases.
+/// #148, #156: a confirmed transition closes the sockets whose path it
+/// removed, at once and again as routes settle; a flap holds the sweeps.
 @MainActor
 final class VPNTunnelMigrationTests: XCTestCase {
     private func migrations(_ events: [RuntimeEvent]) -> [String] {
         events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
     }
 
-    /// The address phase must not wait for the connectivity probe: the probe
-    /// can take its whole connect budget while stranded sockets stall.
-    func testTheAddressPhaseRunsBeforeTheProbeAndTheRoutingPhaseAfterIt() async throws {
+    /// Local addresses whose path is gone; every other socket is current.
+    private let gone = NIOLockedValueBox<Set<String>>([])
+
+    private var paths: ClosureSocketPaths {
+        let gone = self.gone
+        return ClosureSocketPaths { query in
+            gone.withLockedValue { $0.contains(query.local.ipAddress ?? "") } ? .stranded("address_gone") : .current
+        }
+    }
+
+    private func config() -> ProxyConfig {
         var config = ProxyConfig()
         config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
         config.healthCheckIntervalSeconds = 3600
         config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
-        let reachable = NIOLockedValueBox(true)
-        let log = NIOLockedValueBox<RuntimeEventLog?>(nil)
-        let seenByProbe = NIOLockedValueBox<[String]?>(nil)
-        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+        return config
+    }
+
+    private func orchestrator(
+        reachable: NIOLockedValueBox<Bool> = NIOLockedValueBox(true), logger: any LogSink = DiscardingLogSink(),
+        resweeps: [Duration] = [.milliseconds(50)],
+        probe: (@Sendable () async -> Void)? = nil
+    ) -> ProxyOrchestrator {
+        ProxyOrchestrator(config: config(), logger: logger,
+            authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
             connectivityProbe: { upstreams in
+                await probe?()
                 let up = reachable.withLockedValue { $0 }
-                if !up, let events = log.withLockedValue({ $0 })?.events {
-                    seenByProbe.withLockedValue { $0 = events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail) }
-                }
                 return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
-            })
-        log.withLockedValue { $0 = orchestrator.eventLog }
+            },
+            socketPaths: paths, strandedResweepDelays: resweeps)
+    }
+
+    /// A connected socket from `local`, tracked by `orchestrator`.
+    private func tracked(
+        _ orchestrator: ProxyOrchestrator, local: String, route: OutboundSocketRegistry.Route = .direct
+    ) async throws -> EmbeddedChannel {
+        let channel = EmbeddedChannel()
+        channel.localAddress = try SocketAddress(ipAddress: local, port: 50_000)
+        try await channel.connect(to: SocketAddress(ipAddress: "192.0.2.10", port: route == .upstream ? 3128 : 443)).get()
+        try orchestrator.sockets.register(channel, route: route, target: "origin.test:443")
+        return channel
+    }
+
+    private func until(_ condition: () -> Bool) async throws -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        return condition()
+    }
+
+    /// The sweep does not wait for the connectivity probe: the probe can
+    /// take its whole connect budget while stranded sockets stall.
+    func testADisconnectClosesStrandedSocketsWhileItsProbeRuns() async throws {
+        let reachable = NIOLockedValueBox(true)
+        let holdProbe = NIOLockedValueBox(false)
+        let gate = Gate()
+        let orchestrator = orchestrator(reachable: reachable, probe: {
+            if holdProbe.withLockedValue({ let hold = $0; $0 = false; return hold }) { await gate.wait() }
+        })
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
+        let overVPN = try await tracked(orchestrator, local: "10.20.30.40", route: .upstream)
+        let overWiFi = try await tracked(orchestrator, local: "192.168.2.20")
         reachable.withLockedValue { $0 = false }
+        holdProbe.withLockedValue { $0 = true }
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
 
-        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        while !(await gate.holding) { try await Task.sleep(for: .milliseconds(5)) }
+        let closedDuringProbe = try await until { !overVPN.isActive }
+        await gate.open()
+        await disconnect.value
 
-        let atProbe = try XCTUnwrap(seenByProbe.withLockedValue { $0 }, "the probe ran")
-        XCTAssertEqual(atProbe.count, 1)
-        XCTAssertTrue(atProbe[0].hasPrefix("transition=disconnected phase=addresses reason=user "), atProbe[0])
-        let after = migrations(orchestrator.eventLog.events)
-        XCTAssertEqual(after.count, 2)
-        XCTAssertEqual(after.last, "transition=disconnected phase=routing reason=user routing=direct upstream_closed=0")
+        XCTAssertTrue(closedDuringProbe)
+        XCTAssertTrue(overWiFi.isActive)
+        let events = migrations(orchestrator.eventLog.events)
+        XCTAssertTrue(events.contains("transition=disconnected phase=paths pass=0 upstream_closed=1 direct_closed=0 unchecked=0"), "\(events)")
+        XCTAssertEqual(events.last { $0.contains("phase=routing") }, "transition=disconnected phase=routing reason=user routing=direct upstream_closed=0")
         await orchestrator.stopProxy()
     }
 
-    /// On-prem, or while the probe is pending, the direct-mode cause is
-    /// `.none`, yet DIRECT dials leave on the off-VPN path: the outage is the
-    /// VPN state, and the reconnect still sweeps them.
-    func testAnOnPremOutageMarksDIRECTDialsAndTheReconnectSweepsThem() async throws {
-        var config = ProxyConfig()
-        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
-        config.healthCheckIntervalSeconds = 3600
-        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
-        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
-            connectivityProbe: { upstreams in
-                UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
-            })
+    /// Routes settle after the VPN report: a DIRECT socket whose route moves
+    /// onto the tunnel only after the first pass is closed by a re-sweep.
+    func testAReSweepClosesASocketWhosePathMovedAfterTheFirstPass() async throws {
+        let orchestrator = orchestrator(resweeps: [.milliseconds(100)])
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        let offVPN = try await tracked(orchestrator, local: "192.168.2.20")
+
+        await orchestrator.handleVPNStateChange(.connected)
+        let settled1 = try await until {
+            migrations(orchestrator.eventLog.events).last?.hasPrefix("transition=connected phase=paths pass=0 ") ?? false
+        }
+        XCTAssertTrue(settled1)
+        XCTAssertTrue(offVPN.isActive, "its route had not moved yet")
+        gone.withLockedValue { _ = $0.insert("192.168.2.20") }
+
+        let settled2 = try await until { !offVPN.isActive }
+
+        XCTAssertTrue(settled2)
+        XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
+                       "transition=connected phase=paths pass=1 upstream_closed=0 direct_closed=1 unchecked=0")
+        await orchestrator.stopProxy()
+    }
+
+    /// A route missing mid-flap is not a gone path: the pending re-sweeps of
+    /// the transition before the flap wait it out, and run once it recovers.
+    func testAFlapHoldsThePendingReSweepsUntilItRecovers() async throws {
+        let orchestrator = orchestrator(resweeps: [.milliseconds(100)])
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        await orchestrator.handleVPNStateChange(.connected)
+        let onVPN = try await tracked(orchestrator, local: "10.20.30.40")
+        await orchestrator.handleVPNStateChange(.reasserting)
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
+
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(onVPN.isActive, "the flap held the re-sweep")
+
+        await orchestrator.handleVPNStateChange(.connected)
+        let settled3 = try await until { !onVPN.isActive }
+        XCTAssertTrue(settled3, "the recovery ran the owed re-sweep")
+        await orchestrator.stopProxy()
+    }
+
+    /// A flap with no owed sweeps closes nothing, whatever the paths say.
+    func testAFlapAloneSweepsNothing() async throws {
+        let orchestrator = orchestrator(resweeps: [.milliseconds(20)])
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
-        XCTAssertFalse(orchestrator.transitions.stamp().whileVPNDown)
-
-        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
-        XCTAssertEqual(orchestrator.snapshot.directModeCause, .none)
-        XCTAssertTrue(orchestrator.transitions.stamp().whileVPNDown)
-
+        try await Task.sleep(for: .milliseconds(100))
+        let onVPN = try await tracked(orchestrator, local: "10.20.30.40")
+        await orchestrator.handleVPNStateChange(.reasserting)
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
         await orchestrator.handleVPNStateChange(.connected)
-        XCTAssertFalse(orchestrator.transitions.stamp().whileVPNDown)
-        XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
-                       "transition=reconnected route=direct closed=0 untracked=0")
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(onVPN.isActive)
+        await orchestrator.stopProxy()
+    }
+
+    /// The first report after startup is a real transition: `unknown →
+    /// connected` sweeps like any other (#160).
+    func testTheFirstConnectedReportSweeps() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        let beforeVPN = try await tracked(orchestrator, local: "192.168.2.20")
+        gone.withLockedValue { _ = $0.insert("192.168.2.20") }
+        await orchestrator.handleVPNStateChange(.connected)
+        let settled4 = try await until { !beforeVPN.isActive }
+        XCTAssertTrue(settled4)
         await orchestrator.stopProxy()
     }
 
@@ -84,19 +177,12 @@ final class VPNTunnelMigrationTests: XCTestCase {
     /// A reconnect that runs while the disconnect handler waits on its probe
     /// owns routing; the stale handler must not sweep on its old verdict.
     func testADisconnectSupersededDuringItsProbeSkipsTheRoutingSweep() async throws {
-        var config = ProxyConfig()
-        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
-        config.healthCheckIntervalSeconds = 3600
-        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
         let reachable = NIOLockedValueBox(true)
         let holdNextProbe = NIOLockedValueBox(false)
         let gate = Gate()
-        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
-            connectivityProbe: { upstreams in
-                let up = reachable.withLockedValue { $0 }
-                if holdNextProbe.withLockedValue({ let hold = $0; $0 = false; return hold }) { await gate.wait() }
-                return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
-            })
+        let orchestrator = orchestrator(reachable: reachable, probe: {
+            if holdNextProbe.withLockedValue({ let hold = $0; $0 = false; return hold }) { await gate.wait() }
+        })
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
         reachable.withLockedValue { $0 = false }
@@ -115,48 +201,34 @@ final class VPNTunnelMigrationTests: XCTestCase {
     }
 
     /// A reconnect while the listener is stopped (a config restart in
-    /// flight) still retires the DIRECT tunnels the restart preserved.
-    func testAReconnectWithTheListenerStoppedStillSweepsTheOutage() async throws {
-        var config = ProxyConfig()
-        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
-        config.healthCheckIntervalSeconds = 3600
-        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
-        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
-            connectivityProbe: { upstreams in
-                UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: false) })
-            })
+    /// flight) still closes the stranded sockets the restart preserved.
+    func testAReconnectWithTheListenerStoppedStillSweeps() async throws {
+        let orchestrator = orchestrator(reachable: NIOLockedValueBox(false))
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
-        let offVPN = EmbeddedChannel()
-        try await offVPN.connect(to: SocketAddress(ipAddress: "192.0.2.10", port: 443)).get()
-        try orchestrator.transitions.register(offVPN, route: .direct, stamp: orchestrator.transitions.stamp(), target: "origin.test:443")
+        let offVPN = try await tracked(orchestrator, local: "192.168.2.20")
         await orchestrator.stopProxy(scope: .allButDedicated)
+        gone.withLockedValue { _ = $0.insert("192.168.2.20") }
 
         await orchestrator.handleVPNStateChange(.connected)
 
-        XCTAssertFalse(offVPN.isActive)
-        XCTAssertFalse(orchestrator.transitions.stamp().whileVPNDown)
-        XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
-                       "transition=reconnected route=direct closed=1 untracked=0")
+        let settled5 = try await until { !offVPN.isActive }
+
+        XCTAssertTrue(settled5)
+        XCTAssertTrue(migrations(orchestrator.eventLog.events).contains(
+            "transition=connected phase=paths pass=0 upstream_closed=0 direct_closed=1 unchecked=0"))
     }
 
     /// On-prem: the probe finds the upstream, so the routing phase closes nothing.
     func testAReachableUpstreamKeepsItsChannelsInTheRoutingPhase() async throws {
-        var config = ProxyConfig()
-        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
-        config.healthCheckIntervalSeconds = 3600
-        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
-        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
-            connectivityProbe: { upstreams in
-                UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
-            })
+        let orchestrator = orchestrator()
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
 
         await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
 
-        XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
+        XCTAssertEqual(migrations(orchestrator.eventLog.events).last { $0.contains("phase=routing") },
                        "transition=disconnected phase=routing reason=lost routing=upstream upstream_closed=0")
         await orchestrator.stopProxy()
     }
@@ -166,34 +238,27 @@ final class VPNTunnelMigrationTests: XCTestCase {
     /// decides routing: an upstream tunnel the restart preserved would stall
     /// on proxies behind the gone VPN (#156).
     func testADisconnectWithTheListenerStoppedRoutesOnceTheStartProbeDecides() async throws {
-        var config = ProxyConfig()
-        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
-        config.healthCheckIntervalSeconds = 3600
-        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
         let reachable = NIOLockedValueBox(true)
-        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
-            connectivityProbe: { upstreams in
-                let up = reachable.withLockedValue { $0 }
-                return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
-            })
+        let orchestrator = orchestrator(reachable: reachable)
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
-        let preserved = EmbeddedChannel()
-        try await preserved.connect(to: SocketAddress(ipAddress: "192.0.2.10", port: 3128)).get()
-        try orchestrator.transitions.register(preserved, route: .upstream, stamp: orchestrator.transitions.stamp(), target: "origin.test:443")
+        let preserved = try await tracked(orchestrator, local: "192.168.2.20", route: .upstream)
         await orchestrator.stopProxy(scope: .allButDedicated)
         reachable.withLockedValue { $0 = false }
 
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
 
-        XCTAssertTrue(orchestrator.transitions.stamp().whileVPNDown, "the outage began with the listener stopped")
-        XCTAssertTrue(migrations(orchestrator.eventLog.events).last?.hasPrefix("transition=disconnected phase=addresses reason=user ") ?? false)
-        XCTAssertTrue(preserved.isActive, "routing is not decided yet")
+        let settled6 = try await until {
+            migrations(orchestrator.eventLog.events).last?.hasPrefix("transition=disconnected phase=paths pass=0 ") ?? false
+        }
+
+        XCTAssertTrue(settled6, "the path sweep ran with the listener stopped")
+        XCTAssertTrue(preserved.isActive, "its path is current and routing is not decided yet")
 
         try await orchestrator.startProxy()
 
         XCTAssertFalse(preserved.isActive)
-        XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
+        XCTAssertEqual(migrations(orchestrator.eventLog.events).last { $0.contains("phase=routing") },
                        "transition=disconnected phase=routing reason=user routing=direct upstream_closed=1")
         await orchestrator.stopProxy()
     }
@@ -214,10 +279,6 @@ final class VPNTunnelMigrationTests: XCTestCase {
     /// listener binds) made that verdict stale; startup decides again and
     /// runs the routing phase before it reports running.
     func testADisconnectAfterTheStartProbeIsRoutedBeforeRunning() async throws {
-        var config = ProxyConfig()
-        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
-        config.healthCheckIntervalSeconds = 3600
-        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
         let reachable = NIOLockedValueBox(true)
         let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
         let hook = ListeningHook {
@@ -225,16 +286,9 @@ final class VPNTunnelMigrationTests: XCTestCase {
             reachable.withLockedValue { $0 = false }
             Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
         }
-        let orchestrator = ProxyOrchestrator(config: config, logger: hook,
-            authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
-            connectivityProbe: { upstreams in
-                let up = reachable.withLockedValue { $0 }
-                return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
-            })
+        let orchestrator = orchestrator(reachable: reachable, logger: hook)
         await orchestrator.handleVPNStateChange(.connected)
-        let preserved = EmbeddedChannel()
-        try await preserved.connect(to: SocketAddress(ipAddress: "192.0.2.10", port: 3128)).get()
-        try orchestrator.transitions.register(preserved, route: .upstream, stamp: orchestrator.transitions.stamp(), target: "origin.test:443")
+        let preserved = try await tracked(orchestrator, local: "192.168.2.20", route: .upstream)
         box.withLockedValue { $0 = orchestrator }
 
         try await orchestrator.startProxy()
@@ -242,7 +296,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.vpnState, .disconnected(reason: .userInitiated), "the disconnect landed during startup")
         XCTAssertTrue(orchestrator.snapshot.directModeCause.routesClientTrafficDirectly)
         XCTAssertFalse(preserved.isActive, "the deferred routing phase ran before .running")
-        XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
+        XCTAssertEqual(migrations(orchestrator.eventLog.events).last { $0.contains("phase=routing") },
                        "transition=disconnected phase=routing reason=user routing=direct upstream_closed=1")
         await orchestrator.stopProxy()
     }

@@ -195,9 +195,6 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
         let bufferedData = accumulated
         accumulated = ByteBuffer()
         let target = "\(sniHost):443"
-        // Before the routing state it qualifies: a confirmed VPN transition
-        // after this point retires this connection's dials (#156).
-        let stamp = connectCoordinator.transitionAuthority.stamp()
         let cause = directModeProvider()
 
         nonisolated(unsafe) let ctx = context
@@ -214,13 +211,13 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                 "Transparent proxy: SNI=\(sniHost), relaying directly to \(target) (direct mode: \(cause.rawValue)).",
                 category: .proxy
             )
-            relayDirect(context: ctx, host: sniHost, initialData: bufferedData, stamp: stamp)
+            relayDirect(context: ctx, host: sniHost, initialData: bufferedData)
             return
         }
 
         logger.log(.info, "Transparent proxy: SNI=\(sniHost), tunneling to \(target).", category: .proxy)
 
-        connectCoordinator.connectUpstreamTunnel(target: target, stamp: stamp)
+        connectCoordinator.connectUpstreamTunnel(target: target)
             .hop(to: ctx.eventLoop)
             .whenComplete { [self] result in
                 switch result {
@@ -241,9 +238,9 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                     )
 
                 case .failure(let error) where HTTPProxyHandler.isLocalRefusal(error):
-                    // A VPN transition retired the dial (or the registry is
-                    // full); reported where decided. A DIRECT fallback would
-                    // act on the stale routing; the client reconnects.
+                    // A VPN transition removed the dial's path (or the
+                    // registry is full); reported where decided. The client
+                    // reconnects along the new routing.
                     ctx.close(promise: nil)
 
                 case .failure(let error):
@@ -283,7 +280,7 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                         "Transparent proxy: CONNECT to \(target) failed (\(error.displayDescription)) — falling back to direct.",
                         category: .proxy
                     )
-                    self.relayDirect(context: ctx, host: sniHost, initialData: bufferedData, stamp: stamp)
+                    self.relayDirect(context: ctx, host: sniHost, initialData: bufferedData)
                 }
             }
     }
@@ -297,31 +294,22 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
     ///
     /// The client's TLS session terminates at the origin — we only move bytes,
     /// so its certificate validation is unaffected by the detour.
-    private func relayDirect(context: ChannelHandlerContext, host: String, initialData: ByteBuffer, stamp: RoutingStamp) {
+    private func relayDirect(context: ChannelHandlerContext, host: String, initialData: ByteBuffer) {
         // Every use is on the context's event loop.
         nonisolated(unsafe) let ctx = context
         let eventLoop = ctx.eventLoop
         let started = DispatchTime.now().uptimeNanoseconds
         let startedCause = directModeProvider()
-        let transitions = connectCoordinator.transitionAuthority
-        if transitions.refusal(stamp, route: .direct, target: "\(host):443") != nil {
-            ctx.close(promise: nil)
-            return
-        }
+        let sockets = connectCoordinator.socketRegistry
         originResolver.resolveOrigin(host: host, port: 443, on: eventLoop)
             .flatMap { address -> EventLoopFuture<Channel> in
-                // The lookup is asynchronous too; a transition during it
-                // makes the dial stale.
-                if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):443") {
-                    return eventLoop.makeFailedFuture(refusal)
-                }
-                return ClientBootstrap(group: eventLoop)
+                ClientBootstrap(group: eventLoop)
                     .resolver(AddressFamilyAwareResolver(group: eventLoop))
                     .channelOption(ChannelOptions.tcpNoDelay, value: 1)
                     .connect(to: address)
             }
             .flatMapThrowing { (originChannel: Channel) -> Channel in
-                try transitions.register(originChannel, route: .direct, stamp: stamp, target: "\(host):443")
+                try sockets.register(originChannel, route: .direct, target: "\(host):443")
                 return originChannel
             }
             .hop(to: eventLoop)

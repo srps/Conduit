@@ -159,7 +159,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
                            ["by=transition probed_vpn=connected current_vpn=disconnected reachable=true"])
             // Only the cold-start connect reports; the stale reconnect does not.
             XCTAssertEqual(orchestrator.eventLog.events.filter { $0.event == "vpn.connected" }.count, 1)
-            XCTAssertEqual(details(orchestrator, "vpn.tunnels_migrated").last,
+            XCTAssertEqual(details(orchestrator, "vpn.tunnels_migrated").last { $0.contains("phase=routing") },
                            "transition=disconnected phase=routing reason=lost routing=direct upstream_closed=0")
             await orchestrator.stopProxy()
         }
@@ -271,7 +271,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.directModeCause, .none)
         XCTAssertEqual(details(orchestrator, "connectivity.probe_superseded"),
                        ["by=newer_probe probed_vpn=disconnected current_vpn=disconnected reachable=false"])
-        XCTAssertEqual(details(orchestrator, "vpn.tunnels_migrated").last,
+        XCTAssertEqual(details(orchestrator, "vpn.tunnels_migrated").last { $0.contains("phase=routing") },
                        "transition=disconnected phase=routing reason=user routing=upstream upstream_closed=0")
         await orchestrator.stopProxy()
     }
@@ -380,9 +380,9 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     }
 
     /// Hosts stamp reports on the monitor's callback. An older report that
-    /// lands after a newer one is dropped, but a dropped disconnect still
-    /// runs its address phase: the sockets it stranded are dead regardless.
-    func testAnOlderVPNReportIsDroppedAndADroppedDisconnectStillSweepsAddresses() async throws {
+    /// lands after a newer one is dropped whole: the newer state runs its own
+    /// path sweeps, which close whatever the older one stranded.
+    func testAnOlderVPNReportIsDropped() async throws {
         let script = ProbeScript()
         let orchestrator = makeOrchestrator(script)
         try await orchestrator.startProxy()
@@ -392,9 +392,9 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
 
         XCTAssertEqual(orchestrator.snapshot.vpnState, .connected)
         XCTAssertEqual(details(orchestrator, "vpn.observation_stale"), ["state=disconnected sequence=1 applied=2"])
+        try await Task.sleep(for: .milliseconds(100))
         let migrated = details(orchestrator, "vpn.tunnels_migrated")
-        XCTAssertEqual(migrated.count, 1)
-        XCTAssertTrue(migrated[0].hasPrefix("transition=disconnected phase=addresses reason=user "), migrated[0])
+        XCTAssertFalse(migrated.contains { $0.hasPrefix("transition=disconnected") }, "\(migrated)")
         await orchestrator.stopProxy()
     }
 
