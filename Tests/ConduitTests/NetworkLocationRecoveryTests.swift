@@ -50,6 +50,18 @@ final class NetworkLocationRecoveryTests: XCTestCase {
         }
     }
 
+    func testRestoreEventsNameLocationAndServiceInFieldsTheSanitizerKeeps() throws {
+        try withRecovery { store, _, recovery, events in
+            try recovery.apply(kind: .dns, desired: localDNS, config: ProxyConfig())
+            try recovery.clear(kind: .dns, config: ProxyConfig())
+            let restore = try XCTUnwrap(events.events.first { $0.event == "platform.location_restore" })
+            let detail = try XCTUnwrap(restore.detail)
+            XCTAssertEqual(SensitiveValueSanitizer.sanitize(detail), detail)
+            XCTAssertTrue(detail.contains("location=\(home) service=\(homeService)"), detail)
+            XCTAssertFalse(detail.contains("scope="), detail)
+        }
+    }
+
     func testFreshJournalPreservesUserLoopbackDNSAndRestoresItAfterApply() throws {
         try withRecovery { store, _, recovery, _ in
             store.edit { $0.services[0].dns = localDNS }
