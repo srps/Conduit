@@ -329,7 +329,15 @@ enum NetworkLocationScenarios {
                 .init("an enforcing external writer exhausts a fixed repair budget, reports contention once, then recovers; passes that wrote nothing do not count", contention),
                 .init("a sibling service that keeps failing cannot turn partial applies into a write loop", partialApplyBounded),
                 .init("observable recovery and failure decisions", events.events.contains { $0.event == "platform.location_restore" }
-                      && events.events.contains { $0.event == "platform.location_failed" })
+                      && events.events.contains { $0.event == "platform.location_failed" }),
+                // The joined location/service scope is long enough for the log
+                // sanitizer to mask as a token; separate fields survive it (#145).
+                .init("restore events name location and service in fields the log sanitizer keeps",
+                      events.events.filter { $0.event == "platform.location_restore" }.allSatisfy { event in
+                          guard let detail = event.detail else { return false }
+                          return detail.contains("location=") && detail.contains("service=") && !detail.contains("scope=")
+                              && SensitiveValueSanitizer.sanitize(detail) == detail
+                      })
             ], notes: ["fake locations only; no system settings, helpers, or serving listeners touched"]
         )
     }
