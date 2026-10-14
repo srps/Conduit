@@ -14,7 +14,12 @@ package final class TransparentTCPProxy: @unchecked Sendable {
     private let gatewayModeProvider: @Sendable () -> Bool
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let tunnelFailureReporter: TunnelFailureReporter
-    private let directTunnels: DirectTunnelRegistry?
+    /// Admits intercepted clients under `inboundConnectionMaxLimit`, as the
+    /// HTTP and SOCKS listeners do, so their sockets cannot exhaust the
+    /// runtime's transition registry (#156). Without a config (tools,
+    /// tests) every client is admitted.
+    private let configProvider: (@Sendable () -> ProxyConfig)?
+    private let inboundBudget = InboundConnectionBudget()
     private var listener: Channel?
 
     package private(set) var listeningPort: Int?
@@ -34,9 +39,9 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         strictModeProvider: @escaping @Sendable () -> Bool,
         gatewayModeProvider: @escaping @Sendable () -> Bool = { false },
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
-        directTunnels: DirectTunnelRegistry? = nil
+        configProvider: (@Sendable () -> ProxyConfig)? = nil
     ) {
-        self.directTunnels = directTunnels
+        self.configProvider = configProvider
         self.group = group
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
@@ -59,12 +64,19 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         let gatewayModeProvider = gatewayModeProvider
         let eventSink = eventSink
         let tunnelFailureReporter = tunnelFailureReporter
-        let directTunnels = directTunnels
+        let configProvider = configProvider
+        let inboundBudget = inboundBudget
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(
+                if let configProvider, !inboundBudget.admit(
+                    channel, protocolName: "transparent", config: configProvider(),
+                    logger: log, eventSink: eventSink
+                ) {
+                    return channel.close().flatMap { channel.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel) }
+                }
+                return channel.pipeline.addHandler(
                     SNIInterceptHandler(
                         connectCoordinator: coordinator,
                         connectionPool: pool,
@@ -74,8 +86,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
                         strictModeProvider: strictModeProvider,
                         gatewayModeProvider: gatewayModeProvider,
                         eventSink: eventSink,
-                        tunnelFailureReporter: tunnelFailureReporter,
-                        directTunnels: directTunnels
+                        tunnelFailureReporter: tunnelFailureReporter
                     )
                 )
             }
@@ -118,7 +129,6 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private var accumulated = ByteBuffer()
     private let tunnelFailureReporter: TunnelFailureReporter
-    private let directTunnels: DirectTunnelRegistry?
     private var resolved = false
     private var clientGone = false
 
@@ -131,10 +141,8 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
         strictModeProvider: @escaping @Sendable () -> Bool,
         gatewayModeProvider: @escaping @Sendable () -> Bool,
         eventSink: (@Sendable (RuntimeEvent) -> Void)?,
-        tunnelFailureReporter: TunnelFailureReporter,
-        directTunnels: DirectTunnelRegistry? = nil
+        tunnelFailureReporter: TunnelFailureReporter
     ) {
-        self.directTunnels = directTunnels
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
         self.logger = logger
@@ -187,6 +195,9 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
         let bufferedData = accumulated
         accumulated = ByteBuffer()
         let target = "\(sniHost):443"
+        // Before the routing state it qualifies: a confirmed VPN transition
+        // after this point retires this connection's dials (#156).
+        let stamp = connectCoordinator.transitionAuthority.stamp()
         let cause = directModeProvider()
 
         nonisolated(unsafe) let ctx = context
@@ -203,13 +214,13 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                 "Transparent proxy: SNI=\(sniHost), relaying directly to \(target) (direct mode: \(cause.rawValue)).",
                 category: .proxy
             )
-            relayDirect(context: ctx, host: sniHost, initialData: bufferedData)
+            relayDirect(context: ctx, host: sniHost, initialData: bufferedData, stamp: stamp)
             return
         }
 
         logger.log(.info, "Transparent proxy: SNI=\(sniHost), tunneling to \(target).", category: .proxy)
 
-        connectCoordinator.connectUpstreamTunnel(target: target)
+        connectCoordinator.connectUpstreamTunnel(target: target, stamp: stamp)
             .hop(to: ctx.eventLoop)
             .whenComplete { [self] result in
                 switch result {
@@ -228,6 +239,12 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                         pooledTunnel: true,
                         target: target, endpoint: endpoint
                     )
+
+                case .failure(let error) where HTTPProxyHandler.isLocalRefusal(error):
+                    // A VPN transition retired the dial (or the registry is
+                    // full); reported where decided. A DIRECT fallback would
+                    // act on the stale routing; the client reconnects.
+                    ctx.close(promise: nil)
 
                 case .failure(let error):
                     // Re-read the cause rather than reuse the one sampled before
@@ -266,7 +283,7 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                         "Transparent proxy: CONNECT to \(target) failed (\(error.displayDescription)) — falling back to direct.",
                         category: .proxy
                     )
-                    self.relayDirect(context: ctx, host: sniHost, initialData: bufferedData)
+                    self.relayDirect(context: ctx, host: sniHost, initialData: bufferedData, stamp: stamp)
                 }
             }
     }
@@ -280,19 +297,32 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
     ///
     /// The client's TLS session terminates at the origin — we only move bytes,
     /// so its certificate validation is unaffected by the detour.
-    private func relayDirect(context: ChannelHandlerContext, host: String, initialData: ByteBuffer) {
+    private func relayDirect(context: ChannelHandlerContext, host: String, initialData: ByteBuffer, stamp: RoutingStamp) {
         // Every use is on the context's event loop.
         nonisolated(unsafe) let ctx = context
         let eventLoop = ctx.eventLoop
         let started = DispatchTime.now().uptimeNanoseconds
         let startedCause = directModeProvider()
-        let dial = directTunnels?.beginDial()
+        let transitions = connectCoordinator.transitionAuthority
+        guard transitions.isCurrent(stamp) else {
+            ctx.close(promise: nil)
+            return
+        }
         originResolver.resolveOrigin(host: host, port: 443, on: eventLoop)
-            .flatMap { address in
-                ClientBootstrap(group: eventLoop)
+            .flatMap { address -> EventLoopFuture<Channel> in
+                // The lookup is asynchronous too; a transition during it
+                // makes the dial stale.
+                guard transitions.isCurrent(stamp) else {
+                    return eventLoop.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+                }
+                return ClientBootstrap(group: eventLoop)
                     .resolver(AddressFamilyAwareResolver(group: eventLoop))
                     .channelOption(ChannelOptions.tcpNoDelay, value: 1)
                     .connect(to: address)
+            }
+            .flatMapThrowing { (originChannel: Channel) -> Channel in
+                try transitions.register(originChannel, route: .direct, stamp: stamp, target: "\(host):443")
+                return originChannel
             }
             .hop(to: eventLoop)
             .whenComplete { [self] result in
@@ -300,10 +330,6 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                 case .success(let originChannel):
                     if self.clientGone {
                         originChannel.close(mode: .all, promise: nil)
-                        return
-                    }
-                    if let dial, self.directTunnels?.register(originChannel, dial: dial, target: host) == .retired {
-                        ctx.close(promise: nil)
                         return
                     }
                     self.logger.log(
@@ -318,6 +344,9 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                         pooledTunnel: false,
                         target: "\(host):443", endpoint: nil
                     )
+
+                case .failure(let error) where HTTPProxyHandler.isLocalRefusal(error):
+                    ctx.close(promise: nil)
 
                 case .failure(let error):
                     // Covers the `OriginResolverError.selfReferential` trip, so

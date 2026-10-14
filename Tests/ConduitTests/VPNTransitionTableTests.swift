@@ -686,10 +686,14 @@ final class VPNTransitionTableTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
 
         // Snapshot still mirrors the state (UI cares even when proxy is
-        // stopped) but no event was emitted.
+        // stopped) but no routing reaction fired. The disconnect's address
+        // phase is the exception: sockets a restart preserved still strand
+        // on the gone address (#156).
         XCTAssertEqual(orchestrator.snapshot.vpnState, .disconnected(reason: .userInitiated))
-        XCTAssertEqual(vpnEvents(in: orchestrator.eventLog, since: cutoff).count, 0,
+        let fired = vpnEvents(in: orchestrator.eventLog, since: cutoff)
+        XCTAssertEqual(fired.map(\.event), ["vpn.tunnels_migrated"],
                        "VPN events must not fire while proxy is stopped (no listener to react)")
+        XCTAssertTrue(fired.first?.detail?.hasPrefix("transition=disconnected phase=addresses reason=user ") ?? false)
     }
 }
 

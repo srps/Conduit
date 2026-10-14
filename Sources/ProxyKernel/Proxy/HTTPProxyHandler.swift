@@ -29,9 +29,6 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// Shared by every handler of a listener so a storm of identical
     /// connect failures is reported once per interval, not once per request.
     private let connectFailureLog: ConnectFailureLog
-    /// Direct tunnels by the cause they were opened under, so a VPN
-    /// reconnect can retire the off-VPN ones (#148).
-    private let directTunnels: DirectTunnelRegistry?
 
     private let configProvider: () -> ProxyConfig
     private var requestHead: HTTPRequestHead?
@@ -63,12 +60,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void,
         onRequestCompleted: @Sendable @escaping (RequestOutcome, String?) -> Void,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
-        connectFailureLog: ConnectFailureLog? = nil,
-        directTunnels: DirectTunnelRegistry? = nil
+        connectFailureLog: ConnectFailureLog? = nil
     ) {
         self.pool = pool
         self.connectFailureLog = connectFailureLog ?? ConnectFailureLog(logger: logger, eventSink: eventSink)
-        self.directTunnels = directTunnels
         self.connectCoordinator = connectCoordinator
         self.logger = logger
         self.eventSink = eventSink
@@ -119,6 +114,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             let currentConfig = configProvider()
             let forceProxyPatterns = currentConfig.forceProxyHosts
             let forceProxy = NoProxyMatcher.matchesAny(host: targetHost, patterns: forceProxyPatterns)
+            // Before the routing state it qualifies: a confirmed VPN
+            // transition after this point retires the request's dials, so a
+            // decision taken on stale routing never reaches a socket (#156).
+            let stamp = pool.routingStamp()
             let (isDirectMode, directCause) = directModeProvider()
             let directModeBypass = isDirectMode && directCause.routesClientTrafficDirectly
             // Only unconditional direct states bypass PAC/upstreams. VPN-connected
@@ -183,7 +182,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             forceProxy: forceProxy,
                             directModeBypass: directModeBypass,
                             directCause: directCause,
-                            pacPlan: pacPlan
+                            pacPlan: pacPlan,
+                            stamp: stamp
                         )
                     }
                 return
@@ -198,7 +198,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 forceProxy: forceProxy,
                 directModeBypass: directModeBypass,
                 directCause: directCause,
-                pacPlan: .noOpinion
+                pacPlan: .noOpinion,
+                stamp: stamp
             )
             }
         }
@@ -214,7 +215,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         forceProxy: Bool,
         directModeBypass: Bool,
         directCause: DirectModeCause,
-        pacPlan: PACRoutePlan
+        pacPlan: PACRoutePlan,
+        stamp: RoutingStamp
     ) {
         let targetHost = target.host
         // The reachability shortcut applies only where PAC has no say and
@@ -246,7 +248,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             context: context,
             bypass: bypass,
             directCause: directCause,
-            pacPlan: pacPlan
+            pacPlan: pacPlan,
+            stamp: stamp
         )
     }
 
@@ -454,7 +457,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             return status >= 500
         case .authenticationUnavailable, .authenticationRejected,
              .noUpstreamsConfigured, .poolExhausted, .authHandshakeLimitExceeded,
-             .bodyTooLargeForReplay, .clientClosedDuringResponse, .vpnTransitionDuringConnect:
+             .bodyTooLargeForReplay, .clientClosedDuringResponse, .vpnTransitionDuringConnect,
+             .connectionTrackingFull:
             return false
         case .invalidResponse, .streamingResponseInterrupted, .upstreamResponseTimedOut:
             return true
@@ -482,7 +486,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     }
 
     package static func shouldFallbackToDirectAfterProxyExchangeFailure(hasDirectFallback: Bool, error: Error) -> Bool {
-        hasDirectFallback && !ConnectionPoolError.isStreamingResponseInterrupted(error)
+        hasDirectFallback && !ConnectionPoolError.isStreamingResponseInterrupted(error) && !isLocalRefusal(error)
     }
 
     /// The routing plan for a PAC decision, shared with the SOCKS5 listener.
@@ -533,7 +537,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         context: ChannelHandlerContext,
         bypass: Bool,
         directCause: DirectModeCause = .none,
-        pacPlan: PACRoutePlan = .noOpinion
+        pacPlan: PACRoutePlan = .noOpinion,
+        stamp: RoutingStamp
     ) {
         if MetadataBlocklist.isBlocked(host: target.host, gatewayMode: gatewayMode) {
             logger.log(.warning, "Blocked request to \(SensitiveValueSanitizer.observableTarget(head.uri)) (metadata/loopback protection).", category: .proxy)
@@ -547,7 +552,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         if head.method == .CONNECT {
             body?.cleanup()
             if bypass {
-                handleDirectConnect(head: head, target: target, infoID: infoID, context: context)
+                handleDirectConnect(head: head, target: target, infoID: infoID, context: context, stamp: stamp)
             } else {
                 let hasDirectFallback = pacPlan.hasDirectFallback
                 let upstreamFailureLevel = Self.upstreamFailureLogLevel(for: directCause)
@@ -557,6 +562,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     requestHead: head,
                     clientContext: ctx,
                     proxyChain: pacPlan.proxyChain,
+                    stamp: stamp,
                     onTunnelClosed: { onConnectionClosed(infoID) }
                 )
                 .hop(to: ctx.eventLoop)
@@ -575,9 +581,13 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                         self.onRequestCompleted(.succeeded, tunnel.endpoint)
                     case .failure(let error):
-                        if hasDirectFallback {
+                        if ConnectionPoolError.isVPNTransitionDuringConnect(error) || ConnectionPoolError.isConnectionTrackingFull(error) {
+                            // Reported where it was decided; no DIRECT
+                            // fallback on stale routing, no strict hint.
+                            self.refuseLocally(error, context: ctx, infoID: infoID)
+                        } else if hasDirectFallback {
                             self.logger.log(.warning, "CONNECT via upstream failed for \(SensitiveValueSanitizer.observableTarget(head.uri)), falling back to DIRECT (PAC chain includes DIRECT).", category: .proxy)
-                            self.handleDirectConnect(head: head, target: target, infoID: infoID, context: ctx)
+                            self.handleDirectConnect(head: head, target: target, infoID: infoID, context: ctx, stamp: stamp)
                         } else if Self.isBenignTunnelSetupRace(error), !ctx.channel.isActive {
                             // The client hung up during the upstream dial. The
                             // inactive client channel tells this apart from an
@@ -624,12 +634,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             if !bypass {
                 logger.log(.info, "Routing Upgrade request for \(SensitiveValueSanitizer.observableTarget(head.uri)) direct (upstream proxies require CONNECT for protocol upgrades).", category: .proxy)
             }
-            handleUpgradeRequest(head: head, body: body, infoID: infoID, target: target, context: context)
+            handleUpgradeRequest(head: head, body: body, infoID: infoID, target: target, context: context, stamp: stamp)
             return
         }
 
         if bypass {
-            handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: context)
+            handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: context, stamp: stamp)
             return
         }
 
@@ -642,7 +652,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             requestBody: body,
             clientChannel: ctx.channel,
             authSource: authSource,
-            forcedProxy: pacPlan.proxyChain.first
+            forcedProxy: pacPlan.proxyChain.first,
+            stamp: stamp
         )
         // The upstream this exchange dials, fixed at selection: the pool's
         // last selection may belong to a concurrent request by the time a
@@ -684,7 +695,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         error: error
                     ) {
                         self.logger.log(.warning, "\(message); falling back to DIRECT.", category: .proxy)
-                        self.handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: ctx)
+                        self.handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: ctx, stamp: stamp)
                     } else {
                         let report = Self.upstreamFailureReport("upstream.exchange_failed", level: upstreamFailureLevel, for: error)
                         self.connectFailureLog.report(
@@ -711,7 +722,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         body: HTTPRequestBody?,
         infoID: UUID,
         target: HTTPRequestTarget,
-        context: ChannelHandlerContext
+        context: ChannelHandlerContext,
+        stamp: RoutingStamp
     ) {
         guard let url = target.directURL, let directHead = target.directRequestHead(from: head) else {
             writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
@@ -741,6 +753,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             host: host,
             port: port,
             clientEL: clientEL,
+            stamp: stamp,
             channelInitializer: { channel in
                 do {
                     try channel.pipeline.syncOperations.addHandler(HTTPRequestEncoder())
@@ -799,6 +812,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             upstream.close(mode: .all, promise: nil)
                         }
                     }
+                case .failure(let error) where Self.isLocalRefusal(error):
+                    body?.cleanup()
+                    clientEL.execute { self.refuseLocally(error, context: nil, clientChannel: clientChannel, infoID: infoID) }
                 case .failure(let error):
                     let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
                     connectFailureLog.report(
@@ -837,7 +853,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         body: HTTPRequestBody?,
         infoID: UUID,
         target: HTTPRequestTarget,
-        context: ChannelHandlerContext
+        context: ChannelHandlerContext,
+        stamp: RoutingStamp
     ) {
         guard let url = target.directURL, let directHead = target.directRequestHead(from: head) else {
             writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
@@ -860,13 +877,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let onConnectionClosed = self.onConnectionClosed
         let startedCause = directModeProvider().1
         let directFailureLevel = Self.directFailureLogLevel(for: startedCause)
-        let directTunnels = self.directTunnels
-        let dial = directTunnels?.beginDial()
 
         directConnectWithFallback(
             host: host,
             port: port,
             clientEL: clientEL,
+            stamp: stamp,
             channelInitializer: { channel in
                 do {
                     try channel.pipeline.syncOperations.addHandler(
@@ -883,13 +899,6 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
-                    if let dial, directTunnels?.register(upstream, dial: dial, target: "\(host):\(port)") == .retired {
-                        onRequestCompleted(.failed(.local), nil)
-                        body?.cleanup()
-                        self.writeError(status: .badGateway, message: DirectTunnelRegistry.retiredMessage, context: ctx)
-                        onConnectionClosed(infoID)
-                        return
-                    }
                     let relay = HTTPUpgradeResponseRelay(
                         clientChannel: clientChannel,
                         targetDescription: "\(host):\(port)",
@@ -927,6 +936,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             upstream.close(mode: .all, promise: nil)
                         }
                     }
+                case .failure(let error) where Self.isLocalRefusal(error):
+                    body?.cleanup()
+                    self.refuseLocally(error, context: ctx, infoID: infoID)
                 case .failure(let error):
                     let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
                     connectFailureLog.report(
@@ -942,27 +954,22 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             }
     }
 
-    private func handleDirectConnect(head: HTTPRequestHead, target: HTTPRequestTarget, infoID: UUID, context: ChannelHandlerContext) {
+    private func handleDirectConnect(
+        head: HTTPRequestHead, target: HTTPRequestTarget, infoID: UUID, context: ChannelHandlerContext, stamp: RoutingStamp
+    ) {
         let host = target.host
         let port = target.port
         nonisolated(unsafe) let ctx = context
         let clientEL = ctx.eventLoop
         let startedCause = directModeProvider().1
         let directFailureLevel = Self.directFailureLogLevel(for: startedCause)
-        let dial = directTunnels?.beginDial()
 
         logger.log(.info, "DIRECT CONNECT to \(host):\(port)", category: .proxy)
 
-        directConnectWithFallback(host: host, port: port, clientEL: clientEL)
+        directConnectWithFallback(host: host, port: port, clientEL: clientEL, stamp: stamp)
             .whenComplete { result in
                 switch result {
                 case .success(let upstreamChannel):
-                    if let dial, self.directTunnels?.register(upstreamChannel, dial: dial, target: "\(host):\(port)") == .retired {
-                        self.onRequestCompleted(.failed(.local), nil)
-                        self.writeError(status: .badGateway, message: DirectTunnelRegistry.retiredMessage, context: ctx)
-                        self.onConnectionClosed(infoID)
-                        return
-                    }
                     self.attachDirectTunnel(
                         clientContext: ctx,
                         upstreamChannel: upstreamChannel,
@@ -970,6 +977,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         infoID: infoID,
                         directFailureLevel: directFailureLevel
                     )
+                case .failure(let error) where Self.isLocalRefusal(error):
+                    self.refuseLocally(error, context: ctx, infoID: infoID)
                 case .failure(let error):
                     let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
                     self.connectFailureLog.report(
@@ -1011,19 +1020,33 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// case, including internal hosts that only have A records) never
     /// trip this path — the flatMap observes a non-nil `remoteAddress` and
     /// hands the channel through with zero overhead.
+    ///
+    /// The dial runs under the request's `stamp`: nothing is dialed after a
+    /// confirmed VPN transition, and a socket whose dial straddled one is
+    /// closed on arrival; a kept one is tracked for VPN migration (#156).
     private func directConnectWithFallback(
         host: String,
         port: Int,
         clientEL: EventLoop,
+        stamp: RoutingStamp,
         channelInitializer: (@Sendable (Channel) -> EventLoopFuture<Void>)? = nil
     ) -> EventLoopFuture<Channel> {
         let eventLoopGroup = self.eventLoopGroup
         let logger = self.logger
         let gatewayMode = self.gatewayMode
+        let transitions = pool.transitionAuthority
+        guard transitions.isCurrent(stamp) else {
+            return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+        }
 
         // Link-local literals get a short budget and a remembered timeout;
         // the SOCKS direct path shares this dial. See `LinkLocalConnectPolicy`.
         return LinkLocalConnectPolicy.dial(host: host, port: port, on: clientEL, eventSink: eventSink) { connectTimeout in
+            // A joiner may run after waiting on another dial; each connect
+            // rechecks the request's routing right before it opens (#156).
+            guard transitions.isCurrent(stamp) else {
+                return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+            }
             let makeBootstrap: @Sendable () -> ClientBootstrap = {
                 let bootstrap = ClientBootstrap(group: eventLoopGroup)
                     .resolver(AddressFamilyAwareResolver(group: eventLoopGroup))
@@ -1048,6 +1071,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         port: port,
                         on: clientEL,
                         ipv4Reconnect: { address in
+                            guard transitions.isCurrent(stamp) else {
+                                return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+                            }
                             logger.log(.info, "Half-open fallback: reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
                             return makeBootstrap()
                                 .connect(to: address)
@@ -1066,8 +1092,26 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     channel.close(promise: nil)
                     throw MetadataBlocklist.BlockedAddressError(host: host, resolvedIP: ip)
                 }
+                try transitions.register(channel, route: .direct, stamp: stamp, target: "\(host):\(port)")
                 return channel
             }
+    }
+
+    /// A refusal decided and reported locally (a VPN transition retired
+    /// the request, or the transition registry is full): no upstream or
+    /// origin failure, no fallback, no strict-mode hint.
+    static func isLocalRefusal(_ error: Error) -> Bool {
+        ConnectionPoolError.isVPNTransitionDuringConnect(error) || ConnectionPoolError.isConnectionTrackingFull(error)
+    }
+
+    private func refuseLocally(_ error: Error, context: ChannelHandlerContext?, clientChannel: Channel? = nil, infoID: UUID) {
+        onRequestCompleted(.failed(.local), nil)
+        if let context {
+            writeError(status: .badGateway, message: error.displayDescription, context: context)
+        } else if let clientChannel, clientChannel.isActive {
+            clientChannel.close(promise: nil)
+        }
+        onConnectionClosed(infoID)
     }
 
     /// Half-open-guard decision, split out from `directConnectWithFallback` so
@@ -1218,6 +1262,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         // The VPN-transition sweep closed it on purpose and counted it in
         // `vpn.tunnels_migrated` (#148); the upstream did nothing wrong.
         if ConnectionPoolError.isVPNTransitionDuringConnect(error) { return (nil, .info) }
+        // Refused and reported by the transition registry (#156).
+        if ConnectionPoolError.isConnectionTrackingFull(error) { return (nil, .info) }
         return (event, level)
     }
 
