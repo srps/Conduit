@@ -37,20 +37,31 @@ enum ReconnectReprobeScenarios {
         try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
         await orchestrator.handleVPNStateChange(.connected)
         let port = orchestrator.snapshot.bindings.proxyPort!
-        let client = FakeClient(id: 0, group: group, localProxyHost: "127.0.0.1", localProxyPort: port,
-            target: "reprobe.test:443", behavior: .periodicPing(requestBytes: 16, pingIntervalMs: 250, pingBytes: 16))
-        ScenarioCleanup.register { await client.close() }
-        try await client.run()
-        guard try await until(timeout: 3, { client.metrics.bytesReceived > 0 }) else {
-            throw ScenarioExecutionError(message: "established CONNECT never echoed")
+        func tunnel(_ id: Int) async throws -> FakeClient {
+            let client = FakeClient(id: id, group: group, localProxyHost: "127.0.0.1", localProxyPort: port,
+                target: "reprobe.test:443", behavior: .periodicPing(requestBytes: 16, pingIntervalMs: 250, pingBytes: 16))
+            ScenarioCleanup.register { await client.close() }
+            try await client.run()
+            guard try await until(timeout: 3, { client.metrics.bytesReceived > 0 }) else {
+                throw ScenarioExecutionError(message: "established CONNECT never echoed")
+            }
+            return client
         }
-        let before = client.metrics.bytesReceived
+        // A confirmed disconnect that routes DIRECT retires the upstream
+        // tunnel at once (#148): it left with the VPN and cannot resume.
+        let onVPN = try await tunnel(0)
         state.withLockedValue { $0.reachable = false }
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        let migratedOnDisconnect = try await until(timeout: 2, { onVPN.metrics.closedAt != nil })
+        let migration = orchestrator.eventLog.events.last { $0.event == "vpn.tunnels_migrated" }
         await orchestrator.handleVPNStateChange(.connected)
         let degraded = orchestrator.snapshot.directModeCause
         let attempts = state.withLockedValue { $0.attempts }
         let connectedEvents = orchestrator.eventLog.events.filter { $0.event == "vpn.connected" }.count
+        // A tunnel opened on the reconnected VPN, while the reprobe still
+        // fails, must ride out the production retry.
+        let client = try await tunnel(1)
+        let before = client.metrics.bytesReceived
         state.withLockedValue { $0.reachable = true }
         let recovered = try await until(timeout: 22) {
             orchestrator.snapshot.directModeCause == .none && orchestrator.eventLog.events.contains {
@@ -60,14 +71,18 @@ enum ReconnectReprobeScenarios {
         let metrics = client.metrics
         let retried = state.withLockedValue { $0.attempts } > attempts
         let sameVPNReport = connectedEvents == orchestrator.eventLog.events.filter { $0.event == "vpn.connected" }.count
-        return ScenarioResult(name: "vpn-reconnect-reprobe", clientCount: 1, clientsOpened: 1,
+        return ScenarioResult(name: "vpn-reconnect-reprobe", clientCount: 2, clientsOpened: 2,
             clientsWithFirstByte: metrics.firstByteAt == nil ? 0 : 1, clientsClosedEarly: metrics.closedAt == nil ? 0 : 1,
             totalBytes: metrics.bytesReceived, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: metrics.bytesReceived, maxBytes: metrics.bytesReceived, medianBytes: metrics.bytesReceived,
             earliestClose: nil, latestClose: nil, assertions: [
+                .init("a DIRECT-routing disconnect closes the upstream tunnel with one migration event",
+                      migratedOnDisconnect && migration?.detail?.contains("routing=direct upstream_closed=") == true
+                          && migration?.detail?.contains("upstream_closed=0 ") == false),
                 .init("failed first probe degrades health without allowing strict DIRECT", degraded == .upstreamsUnreachable && !degraded.routesClientTrafficDirectly),
                 .init("production retry restores reachable state without another VPN report", recovered && retried && sameVPNReport),
-                .init("the established CONNECT keeps exchanging bytes on the same listener", metrics.closedAt == nil && metrics.bytesReceived > before && orchestrator.snapshot.bindings.proxyPort == port),
-            ], notes: ["Real 15-second retry cadence; injected probe outcomes; no real VPN, helper, settings or credentials"])
+                .init("a CONNECT opened on the reconnected VPN keeps exchanging bytes on the same listener", metrics.closedAt == nil && metrics.bytesReceived > before && orchestrator.snapshot.bindings.proxyPort == port),
+            ], notes: ["Real 15-second retry cadence; injected probe outcomes; no real VPN, helper, settings or credentials",
+                       "migration: \(migration?.detail ?? "none")"])
     }
 }
