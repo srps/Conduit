@@ -260,4 +260,21 @@ final class StreamingExchangeTests: XCTestCase {
         XCTAssertEqual(errors, 0)
         try? clientChannel.close().wait()
     }
+
+    /// A DIRECT plain-HTTP request refused before its dial (a VPN
+    /// transition retired it) gets a definite 502 the client can retry, not
+    /// an ambiguous close.
+    func testALocalRefusalAnswersTheClientWithA502() throws {
+        let clientChannel = EmbeddedChannel()
+        try clientChannel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
+        try clientChannel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1)).wait()
+
+        HTTPProxyHandler.writeBadGateway(ConnectionPoolError.vpnTransitionDuringConnect, to: clientChannel)
+
+        var written = ""
+        while let buffer = try clientChannel.readOutbound(as: ByteBuffer.self) { written += String(buffer: buffer) }
+        XCTAssertTrue(written.hasPrefix("HTTP/1.1 502 Bad Gateway\r\n"), written)
+        XCTAssertTrue(clientChannel.isActive, "the connection stays usable")
+        _ = try? clientChannel.finish()
+    }
 }
