@@ -93,7 +93,7 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(events.names, ["recovery.exhausted"])
         XCTAssertTrue(events.details.last?.hasPrefix("failure=credential_unavailable ") == true)
         let exhausted = logger.entries().last { $0.level == .error }
-        XCTAssertEqual(exhausted?.message.contains("Your password may have changed"), true)
+        XCTAssertEqual(exhausted?.message.contains("Re-enter your password in Settings"), true)
     }
 
     /// A ladder that starts unreachable re-authenticates once a step's
@@ -114,10 +114,44 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(service.reauthenticateCallCount, 1)
     }
 
+    /// An upstream that answered with a final 407 is reachable: the ladder
+    /// re-authenticates and the exhaustion line keeps the password hint.
+    @MainActor func testAuthenticationRejectionRunsReauthenticationAndKeepsPasswordHint() async {
+        let logger = RecordingLogSink()
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.reauthenticateShouldSucceed = true
+        let rejected = HealthCheckFailure.authenticationRejected(detail: "The upstream proxy rejected authentication.")
+        service.healthResults = Array(repeating: .unhealthy(rejected, responseTimeMS: 5), count: 4)
+        let recovery = AutoRecovery(service: service, logger: logger, eventSink: events.record)
+
+        let result = await recovery.recover(trigger: rejected)
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.reauthenticateCallCount, 1)
+        XCTAssertEqual(events.names, ["recovery.exhausted"])
+        XCTAssertTrue(events.details.last?.hasPrefix("failure=authentication_rejected ") == true)
+        let exhausted = logger.entries().last { $0.level == .error }
+        XCTAssertEqual(exhausted?.message.contains("Your password may have changed"), true)
+    }
+
+    func testHealthCheckClassifiesAFinal407AsRejectionNotUnreachable() {
+        XCTAssertEqual(
+            ConnectionPool.healthFailure(for: ConnectionPoolError.authenticationRejected, detail: "rejected"),
+            .authenticationRejected(detail: "rejected")
+        )
+        XCTAssertEqual(
+            ConnectionPool.healthFailure(for: ConnectionPoolError.upstreamResponseTimedOut, detail: "timeout"),
+            .unreachable(detail: "timeout")
+        )
+    }
+
     func testExhaustionMessageOnlySuggestsPasswordForCredentialOrUnknownFailures() {
         XCTAssertFalse(AutoRecovery.exhaustion(for: .unreachable(detail: "timeout")).message.contains("password"))
         XCTAssertFalse(AutoRecovery.exhaustion(for: .upstreamStatus(code: 503, upstream: "proxy.example.test:8080")).message.contains("password"))
         XCTAssertTrue(AutoRecovery.exhaustion(for: .credentialUnavailable(detail: "no ticket")).message.contains("password"))
+        XCTAssertTrue(AutoRecovery.exhaustion(for: .authenticationRejected(detail: "407")).message.contains("password"))
         XCTAssertEqual(AutoRecovery.exhaustion(for: nil).failure, "unknown")
     }
 

@@ -106,12 +106,15 @@ package final class AutoRecovery: @unchecked Sendable {
     }
 
     /// The exhaustion event's `failure=` value and the log line derived from
-    /// it. Only a credential failure points at the password; an unclassified
+    /// it. Only a credential failure or rejection points at the password; an unclassified
     /// failure keeps the conditional hint.
     static func exhaustion(for failure: HealthCheckFailure?) -> (failure: String, message: String) {
         switch failure {
-        case .credentialUnavailable:
+        case .credentialUnavailable(let detail):
             return ("credential_unavailable",
+                    "Automatic recovery exhausted all steps: no usable proxy credential (\(detail)). Re-enter your password in Settings.")
+        case .authenticationRejected:
+            return ("authentication_rejected",
                     "Automatic recovery exhausted all steps: the upstream rejected authentication. Your password may have changed — re-enter it in Settings.")
         case .unreachable(let detail):
             return ("unreachable",
