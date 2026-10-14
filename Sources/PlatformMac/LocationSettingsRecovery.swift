@@ -43,6 +43,13 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         emit(RuntimeEvent(kind: .config, event: "platform.location_" + event, detail: detail))
     }
 
+    /// A record's identity as separate fields. The joined `scope` of two
+    /// UUIDs is long enough for the log sanitizer to mask as a token (#145).
+    private static func identity(_ record: PlatformStateRecord) -> String {
+        guard let location = record.locationID, let service = record.serviceID else { return "scope=\(record.scope)" }
+        return "location=\(location) service=\(service)"
+    }
+
     package func failureEvent(operation: String, error: Error) -> RuntimeEvent {
         let event = RuntimeEvent(kind: .config, event: "platform.location_failed", detail: "operation=\(operation) reason=\(error.localizedDescription)")
         emit(event)
@@ -283,7 +290,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
                 if inactiveOnly && record.locationID == snapshot.activeLocationID { continue }
                 do { try restoreRecord(record, snapshot: snapshot, kind: kind) }
                 catch {
-                    report("failed", "operation=restore scope=\(record.scope) reason=\(error.localizedDescription)")
+                    report("failed", "operation=restore \(Self.identity(record)) reason=\(error.localizedDescription)")
                     if firstError == nil { firstError = error }
                 }
             }
@@ -296,7 +303,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
         guard let member = snapshot.services.first(where: {
             $0.locationID == record.locationID && $0.serviceID == record.serviceID && $0.supports(kind)
         }) else {
-            report("deleted", "scope=\(record.scope) surface=\(kind.rawValue)")
+            report("deleted", "\(Self.identity(record)) surface=\(kind.rawValue)")
             try journal.forgetNetworkState(surface: surface(kind), scope: record.scope)
             return
         }
@@ -323,7 +330,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             }
         }
         report(replacement == current ? "external_preserved" : "restore",
-               "scope=\(record.scope) surface=\(kind.rawValue) active=\(member.locationID == snapshot.activeLocationID)")
+               "\(Self.identity(record)) surface=\(kind.rawValue) active=\(member.locationID == snapshot.activeLocationID)")
         // Compare even a no-op so an external change between snapshot and release is detected.
         do {
             try commit(NetworkSettingsRequest(locationID: member.locationID, serviceID: member.serviceID,
@@ -343,7 +350,7 @@ package final class LocationSettingsRecovery: @unchecked Sendable {
             try journal.recordNetworkState(surface: surface(kind), locationID: member.locationID, serviceID: member.serviceID,
                                            prior: record.priorValue ?? [:], applied: packApplied(cleanup, previous: current),
                                            maximumRecords: limits.maximumRecords)
-            report("cleanup_deferred", "scope=\(record.scope) surface=\(kind.rawValue) reason=no_console_user")
+            report("cleanup_deferred", "\(Self.identity(record)) surface=\(kind.rawValue) reason=no_console_user")
             try commit(cleanupRequest)
             try journal.recordNetworkState(surface: surface(kind), locationID: member.locationID, serviceID: member.serviceID,
                                            prior: record.priorValue ?? [:], applied: pack(cleanup), maximumRecords: limits.maximumRecords)
