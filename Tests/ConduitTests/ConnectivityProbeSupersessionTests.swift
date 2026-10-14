@@ -283,6 +283,51 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
+    /// Calls `onListening` when the listener logs that it is up: after the
+    /// start probe committed, before startup reports running.
+    private final class ListeningHook: LogSink, @unchecked Sendable {
+        let onListening: @Sendable () -> Void
+        init(_ onListening: @escaping @Sendable () -> Void) { self.onListening = onListening }
+        var minLevel: LogLevel { .debug }
+        func flush(timeout: TimeInterval) -> Bool { true }
+        func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+            if message.hasPrefix("Local proxy listening on") { onListening() }
+        }
+    }
+
+    /// A reconnect that lands after the start probe committed, while the
+    /// listener binds, finds the listener not yet running and reacts to
+    /// nothing. Startup must decide again before it reports running, not
+    /// publish the off-VPN DIRECT verdict.
+    func testAVPNReportAfterTheStartProbeIsDecidedAgainBeforeRunning() async throws {
+        let script = ProbeScript()
+        _ = script.next(reachable: false)
+        let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
+        let hook = ListeningHook {
+            guard let orchestrator = box.withLockedValue({ $0 }) else { return }
+            box.withLockedValue { $0 = nil }
+            _ = script.next(reachable: true)
+            Task { @MainActor in await orchestrator.handleVPNStateChange(.connected) }
+        }
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
+        let orchestrator = ProxyOrchestrator(config: config, logger: hook,
+                                             authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+                                             connectivityProbe: { await script.probe($0) })
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        box.withLockedValue { $0 = orchestrator }
+
+        try await orchestrator.startProxy()
+
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .connected, "the reconnect landed during startup")
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .none, "routing follows the reconnect")
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.activeUpstream, "127.0.0.1:9")
+        XCTAssertEqual(details(orchestrator, "connectivity.startup_rederived"), ["attempt=1 vpn=connected"])
+        await orchestrator.stopProxy()
+    }
+
     /// Hosts stamp reports on the monitor's callback. An older report that
     /// lands after a newer one is dropped, but a dropped disconnect still
     /// runs its address phase: the sockets it stranded are dead regardless.
