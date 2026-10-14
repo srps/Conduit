@@ -743,6 +743,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let connectFailureLog = self.connectFailureLog
         let onRequestCompleted = self.onRequestCompleted
         let onConnectionClosed = self.onConnectionClosed
+        let transitions = connectCoordinator.transitionAuthority
         // Capture cause once for log-severity decisions in the failure handlers.
         // We snapshot here rather than re-querying inside the closures so the
         // log severity reflects the cause as of when the request started, not
@@ -767,6 +768,29 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
+                    let onError: (Error) -> Void = { error in
+                        logger.log(directFailureLevel, "Direct HTTP relay failed: \(error.displayDescription)", category: .proxy)
+                        clientEL.execute {
+                            if clientChannel.isActive, !(error is DirectHTTPResponseForwarder.ResponseCutShort) {
+                                var head = HTTPResponseHead(version: .http1_1, status: .badGateway)
+                                let content = "Conduit could not complete the request.\n\n\(error.displayDescription)"
+                                var buffer = clientChannel.allocator.buffer(capacity: content.utf8.count)
+                                buffer.writeString(content)
+                                head.headers.add(name: "Content-Length", value: "\(buffer.readableBytes)")
+                                head.headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
+                                clientChannel.write(HTTPServerResponsePart.head(head), promise: nil)
+                                clientChannel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
+                                clientChannel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
+                            }
+                        }
+                        // A sweep closing the origin socket is a local
+                        // retirement, not an origin failure.
+                        let transitionClosed = !transitions.isCurrent(stamp)
+                        onRequestCompleted(.failed(transitionClosed ? .local : .origin), nil)
+                        onConnectionClosed(infoID)
+                        body?.cleanup()
+                        upstream.close(mode: .all, promise: nil)
+                    }
                     let forwarder = DirectHTTPResponseForwarder(
                         clientChannel: clientChannel,
                         onComplete: {
@@ -775,27 +799,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             body?.cleanup()
                             upstream.close(mode: .all, promise: nil)
                         },
-                        onError: { error in
-                            logger.log(directFailureLevel, "Direct HTTP relay failed: \(error.displayDescription)", category: .proxy)
-                            clientEL.execute {
-                                if clientChannel.isActive {
-                                    var head = HTTPResponseHead(version: .http1_1, status: .badGateway)
-                                    let content = "Conduit could not complete the request.\n\n\(error.displayDescription)"
-                                    var buffer = clientChannel.allocator.buffer(capacity: content.utf8.count)
-                                    buffer.writeString(content)
-                                    head.headers.add(name: "Content-Length", value: "\(buffer.readableBytes)")
-                                    head.headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
-                                    clientChannel.write(HTTPServerResponsePart.head(head), promise: nil)
-                                    clientChannel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
-                                    clientChannel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
-                                }
-                            }
-                            onRequestCompleted(.failed(.origin), nil)
-                            onConnectionClosed(infoID)
-                            body?.cleanup()
-                        }
+                        onError: onError
                     )
-                    upstream.pipeline.addHandler(forwarder).whenSuccess {
+                    let attached = upstream.pipeline.addHandler(forwarder)
+                    attached.whenFailure(onError)
+                    attached.whenSuccess {
                         var reqHead = directHead
                         HTTPHopByHopHeaders.sanitizeForwardedRequestHeaders(&reqHead.headers)
                         upstream.write(HTTPClientRequestPart.head(reqHead), promise: nil)
@@ -804,11 +812,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         bodyFuture.flatMap {
                             upstream.writeAndFlush(HTTPClientRequestPart.end(nil))
                         }.whenFailure { error in
+                            // Closing the origin reports the failure once,
+                            // through the forwarder.
                             logger.log(directFailureLevel, "Direct HTTP request write failed: \(error.displayDescription)", category: .proxy)
-                            onRequestCompleted(.failed(.origin), nil)
-                            onConnectionClosed(infoID)
-                            body?.cleanup()
-                            clientChannel.close(mode: .all, promise: nil)
                             upstream.close(mode: .all, promise: nil)
                         }
                     }
@@ -1628,10 +1634,21 @@ final class HTTPUpgradeResponseRelay: ChannelInboundHandler, RemovableChannelHan
 final class DirectHTTPResponseForwarder: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPClientResponsePart
 
+    /// The response failed after its head reached the client: no error
+    /// response can follow, so the forwarder has closed the client.
+    struct ResponseCutShort: Error, CustomStringConvertible {
+        let underlying: Error
+        var description: String { "the response was cut short: \(underlying.displayDescription)" }
+    }
+
     private let clientChannel: Channel
     private let onComplete: () -> Void
     private let onError: (Error) -> Void
     private var backpressure: HTTPResponseBackpressureController?
+    /// The client has the response head.
+    private var headForwarded = false
+    /// `.end` arrived, or the failure was reported: report nothing more.
+    private var settled = false
 
     init(clientChannel: Channel, onComplete: @escaping () -> Void, onError: @escaping (Error) -> Void) {
         self.clientChannel = clientChannel
@@ -1657,6 +1674,7 @@ final class DirectHTTPResponseForwarder: ChannelInboundHandler, @unchecked Senda
         let part = unwrapInboundIn(data)
         switch part {
         case .head(let head):
+            headForwarded = true
             var sanitized = head
             HTTPHopByHopHeaders.sanitizeForwardedResponseHeaders(&sanitized.headers)
             if let backpressure {
@@ -1671,6 +1689,7 @@ final class DirectHTTPResponseForwarder: ChannelInboundHandler, @unchecked Senda
                 clientChannel.writeAndFlush(HTTPServerResponsePart.body(.byteBuffer(body)), promise: nil)
             }
         case .end(let trailers):
+            settled = true
             let completion: @Sendable (Result<Void, Error>) -> Void = { result in
                 self.backpressure?.complete()
                 if case .failure(let error) = result {
@@ -1688,13 +1707,24 @@ final class DirectHTTPResponseForwarder: ChannelInboundHandler, @unchecked Senda
     }
 
     func errorCaught(context: ChannelHandlerContext, error: Error) {
-        backpressure?.complete()
         context.close(promise: nil)
-        onError(error)
+        fail(error)
     }
 
+    /// The origin socket closed before `.end`: the origin hung up, or a VPN
+    /// transition sweep closed it (#156). Either way the client must hear.
     func channelInactive(context: ChannelHandlerContext) {
+        fail(ChannelError.eof)
         context.fireChannelInactive()
+    }
+
+    private func fail(_ error: Error) {
+        guard !settled else { return }
+        settled = true
+        backpressure?.complete()
+        guard headForwarded else { return onError(error) }
+        clientChannel.close(mode: .all, promise: nil)
+        onError(ResponseCutShort(underlying: error))
     }
 }
 

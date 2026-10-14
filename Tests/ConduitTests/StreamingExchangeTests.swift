@@ -181,10 +181,11 @@ final class StreamingExchangeTests: XCTestCase {
         let clientChannel = EmbeddedChannel(loop: loop)
         try clientChannel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
 
+        var errors = 0
         let forwarder = DirectHTTPResponseForwarder(
             clientChannel: clientChannel,
             onComplete: {},
-            onError: { _ in XCTFail("Should not error") }
+            onError: { _ in errors += 1 }
         )
         let upstreamChannel = EmbeddedChannel(handlers: [forwarder], loop: loop)
 
@@ -193,8 +194,70 @@ final class StreamingExchangeTests: XCTestCase {
 
         let resumedAutoRead = try upstreamChannel.getOption(ChannelOptions.autoRead).wait()
         XCTAssertTrue(resumedAutoRead, "Client writability recovery should resume upstream reads")
+        XCTAssertEqual(errors, 0)
 
         try? clientChannel.close().wait()
         try? upstreamChannel.close().wait()
+    }
+
+    /// The origin socket closes before any response (the origin hung up,
+    /// or a VPN transition sweep closed it): the failure is reported once,
+    /// so the caller answers the client.
+    func testForwarderReportsAnOriginCloseBeforeTheResponse() throws {
+        let loop = EmbeddedEventLoop()
+        let clientChannel = EmbeddedChannel(loop: loop)
+        try clientChannel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
+        try clientChannel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1)).wait()
+        var errors: [Error] = []
+        let forwarder = DirectHTTPResponseForwarder(clientChannel: clientChannel, onComplete: {}, onError: { errors.append($0) })
+        let upstreamChannel = EmbeddedChannel(handlers: [forwarder], loop: loop)
+
+        try upstreamChannel.close().wait()
+
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertEqual(errors.first as? ChannelError, .eof)
+        XCTAssertTrue(clientChannel.isActive, "the caller writes the error response")
+        try? clientChannel.close().wait()
+    }
+
+    /// Once the head reached the client no error response can follow: the
+    /// forwarder closes the client and reports the response cut short.
+    func testForwarderClosesTheClientWhenTheOriginClosesMidResponse() throws {
+        let loop = EmbeddedEventLoop()
+        let clientChannel = EmbeddedChannel(loop: loop)
+        try clientChannel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
+        try clientChannel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1)).wait()
+        var errors: [Error] = []
+        var completed = false
+        let forwarder = DirectHTTPResponseForwarder(clientChannel: clientChannel, onComplete: { completed = true }, onError: { errors.append($0) })
+        let upstreamChannel = EmbeddedChannel(handlers: [forwarder], loop: loop)
+
+        try upstreamChannel.writeInbound(HTTPClientResponsePart.head(HTTPResponseHead(version: .http1_1, status: .ok)))
+        try upstreamChannel.close().wait()
+
+        XCTAssertFalse(completed)
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertTrue(errors.first is DirectHTTPResponseForwarder.ResponseCutShort)
+        XCTAssertFalse(clientChannel.isActive, "the client hears EOF, not a hang")
+    }
+
+    /// A complete response settles the forwarder: closing the origin
+    /// afterwards reports nothing.
+    func testForwarderReportsNothingWhenTheOriginClosesAfterTheResponse() throws {
+        let loop = EmbeddedEventLoop()
+        let clientChannel = EmbeddedChannel(loop: loop)
+        try clientChannel.pipeline.syncOperations.addHandler(HTTPResponseEncoder())
+        var errors = 0
+        var completed = false
+        let forwarder = DirectHTTPResponseForwarder(clientChannel: clientChannel, onComplete: { completed = true }, onError: { _ in errors += 1 })
+        let upstreamChannel = EmbeddedChannel(handlers: [forwarder], loop: loop)
+
+        try upstreamChannel.writeInbound(HTTPClientResponsePart.head(HTTPResponseHead(version: .http1_1, status: .ok)))
+        try upstreamChannel.writeInbound(HTTPClientResponsePart.end(nil))
+        try upstreamChannel.close().wait()
+
+        XCTAssertTrue(completed)
+        XCTAssertEqual(errors, 0)
+        try? clientChannel.close().wait()
     }
 }
