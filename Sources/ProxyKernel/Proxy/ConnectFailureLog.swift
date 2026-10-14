@@ -52,6 +52,62 @@ package enum ConnectFailureKind: String, Sendable {
     }
 }
 
+/// A direct connect that failed only because the destination is absent
+/// (#149): the name does not exist, the host is under the reserved
+/// `.invalid` TLD, or nothing listens on a loopback port. The path worked;
+/// the client asked for something that is not there, so the failure is not
+/// worth an event or an error line. DNS server failures (`EAI_AGAIN`,
+/// `EAI_FAIL`), lookup timeouts and connect timeouts are not absent: they
+/// can mean a broken route or resolver.
+package enum AbsentDestination {
+    package static func matches(_ error: Error, host: String) -> Bool {
+        let name = normalized(host)
+        if name == "invalid" || name.hasSuffix(".invalid") { return true }
+        switch ConnectFailureKind(error) {
+        case .dns: return isNoSuchName(error)
+        case .refused: return isLoopback(name)
+        default: return false
+        }
+    }
+
+    private static func normalized(_ host: String) -> String {
+        var name = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        while name.hasSuffix(".") { name.removeLast() }
+        return name
+    }
+
+    /// Every lookup that answered said the name has no address. A lookup
+    /// that failed some other way keeps the failure unexplained.
+    private static func isNoSuchName(_ error: Error) -> Bool {
+        switch error {
+        case let resolution as AddressFamilyAwareResolver.ResolutionError:
+            return resolution.rc == EAI_NONAME
+        case let fallback as DirectIPv4FallbackError:
+            switch fallback {
+            case .resolutionFailed(_, let rc): return rc == EAI_NONAME
+            case .noIPv4Address: return true
+            case .resolutionTimedOut: return false
+            }
+        case let connection as NIOConnectionError:
+            let lookups = [connection.dnsAError, connection.dnsAAAAError].compactMap { $0 }
+            return connection.connectionErrors.isEmpty && !lookups.isEmpty && lookups.allSatisfy(isNoSuchName)
+        default:
+            return false
+        }
+    }
+
+    private static func isLoopback(_ name: String) -> Bool {
+        if name == "localhost" || name.hasSuffix(".localhost") { return true }
+        var v4 = in_addr()
+        if inet_pton(AF_INET, name, &v4) == 1 { return UInt32(bigEndian: v4.s_addr) >> 24 == 127 }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, name, &v6) == 1 {
+            return withUnsafeBytes(of: &v6) { bytes in bytes.prefix(15).allSatisfy { $0 == 0 } && bytes[15] == 1 }
+        }
+        return false
+    }
+}
+
 /// Coalesces connect-failure reports per target and failure kind (#100).
 ///
 /// The first failure is reported as it happens. Repeats inside `interval`

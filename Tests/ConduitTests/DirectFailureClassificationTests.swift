@@ -54,7 +54,9 @@ final class DirectFailureClassificationTests: XCTestCase {
         XCTAssertEqual(outcomes.withLockedValue { $0 }, Array(repeating: .failed(.origin), count: storm))
         let stormLines = logger.entries().filter { $0.message.hasPrefix("Direct connect to \(stormHost):443 failed") }
         XCTAssertEqual(stormLines.count, 1, "the storm is logged once; the rest wait for the interval's summary")
-        XCTAssertEqual(events.events.filter { $0.event == "direct.connect_failed" }.count, 1)
+        // #149: a name that does not exist is the destination's absence, not a path fault.
+        XCTAssertEqual(stormLines.map(\.level), [.warning])
+        XCTAssertEqual(events.events.filter { $0.event == "direct.connect_failed" }.count, 0)
 
         clients.append(try await sendConnect(to: "example.test:443", proxyPort: port, group: group))
         try await waitForOutcomes(storm + 1, outcomes)

@@ -1,0 +1,95 @@
+// SPDX-License-Identifier: Apache-2.0
+import Foundation
+import NIOConcurrencyHelpers
+import NIOCore
+import XCTest
+@testable import ProxyKernel
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
+
+/// #149: failures that only say a destination is absent, or that a client
+/// closed its own tunnel, are not reported like path faults.
+final class ExpectedFailureLevelTests: XCTestCase {
+    private typealias ResolutionError = AddressFamilyAwareResolver.ResolutionError
+
+    func testAbsentDestinations() {
+        let refused = IOError(errnoCode: ECONNREFUSED, reason: "connect")
+        XCTAssertTrue(AbsentDestination.matches(refused, host: "127.0.0.1"))
+        XCTAssertTrue(AbsentDestination.matches(refused, host: "127.8.9.10"))
+        XCTAssertTrue(AbsentDestination.matches(refused, host: "[::1]"))
+        XCTAssertTrue(AbsentDestination.matches(refused, host: "localhost"))
+        XCTAssertFalse(AbsentDestination.matches(refused, host: "10.0.0.1"), "a refusal elsewhere can be a firewall")
+        XCTAssertFalse(AbsentDestination.matches(refused, host: "::2"))
+
+        XCTAssertTrue(AbsentDestination.matches(ResolutionError(host: "gone.example", rc: EAI_NONAME), host: "gone.example"))
+        XCTAssertTrue(AbsentDestination.matches(DirectIPv4FallbackError.noIPv4Address(host: "v6.example"), host: "v6.example"))
+        XCTAssertFalse(AbsentDestination.matches(ResolutionError(host: "x.example", rc: EAI_AGAIN), host: "x.example"),
+                       "a resolver that could not answer is not an absent name")
+        XCTAssertFalse(AbsentDestination.matches(DirectIPv4FallbackError.resolutionTimedOut(host: "x.example"), host: "x.example"))
+
+        let timeout = ChannelError.connectTimeout(.seconds(2))
+        XCTAssertTrue(AbsentDestination.matches(timeout, host: "probe.INVALID."), "the reserved TLD never exists")
+        XCTAssertFalse(AbsentDestination.matches(timeout, host: "127.0.0.1"), "a loopback timeout is not a closed port")
+        XCTAssertFalse(AbsentDestination.matches(timeout, host: "169.254.169.254"))
+    }
+
+    func testDirectConnectReportLowersAbsentDestinationsAndNeverRaises() {
+        let nxdomain = ResolutionError(host: "gone.example", rc: EAI_NONAME)
+        let absent = HTTPProxyHandler.directConnectFailureReport(nxdomain, host: "gone.example", default: .error)
+        XCTAssertNil(absent.event)
+        XCTAssertEqual(absent.level, .warning)
+
+        let offVPN = HTTPProxyHandler.directConnectFailureReport(nxdomain, host: "gone.example", default: .info)
+        XCTAssertEqual(offVPN.level, .info, "the direct-mode cause already lowered it")
+
+        let timeout = HTTPProxyHandler.directConnectFailureReport(
+            ChannelError.connectTimeout(.seconds(2)), host: "example.test", default: .error)
+        XCTAssertEqual(timeout.event, "direct.connect_failed")
+        XCTAssertEqual(timeout.level, .error)
+
+        let unreachable = HTTPProxyHandler.directConnectFailureReport(
+            IOError(errnoCode: ENETUNREACH, reason: "connect"), host: "example.test", default: .error)
+        XCTAssertEqual(unreachable.event, "direct.connect_failed")
+        XCTAssertEqual(unreachable.level, .error)
+    }
+
+    func testAbsentDestinationLogsAWarningAndNoEvent() {
+        let logger = RecordingLogSink(minLevel: .debug)
+        let events = RuntimeEventLog(capacity: 16)
+        let error = IOError(errnoCode: ECONNREFUSED, reason: "connect")
+        let report = HTTPProxyHandler.directConnectFailureReport(error, host: "127.0.0.1", default: .error)
+        HTTPProxyHandler.reportConnectFailure(
+            report.event, level: report.level, target: "127.0.0.1:11434", error: error,
+            message: "Direct connect to 127.0.0.1:11434 failed", logger: logger, eventSink: { events.append($0) }
+        )
+        XCTAssertEqual(logger.entries().map(\.level), [.warning])
+        XCTAssertTrue(events.events.isEmpty)
+    }
+
+    func testRelayLevelBySide() {
+        XCTAssertEqual(TunnelRelayDiagnostics.level(side: .client, errno: ECONNRESET), .info)
+        XCTAssertEqual(TunnelRelayDiagnostics.level(side: .client, errno: EPIPE), .info)
+        XCTAssertEqual(TunnelRelayDiagnostics.level(side: .client, errno: ETIMEDOUT), .warning)
+        XCTAssertEqual(TunnelRelayDiagnostics.level(side: .client, errno: nil), .warning)
+        XCTAssertEqual(TunnelRelayDiagnostics.level(side: .remote, errno: ECONNRESET), .warning)
+        XCTAssertEqual(TunnelRelayDiagnostics.level(side: .remote, errno: ETIMEDOUT), .warning)
+    }
+
+    func testClientResetLogsAtInfoAndKeepsItsEvent() {
+        let logger = RecordingLogSink(minLevel: .debug)
+        let events = RuntimeEventLog(capacity: 16)
+        let reporter = TunnelFailureReporter(logger: logger, eventSink: { events.append($0) })
+        func relay(_ target: String) -> TunnelRelayDiagnostics {
+            TunnelRelayDiagnostics(target: target, transport: "connect", route: "upstream", upstream: "upstream.example:8080",
+                                   causeProvider: { .none }, reporter: reporter)
+        }
+        relay("client.example:443").failed(IOError(errnoCode: ECONNRESET, reason: "read"), on: .client)
+        relay("remote.example:443").failed(IOError(errnoCode: ECONNRESET, reason: "read"), on: .remote)
+
+        XCTAssertEqual(logger.entries().map(\.level), [.info, .warning])
+        XCTAssertEqual(events.events.map(\.event), ["tunnel.relay_failed", "tunnel.relay_failed"])
+    }
+}
