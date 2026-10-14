@@ -223,4 +223,65 @@ enum VPNTransitionMigrationScenarios {
     private static func migrations(_ orchestrator: ProxyOrchestrator) -> [String] {
         orchestrator.eventLog.events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
     }
+
+    /// #156: a plain HTTP request routed DIRECT during an outage, waiting on
+    /// a silent origin, has its origin socket closed by the reconnect sweep.
+    /// The client must get a 502 at once, not hang until it gives up.
+    @MainActor
+    static func directHTTPSwept(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
+        // Accepts the request and never answers, counting connections.
+        let accepted = NIOLockedValueBox(0)
+        let silent = try await ServerBootstrap(group: group)
+            .childChannelInitializer { channel in
+                accepted.withLockedValue { $0 += 1 }
+                return channel.eventLoop.makeSucceededVoidFuture()
+            }
+            .bind(host: "127.0.0.1", port: 0).get()
+        ScenarioCleanup.register { try? await silent.close().get() }
+        let silentPort = silent.localAddress!.port!
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "corp", host: "127.0.0.1", port: 9, priority: 0)]
+        let reachable = NIOLockedValueBox(true)
+        let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
+            connectivityProbe: { targets in
+                let up = reachable.withLockedValue { $0 }
+                return UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
+            })
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+        await orchestrator.handleVPNStateChange(.connected)
+        let port = orchestrator.snapshot.bindings.proxyPort!
+
+        // Off the VPN the upstream is gone: routing is DIRECT.
+        reachable.withLockedValue { $0 = false }
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        let direct = orchestrator.snapshot.directModeCause == .vpnDisconnected
+        let pending = try await RawClient.send(group: group, port: port,
+            request: "GET http://127.0.0.1:\(silentPort)/held HTTP/1.1\r\nHost: 127.0.0.1:\(silentPort)\r\n\r\n")
+        guard try await until(timeout: 3, { accepted.withLockedValue { $0 } > 0 }) else {
+            throw ScenarioExecutionError(message: "the DIRECT request never reached the silent origin")
+        }
+        // The reconnect ends the outage and closes the DIRECT socket set up
+        // during it.
+        let reconnectedAt = ContinuousClock.now
+        reachable.withLockedValue { $0 = true }
+        await orchestrator.handleVPNStateChange(.connected)
+        let answer = try await pending.get()
+        let answeredWithin = ContinuousClock.now - reconnectedAt
+        let sweep = orchestrator.eventLog.events.last { $0.event == "vpn.tunnels_migrated" }?.detail ?? ""
+
+        return ScenarioResult(name: "vpn-transition-direct-http", clientCount: 1, clientsOpened: 1,
+            clientsWithFirstByte: answer.isEmpty ? 0 : 1, clientsClosedEarly: 0,
+            totalBytes: answer.utf8.count, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+                .init("the request is routed DIRECT during the outage", direct),
+                .init("the reconnect sweep closes its origin socket",
+                      sweep.hasPrefix("transition=reconnected route=direct ") && !sweep.contains("closed=0")),
+                .init("the client gets a 502 within 1 s of the reconnect, not a hang",
+                      answer.hasPrefix("HTTP/1.1 502") && answeredWithin < .seconds(1)),
+            ], notes: ["silent loopback origin on port \(silentPort); injected probe outcomes; sweep: \(sweep)"])
+    }
 }

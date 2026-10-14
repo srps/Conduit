@@ -60,6 +60,7 @@ enum PMSim {
               vpn-startup-rederive    a reconnect while the listener binds is decided again before startup reports running
               vpn-transition-migration  confirmed disconnect/reconnect closes stranded tunnels at once; a flap keeps them
               vpn-transition-setup-race a CONNECT mid-handshake at a DIRECT-routing disconnect fails at once, locally, without fallback
+              vpn-transition-direct-http  a plain HTTP request DIRECT in an outage gets a 502 when the reconnect sweep closes its origin
               vpn-existing-stream-failure  retired-address write and read errors close broken tunnels promptly
               browser-retained-pac    browser keeps one PAC across VPN cycle; fresh requests recover
               network-transition      Wi-Fi → VPN → captive portal → resume; recovery <5s, DoH recycled
@@ -218,6 +219,7 @@ enum PMSim {
         "vpn-startup-rederive",
         "vpn-transition-migration",
         "vpn-transition-setup-race",
+        "vpn-transition-direct-http",
         "vpn-existing-stream-failure",
         "browser-retained-pac",
         "network-transition",
@@ -340,6 +342,8 @@ enum PMSim {
             return [try await RecoveryLadderScenarios.unreachableLadder(verbose: verbose)]
         case "vpn-transition-migration":
             return [try await VPNTransitionMigrationScenarios.run(verbose: verbose)]
+        case "vpn-transition-direct-http":
+            return [try await VPNTransitionMigrationScenarios.directHTTPSwept(verbose: verbose)]
         case "vpn-transition-setup-race":
             return [try await VPNTransitionMigrationScenarios.setupRace(verbose: verbose)]
         case "vpn-existing-stream-failure":
