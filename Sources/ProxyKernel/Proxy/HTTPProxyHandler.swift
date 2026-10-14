@@ -771,16 +771,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     let onError: (Error) -> Void = { error in
                         logger.log(directFailureLevel, "Direct HTTP relay failed: \(error.displayDescription)", category: .proxy)
                         clientEL.execute {
-                            if clientChannel.isActive, !(error is DirectHTTPResponseForwarder.ResponseCutShort) {
-                                var head = HTTPResponseHead(version: .http1_1, status: .badGateway)
-                                let content = "Conduit could not complete the request.\n\n\(error.displayDescription)"
-                                var buffer = clientChannel.allocator.buffer(capacity: content.utf8.count)
-                                buffer.writeString(content)
-                                head.headers.add(name: "Content-Length", value: "\(buffer.readableBytes)")
-                                head.headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
-                                clientChannel.write(HTTPServerResponsePart.head(head), promise: nil)
-                                clientChannel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
-                                clientChannel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
+                            if !(error is DirectHTTPResponseForwarder.ResponseCutShort) {
+                                Self.writeBadGateway(error, to: clientChannel)
                             }
                         }
                         // A sweep closing the origin socket is a local
@@ -830,19 +822,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     )
                     onRequestCompleted(.failed(Self.directPathFailureClass(error)), nil)
                     body?.cleanup()
-                    clientEL.execute {
-                        if clientChannel.isActive {
-                            var head = HTTPResponseHead(version: .http1_1, status: .badGateway)
-                            let content = "Conduit could not complete the request.\n\n\(error.displayDescription)"
-                            var buffer = clientChannel.allocator.buffer(capacity: content.utf8.count)
-                            buffer.writeString(content)
-                            head.headers.add(name: "Content-Length", value: "\(buffer.readableBytes)")
-                            head.headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
-                            clientChannel.write(HTTPServerResponsePart.head(head), promise: nil)
-                            clientChannel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
-                            clientChannel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
-                        }
-                    }
+                    clientEL.execute { Self.writeBadGateway(error, to: clientChannel) }
                     onConnectionClosed(infoID)
                 }
             }
@@ -1114,10 +1094,25 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         onRequestCompleted(.failed(.local), nil)
         if let context {
             writeError(status: .badGateway, message: error.displayDescription, context: context)
-        } else if let clientChannel, clientChannel.isActive {
-            clientChannel.close(promise: nil)
+        } else if let clientChannel {
+            // Refused before any dial: a definite 502 the client can retry,
+            // not an ambiguous close.
+            Self.writeBadGateway(error, to: clientChannel)
         }
         onConnectionClosed(infoID)
+    }
+
+    /// Answers `error` with a 502 on the HTTP client channel, outside its
+    /// handler's context. Nothing when the client already left.
+    package static func writeBadGateway(_ error: Error, to clientChannel: Channel) {
+        guard clientChannel.isActive else { return }
+        var head = HTTPResponseHead(version: .http1_1, status: .badGateway)
+        let buffer = clientChannel.allocator.buffer(string: "Conduit could not complete the request.\n\n\(error.displayDescription)")
+        head.headers.add(name: "Content-Length", value: "\(buffer.readableBytes)")
+        head.headers.add(name: "Content-Type", value: "text/plain; charset=utf-8")
+        clientChannel.write(HTTPServerResponsePart.head(head), promise: nil)
+        clientChannel.write(HTTPServerResponsePart.body(.byteBuffer(buffer)), promise: nil)
+        clientChannel.writeAndFlush(HTTPServerResponsePart.end(nil), promise: nil)
     }
 
     /// Half-open-guard decision, split out from `directConnectWithFallback` so
