@@ -116,6 +116,35 @@ final class ConnectFailureLogTests: XCTestCase {
         XCTAssertEqual(fixture.log.count, 3)
     }
 
+    /// #146: one target failing via two upstreams is two reports, each event
+    /// naming its upstream; a repeat via the same upstream is held back.
+    func testUpstreamsCoalesceSeparatelyAndTheEventNamesThem() {
+        let fixture = Fixture()
+        let target = "http://a.example.test/"
+        for upstream in ["upstream-a.example:8080", "upstream-b.example:8080", "upstream-a.example:8080"] {
+            fixture.log.report(
+                "upstream.exchange_failed", level: .error, target: target, upstream: upstream,
+                error: ConnectionPoolError.upstreamResponseTimedOut,
+                message: HTTPProxyHandler.exchangeFailureMessage(
+                    target: target, upstream: upstream, error: ConnectionPoolError.upstreamResponseTimedOut
+                )
+            )
+        }
+        XCTAssertEqual(fixture.proxyLines().map(\.message), [
+            "Proxy exchange for \(target) via upstream-a.example:8080 failed: Timed out waiting for the upstream proxy to respond.",
+            "Proxy exchange for \(target) via upstream-b.example:8080 failed: Timed out waiting for the upstream proxy to respond.",
+        ])
+        let details = fixture.emitted().map { $0.detail ?? "" }
+        XCTAssertEqual(details.count, 2, "\(details)")
+        XCTAssertTrue(details[0].hasPrefix("target=\(target) upstream=upstream-a.example:8080 reason=Timed out"), details[0])
+        XCTAssertTrue(details[1].hasPrefix("target=\(target) upstream=upstream-b.example:8080 reason=Timed out"), details[1])
+        XCTAssertEqual(fixture.log.count, 2)
+
+        // Without an upstream the detail keeps its old shape.
+        reportNXDOMAIN(fixture)
+        XCTAssertEqual(fixture.emitted().last?.detail?.hasPrefix("target=pancake.apple.com:443 reason="), true)
+    }
+
     func testAFailureAfterAQuietIntervalIsReportedAsNew() {
         let fixture = Fixture()
         reportNXDOMAIN(fixture)

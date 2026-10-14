@@ -74,6 +74,9 @@ package final class ConnectFailureLog: @unchecked Sendable {
         /// Emit `event` whatever the level; otherwise only at warning and up.
         let eventAtAnyLevel: Bool
         let target: String
+        /// The upstream the failed attempt dialed, when the caller knows it:
+        /// one target failing via two upstreams is two stories.
+        let upstream: String?
         let kind: ConnectFailureKind
     }
 
@@ -137,10 +140,14 @@ package final class ConnectFailureLog: @unchecked Sendable {
         }
     }
 
+    /// `upstream` is the sanitized endpoint the attempt dialed; pass it only
+    /// when the attempt went through one.
     package func report(
-        _ event: String?, level: LogLevel, target: String, error: Error, message: String, eventAtAnyLevel: Bool = false
+        _ event: String?, level: LogLevel, target: String, upstream: String? = nil, error: Error, message: String,
+        eventAtAnyLevel: Bool = false
     ) {
-        let key = Key(event: event, eventAtAnyLevel: eventAtAnyLevel, target: target, kind: ConnectFailureKind(error))
+        let key = Key(event: event, eventAtAnyLevel: eventAtAnyLevel, target: target, upstream: upstream,
+                      kind: ConnectFailureKind(error))
         let at = now()
         var reports: [Report] = []
         lock.withLock {
@@ -230,7 +237,8 @@ package final class ConnectFailureLog: @unchecked Sendable {
     private func emit(_ reports: [Report]) {
         for report in reports {
             HTTPProxyHandler.reportConnectFailure(
-                report.key.event, level: report.level, target: report.key.target, error: report.error,
+                report.key.event, level: report.level, target: report.key.target, upstream: report.key.upstream,
+                error: report.error,
                 message: report.message, logger: logger, eventSink: eventSink,
                 eventAtAnyLevel: report.key.eventAtAnyLevel,
                 kind: report.key.kind, suppressed: report.suppressed, windowSeconds: Int(interval)
