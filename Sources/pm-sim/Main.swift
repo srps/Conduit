@@ -57,6 +57,7 @@ enum PMSim {
               vpn-reconnect-routing   intercepted client uses upstream while reconnect probe is held
               vpn-reconnect-reprobe   disconnect migrates the upstream tunnel; failed first reconnect probe retries and keeps new tunnels
               vpn-probe-superseded    a disconnect probe still pending at reconnect never turns routing DIRECT or sweeps
+              vpn-startup-rederive    a reconnect while the listener binds is decided again before startup reports running
               vpn-transition-migration  confirmed disconnect/reconnect closes stranded tunnels at once; a flap keeps them
               vpn-existing-stream-failure  retired-address write and read errors close broken tunnels promptly
               browser-retained-pac    browser keeps one PAC across VPN cycle; fresh requests recover
@@ -212,6 +213,7 @@ enum PMSim {
         "vpn-reconnect-routing",
         "vpn-reconnect-reprobe",
         "vpn-probe-superseded",
+        "vpn-startup-rederive",
         "vpn-transition-migration",
         "vpn-existing-stream-failure",
         "browser-retained-pac",
@@ -326,6 +328,8 @@ enum PMSim {
             return [try await ReconnectReprobeScenarios.failedFirstProbe(verbose: verbose)]
         case "vpn-probe-superseded":
             return [try await ProbeSupersessionScenarios.staleDisconnectProbe(verbose: verbose)]
+        case "vpn-startup-rederive":
+            return [try await ProbeSupersessionScenarios.startupRederive(verbose: verbose)]
         case "recovery-unreachable-ladder":
             return [try await RecoveryLadderScenarios.unreachableLadder(verbose: verbose)]
         case "vpn-transition-migration":
