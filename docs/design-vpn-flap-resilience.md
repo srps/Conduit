@@ -30,9 +30,13 @@ connections must migrate and work as soon as possible.
     every remaining upstream channel, since the proxies are behind the VPN.
     Routing via a still-reachable upstream (on-prem) keeps them.
 - **Reconnect after a disconnect**: before the first await, alongside the
-  routing revocation, close the DIRECT tunnels opened while the VPN was down
-  (`DirectTunnelRegistry`, keyed by the cause at dial time). Tunnels PAC or
-  no-proxy sent DIRECT while connected stay.
+  routing revocation, close the DIRECT tunnels dialed while the VPN was down.
+  `DirectTunnelRegistry` records that from the VPN state, not the direct-mode
+  cause: while the probe is pending, or on-prem with a reachable upstream, the
+  cause is `.none`, yet a no-proxy or PAC-DIRECT dial still leaves on the
+  off-VPN path. The orchestrator marks the outage on a confirmed disconnect;
+  the reconnect sweep ends it under the registry lock. Tunnels PAC or no-proxy
+  sent DIRECT while connected stay.
 - **Flap** (`.reasserting` → `.connected`): unchanged, nothing closes.
 
 Each phase or reconnect emits one `vpn.tunnels_migrated` event and the log line
@@ -41,14 +45,24 @@ lines. The registry is bounded by `inboundConnectionMaxLimit`; a tunnel that
 finds it full is counted as `untracked` in the next event instead of being
 dropped silently.
 
-A dial outlives the moment its cause is read. Each dial captures the registry's
-transition epoch before it starts, and every sweep advances the epoch under the
-registry lock. A tunnel that registers after a sweep it would have matched
-(dialed under the swept cause, or now on an address the sweep found gone) is
-closed at registration rather than escaping the sweep; the client gets a 502,
-a SOCKS failure or an EOF, and the next event counts it as `late_closed`. The
-registry remembers the last 8 sweeps; a dial older than all of them is retired
-too.
+A dial outlives the moment it starts, so both owners keep a bounded
+`TransitionSweeps` history (the last 8 sweeps) under the lock they sweep with:
+
+- `DirectTunnelRegistry.beginDial()` captures the sweep epoch and the outage
+  flag together. A tunnel that registers after a sweep it would have matched
+  (dialed during the outage the reconnect ended, or now on an address the
+  sweep found gone) is closed at registration; the client gets a 502, a SOCKS
+  failure or an EOF, and the next event counts it as `direct_late_closed` (or
+  `late_closed` on reconnect).
+- `ConnectionPool` captures its epoch when an acquisition decides to dial.
+  `closeConnections(migrating:)` records the rule (`.all` or
+  `.orphanedFrom`) and snapshots in one step. A dial that completes after a
+  sweep that selects it is closed instead of inserted, and its acquisition
+  fails with `vpnTransitionDuringConnect`: a local failure that feeds no
+  breaker, so the client sees a 502 and retries along the new routing. The
+  next event counts it as `upstream_late_closed`.
+
+A dial older than every remembered sweep is retired too.
 
 Not changed: during the grace window new CONNECTs still go to the upstream
 even if its name no longer resolves. Routing DIRECT there would bypass upstream

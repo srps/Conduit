@@ -41,7 +41,34 @@ final class VPNTunnelMigrationTests: XCTestCase {
         XCTAssertTrue(atProbe[0].hasPrefix("transition=disconnected phase=addresses reason=user "), atProbe[0])
         let after = migrations(orchestrator.eventLog.events)
         XCTAssertEqual(after.count, 2)
-        XCTAssertEqual(after.last, "transition=disconnected phase=routing reason=user routing=direct upstream_closed=0")
+        XCTAssertEqual(after.last, "transition=disconnected phase=routing reason=user routing=direct upstream_closed=0 upstream_late_closed=0")
+        await orchestrator.stopProxy()
+    }
+
+    /// On-prem, or while the probe is pending, the direct-mode cause is
+    /// `.none`, yet DIRECT dials leave on the off-VPN path: the outage is the
+    /// VPN state, and the reconnect still sweeps them.
+    func testAnOnPremOutageMarksDIRECTDialsAndTheReconnectSweepsThem() async throws {
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
+        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+            connectivityProbe: { upstreams in
+                UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
+            })
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.connected)
+        XCTAssertFalse(orchestrator.directTunnels.beginDial().whileVPNDown)
+
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .none)
+        XCTAssertTrue(orchestrator.directTunnels.beginDial().whileVPNDown)
+
+        await orchestrator.handleVPNStateChange(.connected)
+        XCTAssertFalse(orchestrator.directTunnels.beginDial().whileVPNDown)
+        XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
+                       "transition=reconnected route=direct closed=0 late_closed=0 untracked=0")
         await orchestrator.stopProxy()
     }
 
@@ -61,7 +88,7 @@ final class VPNTunnelMigrationTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
 
         XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
-                       "transition=disconnected phase=routing reason=lost routing=upstream upstream_closed=0")
+                       "transition=disconnected phase=routing reason=lost routing=upstream upstream_closed=0 upstream_late_closed=0")
         await orchestrator.stopProxy()
     }
 }

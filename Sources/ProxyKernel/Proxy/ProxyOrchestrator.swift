@@ -963,10 +963,10 @@ package final class ProxyOrchestrator {
     /// via `setDirectMode(_:)`.
     private let directModeBox = NIOLockedValueBox<(isDirect: Bool, cause: DirectModeCause)>((false, .none))
 
-    /// Direct tunnels by the cause they were opened under; a VPN reconnect
-    /// retires the ones opened while it was down (#148). Bounded by the
+    /// Direct tunnels and whether each was dialed during a confirmed VPN
+    /// outage; a reconnect retires those (#148). Bounded by the
     /// inbound-connection limit every tracked tunnel already counts against.
-    private lazy var directTunnels = DirectTunnelRegistry(capacity: { [configBox] in
+    private(set) lazy var directTunnels = DirectTunnelRegistry(capacity: { [configBox] in
         configBox.current.inboundConnectionMaxLimit
     })
     /// Mirror of `snapshot.vpnState == .connected` for the DNS forwarder's
@@ -1799,6 +1799,14 @@ package final class ProxyOrchestrator {
             $0.vpnState = state
             $0.vpnInterfaceName = shownInterface
         }
+        // DIRECT dials record whether they began during a confirmed outage,
+        // whatever the direct-mode cause says (#148). The reconnect sweep
+        // ends the outage; with nothing listening there is nothing to sweep.
+        switch state {
+        case .disconnected: directTunnels.markVPNDown()
+        case .connected where !isProxyActive: directTunnels.markVPNUp()
+        case .connected, .reasserting, .unknown: break
+        }
 
         // Reactions are skipped while the proxy listener is stopped — there's
         // nothing to react WITH. The UI snapshot still mirrors the state above.
@@ -1862,11 +1870,9 @@ package final class ProxyOrchestrator {
             }
             setDirectMode(reconnectCause)
             stopDirectModeReprobeTimer()
-            if case .disconnected = previous {
-                // New routing is already on the VPN; tunnels dialed DIRECT
-                // only because it was down would stall on the old path.
-                migrateDirectTunnelsAfterVPNReconnect()
-            }
+            // New routing is already on the VPN; DIRECT tunnels dialed while
+            // it was down would stall on the old path.
+            migrateDirectTunnelsAfterVPNReconnect()
             // Recovery path. Two flavors based on what state we came from:
             //   .reasserting → .connected: flap recovered. Hot path; reset
             //                              breakers, reprobe once for sanity.
@@ -2011,12 +2017,12 @@ package final class ProxyOrchestrator {
             logStore.log(.warning, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
             return
         }
-        let listener = localProxyServer.closeUpstreamChannels(orphanedFrom: assigned)
-        let tunnels = tunnelConnectionPool.closeConnections(orphanedFrom: assigned)
+        let upstream = localProxyServer.closeUpstreamChannels(orphanedFrom: assigned)
+            + tunnelConnectionPool.closeConnections(migrating: .orphanedFrom(assigned))
         let direct = directTunnels.closeTunnels(orphanedFrom: assigned)
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
-            detail: "transition=disconnected phase=addresses reason=\(Self.label(reason)) upstream_closed=\(listener + tunnels) direct_closed=\(direct.closed) late_closed=\(direct.lateClosed) untracked=\(direct.untracked) addresses=checked"
+            detail: "transition=disconnected phase=addresses reason=\(Self.label(reason)) upstream_closed=\(upstream.closed) upstream_late_closed=\(upstream.lateClosed) direct_closed=\(direct.closed) direct_late_closed=\(direct.lateClosed) untracked=\(direct.untracked) addresses=checked"
         )
         eventLog.append(event)
         logStore.log(direct.untracked > 0 ? .warning : .notice,
@@ -2027,11 +2033,12 @@ package final class ProxyOrchestrator {
     /// The proxies are behind the VPN, so they cannot answer. Routing via a
     /// still-reachable upstream (on-prem) keeps the rest.
     private func migrateUpstreamChannelsAfterVPNDisconnect(reason: VPNDisconnectReason, routesDirect: Bool) {
-        let listener = routesDirect ? localProxyServer.closeUpstreamChannelsAfterVPNDisconnect() : 0
-        let tunnels = routesDirect ? tunnelConnectionPool.closeAll(scope: .all) : 0
+        let upstream = routesDirect
+            ? localProxyServer.closeUpstreamChannelsAfterVPNDisconnect() + tunnelConnectionPool.closeConnections(migrating: .all)
+            : ConnectionPool.MigrationSweep(closed: 0, lateClosed: 0)
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
-            detail: "transition=disconnected phase=routing reason=\(Self.label(reason)) routing=\(routesDirect ? "direct" : "upstream") upstream_closed=\(listener + tunnels)"
+            detail: "transition=disconnected phase=routing reason=\(Self.label(reason)) routing=\(routesDirect ? "direct" : "upstream") upstream_closed=\(upstream.closed) upstream_late_closed=\(upstream.lateClosed)"
         )
         eventLog.append(event)
         logStore.log(.notice, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
@@ -2049,7 +2056,7 @@ package final class ProxyOrchestrator {
     /// opened while the VPN was down so their clients reconnect along the
     /// VPN's routing. Tunnels PAC sent DIRECT while connected stay (#148).
     private func migrateDirectTunnelsAfterVPNReconnect() {
-        let result = directTunnels.closeTunnels(openedUnder: .vpnDisconnected)
+        guard let result = directTunnels.closeTunnelsOpenedWhileVPNDown() else { return }
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
             detail: "transition=reconnected route=direct closed=\(result.closed) late_closed=\(result.lateClosed) untracked=\(result.untracked)"

@@ -99,6 +99,18 @@ enum VPNTransitionMigrationScenarios {
         let reconnectEvent = migrations().last
         let directKeptOnReconnect = try await exchanging(directOnVPN)
 
+        // On-prem: the upstream stays reachable, so the cause stays `.none`
+        // and routing stays on the upstream, yet a no-proxy DIRECT tunnel
+        // dialed during the outage still leaves on the off-VPN path. The
+        // reconnect sweeps it by VPN state, not by cause.
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
+        let onPremCause = orchestrator.snapshot.directModeCause
+        let directOnPrem = try await tunnel(3, directTarget)
+        await orchestrator.handleVPNStateChange(.connected)
+        let onPremClosed = try await until(timeout: 1, { directOnPrem.metrics.closedAt != nil })
+        let onPremReconnect = migrations().last?.detail ?? ""
+        let directKeptOnPrem = try await exchanging(directOnVPN)
+
         let addressesDetail = disconnectEvents.first ?? ""
         let disconnectDetail = disconnectEvents.last ?? ""
         let atProbe = migrationsAtProbe.withLockedValue { $0 } ?? []
@@ -107,8 +119,8 @@ enum VPNTransitionMigrationScenarios {
             .first { $0.hasPrefix("upstream_closed=") }
             .flatMap { Int($0.dropFirst("upstream_closed=".count)) } ?? 0
         let reconnectDetail = reconnectEvent?.detail ?? ""
-        return ScenarioResult(name: "vpn-transition-migration", clientCount: 3, clientsOpened: 3,
-            clientsWithFirstByte: 3, clientsClosedEarly: [viaUpstream, directOnVPN, directOffVPN].filter { $0.metrics.closedAt != nil }.count,
+        return ScenarioResult(name: "vpn-transition-migration", clientCount: 4, clientsOpened: 4,
+            clientsWithFirstByte: 4, clientsClosedEarly: [viaUpstream, directOnVPN, directOffVPN, directOnPrem].filter { $0.metrics.closedAt != nil }.count,
             totalBytes: directOnVPN.metrics.bytesReceived, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
                 .init("a flap keeps both tunnels and migrates nothing", flapKept && flapKeptDirect && flapMigrations == 0),
@@ -124,7 +136,11 @@ enum VPNTransitionMigrationScenarios {
                 .init("the reconnect closes the DIRECT tunnel opened off the VPN within 1 s", offVPNClosed),
                 .init("the reconnect reports one DIRECT migration",
                       reconnectDetail == "transition=reconnected route=direct closed=1 late_closed=0 untracked=0"),
-            ], notes: ["addresses: \(addressesDetail)", "routing: \(disconnectDetail)", "reconnect: \(reconnectDetail)",
+                .init("an on-prem outage (cause none) still retires its DIRECT tunnel on reconnect within 1 s",
+                      onPremCause == .none && onPremClosed
+                          && onPremReconnect == "transition=reconnected route=direct closed=1 late_closed=0 untracked=0"),
+                .init("the on-VPN DIRECT tunnel survives the on-prem round too", directKeptOnPrem),
+            ], notes: ["addresses: \(addressesDetail)", "routing: \(disconnectDetail)", "reconnect: \(reconnectDetail)", "on-prem reconnect: \(onPremReconnect)",
                        "Injected probe outcomes; no real VPN, helper, settings or credentials"])
     }
 }
