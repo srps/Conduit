@@ -97,13 +97,20 @@ package struct RoutingSection: Codable, Equatable, Sendable {
     package var noProxyHosts: [String]
     package var forceProxyHosts: [String]
 
+    /// Loopback, mDNS, link-local and the RFC 1918 ranges. The grammar has
+    /// no CIDR, so 172.16.0.0/12 is spelled out per second octet (#149).
+    /// Applies to new configs only; a saved list is the user's.
+    package static let defaultNoProxyHosts: [String] =
+        ["localhost", "127.0.0.1", "127.0.0.*", "::1", "[::1]", "*.local", "169.254.*", "10.*", "192.168.*"]
+        + (16...31).map { "172.\($0).*" }
+
     package init(
         pacURL: String = "",
         localPACEnabled: Bool = false,
         localPACPort: Int = 63145,
         pacRoutingEnabled: Bool = true,
         pacUsableRouteLimit: Int = ProxyConfig.defaultPACUsableRouteLimit,
-        noProxyHosts: [String] = ["localhost", "127.0.0.1", "127.0.0.*", "::1", "[::1]", "*.local", "10.*", "192.168.*", "172.16.*"],
+        noProxyHosts: [String] = RoutingSection.defaultNoProxyHosts,
         forceProxyHosts: [String] = []
     ) {
         self.pacURL = pacURL
