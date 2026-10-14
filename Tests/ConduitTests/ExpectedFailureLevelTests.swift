@@ -39,7 +39,7 @@ final class ExpectedFailureLevelTests: XCTestCase {
     func testDirectConnectReportLowersAbsentDestinationsAndNeverRaises() {
         let nxdomain = ResolutionError(host: "gone.example", rc: EAI_NONAME)
         let absent = HTTPProxyHandler.directConnectFailureReport(nxdomain, host: "gone.example", default: .error)
-        XCTAssertNil(absent.event)
+        XCTAssertEqual(absent.event, "direct.connect_failed", "structured consumers still see the 502")
         XCTAssertEqual(absent.level, .warning)
 
         let offVPN = HTTPProxyHandler.directConnectFailureReport(nxdomain, host: "gone.example", default: .info)
@@ -56,7 +56,7 @@ final class ExpectedFailureLevelTests: XCTestCase {
         XCTAssertEqual(unreachable.level, .error)
     }
 
-    func testAbsentDestinationLogsAWarningAndNoEvent() {
+    func testAbsentDestinationLogsAWarningAndKeepsItsEvent() {
         let logger = RecordingLogSink(minLevel: .debug)
         let events = RuntimeEventLog(capacity: 16)
         let error = IOError(errnoCode: ECONNREFUSED, reason: "connect")
@@ -66,7 +66,7 @@ final class ExpectedFailureLevelTests: XCTestCase {
             message: "Direct connect to 127.0.0.1:11434 failed", logger: logger, eventSink: { events.append($0) }
         )
         XCTAssertEqual(logger.entries().map(\.level), [.warning])
-        XCTAssertTrue(events.events.isEmpty)
+        XCTAssertEqual(events.events.map(\.event), ["direct.connect_failed"])
     }
 
     func testRelayLevelBySide() {

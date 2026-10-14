@@ -1131,16 +1131,17 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         error is LinkLocalFailureMemo.RecentFailure ? .info : level
     }
 
-    /// What a failed direct connect reports. An absent destination (see
-    /// `AbsentDestination`) logs at `.warning` at most and emits no event;
-    /// everything else keeps `direct.connect_failed` at `level`. Never
-    /// raises a level the direct-mode cause or the link-local memo lowered.
+    /// What a failed direct connect reports: always `direct.connect_failed`,
+    /// so structured consumers see every 502. An absent destination (see
+    /// `AbsentDestination`) logs at `.warning` at most; everything else keeps
+    /// `level`. Never raises a level the direct-mode cause or the link-local
+    /// memo lowered.
     static func directConnectFailureReport(
         _ error: Error, host: String, default level: LogLevel
     ) -> (event: String?, level: LogLevel) {
         let level = directConnectFailureLevel(error, default: level)
         guard AbsentDestination.matches(error, host: host) else { return ("direct.connect_failed", level) }
-        return (nil, min(level, .warning))
+        return ("direct.connect_failed", min(level, .warning))
     }
 
     /// Records a connect failure as an event and then as the log line derived

@@ -55,8 +55,8 @@ package enum ConnectFailureKind: String, Sendable {
 /// A direct connect that failed only because the destination is absent
 /// (#149): the name does not exist, the host is under the reserved
 /// `.invalid` TLD, or nothing listens on a loopback port. The path worked;
-/// the client asked for something that is not there, so the failure is not
-/// worth an event or an error line. DNS server failures (`EAI_AGAIN`,
+/// the client asked for something that is not there, so the failure is
+/// worth a warning, not an error line. It still emits its event. DNS server failures (`EAI_AGAIN`,
 /// `EAI_FAIL`), lookup timeouts and connect timeouts are not absent: they
 /// can mean a broken route or resolver.
 package enum AbsentDestination {
