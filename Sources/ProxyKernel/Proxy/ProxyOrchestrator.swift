@@ -2029,6 +2029,10 @@ package final class ProxyOrchestrator {
                 if cause.routesClientTrafficDirectly {
                     $0.runtimeStatus.lastHealthSummary = cause.healthSummary
                     $0.runtimeStatus.activeUpstream = "DIRECT"
+                    // This verdict owns the status: a recovery ladder this
+                    // disconnect superseded may have set `.degraded` from
+                    // the cause before it (#155).
+                    $0.runtimeStatus.state = .running
                 } else {
                     $0.runtimeStatus.lastHealthSummary = summary.bestReachableUpstream.map {
                         "Healthy via \($0.endpoint)"

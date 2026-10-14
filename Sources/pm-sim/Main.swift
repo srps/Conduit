@@ -68,6 +68,7 @@ enum PMSim {
               pac-route-bounds        configurable PAC cap bounds real fallback attempts without promoting DIRECT
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
               recovery-unreachable-ladder  unreachable upstream: ladder skips re-auth, exhaustion does not blame the password
+              recovery-superseded-by-disconnect  a disconnect that routes DIRECT owns the status a superseded ladder left
               websocket-upgrade       101 upgrade relayed, frames flow both ways
               connect-early-direct    CONNECT with early bytes through a direct tunnel
               connect-early-upstream  CONNECT with early bytes through an authenticated upstream
@@ -224,6 +225,7 @@ enum PMSim {
         "pac-route-bounds",
         "upstream-flap",
         "recovery-unreachable-ladder",
+        "recovery-superseded-by-disconnect",
         "websocket-upgrade",
         "connect-early-direct",
         "connect-early-upstream",
@@ -330,6 +332,8 @@ enum PMSim {
             return [try await ProbeSupersessionScenarios.staleDisconnectProbe(verbose: verbose)]
         case "vpn-startup-rederive":
             return [try await ProbeSupersessionScenarios.startupRederive(verbose: verbose)]
+        case "recovery-superseded-by-disconnect":
+            return [try await RecoveryLadderScenarios.ladderSupersededByDisconnect(verbose: verbose)]
         case "recovery-unreachable-ladder":
             return [try await RecoveryLadderScenarios.unreachableLadder(verbose: verbose)]
         case "vpn-transition-migration":
