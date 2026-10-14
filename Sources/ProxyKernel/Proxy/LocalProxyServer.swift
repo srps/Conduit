@@ -655,7 +655,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// Close every upstream channel this listener's pool holds, dedicated
     /// CONNECT tunnels included. Only for a confirmed VPN disconnect that
     /// routes traffic DIRECT: their source address left with the VPN, so
-    /// they cannot resume (#148).
+    /// they is not expected to resume (#148).
     package func closeUpstreamChannelsAfterVPNDisconnect() -> ConnectionPool.MigrationSweep {
         pool?.closeConnections(migrating: .all) ?? .init(closed: 0, lateClosed: 0)
     }

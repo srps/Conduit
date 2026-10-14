@@ -4,7 +4,7 @@ import NIOConcurrencyHelpers
 import NIOCore
 
 /// The machine's assigned IP addresses, to find sockets a VPN disconnect
-/// stranded: a socket whose local address is gone cannot resume (#148).
+/// stranded: a socket whose local address is gone is not expected to resume (#148).
 package enum LocalAddresses {
     package static func assigned() throws -> Set<String> {
         Set(try System.enumerateDevices().compactMap { $0.address?.ipAddress })
@@ -149,7 +149,7 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
     }
 
     /// Close every tracked tunnel whose local address is not in `assigned`:
-    /// the VPN took it, so the socket cannot resume.
+    /// the VPN took it, so the socket is not expected to resume.
     package func closeTunnels(orphanedFrom assigned: Set<String>) -> Sweep {
         sweep(.orphanedFrom(assigned), endingOutage: false) ?? Sweep(closed: 0, untracked: 0, lateClosed: 0)
     }
