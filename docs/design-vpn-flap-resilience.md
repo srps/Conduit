@@ -7,8 +7,41 @@ browsers keep using the local Conduit listener while the kernel decides whether
 VPN-off traffic goes direct or VPN-connected traffic uses upstreams. A config
 with no enabled upstreams still advertises DIRECT. Explicit no-proxy patterns,
 force-proxy precedence and non-strict fallback retain their configured behavior.
-VPN transitions preserve established tunnels; they do not restart the browser,
+A flap preserves established tunnels; no VPN transition restarts the browser,
 proxy listener or helper.
+
+## Confirmed transitions migrate stranded tunnels (#148, 2026-10-14)
+
+Preservation is for a flap: the VPN may return and macOS resumes the stream.
+A confirmed transition cannot give a stranded socket back, so keeping it only
+makes the client wait out a 60 s+ timeout (a day of logs showed ~18 upstream
+tunnels dying over two minutes with `EADDRNOTAVAIL`/`ETIMEDOUT` after a
+user-initiated disconnect, and DIRECT tunnels opened off the VPN dying a minute
+after it came back). The owner's call: when the VPN is disconnected or connected,
+connections must migrate and work as soon as possible.
+
+- **Confirmed disconnect** (`.disconnected(_)`, after the probe settles the
+  cause): routing DIRECT closes every upstream channel, both the listener's pool
+  and the tunnel pool, dedicated tunnels included; the proxies are behind the
+  VPN and the channels left with its address. Routing via a still-reachable
+  upstream (on-prem) closes only channels whose local address is no longer
+  assigned. DIRECT tunnels whose local address is gone close too.
+- **Reconnect after a disconnect**: before the first await, alongside the
+  routing revocation, close the DIRECT tunnels opened while the VPN was down
+  (`DirectTunnelRegistry`, keyed by the cause at dial time). Tunnels PAC or
+  no-proxy sent DIRECT while connected stay.
+- **Flap** (`.reasserting` → `.connected`): unchanged, nothing closes.
+
+Each decision emits one `vpn.tunnels_migrated` event and the log line derives
+from it. An orderly close produces no per-tunnel `tunnel.relay_failed` lines.
+The registry is bounded by `inboundConnectionMaxLimit`; a tunnel that finds it
+full is counted as `untracked` in the next event instead of being dropped
+silently.
+
+Not changed: during the grace window new CONNECTs still go to the upstream
+even if its name no longer resolves. Routing DIRECT there would bypass upstream
+policy for a VPN that may return within the grace; the window is the grace
+itself, and failover to the next PAC upstream already runs.
 
 Chrome retains successful PAC contexts independently of HTTP cache headers.
 [Chromium's proxy documentation](https://chromium.googlesource.com/chromium/src/+/main/net/docs/proxy.md#caching-of-successful-pac-fetches)
@@ -227,11 +260,13 @@ Transition table:
 
 ## Active Stream Preservation Policy
 
-When `directModeCause ∈ {.transientNetworkChange, .vpnDisconnected}` and active tunnels exist, the snapshot reflects:
+When `directModeCause == .transientNetworkChange` (a flap) and active tunnels exist, the snapshot reflects:
 
-- `directModeCause = .vpnDisconnected` (routing-policy state for *new* requests)
+- `directModeCause = .transientNetworkChange` (routing-policy state for *new* requests)
 - `activeConnections` unchanged (channel-health state)
 - Stalled tunnels survive until TCP keepalive (~120 s) declares them dead
+
+A confirmed disconnect no longer preserves stranded tunnels; see "Confirmed transitions migrate stranded tunnels" above.
 
 UI surfaces this split:
 
