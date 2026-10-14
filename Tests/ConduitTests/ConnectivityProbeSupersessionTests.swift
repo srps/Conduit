@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOConcurrencyHelpers
+import NIOPosix
 import XCTest
 @testable import ProxyKernel
 @testable import ProxyPAC
@@ -170,6 +171,8 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         private var holdNext = false
         private var parked: CheckedContinuation<Void, Never>?
         private let evaluator = CFPACEvaluator()
+        /// Awaited at the start of every fetch.
+        var onFetch: (@Sendable () async -> Void)?
 
         func holdNextFetch() { lock.withLockVoid { holdNext = true } }
         var isParked: Bool { lock.withLock { parked != nil } }
@@ -179,6 +182,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         }
 
         func fetchPAC(from urlString: String) async throws -> String {
+            await onFetch?()
             let hold = lock.withLock { () -> Bool in defer { holdNext = false }; return holdNext }
             if hold { await withCheckedContinuation { continuation in lock.withLockVoid { parked = continuation } } }
             return #"function FindProxyForURL(url, host) { return "PROXY 127.0.0.1:9"; }"#
@@ -333,6 +337,45 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         XCTAssertEqual(orchestrator.snapshot.directModeCause, .none, "routing follows the reconnect")
         XCTAssertEqual(orchestrator.snapshot.runtimeStatus.activeUpstream, "127.0.0.1:9")
         XCTAssertEqual(details(orchestrator, "connectivity.startup_rederived"), ["attempt=1 vpn=connected"])
+        await orchestrator.stopProxy()
+    }
+
+    /// A VPN that flaps during every PAC refresh startup runs: re-deciding
+    /// is bounded, and startup still reports running with the probe-less
+    /// cause for the state it ends on. The PAC fetched across the last flap
+    /// is dropped and fetched again once running (#155).
+    func testStartupUnderAFlappingVPNStopsReDecidingAndRuns() async throws {
+        let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
+        let flips = NIOLockedValueBox(0)
+        // Flips the VPN while startup is still deciding: once when the
+        // listener is up, then during every PAC fetch that follows.
+        @MainActor @Sendable func flip() async {
+            guard let orchestrator = box.withLockedValue({ $0 }), orchestrator.snapshot.runtimeStatus.state == .starting else { return }
+            let n = flips.withLockedValue { $0 += 1; return $0 }
+            await orchestrator.handleVPNStateChange(n.isMultiple(of: 2) ? .connected : .disconnected(reason: .networkLost))
+        }
+        let pac = HeldPAC()
+        pac.onFetch = { if flips.withLockedValue({ $0 }) > 0 { await flip() } }
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false
+        config.pacRoutingEnabled = true; config.pacURL = "http://pac.example.test/proxy.pac"
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
+        let orchestrator = ProxyOrchestrator(config: config, logger: ListeningHook { Task { @MainActor in await flip() } },
+            authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+            pacEvaluator: pac, connectivityProbe: { upstreams in
+                UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
+            })
+        await orchestrator.handleVPNStateChange(.connected)
+        box.withLockedValue { $0 = orchestrator }
+
+        try await orchestrator.startProxy()
+
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertEqual(details(orchestrator, "connectivity.startup_rederived").count, 3, "bounded")
+        let pacEvents = orchestrator.eventLog.events.map(\.event).filter { $0.hasPrefix("pac.") }
+        XCTAssertEqual(pacEvents.suffix(2), ["pac.routes_invalidated", "pac.refreshed"],
+                       "the PAC fetched across the last flap is dropped, then fetched again: \(pacEvents)")
         await orchestrator.stopProxy()
     }
 

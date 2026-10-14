@@ -978,6 +978,9 @@ package final class ProxyOrchestrator {
     /// that finishes after a later-started one committed is older evidence
     /// and yields to it (#155).
     private var probeSerial: UInt64 = 0
+    /// Startup gave up re-deciding under a flapping VPN and dropped its PAC
+    /// answers; refetch once running (#155).
+    private var pacRefetchAfterStart = false
     private var committedProbe: (serial: UInt64, summary: UpstreamProbeSummary)?
 
     /// Direct tunnels and whether each was dialed during a confirmed VPN
@@ -1279,6 +1282,11 @@ package final class ProxyOrchestrator {
                     setDirectMode(deriveDirectModeCause(probeSummary: nil))
                     refreshUpstreamStatuses()
                     summary = UpstreamProbeSummary(results: [])
+                    // The last PAC refresh ran on a network that is gone:
+                    // drop its answers now and refetch once running, when a
+                    // further VPN report is handled as usual.
+                    invalidatePACRoutes(reason: snapshot.vpnState == .connected ? .vpnConnected : .vpnDisconnected)
+                    pacRefetchAfterStart = true
                     break
                 }
                 rederived += 1
@@ -1309,6 +1317,10 @@ package final class ProxyOrchestrator {
             }
 
             reconcileConnectivityMonitors(for: directCause)
+            if pacRefetchAfterStart {
+                pacRefetchAfterStart = false
+                await refreshPACRouting(force: true)
+            }
         } catch {
             await localPACServer.stop()
             await localProxyServer.stop(scope: .all)
