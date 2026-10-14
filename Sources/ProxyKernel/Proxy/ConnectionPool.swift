@@ -45,8 +45,9 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     case upstreamResponseTimedOut
     case upstreamReturnedStatus(Int, target: String)
     /// A confirmed VPN transition swept the pool while this connection was
-    /// being dialed, and the sweep would have closed it (#148). Local: the
-    /// upstream did nothing wrong.
+    /// being dialed or used, and closed it (#148). Local: the upstream did
+    /// nothing wrong, and the exchange is not retried on a fresh upstream
+    /// connection, since routing may have left the upstream.
     case vpnTransitionDuringConnect
 
     package var errorDescription: String? {
@@ -74,7 +75,7 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
         case .upstreamReturnedStatus(let statusCode, let target):
             return "The upstream proxy returned HTTP \(statusCode) for \(SensitiveValueSanitizer.observableTarget(target))."
         case .vpnTransitionDuringConnect:
-            return "The VPN changed while connecting to the upstream proxy; retry the request."
+            return "A VPN transition closed the upstream connection; retry the request."
         }
     }
 
@@ -166,6 +167,9 @@ package final class PooledUpstreamConnection: @unchecked Sendable {
     package fileprivate(set) var inUse = false
     package var lastUsedAt = Date()
     package var isDedicatedTunnel = false
+    /// A confirmed-VPN-transition sweep closed it (#148): whatever its
+    /// exchange then fails with is the sweep's doing, not the upstream's.
+    package fileprivate(set) var sweptByVPNTransition = false
 
     package init(proxy: UpstreamProxy, channel: Channel) {
         self.proxy = proxy
@@ -334,14 +338,14 @@ package final class ConnectionPool: @unchecked Sendable {
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
-            return self.performStreamingExchange(
+            return self.attributingSweep(self.performStreamingExchange(
                 head: head,
                 requestBody: requestBody,
                 clientChannel: clientChannel,
                 connection: connection,
                 proxy: proxy,
                 authSource: authSource
-            ).flatMap { result in
+            ), connection: connection).flatMap { result in
                 self.recordSuccess(for: result.upstream, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
                 return connection.channel.eventLoop.makeSucceededFuture(result)
             }
@@ -626,7 +630,9 @@ package final class ConnectionPool: @unchecked Sendable {
             transitionSweeps.record(rule)
             let late = lateClosedDials
             lateClosedDials = 0
-            return (allConnections.values.filter { rule.selects($0.channel) }, late)
+            let selected = allConnections.values.filter { rule.selects($0.channel) }
+            for connection in selected { connection.sweptByVPNTransition = true }
+            return (selected, late)
         }
         for connection in selected {
             connection.channel.close(mode: .all, promise: nil)
@@ -775,6 +781,24 @@ package final class ConnectionPool: @unchecked Sendable {
                 self?.logger.log(.info, "Connected to upstream proxy \(proxy.endpoint) (raw).", category: .proxy)
                 return connection
             }
+    }
+
+    /// An exchange on a connection a VPN-transition sweep closed failed
+    /// because of the sweep: report it as `vpnTransitionDuringConnect`, a
+    /// local failure, so it is neither retried on a fresh upstream
+    /// connection (routing may have gone DIRECT) nor fed to the breaker
+    /// (#148). A client hang-up and a stream interrupted after the response
+    /// began keep their own meaning.
+    private func attributingSweep<T>(_ exchange: EventLoopFuture<T>, connection: PooledUpstreamConnection) -> EventLoopFuture<T> {
+        exchange.flatMapErrorThrowing { [weak self] error in
+            guard let self,
+                  !ConnectionPoolError.isClientClosedDuringResponse(error),
+                  !ConnectionPoolError.isStreamingResponseInterrupted(error),
+                  self.lock.withLock({ connection.sweptByVPNTransition })
+            else { throw error }
+            self.logger.log(.info, "Upstream exchange via \(connection.proxy.endpoint) ended by a VPN-transition sweep: \(error.displayDescription)", category: .proxy)
+            throw ConnectionPoolError.vpnTransitionDuringConnect
+        }
     }
 
     /// The pool's sweep epoch, as a dial captures it before connecting.
@@ -948,7 +972,10 @@ package final class ConnectionPool: @unchecked Sendable {
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
-            return self.performBufferedExchange(head: head, requestBody: requestBody, connection: connection, proxy: proxy, authSource: authSource)
+            return self.attributingSweep(
+                self.performBufferedExchange(head: head, requestBody: requestBody, connection: connection, proxy: proxy, authSource: authSource),
+                connection: connection
+            )
                 .flatMap { response in
                     self.recordSuccess(for: response.upstream, latencyMS: Int(Date().timeIntervalSince(start) * 1_000))
                     return connection.channel.eventLoop.makeSucceededFuture(response)
@@ -1426,6 +1453,9 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     private static func isRetryableConnectionError(_ error: Error) -> Bool {
+        // A sweep closed it because routing left that path (#148); the
+        // message fallback below would otherwise match its "closed".
+        if ConnectionPoolError.isVPNTransitionDuringConnect(error) { return false }
         if let channelError = error as? ChannelError {
             switch channelError {
             case .eof, .ioOnClosedChannel, .alreadyClosed:

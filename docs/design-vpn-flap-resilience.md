@@ -28,14 +28,23 @@ connections must migrate and work as soon as possible.
     budget (3 s) when the upstreams are gone.
   - `phase=routing`, once the probe settles the cause: routing DIRECT closes
     every remaining upstream channel, since the proxies are behind the VPN.
-    Routing via a still-reachable upstream (on-prem) keeps them.
+    Routing via a still-reachable upstream (on-prem) keeps them. The handler
+    captures a VPN transition generation before its probe; if a newer report
+    (a reconnect) ran during the await, it sweeps nothing and reports
+    `skipped=superseded`, since the channels now belong to the new routing.
+  - An exchange whose connection a sweep closed fails as
+    `vpnTransitionDuringConnect`, a local failure: the pool does not retry an
+    idempotent request on a fresh upstream connection (routing may have gone
+    DIRECT), and no breaker or upstream failure event sees it.
 - **Reconnect after a disconnect**: before the first await, alongside the
   routing revocation, close the DIRECT tunnels dialed while the VPN was down.
   `DirectTunnelRegistry` records that from the VPN state, not the direct-mode
   cause: while the probe is pending, or on-prem with a reachable upstream, the
   cause is `.none`, yet a no-proxy or PAC-DIRECT dial still leaves on the
   off-VPN path. The orchestrator marks the outage on a confirmed disconnect;
-  the reconnect sweep ends it under the registry lock. Tunnels PAC or no-proxy
+  the reconnect sweep ends it under the registry lock. It runs even with the
+  listener stopped (a config restart in flight), because the restart
+  preserves dedicated and DIRECT tunnels. Tunnels PAC or no-proxy
   sent DIRECT while connected stay.
 - **Flap** (`.reasserting` → `.connected`): unchanged, nothing closes.
 
