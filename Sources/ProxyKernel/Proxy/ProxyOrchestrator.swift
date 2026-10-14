@@ -1262,11 +1262,31 @@ package final class ProxyOrchestrator {
             // A VPN report during startup supersedes the probe; the listener
             // is not up yet, so that report reacts to nothing and this probe
             // is still the one that decides routing. Probe again under it.
-            let summary = await refreshConnectivityModeForStart()
+            var summary = await refreshConnectivityModeForStart()
+            var decidedUnder = routingGeneration
             await refreshPACRouting(force: true)
 
             try await localProxyServer.start()
             try await reconcileLocalPACServer(reason: "proxy_start")
+            // A VPN report during those awaits found the listener not yet
+            // running and reacted to nothing, yet made the verdict above
+            // stale. Decide again until none lands in between, so the final
+            // verdict and `.running` publish in one turn. Bounded: a VPN that
+            // keeps flapping gets the probe-less cause for its current state.
+            var rederived = 0
+            while decidedUnder != routingGeneration {
+                guard rederived < Self.startupProbeAttempts else {
+                    setDirectMode(deriveDirectModeCause(probeSummary: nil))
+                    refreshUpstreamStatuses()
+                    summary = UpstreamProbeSummary(results: [])
+                    break
+                }
+                rederived += 1
+                emitEvent(.routing, "connectivity.startup_rederived", detail: "attempt=\(rederived) vpn=\(snapshot.vpnState.eventLabel)")
+                summary = await refreshConnectivityModeForStart()
+                decidedUnder = routingGeneration
+                await refreshPACRouting(force: true)
+            }
 
             let directCause = snapshot.directModeCause
             mutateSnapshot {
