@@ -96,9 +96,10 @@ Every confirmed transition advances one generation. An operation captures a
 `.end`, before it reads the direct-mode cause; a SOCKS5 request before its
 routing step; an intercepted connection after its SNI, before it reads the
 cause. The stamp travels through PAC, DNS, retries and DIRECT fallbacks; a
-retry never takes a fresh one. A dial is not started when the generation has
-moved, and a socket whose setup straddled a transition is closed when it
-registers: it was routed for a network that is gone. The client gets a 502, a
+retry never takes a fresh one. When the generation has moved, no dial
+starts and no idle pooled connection is reused, and a socket whose setup
+straddled a transition is closed when it registers: it was routed for a
+network that is gone. The client gets a 502, a
 SOCKS failure or an EOF and retries along the new routing. The request fails
 locally (`vpnTransitionDuringConnect`): no retry on another upstream, no
 DIRECT fallback on the stale routing, no breaker signal, no `upstream.*_failed`
@@ -110,6 +111,10 @@ disconnect fails once even when its upstream is on-prem and still reachable,
 and a DIRECT dial started between a disconnect's two phases is retired by the
 second; both are bounded setup failures a client retries. No request that
 was already registered is touched for a transition whose predicate keeps it.
+
+A stale disconnect report (dropped for a newer one) still closes sockets on
+gone addresses, but does not advance the generation: setup begun under the
+newer state stands.
 
 A sweep retires its entries' tickets under the lock and closes outside it.
 The pool keeps the ticket beside its connection: an exchange or handshake

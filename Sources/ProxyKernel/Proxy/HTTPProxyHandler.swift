@@ -1035,8 +1035,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let logger = self.logger
         let gatewayMode = self.gatewayMode
         let transitions = pool.transitionAuthority
-        guard transitions.isCurrent(stamp) else {
-            return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+        if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") {
+            return clientEL.makeFailedFuture(refusal)
         }
 
         // Link-local literals get a short budget and a remembered timeout;
@@ -1044,8 +1044,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         return LinkLocalConnectPolicy.dial(host: host, port: port, on: clientEL, eventSink: eventSink) { connectTimeout in
             // A joiner may run after waiting on another dial; each connect
             // rechecks the request's routing right before it opens (#156).
-            guard transitions.isCurrent(stamp) else {
-                return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+            if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") {
+                return clientEL.makeFailedFuture(refusal)
             }
             let makeBootstrap: @Sendable () -> ClientBootstrap = {
                 let bootstrap = ClientBootstrap(group: eventLoopGroup)
@@ -1071,8 +1071,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         port: port,
                         on: clientEL,
                         ipv4Reconnect: { address in
-                            guard transitions.isCurrent(stamp) else {
-                                return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+                            if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") {
+                                return clientEL.makeFailedFuture(refusal)
                             }
                             logger.log(.info, "Half-open fallback: reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
                             return makeBootstrap()

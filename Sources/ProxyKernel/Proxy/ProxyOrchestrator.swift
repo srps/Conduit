@@ -1861,7 +1861,7 @@ package final class ProxyOrchestrator {
             // took, whatever came after it; the address phase needs no
             // routing verdict and closes only sockets whose address is gone.
             if case .disconnected(let reason) = state {
-                migrateOrphanedTunnelsAfterVPNDisconnect(reason: reason)
+                migrateOrphanedTunnelsAfterVPNDisconnect(reason: reason, stale: true)
             }
             return
         }
@@ -1899,7 +1899,7 @@ package final class ProxyOrchestrator {
         switch state {
         case .disconnected(let reason):
             transitions.beginOutage()
-            migrateOrphanedTunnelsAfterVPNDisconnect(reason: reason)
+            migrateOrphanedTunnelsAfterVPNDisconnect(reason: reason, stale: false)
             disconnectRoutingPending = !isProxyActive
         case .connected where !isProxyActive:
             disconnectRoutingPending = false
@@ -2117,7 +2117,10 @@ package final class ProxyOrchestrator {
     /// channel or DIRECT tunnel whose local address is no longer assigned is
     /// dead whatever the probe decides, and the probe can take its whole
     /// connect budget. `phase=routing` runs once the probe settles the cause.
-    private func migrateOrphanedTunnelsAfterVPNDisconnect(reason: VPNDisconnectReason) {
+    /// A `stale` report was dropped for a newer one: its sweep closes only
+    /// sockets whose address is gone, and retires no setup the newer state
+    /// started (#156).
+    private func migrateOrphanedTunnelsAfterVPNDisconnect(reason: VPNDisconnectReason, stale: Bool) {
         let assigned: Set<String>
         do {
             assigned = try LocalAddresses.assigned()
@@ -2131,7 +2134,7 @@ package final class ProxyOrchestrator {
             logStore.log(.warning, "VPN tunnels migrated: \(event.detail ?? "")", category: .network)
             return
         }
-        let closed = transitions.closeOrphaned(from: assigned)
+        let closed = transitions.closeOrphaned(from: assigned, retiringSetup: !stale)
         // `untracked` stays for readers of #148's format: every socket is
         // tracked or refused since #156, so it is always 0.
         let event = RuntimeEvent(
