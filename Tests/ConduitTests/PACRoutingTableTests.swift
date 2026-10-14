@@ -374,25 +374,94 @@ final class PACRoutingTableTests: XCTestCase {
         XCTAssertEqual(servers.origin.accepted, 0)
         await fixture.stop()
     }
+
+    /// Two upstreams, and the active one switches (as recovery's "switch
+    /// upstream" step does) while the first request is in flight, so the
+    /// second request dials the other upstream. Both fail after both were
+    /// selected. Each line names the upstream that took its request, not
+    /// the pool's last selection, which by then is the second.
+    func testConcurrentFailuresNameTheUpstreamEachExchangeDialed() async throws {
+        let servers = try await Servers.start()
+        defer { servers.stop() }
+        let first = SilentCloseUpstream(hold: true)
+        let second = SilentCloseUpstream(hold: true)
+        try await first.start()
+        try await second.start()
+        defer { first.stop(); second.stop() }
+        let logger = RecordingLogSink(minLevel: .info)
+        let fixture = try await ProxyFixture.start(
+            servers: servers, strict: true, pac: nil,
+            configure: { config in
+                config.upstreams = [first, second].enumerated().map { index, upstream in
+                    UpstreamProxy(name: "Upstream \(index)", host: "127.0.0.1", port: upstream.port, priority: 0)
+                }
+            },
+            logger: logger
+        )
+        let port = try XCTUnwrap(fixture.server.listeningPort)
+        let held = [first, second]
+        var sockets: [BlockingSocket] = []
+        for path in ["one", "two"] {
+            let socket = try BlockingSocket(port: port)
+            try socket.send("GET http://127.0.0.1:\(servers.origin.port)/\(path) HTTP/1.1\r\nHost: 127.0.0.1:\(servers.origin.port)\r\n\r\n")
+            sockets.append(socket)
+            for _ in 0..<500 where !held.contains(where: { $0.paths.contains("/\(path)") }) {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            if path == "one" { _ = try await fixture.server.switchToNextUpstream() }
+        }
+        let owners = ["one", "two"].map { path in held.first { $0.paths.contains("/\(path)") } }
+        XCTAssertTrue(owners[0] != nil && owners[1] != nil && owners[0] !== owners[1],
+                      "the requests did not reach different upstreams: \(held.map(\.paths))")
+
+        held.forEach { $0.release() }
+        for socket in sockets { _ = socket.readResponse() }
+        let lines = logger.entries().map(\.message).filter { $0.hasPrefix("Proxy exchange for ") }
+        XCTAssertEqual(lines.count, 2, "\(lines)")
+        for (path, owner) in zip(["one", "two"], owners) {
+            guard let owner else { continue }
+            let target = "http://127.0.0.1:\(servers.origin.port)/\(path)"
+            XCTAssertTrue(lines.contains { $0.hasPrefix("Proxy exchange for \(target) via 127.0.0.1:\(owner.port) failed: ") },
+                          "/\(path) went to \(owner.port): \(lines)")
+        }
+        await fixture.stop()
+    }
 }
 
-/// Reads one request head, then closes without a response.
+/// Reads one request head, records its path, then closes without a
+/// response: at once, or on `release()` when holding.
 private final class SilentCloseUpstream: @unchecked Sendable {
     private var channel: Channel?
+    private let hold: Bool
+    private let state = NIOLockedValueBox<(paths: [String], held: [Channel])>(([], []))
+
+    init(hold: Bool = false) {
+        self.hold = hold
+    }
 
     var port: Int { channel?.localAddress?.port ?? 0 }
+    var paths: [String] { state.withLockedValue { $0.paths } }
 
     func start() async throws {
+        let state = self.state
+        let hold = self.hold
         channel = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandler(SilentCloseHandler())
+                channel.pipeline.addHandler(SilentCloseHandler(state: state, hold: hold))
             }
             .bind(host: "127.0.0.1", port: 0)
             .get()
     }
 
+    func release() {
+        for channel in state.withLockedValue({ state in defer { state.held = [] }; return state.held }) {
+            channel.close(promise: nil)
+        }
+    }
+
     func stop() {
+        release()
         channel?.close(promise: nil)
     }
 }
@@ -400,13 +469,29 @@ private final class SilentCloseUpstream: @unchecked Sendable {
 private final class SilentCloseHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = ByteBuffer
 
+    private let state: NIOLockedValueBox<(paths: [String], held: [Channel])>
+    private let hold: Bool
     private var pending = ""
+
+    init(state: NIOLockedValueBox<(paths: [String], held: [Channel])>, hold: Bool) {
+        self.state = state
+        self.hold = hold
+    }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data)
         pending += buffer.readString(length: buffer.readableBytes) ?? ""
-        guard pending.contains("\r\n\r\n") else { return }
-        context.close(promise: nil)
+        guard let headEnd = pending.range(of: "\r\n\r\n") else { return }
+        // "GET http://host:port/path HTTP/1.1": record the path.
+        let uri = pending[..<headEnd.lowerBound].split(separator: " ").dropFirst().first.map(String.init) ?? ""
+        let path = URLComponents(string: uri)?.path ?? uri
+        let channel = context.channel
+        state.withLockedValue {
+            $0.paths.append(path)
+            if hold { $0.held.append(channel) }
+        }
+        pending = ""
+        if !hold { context.close(promise: nil) }
     }
 }
 
