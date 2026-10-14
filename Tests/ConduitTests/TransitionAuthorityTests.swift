@@ -141,6 +141,31 @@ final class TransitionAuthorityTests: XCTestCase {
         }
     }
 
+    /// A stale disconnect report still closes sockets on gone addresses,
+    /// but a newer state owns routing: setup begun under it stands.
+    func testAStaleReportsAddressSweepRetiresNoSetup() throws {
+        let authority = makeAuthority()
+        let overVPN = try channel(local: "10.20.30.40")
+        try open(authority, overVPN, route: .upstream)
+        let stamp = authority.stamp()
+        XCTAssertEqual(authority.closeOrphaned(from: ["127.0.0.1"], retiringSetup: false).upstream, 1)
+        XCTAssertFalse(overVPN.isActive)
+        XCTAssertTrue(authority.isCurrent(stamp))
+        XCTAssertNoThrow(try authority.register(try channel(), route: .direct, stamp: stamp, target: "origin.test:443"))
+    }
+
+    func testARefusalBeforeTheDialIsReported() throws {
+        let authority = makeAuthority()
+        let stamp = authority.stamp()
+        XCTAssertNil(authority.refusal(stamp, route: .direct, target: "origin.test:443"))
+        authority.beginOutage()
+        let refusal = authority.refusal(stamp, route: .direct, target: "origin.test:443")
+        XCTAssertTrue(refusal.map(ConnectionPoolError.isVPNTransitionDuringConnect) ?? false)
+        XCTAssertEqual(details(LateDialRetired.event), [
+            "target=origin.test:443 reason=\(LateDialRetired.beforeDial) kind=other",
+        ])
+    }
+
     func testARetirementIsReportedWhenItHappens() throws {
         let authority = makeAuthority()
         let stamp = authority.stamp()

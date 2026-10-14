@@ -660,9 +660,6 @@ package final class ConnectionPool: @unchecked Sendable {
         case idle(PooledUpstreamConnection)
         case needsNew
         case exhausted
-        /// A confirmed VPN transition ran since the request started: its
-        /// routing is stale, so it dials nothing (#156).
-        case retired
     }
 
     /// `connectTimeout` overrides the data-path budget for a new connection;
@@ -679,10 +676,14 @@ package final class ConnectionPool: @unchecked Sendable {
         connectTimeout: TimeAmount? = nil,
         stamp: RoutingStamp
     ) -> EventLoopFuture<PooledUpstreamConnection> {
+        // Before an idle connection is considered too: the request's choice
+        // of this upstream is as stale as a new dial would be. Outside the
+        // pool lock; the two locks never nest.
+        if let refusal = transitions.refusal(stamp, route: .upstream, target: SensitiveValueSanitizer.observableTarget(target), upstream: proxy.endpoint) {
+            return group.next().makeFailedFuture(refusal)
+        }
         let config = configProvider()
         let maxConns = config.maxConnections
-        // Read before the pool lock; the two locks never nest.
-        let current = transitions.isCurrent(stamp)
         let result: AcquireResult = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             pruneExpiredIdleConnectionsLocked(now: .now)
@@ -700,7 +701,6 @@ package final class ConnectionPool: @unchecked Sendable {
                     return .idle(existing)
                 }
             }
-            guard current else { return .retired }
             if allConnections.count + pendingConnectionCount >= maxConns {
                 return .exhausted
             }
@@ -715,8 +715,6 @@ package final class ConnectionPool: @unchecked Sendable {
             return conn.channel.eventLoop.makeSucceededFuture(conn)
         case .exhausted:
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
-        case .retired:
-            return group.next().makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
         case .needsNew:
             return makeConnection(to: proxy, stamp: stamp, target: target, connectTimeout: connectTimeout).always { [weak self] _ in
                 self?.lock.withLockVoid {
@@ -733,10 +731,11 @@ package final class ConnectionPool: @unchecked Sendable {
         config: ProxyConfig,
         stamp: RoutingStamp
     ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
+        if let refusal = transitions.refusal(stamp, route: .upstream, target: SensitiveValueSanitizer.observableTarget(target), upstream: proxy.endpoint) {
+            return group.next().makeFailedFuture(refusal)
+        }
         let maxConns = config.maxConnections
-        let current = transitions.isCurrent(stamp)
         let result: AcquireResult = lock.withLock {
-            guard current else { return .retired }
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             pruneExpiredIdleConnectionsLocked(now: .now)
             guard allConnections.count + pendingConnectionCount < maxConns else {
@@ -753,8 +752,6 @@ package final class ConnectionPool: @unchecked Sendable {
             preconditionFailure("Dedicated tunnels never reuse pooled idle connections")
         case .exhausted:
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
-        case .retired:
-            return group.next().makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
         case .needsNew:
             return makeRawConnection(to: proxy, stamp: stamp, target: target).map { conn in
                 conn.isDedicatedTunnel = true
@@ -787,7 +784,7 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     private func makeRawConnection(to proxy: UpstreamProxy, stamp: RoutingStamp, target: String) -> EventLoopFuture<PooledUpstreamConnection> {
-        return connectToUpstreamProxy(proxy, stamp: stamp)
+        return connectToUpstreamProxy(proxy, stamp: stamp, target: target)
             .flatMapThrowing { [weak self] channel in
                 let connection = PooledUpstreamConnection(proxy: proxy, channel: channel)
                 try self?.insertDialedConnection(connection, stamp: stamp, target: target)
@@ -839,7 +836,7 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     private func makeConnection(to proxy: UpstreamProxy, stamp: RoutingStamp, target: String, connectTimeout: TimeAmount? = nil) -> EventLoopFuture<PooledUpstreamConnection> {
-        return connectToUpstreamProxy(proxy, connectTimeout: connectTimeout, stamp: stamp) { channel in
+        return connectToUpstreamProxy(proxy, connectTimeout: connectTimeout, stamp: stamp, target: target) { channel in
             do {
                 try channel.pipeline.syncOperations.addHandler(HTTPRequestEncoder(), name: ProxyPipelineNames.upstreamEncoder)
                 try channel.pipeline.syncOperations.addHandler(ByteToMessageHandler(HTTPResponseDecoder(leftOverBytesStrategy: .forwardBytes)), name: ProxyPipelineNames.upstreamDecoder)
@@ -887,9 +884,11 @@ package final class ConnectionPool: @unchecked Sendable {
         _ proxy: UpstreamProxy,
         connectTimeout: TimeAmount? = nil,
         stamp: RoutingStamp,
+        target: String,
         channelInitializer: (@Sendable (Channel) -> EventLoopFuture<Void>)? = nil
     ) -> EventLoopFuture<Channel> {
         let transitions = self.transitions
+        let observedTarget = SensitiveValueSanitizer.observableTarget(target)
         let makeBootstrap: @Sendable () -> ClientBootstrap = { [weak self] in
             guard let self else {
                 return ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -913,8 +912,8 @@ package final class ConnectionPool: @unchecked Sendable {
                     ipv4Reconnect: { address in
                         // The lookup was asynchronous: a transition during
                         // it makes this second dial stale (#156).
-                        guard transitions.isCurrent(stamp) else {
-                            return channel.eventLoop.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+                        if let refusal = transitions.refusal(stamp, route: .upstream, target: observedTarget, upstream: proxy.endpoint) {
+                            return channel.eventLoop.makeFailedFuture(refusal)
                         }
                         self.logger.log(.info, "Half-open upstream fallback: reconnecting to \(proxy.endpoint) via IPv4 \(address)", category: .proxy)
                         return makeBootstrap()

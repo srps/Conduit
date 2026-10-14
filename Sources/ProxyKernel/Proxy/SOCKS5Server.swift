@@ -465,7 +465,13 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let logger = self.logger
         let gatewayMode = self.gatewayMode
         let transitions = connectCoordinator.transitionAuthority
-        guard let stamp = routingStamp, transitions.isCurrent(stamp) else {
+        guard let stamp = routingStamp else {
+            // Routing always stamps first; a missing stamp is a bug.
+            assertionFailure("SOCKS5 direct dial without a routing stamp")
+            sendReply(context: context, rep: 0x05)
+            return
+        }
+        if transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") != nil {
             sendReply(context: context, rep: 0x05)
             return
         }
@@ -475,8 +481,8 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         LinkLocalConnectPolicy.dial(host: host, port: Int(port), on: clientEL, eventSink: eventSink) { connectTimeout in
             // Rechecked right before each connect: a joiner may run after
             // waiting on another dial (#156).
-            guard transitions.isCurrent(stamp) else {
-                return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+            if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") {
+                return clientEL.makeFailedFuture(refusal)
             }
             let makeBootstrap: @Sendable () -> ClientBootstrap = {
                 ClientBootstrap(group: group)
@@ -502,8 +508,8 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                         port: Int(port),
                         on: clientEL,
                         ipv4Reconnect: { address in
-                            guard transitions.isCurrent(stamp) else {
-                                return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+                            if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):\(port)") {
+                                return clientEL.makeFailedFuture(refusal)
                             }
                             logger.log(.info, "SOCKS5: half-open fallback reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
                             return makeBootstrap().connect(to: address).hop(to: clientEL)

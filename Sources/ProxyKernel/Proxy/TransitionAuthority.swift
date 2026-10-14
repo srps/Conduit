@@ -125,11 +125,19 @@ package final class TransitionAuthority: @unchecked Sendable {
         lock.withLock { RoutingStamp(generation: generation, whileVPNDown: vpnDown) }
     }
 
-    /// Whether no confirmed transition ran since `stamp`. Checked before a
-    /// dial starts, so a retired operation does not dial at all; `register`
-    /// decides.
+    /// Whether no confirmed transition ran since `stamp`.
     package func isCurrent(_ stamp: RoutingStamp) -> Bool {
         lock.withLock { stamp.generation == generation }
+    }
+
+    /// Checked right before an operation opens or reuses a socket: when a
+    /// confirmed transition ran since `stamp`, its routing is stale, so it
+    /// opens nothing. Reports `connection.late_dial_retired` and returns
+    /// the local error to fail with; `nil` when the stamp is current.
+    package func refusal(_ stamp: RoutingStamp, route: Route, target: String, upstream: String? = nil) -> Error? {
+        guard !isCurrent(stamp) else { return nil }
+        report(.vpnTransitionDuringConnect, route: route, target: target, upstream: upstream, reason: LateDialRetired.beforeDial)
+        return ConnectionPoolError.vpnTransitionDuringConnect
     }
 
     /// Track `channel` until it closes, unless a confirmed transition ran
@@ -160,12 +168,17 @@ package final class TransitionAuthority: @unchecked Sendable {
         }
         ticket.retire()
         channel.close(mode: .all, promise: nil)
+        report(outcome, route: route, target: target, upstream: upstream, reason: LateDialRetired.transition)
+        throw outcome
+    }
+
+    private func report(_ outcome: ConnectionPoolError, route: Route, target: String, upstream: String?, reason: LateDialRetired) {
         let kind = route == .upstream ? "Upstream" : "Direct"
         let via = upstream.map { " via \($0)" } ?? ""
         if outcome == .vpnTransitionDuringConnect {
             retirementLog.report(
-                LateDialRetired.event, level: .notice, target: target, upstream: upstream, error: LateDialRetired.transition,
-                message: "\(kind) dial for \(target)\(via) retired: \(LateDialRetired.transition)", eventAtAnyLevel: true
+                LateDialRetired.event, level: .notice, target: target, upstream: upstream, error: reason,
+                message: "\(kind) dial for \(target)\(via) retired: \(reason)", eventAtAnyLevel: true
             )
         } else {
             retirementLog.report(
@@ -174,7 +187,6 @@ package final class TransitionAuthority: @unchecked Sendable {
                 eventAtAnyLevel: true
             )
         }
-        throw outcome
     }
 
     package var count: Int { lock.withLock { entries.count } }
@@ -189,9 +201,11 @@ package final class TransitionAuthority: @unchecked Sendable {
     }
 
     /// Close every tracked socket whose local address is not in `assigned`:
-    /// the VPN took it, so the socket is not expected to resume.
-    package func closeOrphaned(from assigned: Set<String>) -> Sweep {
-        sweep(endingOutage: false) { LocalAddresses.isOrphaned($0.channel, assigned: assigned) } ?? Sweep()
+    /// the VPN took it, so the socket is not expected to resume. A stale
+    /// disconnect report passes `retiringSetup: false`: a newer state
+    /// already owns routing, and setup begun under it must stand.
+    package func closeOrphaned(from assigned: Set<String>, retiringSetup: Bool = true) -> Sweep {
+        sweep(endingOutage: false, advancing: retiringSetup) { LocalAddresses.isOrphaned($0.channel, assigned: assigned) } ?? Sweep()
     }
 
     /// A disconnect that routes DIRECT: every upstream socket, since the
@@ -206,13 +220,13 @@ package final class TransitionAuthority: @unchecked Sendable {
         sweep(endingOutage: true) { $0.route == .direct && $0.dialedWhileDown }?.direct
     }
 
-    private func sweep(endingOutage: Bool, _ selects: (Entry) -> Bool) -> Sweep? {
+    private func sweep(endingOutage: Bool, advancing: Bool = true, _ selects: (Entry) -> Bool) -> Sweep? {
         let selected: [Entry]? = lock.withLock {
             if endingOutage {
                 guard vpnDown else { return nil }
                 vpnDown = false
             }
-            generation &+= 1
+            if advancing { generation &+= 1 }
             let matching = entries.filter { selects($0.value) }
             for (key, entry) in matching {
                 entry.ticket.retire()
@@ -247,4 +261,5 @@ package struct LateDialRetired: Error, CustomStringConvertible, Sendable {
 
     package static let event = "connection.late_dial_retired"
     package static let transition = LateDialRetired("a confirmed VPN transition ran while it was set up")
+    package static let beforeDial = LateDialRetired("a confirmed VPN transition ran before it dialed")
 }

@@ -113,6 +113,8 @@ final class ConnectionPoolMigrationTests: XCTestCase {
         }
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(accepted.withLockedValue { $0 }, 0, "nothing dialed")
+        XCTAssertEqual(retirements.count, 2, "each refusal is reported (one per target)")
+        XCTAssertTrue(retirements.allSatisfy { $0.contains("reason=\(LateDialRetired.beforeDial)") }, "\(retirements)")
         try await server.close().get()
     }
 
@@ -155,6 +157,52 @@ final class ConnectionPoolMigrationTests: XCTestCase {
         XCTAssertEqual(accepted.withLockedValue { $0 }, 1, "no fresh upstream connection")
         XCTAssertEqual(transitions.count, 0)
         XCTAssertTrue(pool.allConnectionSnapshot.isEmpty)
+        try await server.close().get()
+    }
+
+    /// Answers every request with a keep-alive 200, counting requests.
+    private final class OK: ChannelInboundHandler, @unchecked Sendable {
+        typealias InboundIn = ByteBuffer
+        let requests: NIOLockedValueBox<Int>
+        init(_ requests: NIOLockedValueBox<Int>) { self.requests = requests }
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            let text = unwrapInboundIn(data).getString(at: 0, length: unwrapInboundIn(data).readableBytes) ?? ""
+            guard text.contains("\r\n\r\n") else { return }
+            requests.withLockedValue { $0 += 1 }
+            context.writeAndFlush(NIOAny(context.channel.allocator.buffer(string: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")), promise: nil)
+        }
+    }
+
+    /// The request's choice of upstream is as stale as a new dial would be:
+    /// an idle connection that survived the sweep does not serve it.
+    func testAStaleStampIsRefusedEvenWithAnIdleConnectionAvailable() async throws {
+        let requests = NIOLockedValueBox(0)
+        let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .childChannelInitializer { $0.pipeline.addHandler(OK(requests)) }
+            .bind(host: "127.0.0.1", port: 0).get()
+        var config = ProxyConfig.testFixture()
+        config.upstreams = [UpstreamProxy(name: "ok", host: "127.0.0.1", port: server.localAddress!.port!, priority: 0)]
+        let transitions = makeAuthority()
+        let pool = ConnectionPool(group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(),
+                                  configProvider: { config },
+                                  authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+                                  transitions: transitions)
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://origin.test/",
+                                   headers: ["Host": "origin.test"])
+        _ = try await pool.exchange(head: head, body: nil).get()
+        XCTAssertEqual(pool.allConnectionSnapshot.filter { !$0.inUse }.count, 1, "an idle keep-alive connection")
+
+        let stamp = transitions.stamp()
+        _ = transitions.closeOrphaned(from: [])           // a transition that keeps it (no local address matches nothing)
+        XCTAssertEqual(pool.allConnectionSnapshot.count, 1, "the sweep kept the idle connection")
+        do {
+            _ = try await pool.exchange(head: head, body: nil, stamp: stamp).get()
+            XCTFail("the stale request must fail")
+        } catch {
+            XCTAssertEqual(error as? ConnectionPoolError, .vpnTransitionDuringConnect)
+        }
+        XCTAssertEqual(requests.withLockedValue { $0 }, 1, "the idle connection never carried it")
+        pool.closeAll(scope: .all)
         try await server.close().get()
     }
 

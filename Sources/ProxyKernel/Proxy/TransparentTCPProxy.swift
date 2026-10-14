@@ -304,7 +304,7 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
         let started = DispatchTime.now().uptimeNanoseconds
         let startedCause = directModeProvider()
         let transitions = connectCoordinator.transitionAuthority
-        guard transitions.isCurrent(stamp) else {
+        if transitions.refusal(stamp, route: .direct, target: "\(host):443") != nil {
             ctx.close(promise: nil)
             return
         }
@@ -312,8 +312,8 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
             .flatMap { address -> EventLoopFuture<Channel> in
                 // The lookup is asynchronous too; a transition during it
                 // makes the dial stale.
-                guard transitions.isCurrent(stamp) else {
-                    return eventLoop.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+                if let refusal = transitions.refusal(stamp, route: .direct, target: "\(host):443") {
+                    return eventLoop.makeFailedFuture(refusal)
                 }
                 return ClientBootstrap(group: eventLoop)
                     .resolver(AddressFamilyAwareResolver(group: eventLoop))
