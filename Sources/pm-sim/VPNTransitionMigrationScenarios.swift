@@ -4,14 +4,17 @@ import NIOConcurrencyHelpers
 import NIOPosix
 import ProxyKernel
 
-/// #148: a confirmed VPN transition retires the tunnels the new routing
-/// stranded, at once, so clients reconnect instead of stalling into a
+/// #148, #156: a confirmed VPN transition closes the tunnels whose path it
+/// removed, at once, so clients reconnect instead of stalling into a
 /// timeout; a flap keeps every stream.
 ///
 /// The real orchestrator, listener, pool and CONNECT pipeline own the
-/// sockets. Only probe reachability is injected. `127.0.0.1` is a default
-/// no-proxy host, so a CONNECT to the origin's loopback port is a DIRECT
-/// tunnel whatever the VPN state; `migrate.test:443` goes via the upstream.
+/// sockets. Probe reachability and the machine's paths are injected: every
+/// socket here is loopback, so a path is "gone" by its peer's port, standing
+/// in for a VPN address that went away or a route that moved onto the
+/// tunnel. `127.0.0.1` is a default no-proxy host, so a CONNECT to an
+/// origin's loopback port is a DIRECT tunnel whatever the VPN state;
+/// `migrate.test:443` goes via the upstream.
 enum VPNTransitionMigrationScenarios {
     @MainActor
     private static func until(timeout: TimeInterval, _ condition: () -> Bool) async throws -> Bool {
@@ -20,12 +23,21 @@ enum VPNTransitionMigrationScenarios {
         return condition()
     }
 
+    /// Paths judged by peer port: a port in `gone` has lost its path.
+    private static func paths(_ gone: NIOLockedValueBox<Set<Int>>) -> ClosureSocketPaths {
+        ClosureSocketPaths { query in
+            gone.withLockedValue { $0.contains(query.remote.port ?? -1) } ? .stranded("address_gone") : .current
+        }
+    }
+
     @MainActor
     static func run(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
         let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
         let origin = FakeOrigin(group: group, behavior: .echo)
         try await origin.start(); ScenarioCleanup.register { await origin.stop() }
+        let offOrigin = FakeOrigin(group: group, behavior: .echo)
+        try await offOrigin.start(); ScenarioCleanup.register { await offOrigin.stop() }
         let upstream = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: origin.port, requireAuth: false)
         try await upstream.start(); ScenarioCleanup.register { await upstream.stop() }
         var config = ProxyConfig()
@@ -33,20 +45,13 @@ enum VPNTransitionMigrationScenarios {
         config.healthCheckIntervalSeconds = 3600
         config.upstreams = [UpstreamProxy(name: "migrating", host: "127.0.0.1", port: upstream.port, priority: 0)]
         let reachable = NIOLockedValueBox(true)
-        // What the disconnect's probe saw: the address phase must precede it.
-        let eventLog = NIOLockedValueBox<RuntimeEventLog?>(nil)
-        let migrationsAtProbe = NIOLockedValueBox<[String]?>(nil)
+        let gone = NIOLockedValueBox<Set<Int>>([])
         let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
             connectivityProbe: { targets in
                 let up = reachable.withLockedValue { $0 }
-                if !up, let events = eventLog.withLockedValue({ $0 })?.events {
-                    migrationsAtProbe.withLockedValue {
-                        $0 = events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
-                    }
-                }
                 return UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
-            })
-        eventLog.withLockedValue { $0 = orchestrator.eventLog }
+            },
+            socketPaths: paths(gone), strandedResweepDelays: [.milliseconds(200)])
         try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
         await orchestrator.handleVPNStateChange(.connected)
         let port = orchestrator.snapshot.bindings.proxyPort!
@@ -65,90 +70,88 @@ enum VPNTransitionMigrationScenarios {
             let before = client.metrics.bytesReceived
             return try await until(timeout: 2, { client.metrics.bytesReceived > before }) && client.metrics.closedAt == nil
         }
-        func migrations() -> [RuntimeEvent] {
-            orchestrator.eventLog.events.filter { $0.event == "vpn.tunnels_migrated" }
+        func migrations() -> [String] {
+            orchestrator.eventLog.events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
         }
-        let directTarget = "127.0.0.1:\(origin.port)"
 
         // On the VPN: one tunnel via the upstream, one PAC/no-proxy DIRECT.
         let viaUpstream = try await tunnel(0, "migrate.test:443")
-        let directOnVPN = try await tunnel(1, directTarget)
+        let directOnVPN = try await tunnel(1, "127.0.0.1:\(origin.port)")
 
-        // A flap keeps every stream and decides nothing.
+        // A flap keeps every stream and sweeps nothing, even with a path
+        // missing mid-flap.
         await orchestrator.handleVPNStateChange(.reasserting)
-        try await Task.sleep(for: .milliseconds(200))
+        gone.withLockedValue { _ = $0.insert(upstream.port) }
+        try await Task.sleep(for: .milliseconds(300))
+        gone.withLockedValue { _ = $0.remove(upstream.port) }
         await orchestrator.handleVPNStateChange(.connected)
         let flapKept = try await exchanging(viaUpstream)
         let flapKeptDirect = try await exchanging(directOnVPN)
-        let flapMigrations = migrations().count
+        try await Task.sleep(for: .milliseconds(300))
+        let afterFlap = migrations()
+        let flapClosed = afterFlap.filter { !$0.contains("upstream_closed=0") || !$0.contains("direct_closed=0") }
 
-        // A confirmed disconnect routing DIRECT retires the upstream tunnel;
-        // the DIRECT one (its loopback address is still assigned) stays.
+        // A confirmed disconnect takes the VPN address the upstream tunnel
+        // used; the DIRECT one's path survives.
         reachable.withLockedValue { $0 = false }
+        gone.withLockedValue { _ = $0.insert(upstream.port) }
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
         let upstreamClosed = try await until(timeout: 1, { viaUpstream.metrics.closedAt != nil })
-        let disconnectEvents = migrations().suffix(2).compactMap(\.detail)
+        let disconnectSweep = migrations().first { $0.hasPrefix("transition=disconnected phase=paths pass=0 ") } ?? ""
         let directKeptOnDisconnect = try await exchanging(directOnVPN)
 
-        // Off the VPN, a DIRECT tunnel; the reconnect retires it, not the
-        // one PAC/no-proxy sent DIRECT while connected.
-        let directOffVPN = try await tunnel(2, directTarget)
+        // Off the VPN, a DIRECT tunnel; the reconnect moves its route onto
+        // the tunnel, but not the one PAC/no-proxy sent DIRECT while connected.
+        let directOffVPN = try await tunnel(2, "127.0.0.1:\(offOrigin.port)")
         reachable.withLockedValue { $0 = true }
+        gone.withLockedValue { $0 = [offOrigin.port] }
         await orchestrator.handleVPNStateChange(.connected)
         let offVPNClosed = try await until(timeout: 1, { directOffVPN.metrics.closedAt != nil })
-        let reconnectEvent = migrations().last
+        let reconnectSweep = migrations().last { $0.hasPrefix("transition=connected phase=paths pass=0 ") } ?? ""
         let directKeptOnReconnect = try await exchanging(directOnVPN)
 
-        // On-prem: the upstream stays reachable, so the cause stays `.none`
-        // and routing stays on the upstream, yet a no-proxy DIRECT tunnel
-        // dialed during the outage still leaves on the off-VPN path. The
-        // reconnect sweeps it by VPN state, not by cause.
+        // On-prem: the VPN goes but the upstream stays reachable over the
+        // LAN, so its tunnel's path is current and it keeps exchanging; a
+        // DIRECT tunnel whose route the reconnect moves is closed.
+        gone.withLockedValue { $0 = [] }
+        let onPremUpstream = try await tunnel(3, "migrate.test:443")
         await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost))
         let onPremCause = orchestrator.snapshot.directModeCause
-        let directOnPrem = try await tunnel(3, directTarget)
+        let onPremKept = try await exchanging(onPremUpstream)
+        let directOnPrem = try await tunnel(4, "127.0.0.1:\(offOrigin.port)")
+        gone.withLockedValue { $0 = [offOrigin.port] }
         await orchestrator.handleVPNStateChange(.connected)
         let onPremClosed = try await until(timeout: 1, { directOnPrem.metrics.closedAt != nil })
-        let onPremReconnect = migrations().last?.detail ?? ""
         let directKeptOnPrem = try await exchanging(directOnVPN)
 
-        let addressesDetail = disconnectEvents.first ?? ""
-        let disconnectDetail = disconnectEvents.last ?? ""
-        let atProbe = migrationsAtProbe.withLockedValue { $0 } ?? []
-        // The tunnel plus any pooled connection the health check left idle.
-        let upstreamClosedCount = disconnectDetail.split(separator: " ")
-            .first { $0.hasPrefix("upstream_closed=") }
-            .flatMap { Int($0.dropFirst("upstream_closed=".count)) } ?? 0
-        let reconnectDetail = reconnectEvent?.detail ?? ""
-        return ScenarioResult(name: "vpn-transition-migration", clientCount: 4, clientsOpened: 4,
-            clientsWithFirstByte: 4, clientsClosedEarly: [viaUpstream, directOnVPN, directOffVPN, directOnPrem].filter { $0.metrics.closedAt != nil }.count,
+        let routingDetail = migrations().first { $0.contains("phase=routing reason=user") } ?? ""
+        let clients = [viaUpstream, directOnVPN, directOffVPN, onPremUpstream, directOnPrem]
+        return ScenarioResult(name: "vpn-transition-migration", clientCount: clients.count, clientsOpened: clients.count,
+            clientsWithFirstByte: clients.count, clientsClosedEarly: clients.filter { $0.metrics.closedAt != nil }.count,
             totalBytes: directOnVPN.metrics.bytesReceived, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
-                .init("a flap keeps both tunnels and migrates nothing", flapKept && flapKeptDirect && flapMigrations == 0),
-                .init("a DIRECT-routing disconnect closes the upstream tunnel within 1 s", upstreamClosed),
-                .init("the address phase ran before the probe and kept the loopback DIRECT tunnel",
-                      atProbe.count == 1 && atProbe[0] == addressesDetail
-                          && addressesDetail.hasPrefix("transition=disconnected phase=addresses reason=user ")
-                          && addressesDetail.contains(" direct_closed=0 ")),
-                .init("the routing phase reports the upstream tunnel it closed",
-                      disconnectDetail.hasPrefix("transition=disconnected phase=routing reason=user routing=direct ")
-                          && upstreamClosedCount >= 1),
-                .init("a DIRECT tunnel whose address survived keeps exchanging", directKeptOnDisconnect && directKeptOnReconnect),
-                .init("the reconnect closes the DIRECT tunnel opened off the VPN within 1 s", offVPNClosed),
-                .init("the reconnect reports one DIRECT migration",
-                      reconnectDetail == "transition=reconnected route=direct closed=1 untracked=0"),
-                .init("an on-prem outage (cause none) still retires its DIRECT tunnel on reconnect within 1 s",
-                      onPremCause == .none && onPremClosed
-                          && onPremReconnect == "transition=reconnected route=direct closed=1 untracked=0"),
+                .init("a flap keeps both tunnels and closes nothing, even with a path missing mid-flap",
+                      flapKept && flapKeptDirect && flapClosed.isEmpty),
+                .init("a disconnect closes the upstream tunnel whose path it removed within 1 s", upstreamClosed),
+                .init("the disconnect's path sweep reports it",
+                      disconnectSweep.contains(" upstream_closed=") && !disconnectSweep.contains(" upstream_closed=0 ")),
+                .init("the routing phase still runs once the probe decides", routingDetail.contains("routing=direct")),
+                .init("a DIRECT tunnel whose path survived keeps exchanging", directKeptOnDisconnect && directKeptOnReconnect),
+                .init("the reconnect closes the DIRECT tunnel whose route moved within 1 s", offVPNClosed),
+                .init("the reconnect's path sweep reports one DIRECT closure",
+                      reconnectSweep.contains(" direct_closed=1 ")),
+                .init("on-prem, the upstream tunnel on a current path survives the disconnect",
+                      onPremCause == .none && onPremKept),
+                .init("on-prem, the reconnect closes the DIRECT tunnel whose route moved within 1 s", onPremClosed),
                 .init("the on-VPN DIRECT tunnel survives the on-prem round too", directKeptOnPrem),
-            ], notes: ["addresses: \(addressesDetail)", "routing: \(disconnectDetail)", "reconnect: \(reconnectDetail)", "on-prem reconnect: \(onPremReconnect)",
-                       "Injected probe outcomes; no real VPN, helper, settings or credentials"])
+            ], notes: ["disconnect: \(disconnectSweep)", "routing: \(routingDetail)", "reconnect: \(reconnectSweep)",
+                       "Injected probe outcomes and paths; no real VPN, helper, settings or credentials"])
     }
 
     /// #156: setup that straddles a confirmed transition. A CONNECT whose
     /// upstream handshake is still unanswered when a DIRECT-routing
     /// disconnect lands fails at once with a local 502: no wait for the
-    /// response timeout, no retry on another upstream, no DIRECT fallback
-    /// on the stale routing.
+    /// response timeout, no retry on another upstream, no DIRECT fallback.
     @MainActor
     static func setupRace(verbose: Bool) async throws -> ScenarioResult {
         let started = Date(), group = MultiThreadedEventLoopGroup.singleton
@@ -199,7 +202,7 @@ enum VPNTransitionMigrationScenarios {
         let upstreamDials = accepted.withLockedValue { $0 } - baseline
         let originAfterRace = origin.connectionCount
 
-        let routing = migrations(orchestrator).last ?? ""
+        let routing = migrations(orchestrator).last { $0.contains("phase=routing") } ?? ""
         let cause = orchestrator.snapshot.directModeCause
 
         return ScenarioResult(name: "vpn-transition-setup-race", clientCount: 1, clientsOpened: 1,
@@ -219,13 +222,76 @@ enum VPNTransitionMigrationScenarios {
                        "answered in \(answeredWithin)", "Injected probe outcomes; no real VPN, helper, settings or credentials"])
     }
 
+    /// #156: a dial that connects over a path a VPN transition already
+    /// removed is closed when it registers, whenever its routing was decided:
+    /// the client gets a 502 at once, the upstream is not blamed, and no
+    /// other upstream is tried.
+    @MainActor
+    static func lateDial(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
+        // Two upstreams that count connections; the dial never gets past
+        // registration, so neither needs to answer.
+        let accepted = NIOLockedValueBox(0)
+        var ports: [Int] = []
+        for _ in 0..<2 {
+            let upstream = try await ServerBootstrap(group: group)
+                .childChannelInitializer { channel in
+                    accepted.withLockedValue { $0 += 1 }
+                    return channel.eventLoop.makeSucceededVoidFuture()
+                }
+                .bind(host: "127.0.0.1", port: 0).get()
+            ScenarioCleanup.register { try? await upstream.close().get() }
+            ports.append(upstream.localAddress!.port!)
+        }
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "first", host: "127.0.0.1", port: ports[0], priority: 0),
+                            UpstreamProxy(name: "second", host: "127.0.0.1", port: ports[1], priority: 1)]
+        let gone = NIOLockedValueBox<Set<Int>>([])
+        let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
+            connectivityProbe: { targets in
+                UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: true) })
+            },
+            socketPaths: paths(gone))
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+        await orchestrator.handleVPNStateChange(.connected)
+        let port = orchestrator.snapshot.bindings.proxyPort!
+        try await Task.sleep(for: .milliseconds(300))
+        let before = accepted.withLockedValue { $0 }
+
+        // The route to both upstreams moved while the CONNECT was being set up.
+        gone.withLockedValue { $0 = Set(ports) }
+        let sentAt = ContinuousClock.now
+        let answer = try await RawClient.send(group: group, port: port,
+            request: "CONNECT migrate.test:443 HTTP/1.1\r\nHost: migrate.test:443\r\n\r\n").get()
+        let answeredWithin = ContinuousClock.now - sentAt
+        try await Task.sleep(for: .milliseconds(100))
+        let retired = orchestrator.eventLog.events.filter { $0.event == LateDialRetired.event }.compactMap(\.detail)
+        let failures = orchestrator.eventLog.events.filter { $0.event.hasPrefix("upstream.") && $0.event.hasSuffix("_failed") }
+
+        return ScenarioResult(name: "vpn-transition-late-dial", clientCount: 1, clientsOpened: 1,
+            clientsWithFirstByte: answer.isEmpty ? 0 : 1, clientsClosedEarly: 0,
+            totalBytes: answer.utf8.count, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+                .init("the client gets a 502 within 1 s", answer.hasPrefix("HTTP/1.1 502") && answeredWithin < .seconds(1)),
+                .init("the retirement is reported with its path", retired.count == 1
+                      && retired[0].contains("reason=\(LateDialRetired.pathGone("address_gone"))")),
+                .init("no other upstream is tried", accepted.withLockedValue { $0 } - before == 1),
+                .init("no upstream failure is reported", failures.isEmpty),
+            ], notes: ["answer: \(answer.split(separator: "\r\n").first ?? "")", "retired: \(retired)",
+                       "Injected probe outcomes and paths; no real VPN, helper, settings or credentials"])
+    }
+
     @MainActor
     private static func migrations(_ orchestrator: ProxyOrchestrator) -> [String] {
         orchestrator.eventLog.events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
     }
 
     /// #156: a plain HTTP request routed DIRECT during an outage, waiting on
-    /// a silent origin, has its origin socket closed by the reconnect sweep.
+    /// a silent origin, has its origin socket closed by the reconnect sweep
+    /// once its route moves onto the tunnel.
     /// The client must get a 502 at once, not hang until it gives up.
     @MainActor
     static func directHTTPSwept(verbose: Bool) async throws -> ScenarioResult {
@@ -246,11 +312,13 @@ enum VPNTransitionMigrationScenarios {
         config.healthCheckIntervalSeconds = 3600
         config.upstreams = [UpstreamProxy(name: "corp", host: "127.0.0.1", port: 9, priority: 0)]
         let reachable = NIOLockedValueBox(true)
+        let gone = NIOLockedValueBox<Set<Int>>([])
         let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
             connectivityProbe: { targets in
                 let up = reachable.withLockedValue { $0 }
                 return UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
-            })
+            },
+            socketPaths: paths(gone))
         try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
         await orchestrator.handleVPNStateChange(.connected)
         let port = orchestrator.snapshot.bindings.proxyPort!
@@ -264,14 +332,17 @@ enum VPNTransitionMigrationScenarios {
         guard try await until(timeout: 3, { accepted.withLockedValue { $0 } > 0 }) else {
             throw ScenarioExecutionError(message: "the DIRECT request never reached the silent origin")
         }
-        // The reconnect ends the outage and closes the DIRECT socket set up
-        // during it.
+        // The reconnect moves the origin's route onto the tunnel and closes
+        // the DIRECT socket set up during the outage.
         let reconnectedAt = ContinuousClock.now
         reachable.withLockedValue { $0 = true }
+        gone.withLockedValue { _ = $0.insert(silentPort) }
         await orchestrator.handleVPNStateChange(.connected)
         let answer = try await pending.get()
         let answeredWithin = ContinuousClock.now - reconnectedAt
-        let sweep = orchestrator.eventLog.events.last { $0.event == "vpn.tunnels_migrated" }?.detail ?? ""
+        let sweep = orchestrator.eventLog.events.last {
+            $0.event == "vpn.tunnels_migrated" && ($0.detail?.hasPrefix("transition=connected phase=paths") ?? false)
+        }?.detail ?? ""
 
         return ScenarioResult(name: "vpn-transition-direct-http", clientCount: 1, clientsOpened: 1,
             clientsWithFirstByte: answer.isEmpty ? 0 : 1, clientsClosedEarly: 0,
@@ -279,7 +350,7 @@ enum VPNTransitionMigrationScenarios {
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
                 .init("the request is routed DIRECT during the outage", direct),
                 .init("the reconnect sweep closes its origin socket",
-                      sweep.hasPrefix("transition=reconnected route=direct ") && !sweep.contains("closed=0")),
+                      sweep.contains(" direct_closed=1 ")),
                 .init("the client gets a 502 within 1 s of the reconnect, not a hang",
                       answer.hasPrefix("HTTP/1.1 502") && answeredWithin < .seconds(1)),
             ], notes: ["silent loopback origin on port \(silentPort); injected probe outcomes; sweep: \(sweep)"])

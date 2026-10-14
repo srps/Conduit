@@ -53,7 +53,9 @@ enum ReconnectReprobeScenarios {
         state.withLockedValue { $0.reachable = false }
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
         let migratedOnDisconnect = try await until(timeout: 2, { onVPN.metrics.closedAt != nil })
-        let migration = orchestrator.eventLog.events.last { $0.event == "vpn.tunnels_migrated" }
+        let migration = orchestrator.eventLog.events.last {
+            $0.event == "vpn.tunnels_migrated" && ($0.detail?.contains("phase=routing") ?? false)
+        }
         await orchestrator.handleVPNStateChange(.connected)
         let degraded = orchestrator.snapshot.directModeCause
         let attempts = state.withLockedValue { $0.attempts }
