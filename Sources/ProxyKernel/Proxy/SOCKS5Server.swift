@@ -20,7 +20,6 @@ final class SOCKS5Server: @unchecked Sendable {
     private let onConnectionClosed: @Sendable (UUID) -> Void
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
     private let inboundBudget: InboundConnectionBudget
-    private let directTunnels: DirectTunnelRegistry?
     private let handshakeTimeout: TimeAmount
     private var serverChannel: Channel?
 
@@ -45,11 +44,9 @@ final class SOCKS5Server: @unchecked Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void = { _ in },
         onConnectionClosed: @Sendable @escaping (UUID) -> Void = { _ in },
-        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in },
-        directTunnels: DirectTunnelRegistry? = nil
+        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void = { _ in }
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
-        self.directTunnels = directTunnels
         self.inboundBudget = inboundBudget
         self.handshakeTimeout = handshakeTimeout
         self.group = group
@@ -99,8 +96,7 @@ final class SOCKS5Server: @unchecked Sendable {
                             eventSink: self.eventSink,
                             onConnectionOpened: self.onConnectionOpened,
                             onConnectionClosed: self.onConnectionClosed,
-                            onConnectionActivity: self.onConnectionActivity,
-                            directTunnels: self.directTunnels
+                            onConnectionActivity: self.onConnectionActivity
                         )
                     )
                 }
@@ -133,9 +129,10 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
     private let onConnectionOpened: @Sendable (ActiveConnectionInfo) -> Void
     private let onConnectionClosed: @Sendable (UUID) -> Void
     private let onConnectionActivity: @Sendable (ConnectionActivity) -> Void
-    private let directTunnels: DirectTunnelRegistry?
     private enum State { case greeting, request, routing, relaying }
     private var state: State = .greeting
+    /// The routing the request captured before PAC and dialing (#156).
+    private var routingStamp: RoutingStamp?
     private let handshakeTimeout: TimeAmount
     private var handshakeDeadline: Scheduled<Void>?
     private var connectionID: UUID?
@@ -153,11 +150,9 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         onConnectionOpened: @Sendable @escaping (ActiveConnectionInfo) -> Void,
         onConnectionClosed: @Sendable @escaping (UUID) -> Void,
-        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void,
-        directTunnels: DirectTunnelRegistry? = nil
+        onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void
     ) {
         precondition(handshakeTimeout.nanoseconds > 0)
-        self.directTunnels = directTunnels
         self.handshakeTimeout = handshakeTimeout
         self.connectCoordinator = connectCoordinator
         self.logger = logger
@@ -355,6 +350,9 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             return false
         }
 
+        // Before the routing state it qualifies: a confirmed VPN transition
+        // after this point retires the request's dials (#156).
+        routingStamp = connectCoordinator.transitionAuthority.stamp()
         let (isDirectMode, directCause) = directModeProvider()
         let directModeBypass = isDirectMode && directCause.routesClientTrafficDirectly
         let currentConfig = configProvider()
@@ -466,11 +464,20 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let group = self.group
         let logger = self.logger
         let gatewayMode = self.gatewayMode
-        let dial = directTunnels?.beginDial()
+        let transitions = connectCoordinator.transitionAuthority
+        guard let stamp = routingStamp, transitions.isCurrent(stamp) else {
+            sendReply(context: context, rep: 0x05)
+            return
+        }
 
         // Same direct-dial policy as `HTTPProxyHandler`: link-local literals
         // get a short budget and a remembered timeout fails the next attempt at once.
         LinkLocalConnectPolicy.dial(host: host, port: Int(port), on: clientEL, eventSink: eventSink) { connectTimeout in
+            // Rechecked right before each connect: a joiner may run after
+            // waiting on another dial (#156).
+            guard transitions.isCurrent(stamp) else {
+                return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+            }
             let makeBootstrap: @Sendable () -> ClientBootstrap = {
                 ClientBootstrap(group: group)
                     .resolver(AddressFamilyAwareResolver(group: group))
@@ -495,6 +502,9 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                         port: Int(port),
                         on: clientEL,
                         ipv4Reconnect: { address in
+                            guard transitions.isCurrent(stamp) else {
+                                return clientEL.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+                            }
                             logger.log(.info, "SOCKS5: half-open fallback reconnecting to \(host):\(port) via IPv4 \(address)", category: .proxy)
                             return makeBootstrap().connect(to: address).hop(to: clientEL)
                         }
@@ -512,15 +522,12 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
                     channel.close(promise: nil)
                     throw MetadataBlocklist.BlockedAddressError(host: host, resolvedIP: ip)
                 }
+                try transitions.register(channel, route: .direct, stamp: stamp, target: "\(host):\(port)")
                 return channel
             }
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
-                    if let dial, self.directTunnels?.register(upstream, dial: dial, target: "\(host):\(port)") == .retired {
-                        self.sendReply(context: ctx, rep: 0x05)
-                        return
-                    }
                     self.attachRelay(context: ctx, upstream: upstream, isUpstreamTunnel: false)
                 case .failure(let error):
                     // A blocked rebinding peer is a policy denial (0x02, not
@@ -543,7 +550,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let clientEL = ctx.eventLoop
         let target = host.contains(":") ? "[\(host)]:\(port)" : "\(host):\(port)"
         let authSource = context.remoteAddress?.ipAddress
-        connectCoordinator.connectUpstreamTunnel(target: target, authSource: authSource, proxyChain: proxyChain)
+        connectCoordinator.connectUpstreamTunnel(target: target, authSource: authSource, proxyChain: proxyChain, stamp: routingStamp)
             .hop(to: clientEL)
             .whenComplete { result in
                 switch result {

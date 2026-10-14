@@ -28,7 +28,9 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// it, so a host that fails a thousand times is one line and a summary
     /// per interval (#100). Bounded by `ConnectFailureLog.defaultCapacity`.
     private let connectFailureLog: ConnectFailureLog
-    private let directTunnels: DirectTunnelRegistry?
+    /// The runtime's VPN-transition registry; every pool this listener
+    /// builds tracks its sockets there (#156).
+    private let transitions: TransitionAuthority
     private let socksHandshakeTimeout: TimeAmount
     /// Count of accept sockets this server has successfully bound. Lets callers
     /// (and tests) distinguish "the listener was preserved" from "the listener
@@ -139,10 +141,10 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         bindRetryLimit: Int = 10,
         socksHandshakeTimeout: TimeAmount = .seconds(10),
         portHolderProbe: (any ListenerPortHolderProbing)? = nil,
-        directTunnels: DirectTunnelRegistry? = nil
+        transitions: TransitionAuthority = .standalone()
     ) {
         precondition(socksHandshakeTimeout.nanoseconds > 0)
-        self.directTunnels = directTunnels
+        self.transitions = transitions
         self.socksHandshakeTimeout = socksHandshakeTimeout
         self.bindRetryLimit = max(1, bindRetryLimit)
         self.portHolderProbe = portHolderProbe
@@ -198,7 +200,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
             configProvider: configProvider,
             authenticatorProvider: authenticatorProvider,
             authHandshakeLimiter: authHandshakeLimiter,
-            eventSink: eventSink
+            eventSink: eventSink,
+            transitions: transitions
         )
         let coordinator = CONNECTCoordinator(
             pool: pool,
@@ -283,8 +286,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                 eventSink: self.eventSink,
                 onConnectionOpened: self.onConnectionOpened,
                 onConnectionClosed: self.onConnectionClosed,
-                onConnectionActivity: self.onConnectionActivity,
-                directTunnels: self.directTunnels
+                onConnectionActivity: self.onConnectionActivity
             )
             try await socks.start(host: listenHost, port: config.socksPort)
             let socksPublished = refs.withLockedValue { r -> Bool in
@@ -515,8 +517,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                     onConnectionActivity: self.onConnectionActivity,
                     onRequestCompleted: self.onRequestCompleted,
                     eventSink: self.eventSink,
-                    connectFailureLog: self.connectFailureLog,
-                    directTunnels: self.directTunnels
+                    connectFailureLog: self.connectFailureLog
                 )
 
                 do {
@@ -650,20 +651,6 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// flap-network path. See `docs/design-vpn-flap-resilience.md` § "Pool Hardening".
     package func resetCircuitsAfterFlap() {
         pool?.resetCircuitsAfterFlap()
-    }
-
-    /// Close every upstream channel this listener's pool holds, dedicated
-    /// CONNECT tunnels included. Only for a confirmed VPN disconnect that
-    /// routes traffic DIRECT: their source address left with the VPN, so
-    /// they is not expected to resume (#148).
-    package func closeUpstreamChannelsAfterVPNDisconnect() -> Int {
-        pool?.closeConnections(migrating: .all) ?? 0
-    }
-
-    /// Close the upstream channels whose local address is not in `assigned`:
-    /// any confirmed VPN disconnect, before the probe decides routing (#148).
-    package func closeUpstreamChannels(orphanedFrom assigned: Set<String>) -> Int {
-        pool?.closeConnections(migrating: .orphanedFrom(assigned)) ?? 0
     }
 
     package func closeStalledConnections() async throws -> Int {

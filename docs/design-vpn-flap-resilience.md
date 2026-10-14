@@ -63,44 +63,71 @@ connections must migrate and work as soon as possible.
     DIRECT), and no breaker or upstream failure event sees it.
 - **Reconnect after a disconnect**: before the first await, alongside the
   routing revocation, close the DIRECT tunnels dialed while the VPN was down.
-  `DirectTunnelRegistry` records that from the VPN state, not the direct-mode
-  cause: while the probe is pending, or on-prem with a reachable upstream, the
-  cause is `.none`, yet a no-proxy or PAC-DIRECT dial still leaves on the
-  off-VPN path. The orchestrator marks the outage on a confirmed disconnect;
-  the reconnect sweep ends it under the registry lock. It runs even with the
-  listener stopped (a config restart in flight), because the restart
-  preserves dedicated and DIRECT tunnels. Tunnels PAC or no-proxy
-  sent DIRECT while connected stay.
+  The registry records that from the VPN state, not the direct-mode cause:
+  while the probe is pending, or on-prem with a reachable upstream, the cause
+  is `.none`, yet a no-proxy or PAC-DIRECT dial still leaves on the off-VPN
+  path. The orchestrator begins the outage on a confirmed disconnect; the
+  reconnect sweep ends it under the registry lock, after the new cause is
+  published. Tunnels PAC or no-proxy sent DIRECT while connected stay.
+- **Listener stopped** (a config restart in flight): the restart preserves
+  dedicated and DIRECT tunnels, so a disconnect still begins the outage and
+  runs its address phase, and a reconnect still sweeps. A disconnect's routing
+  phase needs a routing verdict; it runs once the start probe commits one.
 - **Flap** (`.reasserting` → `.connected`): unchanged, nothing closes.
 
 Each phase or reconnect emits one `vpn.tunnels_migrated` event and the log line
 derives from it. An orderly close produces no per-tunnel `tunnel.relay_failed`
-lines. The registry is bounded by `inboundConnectionMaxLimit`; a tunnel that
-finds it full is counted as `untracked` in the next event instead of being
-dropped silently.
+lines.
 
-A dial outlives the moment it starts, so both owners keep a bounded
-`TransitionSweeps` history (the last 8 sweeps) under the lock they sweep with:
+### One registry for every socket a routing decision opens (#156)
 
-- `DirectTunnelRegistry.beginDial()` captures the sweep epoch and the outage
-  flag together. A tunnel that registers after a sweep it would have matched
-  (dialed during the outage the reconnect ended, or now on an address the
-  sweep found gone) is closed at registration; the client gets a 502, a SOCKS
-  failure or an EOF.
-- `ConnectionPool` captures its epoch when an acquisition decides to dial.
-  `closeConnections(migrating:)` records the rule (`.all` or
-  `.orphanedFrom`) and snapshots in one step. A dial that completes after a
-  sweep that selects it is closed instead of inserted, and its acquisition
-  fails with `vpnTransitionDuringConnect`: a local failure that feeds no
-  breaker, so the client sees a 502 and retries along the new routing. The
-  CONNECT path does not try the next upstream for it either.
+`TransitionAuthority`, owned by the orchestrator, outlives listener restarts
+and pool replacement, and tracks every outbound socket a routing decision
+opens: pooled upstream connections (health-check and prewarm dials included,
+since they can serve clients later), dedicated CONNECT tunnels, and DIRECT
+origin sockets from the HTTP (CONNECT, plain HTTP, upgrades), SOCKS5 and
+transparent-proxy paths. A configured direct tunnel is not a routing decision
+and stays out. Each entry records its route (upstream or DIRECT) and whether
+it was dialed during an outage; the sweeps are predicates over those entries
+and the socket's local address.
 
-A dial older than every remembered sweep is retired too. Each retirement is
-reported when it happens, as `connection.late_dial_retired`, not deferred to
-the next `vpn.tunnels_migrated` (the next transition may never come). Both
-owners report through a `ConnectFailureLog`, so a burst of retirements for
-one target is one event and a `suppressed=N` summary, and the tracked
-targets are bounded.
+Every confirmed transition advances one generation. An operation captures a
+`RoutingStamp` before its first asynchronous step: an HTTP request at its
+`.end`, before it reads the direct-mode cause; a SOCKS5 request before its
+routing step; an intercepted connection after its SNI, before it reads the
+cause. The stamp travels through PAC, DNS, retries and DIRECT fallbacks; a
+retry never takes a fresh one. A dial is not started when the generation has
+moved, and a socket whose setup straddled a transition is closed when it
+registers: it was routed for a network that is gone. The client gets a 502, a
+SOCKS failure or an EOF and retries along the new routing. The request fails
+locally (`vpnTransitionDuringConnect`): no retry on another upstream, no
+DIRECT fallback on the stale routing, no breaker signal, no `upstream.*_failed`
+event. A socket registered before a transition is judged only by that
+transition's predicate, so a socket the predicate keeps finishes its setup.
+
+This is deliberately conservative. A request that waited on PAC across a
+disconnect fails once even when its upstream is on-prem and still reachable,
+and a DIRECT dial started between a disconnect's two phases is retired by the
+second; both are bounded setup failures a client retries. No request that
+was already registered is touched for a transition whose predicate keeps it.
+
+A sweep retires its entries' tickets under the lock and closes outside it.
+The pool keeps the ticket beside its connection: an exchange or handshake
+that then fails failed because of the sweep, and a CONNECT handshake whose
+socket closes fails at once (`handlerRemoved`) instead of after the response
+timeout. A closed socket leaves the pool when it closes, not when next picked.
+
+Bounded: the capacity is what admits those sockets, the HTTP/SOCKS inbound
+budget and the transparent proxy's (each `inboundConnectionMaxLimit`), the
+tunnel sessions, and both pools' `maxConnections`. A socket that finds it
+full is closed and its request fails locally (`connection.tracking_full`), so
+no socket is ever left untracked and stranded.
+
+Each retirement is reported when it happens, as
+`connection.late_dial_retired`, not deferred to the next
+`vpn.tunnels_migrated` (the next transition may never come). It reports
+through a `ConnectFailureLog`, so a burst of retirements for one target is
+one event and a `suppressed=N` summary, and the tracked targets are bounded.
 
 Not changed: during the grace window new CONNECTs still go to the upstream
 even if its name no longer resolves. Routing DIRECT there would bypass upstream

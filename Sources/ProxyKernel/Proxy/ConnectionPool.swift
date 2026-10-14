@@ -49,6 +49,9 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
     /// nothing wrong, and the exchange is not retried on a fresh upstream
     /// connection, since routing may have left the upstream.
     case vpnTransitionDuringConnect
+    /// The runtime's transition registry is full, so the connection could
+    /// not be tracked for VPN migration and was closed (#156). Local.
+    case connectionTrackingFull
 
     package var errorDescription: String? {
         switch self {
@@ -76,6 +79,8 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
             return "The upstream proxy returned HTTP \(statusCode) for \(SensitiveValueSanitizer.observableTarget(target))."
         case .vpnTransitionDuringConnect:
             return "A VPN transition closed the upstream connection; retry the request."
+        case .connectionTrackingFull:
+            return TransitionAuthority.fullMessage
         }
     }
 
@@ -95,6 +100,14 @@ package enum ConnectionPoolError: Error, LocalizedError, Equatable {
 
     package static func isLocalNonUpstreamFailure(_ error: Error) -> Bool {
         isAuthHandshakeLimitExceeded(error) || isPoolExhausted(error) || isVPNTransitionDuringConnect(error)
+            || isConnectionTrackingFull(error)
+    }
+
+    package static func isConnectionTrackingFull(_ error: Error) -> Bool {
+        if case ConnectionPoolError.connectionTrackingFull = error {
+            return true
+        }
+        return false
     }
 
     package static func isVPNTransitionDuringConnect(_ error: Error) -> Bool {
@@ -167,9 +180,14 @@ package final class PooledUpstreamConnection: @unchecked Sendable {
     package fileprivate(set) var inUse = false
     package var lastUsedAt = Date()
     package var isDedicatedTunnel = false
-    /// A confirmed-VPN-transition sweep closed it (#148): whatever its
-    /// exchange then fails with is the sweep's doing, not the upstream's.
-    package fileprivate(set) var sweptByVPNTransition = false
+    /// The runtime transition registry's record of it, set before the pool
+    /// publishes it (#156). Retired once a confirmed-VPN-transition sweep
+    /// closed it: whatever its exchange then fails with is the sweep's
+    /// doing, not the upstream's.
+    package fileprivate(set) var transitionTicket: TransitionTicket?
+
+    /// Whether a VPN-transition sweep closed it.
+    package var wasRetiredByVPNTransition: Bool { transitionTicket?.isRetired ?? false }
 
     package init(proxy: UpstreamProxy, channel: Channel) {
         self.proxy = proxy
@@ -232,12 +250,9 @@ package final class ConnectionPool: @unchecked Sendable {
     /// event tagged with the upstream that actually transitioned).
     private var upstreamIdentities: [UUID: (name: String, endpoint: String)] = [:]
     private var pendingConnectionCount = 0
-    /// Confirmed-VPN-transition sweeps, so a dial that straddles one is
-    /// judged by it on completion instead of being inserted (#148).
-    private var transitionSweeps = TransitionSweeps<TransitionSweepRule>()
-    /// Reports a dial retired on completion when it happens, coalesced per
-    /// target (#148).
-    private let retirementLog: ConnectFailureLog
+    /// Tracks every connection this pool dials for VPN migration; shared by
+    /// the whole runtime, so it outlives this pool (#156).
+    private let transitions: TransitionAuthority
     private var preferredProxyIndex = 0
     private var selectionCounter = 0
     private var lastSelectedUpstreamID: UUID?
@@ -248,7 +263,8 @@ package final class ConnectionPool: @unchecked Sendable {
         configProvider: @escaping () -> ProxyConfig,
         authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         authHandshakeLimiter: AuthHandshakeLimiter = AuthHandshakeLimiter(),
-        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        transitions: TransitionAuthority = .standalone()
     ) {
         self.group = group
         self.logger = logger
@@ -256,17 +272,17 @@ package final class ConnectionPool: @unchecked Sendable {
         self.authenticatorProvider = authenticatorProvider
         self.authHandshakeLimiter = authHandshakeLimiter
         self.eventSink = eventSink
-        self.retirementLog = ConnectFailureLog(
-            logger: logger, eventSink: eventSink, scheduleFlush: ConnectFailureLog.eventLoopScheduler(group)
-        )
+        self.transitions = transitions
     }
 
-    package func exchange(head: HTTPRequestHead, body: ByteBuffer?) -> EventLoopFuture<UpstreamExchangeResponse> {
-        bufferedExchange(head: head, requestBody: body.map(HTTPRequestBody.memory), forcedProxy: nil, allowRetry: true, preferFreshConnection: false, authSource: nil)
+    package func exchange(head: HTTPRequestHead, body: ByteBuffer?, stamp: RoutingStamp? = nil) -> EventLoopFuture<UpstreamExchangeResponse> {
+        bufferedExchange(head: head, requestBody: body.map(HTTPRequestBody.memory), forcedProxy: nil, allowRetry: true,
+                         preferFreshConnection: false, authSource: nil, stamp: stamp ?? transitions.stamp())
     }
 
-    package func exchange(head: HTTPRequestHead, requestBody: HTTPRequestBody?) -> EventLoopFuture<UpstreamExchangeResponse> {
-        bufferedExchange(head: head, requestBody: requestBody, forcedProxy: nil, allowRetry: true, preferFreshConnection: false, authSource: nil)
+    package func exchange(head: HTTPRequestHead, requestBody: HTTPRequestBody?, stamp: RoutingStamp? = nil) -> EventLoopFuture<UpstreamExchangeResponse> {
+        bufferedExchange(head: head, requestBody: requestBody, forcedProxy: nil, allowRetry: true,
+                         preferFreshConnection: false, authSource: nil, stamp: stamp ?? transitions.stamp())
     }
 
     package func streamingExchange(
@@ -274,14 +290,16 @@ package final class ConnectionPool: @unchecked Sendable {
         body: ByteBuffer?,
         clientChannel: Channel,
         authSource: String? = nil,
-        forcedProxy: UpstreamProxy? = nil
+        forcedProxy: UpstreamProxy? = nil,
+        stamp: RoutingStamp? = nil
     ) -> EventLoopFuture<StreamingExchangeResult> {
         streamingExchange(
             head: head,
             requestBody: body.map(HTTPRequestBody.memory),
             clientChannel: clientChannel,
             authSource: authSource,
-            forcedProxy: forcedProxy
+            forcedProxy: forcedProxy,
+            stamp: stamp
         )
     }
 
@@ -290,27 +308,33 @@ package final class ConnectionPool: @unchecked Sendable {
         requestBody: HTTPRequestBody?,
         clientChannel: Channel,
         authSource: String? = nil,
-        forcedProxy: UpstreamProxy? = nil
+        forcedProxy: UpstreamProxy? = nil,
+        stamp: RoutingStamp? = nil
     ) -> EventLoopFuture<StreamingExchangeResult> {
         startStreamingExchange(
             head: head,
             requestBody: requestBody,
             clientChannel: clientChannel,
             authSource: authSource,
-            forcedProxy: forcedProxy
+            forcedProxy: forcedProxy,
+            stamp: stamp
         ).result
     }
 
     /// Starts an exchange and says which upstream it dials. A caller that
     /// reports the failure names `upstream`: `activeUpstream()` is the
     /// pool-wide last selection, which a concurrent request can move.
+    /// `stamp` is the routing the request captured when it started (#156);
+    /// `nil` takes the current one.
     package func startStreamingExchange(
         head: HTTPRequestHead,
         requestBody: HTTPRequestBody?,
         clientChannel: Channel,
         authSource: String? = nil,
-        forcedProxy: UpstreamProxy? = nil
+        forcedProxy: UpstreamProxy? = nil,
+        stamp: RoutingStamp? = nil
     ) -> StreamingExchangeAttempt {
+        let stamp = stamp ?? transitions.stamp()
         let config = configProvider()
         guard let proxy = forcedProxy ?? selectProxy(from: config) else {
             return StreamingExchangeAttempt(
@@ -323,7 +347,8 @@ package final class ConnectionPool: @unchecked Sendable {
             requestBody: requestBody,
             clientChannel: clientChannel,
             authSource: authSource,
-            proxy: proxy
+            proxy: proxy,
+            stamp: stamp
         ))
     }
 
@@ -332,18 +357,20 @@ package final class ConnectionPool: @unchecked Sendable {
         requestBody: HTTPRequestBody?,
         clientChannel: Channel,
         authSource: String?,
-        proxy: UpstreamProxy
+        proxy: UpstreamProxy,
+        stamp: RoutingStamp
     ) -> EventLoopFuture<StreamingExchangeResult> {
         let start = Date()
         let attempt: EventLoopFuture<StreamingExchangeResult> = acquireConnection(
             for: proxy,
             target: head.uri,
-            preferFreshConnection: false
+            preferFreshConnection: false,
+            stamp: stamp
         ).flatMap { [weak self] connection in
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
-            return self.attributingSweep(self.performStreamingExchange(
+            return self.attributingRetirement(self.performStreamingExchange(
                 head: head,
                 requestBody: requestBody,
                 clientChannel: clientChannel,
@@ -372,12 +399,15 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    package func makeDedicatedTunnelConnection(forcedProxy: UpstreamProxy? = nil, target: String? = nil) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
+    package func makeDedicatedTunnelConnection(
+        forcedProxy: UpstreamProxy? = nil, target: String? = nil, stamp: RoutingStamp? = nil
+    ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
         let config = configProvider()
         guard let proxy = forcedProxy ?? selectProxy(from: config) else {
             return group.next().makeFailedFuture(ConnectionPoolError.noUpstreamsConfigured)
         }
-        return acquireDedicatedTunnelConnection(for: proxy, target: target ?? proxy.endpoint, config: config)
+        return acquireDedicatedTunnelConnection(for: proxy, target: target ?? proxy.endpoint, config: config,
+                                                stamp: stamp ?? transitions.stamp())
     }
 
     private func authHandshakeLimits() -> AuthHandshakeLimiter.Limits {
@@ -422,7 +452,8 @@ package final class ConnectionPool: @unchecked Sendable {
         do {
             let response = try await bufferedExchange(
                 head: head, requestBody: nil, forcedProxy: nil, allowRetry: true,
-                preferFreshConnection: false, authSource: nil, connectTimeout: probeTimeout
+                preferFreshConnection: false, authSource: nil, connectTimeout: probeTimeout,
+                stamp: transitions.stamp()
             ).get()
             let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
             let code = Int(response.head.status.code)
@@ -481,8 +512,11 @@ package final class ConnectionPool: @unchecked Sendable {
                     group.addTask { [weak self] in
                         guard let self else { return }
                         do {
-                            let dialEpoch = self.transitionEpoch
-                            let connection = try await self.makeConnection(to: proxy, dialEpoch: dialEpoch, target: "prewarm").get()
+                            // Through acquisition, so a prewarm dial holds a
+                            // pool slot and is tracked for VPN migration.
+                            let connection = try await self.acquireConnection(
+                                for: proxy, target: "prewarm", preferFreshConnection: true, stamp: self.transitions.stamp()
+                            ).get()
                             self.release(connection, keepAlive: true)
                             self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
                         } catch {
@@ -598,55 +632,12 @@ package final class ConnectionPool: @unchecked Sendable {
         return closeIDs.count
     }
 
-    /// What a confirmed VPN transition closes (#148).
-    package enum TransitionSweepRule: Sendable {
-        /// Routing DIRECT after a disconnect: the proxies are behind the VPN.
-        case all
-        /// A socket whose local address left with the VPN is not expected to resume.
-        case orphanedFrom(Set<String>)
+    /// The routing a request starting now captures (#156).
+    package func routingStamp() -> RoutingStamp { transitions.stamp() }
 
-        func selects(_ channel: Channel) -> Bool {
-            switch self {
-            case .all: return true
-            case .orphanedFrom(let assigned): return LocalAddresses.isOrphaned(channel, assigned: assigned)
-            }
-        }
-
-        var retirement: LateDialRetired {
-            switch self {
-            case .all: return LateDialRetired("the upstream dial completed after the disconnect sweep switched routing DIRECT")
-            case .orphanedFrom: return LateDialRetired("the upstream dial completed on an address the disconnect sweep found gone")
-            }
-        }
-    }
-
-    /// Close the connections `rule` selects, dedicated tunnels included,
-    /// for a confirmed VPN transition. Recording the sweep and taking the
-    /// snapshot are one step under the pool lock: a dial that completes
-    /// after it is checked against it instead of escaping (#148).
-    @discardableResult
-    package func closeConnections(migrating rule: TransitionSweepRule) -> Int {
-        let selected = lock.withLock { () -> [PooledUpstreamConnection] in
-            transitionSweeps.record(rule)
-            let selected = allConnections.values.filter { rule.selects($0.channel) }
-            for connection in selected { connection.sweptByVPNTransition = true }
-            return selected
-        }
-        for connection in selected {
-            connection.channel.close(mode: .all, promise: nil)
-        }
-        if !selected.isEmpty {
-            lock.withLockVoid {
-                removeConnectionsLocked(ids: Set(selected.map(\.id)))
-            }
-        }
-        return selected.count
-    }
-
-    /// Whether a VPN-transition sweep closed `connection` (#148).
-    package func wasSwept(_ connection: PooledUpstreamConnection) -> Bool {
-        lock.withLock { connection.sweptByVPNTransition }
-    }
+    /// The runtime's transition registry, for a caller dialing DIRECT
+    /// beside this pool.
+    package var transitionAuthority: TransitionAuthority { transitions }
 
     /// Pure filter exposed for unit testing: returns the IDs of connections that
     /// should be closed for a given `scope`. Mirrors the `stalledConnectionIDs`
@@ -667,29 +658,38 @@ package final class ConnectionPool: @unchecked Sendable {
 
     private enum AcquireResult {
         case idle(PooledUpstreamConnection)
-        /// Dial a new connection; the epoch is the pool's at dial start.
-        case needsNew(dialEpoch: UInt64)
+        case needsNew
         case exhausted
+        /// A confirmed VPN transition ran since the request started: its
+        /// routing is stale, so it dials nothing (#156).
+        case retired
     }
 
     /// `connectTimeout` overrides the data-path budget for a new connection;
     /// the health check passes the probe timeout. An idle pooled connection
     /// is reused without connecting.
+    ///
+    /// A pooled connection that survived every sweep since `stamp` serves
+    /// the request; a new one is dialed only if no confirmed VPN transition
+    /// ran since `stamp`, and is retired on arrival if one ran meanwhile.
     private func acquireConnection(
         for proxy: UpstreamProxy,
         target: String,
         preferFreshConnection: Bool,
-        connectTimeout: TimeAmount? = nil
+        connectTimeout: TimeAmount? = nil,
+        stamp: RoutingStamp
     ) -> EventLoopFuture<PooledUpstreamConnection> {
         let config = configProvider()
         let maxConns = config.maxConnections
+        // Read before the pool lock; the two locks never nest.
+        let current = transitions.isCurrent(stamp)
         let result: AcquireResult = lock.withLock {
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             pruneExpiredIdleConnectionsLocked(now: .now)
             if !preferFreshConnection {
                 while let existing = idleConnections[proxy.id]?.popLast() {
                     guard allConnections[existing.id] != nil else { continue }
-                    if isConnectionExpired(existing, now: .now) {
+                    if isConnectionExpired(existing, now: .now) || !existing.channel.isActive || existing.wasRetiredByVPNTransition {
                         existing.channel.close(mode: .all, promise: nil)
                         removeConnectionLocked(id: existing.id)
                         continue
@@ -700,13 +700,14 @@ package final class ConnectionPool: @unchecked Sendable {
                     return .idle(existing)
                 }
             }
+            guard current else { return .retired }
             if allConnections.count + pendingConnectionCount >= maxConns {
                 return .exhausted
             }
             pendingConnectionCount += 1
             lastSelectedUpstreamID = proxy.id
             preconditionCapacityLocked(maxConnections: maxConns)
-            return .needsNew(dialEpoch: transitionSweeps.epoch)
+            return .needsNew
         }
 
         switch result {
@@ -714,8 +715,10 @@ package final class ConnectionPool: @unchecked Sendable {
             return conn.channel.eventLoop.makeSucceededFuture(conn)
         case .exhausted:
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
-        case .needsNew(let dialEpoch):
-            return makeConnection(to: proxy, dialEpoch: dialEpoch, target: target, connectTimeout: connectTimeout).always { [weak self] _ in
+        case .retired:
+            return group.next().makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+        case .needsNew:
+            return makeConnection(to: proxy, stamp: stamp, target: target, connectTimeout: connectTimeout).always { [weak self] _ in
                 self?.lock.withLockVoid {
                     self?.pendingConnectionCount -= 1
                     self?.preconditionCapacityLocked(maxConnections: maxConns)
@@ -727,10 +730,13 @@ package final class ConnectionPool: @unchecked Sendable {
     private func acquireDedicatedTunnelConnection(
         for proxy: UpstreamProxy,
         target: String,
-        config: ProxyConfig
+        config: ProxyConfig,
+        stamp: RoutingStamp
     ) -> EventLoopFuture<(PooledUpstreamConnection, ProxyConfig)> {
         let maxConns = config.maxConnections
+        let current = transitions.isCurrent(stamp)
         let result: AcquireResult = lock.withLock {
+            guard current else { return .retired }
             syncUpstreamStatesLocked(with: config.enabledUpstreams)
             pruneExpiredIdleConnectionsLocked(now: .now)
             guard allConnections.count + pendingConnectionCount < maxConns else {
@@ -739,7 +745,7 @@ package final class ConnectionPool: @unchecked Sendable {
             pendingConnectionCount += 1
             lastSelectedUpstreamID = proxy.id
             preconditionCapacityLocked(maxConnections: maxConns)
-            return .needsNew(dialEpoch: transitionSweeps.epoch)
+            return .needsNew
         }
 
         switch result {
@@ -747,8 +753,10 @@ package final class ConnectionPool: @unchecked Sendable {
             preconditionFailure("Dedicated tunnels never reuse pooled idle connections")
         case .exhausted:
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
-        case .needsNew(let dialEpoch):
-            return makeRawConnection(to: proxy, dialEpoch: dialEpoch, target: target).map { conn in
+        case .retired:
+            return group.next().makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+        case .needsNew:
+            return makeRawConnection(to: proxy, stamp: stamp, target: target).map { conn in
                 conn.isDedicatedTunnel = true
                 return (conn, config)
             }.always { [weak self] _ in
@@ -778,11 +786,11 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    private func makeRawConnection(to proxy: UpstreamProxy, dialEpoch: UInt64, target: String) -> EventLoopFuture<PooledUpstreamConnection> {
-        return connectToUpstreamProxy(proxy)
+    private func makeRawConnection(to proxy: UpstreamProxy, stamp: RoutingStamp, target: String) -> EventLoopFuture<PooledUpstreamConnection> {
+        return connectToUpstreamProxy(proxy, stamp: stamp)
             .flatMapThrowing { [weak self] channel in
                 let connection = PooledUpstreamConnection(proxy: proxy, channel: channel)
-                try self?.insertDialedConnection(connection, dialEpoch: dialEpoch, target: target)
+                try self?.insertDialedConnection(connection, stamp: stamp, target: target)
                 self?.logger.log(.info, "Connected to upstream proxy \(proxy.endpoint) (raw).", category: .proxy)
                 return connection
             }
@@ -794,50 +802,44 @@ package final class ConnectionPool: @unchecked Sendable {
     /// connection (routing may have gone DIRECT) nor fed to the breaker
     /// (#148). A client hang-up and a stream interrupted after the response
     /// began keep their own meaning.
-    private func attributingSweep<T>(_ exchange: EventLoopFuture<T>, connection: PooledUpstreamConnection) -> EventLoopFuture<T> {
+    private func attributingRetirement<T>(_ exchange: EventLoopFuture<T>, connection: PooledUpstreamConnection) -> EventLoopFuture<T> {
         exchange.flatMapErrorThrowing { [weak self] error in
             guard let self,
                   !ConnectionPoolError.isClientClosedDuringResponse(error),
                   !ConnectionPoolError.isStreamingResponseInterrupted(error),
-                  self.lock.withLock({ connection.sweptByVPNTransition })
+                  connection.wasRetiredByVPNTransition
             else { throw error }
             self.logger.log(.info, "Upstream exchange via \(connection.proxy.endpoint) ended by a VPN-transition sweep: \(error.displayDescription)", category: .proxy)
             throw ConnectionPoolError.vpnTransitionDuringConnect
         }
     }
 
-    /// The pool's sweep epoch, as a dial captures it before connecting.
-    var transitionEpoch: UInt64 { lock.withLock { transitionSweeps.epoch } }
-
-    /// Insert a freshly dialed connection, unless a migration sweep run
-    /// while it was dialed would have closed it: then close it, report it as
-    /// `connection.late_dial_retired` at once, and fail the acquisition
-    /// (#148). `target` is what the request asked for, sanitized here.
-    func insertDialedConnection(_ connection: PooledUpstreamConnection, dialEpoch: UInt64, target: String) throws {
-        let reason = lock.withLock { () -> LateDialRetired? in
-            switch transitionSweeps.retirement(since: dialEpoch, { $0.selects(connection.channel) }) {
-            case .sweep(let rule): return rule.retirement
-            case .forgotten: return LateDialRetired.forgotten
-            case nil:
-                connection.inUse = true
-                insertConnectionLocked(connection)
-                lastSelectedUpstreamID = connection.proxy.id
-                return nil
-            }
-        }
-        guard let reason else { return }
-        connection.channel.close(mode: .all, promise: nil)
-        let observable = SensitiveValueSanitizer.observableTarget(target)
-        retirementLog.report(
-            LateDialRetired.event, level: .notice, target: observable, upstream: connection.proxy.endpoint, error: reason,
-            message: "Upstream dial for \(observable) via \(connection.proxy.endpoint) retired: \(reason)",
-            eventAtAnyLevel: true
+    /// Insert a freshly dialed connection once the runtime's transition
+    /// registry tracks it. A confirmed VPN transition since `stamp` (or a
+    /// full registry) closes it instead, reports it, and fails the
+    /// acquisition locally (#156). `target` is what the request asked for,
+    /// sanitized here.
+    func insertDialedConnection(_ connection: PooledUpstreamConnection, stamp: RoutingStamp, target: String) throws {
+        connection.transitionTicket = try transitions.register(
+            connection.channel, route: .upstream, stamp: stamp,
+            target: SensitiveValueSanitizer.observableTarget(target), upstream: connection.proxy.endpoint
         )
-        throw ConnectionPoolError.vpnTransitionDuringConnect
+        lock.withLockVoid {
+            connection.inUse = true
+            insertConnectionLocked(connection)
+            lastSelectedUpstreamID = connection.proxy.id
+        }
+        // A connection that closes (a sweep, the upstream, a timeout) leaves
+        // the pool at once instead of holding a slot until it is next picked.
+        let id = connection.id
+        connection.channel.closeFuture.whenComplete { [weak self] _ in
+            guard let self else { return }
+            self.lock.withLockVoid { self.removeConnectionLocked(id: id) }
+        }
     }
 
-    private func makeConnection(to proxy: UpstreamProxy, dialEpoch: UInt64, target: String, connectTimeout: TimeAmount? = nil) -> EventLoopFuture<PooledUpstreamConnection> {
-        return connectToUpstreamProxy(proxy, connectTimeout: connectTimeout) { channel in
+    private func makeConnection(to proxy: UpstreamProxy, stamp: RoutingStamp, target: String, connectTimeout: TimeAmount? = nil) -> EventLoopFuture<PooledUpstreamConnection> {
+        return connectToUpstreamProxy(proxy, connectTimeout: connectTimeout, stamp: stamp) { channel in
             do {
                 try channel.pipeline.syncOperations.addHandler(HTTPRequestEncoder(), name: ProxyPipelineNames.upstreamEncoder)
                 try channel.pipeline.syncOperations.addHandler(ByteToMessageHandler(HTTPResponseDecoder(leftOverBytesStrategy: .forwardBytes)), name: ProxyPipelineNames.upstreamDecoder)
@@ -848,7 +850,7 @@ package final class ConnectionPool: @unchecked Sendable {
         }
             .flatMapThrowing { [weak self] channel in
                 let connection = PooledUpstreamConnection(proxy: proxy, channel: channel)
-                try self?.insertDialedConnection(connection, dialEpoch: dialEpoch, target: target)
+                try self?.insertDialedConnection(connection, stamp: stamp, target: target)
                 self?.logger.log(.info, "Connected to upstream proxy \(proxy.endpoint).", category: .proxy)
                 return connection
             }
@@ -884,8 +886,10 @@ package final class ConnectionPool: @unchecked Sendable {
     private func connectToUpstreamProxy(
         _ proxy: UpstreamProxy,
         connectTimeout: TimeAmount? = nil,
+        stamp: RoutingStamp,
         channelInitializer: (@Sendable (Channel) -> EventLoopFuture<Void>)? = nil
     ) -> EventLoopFuture<Channel> {
+        let transitions = self.transitions
         let makeBootstrap: @Sendable () -> ClientBootstrap = { [weak self] in
             guard let self else {
                 return ClientBootstrap(group: MultiThreadedEventLoopGroup.singleton)
@@ -907,6 +911,11 @@ package final class ConnectionPool: @unchecked Sendable {
                     proxy: proxy,
                     on: channel.eventLoop,
                     ipv4Reconnect: { address in
+                        // The lookup was asynchronous: a transition during
+                        // it makes this second dial stale (#156).
+                        guard transitions.isCurrent(stamp) else {
+                            return channel.eventLoop.makeFailedFuture(ConnectionPoolError.vpnTransitionDuringConnect)
+                        }
                         self.logger.log(.info, "Half-open upstream fallback: reconnecting to \(proxy.endpoint) via IPv4 \(address)", category: .proxy)
                         return makeBootstrap()
                             .connect(to: address)
@@ -968,7 +977,8 @@ package final class ConnectionPool: @unchecked Sendable {
         allowRetry: Bool,
         preferFreshConnection: Bool,
         authSource: String?,
-        connectTimeout: TimeAmount? = nil
+        connectTimeout: TimeAmount? = nil,
+        stamp: RoutingStamp
     ) -> EventLoopFuture<UpstreamExchangeResponse> {
         let config = configProvider()
         guard let proxy = forcedProxy ?? selectProxy(from: config) else {
@@ -980,12 +990,13 @@ package final class ConnectionPool: @unchecked Sendable {
             for: proxy,
             target: head.uri,
             preferFreshConnection: preferFreshConnection,
-            connectTimeout: connectTimeout
+            connectTimeout: connectTimeout,
+            stamp: stamp
         ).flatMap { [weak self] connection in
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
-            return self.attributingSweep(
+            return self.attributingRetirement(
                 self.performBufferedExchange(head: head, requestBody: requestBody, connection: connection, proxy: proxy, authSource: authSource),
                 connection: connection
             )
@@ -1022,7 +1033,10 @@ package final class ConnectionPool: @unchecked Sendable {
                     allowRetry: false,
                     preferFreshConnection: true,
                     authSource: authSource,
-                    connectTimeout: connectTimeout
+                    connectTimeout: connectTimeout,
+                    // The request's own routing: a transition since it
+                    // started fails the retry locally instead of dialing.
+                    stamp: stamp
                 )
             }
             if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
@@ -1466,9 +1480,10 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     private static func isRetryableConnectionError(_ error: Error) -> Bool {
-        // A sweep closed it because routing left that path (#148); the
-        // message fallback below would otherwise match its "closed".
-        if ConnectionPoolError.isVPNTransitionDuringConnect(error) { return false }
+        // A sweep closed it because routing left that path (#148), or the
+        // pool refused it locally; the message fallback below would
+        // otherwise match a "closed".
+        if ConnectionPoolError.isLocalNonUpstreamFailure(error) { return false }
         if let channelError = error as? ChannelError {
             switch channelError {
             case .eof, .ioOnClosedChannel, .alreadyClosed:
