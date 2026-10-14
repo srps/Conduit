@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOEmbedded
+import NIOHTTP1
 import NIOPosix
 import XCTest
 @testable import ProxyKernel
@@ -61,6 +63,45 @@ final class ConnectionPoolMigrationTests: XCTestCase {
         XCTAssertNoThrow(try pool.insertDialedConnection(fresh, dialEpoch: pool.transitionEpoch))
         XCTAssertEqual(pool.allConnectionSnapshot.count, 1)
         pool.closeAll()
+    }
+
+    /// An idempotent buffered GET whose connection the routing sweep closed
+    /// fails locally instead of retrying on a fresh upstream connection:
+    /// routing may have gone DIRECT (#148).
+    func testAnExchangeTheSweepClosedIsNotRetriedOnAFreshUpstream() async throws {
+        let accepted = NIOLockedValueBox(0)
+        let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            // Accepts and never answers, counting connections.
+            .childChannelInitializer { channel in
+                accepted.withLockedValue { $0 += 1 }
+                return channel.eventLoop.makeSucceededVoidFuture()
+            }
+            .bind(host: "127.0.0.1", port: 0).get()
+        var config = ProxyConfig.testFixture()
+        config.upstreams = [UpstreamProxy(name: "silent", host: "127.0.0.1", port: server.localAddress!.port!, priority: 0)]
+        let pool = ConnectionPool(group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(),
+                                  configProvider: { config },
+                                  authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") })
+        let head = HTTPRequestHead(version: .http1_1, method: .GET, uri: "http://origin.test/",
+                                   headers: ["Host": "origin.test"])
+        let exchange = pool.exchange(head: head, body: nil)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while accepted.withLockedValue({ $0 }) == 0 || pool.allConnectionSnapshot.isEmpty, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        XCTAssertEqual(pool.closeConnections(migrating: .all).closed, 1)
+
+        do {
+            _ = try await exchange.get()
+            XCTFail("the exchange must fail")
+        } catch {
+            XCTAssertEqual(error as? ConnectionPoolError, .vpnTransitionDuringConnect)
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(accepted.withLockedValue { $0 }, 1, "no fresh upstream connection")
+        XCTAssertTrue(pool.allConnectionSnapshot.isEmpty)
+        try await server.close().get()
     }
 
     func testTheSweepClosesEstablishedConnectionsItSelects() throws {

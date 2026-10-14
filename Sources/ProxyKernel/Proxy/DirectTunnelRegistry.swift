@@ -108,11 +108,6 @@ package final class DirectTunnelRegistry: @unchecked Sendable {
         lock.withLockVoid { vpnDown = true }
     }
 
-    /// A reconnect with nothing listening: end the outage without a sweep.
-    package func markVPNUp() {
-        lock.withLockVoid { vpnDown = false }
-    }
-
     /// Track `channel` until it closes, unless a sweep that ran since the
     /// dial began would have closed it: then close it now.
     @discardableResult

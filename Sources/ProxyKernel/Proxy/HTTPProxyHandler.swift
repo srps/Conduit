@@ -1210,12 +1210,16 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// level the direct-mode cause assigns to upstream failures (a transient
     /// path change demotes those to info; a cap hit is loud regardless).
     /// Exhaustion reports as `connection.pool_exhausted`; the limiter
-    /// already emits `auth.handshake_rejected` for its own refusals.
+    /// already emits `auth.handshake_rejected` for its own refusals. A
+    /// connection a VPN-transition sweep closed logs at `.info` only.
     static func upstreamFailureReport(
         _ event: String, level: LogLevel, for error: Error
     ) -> (event: String?, level: LogLevel) {
         if ConnectionPoolError.isPoolExhausted(error) { return ("connection.pool_exhausted", .error) }
         if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) { return (nil, .error) }
+        // The VPN-transition sweep closed it on purpose and counted it in
+        // `vpn.tunnels_migrated` (#148); the upstream did nothing wrong.
+        if ConnectionPoolError.isVPNTransitionDuringConnect(error) { return (nil, .info) }
         return (event, level)
     }
 

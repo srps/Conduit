@@ -47,13 +47,6 @@ final class DirectTunnelRegistryTests: XCTestCase {
         XCTAssertNil(registry.closeTunnelsOpenedWhileVPNDown())
     }
 
-    func testMarkingTheVPNUpWithoutASweepStopsMarkingDials() {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
-        registry.markVPNDown()
-        registry.markVPNUp()
-        XCTAssertFalse(registry.beginDial().whileVPNDown)
-    }
-
     func testAClosedTunnelLeavesTheRegistry() throws {
         let registry = DirectTunnelRegistry(capacity: { 8 })
         registry.markVPNDown()
