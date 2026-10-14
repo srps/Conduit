@@ -664,18 +664,24 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     self.onConnectionClosed(infoID)
                     body?.cleanup()
                 case .failure(let error):
+                    // The only report of this failure: the pool leaves it to
+                    // its caller. The upstream is the PAC-forced one or the
+                    // pool's last selection, which is the one just tried.
+                    let observedTarget = SensitiveValueSanitizer.observableTarget(head.uri)
+                    let upstream = pacPlan.proxyChain.first?.endpoint ?? self.pool.activeUpstream()
+                    let message = Self.exchangeFailureMessage(target: observedTarget, upstream: upstream, error: error)
                     if Self.shouldFallbackToDirectAfterProxyExchangeFailure(
                         hasDirectFallback: hasDirectFallback,
                         error: error
                     ) {
-                        self.logger.log(.warning, "Proxy exchange failed for \(SensitiveValueSanitizer.observableTarget(head.uri)), falling back to DIRECT.", category: .proxy)
+                        self.logger.log(.warning, "\(message); falling back to DIRECT.", category: .proxy)
                         self.handleDirectHTTP(head: head, body: body, infoID: infoID, target: target, context: ctx)
                     } else {
                         let report = Self.upstreamFailureReport("upstream.exchange_failed", level: upstreamFailureLevel, for: error)
                         self.connectFailureLog.report(
                             report.event, level: report.level,
-                            target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
-                            message: "Proxy exchange failed: \(error.displayDescription)"
+                            target: observedTarget, error: error,
+                            message: message
                         )
                         self.onRequestCompleted(.failed(Self.upstreamPathFailureClass(error)), nil)
                         if ctx.channel.isActive {
@@ -1094,6 +1100,14 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
 
     static func upstreamFailureLogLevel(for cause: DirectModeCause) -> LogLevel {
         cause == .transientNetworkChange ? .info : .error
+    }
+
+    /// The line for an exchange that failed through the upstream. It names
+    /// the target, so a coalesced `(suppressed=N)` summary, which is keyed on
+    /// the target, can be traced back to its host.
+    static func exchangeFailureMessage(target: String, upstream: String?, error: Error) -> String {
+        let via = upstream.map { " via \(SensitiveValueSanitizer.observableTarget($0))" } ?? ""
+        return "Proxy exchange for \(target)\(via) failed: \(error.displayDescription)"
     }
 
     /// A memo refusal repeats a failure already logged; log it at `.info`.
