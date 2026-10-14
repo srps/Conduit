@@ -672,7 +672,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     // The only report of this failure: the pool leaves it to
                     // its caller.
                     let observedTarget = SensitiveValueSanitizer.observableTarget(head.uri)
-                    let message = Self.exchangeFailureMessage(target: observedTarget, upstream: exchangeUpstream, error: error)
+                    let failedUpstream = Self.attributedUpstream(exchangeUpstream, for: error)
+                    let message = Self.exchangeFailureMessage(target: observedTarget, upstream: failedUpstream, error: error)
                     if Self.shouldFallbackToDirectAfterProxyExchangeFailure(
                         hasDirectFallback: hasDirectFallback,
                         error: error
@@ -683,7 +684,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         let report = Self.upstreamFailureReport("upstream.exchange_failed", level: upstreamFailureLevel, for: error)
                         self.connectFailureLog.report(
                             report.event, level: report.level,
-                            target: observedTarget, upstream: exchangeUpstream, error: error,
+                            target: observedTarget, upstream: failedUpstream, error: error,
                             message: message
                         )
                         self.onRequestCompleted(.failed(Self.upstreamPathFailureClass(error)), nil)
@@ -1112,6 +1113,14 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     static func exchangeFailureMessage(target: String, upstream: String?, error: Error) -> String {
         let via = upstream.map { " via \($0)" } ?? ""
         return "Proxy exchange for \(target)\(via) failed: \(error.displayDescription)"
+    }
+
+    /// The upstream a failed exchange is attributed to. A pool-exhausted or
+    /// handshake-limited request was refused locally and never dialed the
+    /// selected upstream, so it names none (see `upstreamFailureReport`).
+    static func attributedUpstream(_ upstream: String?, for error: Error) -> String? {
+        if ConnectionPoolError.isPoolExhausted(error) || ConnectionPoolError.isAuthHandshakeLimitExceeded(error) { return nil }
+        return upstream
     }
 
     /// A memo refusal repeats a failure already logged; log it at `.info`.

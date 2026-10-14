@@ -58,6 +58,15 @@ final class ConnectFailureEventTests: XCTestCase {
         )
     }
 
+    /// A local refusal never dialed the selected upstream, so it is not
+    /// attributed to one; a real exchange failure keeps its upstream.
+    func testLocalRefusalsAreNotAttributedToAnUpstream() {
+        let selected = "proxy.example.test:8080"
+        XCTAssertNil(HTTPProxyHandler.attributedUpstream(selected, for: ConnectionPoolError.poolExhausted))
+        XCTAssertNil(HTTPProxyHandler.attributedUpstream(selected, for: ConnectionPoolError.authHandshakeLimitExceeded))
+        XCTAssertEqual(HTTPProxyHandler.attributedUpstream(selected, for: ConnectionPoolError.upstreamResponseTimedOut), selected)
+    }
+
     func testAnEventOfNilIsLoggedButNotEmitted() {
         let logger = RecordingLogSink(minLevel: .info)
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
