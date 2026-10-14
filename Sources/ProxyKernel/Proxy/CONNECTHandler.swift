@@ -71,7 +71,9 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             authSource: authSource,
             forcedProxy: forcedProxy
         ).flatMapError { [weak self] error in
-            if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) {
+            // Local refusals end here: another upstream would not help, and
+            // after a VPN-transition sweep routing may have left the upstreams.
+            if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) || ConnectionPoolError.isVPNTransitionDuringConnect(error) {
                 let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
                 return el.makeFailedFuture(error)
             }
@@ -92,7 +94,9 @@ package final class CONNECTCoordinator: @unchecked Sendable {
         maxRetries: Int
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         return attemptTunnel(target: target, authSource: authSource, forcedProxy: nil).flatMapError { [weak self] error -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
-            if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) {
+            // Local refusals end here: another upstream would not help, and
+            // after a VPN-transition sweep routing may have left the upstreams.
+            if ConnectionPoolError.isAuthHandshakeLimitExceeded(error) || ConnectionPoolError.isVPNTransitionDuringConnect(error) {
                 let el = self?.pool.eventLoop ?? MultiThreadedEventLoopGroup.singleton.next()
                 return el.makeFailedFuture(error)
             }
@@ -113,7 +117,7 @@ package final class CONNECTCoordinator: @unchecked Sendable {
     ) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> {
         let pool = self.pool
         let start = Date()
-        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
+        return pool.makeDedicatedTunnelConnection(forcedProxy: forcedProxy, target: target).flatMap { [weak self] (connection: PooledUpstreamConnection, _: ProxyConfig) -> EventLoopFuture<(channel: Channel, endpoint: String, authMethod: String?)> in
             guard let self else {
                 return connection.channel.eventLoop.makeFailedFuture(ConnectionPoolError.invalidResponse)
             }
@@ -150,7 +154,10 @@ package final class CONNECTCoordinator: @unchecked Sendable {
             }.flatMapError { error in
                 connection.channel.close(mode: .all, promise: nil)
                 pool.removeDedicatedTunnel(connection)
-                if !ConnectionPoolError.isAuthHandshakeLimitExceeded(error) {
+                // A VPN-transition sweep closed it mid-handshake (#148): the
+                // upstream did nothing wrong, and it is not retried.
+                let error: Error = pool.wasSwept(connection) ? ConnectionPoolError.vpnTransitionDuringConnect : error
+                if !ConnectionPoolError.isLocalNonUpstreamFailure(error) {
                     pool.recordDedicatedTunnelFailure(for: connection.proxy)
                 }
                 return connection.channel.eventLoop.makeFailedFuture(error)

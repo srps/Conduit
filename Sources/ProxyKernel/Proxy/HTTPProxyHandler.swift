@@ -883,8 +883,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
-                    if let dial, directTunnels?.register(upstream, dial: dial) == .retired {
-                        logger.log(.info, "Direct upgrade to \(host):\(port): \(DirectTunnelRegistry.retiredMessage)", category: .proxy)
+                    if let dial, directTunnels?.register(upstream, dial: dial, target: "\(host):\(port)") == .retired {
                         onRequestCompleted(.failed(.local), nil)
                         body?.cleanup()
                         self.writeError(status: .badGateway, message: DirectTunnelRegistry.retiredMessage, context: ctx)
@@ -958,8 +957,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let upstreamChannel):
-                    if let dial, self.directTunnels?.register(upstreamChannel, dial: dial) == .retired {
-                        self.logger.log(.info, "Direct tunnel to \(host):\(port): \(DirectTunnelRegistry.retiredMessage)", category: .proxy)
+                    if let dial, self.directTunnels?.register(upstreamChannel, dial: dial, target: "\(host):\(port)") == .retired {
                         self.onRequestCompleted(.failed(.local), nil)
                         self.writeError(status: .badGateway, message: DirectTunnelRegistry.retiredMessage, context: ctx)
                         self.onConnectionClosed(infoID)

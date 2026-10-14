@@ -135,10 +135,10 @@ enum VPNTransitionMigrationScenarios {
                 .init("a DIRECT tunnel whose address survived keeps exchanging", directKeptOnDisconnect && directKeptOnReconnect),
                 .init("the reconnect closes the DIRECT tunnel opened off the VPN within 1 s", offVPNClosed),
                 .init("the reconnect reports one DIRECT migration",
-                      reconnectDetail == "transition=reconnected route=direct closed=1 late_closed=0 untracked=0"),
+                      reconnectDetail == "transition=reconnected route=direct closed=1 untracked=0"),
                 .init("an on-prem outage (cause none) still retires its DIRECT tunnel on reconnect within 1 s",
                       onPremCause == .none && onPremClosed
-                          && onPremReconnect == "transition=reconnected route=direct closed=1 late_closed=0 untracked=0"),
+                          && onPremReconnect == "transition=reconnected route=direct closed=1 untracked=0"),
                 .init("the on-VPN DIRECT tunnel survives the on-prem round too", directKeptOnPrem),
             ], notes: ["addresses: \(addressesDetail)", "routing: \(disconnectDetail)", "reconnect: \(reconnectDetail)", "on-prem reconnect: \(onPremReconnect)",
                        "Injected probe outcomes; no real VPN, helper, settings or credentials"])

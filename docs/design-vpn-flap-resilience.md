@@ -70,17 +70,21 @@ A dial outlives the moment it starts, so both owners keep a bounded
   flag together. A tunnel that registers after a sweep it would have matched
   (dialed during the outage the reconnect ended, or now on an address the
   sweep found gone) is closed at registration; the client gets a 502, a SOCKS
-  failure or an EOF, and the next event counts it as `direct_late_closed` (or
-  `late_closed` on reconnect).
+  failure or an EOF.
 - `ConnectionPool` captures its epoch when an acquisition decides to dial.
   `closeConnections(migrating:)` records the rule (`.all` or
   `.orphanedFrom`) and snapshots in one step. A dial that completes after a
   sweep that selects it is closed instead of inserted, and its acquisition
   fails with `vpnTransitionDuringConnect`: a local failure that feeds no
   breaker, so the client sees a 502 and retries along the new routing. The
-  next event counts it as `upstream_late_closed`.
+  CONNECT path does not try the next upstream for it either.
 
-A dial older than every remembered sweep is retired too.
+A dial older than every remembered sweep is retired too. Each retirement is
+reported when it happens, as `connection.late_dial_retired`, not deferred to
+the next `vpn.tunnels_migrated` (the next transition may never come). Both
+owners report through a `ConnectFailureLog`, so a burst of retirements for
+one target is one event and a `suppressed=N` summary, and the tracked
+targets are bounded.
 
 Not changed: during the grace window new CONNECTs still go to the upstream
 even if its name no longer resolves. Routing DIRECT there would bypass upstream

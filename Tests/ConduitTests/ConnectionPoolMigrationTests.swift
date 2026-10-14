@@ -12,11 +12,19 @@ import XCTest
 final class ConnectionPoolMigrationTests: XCTestCase {
     private let proxy = UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)
 
+    private let events = NIOLockedValueBox<[RuntimeEvent]>([])
+
     private func makePool() -> ConnectionPool {
         let config = ProxyConfig.testFixture()
+        let events = self.events
         return ConnectionPool(group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink(),
                               configProvider: { config },
-                              authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") })
+                              authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+                              eventSink: { event in events.withLockedValue { $0.append(event) } })
+    }
+
+    private var retirements: [String] {
+        events.withLockedValue { $0 }.filter { $0.event == LateDialRetired.event }.compactMap(\.detail)
     }
 
     private func dialed(local: String? = nil) throws -> PooledUpstreamConnection {
@@ -29,17 +37,20 @@ final class ConnectionPoolMigrationTests: XCTestCase {
     func testADialCompletingAfterTheDirectRoutingSweepIsClosedAndFailsItsAcquisition() throws {
         let pool = makePool()
         let dialEpoch = pool.transitionEpoch                  // dial starts on the VPN
-        XCTAssertEqual(pool.closeConnections(migrating: .all), .init(closed: 0, lateClosed: 0))
+        XCTAssertEqual(pool.closeConnections(migrating: .all), 0)
         let late = try dialed()                               // and completes after the sweep
 
-        XCTAssertThrowsError(try pool.insertDialedConnection(late, dialEpoch: dialEpoch)) { error in
+        XCTAssertThrowsError(try pool.insertDialedConnection(late, dialEpoch: dialEpoch, target: "http://origin.test/a?q=1")) { error in
             XCTAssertEqual(error as? ConnectionPoolError, .vpnTransitionDuringConnect)
             XCTAssertTrue(ConnectionPoolError.isLocalNonUpstreamFailure(error), "never a breaker signal")
         }
         XCTAssertFalse(late.channel.isActive)
         XCTAssertTrue(pool.allConnectionSnapshot.isEmpty, "never handed to a request")
-        XCTAssertEqual(pool.closeConnections(migrating: .orphanedFrom([])).lateClosed, 1)
-        XCTAssertEqual(pool.closeConnections(migrating: .orphanedFrom([])).lateClosed, 0)
+        XCTAssertEqual(retirements.count, 1, "reported when it happens, not at the next sweep")
+        let detail = try XCTUnwrap(retirements.first)
+        XCTAssertTrue(detail.hasPrefix("target="), detail)
+        XCTAssertFalse(detail.contains("q=1"), "the target is sanitized: \(detail)")
+        XCTAssertTrue(detail.contains(" upstream=127.0.0.1:9 reason=the upstream dial completed after the disconnect sweep switched routing DIRECT "), detail)
     }
 
     func testALateDialIsJudgedByTheAddressSweepItStraddled() throws {
@@ -49,8 +60,8 @@ final class ConnectionPoolMigrationTests: XCTestCase {
         let oldPath = try dialed(local: "10.20.30.40")
         let newPath = try dialed(local: "192.168.2.20")
 
-        XCTAssertThrowsError(try pool.insertDialedConnection(oldPath, dialEpoch: dialEpoch))
-        XCTAssertNoThrow(try pool.insertDialedConnection(newPath, dialEpoch: dialEpoch))
+        XCTAssertThrowsError(try pool.insertDialedConnection(oldPath, dialEpoch: dialEpoch, target: "origin.test:443"))
+        XCTAssertNoThrow(try pool.insertDialedConnection(newPath, dialEpoch: dialEpoch, target: "origin.test:443"))
         XCTAssertEqual(pool.allConnectionSnapshot.map(\.id), [newPath.id])
         XCTAssertTrue(newPath.inUse)
         pool.closeAll()
@@ -60,7 +71,7 @@ final class ConnectionPoolMigrationTests: XCTestCase {
         let pool = makePool()
         pool.closeConnections(migrating: .all)
         let fresh = try dialed()
-        XCTAssertNoThrow(try pool.insertDialedConnection(fresh, dialEpoch: pool.transitionEpoch))
+        XCTAssertNoThrow(try pool.insertDialedConnection(fresh, dialEpoch: pool.transitionEpoch, target: "origin.test:443"))
         XCTAssertEqual(pool.allConnectionSnapshot.count, 1)
         pool.closeAll()
     }
@@ -90,7 +101,7 @@ final class ConnectionPoolMigrationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(5))
         }
 
-        XCTAssertEqual(pool.closeConnections(migrating: .all).closed, 1)
+        XCTAssertEqual(pool.closeConnections(migrating: .all), 1)
 
         do {
             _ = try await exchange.get()
@@ -107,13 +118,13 @@ final class ConnectionPoolMigrationTests: XCTestCase {
     func testTheSweepClosesEstablishedConnectionsItSelects() throws {
         let pool = makePool()
         let overVPN = try dialed(local: "10.20.30.40"), overWiFi = try dialed(local: "192.168.2.20")
-        try pool.insertDialedConnection(overVPN, dialEpoch: pool.transitionEpoch)
-        try pool.insertDialedConnection(overWiFi, dialEpoch: pool.transitionEpoch)
+        try pool.insertDialedConnection(overVPN, dialEpoch: pool.transitionEpoch, target: "origin.test:443")
+        try pool.insertDialedConnection(overWiFi, dialEpoch: pool.transitionEpoch, target: "origin.test:443")
 
-        XCTAssertEqual(pool.closeConnections(migrating: .orphanedFrom(["192.168.2.20"])).closed, 1)
+        XCTAssertEqual(pool.closeConnections(migrating: .orphanedFrom(["192.168.2.20"])), 1)
         XCTAssertFalse(overVPN.channel.isActive)
         XCTAssertEqual(pool.allConnectionSnapshot.map(\.id), [overWiFi.id])
-        XCTAssertEqual(pool.closeConnections(migrating: .all).closed, 1)
+        XCTAssertEqual(pool.closeConnections(migrating: .all), 1)
         XCTAssertTrue(pool.allConnectionSnapshot.isEmpty)
     }
 }

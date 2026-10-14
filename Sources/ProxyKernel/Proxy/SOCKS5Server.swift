@@ -517,8 +517,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
-                    if let dial, self.directTunnels?.register(upstream, dial: dial) == .retired {
-                        logger.log(.info, "SOCKS5: direct connection to \(host):\(port): \(DirectTunnelRegistry.retiredMessage)", category: .proxy)
+                    if let dial, self.directTunnels?.register(upstream, dial: dial, target: "\(host):\(port)") == .retired {
                         self.sendReply(context: ctx, rep: 0x05)
                         return
                     }

@@ -1,10 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
+import NIOConcurrencyHelpers
 import NIOCore
 import NIOEmbedded
 import XCTest
 @testable import ProxyKernel
 
 final class DirectTunnelRegistryTests: XCTestCase {
+    private let events = NIOLockedValueBox<[RuntimeEvent]>([])
+
+    private func makeRegistry(capacity: Int = 8) -> DirectTunnelRegistry {
+        let events = self.events
+        return DirectTunnelRegistry(capacity: { capacity }, retirementLog: ConnectFailureLog(
+            logger: DiscardingLogSink(), eventSink: { event in events.withLockedValue { $0.append(event) } }
+        ))
+    }
+
+    private var retirements: [String] {
+        events.withLockedValue { $0 }.filter { $0.event == LateDialRetired.event }.compactMap(\.detail)
+    }
     private func channel(local: String? = nil) throws -> EmbeddedChannel {
         let channel = EmbeddedChannel()
         if let local { channel.localAddress = try SocketAddress(ipAddress: local, port: 50_000) }
@@ -15,11 +28,11 @@ final class DirectTunnelRegistryTests: XCTestCase {
     /// Dial and register with no sweep in between.
     @discardableResult
     private func open(_ registry: DirectTunnelRegistry, _ channel: Channel) -> DirectTunnelRegistry.Registration {
-        registry.register(channel, dial: registry.beginDial())
+        registry.register(channel, dial: registry.beginDial(), target: "origin.test:443")
     }
 
     func testReconnectClosesOnlyTunnelsOpenedWhileTheVPNWasDown() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         let onVPN = try channel()
         XCTAssertEqual(open(registry, onVPN), .tracked)
         registry.markVPNDown()
@@ -28,7 +41,7 @@ final class DirectTunnelRegistryTests: XCTestCase {
 
         let result = registry.closeTunnelsOpenedWhileVPNDown()
 
-        XCTAssertEqual(result, .init(closed: 1, untracked: 0, lateClosed: 0))
+        XCTAssertEqual(result, .init(closed: 1, untracked: 0))
         XCTAssertFalse(offVPN.isActive)
         XCTAssertTrue(onVPN.isActive)
         XCTAssertEqual(registry.count, 1)
@@ -38,7 +51,7 @@ final class DirectTunnelRegistryTests: XCTestCase {
     /// no-proxy or PAC-DIRECT dial while the probe is pending or on-prem
     /// leaves on the off-VPN path under cause `.none` (#148).
     func testTheReconnectSweepEndsTheOutageOnce() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         XCTAssertNil(registry.closeTunnelsOpenedWhileVPNDown(), "no outage, no sweep")
         registry.markVPNDown()
         XCTAssertTrue(registry.beginDial().whileVPNDown)
@@ -48,7 +61,7 @@ final class DirectTunnelRegistryTests: XCTestCase {
     }
 
     func testAClosedTunnelLeavesTheRegistry() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         registry.markVPNDown()
         let tunnel = try channel()
         open(registry, tunnel)
@@ -59,7 +72,7 @@ final class DirectTunnelRegistryTests: XCTestCase {
     }
 
     func testAFullRegistryCountsUntrackedTunnelsAndReportsThemOnce() throws {
-        let registry = DirectTunnelRegistry(capacity: { 1 })
+        let registry = makeRegistry(capacity: 1)
         registry.markVPNDown()
         let tracked = try channel(), overflow = try channel()
         XCTAssertEqual(open(registry, tracked), .tracked)
@@ -73,7 +86,7 @@ final class DirectTunnelRegistryTests: XCTestCase {
     }
 
     func testDisconnectClosesTunnelsWhoseLocalAddressLeftWithTheVPN() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         let overVPN = try channel(local: "10.20.30.40")
         let overWiFi = try channel(local: "192.168.2.20")
         let unknownLocal = try channel()
@@ -90,61 +103,78 @@ final class DirectTunnelRegistryTests: XCTestCase {
     // MARK: - Dials that straddle a sweep
 
     func testATunnelDialedOffVPNThatRegistersAfterTheReconnectSweepIsRetired() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         registry.markVPNDown()
         let dial = registry.beginDial()                     // dial starts while the VPN is down
         _ = registry.closeTunnelsOpenedWhileVPNDown()       // reconnect sweep runs mid-dial
         let late = try channel()
 
-        XCTAssertEqual(registry.register(late, dial: dial), .retired)
+        XCTAssertTrue(retirements.isEmpty)
+        XCTAssertEqual(registry.register(late, dial: dial, target: "origin.test:443"), .retired)
         XCTAssertFalse(late.isActive)
         XCTAssertEqual(registry.count, 0)
-        XCTAssertEqual(registry.closeTunnels(orphanedFrom: []).lateClosed, 1,
-                       "the next sweep reports the retirement once")
-        XCTAssertEqual(registry.closeTunnels(orphanedFrom: []).lateClosed, 0)
+        XCTAssertEqual(retirements, [
+            "target=origin.test:443 reason=the DIRECT dial began off the VPN and the reconnect sweep ran during it kind=other",
+        ], "reported when it happens, not at the next sweep")
     }
 
     func testALateTunnelDialedOnTheVPNIsTracked() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         let dial = registry.beginDial()
         registry.markVPNDown()
         _ = registry.closeTunnelsOpenedWhileVPNDown()
         let onVPN = try channel()
 
-        XCTAssertEqual(registry.register(onVPN, dial: dial), .tracked)
+        XCTAssertEqual(registry.register(onVPN, dial: dial, target: "origin.test:443"), .tracked)
         XCTAssertTrue(onVPN.isActive)
     }
 
     func testALateTunnelOnAnAddressTheDisconnectRemovedIsRetired() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         let dial = registry.beginDial()
         _ = registry.closeTunnels(orphanedFrom: ["192.168.2.20"])
         let oldPath = try channel(local: "10.20.30.40")
         let newPath = try channel(local: "192.168.2.20")
 
-        XCTAssertEqual(registry.register(oldPath, dial: dial), .retired)
-        XCTAssertEqual(registry.register(newPath, dial: dial), .tracked)
+        XCTAssertEqual(registry.register(oldPath, dial: dial, target: "origin.test:443"), .retired)
+        XCTAssertEqual(registry.register(newPath, dial: dial, target: "origin.test:443"), .tracked)
         XCTAssertFalse(oldPath.isActive)
         XCTAssertTrue(newPath.isActive)
+        XCTAssertEqual(retirements, [
+            "target=origin.test:443 reason=the DIRECT dial completed on an address the disconnect sweep found gone kind=other",
+        ])
+    }
+
+    /// A burst of retirements for one target is one event and a summary,
+    /// not one event each: the event log is bounded and shared.
+    func testABurstOfRetirementsForOneTargetCoalesces() throws {
+        let registry = makeRegistry()
+        registry.markVPNDown()
+        let dial = registry.beginDial()
+        _ = registry.closeTunnelsOpenedWhileVPNDown()
+        for _ in 0..<5 {
+            XCTAssertEqual(registry.register(try channel(), dial: dial, target: "origin.test:443"), .retired)
+        }
+        XCTAssertEqual(retirements.count, 1)
     }
 
     func testADialOlderThanEveryRememberedSweepIsRetired() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         let dial = registry.beginDial()
         for _ in 0...TransitionSweeps<Int>.capacity {
             _ = registry.closeTunnels(orphanedFrom: [])
         }
-        XCTAssertEqual(registry.register(try channel(), dial: dial), .retired)
+        XCTAssertEqual(registry.register(try channel(), dial: dial, target: "origin.test:443"), .retired)
     }
 
     func testADialWithinRememberedHistoryIsJudgedOnlyByTheSweepsItMissed() throws {
-        let registry = DirectTunnelRegistry(capacity: { 8 })
+        let registry = makeRegistry()
         registry.markVPNDown()
         _ = registry.closeTunnelsOpenedWhileVPNDown()
         registry.markVPNDown()
         let dial = registry.beginDial()
         _ = registry.closeTunnels(orphanedFrom: [])
-        XCTAssertEqual(registry.register(try channel(), dial: dial), .tracked,
+        XCTAssertEqual(registry.register(try channel(), dial: dial, target: "origin.test:443"), .tracked,
                        "the reconnect sweep finished before this dial began")
     }
 
