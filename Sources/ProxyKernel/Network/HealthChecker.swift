@@ -9,12 +9,15 @@ package enum HealthCheckFailure: Error, Equatable, Sendable {
     case credentialUnavailable(detail: String)
     /// The upstream answered with a status outside 2xx–4xx.
     case upstreamStatus(code: Int, upstream: String)
+    /// The upstream answered and refused the credential the ladder offered
+    /// (a final 407). Re-authenticating can help, unlike `.unreachable`.
+    case authenticationRejected(detail: String)
     /// No usable answer: unreachable, timed out, refused, or the proxy is stopped.
     case unreachable(detail: String)
 
     package var summary: String {
         switch self {
-        case .credentialUnavailable(let detail), .unreachable(let detail):
+        case .credentialUnavailable(let detail), .authenticationRejected(let detail), .unreachable(let detail):
             return detail
         case .upstreamStatus(let code, let upstream):
             return "HTTP \(code) via \(upstream)"

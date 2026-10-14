@@ -377,11 +377,18 @@ package final class ConnectionPool: @unchecked Sendable {
         } catch {
             let elapsed = Int(Date().timeIntervalSince(start) * 1_000)
             let detail = error.displayDescription
-            let failure: HealthCheckFailure = error.isCredentialUnavailable
-                ? .credentialUnavailable(detail: detail)
-                : .unreachable(detail: detail)
-            return .unhealthy(failure, responseTimeMS: elapsed)
+            return .unhealthy(Self.healthFailure(for: error, detail: detail), responseTimeMS: elapsed)
         }
+    }
+
+    /// Recovery branches on this: only `.unreachable` skips re-authentication,
+    /// so an upstream that answered with a final 407 must not land there.
+    static func healthFailure(for error: Error, detail: String) -> HealthCheckFailure {
+        if error.isCredentialUnavailable { return .credentialUnavailable(detail: detail) }
+        if case ConnectionPoolError.authenticationRejected? = error as? ConnectionPoolError {
+            return .authenticationRejected(detail: detail)
+        }
+        return .unreachable(detail: detail)
     }
 
     package func upstreamStatuses() -> [UpstreamRuntimeStatus] {
