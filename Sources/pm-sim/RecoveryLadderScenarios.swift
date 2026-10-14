@@ -106,4 +106,68 @@ enum RecoveryLadderScenarios {
                       probeHeld && cleared && clearedDetail == "reason=superseded"),
             ], notes: ["refusing loopback upstream on port \(deadPort); injected reachable probe; no credentials, helper or settings"])
     }
+
+    /// #155: a VPN disconnect lands while an exhausted ladder's probe is
+    /// out. The ladder's probe returns first, finds itself superseded and
+    /// stands down, reading the cause from before the disconnect; then the
+    /// disconnect's probe routes DIRECT. The disconnect's verdict must own
+    /// the status: `.running`, not the `.degraded` the ladder left.
+    @MainActor
+    static func ladderSupersededByDisconnect(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let dead = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: 9, requireAuth: false)
+        try await dead.start()
+        let deadPort = dead.port
+        await dead.stop()
+
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "refusing", host: "127.0.0.1", port: deadPort, priority: 0)]
+        let logger = ConsoleLogSink(minLevel: verbose ? .debug : .warning)
+        // Reachable, so the health loop owns the outage, until the
+        // disconnect. The ladder's post-exhaustion probe and the
+        // disconnect's probe are each held.
+        let log = NIOLockedValueBox<RuntimeEventLog?>(nil)
+        let disconnected = NIOLockedValueBox(false)
+        let ladderProbe = ProbeHold(), disconnectProbe = ProbeHold()
+        let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
+            connectivityProbe: { targets in
+                let off = disconnected.withLockedValue { $0 }
+                if off {
+                    await disconnectProbe.holdOnce()
+                } else if log.withLockedValue({ $0 })?.events.contains(where: { $0.event == "recovery.exhausted" }) ?? false {
+                    await ladderProbe.holdOnce()
+                }
+                return UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: !off) })
+            })
+        log.withLockedValue { $0 = orchestrator.eventLog }
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+        func events(_ name: String) -> [RuntimeEvent] { orchestrator.eventLog.events.filter { $0.event == name } }
+
+        // The startup health check fails; the ladder runs out and probes.
+        let ladderHeld = try await until(timeout: 15) { ladderProbe.isHolding }
+        let recovering = orchestrator.snapshot.runtimeStatus.state == .recovering
+        disconnected.withLockedValue { $0 = true }
+        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        let disconnectHeld = try await until(timeout: 5) { disconnectProbe.isHolding }
+        // The ladder's probe returns first and stands down.
+        ladderProbe.release()
+        let stoodDown = try await until(timeout: 5) { !events("recovery.cooldown_cleared").isEmpty }
+        let ladderLeft = orchestrator.snapshot.runtimeStatus.state
+        disconnectProbe.release()
+        await disconnect.value
+        let status = orchestrator.snapshot.runtimeStatus
+
+        return ScenarioResult(name: "recovery-superseded-by-disconnect", clientCount: 0, clientsOpened: 0,
+            clientsWithFirstByte: 0, clientsClosedEarly: 0, totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
+                .init("the exhausted ladder's probe is out while recovering", ladderHeld && recovering),
+                .init("the superseded ladder stands down to degraded before the disconnect decides",
+                      disconnectHeld && stoodDown && ladderLeft == .degraded),
+                .init("the disconnect routes DIRECT", orchestrator.snapshot.directModeCause == .vpnDisconnected),
+                .init("the disconnect's verdict owns the status", status.state == .running && status.activeUpstream == "DIRECT"),
+            ], notes: ["refusing loopback upstream on port \(deadPort); injected probe outcomes, the ladder's and the disconnect's probes held"])
+    }
 }
