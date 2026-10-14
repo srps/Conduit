@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOCore
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 /// One bounded reporter per listener/coordinator, shared by its relays. No
 /// per-connection timers; the existing gate caps state at 64 keys. Repeats
@@ -17,13 +22,13 @@ package final class TunnelFailureReporter: Sendable {
         self.gate = RuntimeEventRepeatGate(now: now)
     }
 
-    package func report(target: String, key: String, fields: String, error: Error) {
+    package func report(target: String, key: String, fields: String, error: Error, level: LogLevel = .warning) {
         let target = SensitiveValueSanitizer.observableTarget(target)
         guard let suppressed = gate.admit(host: target, reason: key) else { return }
         let event = RuntimeEvent(kind: .connection, event: "tunnel.relay_failed",
                                  detail: "target=\(target) \(fields) reason=\(error.displayDescription) suppressed=\(suppressed) window_seconds=60")
         eventSink?(event)
-        logger.log(.warning, "Tunnel relay: \(event.detail ?? "")", category: .proxy)
+        logger.log(level, "Tunnel relay: \(event.detail ?? "")", category: .proxy)
     }
 }
 
@@ -80,12 +85,23 @@ package final class TunnelRelayDiagnostics: @unchecked Sendable {
         let client = clientBytes, remote = remoteBytes, last = lastRead
         lock.unlock()
         let cause = causeProvider()
-        let code = (error as? IOError).map { String($0.errnoCode) } ?? "none"
+        let errno = (error as? IOError)?.errnoCode
+        let code = errno.map { String($0) } ?? "none"
         reporter.report(
             target: target, key: "\(transport):\(route):\(side.rawValue):\(operation.rawValue):\(code)",
             fields: "transport=\(transport) route=\(route) upstream=\(upstream) side=\(side.rawValue) operation=\(operation.rawValue) errno=\(code) age_ms=\(Self.milliseconds(at, since: started)) idle_ms=\(Self.milliseconds(at, since: last)) client_bytes=\(client) remote_bytes=\(remote) started_cause=\(startedCause.rawValue) current_cause=\(cause.rawValue)",
-            error: error
+            error: error,
+            level: Self.level(side: side, errno: errno)
         )
+    }
+
+    /// A client that resets or abandons its own tunnel is an application
+    /// closing a connection it no longer wants, not a relay fault: `.info`
+    /// (#149). The event is still emitted. Remote-side failures and any
+    /// other client error stay `.warning`.
+    package static func level(side: Side, errno: Int32?) -> LogLevel {
+        guard side == .client, let errno else { return .warning }
+        return errno == ECONNRESET || errno == EPIPE ? .info : .warning
     }
 
     private static func add(_ value: UInt64, _ amount: UInt64) -> UInt64 {

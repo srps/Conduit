@@ -47,6 +47,7 @@ enum PMSim {
               request-body-spool      Bodies: spooled bodies arrive whole; an unavailable spool closes the client with a structured cause (#81)
               direct-mode-silence     Phase 2: prove expected-direct causes log .info, not .error
               direct-failure-storm    Direct NXDOMAIN storm: no error_rate.alarm or re-probe, one log line; upstream failures still alarm
+              expected-failure-levels Refused loopback connect is one WARNING and no event; a client tunnel reset logs INFO with its event
               vpn-flap-idle           idle CONNECT tunnel survives a brief VPN flap
               vpn-flap-stream         streaming HTTP response survives a brief VPN flap
               vpn-flap-long-outage    long outage transitions to .vpnDisconnected, recovers on reconnect
@@ -199,6 +200,7 @@ enum PMSim {
         "request-body-spool",
         "direct-mode-silence",
         "direct-failure-storm",
+        "expected-failure-levels",
         "vpn-flap-idle",
         "vpn-flap-stream",
         "vpn-flap-long-outage",
@@ -302,6 +304,8 @@ enum PMSim {
             return [try await OrchestratorScenarios.directModeSilence(verbose: verbose)]
         case "direct-failure-storm":
             return [try await DirectFailureStormScenarios.run(verbose: verbose)]
+        case "expected-failure-levels":
+            return [try await ExpectedFailureLevelScenarios.run(verbose: verbose)]
         case "vpn-flap-idle":
             return [try await VPNFlapScenarios.vpnFlapShortIdleTunnel(verbose: verbose)]
         case "vpn-flap-stream":

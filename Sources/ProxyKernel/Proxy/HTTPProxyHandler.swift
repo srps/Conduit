@@ -795,8 +795,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                     }
                 case .failure(let error):
+                    let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
                     connectFailureLog.report(
-                        "direct.connect_failed", level: Self.directConnectFailureLevel(error, default: directFailureLevel),
+                        report.event, level: report.level,
                         target: "\(host):\(port)", error: error,
                         message: "Direct connect to \(host):\(port) failed: \(error.displayDescription)"
                     )
@@ -912,8 +913,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         }
                     }
                 case .failure(let error):
+                    let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
                     connectFailureLog.report(
-                        "direct.connect_failed", level: Self.directConnectFailureLevel(error, default: directFailureLevel),
+                        report.event, level: report.level,
                         target: "\(host):\(port)", error: error,
                         message: "Direct connect for upgrade to \(host):\(port) failed: \(error.displayDescription)"
                     )
@@ -946,8 +948,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         directFailureLevel: directFailureLevel
                     )
                 case .failure(let error):
+                    let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
                     self.connectFailureLog.report(
-                        "direct.connect_failed", level: Self.directConnectFailureLevel(error, default: directFailureLevel),
+                        report.event, level: report.level,
                         target: "\(host):\(port)", error: error,
                         message: "Direct connect to \(host):\(port) failed: \(error.displayDescription)"
                     )
@@ -1126,6 +1129,18 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// A memo refusal repeats a failure already logged; log it at `.info`.
     static func directConnectFailureLevel(_ error: Error, default level: LogLevel) -> LogLevel {
         error is LinkLocalFailureMemo.RecentFailure ? .info : level
+    }
+
+    /// What a failed direct connect reports. An absent destination (see
+    /// `AbsentDestination`) logs at `.warning` at most and emits no event;
+    /// everything else keeps `direct.connect_failed` at `level`. Never
+    /// raises a level the direct-mode cause or the link-local memo lowered.
+    static func directConnectFailureReport(
+        _ error: Error, host: String, default level: LogLevel
+    ) -> (event: String?, level: LogLevel) {
+        let level = directConnectFailureLevel(error, default: level)
+        guard AbsentDestination.matches(error, host: host) else { return ("direct.connect_failed", level) }
+        return (nil, min(level, .warning))
     }
 
     /// Records a connect failure as an event and then as the log line derived
