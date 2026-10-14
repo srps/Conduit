@@ -597,7 +597,7 @@ package final class ConnectionPool: @unchecked Sendable {
     package enum TransitionSweepRule: Sendable {
         /// Routing DIRECT after a disconnect: the proxies are behind the VPN.
         case all
-        /// A socket whose local address left with the VPN cannot resume.
+        /// A socket whose local address left with the VPN is not expected to resume.
         case orphanedFrom(Set<String>)
 
         func selects(_ channel: Channel) -> Bool {

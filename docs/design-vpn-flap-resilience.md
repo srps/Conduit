@@ -13,8 +13,17 @@ proxy listener or helper.
 ## Confirmed transitions migrate stranded tunnels (#148, 2026-10-14)
 
 Preservation is for a flap: the VPN may return and macOS resumes the stream.
-A confirmed transition cannot give a stranded socket back, so keeping it only
-makes the client wait out a 60 s+ timeout (a day of logs showed ~18 upstream
+"Confirmed" is the classifier's verdict, not proof the path is gone: removal of
+both utun address keys is labelled user-initiated, and an outage past the grace
+window is `.networkLost`, even if the same path would come back. The policy is
+therefore: streams are preserved until the classifier declares an outage; after
+that, recovery means reconnecting, even if the network later returns. The
+per-subsystem sweep bookkeeping below is an interim model with known windows
+(listener restarts, CONNECT failover, routing decisions captured before an
+async step); #156 replaces it with a runtime-wide routing-token/lease
+authority, and #155 covers stale probe results. In
+practice a stranded socket almost never comes back, and keeping it only makes
+the client wait out a 60 s+ timeout (a day of logs showed ~18 upstream
 tunnels dying over two minutes with `EADDRNOTAVAIL`/`ETIMEDOUT` after a
 user-initiated disconnect, and DIRECT tunnels opened off the VPN dying a minute
 after it came back). The owner's call: when the VPN is disconnected or connected,
