@@ -183,7 +183,7 @@ private final class HoldThenCloseHandler: ChannelInboundHandler, @unchecked Send
 }
 
 /// Sends one request; the future holds everything read until the proxy closes.
-private enum RawClient {
+enum RawClient {
     private struct Timeout: Error {}
 
     static func send(group: EventLoopGroup, port: Int, request: String) async throws -> EventLoopFuture<String> {
