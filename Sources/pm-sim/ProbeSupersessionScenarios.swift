@@ -110,4 +110,72 @@ enum ProbeSupersessionScenarios {
                 .init("a fresh CONNECT goes through the upstream", freshViaUpstream && fresh.metrics.bytesReceived > 0),
             ], notes: ["Injected probe outcomes with the disconnect probe held; real listener, pool and upstream CONNECT tunnels"])
     }
+
+    /// Forwards to `base`, and calls `onListening` once when the listener
+    /// logs that it is up: after the start probe committed, before startup
+    /// reports running.
+    private final class ListeningHook: LogSink, @unchecked Sendable {
+        private let base: any LogSink
+        private let fired = NIOLockedValueBox(false)
+        private let onListening: @Sendable () -> Void
+        init(base: any LogSink, _ onListening: @escaping @Sendable () -> Void) { self.base = base; self.onListening = onListening }
+        var minLevel: LogLevel { .debug }
+        func flush(timeout: TimeInterval) -> Bool { base.flush(timeout: timeout) }
+        func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+            base.log(level, message, category: category)
+            if message.hasPrefix("Local proxy listening on"), !fired.withLockedValue({ let was = $0; $0 = true; return was }) {
+                onListening()
+            }
+        }
+    }
+
+    /// #155: a reconnect that lands after startup's connectivity verdict,
+    /// while the listener binds, finds the listener not yet running. Startup
+    /// decides again before it reports running, so the first CONNECT goes
+    /// through the upstream instead of the off-VPN DIRECT verdict.
+    @MainActor
+    static func startupRederive(verbose: Bool) async throws -> ScenarioResult {
+        let started = Date(), group = MultiThreadedEventLoopGroup.singleton
+        let origin = FakeOrigin(group: group, behavior: .echo)
+        try await origin.start(); ScenarioCleanup.register { await origin.stop() }
+        let upstream = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: origin.port, requireAuth: false)
+        try await upstream.start(); ScenarioCleanup.register { await upstream.stop() }
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "corp", host: "127.0.0.1", port: upstream.port, priority: 0)]
+        let probe = HeldProbe()
+        probe.set(reachable: false)
+        let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
+        let logger = ListeningHook(base: ConsoleLogSink(minLevel: verbose ? .debug : .warning)) {
+            guard let orchestrator = box.withLockedValue({ $0 }) else { return }
+            probe.set(reachable: true)
+            Task { @MainActor in await orchestrator.handleVPNStateChange(.connected) }
+        }
+        let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
+                                             connectivityProbe: { await probe.probe($0) })
+        await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
+        box.withLockedValue { $0 = orchestrator }
+        try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
+
+        let cause = orchestrator.snapshot.directModeCause
+        let rederived = orchestrator.eventLog.events.filter { $0.event == "connectivity.startup_rederived" }.compactMap(\.detail)
+        let port = orchestrator.snapshot.bindings.proxyPort!
+        let client = FakeClient(id: 0, group: group, localProxyHost: "127.0.0.1", localProxyPort: port,
+            target: "rederive.test:443", behavior: .periodicPing(requestBytes: 16, pingIntervalMs: 250, pingBytes: 16))
+        ScenarioCleanup.register { await client.close() }
+        try await client.run()
+        let echoed = try await until(timeout: 3, { client.metrics.bytesReceived > 0 })
+        let metrics = client.metrics
+        return ScenarioResult(name: "vpn-startup-rederive", clientCount: 1, clientsOpened: 1,
+            clientsWithFirstByte: metrics.firstByteAt == nil ? 0 : 1, clientsClosedEarly: metrics.closedAt == nil ? 0 : 1,
+            totalBytes: metrics.bytesReceived, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
+            minBytes: metrics.bytesReceived, maxBytes: metrics.bytesReceived, medianBytes: metrics.bytesReceived,
+            earliestClose: nil, latestClose: nil, assertions: [
+                .init("the reconnect during listener start re-derives routing once", rederived == ["attempt=1 vpn=connected"]),
+                .init("startup reports the upstream route, not the stale DIRECT verdict",
+                      cause == .none && orchestrator.snapshot.runtimeStatus.activeUpstream != "DIRECT"),
+                .init("the first CONNECT goes through the upstream", echoed && upstream.connectCount == 1),
+            ], notes: ["Injected probe outcomes; the reconnect is delivered when the listener logs that it is up"])
+    }
 }
