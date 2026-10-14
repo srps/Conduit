@@ -642,7 +642,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         // The upstream this exchange dials, fixed at selection: the pool's
         // last selection may belong to a concurrent request by the time a
         // failure is reported.
-        let exchangeUpstream = attempt.upstream?.endpoint
+        let exchangeUpstream = attempt.upstream.map { SensitiveValueSanitizer.observableTarget($0.endpoint) }
         attempt.result
             .hop(to: clientEL)
             .whenComplete { result in
@@ -683,7 +683,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                         let report = Self.upstreamFailureReport("upstream.exchange_failed", level: upstreamFailureLevel, for: error)
                         self.connectFailureLog.report(
                             report.event, level: report.level,
-                            target: observedTarget, error: error,
+                            target: observedTarget, upstream: exchangeUpstream, error: error,
                             message: message
                         )
                         self.onRequestCompleted(.failed(Self.upstreamPathFailureClass(error)), nil)
@@ -1108,8 +1108,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// The line for an exchange that failed through the upstream. It names
     /// the target, so a coalesced `(suppressed=N)` summary, which is keyed on
     /// the target, can be traced back to its host.
+    /// Both values arrive sanitized, as the event carries them.
     static func exchangeFailureMessage(target: String, upstream: String?, error: Error) -> String {
-        let via = upstream.map { " via \(SensitiveValueSanitizer.observableTarget($0))" } ?? ""
+        let via = upstream.map { " via \($0)" } ?? ""
         return "Proxy exchange for \(target)\(via) failed: \(error.displayDescription)"
     }
 
@@ -1130,6 +1131,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         _ event: String?,
         level: LogLevel,
         target: String,
+        upstream: String? = nil,
         error: Error,
         message: String,
         logger: any LogSink,
@@ -1140,7 +1142,10 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         windowSeconds: Int = 0
     ) {
         if let event, eventAtAnyLevel || level >= .warning {
-            var detail = "target=\(target) reason=\(error.displayDescription)"
+            // `upstream=` precedes `reason=`, whose value may hold spaces.
+            var detail = "target=\(target)"
+            if let upstream { detail += " upstream=\(upstream)" }
+            detail += " reason=\(error.displayDescription)"
             if let kind { detail += " kind=\(kind.rawValue)" }
             if suppressed > 0 { detail += " suppressed=\(suppressed) windowSeconds=\(windowSeconds)" }
             eventSink?(RuntimeEvent(kind: .connection, event: event, detail: detail))

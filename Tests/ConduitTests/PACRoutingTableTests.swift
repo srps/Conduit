@@ -370,7 +370,10 @@ final class PACRoutingTableTests: XCTestCase {
         XCTAssertEqual(lines.count, 1, "\(lines.map(\.message))")
         XCTAssertTrue(lines.first?.message.hasPrefix("Proxy exchange for \(target) via 127.0.0.1:\(upstream.port) failed: ") ?? false,
                       "\(lines.map(\.message))")
-        XCTAssertEqual(fixture.events(named: "upstream.exchange_failed").count, 1)
+        let failed = fixture.events(named: "upstream.exchange_failed")
+        XCTAssertEqual(failed.count, 1)
+        XCTAssertTrue(failed.first?.detail?.hasPrefix("target=\(target) upstream=127.0.0.1:\(upstream.port) reason=") ?? false,
+                      "\(failed.map { $0.detail ?? "" })")
         XCTAssertEqual(servers.origin.accepted, 0)
         await fixture.stop()
     }
@@ -423,6 +426,9 @@ final class PACRoutingTableTests: XCTestCase {
             let target = "http://127.0.0.1:\(servers.origin.port)/\(path)"
             XCTAssertTrue(lines.contains { $0.hasPrefix("Proxy exchange for \(target) via 127.0.0.1:\(owner.port) failed: ") },
                           "/\(path) went to \(owner.port): \(lines)")
+            XCTAssertTrue(fixture.events(named: "upstream.exchange_failed").contains {
+                $0.detail?.hasPrefix("target=\(target) upstream=127.0.0.1:\(owner.port) reason=") ?? false
+            }, "/\(path): the event does not name \(owner.port)")
         }
         await fixture.stop()
     }
