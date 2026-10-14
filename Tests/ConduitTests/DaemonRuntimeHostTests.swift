@@ -195,6 +195,46 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected)
     }
 
+    /// Twin of the app's burst scenario: reports delivered without waiting
+    /// for each other are stamped on the observer's turn, all applied in
+    /// order, and the last one decides (#155).
+    func testABurstOfVPNReportsEndsOnTheLastOneAndDropsNone() async throws {
+        let environment = RuntimeEnvironment.isolated(
+            stateDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        )
+        defer { try? FileManager.default.removeItem(at: environment.configDirectory) }
+
+        let observer = FakeVPNStatusObserver()
+        let loaded = RuntimeConfigurationLoadResult(
+            config: GenericDefaults.shared.makeConfig(),
+            platformConfig: PlatformIntegrationConfig(),
+            appPreferences: AppPreferences(),
+            migrated: false,
+            warnings: []
+        )
+        let host = DaemonRuntimeHost(
+            environment: environment,
+            logger: DiscardingLogSink(),
+            loadedConfiguration: loaded,
+            configFilePredatesLaunch: false,
+            networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
+            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
+        )
+        await host.awaitLaunchRecovery()
+        observer.start()
+        defer { observer.stop() }
+
+        for state: VPNObservedState in [.connected, .disconnected(reason: .userInitiated), .connected, .disconnected(reason: .networkLost)] {
+            observer.emit(state)
+        }
+        await host.deliveries.drain()
+
+        XCTAssertEqual(host.orchestrator.snapshot.vpnState, .disconnected(reason: .networkLost))
+        XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "vpn.observation_stale" }.count, 0)
+    }
+
     /// The interface name belongs to the delivery it came with. The host
     /// hops to the main actor between the observer's callback and the
     /// orchestrator, so a name read after the hop would be whatever the
