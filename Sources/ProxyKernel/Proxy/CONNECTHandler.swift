@@ -310,6 +310,11 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
         responseTimeoutTask?.cancel()
         responseTimeoutTask = nil
         self.ctx = nil
+        // Removed before the answer: the socket closed (a VPN-transition
+        // sweep, the upstream, a reset) and the pipeline tore down. Fail now;
+        // the timeout that would have was just cancelled. The coordinator
+        // attributes a sweep's close to the sweep (#156).
+        fail(ChannelError.ioOnClosedChannel, context: nil, close: false)
         guard awaitingRelay else { return }
         awaitingRelay = false
         // Server-first bytes go to the relay installed after this handler.
@@ -442,6 +447,9 @@ private final class RawConnectHandshakeHandler: ChannelInboundHandler, Removable
     }
 
     private func writeRawConnect(authHeader: String, context: ChannelHandlerContext) {
+        // An auth callback that lands after the handshake ended (failed,
+        // closed by a sweep) must not write or arm a timer.
+        guard !completed, context.channel.isActive else { return }
         var request = "CONNECT \(target) HTTP/1.1\r\n"
         request += "Host: \(target)\r\n"
         request += "Proxy-Authorization: \(authHeader)\r\n"
