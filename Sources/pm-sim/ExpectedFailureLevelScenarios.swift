@@ -7,8 +7,8 @@ import NIOPosix
 import ProxyKernel
 
 /// #149 through a running orchestrator. A direct CONNECT to a loopback port
-/// nobody listens on is the destination's absence: one WARNING line and no
-/// `direct.connect_failed` event. A client that resets its own established upstream
+/// nobody listens on is the destination's absence: one WARNING line, and its
+/// `direct.connect_failed` event is still emitted. A client that resets its own established upstream
 /// tunnel logs at INFO and still emits `tunnel.relay_failed`.
 enum ExpectedFailureLevelScenarios {
     private final class Capture: ChannelInboundHandler, @unchecked Sendable {
@@ -93,7 +93,7 @@ enum ExpectedFailureLevelScenarios {
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: [
                 .init("a refused loopback connect is one WARNING line", refusedLevels == [.warning]),
-                .init("a refused loopback connect emits no direct.connect_failed", events("direct.connect_failed").isEmpty),
+                .init("a refused loopback connect still emits direct.connect_failed", events("direct.connect_failed").count == 1),
                 .init("the upstream tunnel was established", established),
                 .init("a client reset emits tunnel.relay_failed", relayEvents.count == 1
                       && relayEvents[0].detail?.contains("side=client") == true),
