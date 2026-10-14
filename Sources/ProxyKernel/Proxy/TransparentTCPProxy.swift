@@ -14,6 +14,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
     private let gatewayModeProvider: @Sendable () -> Bool
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let tunnelFailureReporter: TunnelFailureReporter
+    private let directTunnels: DirectTunnelRegistry?
     private var listener: Channel?
 
     package private(set) var listeningPort: Int?
@@ -32,8 +33,10 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         directModeProvider: @escaping @Sendable () -> DirectModeCause,
         strictModeProvider: @escaping @Sendable () -> Bool,
         gatewayModeProvider: @escaping @Sendable () -> Bool = { false },
-        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        directTunnels: DirectTunnelRegistry? = nil
     ) {
+        self.directTunnels = directTunnels
         self.group = group
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
@@ -56,6 +59,7 @@ package final class TransparentTCPProxy: @unchecked Sendable {
         let gatewayModeProvider = gatewayModeProvider
         let eventSink = eventSink
         let tunnelFailureReporter = tunnelFailureReporter
+        let directTunnels = directTunnels
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.tcpNoDelay, value: 1)
@@ -70,7 +74,8 @@ package final class TransparentTCPProxy: @unchecked Sendable {
                         strictModeProvider: strictModeProvider,
                         gatewayModeProvider: gatewayModeProvider,
                         eventSink: eventSink,
-                        tunnelFailureReporter: tunnelFailureReporter
+                        tunnelFailureReporter: tunnelFailureReporter,
+                        directTunnels: directTunnels
                     )
                 )
             }
@@ -113,6 +118,7 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private var accumulated = ByteBuffer()
     private let tunnelFailureReporter: TunnelFailureReporter
+    private let directTunnels: DirectTunnelRegistry?
     private var resolved = false
     private var clientGone = false
 
@@ -125,8 +131,10 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
         strictModeProvider: @escaping @Sendable () -> Bool,
         gatewayModeProvider: @escaping @Sendable () -> Bool,
         eventSink: (@Sendable (RuntimeEvent) -> Void)?,
-        tunnelFailureReporter: TunnelFailureReporter
+        tunnelFailureReporter: TunnelFailureReporter,
+        directTunnels: DirectTunnelRegistry? = nil
     ) {
+        self.directTunnels = directTunnels
         self.connectCoordinator = connectCoordinator
         self.connectionPool = connectionPool
         self.logger = logger
@@ -293,6 +301,7 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                         originChannel.close(mode: .all, promise: nil)
                         return
                     }
+                    self.directTunnels?.register(originChannel, startedCause: startedCause)
                     self.logger.log(
                         .info,
                         "Transparent proxy: direct relay established for \(host).",

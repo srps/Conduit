@@ -29,6 +29,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     /// Shared by every handler of a listener so a storm of identical
     /// connect failures is reported once per interval, not once per request.
     private let connectFailureLog: ConnectFailureLog
+    /// Direct tunnels by the cause they were opened under, so a VPN
+    /// reconnect can retire the off-VPN ones (#148).
+    private let directTunnels: DirectTunnelRegistry?
 
     private let configProvider: () -> ProxyConfig
     private var requestHead: HTTPRequestHead?
@@ -60,10 +63,12 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         onConnectionActivity: @Sendable @escaping (ConnectionActivity) -> Void,
         onRequestCompleted: @Sendable @escaping (RequestOutcome, String?) -> Void,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
-        connectFailureLog: ConnectFailureLog? = nil
+        connectFailureLog: ConnectFailureLog? = nil,
+        directTunnels: DirectTunnelRegistry? = nil
     ) {
         self.pool = pool
         self.connectFailureLog = connectFailureLog ?? ConnectFailureLog(logger: logger, eventSink: eventSink)
+        self.directTunnels = directTunnels
         self.connectCoordinator = connectCoordinator
         self.logger = logger
         self.eventSink = eventSink
@@ -853,7 +858,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let connectFailureLog = self.connectFailureLog
         let onRequestCompleted = self.onRequestCompleted
         let onConnectionClosed = self.onConnectionClosed
-        let directFailureLevel = Self.directFailureLogLevel(for: directModeProvider().1)
+        let startedCause = directModeProvider().1
+        let directFailureLevel = Self.directFailureLogLevel(for: startedCause)
+        let directTunnels = self.directTunnels
 
         directConnectWithFallback(
             host: host,
@@ -875,6 +882,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
+                    directTunnels?.register(upstream, startedCause: startedCause)
                     let relay = HTTPUpgradeResponseRelay(
                         clientChannel: clientChannel,
                         targetDescription: "\(host):\(port)",
@@ -932,7 +940,8 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let port = target.port
         nonisolated(unsafe) let ctx = context
         let clientEL = ctx.eventLoop
-        let directFailureLevel = Self.directFailureLogLevel(for: directModeProvider().1)
+        let startedCause = directModeProvider().1
+        let directFailureLevel = Self.directFailureLogLevel(for: startedCause)
 
         logger.log(.info, "DIRECT CONNECT to \(host):\(port)", category: .proxy)
 
@@ -940,6 +949,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let upstreamChannel):
+                    self.directTunnels?.register(upstreamChannel, startedCause: startedCause)
                     self.attachDirectTunnel(
                         clientContext: ctx,
                         upstreamChannel: upstreamChannel,
