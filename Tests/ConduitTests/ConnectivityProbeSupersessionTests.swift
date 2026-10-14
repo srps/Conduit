@@ -197,7 +197,12 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
     /// PAC refresh is pending: the reconnect must not report `vpn.connected`
     /// over the disconnected state.
     func testAReconnectSupersededDuringItsPACRefreshReportsNoOutcome() async throws {
-        let script = ProbeScript()
+        // Upstreams answer exactly while the VPN is up. The verdict follows
+        // the state, not call order: a health check against the fixture's
+        // dead port may start a recovery ladder whose probe would otherwise
+        // take a verdict queued for the disconnect.
+        let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
+        let probes = NIOLockedValueBox(0)
         let pac = HeldPAC()
         var config = ProxyConfig()
         config.localPort = 0; config.localPACEnabled = false
@@ -205,25 +210,28 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         config.healthCheckIntervalSeconds = 3600
         config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
         let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(),
-                                             authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
-                                             pacEvaluator: pac, connectivityProbe: { await script.probe($0) })
-        _ = script.next(reachable: true)
+            authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+            pacEvaluator: pac, connectivityProbe: { upstreams in
+                probes.withLockedValue { $0 += 1 }
+                let orchestrator = box.withLockedValue { $0 }
+                let up = await MainActor.run { orchestrator.map { $0.snapshot.vpnState == .connected } ?? true }
+                return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
+            })
+        box.withLockedValue { $0 = orchestrator }
         try await orchestrator.startProxy()
-        _ = script.next(reachable: true)
         await orchestrator.handleVPNStateChange(.connected)
-        _ = script.next(reachable: false)
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
 
         pac.holdNextFetch()
-        let reconnectProbe = script.next(reachable: true)
         let reconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.connected) }
-        for _ in 0..<2_000 where !(pac.isParked && script.callCount > reconnectProbe) { try await Task.sleep(for: .milliseconds(1)) }
+        for _ in 0..<2_000 where !pac.isParked { try await Task.sleep(for: .milliseconds(1)) }
         XCTAssertTrue(pac.isParked)
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .none, "the reconnect's probe committed")
         let connectedBefore = details(orchestrator, "vpn.connected").count
 
-        _ = script.next(reachable: false)
+        let probesBefore = probes.withLockedValue { $0 }
         let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .networkLost)) }
-        for _ in 0..<2_000 where script.callCount <= reconnectProbe + 1 { try await Task.sleep(for: .milliseconds(1)) }
+        for _ in 0..<2_000 where probes.withLockedValue({ $0 }) <= probesBefore { try await Task.sleep(for: .milliseconds(1)) }
         pac.release()
         await reconnect.value
         await disconnect.value
