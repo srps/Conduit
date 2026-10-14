@@ -1196,6 +1196,37 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the entry file is back")
     }
 
+    /// A burst of reports from the observer, delivered without waiting for
+    /// each other: every one is stamped on the observer's turn and runs
+    /// through both order gates (the split-DNS gate's and the
+    /// orchestrator's), each keeping its own position, so in-order reports
+    /// are all applied and the last one decides (#155).
+    func testABurstOfVPNReportsEndsOnTheLastOneAndDropsNone() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
+
+        for state: VPNObservedState in [.disconnected(reason: .userInitiated), .connected, .disconnected(reason: .networkLost)] {
+            harness.vpn.emit(state)
+        }
+        await harness.deliveries()
+
+        XCTAssertEqual(appState.runtimeSnapshot.vpnState, .disconnected(reason: .networkLost))
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the gate followed the last report")
+
+        for state: VPNObservedState in [.connected, .disconnected(reason: .userInitiated), .connected] {
+            harness.vpn.emit(state)
+        }
+        await harness.deliveries()
+
+        XCTAssertEqual(appState.runtimeSnapshot.vpnState, .connected)
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the gate followed the last report")
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "vpn.observation_stale" }.count, 0,
+                       "a gate that took a report never makes the orchestrator drop it")
+        XCTAssertTrue(isRunning(appState))
+    }
+
     /// The interface name belongs to the delivery it came with, read on the
     /// observer's turn rather than after the main-actor hop.
     func testVPNInterfaceNameIsTheOneDeliveredWithTheState() async throws {
