@@ -655,16 +655,15 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// Close every upstream channel this listener's pool holds, dedicated
     /// CONNECT tunnels included. Only for a confirmed VPN disconnect that
     /// routes traffic DIRECT: their source address left with the VPN, so
-    /// they cannot resume (#148). Returns how many were closed.
-    package func closeUpstreamChannelsAfterVPNDisconnect() -> Int {
-        pool?.closeAll(scope: .all) ?? 0
+    /// they cannot resume (#148).
+    package func closeUpstreamChannelsAfterVPNDisconnect() -> ConnectionPool.MigrationSweep {
+        pool?.closeConnections(migrating: .all) ?? .init(closed: 0, lateClosed: 0)
     }
 
-    /// Close the upstream channels whose local address is not in `assigned`;
-    /// for a confirmed VPN disconnect that keeps proxy routing (#148).
-    /// Returns how many were closed.
-    package func closeUpstreamChannels(orphanedFrom assigned: Set<String>) -> Int {
-        pool?.closeConnections { LocalAddresses.isOrphaned($0.channel, assigned: assigned) } ?? 0
+    /// Close the upstream channels whose local address is not in `assigned`:
+    /// any confirmed VPN disconnect, before the probe decides routing (#148).
+    package func closeUpstreamChannels(orphanedFrom assigned: Set<String>) -> ConnectionPool.MigrationSweep {
+        pool?.closeConnections(migrating: .orphanedFrom(assigned)) ?? .init(closed: 0, lateClosed: 0)
     }
 
     package func closeStalledConnections() async throws -> Int {
