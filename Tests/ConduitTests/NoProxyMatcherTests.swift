@@ -34,6 +34,16 @@ final class NoProxyMatcherTests: XCTestCase {
         XCTAssertTrue(NoProxyMatcher.shouldBypass(host: "[::1]", patterns: patterns))
     }
 
+    func testDefaultConfigCoversPrivateAndLinkLocalRanges() {
+        let patterns = ProxyConfig().noProxyHosts
+        for host in ["172.16.0.1", "172.20.10.4", "172.31.255.254", "169.254.169.254", "10.1.2.3", "192.168.2.1"] {
+            XCTAssertTrue(NoProxyMatcher.shouldBypass(host: host, patterns: patterns), host)
+        }
+        for host in ["172.15.0.1", "172.32.0.1", "169.255.0.1", "172.160.0.1"] {
+            XCTAssertFalse(NoProxyMatcher.shouldBypass(host: host, patterns: patterns), host)
+        }
+    }
+
     func testNoMatchForExternalHosts() {
         XCTAssertFalse(NoProxyMatcher.shouldBypass(host: "example.com", patterns: patterns))
         XCTAssertFalse(NoProxyMatcher.shouldBypass(host: "github.com", patterns: patterns))
