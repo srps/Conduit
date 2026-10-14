@@ -1085,7 +1085,11 @@ package final class ProxyOrchestrator {
 
     private lazy var localPACServer = LocalPACServer(logger: logStore)
 
-    private lazy var autoRecovery = AutoRecovery(service: localProxyServer, logger: logStore)
+    private lazy var autoRecovery = AutoRecovery(
+        service: localProxyServer,
+        logger: logStore,
+        eventSink: { [eventLog] event in eventLog.append(event) }
+    )
     private var recoveryGate = RecoveryGate()
 
     /// Platform probe that names the process holding a contended listen
@@ -2195,7 +2199,7 @@ package final class ProxyOrchestrator {
 
         Task { @MainActor in
             self.mutateSnapshot { $0.runtimeStatus.state = .recovering }
-            let recovered = await self.autoRecovery.recover()
+            let recovered = await self.autoRecovery.recover(trigger: result.failure)
             self.recoveryGate.end(recovered: recovered)
             if !recovered {
                 let seconds = Int(self.recoveryGate.cooldown)

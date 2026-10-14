@@ -62,6 +62,7 @@ enum PMSim {
               pac-slow-host           slow PAC host: answered from cache, re-evaluated in the background, warning rate-limited
               pac-route-bounds        configurable PAC cap bounds real fallback attempts without promoting DIRECT
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
+              recovery-unreachable-ladder  unreachable upstream: ladder skips re-auth, exhaustion does not blame the password
               websocket-upgrade       101 upgrade relayed, frames flow both ways
               connect-early-direct    CONNECT with early bytes through a direct tunnel
               connect-early-upstream  CONNECT with early bytes through an authenticated upstream
@@ -212,6 +213,7 @@ enum PMSim {
         "pac-slow-host",
         "pac-route-bounds",
         "upstream-flap",
+        "recovery-unreachable-ladder",
         "websocket-upgrade",
         "connect-early-direct",
         "connect-early-upstream",
@@ -310,6 +312,8 @@ enum PMSim {
             return [try await TransparentProxyScenarios.vpnReconnectRouting(verbose: verbose)]
         case "vpn-reconnect-reprobe":
             return [try await ReconnectReprobeScenarios.failedFirstProbe(verbose: verbose)]
+        case "recovery-unreachable-ladder":
+            return [try await RecoveryLadderScenarios.unreachableLadder(verbose: verbose)]
         case "vpn-existing-stream-failure":
             return [try await TunnelFailureScenarios.vpnExistingStreamFailure(verbose: verbose)]
         case "browser-retained-pac":

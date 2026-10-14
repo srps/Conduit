@@ -50,6 +50,77 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(service.recycleListenerCallCount, 1, "Should try all steps including listener recycle")
     }
 
+    /// #147: a connect timeout cannot be fixed by credentials, and exhaustion
+    /// must not blame the password.
+    @MainActor func testUnreachableLadderSkipsReauthenticationAndDoesNotMentionPassword() async {
+        let logger = RecordingLogSink()
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.switchUpstreamShouldSucceed = true
+        service.recycleListenerShouldSucceed = true
+        service.healthResults = Array(repeating: .unhealthy(.unreachable(detail: "Connect timeout (500 ms)"), responseTimeMS: 500), count: 4)
+        let recovery = AutoRecovery(service: service, logger: logger, eventSink: events.record)
+
+        let result = await recovery.recover(trigger: .unreachable(detail: "Connect timeout (500 ms)"))
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.reauthenticateCallCount, 0)
+        XCTAssertEqual(service.closeStalledCallCount, 1)
+        XCTAssertEqual(service.switchUpstreamCallCount, 1)
+        XCTAssertEqual(service.recycleListenerCallCount, 1)
+        XCTAssertEqual(events.names, ["recovery.step_skipped", "recovery.exhausted"])
+        XCTAssertEqual(events.details.first, "step=reauthenticate reason=upstream_unreachable summary=Connect timeout (500 ms)")
+        XCTAssertTrue(events.details.last?.hasPrefix("failure=unreachable ") == true)
+        XCTAssertFalse(logger.entries().contains { $0.message.localizedCaseInsensitiveContains("password") })
+        let exhausted = logger.entries().last { $0.level == .error }
+        XCTAssertEqual(exhausted?.message.contains("no upstream proxy answered"), true)
+    }
+
+    @MainActor func testCredentialFailureRunsReauthenticationAndKeepsPasswordHint() async {
+        let logger = RecordingLogSink()
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.reauthenticateShouldSucceed = true
+        service.healthResults = Array(repeating: .unhealthy(.credentialUnavailable(detail: "407 with no usable credential"), responseTimeMS: 5), count: 4)
+        let recovery = AutoRecovery(service: service, logger: logger, eventSink: events.record)
+
+        let result = await recovery.recover(trigger: .credentialUnavailable(detail: "407 with no usable credential"))
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.reauthenticateCallCount, 1)
+        XCTAssertEqual(events.names, ["recovery.exhausted"])
+        XCTAssertTrue(events.details.last?.hasPrefix("failure=credential_unavailable ") == true)
+        let exhausted = logger.entries().last { $0.level == .error }
+        XCTAssertEqual(exhausted?.message.contains("Your password may have changed"), true)
+    }
+
+    /// A ladder that starts unreachable re-authenticates once a step's
+    /// health check reports something else: the latest failure decides.
+    @MainActor func testReauthenticationRunsWhenLatestFailureIsNoLongerUnreachable() async {
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.reauthenticateShouldSucceed = true
+        service.healthResults = [
+            .unhealthy(.upstreamStatus(code: 502, upstream: "proxy.example.test:8080"), responseTimeMS: 5),
+            .healthy(summary: "healthy after auth reset"),
+        ]
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink())
+
+        let result = await recovery.recover(trigger: .unreachable(detail: "Connect timeout (500 ms)"))
+
+        XCTAssertTrue(result)
+        XCTAssertEqual(service.reauthenticateCallCount, 1)
+    }
+
+    func testExhaustionMessageOnlySuggestsPasswordForCredentialOrUnknownFailures() {
+        XCTAssertFalse(AutoRecovery.exhaustion(for: .unreachable(detail: "timeout")).message.contains("password"))
+        XCTAssertFalse(AutoRecovery.exhaustion(for: .upstreamStatus(code: 503, upstream: "proxy.example.test:8080")).message.contains("password"))
+        XCTAssertTrue(AutoRecovery.exhaustion(for: .credentialUnavailable(detail: "no ticket")).message.contains("password"))
+        XCTAssertEqual(AutoRecovery.exhaustion(for: nil).failure, "unknown")
+    }
+
     @MainActor func testRecoveryReturnsFalseWhenServiceIsNil() async {
         let logger = DiscardingLogSink()
         let recovery = AutoRecovery(service: nil, logger: logger)
@@ -105,6 +176,18 @@ private final class MockRecoverableService: RecoverableProxyService {
 }
 
 private enum TestError: Error { case simulated }
+
+private final class EventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [RuntimeEvent] = []
+
+    var record: @Sendable (RuntimeEvent) -> Void {
+        { [self] event in lock.withLock { events.append(event) } }
+    }
+
+    var names: [String] { lock.withLock { events.map(\.event) } }
+    var details: [String] { lock.withLock { events.compactMap(\.detail) } }
+}
 
 private extension HealthCheckResult {
     static func healthy(summary: String) -> HealthCheckResult {
