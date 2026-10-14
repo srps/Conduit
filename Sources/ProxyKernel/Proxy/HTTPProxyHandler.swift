@@ -861,6 +861,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let startedCause = directModeProvider().1
         let directFailureLevel = Self.directFailureLogLevel(for: startedCause)
         let directTunnels = self.directTunnels
+        let transitionEpoch = directTunnels?.epoch ?? 0
 
         directConnectWithFallback(
             host: host,
@@ -882,7 +883,14 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
-                    directTunnels?.register(upstream, startedCause: startedCause)
+                    if directTunnels?.register(upstream, startedCause: startedCause, epoch: transitionEpoch) == .retired {
+                        logger.log(.info, "Direct upgrade to \(host):\(port): \(DirectTunnelRegistry.retiredMessage)", category: .proxy)
+                        onRequestCompleted(.failed(.local), nil)
+                        body?.cleanup()
+                        self.writeError(status: .badGateway, message: DirectTunnelRegistry.retiredMessage, context: ctx)
+                        onConnectionClosed(infoID)
+                        return
+                    }
                     let relay = HTTPUpgradeResponseRelay(
                         clientChannel: clientChannel,
                         targetDescription: "\(host):\(port)",
@@ -942,6 +950,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         let clientEL = ctx.eventLoop
         let startedCause = directModeProvider().1
         let directFailureLevel = Self.directFailureLogLevel(for: startedCause)
+        let transitionEpoch = directTunnels?.epoch ?? 0
 
         logger.log(.info, "DIRECT CONNECT to \(host):\(port)", category: .proxy)
 
@@ -949,7 +958,13 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let upstreamChannel):
-                    self.directTunnels?.register(upstreamChannel, startedCause: startedCause)
+                    if self.directTunnels?.register(upstreamChannel, startedCause: startedCause, epoch: transitionEpoch) == .retired {
+                        self.logger.log(.info, "Direct tunnel to \(host):\(port): \(DirectTunnelRegistry.retiredMessage)", category: .proxy)
+                        self.onRequestCompleted(.failed(.local), nil)
+                        self.writeError(status: .badGateway, message: DirectTunnelRegistry.retiredMessage, context: ctx)
+                        self.onConnectionClosed(infoID)
+                        return
+                    }
                     self.attachDirectTunnel(
                         clientContext: ctx,
                         upstreamChannel: upstreamChannel,

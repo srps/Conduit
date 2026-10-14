@@ -33,11 +33,20 @@ enum VPNTransitionMigrationScenarios {
         config.healthCheckIntervalSeconds = 3600
         config.upstreams = [UpstreamProxy(name: "migrating", host: "127.0.0.1", port: upstream.port, priority: 0)]
         let reachable = NIOLockedValueBox(true)
+        // What the disconnect's probe saw: the address phase must precede it.
+        let eventLog = NIOLockedValueBox<RuntimeEventLog?>(nil)
+        let migrationsAtProbe = NIOLockedValueBox<[String]?>(nil)
         let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
             connectivityProbe: { targets in
                 let up = reachable.withLockedValue { $0 }
+                if !up, let events = eventLog.withLockedValue({ $0 })?.events {
+                    migrationsAtProbe.withLockedValue {
+                        $0 = events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
+                    }
+                }
                 return UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
             })
+        eventLog.withLockedValue { $0 = orchestrator.eventLog }
         try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
         await orchestrator.handleVPNStateChange(.connected)
         let port = orchestrator.snapshot.bindings.proxyPort!
@@ -78,7 +87,7 @@ enum VPNTransitionMigrationScenarios {
         reachable.withLockedValue { $0 = false }
         await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated))
         let upstreamClosed = try await until(timeout: 1, { viaUpstream.metrics.closedAt != nil })
-        let disconnectEvent = migrations().last
+        let disconnectEvents = migrations().suffix(2).compactMap(\.detail)
         let directKeptOnDisconnect = try await exchanging(directOnVPN)
 
         // Off the VPN, a DIRECT tunnel; the reconnect retires it, not the
@@ -90,7 +99,9 @@ enum VPNTransitionMigrationScenarios {
         let reconnectEvent = migrations().last
         let directKeptOnReconnect = try await exchanging(directOnVPN)
 
-        let disconnectDetail = disconnectEvent?.detail ?? ""
+        let addressesDetail = disconnectEvents.first ?? ""
+        let disconnectDetail = disconnectEvents.last ?? ""
+        let atProbe = migrationsAtProbe.withLockedValue { $0 } ?? []
         // The tunnel plus any pooled connection the health check left idle.
         let upstreamClosedCount = disconnectDetail.split(separator: " ")
             .first { $0.hasPrefix("upstream_closed=") }
@@ -102,14 +113,18 @@ enum VPNTransitionMigrationScenarios {
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
                 .init("a flap keeps both tunnels and migrates nothing", flapKept && flapKeptDirect && flapMigrations == 0),
                 .init("a DIRECT-routing disconnect closes the upstream tunnel within 1 s", upstreamClosed),
-                .init("the disconnect reports one migration covering the upstream tunnel",
-                      disconnectDetail.hasPrefix("transition=disconnected reason=user routing=direct ")
-                          && upstreamClosedCount >= 1 && disconnectDetail.contains(" direct_closed=0 ")),
+                .init("the address phase ran before the probe and kept the loopback DIRECT tunnel",
+                      atProbe.count == 1 && atProbe[0] == addressesDetail
+                          && addressesDetail.hasPrefix("transition=disconnected phase=addresses reason=user ")
+                          && addressesDetail.contains(" direct_closed=0 ")),
+                .init("the routing phase reports the upstream tunnel it closed",
+                      disconnectDetail.hasPrefix("transition=disconnected phase=routing reason=user routing=direct ")
+                          && upstreamClosedCount >= 1),
                 .init("a DIRECT tunnel whose address survived keeps exchanging", directKeptOnDisconnect && directKeptOnReconnect),
                 .init("the reconnect closes the DIRECT tunnel opened off the VPN within 1 s", offVPNClosed),
                 .init("the reconnect reports one DIRECT migration",
-                      reconnectDetail == "transition=reconnected route=direct closed=1 untracked=0"),
-            ], notes: ["disconnect: \(disconnectDetail)", "reconnect: \(reconnectDetail)",
+                      reconnectDetail == "transition=reconnected route=direct closed=1 late_closed=0 untracked=0"),
+            ], notes: ["addresses: \(addressesDetail)", "routing: \(disconnectDetail)", "reconnect: \(reconnectDetail)",
                        "Injected probe outcomes; no real VPN, helper, settings or credentials"])
     }
 }

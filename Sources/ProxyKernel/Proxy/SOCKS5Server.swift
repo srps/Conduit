@@ -467,6 +467,7 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
         let logger = self.logger
         let gatewayMode = self.gatewayMode
         let startedCause = directModeProvider().1
+        let transitionEpoch = directTunnels?.epoch ?? 0
 
         // Same direct-dial policy as `HTTPProxyHandler`: link-local literals
         // get a short budget and a remembered timeout fails the next attempt at once.
@@ -517,7 +518,11 @@ final class SOCKS5Handler: ChannelInboundHandler, @unchecked Sendable {
             .whenComplete { result in
                 switch result {
                 case .success(let upstream):
-                    self.directTunnels?.register(upstream, startedCause: startedCause)
+                    if self.directTunnels?.register(upstream, startedCause: startedCause, epoch: transitionEpoch) == .retired {
+                        logger.log(.info, "SOCKS5: direct connection to \(host):\(port): \(DirectTunnelRegistry.retiredMessage)", category: .proxy)
+                        self.sendReply(context: ctx, rep: 0x05)
+                        return
+                    }
                     self.attachRelay(context: ctx, upstream: upstream, isUpstreamTunnel: false)
                 case .failure(let error):
                     // A blocked rebinding peer is a policy denial (0x02, not

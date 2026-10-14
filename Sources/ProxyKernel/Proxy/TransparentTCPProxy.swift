@@ -286,6 +286,7 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
         let eventLoop = ctx.eventLoop
         let started = DispatchTime.now().uptimeNanoseconds
         let startedCause = directModeProvider()
+        let transitionEpoch = directTunnels?.epoch ?? 0
         originResolver.resolveOrigin(host: host, port: 443, on: eventLoop)
             .flatMap { address in
                 ClientBootstrap(group: eventLoop)
@@ -301,7 +302,11 @@ final class SNIInterceptHandler: ChannelInboundHandler, RemovableChannelHandler,
                         originChannel.close(mode: .all, promise: nil)
                         return
                     }
-                    self.directTunnels?.register(originChannel, startedCause: startedCause)
+                    if self.directTunnels?.register(originChannel, startedCause: startedCause, epoch: transitionEpoch) == .retired {
+                        self.logger.log(.info, "Transparent proxy: direct relay for \(host): \(DirectTunnelRegistry.retiredMessage)", category: .proxy)
+                        ctx.close(promise: nil)
+                        return
+                    }
                     self.logger.log(
                         .info,
                         "Transparent proxy: direct relay established for \(host).",

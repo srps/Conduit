@@ -20,23 +20,35 @@ user-initiated disconnect, and DIRECT tunnels opened off the VPN dying a minute
 after it came back). The owner's call: when the VPN is disconnected or connected,
 connections must migrate and work as soon as possible.
 
-- **Confirmed disconnect** (`.disconnected(_)`, after the probe settles the
-  cause): routing DIRECT closes every upstream channel, both the listener's pool
-  and the tunnel pool, dedicated tunnels included; the proxies are behind the
-  VPN and the channels left with its address. Routing via a still-reachable
-  upstream (on-prem) closes only channels whose local address is no longer
-  assigned. DIRECT tunnels whose local address is gone close too.
+- **Confirmed disconnect** (`.disconnected(_)`), in two phases:
+  - `phase=addresses`, before the first await: every upstream channel (the
+    listener's pool and the tunnel pool, dedicated tunnels included) and every
+    DIRECT tunnel whose local address is no longer assigned closes. Those are
+    dead whatever the probe decides, and the probe can take its whole connect
+    budget (3 s) when the upstreams are gone.
+  - `phase=routing`, once the probe settles the cause: routing DIRECT closes
+    every remaining upstream channel, since the proxies are behind the VPN.
+    Routing via a still-reachable upstream (on-prem) keeps them.
 - **Reconnect after a disconnect**: before the first await, alongside the
   routing revocation, close the DIRECT tunnels opened while the VPN was down
   (`DirectTunnelRegistry`, keyed by the cause at dial time). Tunnels PAC or
   no-proxy sent DIRECT while connected stay.
 - **Flap** (`.reasserting` → `.connected`): unchanged, nothing closes.
 
-Each decision emits one `vpn.tunnels_migrated` event and the log line derives
-from it. An orderly close produces no per-tunnel `tunnel.relay_failed` lines.
-The registry is bounded by `inboundConnectionMaxLimit`; a tunnel that finds it
-full is counted as `untracked` in the next event instead of being dropped
-silently.
+Each phase or reconnect emits one `vpn.tunnels_migrated` event and the log line
+derives from it. An orderly close produces no per-tunnel `tunnel.relay_failed`
+lines. The registry is bounded by `inboundConnectionMaxLimit`; a tunnel that
+finds it full is counted as `untracked` in the next event instead of being
+dropped silently.
+
+A dial outlives the moment its cause is read. Each dial captures the registry's
+transition epoch before it starts, and every sweep advances the epoch under the
+registry lock. A tunnel that registers after a sweep it would have matched
+(dialed under the swept cause, or now on an address the sweep found gone) is
+closed at registration rather than escaping the sweep; the client gets a 502,
+a SOCKS failure or an EOF, and the next event counts it as `late_closed`. The
+registry remembers the last 8 sweeps; a dial older than all of them is retired
+too.
 
 Not changed: during the grace window new CONNECTs still go to the upstream
 even if its name no longer resolves. Routing DIRECT there would bypass upstream

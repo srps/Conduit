@@ -77,8 +77,8 @@ enum ReconnectReprobeScenarios {
             minBytes: metrics.bytesReceived, maxBytes: metrics.bytesReceived, medianBytes: metrics.bytesReceived,
             earliestClose: nil, latestClose: nil, assertions: [
                 .init("a DIRECT-routing disconnect closes the upstream tunnel with one migration event",
-                      migratedOnDisconnect && migration?.detail?.contains("routing=direct upstream_closed=") == true
-                          && migration?.detail?.contains("upstream_closed=0 ") == false),
+                      migratedOnDisconnect && migration?.detail?.contains("phase=routing reason=user routing=direct upstream_closed=") == true
+                          && migration?.detail?.hasSuffix(" upstream_closed=0") == false),
                 .init("failed first probe degrades health without allowing strict DIRECT", degraded == .upstreamsUnreachable && !degraded.routesClientTrafficDirectly),
                 .init("production retry restores reachable state without another VPN report", recovered && retried && sameVPNReport),
                 .init("a CONNECT opened on the reconnected VPN keeps exchanging bytes on the same listener", metrics.closedAt == nil && metrics.bytesReceived > before && orchestrator.snapshot.bindings.proxyPort == port),
