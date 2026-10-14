@@ -38,16 +38,35 @@ enum RecoveryStep: String, CaseIterable, Identifiable {
 package final class AutoRecovery: @unchecked Sendable {
     weak var service: RecoverableProxyService?
     private let logger: any LogSink
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
 
-    package init(service: RecoverableProxyService?, logger: any LogSink) {
+    package init(
+        service: RecoverableProxyService?,
+        logger: any LogSink,
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+    ) {
         self.service = service
         self.logger = logger
+        self.eventSink = eventSink
     }
 
-    package func recover() async -> Bool {
+    /// Runs the ladder until a step's health check passes.
+    ///
+    /// `trigger` is the failure that started the ladder; each step's failed
+    /// health check replaces it. While the latest failure is `.unreachable`,
+    /// re-authenticating cannot help (no upstream answered to challenge), so
+    /// that step is skipped. The exhaustion line names the last failure
+    /// rather than always suggesting a changed password (#147).
+    package func recover(trigger: HealthCheckFailure? = nil) async -> Bool {
         guard let service else { return false }
+        var latestFailure = trigger
 
         for step in RecoveryStep.allCases {
+            if step == .reauthenticate, case .unreachable(let detail) = latestFailure {
+                emit("recovery.step_skipped", detail: "step=\(step.rawValue) reason=upstream_unreachable summary=\(detail)")
+                logger.log(.notice, "Recovery step skipped: \(step.description) (no upstream answered: \(detail)).", category: .network)
+                continue
+            }
             do {
                 let detail: String?
                 switch step {
@@ -72,6 +91,7 @@ package final class AutoRecovery: @unchecked Sendable {
                     logger.log(.notice, "Recovery step succeeded: \(step.description)\(suffix).", category: .network)
                     return true
                 }
+                if let failure = health.failure { latestFailure = failure }
                 let suffix = detail.map { " \($0);" } ?? ""
                 logger.log(.warning, "Recovery step completed but health check still failing: \(step.description).\(suffix) \(health.summary)", category: .network)
             } catch {
@@ -79,8 +99,34 @@ package final class AutoRecovery: @unchecked Sendable {
             }
         }
 
-        logger.log(.error, "Automatic recovery exhausted all steps. If authentication was rejected, your password may have changed — re-enter it in Settings.", category: .network)
+        let exhausted = Self.exhaustion(for: latestFailure)
+        emit("recovery.exhausted", detail: "failure=\(exhausted.failure) summary=\(latestFailure?.summary ?? "unknown")")
+        logger.log(.error, exhausted.message, category: .network)
         return false
+    }
+
+    /// The exhaustion event's `failure=` value and the log line derived from
+    /// it. Only a credential failure points at the password; an unclassified
+    /// failure keeps the conditional hint.
+    static func exhaustion(for failure: HealthCheckFailure?) -> (failure: String, message: String) {
+        switch failure {
+        case .credentialUnavailable:
+            return ("credential_unavailable",
+                    "Automatic recovery exhausted all steps: the upstream rejected authentication. Your password may have changed — re-enter it in Settings.")
+        case .unreachable(let detail):
+            return ("unreachable",
+                    "Automatic recovery exhausted all steps: no upstream proxy answered (\(detail)). Health checks continue and routing resumes when an upstream is reachable.")
+        case .upstreamStatus(let code, let upstream):
+            return ("upstream_status",
+                    "Automatic recovery exhausted all steps: the upstream answered HTTP \(code) via \(upstream).")
+        case nil:
+            return ("unknown",
+                    "Automatic recovery exhausted all steps. If authentication was rejected, your password may have changed — re-enter it in Settings.")
+        }
+    }
+
+    private func emit(_ event: String, detail: String) {
+        eventSink?(RuntimeEvent(kind: .health, event: event, detail: detail))
     }
 }
 
