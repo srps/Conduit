@@ -56,6 +56,7 @@ enum PMSim {
               transparent-direct      intercepted SNI client relays direct on VPN-down, upstream otherwise
               vpn-reconnect-routing   intercepted client uses upstream while reconnect probe is held
               vpn-reconnect-reprobe   disconnect migrates the upstream tunnel; failed first reconnect probe retries and keeps new tunnels
+              vpn-probe-superseded    a disconnect probe still pending at reconnect never turns routing DIRECT or sweeps
               vpn-transition-migration  confirmed disconnect/reconnect closes stranded tunnels at once; a flap keeps them
               vpn-existing-stream-failure  retired-address write and read errors close broken tunnels promptly
               browser-retained-pac    browser keeps one PAC across VPN cycle; fresh requests recover
@@ -210,6 +211,7 @@ enum PMSim {
         "transparent-direct",
         "vpn-reconnect-routing",
         "vpn-reconnect-reprobe",
+        "vpn-probe-superseded",
         "vpn-transition-migration",
         "vpn-existing-stream-failure",
         "browser-retained-pac",
@@ -322,6 +324,8 @@ enum PMSim {
             return [try await TransparentProxyScenarios.vpnReconnectRouting(verbose: verbose)]
         case "vpn-reconnect-reprobe":
             return [try await ReconnectReprobeScenarios.failedFirstProbe(verbose: verbose)]
+        case "vpn-probe-superseded":
+            return [try await ProbeSupersessionScenarios.staleDisconnectProbe(verbose: verbose)]
         case "recovery-unreachable-ladder":
             return [try await RecoveryLadderScenarios.unreachableLadder(verbose: verbose)]
         case "vpn-transition-migration":
