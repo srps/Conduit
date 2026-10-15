@@ -53,22 +53,15 @@ package enum NTLMAuth {
     /// from the moment it's computed. Previously returned raw `Data`;
     /// the raw-bytes form would travel briefly through AppState before
     /// being persisted, bypassing SecretBytes's print/Mirror/Codable
-    /// defenses. The MD4 digest is computed into a local `Data` buffer
-    /// (CommonCrypto needs a writable raw pointer) and immediately
-    /// wrapped — the intermediate `Data` is released by ARC at the end
+    /// defenses. The MD4 digest is computed into a local buffer and
+    /// immediately wrapped — the intermediate is released by ARC at the end
     /// of this function and is not accessible to callers.
     package static func ntHash(for password: String) throws -> SecretBytes {
-        let unicode = Data(password.utf16LE)
-        var digest = Data(count: Int(CC_MD4_DIGEST_LENGTH))
-        let status = digest.withUnsafeMutableBytes { digestBytes in
-            unicode.withUnsafeBytes { unicodeBytes in
-                CC_MD4(unicodeBytes.baseAddress, CC_LONG(unicode.count), digestBytes.bindMemory(to: UInt8.self).baseAddress)
-            }
-        }
-        guard status != nil else {
+        let digest = MD4.digest(password.utf16LE)
+        guard digest.count == MD4.digestLength else {
             throw NTLMAuthError.cryptoFailure
         }
-        return SecretBytes(digest)
+        return SecretBytes(Data(digest))
     }
 
     /// Type 1 (Negotiate) message per MS-NLMP with CNTLM-compatible layout:
