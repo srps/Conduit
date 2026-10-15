@@ -143,20 +143,21 @@ final class DirectConnectDetectorTests: XCTestCase {
     }
 
     @MainActor
-    func testProbesCappedAtMaxConcurrent() async {
+    func testProbesCappedAtMaxConcurrent() async throws {
         let detector = DirectConnectDetector(
             group: MultiThreadedEventLoopGroup.singleton,
             logger: DiscardingLogSink(),
             ttlSeconds: 60,
-            baseTimeoutMS: 2000,
+            // Admission is decided synchronously in `probeInBackground`, so the
+            // cap holds whatever the timeout; a short one only drains sooner.
+            baseTimeoutMS: 200,
             maxConcurrentProbes: 2
         )
 
         for port in 1...5 {
             detector.probeInBackground(host: "192.0.2.1", port: port, gatewayMode: false)
+            XCTAssertLessThanOrEqual(detector.pendingProbeCount, 2, "probe \(port) ran past maxConcurrentProbes")
         }
-
-        try? await Task.sleep(for: .milliseconds(100))
 
         var cachedCount = 0
         for port in 1...5 {
@@ -167,7 +168,11 @@ final class DirectConnectDetectorTests: XCTestCase {
         XCTAssertLessThanOrEqual(cachedCount, 2,
                                   "At most 2 probes should have started (maxConcurrentProbes=2), found \(cachedCount) cached")
 
-        try? await Task.sleep(for: .milliseconds(2500))
+        // Let the admitted probes finish before clearing. Counts, not time.
+        for _ in 0..<500 where detector.pendingProbeCount > 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(detector.pendingProbeCount, 0, "the admitted probes never finished")
         detector.clearCache()
     }
 
