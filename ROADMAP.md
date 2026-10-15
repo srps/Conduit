@@ -1,7 +1,7 @@
 # Conduit Roadmap
 
 The execution queue and sole tracker of product-work status. Reviewed against the
-checkout and open issues on 2026-10-13. Conduit remains a macOS-native Swift corporate proxy manager;
+checkout and open issues on 2026-10-15. Conduit remains a macOS-native Swift corporate proxy manager;
 no rewrite or cross-platform port is planned.
 
 Implementation rationale, dependencies, and acceptance criteria live in
@@ -17,19 +17,24 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
-## Immediate cleanup priorities (2026-10-13)
+## Immediate cleanup priorities (2026-10-15)
 
-In 0.5.5, awaiting install: the post-reconnect monitoring fix (#140), the
-compiler-backed kernel import/Process fence (#77), the configurable usable PAC
-route bound (#93) and #118 track B's deterministic `pac-slow-host` (all #141).
+In 0.5.6, awaiting install: path-based VPN transition migration (#153, #157,
+#162), the 0.5.5 log-review fixes (#150–#152, #154), the prewarm selection fix
+(#164) and the faster test suite (#166–#168). The path migration was validated
+on the owner's full-tunnel VPN with a pre-release build.
 
-1. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
+1. **Split-DNS repair after a helper outage ([#165](https://github.com/srps/Conduit/issues/165))
+   [Rel, Sec, Sim]** — a failed entry-file apply or removal is not retried
+   when the helper becomes available. A removal that failed while the VPN is
+   down is the bootstrap deadlock `SplitDNSVPNGate` exists to prevent.
+2. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
    — separate identity/name, automatic fake-machine mode, scratch state and
    ad-hoc signing. Reject installation and never share the production path.
    This now has a practical trigger: tandem testing selected a personal signing
    identity and generated repeated prompts, and duplicate bundle IDs made status
    inspection ambiguous. No private-key ACL change is needed.
-2. **Sanitizer continuation race ([#118](https://github.com/srps/Conduit/issues/118))
+3. **Sanitizer continuation race ([#118](https://github.com/srps/Conduit/issues/118))
    [Rel, Sim]** — track A remains open; track B shipped in 0.5.5. No
    continuation race fix or new suppression is claimed.
 
@@ -47,8 +52,10 @@ to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
 
 ## Proposed release scope
 
-**0.5.5 — reconnect recovery and bounded maintenance.** Contents are listed
-above and in [`CHANGELOG.md`](./CHANGELOG.md); app-only update from 0.5.4.
+**0.5.6 — VPN transition migration and log-review fixes.** Contents are listed
+above and in [`CHANGELOG.md`](./CHANGELOG.md); app-only update from 0.5.5.
+Follow-ups: #163 (move the registration path check off the event loop) and
+#165.
 
 **Following 0.5.x patches — runtime isolation.** #31 and #81 are patch candidates
 when delivered as focused ownership/correctness changes. For #31, pin restart and

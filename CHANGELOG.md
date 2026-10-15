@@ -4,6 +4,62 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## 0.5.6
+
+VPN transitions no longer leave dead connections behind (#153, #157, #162),
+plus the fixes from the 0.5.5 log review (#150–#152, #154) and a faster,
+steadier test suite (#166–#168). App-only update
+from 0.5.5; helper v5 is unchanged and needs no reinstall.
+
+### Fixed
+
+- A confirmed VPN disconnect, reconnect or tunnel change now closes the
+  connections it stranded at once, so clients reconnect along the new routing
+  instead of waiting a minute or more for TCP to give up. A connection counts as
+  stranded when its local address is gone or the kernel would now reach its peer
+  through another interface; the check reads the kernel's routing without
+  sending a packet. Sweeps run at once and again 2 s and 10 s later as routes
+  settle, and a dial that completes over a removed path is closed on arrival
+  (`connection.late_dial_retired`). A disconnect whose probe routes DIRECT still
+  closes every upstream connection. Flaps keep every stream: sweeps wait out the
+  flap, and its recovery closes only connections whose address did not come back.
+  A split-tunnel reconnect keeps DIRECT connections that still go out over
+  Wi-Fi. Each pass emits `vpn.tunnels_migrated` with counts.
+- A connectivity probe, health check or recovery step that finishes after the
+  VPN changed state no longer commits its stale verdict
+  (`connectivity.probe_superseded`, `health.result_superseded`,
+  `recovery.abandoned`), and a VPN report delivered out of order is dropped
+  (`vpn.observation_stale`).
+- A dial that completes after its connection pool was released is closed
+  instead of leaking (#159), and a DIRECT HTTP request a sweep cut off is no
+  longer counted as an origin failure (#161).
+- The recovery ladder skips re-authentication while the upstreams are
+  unreachable and names the real failure when it runs out of steps
+  (`recovery.step_skipped`, `recovery.exhausted`) instead of suggesting the
+  password changed (#152).
+- A failed upstream exchange is reported once, naming its target and upstream
+  (#151).
+- `platform.location_restore` and related events keep location and service IDs
+  readable instead of masking them as a token (#150).
+- Startup prewarm no longer changes the active upstream: every upstream is
+  prewarmed at once, and whichever dial landed last used to become the upstream
+  the menu showed and failover started from (#164).
+
+### Changed
+
+- Expected failures log below error: a client-side reset or broken pipe on a
+  tunnel logs at INFO, and a DIRECT connect to a name that does not exist, an
+  `.invalid` host or a refused loopback port logs at WARNING without a
+  `direct.connect_failed` event. The no-proxy defaults now include `169.254.*`
+  and `172.16.*`–`172.31.*`; saved configs are not migrated (#154).
+- NTLM computes its MD4 digest in Swift instead of CommonCrypto's deprecated
+  `CC_MD4`, and the build is free of Swift 6.4 warnings (#166).
+- The test suite runs in about 32 s instead of 207 s, and no test takes half a
+  second (#167, #168). Timeouts and grace periods the tests waited out are
+  injectable, with production defaults unchanged; host harnesses and the
+  `--dev` instance no longer probe the machine's port 53; fixed sleeps became
+  bounded waits on conditions, and several tests now check more than before.
+
 ## 0.5.5
 
 VPN reconnect monitoring recovery (#140) and bounded PAC fallback chains
