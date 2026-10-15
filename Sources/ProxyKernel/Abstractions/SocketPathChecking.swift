@@ -21,6 +21,9 @@ package enum SocketPathVerdict: Equatable, Sendable {
     case stranded(String)
     /// The check itself failed; the socket is left alone.
     case unknown(String)
+
+    /// The label of a socket whose local address is no longer assigned.
+    package static let addressGone = "address_gone"
 }
 
 /// Answers, without sending a packet, whether each socket's local address is

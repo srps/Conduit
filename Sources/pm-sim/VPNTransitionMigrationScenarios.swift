@@ -23,10 +23,15 @@ enum VPNTransitionMigrationScenarios {
         return condition()
     }
 
-    /// Paths judged by peer port: a port in `gone` has lost its path.
-    private static func paths(_ gone: NIOLockedValueBox<Set<Int>>) -> ClosureSocketPaths {
+    /// Paths judged by peer port: a port in `gone` has lost its path (its
+    /// route moved), one in `goneAddress` its local address.
+    private static func paths(
+        _ gone: NIOLockedValueBox<Set<Int>>, goneAddress: NIOLockedValueBox<Set<Int>> = NIOLockedValueBox([])
+    ) -> ClosureSocketPaths {
         ClosureSocketPaths { query in
-            gone.withLockedValue { $0.contains(query.remote.port ?? -1) } ? .stranded("address_gone") : .current
+            let port = query.remote.port ?? -1
+            if goneAddress.withLockedValue({ $0.contains(port) }) { return .stranded(SocketPathVerdict.addressGone) }
+            return gone.withLockedValue { $0.contains(port) } ? .stranded("interface_changed") : .current
         }
     }
 
@@ -45,13 +50,13 @@ enum VPNTransitionMigrationScenarios {
         config.healthCheckIntervalSeconds = 3600
         config.upstreams = [UpstreamProxy(name: "migrating", host: "127.0.0.1", port: upstream.port, priority: 0)]
         let reachable = NIOLockedValueBox(true)
-        let gone = NIOLockedValueBox<Set<Int>>([])
+        let gone = NIOLockedValueBox<Set<Int>>([]), goneAddress = NIOLockedValueBox<Set<Int>>([])
         let orchestrator = ProxyOrchestrator(config: config, logger: logger, authenticatorProvider: { _ in MockAuthenticator() },
             connectivityProbe: { targets in
                 let up = reachable.withLockedValue { $0 }
                 return UpstreamProbeSummary(results: targets.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: up) })
             },
-            socketPaths: paths(gone), strandedResweepDelays: [.milliseconds(200)])
+            socketPaths: paths(gone, goneAddress: goneAddress), strandedResweepDelays: [.milliseconds(200)])
         try await orchestrator.startProxy(); ScenarioCleanup.register { await orchestrator.stopProxy() }
         await orchestrator.handleVPNStateChange(.connected)
         let port = orchestrator.snapshot.bindings.proxyPort!
@@ -91,6 +96,16 @@ enum VPNTransitionMigrationScenarios {
         let afterFlap = migrations()
         let flapClosed = afterFlap.filter { !$0.contains("upstream_closed=0") || !$0.contains("direct_closed=0") }
 
+        // A flap that ends with the tunnel back on another address: the
+        // recovery closes the socket whose address went, after a short wait.
+        let onOldAddress = try await tunnel(5, "127.0.0.1:\(offOrigin.port)")
+        await orchestrator.handleVPNStateChange(.reasserting)
+        goneAddress.withLockedValue { _ = $0.insert(offOrigin.port) }
+        await orchestrator.handleVPNStateChange(.connected)
+        let oldAddressClosed = try await until(timeout: 2, { onOldAddress.metrics.closedAt != nil })
+        let flapRecoverySweep = migrations().last { $0.hasPrefix("transition=flap_recovered phase=addresses ") } ?? ""
+        goneAddress.withLockedValue { $0 = [] }
+
         // A confirmed disconnect takes the VPN address the upstream tunnel
         // used; the DIRECT one's path survives.
         reachable.withLockedValue { $0 = false }
@@ -125,13 +140,15 @@ enum VPNTransitionMigrationScenarios {
         let directKeptOnPrem = try await exchanging(directOnVPN)
 
         let routingDetail = migrations().first { $0.contains("phase=routing reason=user") } ?? ""
-        let clients = [viaUpstream, directOnVPN, directOffVPN, onPremUpstream, directOnPrem]
+        let clients = [viaUpstream, directOnVPN, onOldAddress, directOffVPN, onPremUpstream, directOnPrem]
         return ScenarioResult(name: "vpn-transition-migration", clientCount: clients.count, clientsOpened: clients.count,
             clientsWithFirstByte: clients.count, clientsClosedEarly: clients.filter { $0.metrics.closedAt != nil }.count,
             totalBytes: directOnVPN.metrics.bytesReceived, durationSeconds: Date().timeIntervalSince(started), aggregateMBps: 0,
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
                 .init("a flap keeps both tunnels and closes nothing, even with a path missing mid-flap",
                       flapKept && flapKeptDirect && flapClosed.isEmpty),
+                .init("a flap recovery closes the tunnel whose address went, after its wait",
+                      oldAddressClosed && flapRecoverySweep.contains(" direct_closed=1 ")),
                 .init("a disconnect closes the upstream tunnel whose path it removed within 1 s", upstreamClosed),
                 .init("the disconnect's path sweep reports it",
                       disconnectSweep.contains(" upstream_closed=") && !disconnectSweep.contains(" upstream_closed=0 ")),
@@ -144,7 +161,7 @@ enum VPNTransitionMigrationScenarios {
                       onPremCause == .none && onPremKept),
                 .init("on-prem, the reconnect closes the DIRECT tunnel whose route moved within 1 s", onPremClosed),
                 .init("the on-VPN DIRECT tunnel survives the on-prem round too", directKeptOnPrem),
-            ], notes: ["disconnect: \(disconnectSweep)", "routing: \(routingDetail)", "reconnect: \(reconnectSweep)",
+            ], notes: ["flap recovery: \(flapRecoverySweep)", "disconnect: \(disconnectSweep)", "routing: \(routingDetail)", "reconnect: \(reconnectSweep)",
                        "Injected probe outcomes and paths; no real VPN, helper, settings or credentials"])
     }
 
@@ -277,7 +294,7 @@ enum VPNTransitionMigrationScenarios {
             minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil, assertions: [
                 .init("the client gets a 502 within 1 s", answer.hasPrefix("HTTP/1.1 502") && answeredWithin < .seconds(1)),
                 .init("the retirement is reported with its path", retired.count == 1
-                      && retired[0].contains("reason=\(LateDialRetired.pathGone("address_gone"))")),
+                      && retired[0].contains("reason=\(LateDialRetired.pathGone("interface_changed"))")),
                 .init("no other upstream is tried", accepted.withLockedValue { $0 } - before == 1),
                 .init("no upstream failure is reported", failures.isEmpty),
             ], notes: ["answer: \(answer.split(separator: "\r\n").first ?? "")", "retired: \(retired)",

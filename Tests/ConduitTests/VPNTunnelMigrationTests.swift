@@ -14,13 +14,18 @@ final class VPNTunnelMigrationTests: XCTestCase {
         events.filter { $0.event == "vpn.tunnels_migrated" }.compactMap(\.detail)
     }
 
-    /// Local addresses whose path is gone; every other socket is current.
+    /// Local addresses that are gone, and those whose peer the kernel now
+    /// reaches through another interface; every other socket is current.
     private let gone = NIOLockedValueBox<Set<String>>([])
+    private let moved = NIOLockedValueBox<Set<String>>([])
 
     private var paths: ClosureSocketPaths {
-        let gone = self.gone
+        let gone = self.gone, moved = self.moved
         return ClosureSocketPaths { query in
-            gone.withLockedValue { $0.contains(query.local.ipAddress ?? "") } ? .stranded("address_gone") : .current
+            let local = query.local.ipAddress ?? ""
+            if gone.withLockedValue({ $0.contains(local) }) { return .stranded(SocketPathVerdict.addressGone) }
+            if moved.withLockedValue({ $0.contains(local) }) { return .stranded("interface_changed") }
+            return .current
         }
     }
 
@@ -139,18 +144,31 @@ final class VPNTunnelMigrationTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
-    /// A flap with no owed sweeps closes nothing, whatever the paths say.
-    func testAFlapAloneSweepsNothing() async throws {
-        let orchestrator = orchestrator(resweeps: [.milliseconds(20)])
+    /// A flap with no owed sweeps closes nothing while it lasts. Its recovery
+    /// closes, after the first re-sweep delay, only sockets whose address is
+    /// gone (the tunnel came back on another address): a route that moved is
+    /// not judged after a flap.
+    func testAFlapRecoveryClosesOnlySocketsWhoseAddressIsGone() async throws {
+        let orchestrator = orchestrator(resweeps: [.milliseconds(100)])
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
-        try await Task.sleep(for: .milliseconds(100))
-        let onVPN = try await tracked(orchestrator, local: "10.20.30.40")
+        try await Task.sleep(for: .milliseconds(200))
+        let oldAddress = try await tracked(orchestrator, local: "10.20.30.40")
+        let routeMoved = try await tracked(orchestrator, local: "10.20.30.41")
         await orchestrator.handleVPNStateChange(.reasserting)
         gone.withLockedValue { _ = $0.insert("10.20.30.40") }
-        await orchestrator.handleVPNStateChange(.connected)
+        moved.withLockedValue { _ = $0.insert("10.20.30.41") }
         try await Task.sleep(for: .milliseconds(200))
-        XCTAssertTrue(onVPN.isActive)
+        XCTAssertTrue(oldAddress.isActive, "nothing is swept during the flap")
+
+        await orchestrator.handleVPNStateChange(.connected)
+        XCTAssertTrue(oldAddress.isActive, "the recovery waits before judging addresses")
+        let closed = try await until { !oldAddress.isActive }
+        XCTAssertTrue(closed)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(routeMoved.isActive)
+        XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
+                       "transition=flap_recovered phase=addresses pass=1 upstream_closed=0 direct_closed=1 unchecked=0")
         await orchestrator.stopProxy()
     }
 

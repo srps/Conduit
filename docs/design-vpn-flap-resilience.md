@@ -59,7 +59,11 @@ on the same interface.
   superseded sweeps nothing (`skipped=superseded`).
 - **Flap** (`.reasserting`): nothing is swept, and pending re-sweeps wait: a
   route missing mid-flap is not a gone path. The recovery runs the re-sweeps
-  the last confirmed transition still owed.
+  the last confirmed transition still owed; with none owed, it runs one pass,
+  after the first re-sweep delay, that closes only sockets whose local address
+  is gone (the tunnel came back on another address). A missing address after
+  recovery does not come back; the delay lets IPv6 addresses return after the
+  IPv4 one the recovery was declared on. Routes are not judged after a flap.
 - **Listener stopped** (a config restart in flight): the restart preserves
   dedicated and DIRECT tunnels, so the path sweeps still run; the routing
   phase runs once the start probe commits a verdict.

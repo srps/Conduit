@@ -160,10 +160,11 @@ package final class OutboundSocketRegistry: @unchecked Sendable {
 
     package var count: Int { lock.withLock { entries.count } }
 
-    /// Close every tracked socket whose path is gone. Checks every socket
-    /// against the machine, so callers run it off the main actor and the
-    /// event loops.
-    package func closeStranded() -> Sweep {
+    /// Close every tracked socket whose path is gone, or with
+    /// `addressesOnly` only those whose local address is gone. Checks every
+    /// socket against the machine, so callers run it off the main actor and
+    /// the event loops.
+    package func closeStranded(addressesOnly: Bool = false) -> Sweep {
         let tracked = lock.withLock { entries.map { (key: $0.key, entry: $0.value) } }
         var checked: [(key: ObjectIdentifier, entry: Entry)] = []
         var queries: [SocketPathQuery] = []
@@ -178,7 +179,8 @@ package final class OutboundSocketRegistry: @unchecked Sendable {
         for (item, verdict) in zip(checked, paths.verdicts(for: queries)) {
             switch verdict {
             case .current: break
-            case .stranded: stranded.append(item)
+            case .stranded(let label):
+                if !addressesOnly || label == SocketPathVerdict.addressGone { stranded.append(item) }
             case .unknown: result.unknown += 1
             }
         }

@@ -2133,14 +2133,25 @@ package final class ProxyOrchestrator {
     }
 
     /// A flap recovered: the transition before it still owes its re-sweeps.
+    /// Otherwise one pass closes the sockets whose local address is gone (a
+    /// tunnel back on another address): a missing address after recovery,
+    /// unlike a missing route mid-flap, does not come back. It waits the
+    /// first re-sweep delay, since IPv6 addresses can return after the IPv4
+    /// one the recovery was declared on.
     private func resumeStrandedSweeps() {
-        guard let transition = strandedSweepsOwed else { return }
-        runStrandedSweeps(transition: transition, immediately: false)
+        if let transition = strandedSweepsOwed {
+            runStrandedSweeps(transition: transition, immediately: false)
+        } else {
+            runStrandedSweeps(transition: "flap_recovered", immediately: false, addressesOnly: true,
+                              delays: Array(strandedResweepDelays.prefix(1)))
+        }
     }
 
-    private func runStrandedSweeps(transition: String, immediately: Bool) {
+    private func runStrandedSweeps(
+        transition: String, immediately: Bool, addressesOnly: Bool = false, delays resweeps: [Duration]? = nil
+    ) {
         strandedSweeps?.cancel()
-        let delays = (immediately ? [Duration.zero] : []) + strandedResweepDelays
+        let delays = (immediately ? [Duration.zero] : []) + (resweeps ?? strandedResweepDelays)
         strandedSweeps = Task { @MainActor [weak self] in
             var waited = Duration.zero
             for (pass, delay) in delays.enumerated() {
@@ -2154,21 +2165,23 @@ package final class ProxyOrchestrator {
                     waited = delay
                 }
                 guard let self, !Task.isCancelled else { return }
-                await self.sweepStrandedSockets(transition: transition, pass: immediately ? pass : pass + 1)
+                await self.sweepStrandedSockets(
+                    transition: transition, pass: immediately ? pass : pass + 1, addressesOnly: addressesOnly
+                )
             }
             guard let self, !Task.isCancelled else { return }
             self.strandedSweepsOwed = nil
         }
     }
 
-    private func sweepStrandedSockets(transition: String, pass: Int) async {
+    private func sweepStrandedSockets(transition: String, pass: Int, addressesOnly: Bool) async {
         let sockets = self.sockets
         // Off the main actor: it checks every tracked socket's path.
-        let swept = await Task.detached { sockets.closeStranded() }.value
+        let swept = await Task.detached { sockets.closeStranded(addressesOnly: addressesOnly) }.value
         guard pass == 0 || swept != OutboundSocketRegistry.Sweep() else { return }
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
-            detail: "transition=\(transition) phase=paths pass=\(pass) upstream_closed=\(swept.upstream) direct_closed=\(swept.direct) unchecked=\(swept.unknown)"
+            detail: "transition=\(transition) phase=\(addressesOnly ? "addresses" : "paths") pass=\(pass) upstream_closed=\(swept.upstream) direct_closed=\(swept.direct) unchecked=\(swept.unknown)"
         )
         eventLog.append(event)
         // A socket the check could not judge is left to its timeouts.

@@ -30,7 +30,7 @@ package struct SystemSocketPaths: SocketPathChecking {
             guard let local = query.local.ipAddress, let peer = query.remote.ipAddress else {
                 return .unknown("no_address")
             }
-            guard let localInterface = interfaces[local] else { return .stranded("address_gone") }
+            guard let localInterface = interfaces[local] else { return .stranded(SocketPathVerdict.addressGone) }
             let route: Route
             if let cached = routes[peer] {
                 route = cached
