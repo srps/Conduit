@@ -126,13 +126,15 @@ final class SnapshotCoalescingTests: XCTestCase {
         }
         let initial = counter.withLockedValue { $0 }
 
-        // Window 1: trigger coalesced emit, wait past the window.
+        // Window 1: trigger coalesced emit, wait for its emission.
         orchestrator.triggerCoalescedSnapshotEmitForTesting()
-        try await Task.sleep(for: .milliseconds(250))
+        try await waitUntil { counter.withLockedValue { $0 } - initial >= 1 }
 
         // Window 2: another emit, another wait.
         orchestrator.triggerCoalescedSnapshotEmitForTesting()
-        try await Task.sleep(for: .milliseconds(250))
+        try await waitUntil { counter.withLockedValue { $0 } - initial >= 2 }
+        // Past one more 100 ms window: nothing further fires on its own.
+        try await Task.sleep(for: .milliseconds(120))
 
         let total = counter.withLockedValue { $0 }
         let net = total - initial
@@ -176,6 +178,16 @@ final class SnapshotCoalescingTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Returns once `condition` holds, or after five seconds; the caller's
+    /// assertions say what was missing.
+    @MainActor
+    private func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+    }
 
     /// Builds an orchestrator with a default-shape config but no upstreams
     /// and no proxy startup. Construction alone is enough — the throttle
