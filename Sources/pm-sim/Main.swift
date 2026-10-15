@@ -35,6 +35,7 @@ enum PMSim {
               keepalive               Verify OS accepts TCP keepalive socket options
               health-check            5 health checks through the pool (orchestrator behavior)
               failover                Stop upstream1, verify switchToNextUpstream recovers via upstream2
+              prewarm-selection       Startup prewarm of every upstream leaves the first one active
               flood-slow-drain        AE5F6815 repro: fast origin flood + slow client, verify no truncation
               forced-proxy-precedence Routing: force rules override PAC DIRECT across proxy protocols
               pac-unsupported-only    Routing: a PAC with no usable answer goes via the upstream, never direct
@@ -195,6 +196,7 @@ enum PMSim {
         "keepalive",
         "health-check",
         "failover",
+        "prewarm-selection",
         "flood-slow-drain",
         "forced-proxy-precedence",
         "pac-unsupported-only",
@@ -294,6 +296,8 @@ enum PMSim {
             return [try await OrchestratorScenarios.healthCheck(verbose: verbose)]
         case "failover":
             return [try await OrchestratorScenarios.upstreamFailover(verbose: verbose)]
+        case "prewarm-selection":
+            return [try await OrchestratorScenarios.prewarmKeepsSelection(verbose: verbose)]
         case "flood-slow-drain":
             return [try await Scenarios.floodSlowDrain(verbose: verbose)]
         case "forced-proxy-precedence":
