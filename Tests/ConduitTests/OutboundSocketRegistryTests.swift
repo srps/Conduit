@@ -182,6 +182,15 @@ final class OutboundSocketRegistryTests: XCTestCase {
         XCTAssertEqual(SystemSocketPaths().verdicts(for: [query]), [.stranded("address_gone")])
     }
 
+    /// Link-local IPv6 is never judged: its text form loses the scope, so
+    /// two links' peers would share a verdict, and macOS lists the address
+    /// with the scope embedded, so it would look unassigned.
+    func testALinkLocalSocketIsNeverJudged() throws {
+        let query = SocketPathQuery(local: try SocketAddress(ipAddress: "fe80::77", port: 50_000),
+                                    remote: try SocketAddress(ipAddress: "fe80::1", port: 443))
+        XCTAssertEqual(SystemSocketPaths().verdicts(for: [query]), [.current])
+    }
+
     /// A real connected socket is judged current on its own path.
     func testAConnectedLoopbackSocketIsCurrent() async throws {
         let group = MultiThreadedEventLoopGroup.singleton

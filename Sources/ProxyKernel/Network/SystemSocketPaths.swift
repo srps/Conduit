@@ -13,6 +13,10 @@ import NIOCore
 ///
 /// Interfaces are compared, not addresses: IPv6 may prefer a newer temporary
 /// address on the same interface while the old one still works.
+///
+/// IPv6 link-local sockets are never judged: their path stays on one link,
+/// never through a VPN tunnel, and their text form drops the scope that
+/// tells two links apart (and macOS lists them with the scope embedded).
 package struct SystemSocketPaths: SocketPathChecking {
     package init() {}
 
@@ -30,6 +34,7 @@ package struct SystemSocketPaths: SocketPathChecking {
             guard let local = query.local.ipAddress, let peer = query.remote.ipAddress else {
                 return .unknown("no_address")
             }
+            if Self.isLinkLocal(query.local) || Self.isLinkLocal(query.remote) { return .current }
             guard let localInterface = interfaces[local] else { return .stranded(SocketPathVerdict.addressGone) }
             let route: Route
             if let cached = routes[peer] {
@@ -48,6 +53,11 @@ package struct SystemSocketPaths: SocketPathChecking {
                 return .unknown(reason)
             }
         }
+    }
+
+    private static func isLinkLocal(_ address: SocketAddress) -> Bool {
+        guard case .v6(let v6) = address else { return false }
+        return withUnsafeBytes(of: v6.address.sin6_addr) { $0[0] == 0xFE && $0[1] & 0xC0 == 0x80 }
     }
 
     private enum Route {
