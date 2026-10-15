@@ -67,6 +67,20 @@ final class OutboundSocketRegistryTests: XCTestCase {
         XCTAssertEqual(registry.closeStranded(), .init(unknown: 1), "a second pass finds nothing new")
     }
 
+    func testAnAddressOnlySweepKeepsSocketsWhoseRouteMoved() throws {
+        let registry = makeRegistry()
+        let addressGone = try channel(local: "10.20.30.40")
+        let routeMoved = try channel(local: "10.20.30.41")
+        try open(registry, addressGone)
+        try open(registry, routeMoved)
+        strand("10.20.30.40", SocketPathVerdict.addressGone)
+        strand("10.20.30.41", "interface_changed")
+
+        XCTAssertEqual(registry.closeStranded(addressesOnly: true), .init(direct: 1))
+        XCTAssertFalse(addressGone.isActive)
+        XCTAssertTrue(routeMoved.isActive)
+    }
+
     /// A socket that connected over a path a transition then removed is
     /// closed when it registers, whenever its setup started.
     func testASocketWhosePathIsGoneWhenItRegistersIsRetired() throws {
