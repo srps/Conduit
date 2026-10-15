@@ -150,8 +150,12 @@ enum VPNTransitionMigrationScenarios {
                 .init("a flap recovery closes the tunnel whose address went, after its wait",
                       oldAddressClosed && flapRecoverySweep.contains(" direct_closed=1 ")),
                 .init("a disconnect closes the upstream tunnel whose path it removed within 1 s", upstreamClosed),
-                .init("the disconnect's path sweep reports it",
-                      disconnectSweep.contains(" upstream_closed=") && !disconnectSweep.contains(" upstream_closed=0 ")),
+                // Whichever of the path sweep and the routing phase runs
+                // first closes it; the other finds it gone.
+                .init("the disconnect's path sweep or routing phase reports it",
+                      [disconnectSweep, routingDetail].contains {
+                          $0.contains(" upstream_closed=") && !$0.contains(" upstream_closed=0 ") && !$0.hasSuffix(" upstream_closed=0")
+                      }),
                 .init("the routing phase still runs once the probe decides", routingDetail.contains("routing=direct")),
                 .init("a DIRECT tunnel whose path survived keeps exchanging", directKeptOnDisconnect && directKeptOnReconnect),
                 .init("the reconnect closes the DIRECT tunnel whose route moved within 1 s", offVPNClosed),
