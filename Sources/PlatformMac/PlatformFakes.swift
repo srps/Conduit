@@ -521,6 +521,19 @@ package final class FakeKerberosTicketRecovery: KerberosTicketRecovering, @unche
     }
 }
 
+// MARK: - FakeDNSProbe
+
+/// Answers whether a resolver responds on a loopback port without sending a
+/// query. The real probe reaches the machine's port 53, where the installed
+/// Conduit's relay may answer for a dev instance or a harness.
+package final class FakeDNSProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var answering: Set<Int>
+    package init(answering: Set<Int> = []) { self.answering = answering }
+    package func setAnswering(_ ports: Set<Int>) { lock.withLock { answering = ports } }
+    package func responds(onPort port: Int) -> Bool { lock.withLock { answering.contains(port) } }
+}
+
 // MARK: - InMemorySecretStore
 
 /// A `SecretStore` that forgets on exit, for a host whose credential
