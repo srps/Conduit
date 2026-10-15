@@ -68,6 +68,10 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// Injectable so `restoreIfNeeded` is testable without a live relay,
     /// mirroring `SystemProxyManager`'s `portProbe`.
     private let relayIsLive: @Sendable () -> Bool
+    /// Whether a resolver answers on `127.0.0.1:port`: `probeLiveness`, and
+    /// `relayIsLive` when none is given. A host under test passes its fake
+    /// machine's answer, so it never waits on, or reads, the real port 53.
+    private let respondsOnPort: @Sendable (Int) -> Bool
     /// 0.1.x snapshot, imported into the journal on first launch. See
     /// `PlatformStateJournal.importLegacyDNSSnapshot`. Comes from the same
     /// `RuntimeEnvironment` as the journal — never `userDefault()` — so an
@@ -82,14 +86,16 @@ package final class SystemDNSManager: @unchecked Sendable {
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
-        relayIsLive: @escaping @Sendable () -> Bool = { SystemDNSManager.dnsResponds(onPort: 53) },
+        relayIsLive: (@Sendable () -> Bool)? = nil,
+        respondsOnPort: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         locationRecovery: LocationSettingsRecovery? = nil,
         configProvider: @escaping @Sendable () -> ProxyConfig = { ProxyConfig() }
     ) {
         self.privilegeClient = privilegeClient
         self.journal = journal
         self.commandRunner = commandRunner
-        self.relayIsLive = relayIsLive
+        self.relayIsLive = relayIsLive ?? { respondsOnPort(53) }
+        self.respondsOnPort = respondsOnPort
         self.legacySnapshotFile = legacySnapshotFile
         self.locationRecovery = locationRecovery
         self.configProvider = configProvider
@@ -661,7 +667,7 @@ package final class SystemDNSManager: @unchecked Sendable {
     // MARK: - Liveness probe
 
     package func probeLiveness(port: Int = 53) -> Bool {
-        Self.dnsResponds(onPort: port)
+        respondsOnPort(port)
     }
 
     /// Whether a resolver on `127.0.0.1:port` answers a query at all.
@@ -671,7 +677,7 @@ package final class SystemDNSManager: @unchecked Sendable {
     /// that path: reading a live-but-slow relay as dead makes launch-time
     /// recovery tear the DNS out from under a session that is serving the
     /// machine, which is worse than the second it costs to be sure.
-    static func dnsResponds(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> Bool {
+    package static func dnsResponds(onPort port: Int, timeoutMilliseconds: Int32 = 2_000) -> Bool {
         let query = DNSWireFormat.buildQuery(domain: "one.one.one.one", txID: 0xFACE)
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { return false }

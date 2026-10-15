@@ -79,6 +79,9 @@ final class AppState: ObservableObject {
     /// they serve is slated to move into the daemon and a parameter is
     /// cheaper to delete than a protocol.
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+    /// Whether a resolver answers on `127.0.0.1:port`; a fake machine's
+    /// answer under test, so launch recovery never waits on the real port 53.
+    private let dnsResponds: @Sendable (Int) -> Bool
     private let homeDirectory: URL
     private let resolverDirectory: String
 
@@ -107,6 +110,7 @@ final class AppState: ObservableObject {
         journal: platformStateJournal,
         legacySnapshotFile: runtimeEnvironment.legacySavedDNSFile,
         commandRunner: commandRunner,
+        respondsOnPort: dnsResponds,
         locationRecovery: locationRecovery,
         configProvider: orchestrator.configSnapshotProvider
     )
@@ -231,6 +235,7 @@ final class AppState: ObservableObject {
         credentialStore: (any SecretStore)? = nil,
         kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
         commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
@@ -296,6 +301,7 @@ final class AppState: ObservableObject {
         self.logStore = logStore
         self.helperLifecycle = helperLifecycle ?? helperClient
         self.auditedPrivilegeClient = auditedPrivilegeClient
+        self.dnsResponds = dnsResponds
         self.commandRunner = commandRunner ?? { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         }

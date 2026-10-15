@@ -408,6 +408,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                     hold.pass(launchPath, arguments)
                     return try machine.run(launchPath, arguments)
                 },
+                // As `AppStateHarness`: never the real port 53.
+                dnsResponds: { _ in false },
                 homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
                 resolverDirectory: machine.resolverDirectory.path
             )
@@ -970,6 +972,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             logger: DiscardingLogSink(),
             privilegeClient: machine,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            dnsResponds: { _ in false },
             networkLocationStoreFactory: { _ in nil }
         )
 

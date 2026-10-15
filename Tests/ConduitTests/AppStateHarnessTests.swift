@@ -75,6 +75,10 @@ final class AppStateHarness {
                 hold.pass(launchPath, arguments)
                 return try machine.run(launchPath, arguments)
             },
+            // No resolver answers on the fake machine's loopback. Probing the
+            // real port 53 instead waited two seconds wherever nothing does,
+            // and answered for the installed Conduit's relay where it runs.
+            dnsResponds: { _ in false },
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
