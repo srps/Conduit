@@ -609,22 +609,22 @@ final class HelperContractTests: XCTestCase {
     /// than a later step's success standing for the whole. Every command the
     /// script runs is a stub on a PATH of its own, so nothing is removed.
     func testUninstallStopsAtTheFirstFailedRemoval() throws {
-        let stubs = FileManager.default.temporaryDirectory.appendingPathComponent("uninstall-stubs-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: stubs, withIntermediateDirectories: true)
-        addTeardownBlock { try FileManager.default.removeItem(at: stubs) }
-        let log = stubs.appendingPathComponent("calls").path
-        func stub(_ name: String, _ body: String) throws {
-            let url = stubs.appendingPathComponent(name)
-            try "#!/bin/sh\necho \"\(name) $*\" >> '\(log)'\n\(body)\n".write(to: url, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        let stubDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("uninstall-stubs-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: stubDirectory, withIntermediateDirectories: true)
+        addTeardownBlock { try FileManager.default.removeItem(at: stubDirectory) }
+        let log = stubDirectory.appendingPathComponent("calls").path
+        // Shell functions, not executables: macOS assesses a newly written
+        // executable on its first run, which cost this test most of a second.
+        // PATH is still the empty stub directory, so a command left unstubbed
+        // fails instead of running for real.
+        func stub(_ name: String, _ status: Int) -> String {
+            "\(name)() { echo \"\(name) $*\" >> \(log.shellQuoted); return \(status); }\n"
         }
-        try stub("launchctl", "exit 0")
-        try stub("rmdir", "exit 0")
-        try stub("rm", "exit 1")
+        let stubs = stub("launchctl", 0) + stub("rmdir", 0) + stub("rm", 1)
 
         let result = try CommandRunner.run(
             launchPath: "/bin/sh",
-            arguments: ["-c", "PATH=\(stubs.path.shellQuoted)\n" + HelperToolPrivilegeClient.uninstallScript]
+            arguments: ["-c", "PATH=\(stubDirectory.path.shellQuoted)\n" + stubs + HelperToolPrivilegeClient.uninstallScript]
         )
         let calls = try String(contentsOfFile: log, encoding: .utf8).split(separator: "\n")
 
