@@ -30,8 +30,8 @@ final class TransparentRelaySetupTests: XCTestCase {
             gatewayModeProvider: { false }, eventSink: nil,
             tunnelFailureReporter: TunnelFailureReporter(logger: logger, eventSink: { events.append($0) }))
         let capture = ContextCapture()
-        try client.pipeline.addHandler(capture).wait()
-        try client.pipeline.addHandler(handler).wait()
+        try client.pipeline.syncOperations.addHandler(capture)
+        try client.pipeline.syncOperations.addHandler(handler)
         try remote.close().wait()
         let setup = handler.attachRelay(context: capture.context, upstreamChannel: remote,
             initialData: ByteBuffer(string: "ClientHello"), pooledTunnel: false, target: "stream.test:443", endpoint: nil)

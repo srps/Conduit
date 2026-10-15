@@ -80,6 +80,11 @@ final class NTLMCredentialCacheTests: XCTestCase {
 
     /// One handshake that falls back to NTLM; its first token names the scheme.
     private func fallbackToken(_ fixture: Fixture) throws -> String {
+        try Self.fallbackToken(fixture, upstream: upstream)
+    }
+
+    /// Static so the concurrent handshakes below capture no test case.
+    private static func fallbackToken(_ fixture: Fixture, upstream: UpstreamProxy) throws -> String {
         try fixture.factory(upstream).initialToken(for: upstream.host)
     }
 
@@ -90,9 +95,10 @@ final class NTLMCredentialCacheTests: XCTestCase {
         fixture.store.loadDelay = 0.2
         let tokens = NIOLockedValueBox<[String]>([])
         let failures = NIOLockedValueBox(0)
+        let upstream = self.upstream
         DispatchQueue.concurrentPerform(iterations: 16) { _ in
             do {
-                let token = try fallbackToken(fixture)
+                let token = try Self.fallbackToken(fixture, upstream: upstream)
                 tokens.withLockedValue { $0.append(token) }
             } catch {
                 failures.withLockedValue { $0 += 1 }
@@ -119,12 +125,13 @@ final class NTLMCredentialCacheTests: XCTestCase {
 
         let answers = NIOLockedValueBox<[String]>([])
         let longestWait = NIOLockedValueBox<TimeInterval>(0)
+        let upstream = self.upstream
         DispatchQueue.concurrentPerform(iterations: 16) { _ in
             // Timed per call: how many run at once depends on the runner's
             // cores; how long each one waits must not.
             let started = Date()
             do {
-                let token = try fallbackToken(fixture)
+                let token = try Self.fallbackToken(fixture, upstream: upstream)
                 answers.withLockedValue { $0.append(token) }
             } catch is KerberosAuthError {
                 answers.withLockedValue { $0.append("no-ntlm") }

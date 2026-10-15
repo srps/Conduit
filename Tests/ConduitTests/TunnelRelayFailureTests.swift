@@ -65,14 +65,14 @@ final class TunnelRelayFailureTests: XCTestCase {
         let diagnostics = TunnelRelayDiagnostics(target: "stream.test:443", transport: "connect", route: "upstream",
             upstream: "proxy.test:8080", causeProvider: { .none },
             reporter: TunnelFailureReporter(logger: DiscardingLogSink(), eventSink: { events.append($0) }))
-        try client.pipeline.addHandler(TunnelRelayHandler(peer: remote, diagnostics: diagnostics, side: .client)).wait()
-        try remote.pipeline.addHandler(TunnelRelayHandler(peer: client, diagnostics: diagnostics, side: .remote)).wait()
+        try client.pipeline.syncOperations.addHandler(TunnelRelayHandler(peer: remote, diagnostics: diagnostics, side: .client))
+        try remote.pipeline.syncOperations.addHandler(TunnelRelayHandler(peer: client, diagnostics: diagnostics, side: .remote))
     }
 
     func testFailedWriteClosesBothHalvesAndReportsTheDestinationSocket() throws {
         let client = try activeChannel(), remote = try activeChannel()
         let events = RuntimeEventLog(capacity: 4)
-        try remote.pipeline.addHandler(RejectWrite()).wait()
+        try remote.pipeline.syncOperations.addHandler(RejectWrite())
         try attach(client, remote, events: events)
         try client.writeInbound(ByteBuffer(string: "opaque TLS bytes"))
         client.embeddedEventLoop.run(); remote.embeddedEventLoop.run()
@@ -88,7 +88,7 @@ final class TunnelRelayFailureTests: XCTestCase {
     func testFatalReadDoesNotWaitForTheOtherSocketsBlockedWrites() throws {
         let client = try activeChannel(), remote = try activeChannel()
         let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
-        try client.pipeline.addHandler(held).wait()
+        try client.pipeline.syncOperations.addHandler(held)
         try attach(client, remote, events: events)
         try remote.writeInbound(ByteBuffer(string: "queued response"))
         remote.pipeline.fireErrorCaught(IOError(errnoCode: EADDRNOTAVAIL, reason: "injected VPN address loss"))
@@ -103,8 +103,8 @@ final class TunnelRelayFailureTests: XCTestCase {
     func testOrderlyEOFStillDrainsTheCompleteQueuedResponse() throws {
         let client = try activeChannel(), remote = try activeChannel()
         let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
-        try client.pipeline.addHandler(held).wait()
-        try remote.pipeline.addHandler(FailWritesAfterClose()).wait()
+        try client.pipeline.syncOperations.addHandler(held)
+        try remote.pipeline.syncOperations.addHandler(FailWritesAfterClose())
         try attach(client, remote, events: events)
         let response = ByteBuffer(string: "complete response tail")
         try remote.writeInbound(response)
@@ -130,8 +130,8 @@ final class TunnelRelayFailureTests: XCTestCase {
     func testGenuineWriteFailureStillAbortsWhenDestinationHasClosed() throws {
         let client = try activeChannel(), remote = try activeChannel()
         let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
-        try client.pipeline.addHandler(held).wait()
-        try remote.pipeline.addHandler(RejectWrite(closeBeforeFailing: true)).wait()
+        try client.pipeline.syncOperations.addHandler(held)
+        try remote.pipeline.syncOperations.addHandler(RejectWrite(closeBeforeFailing: true))
         try attach(client, remote, events: events)
         try remote.writeInbound(ByteBuffer(string: "blocked response"))
         try client.writeInbound(ByteBuffer(string: "failed client write"))
@@ -147,7 +147,7 @@ final class TunnelRelayFailureTests: XCTestCase {
     func testClientShutdownDoesNotWaitForBlockedUpstreamWrites() throws {
         let client = try activeChannel(), remote = try activeChannel()
         let held = HoldWrites(), events = RuntimeEventLog(capacity: 4)
-        try remote.pipeline.addHandler(held).wait()
+        try remote.pipeline.syncOperations.addHandler(held)
         try attach(client, remote, events: events)
         try client.writeInbound(ByteBuffer(string: "queued client bytes"))
         try client.close().wait()

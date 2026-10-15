@@ -36,7 +36,10 @@ final class VPNReprobeRecoveryTests: XCTestCase {
     private func verifyRecovery(from outage: VPNObservedState) async throws {
         let server = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
             .childChannelInitializer { channel in
-                channel.pipeline.configureHTTPServerPipeline().flatMap { channel.pipeline.addHandler(HealthyProxy()) }
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.configureHTTPServerPipeline()
+                    try channel.pipeline.syncOperations.addHandler(HealthyProxy())
+                }
             }.bind(host: "127.0.0.1", port: 0).get()
         var config = ProxyConfig()
         config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
