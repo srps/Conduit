@@ -562,7 +562,8 @@ final class ConnectionPoolTests: XCTestCase {
 
         var config = ProxyConfig.testFixture()
         config.maxConnections = 1
-        config.upstreamConnectTimeoutSeconds = 0.5
+        // Long enough for the first connect to still be pending 50 ms in.
+        config.upstreamConnectTimeoutSeconds = 0.2
         config.upstreams = [
             UpstreamProxy(name: "Slow", host: "192.0.2.1", port: 9999, priority: 0)
         ]
@@ -573,7 +574,8 @@ final class ConnectionPoolTests: XCTestCase {
             configProvider: { config },
             authenticatorProvider: { _ in
                 NTLMAuthenticator(credentials: ProxyCredentials(username: "test", domain: "TEST", workstation: "MAC", ntHash: SecretBytes.repeating(0, count: 16)))
-            }
+            },
+            minimumConnectTimeout: 0.2
         )
         defer { pool.closeAll() }
 
