@@ -55,6 +55,81 @@ enum OrchestratorScenarios {
 
     // MARK: - Upstream failover: first upstream dies, `switchToNextUpstream` + reconnect works.
 
+    /// Startup prewarm dials every upstream at once; none of those dials is
+    /// a selection, so the active upstream stays the first by priority however
+    /// the dials land (#164).
+    @MainActor
+    static func prewarmKeepsSelection(verbose: Bool) async throws -> ScenarioResult {
+        let name = "prewarm-selection"
+        let group = MultiThreadedEventLoopGroup.singleton
+        let recorder = RecordingLogSink()
+        let origin = FakeOrigin(group: group, behavior: .burstStream(intervalMs: 50, chunkSize: 4096, durationMs: 1000))
+        ScenarioCleanup.register { await origin.stop() }
+        try await origin.start()
+        var upstreams: [FakeUpstreamProxy] = []
+        for _ in 0..<3 {
+            let upstream = FakeUpstreamProxy(group: group, originHost: "127.0.0.1", originPort: origin.port)
+            ScenarioCleanup.register { await upstream.stop() }
+            try await upstream.start()
+            upstreams.append(upstream)
+        }
+        var config = ProxyConfig()
+        config.proxy.host = "127.0.0.1"
+        config.proxy.port = 0
+        config.routing.pacRoutingEnabled = false
+        config.auth.mode = .systemNegotiated
+        config.upstreams = upstreams.enumerated().map { index, upstream in
+            UpstreamProxy(name: "Upstream\(index + 1)", host: "127.0.0.1", port: upstream.port, priority: index)
+        }
+        let capturedConfig = config
+        // Recorded rather than printed: the scenario waits on prewarm's own
+        // completion line.
+        let logger: any LogSink = recorder
+        let server = LocalProxyServer(
+            logger: logger,
+            configProvider: { capturedConfig },
+            directModeProvider: { (false, .none) },
+            authenticatorProvider: { _ in MockAuthenticator() },
+            directConnectDetector: DirectConnectDetector(group: group, logger: logger),
+            pacRoutingEngine: nil,
+            onConnectionOpened: { _ in },
+            onConnectionClosed: { _ in },
+            onConnectionActivity: { _ in },
+            onRequestCompleted: { _, _ in }
+        )
+        ScenarioCleanup.register { await server.stop() }
+        let start = Date()
+        try await server.start()
+
+        // Prewarm logs once it has dialed (and inserted) every upstream.
+        let prewarmed = try await until(timeout: 5) {
+            recorder.entries().contains { $0.message == "Completed upstream connection prewarm." }
+        }
+        // The pool logs each upstream it dials.
+        let connectedLines = Set(recorder.entries().map(\.message).filter { $0.hasPrefix("Connected to upstream proxy ") })
+        let dialed = capturedConfig.upstreams.map { upstream in
+            connectedLines.contains("Connected to upstream proxy \(upstream.endpoint).")
+        }
+        let active = server.activeUpstream() ?? "-"
+        return ScenarioResult(
+            name: name, clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0, clientsClosedEarly: 0,
+            totalBytes: 0, durationSeconds: Date().timeIntervalSince(start), aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("startup prewarm completes", prewarmed),
+                .init("prewarm dials every upstream", dialed.allSatisfy { $0 }),
+                .init("the active upstream is still the first by priority", active == capturedConfig.upstreams[0].endpoint),
+            ],
+            notes: ["dialed per upstream: \(dialed)", "active: \(active)", "No real upstream, helper, settings or credentials"]
+        )
+    }
+
+    nonisolated(nonsending) private static func until(timeout: TimeInterval, _ condition: () -> Bool) async throws -> Bool {
+        let deadline = ContinuousClock.now + .milliseconds(Int64(timeout * 1000))
+        while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        return condition()
+    }
+
     @MainActor
     static func upstreamFailover(verbose: Bool) async throws -> ScenarioResult {
         let name = "upstreamFailover"
