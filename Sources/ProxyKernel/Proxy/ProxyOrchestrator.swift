@@ -1817,6 +1817,10 @@ package final class ProxyOrchestrator {
 
         mutateSnapshot { $0.vpnState = .connected }
         flapStartedAt = nil
+        // A recovery like a monitor's `.connected`: the sweeps the flap held,
+        // or the address-only pass, run from here, since the monitor's own
+        // `.connected` will now find nothing changed.
+        resumeStrandedSweeps()
         localProxyServer.resetCircuitsAfterFlap()
         setDirectMode(deriveDirectModeCause(probeSummary: summary))
         resumeConnectivityMonitoring(summary: summary)
@@ -1878,10 +1882,14 @@ package final class ProxyOrchestrator {
         let previous = snapshot.vpnState
         guard previous != state else {
             // Same verdict, possibly a different tunnel carrying it (a second
-            // VPN came up and the first went away). Nothing to react to, but
-            // the name the UI shows follows the observer.
+            // VPN came up and the first went away). The name the UI shows
+            // follows the observer, and a tunnel that replaced another took
+            // the old one's address and routes with it, so its sockets are
+            // swept like any confirmed transition.
             if snapshot.vpnInterfaceName != shownInterface {
+                let replaced = snapshot.vpnInterfaceName != nil && shownInterface != nil
                 mutateSnapshot { $0.vpnInterfaceName = shownInterface }
+                if replaced { startStrandedSweeps(transition: "tunnel_changed") }
             }
             return
         }

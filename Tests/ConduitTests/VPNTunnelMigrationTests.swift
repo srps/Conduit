@@ -203,6 +203,45 @@ final class VPNTunnelMigrationTests: XCTestCase {
         await orchestrator.stopProxy()
     }
 
+    /// A connected VPN moving to another tunnel interface is a transition:
+    /// the old tunnel's sockets are swept.
+    func testATunnelChangeWhileConnectedSweeps() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun4")
+        try await Task.sleep(for: .milliseconds(150))
+        let onOldTunnel = try await tracked(orchestrator, local: "10.20.30.40")
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
+
+        await orchestrator.handleVPNStateChange(.connected, interfaceName: "utun5")
+        let closed = try await until { !onOldTunnel.isActive }
+        XCTAssertTrue(closed)
+        XCTAssertEqual(orchestrator.snapshot.vpnInterfaceName, "utun5")
+        XCTAssertTrue(migrations(orchestrator.eventLog.events).contains {
+            $0.hasPrefix("transition=tunnel_changed phase=paths pass=0 ") && $0.contains(" direct_closed=1 ")
+        })
+        await orchestrator.stopProxy()
+    }
+
+    /// A flap that a wake recovers, not a monitor report, still runs the
+    /// recovery's sweep: the monitor's later `.connected` changes nothing.
+    func testAWakeRecoveryRunsTheHeldSweep() async throws {
+        let orchestrator = orchestrator(resweeps: [.milliseconds(100)])
+        try await orchestrator.startProxy()
+        await orchestrator.handleVPNStateChange(.connected)
+        try await Task.sleep(for: .milliseconds(200))
+        let oldAddress = try await tracked(orchestrator, local: "10.20.30.40")
+        await orchestrator.handleVPNStateChange(.reasserting)
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
+
+        await orchestrator.handleSystemWake()
+        XCTAssertEqual(orchestrator.snapshot.vpnState, .connected)
+        let closed = try await until { !oldAddress.isActive }
+        XCTAssertTrue(closed)
+        XCTAssertTrue(migrations(orchestrator.eventLog.events).contains { $0.hasPrefix("transition=flap_recovered phase=addresses ") })
+        await orchestrator.stopProxy()
+    }
+
     /// The first report after startup is a real transition: `unknown →
     /// connected` sweeps like any other (#160).
     func testTheFirstConnectedReportSweeps() async throws {
