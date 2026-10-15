@@ -92,7 +92,7 @@ final class CommandRunnerTests: XCTestCase {
                 try CommandRunner.run(
                     launchPath: "/bin/sleep",
                     arguments: ["30"],
-                    timeout: 0.5
+                    timeout: 0.1
                 )
             ) { error in
                 guard case CommandRunnerError.timedOut = error else {
@@ -114,20 +114,44 @@ final class CommandRunnerTests: XCTestCase {
     /// child, and killing `sh` leaves `sleep` holding the inherited pipe. The
     /// call has to come back on its own deadline rather than joining a read
     /// that nothing will end.
+    ///
+    /// The shell writes a marker once its trap is in place. Signalled before
+    /// that, it dies on the `SIGTERM` and the attempt proves nothing, so it is
+    /// repeated with twice the time to get there. Foundation resets the
+    /// child's signal dispositions, so the trap cannot be in place at launch.
     func testAChildThatIgnoresSIGTERMIsKilled() {
         runOffThread {
-            XCTAssertThrowsError(
-                try CommandRunner.run(
-                    launchPath: "/bin/sh",
-                    arguments: ["-c", "trap '' TERM; sleep 30"],
-                    timeout: 0.5,
-                    terminationGrace: Self.shortGrace,
-                    drainJoinGrace: Self.shortGrace
-                )
-            ) { error in
-                guard case CommandRunnerError.timedOut = error else {
-                    return XCTFail("expected timedOut, got \(error)")
+            let marker = FileManager.default.temporaryDirectory
+                .appendingPathComponent("conduit-trap-\(UUID().uuidString)")
+            let grace: TimeInterval = 0.1
+            var timeout: TimeInterval = 0.1
+            while true {
+                let started = Date()
+                XCTAssertThrowsError(
+                    try CommandRunner.run(
+                        launchPath: "/bin/sh",
+                        arguments: ["-c", "trap '' TERM; : > \"$1\"; sleep 30", "sh", marker.path],
+                        timeout: timeout,
+                        terminationGrace: grace,
+                        drainJoinGrace: grace,
+                        drainPollSlice: 0.01
+                    )
+                ) { error in
+                    guard case CommandRunnerError.timedOut = error else {
+                        return XCTFail("expected timedOut, got \(error)")
+                    }
                 }
+                if FileManager.default.fileExists(atPath: marker.path) {
+                    XCTAssertGreaterThanOrEqual(
+                        Date().timeIntervalSince(started),
+                        timeout + grace,
+                        "a child that ignores SIGTERM is killed only once the grace is spent"
+                    )
+                    try FileManager.default.removeItem(at: marker)
+                    return
+                }
+                guard timeout < 3.2 else { return XCTFail("the shell never got as far as its trap") }
+                timeout *= 2
             }
         }
     }
@@ -168,7 +192,8 @@ final class CommandRunnerTests: XCTestCase {
                 try CommandRunner.run(
                     launchPath: "/bin/sh",
                     arguments: ["-c", "echo warm; sleep 20 & exit 0"],
-                    drainJoinGrace: 0.05
+                    drainJoinGrace: 0.02,
+                    drainPollSlice: 0.01
                 )
             )
 
@@ -178,7 +203,8 @@ final class CommandRunnerTests: XCTestCase {
                     try CommandRunner.run(
                         launchPath: "/bin/sh",
                         arguments: ["-c", "echo held; sleep 20 & exit 0"],
-                        drainJoinGrace: 0.05
+                        drainJoinGrace: 0.02,
+                        drainPollSlice: 0.01
                     )
                 )
             }
