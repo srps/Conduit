@@ -8,8 +8,8 @@ Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
 VPN transitions no longer leave dead connections behind (#153, #157, #162),
 plus the fixes from the 0.5.5 log review (#150–#152, #154) and a faster,
-steadier test suite (#166–#168). App-only update
-from 0.5.5; helper v5 is unchanged and needs no reinstall.
+steadier test suite (#166–#168). App-only update from 0.5.5: helper protocol
+v5 and the helper's behaviour are unchanged, so it needs no reinstall.
 
 ### Fixed
 
@@ -22,9 +22,11 @@ from 0.5.5; helper v5 is unchanged and needs no reinstall.
   settle, and a dial that completes over a removed path is closed on arrival
   (`connection.late_dial_retired`). A disconnect whose probe routes DIRECT still
   closes every upstream connection. Flaps keep every stream: sweeps wait out the
-  flap, and its recovery closes only connections whose address did not come back.
-  A split-tunnel reconnect keeps DIRECT connections that still go out over
-  Wi-Fi. Each pass emits `vpn.tunnels_migrated` with counts.
+  flap, a transition's re-sweeps resume after it, and a flap with no re-sweeps
+  owed closes only connections whose address did not come back. A split-tunnel
+  reconnect keeps DIRECT connections that still go out over Wi-Fi. The first
+  pass of a transition always emits `vpn.tunnels_migrated` with counts; later
+  passes emit it when they close a connection or cannot check one.
 - A connectivity probe, health check or recovery step that finishes after the
   VPN changed state no longer commits its stale verdict
   (`connectivity.probe_superseded`, `health.result_superseded`,
@@ -48,9 +50,11 @@ from 0.5.5; helper v5 is unchanged and needs no reinstall.
 ### Changed
 
 - Expected failures log below error: a client-side reset or broken pipe on a
-  tunnel logs at INFO, and a DIRECT connect to a name that does not exist, an
-  `.invalid` host or a refused loopback port logs at WARNING; both still emit
-  their `tunnel.relay_failed` or `direct.connect_failed` event. The no-proxy
+  tunnel logs at INFO and still emits `tunnel.relay_failed`. A DIRECT connect to
+  a name that does not exist, an `.invalid` host or a refused loopback port,
+  which logged at ERROR, now logs at WARNING and still emits
+  `direct.connect_failed`; while DIRECT is expected (VPN off, no upstreams) it
+  stays at INFO without an event, as before. The no-proxy
   defaults now include `169.254.*` and `172.16.*`–`172.31.*`; saved configs are
   not migrated (#154).
 - NTLM computes its MD4 digest in Swift instead of CommonCrypto's deprecated
