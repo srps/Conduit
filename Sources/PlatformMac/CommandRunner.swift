@@ -77,6 +77,11 @@ package enum CommandRunner {
     /// inner script's output itself.
     package static let defaultDrainJoinGrace: TimeInterval = 5
 
+    /// How long one drain `poll` waits before the read looks for a cancel
+    /// again: the upper bound on how long a join that gave up waits for its
+    /// read to stop.
+    package static let defaultDrainPollSlice: TimeInterval = 0.1
+
     private static let drainQueue = DispatchQueue(
         label: "io.github.srps.Conduit.command-runner",
         qos: .utility,
@@ -91,7 +96,8 @@ package enum CommandRunner {
         timeout: TimeInterval = defaultTimeout,
         maxOutputBytes: Int = defaultMaxOutputBytes,
         terminationGrace: TimeInterval = defaultTerminationGrace,
-        drainJoinGrace: TimeInterval = defaultDrainJoinGrace
+        drainJoinGrace: TimeInterval = defaultDrainJoinGrace,
+        drainPollSlice: TimeInterval = defaultDrainPollSlice
     ) throws -> CommandResult {
         let process = Process()
         let stdout = Pipe()
@@ -116,8 +122,13 @@ package enum CommandRunner {
         // writes more than the pipe buffer (64 KiB on Darwin) blocks in
         // `write` until someone reads; waiting for exit first guarantees
         // nobody ever does, and both sides hang with no timeout to break it.
-        let outputDrain = StreamDrain(stdout.fileHandleForReading, limit: maxOutputBytes, on: drainQueue)
-        let errorDrain = StreamDrain(stderr.fileHandleForReading, limit: maxOutputBytes, on: drainQueue)
+        let pollSlice = Int32(min(max(drainPollSlice, 0.001), 1) * 1000)
+        let outputDrain = StreamDrain(
+            stdout.fileHandleForReading, limit: maxOutputBytes, pollSliceMilliseconds: pollSlice, on: drainQueue
+        )
+        let errorDrain = StreamDrain(
+            stderr.fileHandleForReading, limit: maxOutputBytes, pollSliceMilliseconds: pollSlice, on: drainQueue
+        )
 
         var timedOut = false
         if exited.wait(timeout: .now() + timeout) == .timedOut {
@@ -206,7 +217,7 @@ package enum CommandRunner {
     private final class StreamDrain: @unchecked Sendable {
         /// How long a `poll` waits before the loop looks at `cancelled` again.
         /// The upper bound on how long a cancel takes to be honoured.
-        private static let pollSliceMilliseconds: Int32 = 100
+        private let pollSliceMilliseconds: Int32
 
         /// How long a cancel gets to be honoured. Comfortably more than one poll
         /// slice, so it only expires when the read block never started at all.
@@ -224,9 +235,10 @@ package enum CommandRunner {
         private var reachedEOF = false
         private let finished = DispatchSemaphore(value: 0)
 
-        init(_ handle: FileHandle, limit: Int, on queue: DispatchQueue) {
+        init(_ handle: FileHandle, limit: Int, pollSliceMilliseconds: Int32, on queue: DispatchQueue) {
             self.handle = handle
             self.limit = limit
+            self.pollSliceMilliseconds = pollSliceMilliseconds
             queue.async { [self] in
                 readUntilDone()
                 finished.signal()
@@ -286,7 +298,7 @@ package enum CommandRunner {
             var buffer = [UInt8](repeating: 0, count: 65_536)
             while !lock.withLock({ cancelled }) {
                 var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
-                let ready = poll(&descriptor, 1, Self.pollSliceMilliseconds)
+                let ready = poll(&descriptor, 1, pollSliceMilliseconds)
                 if ready < 0 {
                     if errno == EINTR { continue }
                     record(errno: errno, while: "polling")
