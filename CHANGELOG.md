@@ -49,9 +49,10 @@ from 0.5.5; helper v5 is unchanged and needs no reinstall.
 
 - Expected failures log below error: a client-side reset or broken pipe on a
   tunnel logs at INFO, and a DIRECT connect to a name that does not exist, an
-  `.invalid` host or a refused loopback port logs at WARNING without a
-  `direct.connect_failed` event. The no-proxy defaults now include `169.254.*`
-  and `172.16.*`–`172.31.*`; saved configs are not migrated (#154).
+  `.invalid` host or a refused loopback port logs at WARNING; both still emit
+  their `tunnel.relay_failed` or `direct.connect_failed` event. The no-proxy
+  defaults now include `169.254.*` and `172.16.*`–`172.31.*`; saved configs are
+  not migrated (#154).
 - NTLM computes its MD4 digest in Swift instead of CommonCrypto's deprecated
   `CC_MD4`, and the build is free of Swift 6.4 warnings (#166).
 - The test suite runs in about 32 s instead of 207 s, and no test takes half a
