@@ -19,7 +19,7 @@ final class DNSTCPListenerTests: XCTestCase {
 
     private func makeForwarder(
         logger: RecordingLogSink,
-        tcpIdleTimeoutSeconds: Int64 = 2,
+        tcpIdleTimeout: TimeAmount = .milliseconds(300),
         tcpMaximumConnections: Int = 64,
         configure: (inout ProxyConfig) -> Void = { _ in }
     ) -> LocalDNSForwarder {
@@ -30,7 +30,7 @@ final class DNSTCPListenerTests: XCTestCase {
             group: MultiThreadedEventLoopGroup.singleton,
             logger: logger,
             configProvider: { frozen },
-            tcpIdleTimeoutSeconds: tcpIdleTimeoutSeconds,
+            tuning: { var tuning = DNSForwarderTuning(); tuning.tcpIdleTimeout = tcpIdleTimeout; return tuning }(),
             tcpMaximumConnections: tcpMaximumConnections
         )
     }
@@ -140,36 +140,48 @@ final class DNSTCPListenerTests: XCTestCase {
     /// nameserver, whose 1.5-second timeout alone outlasts it.
     @MainActor
     func testSlowLookupIsNotCutOffByTheIdleTimer() async throws {
-        try XCTSkipIf(
-            Self.networkAnswersForUnroutableDNS(),
-            "This network transparently redirects outbound UDP/53, so the unreachable "
-                + "nameserver this test depends on answers instantly and the lookup never "
-                + "outlasts the idle window"
-        )
+        let group = MultiThreadedEventLoopGroup.singleton
+        // An internal server that never answers, so the internal attempt
+        // burns its full timeout, four idle windows, before DoH begins.
+        let silentServer = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        defer { silentServer.close(promise: nil) }
+        // A DoH provider on a port nothing listens on fails at once, so the
+        // lookup ends SERVFAIL right after the internal attempt.
+        let placeholder = try await ServerBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        let deadPort = try XCTUnwrap(placeholder.localAddress?.port)
+        try await placeholder.close().get()
+
         let logger = RecordingLogSink(minLevel: .debug)
         var config = ProxyConfig.testFixture()
-        // TEST-NET-1: routes nowhere, so the internal attempt burns its full
-        // 1.5 s before the DoH stage even begins.
         config.dnsEntries = [
-            DomainDNSEntry(domain: "slow.test", servers: ["192.0.2.53"], enabled: true)
+            DomainDNSEntry(domain: "slow.test", servers: ["127.0.0.1"], enabled: true)
         ]
-        config.dohProviders = ["https://192.0.2.1/dns-query"]
+        config.dohProviders = ["https://127.0.0.1:\(deadPort)/dns-query"]
         let frozen = config
+        var tuning = DNSForwarderTuning()
+        tuning.internalServerPort = try XCTUnwrap(silentServer.localAddress?.port)
+        tuning.internalAttemptTimeout = .milliseconds(400)
+        tuning.tcpIdleTimeout = .milliseconds(100)
 
         let forwarder = LocalDNSForwarder(
-            group: MultiThreadedEventLoopGroup.singleton,
+            group: group,
             logger: logger,
             configProvider: { frozen },
-            tcpIdleTimeoutSeconds: 1
+            tuning: tuning
         )
 
         try await forwarder.start(host: "127.0.0.1", port: 0)
         defer { Task { await forwarder.stop() } }
         let port = try XCTUnwrap(forwarder.tcpListeningPort)
 
-        let query = DNSWireFormat.buildQuery(domain: "host.slow.test", txID: 0x7777, qtype: 1)
+        let query = DNSWireFormat.buildQuery(domain: "host.example.com", txID: 0x7777, qtype: 1)
+        let started = ContinuousClock.now
         let response = try await Self.sendOverTCP(query: query, port: port)
 
+        XCTAssertGreaterThanOrEqual(
+            ContinuousClock.now - started, .milliseconds(400),
+            "The lookup must outlast the idle window for this test to mean anything"
+        )
         XCTAssertTrue(
             DNSWireFormat.responseQuestionMatches(query: query, response: response),
             "A lookup outlasting the idle window must still be answered"
@@ -182,7 +194,7 @@ final class DNSTCPListenerTests: XCTestCase {
     @MainActor
     func testIdleConnectionWithNothingPendingIsClosed() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
-        let forwarder = makeForwarder(logger: logger)
+        let forwarder = makeForwarder(logger: logger, tcpIdleTimeout: .milliseconds(100))
 
         try await forwarder.start(host: "127.0.0.1", port: 0)
         defer { Task { await forwarder.stop() } }
@@ -202,7 +214,7 @@ final class DNSTCPListenerTests: XCTestCase {
     func testStopClosesConnectionsItAlreadyAccepted() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
         // An idle window long enough that only `stop()` can explain the close.
-        let forwarder = makeForwarder(logger: logger, tcpIdleTimeoutSeconds: 60) { config in
+        let forwarder = makeForwarder(logger: logger, tcpIdleTimeout: .seconds(60)) { config in
             config.dnsInterceptRules = [
                 DNSInterceptRule(pattern: "*.intercept.test", interceptIP: "127.44.3.1", enabled: true)
             ]
@@ -234,7 +246,7 @@ final class DNSTCPListenerTests: XCTestCase {
     @MainActor
     func testConnectionsBeyondTheCapAreRefused() async throws {
         let logger = RecordingLogSink(minLevel: .debug)
-        let forwarder = makeForwarder(logger: logger, tcpIdleTimeoutSeconds: 60, tcpMaximumConnections: 2) { config in
+        let forwarder = makeForwarder(logger: logger, tcpIdleTimeout: .seconds(60), tcpMaximumConnections: 2) { config in
             config.dnsInterceptRules = [
                 DNSInterceptRule(pattern: "*.intercept.test", interceptIP: "127.44.3.1", enabled: true)
             ]
@@ -404,45 +416,5 @@ final class DNSTCPListenerTests: XCTestCase {
         // A clean close surfaces as recv() returning 0 (EOF).
         var scratch = [UInt8](repeating: 0, count: 64)
         return recv(fd, &scratch, scratch.count, 0) == 0
-    }
-
-    /// Whether this network answers DNS sent to an address that routes nowhere.
-    ///
-    /// Home routers, hotel networks and ISPs commonly force DNS by redirecting
-    /// *all* outbound UDP/53 to their own resolver regardless of destination
-    /// address. On such a network, a query aimed at a documentation-range
-    /// address comes back instantly — observed as an authoritative NXDOMAIN
-    /// from a `192.0.2.x` "server", with the same address on port 5353 timing
-    /// out normally, which is what identifies the redirect as port-based.
-    ///
-    /// Tests that need a genuinely unreachable nameserver have no way to get
-    /// one there: the forwarder always queries port 53, so every candidate
-    /// address is intercepted.
-    private static func networkAnswersForUnroutableDNS() -> Bool {
-        let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
-        guard fd >= 0 else { return false }
-        defer { Darwin.close(fd) }
-
-        var timeout = timeval(tv_sec: 1, tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
-
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = UInt16(53).bigEndian
-        // TEST-NET-1 (RFC 5737): reserved for documentation, routed nowhere.
-        addr.sin_addr.s_addr = inet_addr("192.0.2.53")
-
-        let connected = withUnsafePointer(to: &addr) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        guard connected == 0 else { return false }
-
-        let probe = DNSWireFormat.buildQuery(domain: "probe.invalid.test", txID: 0x5151, qtype: 1)
-        _ = probe.withUnsafeBytes { send(fd, $0.baseAddress, probe.count, 0) }
-
-        var scratch = [UInt8](repeating: 0, count: 512)
-        return recv(fd, &scratch, scratch.count, 0) > 0
     }
 }

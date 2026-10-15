@@ -17,6 +17,26 @@ package enum DNSForwarderStartError: Error, LocalizedError, Equatable {
     }
 }
 
+/// The forwarder's timing and the internal resolver's port. Production uses
+/// the defaults; tests shorten the waits so a slow-lookup or idle-connection
+/// rule is checked in milliseconds, and point the internal resolver at a
+/// local socket instead of port 53.
+package struct DNSForwarderTuning: Sendable {
+    /// The port internal (split-DNS) servers are asked on.
+    package var internalServerPort = 53
+    /// How long an internal server may take for a name under a managed
+    /// domain, where it is the only answer.
+    package var internalDomainTimeout: TimeAmount = .milliseconds(2000)
+    /// How long the internal attempt for any other name may take before the
+    /// DoH stage begins.
+    package var internalAttemptTimeout: TimeAmount = .milliseconds(1500)
+    /// How long a DNS-over-TCP connection with nothing outstanding may stay
+    /// silent (see `DNSTCPHandler`).
+    package var tcpIdleTimeout: TimeAmount = .seconds(10)
+
+    package init() {}
+}
+
 package final class LocalDNSForwarder: @unchecked Sendable {
     /// How many ephemeral ports `start` tries before giving up. A collision
     /// needs another process to hold, on TCP, the one number the kernel just
@@ -28,7 +48,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let onMetrics: (@Sendable (Int, Int, Int) -> Void)?
-    private let tcpIdleTimeoutSeconds: Int64
+    private let tuning: DNSForwarderTuning
     private let tcpMaximumConnections: Int
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let willBindTCP: @Sendable (Int) async -> Void
@@ -57,9 +77,9 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool = { false },
         onMetrics: (@Sendable (Int, Int, Int) -> Void)? = nil,
-        // Exposed only so tests can drive the "client waiting on a slow lookup
-        // must not be cut off" rule without a ten-second wait.
-        tcpIdleTimeoutSeconds: Int64 = DNSTCPHandler.defaultIdleTimeoutSeconds,
+        // Exposed only so tests can drive the slow-lookup and idle rules
+        // without waiting out the production timeouts.
+        tuning: DNSForwarderTuning = DNSForwarderTuning(),
         // Exposed only so tests can reach the cap without opening 64 sockets.
         tcpMaximumConnections: Int = DNSTCPConnectionRegistry.defaultMaximumConnections,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
@@ -72,7 +92,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
         self.configProvider = configProvider
         self.preferProxyPathForDoH = preferProxyPathForDoH
         self.onMetrics = onMetrics
-        self.tcpIdleTimeoutSeconds = tcpIdleTimeoutSeconds
+        self.tuning = tuning
         self.tcpMaximumConnections = tcpMaximumConnections
         self.eventSink = eventSink
         self.willBindTCP = willBindTCP
@@ -102,7 +122,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             logger: logger,
             configProvider: configProvider,
             preferProxyPathForDoH: { false },
-            onMetrics: nil
+            onMetrics: nil,
+            tuning: DNSForwarderTuning()
         )
         return (DNSUDPHandler(core: core), { core.inFlightQueryCount }, { core.admissionDecisionCount })
     }
@@ -137,7 +158,8 @@ package final class LocalDNSForwarder: @unchecked Sendable {
             logger: logger,
             configProvider: configProvider,
             preferProxyPathForDoH: preferProxyPathForDoH,
-            onMetrics: onMetrics
+            onMetrics: onMetrics,
+            tuning: tuning
         )
         self.core = core
 
@@ -147,7 +169,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
                 channel.pipeline.addHandler(DNSUDPHandler(core: core))
             }
         let log = logger
-        let idleTimeout = tcpIdleTimeoutSeconds
+        let idleTimeout = tuning.tcpIdleTimeout
         let connections = DNSTCPConnectionRegistry(
             maximumConnections: tcpMaximumConnections,
             logger: logger
@@ -163,7 +185,7 @@ package final class LocalDNSForwarder: @unchecked Sendable {
                 }
                 channel.closeFuture.whenComplete { _ in connections.release(channel) }
                 return channel.pipeline.addHandler(
-                    DNSTCPHandler(core: core, logger: log, idleTimeoutSeconds: idleTimeout)
+                    DNSTCPHandler(core: core, logger: log, idleTimeout: idleTimeout)
                 )
             }
         let attempts = port == 0 ? Self.ephemeralPairAttempts : 1
@@ -418,6 +440,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
     private let configProvider: () -> ProxyConfig
     private let preferProxyPathForDoH: @Sendable () -> Bool
     private let onMetrics: (@Sendable (Int, Int, Int) -> Void)?
+    private let tuning: DNSForwarderTuning
     private let lock = NSLock()
     private var queryCount = 0
     private var dohCount = 0
@@ -464,8 +487,10 @@ private final class DNSResolutionCore: @unchecked Sendable {
         logger: any LogSink,
         configProvider: @escaping () -> ProxyConfig,
         preferProxyPathForDoH: @escaping @Sendable () -> Bool,
-        onMetrics: (@Sendable (Int, Int, Int) -> Void)? = nil
+        onMetrics: (@Sendable (Int, Int, Int) -> Void)? = nil,
+        tuning: DNSForwarderTuning
     ) {
+        self.tuning = tuning
         self.group = group
         self.logger = logger
         self.configProvider = configProvider
@@ -640,10 +665,12 @@ private final class DNSResolutionCore: @unchecked Sendable {
         var usedDoH = false
 
         if isInternal {
-            response = await forwardUDP(query: queryBytes, server: primaryDNS, port: 53, timeoutMS: 2000)
+            response = await forwardUDP(
+                query: queryBytes, server: primaryDNS, port: tuning.internalServerPort, timeout: tuning.internalDomainTimeout
+            )
         } else {
             let internalResponse = await forwardUDP(
-                query: queryBytes, server: primaryDNS, port: 53, timeoutMS: 1500
+                query: queryBytes, server: primaryDNS, port: tuning.internalServerPort, timeout: tuning.internalAttemptTimeout
             )
             if DNSWireFormat.shouldFallbackToPublicDoH(internalResponse: internalResponse) {
                 logger.log(.debug, "DNS: \(domain) not resolved internally, trying DoH.", category: .network)
@@ -698,7 +725,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
         return responseBytes
     }
 
-    private func forwardUDP(query: [UInt8], server: String, port: Int, timeoutMS: Int) async -> [UInt8]? {
+    private func forwardUDP(query: [UInt8], server: String, port: Int, timeout: TimeAmount) async -> [UInt8]? {
         do {
             return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[UInt8], Error>) in
                 let handler = UDPResponseCollector(continuation: continuation)
@@ -717,7 +744,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
                                 channel.writeAndFlush(envelope, promise: nil)
                             }
 
-                            channel.eventLoop.scheduleTask(in: .milliseconds(Int64(timeoutMS))) {
+                            channel.eventLoop.scheduleTask(in: timeout) {
                                 handler.timeout()
                                 channel.close(promise: nil)
                             }
@@ -1090,12 +1117,11 @@ private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// to a pipeline from a `@Sendable` initializer warns; and it measures only
     /// inbound silence, which for DNS-over-TCP is indistinguishable between "the
     /// client is gone" and "the client asked a question and is waiting". Only
-    /// the handler knows which, so the handler owns the timer.
-    static let defaultIdleTimeoutSeconds: Int64 = 10
-
+    /// the handler knows which, so the handler owns the timer. The window is
+    /// `DNSForwarderTuning.tcpIdleTimeout`, 10 s in production.
     private let core: DNSResolutionCore
     private let logger: any LogSink
-    private let idleTimeoutSeconds: Int64
+    private let idleTimeout: TimeAmount
     private var pending: ByteBuffer?
 
     /// Lookups spawned from this connection that have not written yet.
@@ -1104,10 +1130,10 @@ private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
     private var outstandingQueries = 0
     private var idleTask: Scheduled<Void>?
 
-    init(core: DNSResolutionCore, logger: any LogSink, idleTimeoutSeconds: Int64) {
+    init(core: DNSResolutionCore, logger: any LogSink, idleTimeout: TimeAmount) {
         self.core = core
         self.logger = logger
-        self.idleTimeoutSeconds = idleTimeoutSeconds
+        self.idleTimeout = idleTimeout
     }
 
     func handlerAdded(context: ChannelHandlerContext) {
@@ -1124,7 +1150,7 @@ private final class DNSTCPHandler: ChannelInboundHandler, @unchecked Sendable {
     /// happened on this connection.
     private func armIdleTimer(on loop: EventLoop, channel: Channel) {
         idleTask?.cancel()
-        idleTask = loop.scheduleTask(in: .seconds(idleTimeoutSeconds)) { [weak self] in
+        idleTask = loop.scheduleTask(in: idleTimeout) { [weak self] in
             guard let self else { return }
             // A client waiting on an answer is legitimately silent. A worst-case
             // resolution (1.5 s internal attempt, then a DoH race bounded by the

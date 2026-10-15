@@ -613,18 +613,29 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         try await forwarder.start(host: "127.0.0.1", port: 0)
         let port = try XCTUnwrap(forwarder.listeningPort)
 
-        let garbage = try await Self.exchangeOverUDP(
-            payload: [0, 1, 2, 3], port: port, group: group, timeoutMilliseconds: 400
-        )
-        XCTAssertNil(garbage, "A sub-header datagram must be dropped, not answered")
-
-        // The forwarder is still serving: an intercept answer is synthesized
-        // locally, so this needs no reachable upstream.
+        // The garbage and then a well-formed query from one client. The
+        // forwarder keeps serving: an intercept answer is synthesized locally,
+        // so this needs no reachable upstream. Once that answer is in, any
+        // answer to the garbage, which needs no lookup at all, would be too.
+        let client = try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+        defer { client.close(promise: nil) }
+        let collector = UDPReplyCollector()
+        try await client.pipeline.addHandler(collector).get()
+        let target = try SocketAddress(ipAddress: "127.0.0.1", port: port)
         let query = DNSWireFormat.buildQuery(domain: "after.intercept.test", txID: 0x7788, qtype: 1)
-        let answer = try await Self.exchangeOverUDP(
-            payload: query, port: port, group: group, timeoutMilliseconds: 2000
-        )
-        let response = try XCTUnwrap(answer, "A well-formed query after garbage must still be answered")
+        for payload in [[0, 1, 2, 3], query] {
+            var buf = client.allocator.buffer(capacity: payload.count)
+            buf.writeBytes(payload)
+            try await client.writeAndFlush(AddressedEnvelope(remoteAddress: target, data: buf)).get()
+        }
+        for _ in 0..<200 where collector.replies().isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        let replies = collector.replies()
+        XCTAssertEqual(replies.count, 1, "A sub-header datagram must be dropped, not answered")
+        let response = try XCTUnwrap(replies.first, "A well-formed query after garbage must still be answered")
         XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: response))
         XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: response)?.ip, "127.44.3.9")
 
@@ -659,10 +670,13 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         let frozen = config
 
         let logger = RecordingLogSink(minLevel: .debug)
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
         let forwarder = LocalDNSForwarder(
             group: group,
             logger: logger,
-            configProvider: { frozen }
+            configProvider: { frozen },
+            tuning: try Self.quickInternalAttempt(against: silentServer)
         )
         try await forwarder.start(host: "127.0.0.1", port: 0)
         let port = try XCTUnwrap(forwarder.listeningPort)
@@ -683,15 +697,15 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         }
 
         var attempts = 0
-        for _ in 0..<60 {
-            try await Task.sleep(for: .milliseconds(100))
+        var answered = 0
+        for _ in 0..<600 where answered < queryCount {
+            try await Task.sleep(for: .milliseconds(10))
             attempts = logger.entries().filter { $0.message.contains("trying DoH") }.count
-            if attempts >= queryCount { break }
+            answered = logger.entries().filter { $0.message.contains("replying SERVFAIL") }.count
         }
         XCTAssertEqual(attempts, queryCount, "Every query must reach the DoH path for this test to mean anything")
-
-        // Let the last failures land before counting.
-        try await Task.sleep(for: .milliseconds(300))
+        // Count only once every query's DoH failure has landed.
+        XCTAssertEqual(answered, queryCount, "Every query must finish before the warnings are counted")
         let warnings = logger.entries().filter { $0.message.contains("DoH provider(s) failed") }
 
         XCTAssertGreaterThanOrEqual(warnings.count, 1, "The outage must still be reported at least once")
@@ -704,32 +718,20 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         try await client.close().get()
     }
 
-    /// Sends one datagram and waits for a single reply, or nil if none arrives
-    /// within `timeout`.
-    private static func exchangeOverUDP(
-        payload: [UInt8],
-        port: Int,
-        group: EventLoopGroup,
-        timeoutMilliseconds: Int
-    ) async throws -> [UInt8]? {
-        let client = try await DatagramBootstrap(group: group)
-            .bind(host: "127.0.0.1", port: 0)
-            .get()
-        defer { client.close(promise: nil) }
+    /// A local UDP socket that takes queries and never answers: an internal
+    /// DNS server that is down, without sending anything off the machine.
+    private static func silentInternalServer(group: EventLoopGroup) async throws -> Channel {
+        try await DatagramBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get()
+    }
 
-        let collector = UDPReplyCollector()
-        try await client.pipeline.addHandler(collector).get()
-
-        var buf = client.allocator.buffer(capacity: payload.count)
-        buf.writeBytes(payload)
-        let target = try SocketAddress(ipAddress: "127.0.0.1", port: port)
-        try await client.writeAndFlush(AddressedEnvelope(remoteAddress: target, data: buf)).get()
-
-        for _ in 0..<(timeoutMilliseconds / 25) {
-            if let reply = collector.reply() { return reply }
-            try await Task.sleep(for: .milliseconds(25))
-        }
-        return collector.reply()
+    /// Internal servers asked on `server`'s port, giving up after 50 ms
+    /// instead of 1.5 s.
+    private static func quickInternalAttempt(against server: Channel) throws -> DNSForwarderTuning {
+        var tuning = DNSForwarderTuning()
+        tuning.internalServerPort = try XCTUnwrap(server.localAddress?.port)
+        tuning.internalAttemptTimeout = .milliseconds(50)
+        tuning.internalDomainTimeout = .milliseconds(50)
+        return tuning
     }
 
     /// Regression test for the 2026-07-01 SIGABRT: `resetUpstreamTransports`
@@ -757,8 +759,8 @@ final class DNSForwarderIntegrationTests: XCTestCase {
 
         var config = ProxyConfig.testFixture()
         config.upstreams = []
-        // Internal DNS at 127.0.0.1:53 — refused (or answered) immediately;
-        // either way external names fall through to the DoH path.
+        // Internal DNS on a local socket that never answers, with a short
+        // attempt, so external names fall through to the DoH path at once.
         config.dnsEntries = [DomainDNSEntry(domain: "corp.internal.test", servers: ["127.0.0.1"])]
         // Several distinct provider URLs multiply the task-group fan-out per
         // query (providers × sessions × {json,wire}), stretching the window
@@ -768,10 +770,13 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         config.localPort = 9
 
         let logger = RecordingLogSink(minLevel: .debug)
+        let silentServer = try await Self.silentInternalServer(group: group)
+        defer { silentServer.close(promise: nil) }
         let forwarder = LocalDNSForwarder(
             group: group,
             logger: logger,
-            configProvider: { [config] in config }
+            configProvider: { [config] in config },
+            tuning: try Self.quickInternalAttempt(against: silentServer)
         )
         try await forwarder.start(host: "127.0.0.1", port: 0)
         let port = try XCTUnwrap(forwarder.listeningPort)
@@ -781,9 +786,9 @@ final class DNSForwarderIntegrationTests: XCTestCase {
             .get()
         let target = try SocketAddress(ipAddress: "127.0.0.1", port: port)
 
-        // Phase 1: send all queries. Their internal-DNS phase (127.0.0.1:53)
-        // resolves fast on refusal or takes up to its 1.5 s timeout — either
-        // way every query then enters `resolveViaDoH` against the tarpit.
+        // Phase 1: send all queries. Their internal-DNS phase times out
+        // quickly, and every query then enters `resolveViaDoH` against the
+        // tarpit.
         for i in 0..<96 {
             // Unique domains defeat the response cache so every query
             // reaches the DoH task group.
@@ -797,8 +802,8 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         // starting the storm — otherwise the test silently stops exercising
         // the crash surface if internal-DNS timing changes.
         var dohAttempts = 0
-        for _ in 0..<40 {
-            try await Task.sleep(for: .milliseconds(100))
+        for _ in 0..<400 {
+            try await Task.sleep(for: .milliseconds(10))
             dohAttempts = logger.entries().filter { $0.message.contains("trying DoH") }.count
             if dohAttempts >= 48 { break }
         }
@@ -808,7 +813,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         // tarpit (each fetch pends until the 4 s request timeout).
         for _ in 0..<300 {
             forwarder.resetUpstreamTransports(reason: "stress")
-            try await Task.sleep(for: .milliseconds(2))
+            try await Task.sleep(for: .microseconds(500))
         }
 
         // Stop while fetches are still pending in the tarpit — exercises the
@@ -823,21 +828,22 @@ final class DNSForwarderIntegrationTests: XCTestCase {
     }
 }
 
-/// Captures the first datagram a test client receives, so a test can assert on
-/// a reply *or* on the absence of one.
+/// Captures the datagrams a test client receives, so a test can assert on a
+/// reply *or* on the absence of one.
 private final class UDPReplyCollector: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
 
     private let lock = NSLock()
-    private var received: [UInt8]?
+    /// Every datagram received, in order; a test reads a handful at most.
+    private var received: [[UInt8]] = []
 
-    func reply() -> [UInt8]? {
+    func replies() -> [[UInt8]] {
         lock.withLock { received }
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var buffer = unwrapInboundIn(data).data
         let bytes = buffer.readBytes(length: buffer.readableBytes) ?? []
-        lock.withLock { if received == nil { received = bytes } }
+        lock.withLock { if received.count < 16 { received.append(bytes) } }
     }
 }
