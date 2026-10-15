@@ -30,11 +30,10 @@ package struct PlatformWork: Sendable {
     /// `LifecycleLane` token and queues its surface work with no suspension in
     /// between, so a stop issued after the check is queued after the start's
     /// work, and a stop issued before it is caught by the check.
-    package func run<T: Sendable>(
-        isolation: isolated (any Actor)? = #isolation,
+    nonisolated(nonsending) package func run<T: Sendable>(
         _ work: @escaping @Sendable () -> T
     ) async -> T {
-        await withCheckedContinuation(isolation: isolation) { continuation in
+        await withCheckedContinuation { continuation in
             queue.async { continuation.resume(returning: work()) }
         }
     }
