@@ -782,11 +782,17 @@ private final class ProxyFixture: @unchecked Sendable {
         if let pac {
             let refused: Bool
             if case .refused = pac.answer { refused = true } else { refused = false }
+            // Only a hanging script waits out the evaluation timeout, once per
+            // request, so it gets a short one: it never answers, so no value
+            // is too short. Every other answer returns at once and keeps the
+            // margin.
+            let hanging: Bool
+            if case .hanging = pac.answer { hanging = true } else { hanging = false }
             let created = PACRoutingEngine(
                 configProvider: { fixed },
                 resolver: pac,
                 refreshInterval: 300,
-                evalTimeoutSeconds: 0.2,
+                evalTimeoutSeconds: hanging ? 0.02 : 0.2,
                 queuedEvaluationLimit: refused ? 0 : 64,
                 eventSink: sink
             )
@@ -837,8 +843,8 @@ private final class ProxyFixture: @unchecked Sendable {
         let reachable = await detector.isDirectlyReachable(host: "127.0.0.1", port: port, gatewayMode: false)
         XCTAssertEqual(reachable, expected, "seeding 127.0.0.1:\(port)")
         guard let origin, expected else { return }
-        for _ in 0..<500 where origin.accepted == before {
-            try await Task.sleep(for: .milliseconds(10))
+        for _ in 0..<5_000 where origin.accepted == before {
+            try await Task.sleep(for: .milliseconds(1))
         }
         XCTAssertEqual(origin.accepted, before + 1, "the seeding probe never reached the origin")
     }

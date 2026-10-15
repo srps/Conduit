@@ -278,9 +278,12 @@ final class PACRoutingEngineTests: XCTestCase {
         config.pacRoutingEnabled = true
 
         let events = NIOLockedValueBox<[RuntimeEvent]>([])
+        // The five requests are admitted in one event-loop turn, so the first
+        // three are still evaluating when the last two arrive however short
+        // the evaluation is.
         let engine = PACRoutingEngine(
             configProvider: { config },
-            resolver: StaticPacEvaluator(scriptEvaluator: SlowCountingPacScriptEvaluator(delay: 0.2)),
+            resolver: StaticPacEvaluator(scriptEvaluator: SlowCountingPacScriptEvaluator(delay: 0.05)),
             refreshInterval: 300,
             queuedEvaluationLimit: 3,
             eventSink: { event in events.withLockedValue { $0.append(event) } }
@@ -339,7 +342,7 @@ final class PACRoutingEngineTests: XCTestCase {
             configProvider: { config },
             resolver: HangingPacEvaluator(),
             refreshInterval: 300,
-            evalTimeoutSeconds: 0.5,
+            evalTimeoutSeconds: 0.1,
             pacLoader: { _ in "function FindProxyForURL(url, host) { return \"DIRECT\"; }" }
         )
 
@@ -349,7 +352,7 @@ final class PACRoutingEngineTests: XCTestCase {
             XCTFail("Expected PAC refresh to time out")
         } catch {
             let elapsed = Date().timeIntervalSince(start)
-            XCTAssertLessThan(elapsed, 3, "Timeout should fire within ~0.5s, not hang indefinitely")
+            XCTAssertLessThan(elapsed, 3, "Timeout should fire within ~0.1s, not hang indefinitely")
             XCTAssertTrue(error.localizedDescription.contains("timed out"),
                           "Error should mention timeout, got: \(error.localizedDescription)")
         }
