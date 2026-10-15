@@ -18,7 +18,7 @@ final class ConnectTimeoutTests: XCTestCase {
 
         var modifiedConfig = ProxyConfig.testFixture()
         // The probe timeout stays long: it must not bound this connect.
-        modifiedConfig.upstreamConnectTimeoutSeconds = 0.2
+        modifiedConfig.upstreamConnectTimeoutSeconds = 0.05
         modifiedConfig.connectionCheckTimeoutMS = 10_000
         modifiedConfig.upstreams = [
             UpstreamProxy(name: "Unreachable", host: "192.0.2.1", port: 9999, priority: 0)
@@ -30,7 +30,9 @@ final class ConnectTimeoutTests: XCTestCase {
             configProvider: { modifiedConfig },
             authenticatorProvider: { _ in
                 NTLMAuthenticator(credentials: ProxyCredentials(username: "test", domain: "TEST", workstation: "MAC", ntHash: SecretBytes.repeating(0, count: 16)))
-            }
+            },
+            // The production floor is checked on its own below.
+            minimumConnectTimeout: 0.05
         )
 
         let start = Date()
@@ -40,10 +42,24 @@ final class ConnectTimeoutTests: XCTestCase {
             XCTFail("Should have failed to connect")
         } catch {
             let elapsed = Date().timeIntervalSince(start)
-            XCTAssertLessThan(elapsed, 3, "Connection should time out within 200ms + overhead, not hang")
+            XCTAssertLessThan(elapsed, 3, "Connection should time out within 50ms + overhead, not hang")
         }
 
         pool.closeAll()
+    }
+
+    /// A configured connect timeout below the floor is raised to it, and one
+    /// above the ceiling is lowered to it, so a typo can neither give up on a
+    /// slow but healthy upstream nor trap converting to `TimeAmount`.
+    func testTheDataPathConnectTimeoutIsClampedToTheFloorAndCeiling() {
+        let floor = ConnectionPool.defaultMinimumConnectTimeout
+        XCTAssertEqual(floor, 0.5)
+        XCTAssertEqual(ConnectionPool.dataPathConnectTimeout(configured: 0.2, minimum: floor), .milliseconds(500))
+        XCTAssertEqual(ConnectionPool.dataPathConnectTimeout(configured: 7, minimum: floor), .milliseconds(7_000))
+        XCTAssertEqual(
+            ConnectionPool.dataPathConnectTimeout(configured: 1e12, minimum: floor),
+            .milliseconds(Int64(HealthSection.maximumUpstreamConnectTimeout * 1000))
+        )
     }
 
     // MARK: - CONNECTCoordinator has connectUpstreamTunnel

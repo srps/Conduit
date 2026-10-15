@@ -231,6 +231,9 @@ package final class ConnectionPool: @unchecked Sendable {
     fileprivate static let defaultCircuitBaseOpenInterval: TimeInterval = 30
     fileprivate static let defaultCircuitMaxOpenInterval: TimeInterval = 300
     private static let maxConnectionAgeSeconds: TimeInterval = 300
+    /// The data-path connect budget never drops below this, whatever the
+    /// config says: a shorter dial gives up on a slow but healthy upstream.
+    package static let defaultMinimumConnectTimeout: TimeInterval = 0.5
 
     private let group: EventLoopGroup
     private let logger: any LogSink
@@ -238,6 +241,7 @@ package final class ConnectionPool: @unchecked Sendable {
     private let authenticatorProvider: (UpstreamProxy) throws -> ProxyAuthenticator
     private let authHandshakeLimiter: AuthHandshakeLimiter
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    private let minimumConnectTimeout: TimeInterval
     private let lock = NIOLock()
     private var idleConnections: [UUID: [PooledUpstreamConnection]] = [:]
     private var allConnections: [UUID: PooledUpstreamConnection] = [:]
@@ -264,8 +268,12 @@ package final class ConnectionPool: @unchecked Sendable {
         authenticatorProvider: @escaping (UpstreamProxy) throws -> ProxyAuthenticator,
         authHandshakeLimiter: AuthHandshakeLimiter = AuthHandshakeLimiter(),
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
-        sockets: OutboundSocketRegistry = .standalone()
+        sockets: OutboundSocketRegistry = .standalone(),
+        // Exposed only so failover tests can dial dead upstreams without
+        // waiting out the production floor once per upstream.
+        minimumConnectTimeout: TimeInterval = ConnectionPool.defaultMinimumConnectTimeout
     ) {
+        self.minimumConnectTimeout = minimumConnectTimeout
         self.group = group
         self.logger = logger
         self.configProvider = configProvider
@@ -842,10 +850,18 @@ package final class ConnectionPool: @unchecked Sendable {
             }
     }
 
-    /// The data-path connect budget. Clamped as well as validated:
-    /// `Int64(_:)` traps on an out-of-range Double.
+    /// The data-path connect budget.
     private var dataPathConnectTimeout: TimeAmount {
-        let seconds = min(max(configProvider().upstreamConnectTimeoutSeconds, 0.5), HealthSection.maximumUpstreamConnectTimeout)
+        Self.dataPathConnectTimeout(
+            configured: configProvider().upstreamConnectTimeoutSeconds, minimum: minimumConnectTimeout
+        )
+    }
+
+    /// `configured`, clamped to `minimum ... maximumUpstreamConnectTimeout`.
+    /// Clamped as well as validated: `Int64(_:)` traps on an out-of-range
+    /// Double.
+    static func dataPathConnectTimeout(configured: TimeInterval, minimum: TimeInterval) -> TimeAmount {
+        let seconds = min(max(configured, minimum), HealthSection.maximumUpstreamConnectTimeout)
         return .milliseconds(Int64(seconds * 1000))
     }
 

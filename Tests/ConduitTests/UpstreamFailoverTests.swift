@@ -9,11 +9,14 @@ import XCTest
 
 final class UpstreamFailoverTests: XCTestCase {
 
+    private static let deadDialTimeout: TimeInterval = 0.05
+
     private func makeConfig(upstreams: [UpstreamProxy]) -> ProxyConfig {
         var config = ProxyConfig.testFixture()
         config.upstreams = upstreams
-        // Bounds each dead-upstream dial; the pool floors it at 500 ms.
-        config.upstreamConnectTimeoutSeconds = 0.2
+        // Bounds each dead-upstream dial; the failover pools lower the pool's
+        // 500 ms floor to this so it applies.
+        config.upstreamConnectTimeoutSeconds = Self.deadDialTimeout
         return config
     }
 
@@ -36,7 +39,8 @@ final class UpstreamFailoverTests: XCTestCase {
             configProvider: { config },
             authenticatorProvider: { _ in
                 NTLMAuthenticator(credentials: ProxyCredentials(username: "test", domain: "D", workstation: "W", ntHash: SecretBytes.repeating(0, count: 16)))
-            }
+            },
+            minimumConnectTimeout: Self.deadDialTimeout
         )
 
         let coordinator = CONNECTCoordinator(
@@ -53,7 +57,7 @@ final class UpstreamFailoverTests: XCTestCase {
             XCTFail("Should have failed after exhausting all upstreams")
         } catch {
             let elapsed = Date().timeIntervalSince(start)
-            XCTAssertLessThan(elapsed, 5, "Failover through 3 dead upstreams at 200ms timeout should complete in <5s")
+            XCTAssertLessThan(elapsed, 5, "Failover through 3 dead upstreams at a 50 ms timeout should complete in <5s")
             let switched = pool.activeUpstream()
             XCTAssertNotNil(switched, "Pool should have cycled through upstreams during failover")
         }
@@ -75,7 +79,8 @@ final class UpstreamFailoverTests: XCTestCase {
             group: group,
             logger: logger,
             configProvider: { config },
-            authenticatorProvider: { _ in throw CredentialManagerError.missingCredentials }
+            authenticatorProvider: { _ in throw CredentialManagerError.missingCredentials },
+            minimumConnectTimeout: Self.deadDialTimeout
         )
 
         XCTAssertEqual(pool.enabledUpstreamCount, 2)
