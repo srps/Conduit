@@ -35,6 +35,12 @@ final class AppStateHarness {
     /// runner's bundle at best.
     let updater = FakeUpdaterLauncher()
     var currentVersion = "0.5.0"
+    /// The host's real waits, by default. A scenario that waits on one
+    /// shortens it; the rest keep the production timing they were written
+    /// against.
+    var networkPathDebounce = NetworkMonitor.defaultDebounceInterval
+    var helperSocketBindWait: Duration = .seconds(1)
+    var dnsReconcileDebounce: TimeInterval = 1.0
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
     private(set) var appState: AppState?
@@ -79,6 +85,9 @@ final class AppStateHarness {
             // real port 53 instead waited two seconds wherever nothing does,
             // and answered for the installed Conduit's relay where it runs.
             dnsResponds: { _ in false },
+            networkPathDebounce: networkPathDebounce,
+            helperSocketBindWait: helperSocketBindWait,
+            dnsReconcileDebounce: dnsReconcileDebounce,
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
@@ -427,6 +436,8 @@ final class AppStateHarnessTests: XCTestCase {
         let locations = NetworkLocationFixture.store()
         harness.locationStore = locations
         harness.locationLimits = NetworkLocationLimits(maximumDriftRepairs: 1, driftRepairWindow: .milliseconds(300))
+        // The real path monitor's first report is waited for below.
+        harness.networkPathDebounce = 0.05
         let state = harness.launch()
         await harness.launchRecovery()
         try await state.startProxy()
@@ -463,6 +474,8 @@ final class AppStateHarnessTests: XCTestCase {
         let locations = NetworkLocationFixture.store()
         locations.edit { $0.services[0].enabled = false }
         harness.locationStore = locations
+        // The VPN report's reconcile runs after this debounce.
+        harness.dnsReconcileDebounce = 0.05
         let state = harness.launch()
         await harness.launchRecovery()
         await state.startDNS()
@@ -562,11 +575,13 @@ final class AppStateHarnessTests: XCTestCase {
 
     private func launch(
         platform: PlatformIntegrationConfig = PlatformIntegrationConfig(),
+        helperSocketBindWait: Duration = .seconds(1),
         configure: (inout ProxyConfig) -> Void = { _ in }
     ) throws -> AppState {
         var config = makeConfig()
         configure(&config)
         harness = try AppStateHarness(config: config, platformConfig: platform)
+        harness.helperSocketBindWait = helperSocketBindWait
         return harness.launch()
     }
 
@@ -989,7 +1004,7 @@ final class AppStateHarnessTests: XCTestCase {
     /// app reaches, never the real installer, and the caller policy the
     /// install reported is recorded as an event and kept for Settings.
     func testHelperInstallReportsTheCallerPolicyItLeft() async throws {
-        let appState = try launch()
+        let appState = try launch(helperSocketBindWait: .zero)
         func helperEvents() -> [String] {
             appState.eventLog.events.filter { $0.event.hasPrefix("helper.") }.map { "\($0.event) \($0.detail ?? "")" }
         }

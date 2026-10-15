@@ -130,7 +130,7 @@ final class DaemonRuntimeHost {
     private var locationReconcileWanted = false
     private var proxySettingsReconcileInFlight = false
     private var proxySettingsReconcileWanted = false
-    private let networkMonitor = NetworkMonitor()
+    private let networkMonitor: NetworkMonitor
     /// The hops from the observers and the orchestrator's callbacks onto the
     /// main actor. Internal so the tests can `drain()` them instead of
     /// sleeping. Same shape as `AppState`.
@@ -197,10 +197,12 @@ final class DaemonRuntimeHost {
         kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
         commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
+        networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil
     ) {
         self.dnsResponds = dnsResponds
+        self.networkMonitor = NetworkMonitor(debounceInterval: networkPathDebounce)
         self.networkLocationObserver = networkLocationObserver
         self.networkLocationStoreFactory = networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits

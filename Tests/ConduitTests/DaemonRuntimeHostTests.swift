@@ -358,6 +358,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let locationObserver = FakeNetworkLocationObserver()
         var locationStore: FakeNetworkLocationStore?
         var locationLimits = NetworkLocationLimits()
+        /// The production path debounce unless a scenario waits on a report.
+        var networkPathDebounce = NetworkMonitor.defaultDebounceInterval
         /// Holds the machine's `networksetup` listings when armed, so a
         /// scenario can keep one system DNS reconcile out while more arrive.
         let listings = HeldListings()
@@ -410,6 +412,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 },
                 // As `AppStateHarness`: never the real port 53.
                 dnsResponds: { _ in false },
+                networkPathDebounce: networkPathDebounce,
                 homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
                 resolverDirectory: machine.resolverDirectory.path
             )
@@ -550,6 +553,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let locations = NetworkLocationFixture.store()
         harness.locationStore = locations
         harness.locationLimits = NetworkLocationLimits(maximumDriftRepairs: 1, driftRepairWindow: .milliseconds(300))
+        // The real path monitor's first report is waited for below.
+        harness.networkPathDebounce = 0.05
         let host = try harness.makeHost()
         await host.awaitLaunchRecovery()
         try await host.startRuntime()

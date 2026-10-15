@@ -133,7 +133,12 @@ final class AppState: ObservableObject {
     private var locationReconcileWanted = false
     private var proxySettingsReconcileInFlight = false
     private var proxySettingsReconcileWanted = false
-    private let networkMonitor = NetworkMonitor()
+    private let networkMonitor: NetworkMonitor
+    /// How long an install waits for the LaunchDaemon to bind its socket
+    /// before re-reading the preflight.
+    private let helperSocketBindWait: Duration
+    /// The trailing debounce before a DNS reconcile runs.
+    private let dnsReconcileDebounce: TimeInterval
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<VPNFlapWindowConfig>
     // AppState's configBox + $config mirror sink were dropped.
@@ -236,6 +241,9 @@ final class AppState: ObservableObject {
         kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
         commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
+        networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
+        helperSocketBindWait: Duration = .seconds(1),
+        dnsReconcileDebounce: TimeInterval = 1.0,
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
@@ -302,6 +310,9 @@ final class AppState: ObservableObject {
         self.helperLifecycle = helperLifecycle ?? helperClient
         self.auditedPrivilegeClient = auditedPrivilegeClient
         self.dnsResponds = dnsResponds
+        self.networkMonitor = NetworkMonitor(debounceInterval: networkPathDebounce)
+        self.helperSocketBindWait = helperSocketBindWait
+        self.dnsReconcileDebounce = dnsReconcileDebounce
         self.commandRunner = commandRunner ?? { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         }
@@ -1778,7 +1789,7 @@ final class AppState: ObservableObject {
         changeHelper(
             "install",
             // The LaunchDaemon takes a moment to bind its socket.
-            refreshAfter: .seconds(1),
+            refreshAfter: helperSocketBindWait,
             { lifecycle in try lifecycle.installHelper() },
             succeeded: { appState, policy in
                 appState.helperCallerPolicy = policy
@@ -2201,7 +2212,7 @@ final class AppState: ObservableObject {
         dnsReconcileWork = work
         // The debounce fires on the main queue because it touches `AppState`;
         // the reconcile itself does not run here.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + dnsReconcileDebounce, execute: work)
     }
 
     /// Off the main actor: one `networksetup` read per interface, and a
