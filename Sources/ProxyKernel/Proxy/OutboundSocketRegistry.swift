@@ -29,8 +29,9 @@ package final class TransitionTicket: Sendable {
 /// - `register` checks a socket once it connects. One that connected over a
 ///   path a transition has since removed is closed on arrival
 ///   (`connection.late_dial_retired`).
-/// - `closeStranded` checks every tracked socket. The orchestrator runs it on
-///   each confirmed transition and again as routes settle.
+/// - `findStranded` checks every tracked socket and `close` closes what it
+///   found; the orchestrator runs them on each confirmed transition and
+///   again as routes settle, and closes only if no flap began meanwhile.
 /// - `closeUpstream` is the one routing rule: a disconnect whose probe found
 ///   the upstreams gone routes DIRECT, and their sockets cannot answer.
 ///
@@ -51,7 +52,13 @@ package final class OutboundSocketRegistry: @unchecked Sendable {
         package var unknown = 0
     }
 
-    private struct Entry {
+    /// The sockets one check found stranded, not yet closed.
+    package struct Stranded: Sendable {
+        fileprivate let candidates: [(key: ObjectIdentifier, entry: Entry)]
+        package let unknown: Int
+    }
+
+    fileprivate struct Entry: Sendable {
         let channel: Channel
         let route: Route
         let ticket: TransitionTicket
@@ -161,10 +168,16 @@ package final class OutboundSocketRegistry: @unchecked Sendable {
     package var count: Int { lock.withLock { entries.count } }
 
     /// Close every tracked socket whose path is gone, or with
-    /// `addressesOnly` only those whose local address is gone. Checks every
+    /// `addressesOnly` only those whose local address is gone.
+    package func closeStranded(addressesOnly: Bool = false) -> Sweep {
+        close(findStranded(addressesOnly: addressesOnly))
+    }
+
+    /// Every tracked socket whose path is gone, or with `addressesOnly`
+    /// whose local address is gone; nothing is closed yet. Checks every
     /// socket against the machine, so callers run it off the main actor and
     /// the event loops.
-    package func closeStranded(addressesOnly: Bool = false) -> Sweep {
+    package func findStranded(addressesOnly: Bool = false) -> Stranded {
         let tracked = lock.withLock { entries.map { (key: $0.key, entry: $0.value) } }
         var checked: [(key: ObjectIdentifier, entry: Entry)] = []
         var queries: [SocketPathQuery] = []
@@ -174,19 +187,24 @@ package final class OutboundSocketRegistry: @unchecked Sendable {
             checked.append(item)
             queries.append(query)
         }
-        var result = Sweep()
+        var unknown = 0
         var stranded: [(key: ObjectIdentifier, entry: Entry)] = []
         for (item, verdict) in zip(checked, paths.verdicts(for: queries)) {
             switch verdict {
             case .current: break
             case .stranded(let label):
                 if !addressesOnly || label == SocketPathVerdict.addressGone { stranded.append(item) }
-            case .unknown: result.unknown += 1
+            case .unknown: unknown += 1
             }
         }
-        let closed = close(retire(stranded))
-        result.upstream = closed.upstream
-        result.direct = closed.direct
+        return Stranded(candidates: stranded, unknown: unknown)
+    }
+
+    /// Close what `findStranded` found, skipping any socket that closed or
+    /// left meanwhile.
+    package func close(_ found: Stranded) -> Sweep {
+        var result = close(retire(found.candidates))
+        result.unknown = found.unknown
         return result
     }
 

@@ -19,9 +19,17 @@ final class VPNTunnelMigrationTests: XCTestCase {
     private let gone = NIOLockedValueBox<Set<String>>([])
     private let moved = NIOLockedValueBox<Set<String>>([])
 
+    /// While set, every check waits on it, standing in for a slow sweep.
+    private let paused = NIOLockedValueBox<DispatchSemaphore?>(nil)
+    private let checking = NIOLockedValueBox(false)
+
     private var paths: ClosureSocketPaths {
-        let gone = self.gone, moved = self.moved
+        let gone = self.gone, moved = self.moved, paused = self.paused, checking = self.checking
         return ClosureSocketPaths { query in
+            if let pause = paused.withLockedValue({ $0 }) {
+                checking.withLockedValue { $0 = true }
+                pause.wait()
+            }
             let local = query.local.ipAddress ?? ""
             if gone.withLockedValue({ $0.contains(local) }) { return .stranded(SocketPathVerdict.addressGone) }
             if moved.withLockedValue({ $0.contains(local) }) { return .stranded("interface_changed") }
@@ -141,6 +149,29 @@ final class VPNTunnelMigrationTests: XCTestCase {
         await orchestrator.handleVPNStateChange(.connected)
         let settled3 = try await until { !onVPN.isActive }
         XCTAssertTrue(settled3, "the recovery ran the owed re-sweep")
+        await orchestrator.stopProxy()
+    }
+
+    /// A flap that begins while a sweep is still checking paths stops it
+    /// before it closes anything: the verdicts were taken mid-transition.
+    func testAFlapDuringASweepsCheckStopsItsClosures() async throws {
+        let orchestrator = orchestrator()
+        try await orchestrator.startProxy()
+        let socket = try await tracked(orchestrator, local: "10.20.30.40")
+        gone.withLockedValue { _ = $0.insert("10.20.30.40") }
+        let pause = DispatchSemaphore(value: 0)
+        paused.withLockedValue { $0 = pause }
+
+        await orchestrator.handleVPNStateChange(.connected)
+        let checking = try await until { self.checking.withLockedValue { $0 } }
+        XCTAssertTrue(checking)
+        await orchestrator.handleVPNStateChange(.reasserting)
+        paused.withLockedValue { $0 = nil }
+        pause.signal()
+        try await Task.sleep(for: .milliseconds(200))
+
+        XCTAssertTrue(socket.isActive)
+        XCTAssertFalse(migrations(orchestrator.eventLog.events).contains { $0.contains("phase=paths") })
         await orchestrator.stopProxy()
     }
 

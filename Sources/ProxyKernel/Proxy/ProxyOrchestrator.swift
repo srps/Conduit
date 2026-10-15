@@ -2177,7 +2177,11 @@ package final class ProxyOrchestrator {
     private func sweepStrandedSockets(transition: String, pass: Int, addressesOnly: Bool) async {
         let sockets = self.sockets
         // Off the main actor: it checks every tracked socket's path.
-        let swept = await Task.detached { sockets.closeStranded(addressesOnly: addressesOnly) }.value
+        let found = await Task.detached { sockets.findStranded(addressesOnly: addressesOnly) }.value
+        // Back on the main actor: a flap or newer report that arrived during
+        // the check cancelled this sweep, and its verdicts no longer hold.
+        guard !Task.isCancelled else { return }
+        let swept = sockets.close(found)
         guard pass == 0 || swept != OutboundSocketRegistry.Sweep() else { return }
         let event = RuntimeEvent(
             kind: .vpn, event: "vpn.tunnels_migrated",
