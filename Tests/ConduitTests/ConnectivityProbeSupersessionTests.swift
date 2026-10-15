@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOConcurrencyHelpers
+import NIOCore
+import NIOHTTP1
 import NIOPosix
 import XCTest
 @testable import ProxyKernel
@@ -10,6 +12,20 @@ import XCTest
 /// a later-started probe overtook, must not change routing.
 @MainActor
 final class ConnectivityProbeSupersessionTests: XCTestCase {
+    /// Answers every request 200, so a health check through it passes.
+    private final class HealthyProxy: ChannelInboundHandler {
+        typealias InboundIn = HTTPServerRequestPart
+        typealias OutboundOut = HTTPServerResponsePart
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            if case .end = unwrapInboundIn(data) {
+                var head = HTTPResponseHead(version: .http1_1, status: .ok)
+                head.headers.add(name: "Content-Length", value: "0")
+                context.write(wrapOutboundOut(.head(head)), promise: nil)
+                context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+            }
+        }
+    }
+
     /// Scripted probes: each call takes the next reachability verdict and,
     /// if told to, parks until released, so a test picks the interleaving.
     private final class ProbeScript: @unchecked Sendable {
@@ -360,7 +376,18 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         config.localPort = 0; config.localPACEnabled = false
         config.pacRoutingEnabled = true; config.pacURL = "http://pac.example.test/proxy.pac"
         config.healthCheckIntervalSeconds = 3600
-        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: 9, priority: 0)]
+        // A real upstream that passes health checks: the one startup fires at
+        // once otherwise fails against a closed port and starts recovery,
+        // racing the state this test asserts.
+        let upstream = try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .childChannelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.configureHTTPServerPipeline()
+                    try channel.pipeline.syncOperations.addHandler(HealthyProxy())
+                }
+            }.bind(host: "127.0.0.1", port: 0).get()
+        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1",
+                                          port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)]
         let orchestrator = ProxyOrchestrator(config: config, logger: ListeningHook { Task { @MainActor in await flip() } },
             authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
             pacEvaluator: pac, connectivityProbe: { upstreams in
@@ -377,6 +404,7 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         XCTAssertEqual(pacEvents.suffix(2), ["pac.routes_invalidated", "pac.refreshed"],
                        "the PAC fetched across the last flap is dropped, then fetched again: \(pacEvents)")
         await orchestrator.stopProxy()
+        try await upstream.close()
     }
 
     /// Hosts stamp reports on the monitor's callback. An older report that
