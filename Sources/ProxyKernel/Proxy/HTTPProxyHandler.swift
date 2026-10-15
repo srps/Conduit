@@ -754,7 +754,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             .whenComplete { result in
                 switch result {
                 case .success(let (upstream, ticket)):
-                    let onError: (Error) -> Void = { error in
+                    let onError: @Sendable (Error) -> Void = { error in
                         logger.log(directFailureLevel, "Direct HTTP relay failed: \(error.displayDescription)", category: .proxy)
                         clientEL.execute {
                             if !(error is DirectHTTPResponseForwarder.ResponseCutShort) {
