@@ -57,7 +57,7 @@ package enum CommandRunner {
     package static let privilegedTimeout: TimeInterval = 600
 
     /// How long a child gets to honour `SIGTERM` before it is killed.
-    private static let terminationGrace: TimeInterval = 2
+    package static let defaultTerminationGrace: TimeInterval = 2
 
     /// How long the pipes get to reach EOF once the child is gone.
     ///
@@ -75,7 +75,7 @@ package enum CommandRunner {
     /// a style choice. No current caller backgrounds a writer on our pipes:
     /// `networksetup`, `scutil` and `curl` do not, and `osascript` collects its
     /// inner script's output itself.
-    private static let drainJoinGrace: TimeInterval = 5
+    package static let defaultDrainJoinGrace: TimeInterval = 5
 
     private static let drainQueue = DispatchQueue(
         label: "io.github.srps.Conduit.command-runner",
@@ -89,7 +89,9 @@ package enum CommandRunner {
         arguments: [String],
         environment: [String: String] = [:],
         timeout: TimeInterval = defaultTimeout,
-        maxOutputBytes: Int = defaultMaxOutputBytes
+        maxOutputBytes: Int = defaultMaxOutputBytes,
+        terminationGrace: TimeInterval = defaultTerminationGrace,
+        drainJoinGrace: TimeInterval = defaultDrainJoinGrace
     ) throws -> CommandResult {
         let process = Process()
         let stdout = Pipe()
@@ -119,7 +121,7 @@ package enum CommandRunner {
 
         var timedOut = false
         if exited.wait(timeout: .now() + timeout) == .timedOut {
-            kill(process, waitingOn: exited)
+            kill(process, waitingOn: exited, grace: terminationGrace)
             timedOut = true
         }
 
@@ -341,11 +343,11 @@ package enum CommandRunner {
     /// has been handed to someone else. The guard was originally on the
     /// escalation only; the window is smaller on the first signal but it is the
     /// same window, and there is no reason to treat them differently.
-    private static func kill(_ process: Process, waitingOn exited: DispatchSemaphore) {
+    private static func kill(_ process: Process, waitingOn exited: DispatchSemaphore, grace: TimeInterval) {
         if process.isRunning {
             process.terminate()
         }
-        guard exited.wait(timeout: .now() + terminationGrace) == .timedOut else { return }
+        guard exited.wait(timeout: .now() + grace) == .timedOut else { return }
         // A child that has survived `SIGTERM` for the grace period is far
         // likelier to still be here than to have exited in that instant.
         if process.isRunning {
@@ -354,7 +356,7 @@ package enum CommandRunner {
         // Bounded even here. `SIGKILL` is not refusable, but a child wedged in
         // an uninterruptible wait can outlive it, and no signal we have left
         // would help — better to return and report than to inherit the hang.
-        _ = exited.wait(timeout: .now() + terminationGrace)
+        _ = exited.wait(timeout: .now() + grace)
     }
 }
 
