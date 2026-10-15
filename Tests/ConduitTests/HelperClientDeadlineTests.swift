@@ -14,7 +14,8 @@ final class HelperClientDeadlineTests: XCTestCase {
     private func client(
         _ listener: HeldHelper,
         events: EventBox? = nil,
-        fallbackRan: FlagBox? = nil
+        fallbackRan: FlagBox? = nil,
+        budget: Int? = nil
     ) -> HelperToolPrivilegeClient {
         let sink: @Sendable (RuntimeEvent) -> Void = { events?.append($0) }
         return HelperToolPrivilegeClient(
@@ -24,7 +25,7 @@ final class HelperClientDeadlineTests: XCTestCase {
                 fallbackRan?.set()
                 return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
             }),
-            transactionMilliseconds: budget
+            transactionMilliseconds: budget ?? self.budget
         )
     }
 
@@ -122,7 +123,9 @@ final class HelperClientDeadlineTests: XCTestCase {
         let helper = try HeldHelper(.readsAndHolds)
         defer { helper.stop() }
         let events = EventBox()
-        let client = client(helper, events: events, fallbackRan: FlagBox())
+        // Half the file's budget: every caller here spends whole budgets.
+        let budget = self.budget / 2
+        let client = client(helper, events: events, fallbackRan: FlagBox(), budget: budget)
         let finished = DispatchGroup()
         let start = HelperLineIO.now()
         for _ in 0..<4 {
