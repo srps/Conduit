@@ -64,6 +64,8 @@ final class DaemonRuntimeHost {
     /// reason as `privilegeClient`: a host test must not rewrite the machine
     /// it runs on. Same seams as `AppState`.
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+    /// Twin of `AppState.dnsResponds`.
+    private let dnsResponds: @Sendable (Int) -> Bool
     private let homeDirectory: URL
     private let resolverDirectory: String
     /// One serialised pass per config reload: the runtime takes the edit,
@@ -106,6 +108,7 @@ final class DaemonRuntimeHost {
         journal: platformStateJournal,
         legacySnapshotFile: environment.legacySavedDNSFile,
         commandRunner: commandRunner,
+        respondsOnPort: dnsResponds,
         locationRecovery: locationRecovery,
         configProvider: orchestrator.configSnapshotProvider
     )
@@ -193,9 +196,11 @@ final class DaemonRuntimeHost {
         credentialStore: (any SecretStore)? = nil,
         kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
         commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         homeDirectory: URL? = nil,
         resolverDirectory: String? = nil
     ) {
+        self.dnsResponds = dnsResponds
         self.networkLocationObserver = networkLocationObserver
         self.networkLocationStoreFactory = networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits
@@ -1083,6 +1088,7 @@ extension DaemonRuntimeHost {
         logger: any LogSink,
         privilegeClient: (any PrivilegeClient)? = nil,
         commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) }
     ) async -> [RuntimeEvent] {
         let writer = RuntimeEventFileWriter(fileURL: environment.eventsFile, logger: logger)
@@ -1105,6 +1111,7 @@ extension DaemonRuntimeHost {
             journal: journal,
             legacySnapshotFile: environment.legacySavedDNSFile,
             commandRunner: runner,
+            respondsOnPort: dnsResponds,
             locationRecovery: locationRecovery
         )
         let systemProxy = SystemProxyManager(privilegeClient: audited, journal: journal, commandRunner: runner, locationRecovery: locationRecovery)
