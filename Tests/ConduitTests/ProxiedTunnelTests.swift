@@ -89,7 +89,9 @@ final class ProxiedTunnelTests: XCTestCase {
         try await clientChannel.writeAndFlush(sendBuf).get()
 
         // 6. Wait for data to arrive at target
-        try await Task.sleep(for: .milliseconds(500))
+        try await Self.waitUntil {
+            (targetReceived.withLockedValue { $0 }?.readableBytes ?? 0) >= mongoMessage.count
+        }
 
         let received = targetReceived.withLockedValue { $0 }
         XCTAssertNotNil(received, "Target server should have received data")
@@ -107,6 +109,16 @@ final class ProxiedTunnelTests: XCTestCase {
         try await tunnelListener.close().get()
         try await targetServer.close().get()
         try await mockProxy.close().get()
+    }
+
+    /// Returns once `condition` holds, or after five seconds; the caller's
+    /// assertions say what was missing.
+    @MainActor
+    private static func waitUntil(_ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !condition(), ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
     }
 
     // MARK: - Verify protocol detection on tunnel data
@@ -165,7 +177,9 @@ final class ProxiedTunnelTests: XCTestCase {
         sendBuf.writeBytes(pgBytes)
         try await clientChannel.writeAndFlush(sendBuf).get()
 
-        try await Task.sleep(for: .milliseconds(500))
+        try await Self.waitUntil {
+            logger.entries().contains { $0.category == .tunnel && $0.message.contains("PostgreSQL") }
+        }
 
         // Check the log for PostgreSQL detection
         let tunnelLogs = logger.entries().filter { $0.category == .tunnel }
