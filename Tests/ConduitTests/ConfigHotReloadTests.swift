@@ -1,15 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import XCTest
 @testable import ProxyKernel
 
 final class ConfigHotReloadTests: XCTestCase {
 
     @MainActor
+    /// Every upstream the orchestrator probed, in order. The probe answers
+    /// unreachable at once instead of connecting out and waiting the real
+    /// probe's timeout.
+    private let probed = NIOLockedValueBox<[String]>([])
+
+    @MainActor
     private func makeRunningOrchestrator() async throws -> ProxyOrchestrator {
         var config = GenericDefaults.shared.makeConfig()
         config.proxy.port = 0
-        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+        let probed = self.probed
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), connectivityProbe: { upstreams in
+            probed.withLockedValue { $0.append(contentsOf: upstreams.map(\.endpoint)) }
+            return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: false) })
+        })
         try await orchestrator.startProxy()
         return orchestrator
     }
@@ -139,10 +150,12 @@ final class ConfigHotReloadTests: XCTestCase {
         newConfig.upstreams = [
             UpstreamProxy(name: "Test", host: "192.0.2.1", port: 8080, priority: 0)
         ]
+        probed.withLockedValue { $0 = [] }
         await orchestrator.applyConfigChange(newConfig)
 
         XCTAssertEqual(orchestrator.config.upstreams.count, 1)
         XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertEqual(probed.withLockedValue { $0 }, ["192.0.2.1:8080"], "the change probed the new upstream")
     }
 
     // MARK: - ConfigDiff drives targeted reload

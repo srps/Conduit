@@ -112,7 +112,11 @@ final class RuntimeEventTests: XCTestCase {
         config.tunnels.definitions = [
             TunnelDefinition(localPort: 0, remoteHost: "db.example.com", remotePort: 5432, proxied: false, label: "DB")
         ]
-        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+        // Unreachable at once: the real probe would connect to the upstream
+        // below and wait out its timeout.
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink(), connectivityProbe: { upstreams in
+            UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: false) })
+        })
         try await orchestrator.startProxy()
         await orchestrator.startTunnels()
 
