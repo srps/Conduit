@@ -10,13 +10,17 @@ final class HelperSubprocessTests: XCTestCase {
     private func run(
         _ script: String,
         milliseconds: Int,
-        maxOutputBytes: Int = HelperSubprocess.defaultMaxOutputBytes
+        maxOutputBytes: Int = HelperSubprocess.defaultMaxOutputBytes,
+        terminationGrace: Int = HelperSubprocess.terminationGraceMilliseconds,
+        drainGrace: Int = HelperSubprocess.drainGraceMilliseconds
     ) throws -> HelperSubprocess.Result {
         try HelperSubprocess.run(
             "/bin/sh",
             ["-c", script],
             deadline: HelperLineIO.deadline(afterMilliseconds: milliseconds),
-            maxOutputBytes: maxOutputBytes
+            maxOutputBytes: maxOutputBytes,
+            terminationGrace: terminationGrace,
+            drainGrace: drainGrace
         )
     }
 
@@ -54,16 +58,24 @@ final class HelperSubprocessTests: XCTestCase {
         // before the deadline, because a shell signalled before it has run
         // its `trap` dies on the SIGTERM, and on a loaded runner 200 ms was
         // not always enough for it to get there.
-        let budget = 2_000
-        XCTAssertThrowsError(try run("trap '' TERM; sleep 12", milliseconds: budget)) { error in
+        //
+        // The kill and drain graces are shortened: the production values are
+        // sized for a loaded machine, and what this case checks is that
+        // SIGKILL follows the one and the drain gives up after the other. The
+        // budget cannot be: Foundation resets the child's signal
+        // dispositions, so no ignored SIGTERM can be handed down to it.
+        let budget = 2_000, grace = 200, drain = 100
+        XCTAssertThrowsError(
+            try run("trap '' TERM; sleep 12", milliseconds: budget, terminationGrace: grace, drainGrace: drain)
+        ) { error in
             XCTAssertEqual(
                 error as? HelperSubprocess.Failure,
                 .deadlineExceeded(executable: "/bin/sh", reaped: true)
             )
         }
         let elapsed = elapsedMilliseconds(since: start)
-        XCTAssertGreaterThanOrEqual(elapsed, budget + HelperSubprocess.terminationGraceMilliseconds)
-        XCTAssertLessThan(elapsed, budget + HelperSubprocess.overrunMilliseconds + 3_000)
+        XCTAssertGreaterThanOrEqual(elapsed, budget + grace)
+        XCTAssertLessThan(elapsed, budget + 2 * grace + drain + 3_000)
     }
 
     /// A child that writes more than a pipe holds blocks until someone reads.

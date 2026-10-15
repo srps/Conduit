@@ -69,7 +69,9 @@ package enum HelperSubprocess {
         _ executable: String,
         _ arguments: [String],
         deadline: UInt64,
-        maxOutputBytes: Int = defaultMaxOutputBytes
+        maxOutputBytes: Int = defaultMaxOutputBytes,
+        terminationGrace: Int = terminationGraceMilliseconds,
+        drainGrace: Int = drainGraceMilliseconds
     ) throws -> Result {
         let process = Process()
         let outputPipe = Pipe()
@@ -109,10 +111,10 @@ package enum HelperSubprocess {
             }
         }
         if timedOut {
-            hasExited = kill(process, waitingOn: exited)
+            hasExited = kill(process, waitingOn: exited, graceMilliseconds: terminationGrace)
         }
 
-        let drainDeadline = HelperLineIO.deadline(afterMilliseconds: drainGraceMilliseconds)
+        let drainDeadline = HelperLineIO.deadline(afterMilliseconds: drainGrace)
         while streams.contains(where: \.isOpen), HelperLineIO.now() < drainDeadline {
             read(&streams, waitMilliseconds: pollSliceMilliseconds)
         }
@@ -194,8 +196,8 @@ package enum HelperSubprocess {
     /// `SIGTERM`, then `SIGKILL` for a child that ignores it. True once the
     /// child is gone. `isRunning` narrows the window in which the pid has
     /// been reaped and handed to another process; it cannot close it.
-    private static func kill(_ process: Process, waitingOn exited: DispatchSemaphore) -> Bool {
-        let grace = DispatchTimeInterval.milliseconds(terminationGraceMilliseconds)
+    private static func kill(_ process: Process, waitingOn exited: DispatchSemaphore, graceMilliseconds: Int) -> Bool {
+        let grace = DispatchTimeInterval.milliseconds(graceMilliseconds)
         if process.isRunning {
             process.terminate()
         }
