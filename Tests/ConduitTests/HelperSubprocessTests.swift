@@ -50,32 +50,50 @@ final class HelperSubprocessTests: XCTestCase {
         XCTAssertLessThan(elapsedMilliseconds(since: start), 300 + HelperSubprocess.terminationGraceMilliseconds)
     }
 
-    func testChildThatIgnoresSIGTERMIsKilled() {
-        let start = HelperLineIO.now()
+    func testChildThatIgnoresSIGTERMIsKilled() throws {
         // The shell ignores SIGTERM and waits on a `sleep` that was not
         // signalled at all, which also leaves a writer on both pipes after
-        // the shell is killed: the drain must give up on it too. Two seconds
-        // before the deadline, because a shell signalled before it has run
-        // its `trap` dies on the SIGTERM, and on a loaded runner 200 ms was
-        // not always enough for it to get there.
+        // the shell is killed: the drain must give up on it too.
         //
         // The kill and drain graces are shortened: the production values are
         // sized for a loaded machine, and what this case checks is that
-        // SIGKILL follows the one and the drain gives up after the other. The
-        // budget cannot be: Foundation resets the child's signal
-        // dispositions, so no ignored SIGTERM can be handed down to it.
-        let budget = 2_000, grace = 200, drain = 100
-        XCTAssertThrowsError(
-            try run("trap '' TERM; sleep 12", milliseconds: budget, terminationGrace: grace, drainGrace: drain)
-        ) { error in
-            XCTAssertEqual(
-                error as? HelperSubprocess.Failure,
-                .deadlineExceeded(executable: "/bin/sh", reaped: true)
-            )
+        // SIGKILL follows the one and the drain gives up after the other.
+        //
+        // Foundation resets the child's signal dispositions, so no ignored
+        // SIGTERM can be handed down to it, and a shell signalled before it
+        // has run its `trap` dies on the SIGTERM. So the shell writes a marker
+        // once the trap is in place; an attempt without it proves nothing and
+        // is repeated with twice the budget.
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("conduit-trap-\(UUID().uuidString)")
+        let grace = 100, drain = 50
+        var budget = 100
+        while true {
+            let start = HelperLineIO.now()
+            XCTAssertThrowsError(
+                try HelperSubprocess.run(
+                    "/bin/sh",
+                    ["-c", "trap '' TERM; : > \"$1\"; sleep 12", "sh", marker.path],
+                    deadline: HelperLineIO.deadline(afterMilliseconds: budget),
+                    terminationGrace: grace,
+                    drainGrace: drain
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? HelperSubprocess.Failure,
+                    .deadlineExceeded(executable: "/bin/sh", reaped: true)
+                )
+            }
+            let elapsed = elapsedMilliseconds(since: start)
+            if FileManager.default.fileExists(atPath: marker.path) {
+                XCTAssertGreaterThanOrEqual(elapsed, budget + grace)
+                XCTAssertLessThan(elapsed, budget + 2 * grace + drain + 3_000)
+                try FileManager.default.removeItem(at: marker)
+                return
+            }
+            guard budget < 3_200 else { return XCTFail("the shell never got as far as its trap") }
+            budget *= 2
         }
-        let elapsed = elapsedMilliseconds(since: start)
-        XCTAssertGreaterThanOrEqual(elapsed, budget + grace)
-        XCTAssertLessThan(elapsed, budget + 2 * grace + drain + 3_000)
     }
 
     /// A child that writes more than a pipe holds blocks until someone reads.
@@ -91,7 +109,9 @@ final class HelperSubprocessTests: XCTestCase {
     /// inherits them. The result comes back after the drain grace, flagged.
     func testGrandchildHoldingThePipesDoesNotHoldTheCaller() throws {
         let start = HelperLineIO.now()
-        let result = try run("sleep 8 & echo started", milliseconds: 5_000)
+        // The drain's grace is shortened: what this case checks is that the
+        // caller is not held for the grandchild's eight seconds.
+        let result = try run("sleep 8 & echo started", milliseconds: 5_000, drainGrace: 50)
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(String(decoding: result.output, as: UTF8.self), "started\n")
         XCTAssertTrue(result.outputTruncated)
