@@ -1004,6 +1004,8 @@ package final class ProxyOrchestrator {
     /// When a confirmed transition sweeps again, after its first sweep:
     /// routes keep settling after the VPN report (#156).
     private let strandedResweepDelays: [Duration]
+    /// How long direct mode waits before reprobing, by cause; tests shorten it.
+    private let reprobeInterval: @Sendable (DirectModeCause) -> TimeInterval
     /// The sweeps of the last confirmed transition still to run.
     private var strandedSweeps: Task<Void, Never>?
     /// The confirmed transition whose sweeps have not all run: a flap holds
@@ -1225,8 +1227,10 @@ package final class ProxyOrchestrator {
         strictHintSettleWindow: TimeInterval = DirectConnectDetector.strictHintSettleWindow,
         connectivityProbe: (@Sendable ([UpstreamProxy]) async -> UpstreamProbeSummary)? = nil,
         socketPaths: any SocketPathChecking = SystemSocketPaths(),
-        strandedResweepDelays: [Duration] = [.seconds(2), .seconds(10)]
+        strandedResweepDelays: [Duration] = [.seconds(2), .seconds(10)],
+        directReprobeInterval: @escaping @Sendable (DirectModeCause) -> TimeInterval = ProxyOrchestrator.directReprobeInterval(for:)
     ) {
+        self.reprobeInterval = directReprobeInterval
         self.connectivityProbe = connectivityProbe
         self.socketPaths = socketPaths
         self.strandedResweepDelays = strandedResweepDelays
@@ -2676,7 +2680,7 @@ package final class ProxyOrchestrator {
     /// Reprobe interval for *unexpected* direct mode (`.upstreamsUnreachable`).
     /// Fast cadence because something is genuinely wrong and we want to detect
     /// recovery quickly.
-    private static let directReprobeIntervalUnexpected: TimeInterval = 15
+    nonisolated private static let directReprobeIntervalUnexpected: TimeInterval = 15
 
     /// Reprobe interval for *expected* direct mode (VPN off, no upstreams
     /// configured). Slow cadence because we're not waiting for "find a working
@@ -2684,18 +2688,18 @@ package final class ProxyOrchestrator {
     /// `VPNStatusMonitor` will detect via SCDynamicStore and route through
     /// `handleVPNStateChange` long before this timer fires. This is just a
     /// belt-and-suspenders catchall.
-    private static let directReprobeIntervalExpected: TimeInterval = 60
+    nonisolated private static let directReprobeIntervalExpected: TimeInterval = 60
 
     /// Pick the reprobe interval based on the current direct-mode cause.
     /// `cause.isExpected` covers VPN-off, no-upstreams, and the transient
     /// flap window; the unexpected case is `.upstreamsUnreachable` only.
-    package static func directReprobeInterval(for cause: DirectModeCause) -> TimeInterval {
+    nonisolated package static func directReprobeInterval(for cause: DirectModeCause) -> TimeInterval {
         cause.isExpected ? Self.directReprobeIntervalExpected : Self.directReprobeIntervalUnexpected
     }
 
     private func startDirectModeReprobeTimer() {
         stopDirectModeReprobeTimer()
-        let interval = Self.directReprobeInterval(for: snapshot.directModeCause)
+        let interval = reprobeInterval(snapshot.directModeCause)
         let scheduled = RuntimeEvent(kind: .health, event: "connectivity.reprobe_scheduled",
             detail: "cause=\(snapshot.directModeCause.rawValue) interval_seconds=\(Int(interval))")
         eventLog.append(scheduled)

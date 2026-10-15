@@ -54,7 +54,10 @@ final class VPNReprobeRecoveryTests: XCTestCase {
             connectivityProbe: { upstreams in
                 let reachable = state.withLockedValue { value in value.attempts += 1; return value.reachable }
                 return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: reachable) })
-            })
+            },
+            // The production cadence (15 s for this cause) is pinned in
+            // VPNTransitionTableTests; here only that the retry runs matters.
+            directReprobeInterval: { _ in 0.1 })
         do {
             try await orchestrator.startProxy()
             await orchestrator.handleVPNStateChange(.connected)
@@ -70,7 +73,7 @@ final class VPNReprobeRecoveryTests: XCTestCase {
                 if snapshot.directModeCause == .none, !fulfilled { fulfilled = true; recovered.fulfill() }
             }
             state.withLockedValue { $0.reachable = true }
-            await fulfillment(of: [recovered], timeout: 22)
+            await fulfillment(of: [recovered], timeout: 10)
             XCTAssertEqual(orchestrator.snapshot.vpnState, .connected)
             XCTAssertEqual(orchestrator.snapshot.directModeCause, .none)
             XCTAssertGreaterThan(state.withLockedValue { $0.attempts }, attempts)
