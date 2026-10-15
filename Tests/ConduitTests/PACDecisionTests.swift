@@ -206,8 +206,12 @@ final class PACDecisionTests: XCTestCase {
 
     /// Waits for running hint probes to finish. Bounded; counts, not time.
     private func drain(_ detector: DirectConnectDetector) async throws {
-        for _ in 0..<500 where detector.strictHintInFlightCount > 0 {
-            try await Task.sleep(for: .milliseconds(10))
+        // Yields rather than sleeping: a probe that cannot resolve ends within
+        // microseconds, and the bounded-table case drains after each of its
+        // 266 probes, so even a 1 ms sleep per drain was most of its runtime.
+        let deadline = ContinuousClock.now + .seconds(5)
+        while detector.strictHintInFlightCount > 0, ContinuousClock.now < deadline {
+            await Task.yield()
         }
         XCTAssertEqual(detector.strictHintInFlightCount, 0, "hint probes never finished")
     }
