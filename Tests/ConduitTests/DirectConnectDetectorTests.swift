@@ -74,16 +74,15 @@ final class DirectConnectDetectorTests: XCTestCase {
             group: MultiThreadedEventLoopGroup.singleton,
             logger: DiscardingLogSink(),
             ttlSeconds: 60,
-            baseTimeoutMS: 200
+            baseTimeoutMS: 20
         )
 
         detector.probeInBackground(host: "192.0.2.1", port: 9999, gatewayMode: false)
         detector.probeInBackground(host: "192.0.2.1", port: 9999, gatewayMode: false)
         detector.probeInBackground(host: "192.0.2.1", port: 9999, gatewayMode: false)
+        XCTAssertEqual(detector.probeCount, 1, "Concurrent probes of one host:port should start once")
 
-        try? await Task.sleep(for: .milliseconds(500))
-
-        let cached = detector.cachedReachability(host: "192.0.2.1", port: 9999, gatewayMode: false)
+        let cached = await Self.cachedReachability(of: detector, host: "192.0.2.1", port: 9999)
         XCTAssertNotNil(cached, "Background probe should have populated cache")
         XCTAssertFalse(cached!, "Unreachable host should be cached as false")
     }
@@ -112,17 +111,21 @@ final class DirectConnectDetectorTests: XCTestCase {
         let detector = DirectConnectDetector(
             group: MultiThreadedEventLoopGroup.singleton,
             logger: DiscardingLogSink(),
-            ttlSeconds: 0.05,
-            baseTimeoutMS: 50
+            ttlSeconds: 0.01,
+            baseTimeoutMS: 5
         )
 
+        // 5, 10, 20, 40, then held at eight times the base.
         for _ in 0..<5 {
             _ = await detector.isDirectlyReachable(host: "192.0.2.1", port: 1, gatewayMode: false)
-            try? await Task.sleep(for: .milliseconds(60))
+            try? await Task.sleep(for: .milliseconds(12))
         }
 
         let cached = detector.cachedReachability(host: "192.0.2.1", port: 1, gatewayMode: false)
         XCTAssertNil(cached, "Cache should have expired after TTL")
+        XCTAssertEqual(detector.probeCount, 5, "Each expired entry should be probed again")
+        XCTAssertEqual(detector.probeTimeoutMS(host: "192.0.2.1", port: 1, gatewayMode: false), 40,
+                       "Consecutive failures should double the timeout up to eight times the base, no further")
     }
 
     @MainActor
@@ -229,8 +232,7 @@ final class DirectConnectDetectorTests: XCTestCase {
         )
 
         detector.probeInBackground(host: "192.0.2.1", port: 9998, gatewayMode: false)
-        try? await Task.sleep(for: .milliseconds(300))
-        let firstResult = detector.cachedReachability(host: "192.0.2.1", port: 9998, gatewayMode: false)
+        let firstResult = await Self.cachedReachability(of: detector, host: "192.0.2.1", port: 9998)
         XCTAssertNotNil(firstResult, "First background probe should populate cache")
         XCTAssertFalse(firstResult!, "Unreachable host should be cached as false")
 
@@ -238,8 +240,19 @@ final class DirectConnectDetectorTests: XCTestCase {
         XCTAssertNil(detector.cachedReachability(host: "192.0.2.1", port: 9998, gatewayMode: false))
 
         detector.probeInBackground(host: "192.0.2.1", port: 9998, gatewayMode: false)
-        try? await Task.sleep(for: .milliseconds(300))
-        let secondResult = detector.cachedReachability(host: "192.0.2.1", port: 9998, gatewayMode: false)
+        let secondResult = await Self.cachedReachability(of: detector, host: "192.0.2.1", port: 9998)
         XCTAssertNotNil(secondResult, "Second background probe should repopulate cache after clear")
+    }
+
+    /// The cached answer for `host:port` once a background probe has filled
+    /// it, or nil if none has within five seconds.
+    private static func cachedReachability(of detector: DirectConnectDetector, host: String, port: Int) async -> Bool? {
+        for _ in 0..<1_000 {
+            if let cached = detector.cachedReachability(host: host, port: port, gatewayMode: false) {
+                return cached
+            }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return detector.cachedReachability(host: host, port: port, gatewayMode: false)
     }
 }

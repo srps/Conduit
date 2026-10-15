@@ -184,6 +184,13 @@ package final class DirectConnectDetector: @unchecked Sendable {
         lock.withLock { probesStarted }
     }
 
+    /// The connect timeout the next probe of `host:port` gets: the base,
+    /// doubled after each consecutive failure up to eight times the base.
+    package func probeTimeoutMS(host: String, port: Int, gatewayMode: Bool) -> Int64 {
+        let key = Self.cacheKey(host: host, port: port, gatewayMode: gatewayMode)
+        return lock.withLock { hostTimeouts[key] ?? baseTimeoutMS }
+    }
+
     /// Background reachability probes running now (at most `maxConcurrentProbes`).
     package var pendingProbeCount: Int {
         lock.withLock { pendingProbes.count }
