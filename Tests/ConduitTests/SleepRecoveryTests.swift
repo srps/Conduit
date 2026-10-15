@@ -124,7 +124,8 @@ final class SleepRecoveryTests: XCTestCase {
             UpstreamProxy(name: "Dead", host: "192.0.2.1", port: 9999, priority: 0)
         ]
 
-        let prober = UpstreamProber(group: group, logger: logger, timeoutSeconds: 1)
+        // The TEST-NET upstream never answers, so the probe runs its whole budget.
+        let prober = UpstreamProber(group: group, logger: logger, timeoutSeconds: 0.05)
         let summary = await prober.summarize(proxies)
 
         XCTAssertFalse(summary.hasReachableUpstream,
@@ -137,7 +138,9 @@ final class SleepRecoveryTests: XCTestCase {
     func testDirectModeFlagTogglesWithProbeResults() async throws {
         let logger = DiscardingLogSink()
         let group = MultiThreadedEventLoopGroup.singleton
-        let prober = UpstreamProber(group: group, logger: logger, timeoutSeconds: 1)
+        // Long enough for the live upstream below to answer; the dead one runs
+        // its whole budget.
+        let prober = UpstreamProber(group: group, logger: logger, timeoutSeconds: 0.25)
 
         let proxies = [
             UpstreamProxy(name: "Dead", host: "192.0.2.1", port: 9999, priority: 0)

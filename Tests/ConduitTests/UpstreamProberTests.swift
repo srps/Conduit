@@ -21,7 +21,9 @@ final class UpstreamProberTests: XCTestCase {
 
     @MainActor func testSummarizeDoesNotMutatePriorities() async {
         let logger = DiscardingLogSink()
-        let prober = UpstreamProber(group: MultiThreadedEventLoopGroup.singleton, logger: logger, timeoutSeconds: 1)
+        // The TEST-NET upstreams never answer; how long the probe waits for
+        // them is beside the point here.
+        let prober = UpstreamProber(group: MultiThreadedEventLoopGroup.singleton, logger: logger, timeoutSeconds: 0.05)
 
         let proxies = [
             UpstreamProxy(name: "A", host: "192.0.2.1", port: 9999, priority: 5),
@@ -89,7 +91,7 @@ final class UpstreamProberTests: XCTestCase {
         defer { serverChannel.close(promise: nil) }
 
         let port = try XCTUnwrap(serverChannel.localAddress?.port)
-        let timeoutSeconds: TimeInterval = 1
+        let timeoutSeconds: TimeInterval = 0.25
         let prober = UpstreamProber(
             group: MultiThreadedEventLoopGroup.singleton,
             logger: DiscardingLogSink(),
