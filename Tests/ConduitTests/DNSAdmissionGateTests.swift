@@ -37,8 +37,10 @@ final class DNSAdmissionGateTests: XCTestCase {
         let channel: NIOAsyncTestingChannel
         let inFlight: @Sendable () -> Int
         let decisions: @Sendable () -> Int
-        /// Holds the next resolution open — see `ParkingConfigProvider`.
-        let armPark: @Sendable (TimeInterval) -> Void
+        /// Holds the next resolution open until `releasePark` — see
+        /// `ParkingConfigProvider`.
+        let armPark: @Sendable () -> Void
+        let releasePark: @Sendable () -> Void
 
         func tearDown() async {
             _ = try? await channel.finish()
@@ -66,44 +68,58 @@ final class DNSAdmissionGateTests: XCTestCase {
     /// looks like a passing test for as long as some other delay happens to
     /// cover the gap.
     ///
-    /// Deliberately a blocking sleep rather than an awaited one — it has to hold
-    /// a synchronous, non-async call. It is bounded and self-releasing, so even
-    /// on a single-threaded cooperative pool it can only delay the test, never
-    /// deadlock it.
+    /// Deliberately a blocking wait rather than an awaited one — it has to hold
+    /// a synchronous, non-async call. It ends when the test releases it, once
+    /// it has read the gauge, and is bounded besides, so even on a
+    /// single-threaded cooperative pool a test that never releases it is only
+    /// delayed, never deadlocked.
     private final class ParkingConfigProvider: @unchecked Sendable {
+        /// The bound on a park the test never releases.
+        private static let parkLimit: DispatchTimeInterval = .seconds(10)
+
         private let config: ProxyConfig
-        private let armedFor = NIOLockedValueBox<TimeInterval?>(nil)
+        private let armed = NIOLockedValueBox<DispatchSemaphore?>(nil)
+        private let released = DispatchSemaphore(value: 0)
 
         init(config: ProxyConfig) {
             self.config = config
         }
 
-        func arm(seconds: TimeInterval) {
-            armedFor.withLockedValue { $0 = seconds }
+        func arm() {
+            armed.withLockedValue { $0 = released }
+        }
+
+        func release() {
+            released.signal()
         }
 
         func provide() -> ProxyConfig {
-            // Disarm under the lock, sleep outside it: parking is meant to hold
+            // Disarm under the lock, wait outside it: parking is meant to hold
             // one resolution, not serialize every later config read behind it.
-            let park = armedFor.withLockedValue { armed -> TimeInterval? in
+            let park = armed.withLockedValue { armed -> DispatchSemaphore? in
                 defer { armed = nil }
                 return armed
             }
-            if let park {
-                Thread.sleep(forTimeInterval: park)
+            if let park, park.wait(timeout: .now() + Self.parkLimit) == .timedOut {
+                XCTFail("the parked resolution was never released")
             }
             return config
         }
     }
 
-    /// A gate whose every resolution path is hermetic: no upstream proxies and
-    /// DoH pointed at a closed loopback port. Nothing reaches the network.
+    /// A gate whose every resolution path is hermetic: no upstream proxies,
+    /// DoH pointed at a closed loopback port, and the names the cases query
+    /// answered by an intercept rule the moment the config is read. Without
+    /// the rule a resolution sent a real query to the documentation address
+    /// `192.0.2.53` and waited out its 1.5 s timeout before releasing its
+    /// slot. Nothing reaches the network.
     private func makeGate(
         logger: RecordingLogSink = RecordingLogSink(minLevel: .debug)
     ) async -> Gate {
         var config = ProxyConfig.testFixture()
         config.upstreams = []
         config.dohProviders = ["https://127.0.0.1:1/dns-query"]
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.example.com")]
         config.localHost = "127.0.0.1"
         config.localPort = 9
 
@@ -117,7 +133,8 @@ final class DNSAdmissionGateTests: XCTestCase {
             channel: await NIOAsyncTestingChannel(handler: handler),
             inFlight: inFlight,
             decisions: decisions,
-            armPark: { provider.arm(seconds: $0) }
+            armPark: { provider.arm() },
+            releasePark: { provider.release() }
         )
     }
 
@@ -182,7 +199,7 @@ final class DNSAdmissionGateTests: XCTestCase {
 
         // Armed after construction, so the park lands on the resolution rather
         // than on the core's own start-up read of the config.
-        gate.armPark(2)
+        gate.armPark()
 
         let query = DNSWireFormat.buildQuery(domain: "slot.example.com", txID: 0x0101, qtype: 1)
         try await gate.channel.writeInbound(datagram(query, on: gate.channel))
@@ -196,6 +213,7 @@ final class DNSAdmissionGateTests: XCTestCase {
         // provider: it cannot have released the slot yet, whatever the machine
         // or the network is doing.
         XCTAssertEqual(gate.inFlight(), 1, "A well-formed query must hold exactly one admission slot")
+        gate.releasePark()
 
         // And the slot comes back: `resolve` pairs with `releaseQuery` on every
         // exit path, including the ones that answer SERVFAIL.
