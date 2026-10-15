@@ -39,12 +39,14 @@ final class TunnelHealthProbeTests: XCTestCase {
         let expectation = XCTestExpectation(description: "probe callback")
         expectation.isInverted = true
 
-        prober.start(interval: 100, tunnels: { [] }, onResult: { _ in
+        // Every 20 ms, with a tunnel to probe: were `stop` to leave the timer
+        // running, the callback would come within the wait below.
+        prober.start(interval: 0.02, tunnels: { [(id: UUID(), host: "127.0.0.1", port: 1)] }, onResult: { _ in
             expectation.fulfill()
         })
 
         prober.stop()
-        wait(for: [expectation], timeout: 0.5)
+        wait(for: [expectation], timeout: 0.1)
     }
 
     func testHealthProberDetectsListeningPort() throws {
