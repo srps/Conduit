@@ -84,7 +84,7 @@ final class AppStateHarness {
             // No resolver answers on the fake machine's loopback. Probing the
             // real port 53 instead waited two seconds wherever nothing does,
             // and answered for the installed Conduit's relay where it runs.
-            dnsResponds: { _ in false },
+            dnsResponds: FakeDNSProbe().responds(onPort:),
             networkPathDebounce: networkPathDebounce,
             helperSocketBindWait: helperSocketBindWait,
             dnsReconcileDebounce: dnsReconcileDebounce,

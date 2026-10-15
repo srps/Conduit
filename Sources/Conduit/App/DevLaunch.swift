@@ -296,6 +296,8 @@ enum DevLaunch {
             credentialStore: secrets,
             kerberosTicketRecovery: FakeKerberosTicketRecovery(),
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            // The installed Conduit's relay may answer on the real port 53.
+            dnsResponds: FakeDNSProbe().responds(onPort:),
             homeDirectory: home,
             resolverDirectory: resolverDirectory.path,
             loginItemManager: loginItems.manager,
