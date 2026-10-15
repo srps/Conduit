@@ -180,23 +180,32 @@ final class VPNTunnelMigrationTests: XCTestCase {
     /// gone (the tunnel came back on another address): a route that moved is
     /// not judged after a flap.
     func testAFlapRecoveryClosesOnlySocketsWhoseAddressIsGone() async throws {
-        let orchestrator = orchestrator(resweeps: [.milliseconds(100)])
+        // Each wait below for nothing to happen is at least the re-sweep delay.
+        let resweep = Duration.milliseconds(40)
+        let orchestrator = orchestrator(resweeps: [resweep])
         try await orchestrator.startProxy()
         await orchestrator.handleVPNStateChange(.connected)
-        try await Task.sleep(for: .milliseconds(200))
+        // The connect's own sweep and its one re-sweep, before any socket: a
+        // re-sweep still owed would run in place of the flap's recovery. A
+        // re-sweep that finds nothing reports nothing, so it is waited out.
+        let swept = try await until {
+            self.migrations(orchestrator.eventLog.events).contains { $0.hasPrefix("transition=connected phase=paths pass=0 ") }
+        }
+        XCTAssertTrue(swept)
+        try await Task.sleep(for: resweep * 2)
         let oldAddress = try await tracked(orchestrator, local: "10.20.30.40")
         let routeMoved = try await tracked(orchestrator, local: "10.20.30.41")
         await orchestrator.handleVPNStateChange(.reasserting)
         gone.withLockedValue { _ = $0.insert("10.20.30.40") }
         moved.withLockedValue { _ = $0.insert("10.20.30.41") }
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(for: resweep * 2)
         XCTAssertTrue(oldAddress.isActive, "nothing is swept during the flap")
 
         await orchestrator.handleVPNStateChange(.connected)
         XCTAssertTrue(oldAddress.isActive, "the recovery waits before judging addresses")
         let closed = try await until { !oldAddress.isActive }
         XCTAssertTrue(closed)
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: resweep)
         XCTAssertTrue(routeMoved.isActive)
         XCTAssertEqual(migrations(orchestrator.eventLog.events).last,
                        "transition=flap_recovered phase=addresses pass=1 upstream_closed=0 direct_closed=1 unchecked=0")
