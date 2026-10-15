@@ -241,11 +241,44 @@ final class UDPRelayTests: XCTestCase {
         let relay = UDPRelay()
         try relay.start(listenPort: listenPort, targetPort: targetPort)
 
+        // Nothing listens on the target, so nothing comes back. Any reply the
+        // relay made up would arrive in well under this wait on loopback.
         let payload: [UInt8] = [0x01, 0x02]
-        let response = sendAndReceiveUDP(host: "127.0.0.1", port: listenPort, payload: payload, timeoutSec: 2)
+        let response = Self.sendAndReceiveUDPImpl(
+            host: "127.0.0.1", port: listenPort, payload: payload, timeoutMS: 200
+        )
 
         XCTAssertNil(response, "Should timeout when target is not listening")
         XCTAssertTrue(relay.isRunning, "Relay should still be running after timeout")
+
+        // And it still relays: once the target listens, the next query is
+        // answered through the same relay.
+        let echoFD = createUDPSocket(port: targetPort)
+        XCTAssertTrue(echoFD >= 0, "Failed to create echo socket")
+        defer { close(echoFD) }
+        let echoThread = Thread {
+            var buf = [UInt8](repeating: 0, count: 4096)
+            var addr = sockaddr_in()
+            var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let n = withUnsafeMutablePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                    recvfrom(echoFD, &buf, buf.count, 0, sockPtr, &addrLen)
+                }
+            }
+            if n > 0 {
+                withUnsafePointer(to: &addr) { ptr in
+                    ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                        _ = sendto(echoFD, buf, n, 0, sockPtr, addrLen)
+                    }
+                }
+            }
+        }
+        echoThread.start()
+        let later: [UInt8] = [0x03, 0x04]
+        XCTAssertEqual(
+            sendAndReceiveUDP(host: "127.0.0.1", port: listenPort, payload: later, timeoutSec: 3), later,
+            "The relay must keep forwarding after a query its target never answered"
+        )
         relay.stop()
     }
 
@@ -339,19 +372,19 @@ final class UDPRelayTests: XCTestCase {
     }
 
     private static func sendAndReceiveUDPStatic(host: String, port: Int, payload: [UInt8], timeoutSec: Int) -> [UInt8]? {
-        sendAndReceiveUDPImpl(host: host, port: port, payload: payload, timeoutSec: timeoutSec)
+        sendAndReceiveUDPImpl(host: host, port: port, payload: payload, timeoutMS: timeoutSec * 1000)
     }
 
     private func sendAndReceiveUDP(host: String, port: Int, payload: [UInt8], timeoutSec: Int) -> [UInt8]? {
-        Self.sendAndReceiveUDPImpl(host: host, port: port, payload: payload, timeoutSec: timeoutSec)
+        Self.sendAndReceiveUDPImpl(host: host, port: port, payload: payload, timeoutMS: timeoutSec * 1000)
     }
 
-    private static func sendAndReceiveUDPImpl(host: String, port: Int, payload: [UInt8], timeoutSec: Int) -> [UInt8]? {
+    private static func sendAndReceiveUDPImpl(host: String, port: Int, payload: [UInt8], timeoutMS: Int) -> [UInt8]? {
         let fd = socket(AF_INET, SOCK_DGRAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
 
-        var tv = timeval(tv_sec: timeoutSec, tv_usec: 0)
+        var tv = timeval(tv_sec: timeoutMS / 1000, tv_usec: Int32(timeoutMS % 1000) * 1000)
         setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 
         var addr = sockaddr_in()
