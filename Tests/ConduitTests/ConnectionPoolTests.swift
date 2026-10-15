@@ -36,6 +36,33 @@ final class ConnectionPoolTests: XCTestCase {
         XCTAssertEqual(wrapped, "proxy-a.example.test:8080", "Should wrap back to first upstream after cycling through all \(count)")
     }
 
+    /// Prewarm dials every upstream at once; none of them is a selection, so
+    /// the active upstream stays whatever was selected before (#164). Several
+    /// rounds, since which dial lands last varies.
+    func testPrewarmDoesNotChangeTheActiveUpstream() async throws {
+        let group = MultiThreadedEventLoopGroup.singleton
+        var listeners: [Channel] = []
+        for _ in 0..<3 {
+            listeners.append(try await ServerBootstrap(group: group).bind(host: "127.0.0.1", port: 0).get())
+        }
+        var config = ProxyConfig()
+        config.upstreams = try listeners.enumerated().map { index, listener in
+            UpstreamProxy(name: "Upstream\(index)", host: "127.0.0.1",
+                          port: try XCTUnwrap(listener.localAddress?.port), priority: index)
+        }
+        let pool = ConnectionPool(group: group, logger: DiscardingLogSink(), configProvider: { config },
+                                  authenticatorProvider: { _ in throw CredentialManagerError.missingCredentials })
+        let selected = pool.switchToNextUpstream()
+        XCTAssertEqual(selected, config.upstreams[1].endpoint)
+
+        for _ in 0..<5 {
+            await pool.prewarmConnections()
+            XCTAssertEqual(pool.activeUpstream(), selected)
+        }
+        pool.closeAll()
+        for listener in listeners { try await listener.close() }
+    }
+
     @MainActor func testActiveUpstreamReturnsNilWhenEmpty() {
         let logger = DiscardingLogSink()
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)

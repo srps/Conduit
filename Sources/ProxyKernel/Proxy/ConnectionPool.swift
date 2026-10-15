@@ -501,8 +501,11 @@ package final class ConnectionPool: @unchecked Sendable {
                         do {
                             // Through acquisition, so a prewarm dial holds a
                             // pool slot and is tracked for VPN migration.
+                            // Not a selection: every upstream is prewarmed at
+                            // once, and the last dial to land would otherwise
+                            // become the active upstream (#164).
                             let connection = try await self.acquireConnection(
-                                for: proxy, target: "prewarm", preferFreshConnection: true
+                                for: proxy, target: "prewarm", preferFreshConnection: true, selects: false
                             ).get()
                             self.release(connection, keepAlive: true)
                             self.logger.log(.debug, "Prewarmed upstream connection for \(proxy.endpoint).", category: .proxy)
@@ -649,11 +652,13 @@ package final class ConnectionPool: @unchecked Sendable {
     /// `connectTimeout` overrides the data-path budget for a new connection;
     /// the health check passes the probe timeout. An idle pooled connection
     /// is reused without connecting.
+    /// `selects`: whether the connection makes `proxy` the active upstream.
     private func acquireConnection(
         for proxy: UpstreamProxy,
         target: String,
         preferFreshConnection: Bool,
-        connectTimeout: TimeAmount? = nil
+        connectTimeout: TimeAmount? = nil,
+        selects: Bool = true
     ) -> EventLoopFuture<PooledUpstreamConnection> {
         let config = configProvider()
         let maxConns = config.maxConnections
@@ -670,7 +675,7 @@ package final class ConnectionPool: @unchecked Sendable {
                     }
                     existing.inUse = true
                     existing.lastUsedAt = .now
-                    lastSelectedUpstreamID = proxy.id
+                    if selects { lastSelectedUpstreamID = proxy.id }
                     return .idle(existing)
                 }
             }
@@ -678,7 +683,7 @@ package final class ConnectionPool: @unchecked Sendable {
                 return .exhausted
             }
             pendingConnectionCount += 1
-            lastSelectedUpstreamID = proxy.id
+            if selects { lastSelectedUpstreamID = proxy.id }
             preconditionCapacityLocked(maxConnections: maxConns)
             return .needsNew
         }
@@ -689,7 +694,7 @@ package final class ConnectionPool: @unchecked Sendable {
         case .exhausted:
             return group.next().makeFailedFuture(ConnectionPoolError.poolExhausted)
         case .needsNew:
-            return makeConnection(to: proxy, target: target, connectTimeout: connectTimeout).always { [weak self] _ in
+            return makeConnection(to: proxy, target: target, connectTimeout: connectTimeout, selects: selects).always { [weak self] _ in
                 self?.lock.withLockVoid {
                     self?.pendingConnectionCount -= 1
                     self?.preconditionCapacityLocked(maxConnections: maxConns)
@@ -765,14 +770,14 @@ package final class ConnectionPool: @unchecked Sendable {
     /// dial was in flight (shutdown, a config restart) closes the channel
     /// and fails the dial: nothing else would ever track or close it (#159).
     static func insert(
-        _ channel: Channel, proxy: UpstreamProxy, target: String, into pool: ConnectionPool?
+        _ channel: Channel, proxy: UpstreamProxy, target: String, into pool: ConnectionPool?, selects: Bool = true
     ) throws -> PooledUpstreamConnection {
         guard let pool else {
             channel.close(mode: .all, promise: nil)
             throw ChannelError.ioOnClosedChannel
         }
         let connection = PooledUpstreamConnection(proxy: proxy, channel: channel)
-        try pool.insertDialedConnection(connection, target: target)
+        try pool.insertDialedConnection(connection, target: target, selects: selects)
         return connection
     }
 
@@ -799,7 +804,7 @@ package final class ConnectionPool: @unchecked Sendable {
     /// full registry) closes it instead, reports it, and fails the
     /// acquisition locally (#156). `target` is what the request asked for,
     /// sanitized here.
-    func insertDialedConnection(_ connection: PooledUpstreamConnection, target: String) throws {
+    func insertDialedConnection(_ connection: PooledUpstreamConnection, target: String, selects: Bool = true) throws {
         connection.transitionTicket = try sockets.register(
             connection.channel, route: .upstream,
             target: SensitiveValueSanitizer.observableTarget(target), upstream: connection.proxy.endpoint
@@ -807,7 +812,7 @@ package final class ConnectionPool: @unchecked Sendable {
         lock.withLockVoid {
             connection.inUse = true
             insertConnectionLocked(connection)
-            lastSelectedUpstreamID = connection.proxy.id
+            if selects { lastSelectedUpstreamID = connection.proxy.id }
         }
         // A connection that closes (a sweep, the upstream, a timeout) leaves
         // the pool at once instead of holding a slot until it is next picked.
@@ -818,7 +823,9 @@ package final class ConnectionPool: @unchecked Sendable {
         }
     }
 
-    private func makeConnection(to proxy: UpstreamProxy, target: String, connectTimeout: TimeAmount? = nil) -> EventLoopFuture<PooledUpstreamConnection> {
+    private func makeConnection(
+        to proxy: UpstreamProxy, target: String, connectTimeout: TimeAmount? = nil, selects: Bool = true
+    ) -> EventLoopFuture<PooledUpstreamConnection> {
         return connectToUpstreamProxy(proxy, connectTimeout: connectTimeout) { channel in
             do {
                 try channel.pipeline.syncOperations.addHandler(HTTPRequestEncoder(), name: ProxyPipelineNames.upstreamEncoder)
@@ -829,7 +836,7 @@ package final class ConnectionPool: @unchecked Sendable {
             }
         }
             .flatMapThrowing { [weak self] channel in
-                let connection = try Self.insert(channel, proxy: proxy, target: target, into: self)
+                let connection = try Self.insert(channel, proxy: proxy, target: target, into: self, selects: selects)
                 self?.logger.log(.info, "Connected to upstream proxy \(proxy.endpoint).", category: .proxy)
                 return connection
             }
