@@ -46,7 +46,9 @@ final class StreamingExchangeLoopConfinementTests: XCTestCase {
         let sinkPort = try XCTUnwrap(sink.localAddress?.port)
         addTeardownBlock { try? await sink.close().get() }
         let clientChannel = try await ClientBootstrap(group: clientGroup)
-            .channelInitializer { $0.pipeline.addHandler(HTTPResponseEncoder()) }
+            .channelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture { try channel.pipeline.syncOperations.addHandler(HTTPResponseEncoder()) }
+            }
             .connect(host: "127.0.0.1", port: sinkPort)
             .get()
         addTeardownBlock { try? await clientChannel.close().get() }
@@ -109,7 +111,9 @@ final class StreamingExchangeLoopConfinementTests: XCTestCase {
         let sinkPort = try XCTUnwrap(sink.localAddress?.port)
         addTeardownBlock { try? await sink.close().get() }
         let clientChannel = try await ClientBootstrap(group: clientGroup)
-            .channelInitializer { $0.pipeline.addHandler(HTTPResponseEncoder()) }
+            .channelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture { try channel.pipeline.syncOperations.addHandler(HTTPResponseEncoder()) }
+            }
             .connect(host: "127.0.0.1", port: sinkPort)
             .get()
 
