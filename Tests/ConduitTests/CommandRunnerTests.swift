@@ -19,6 +19,11 @@ final class CommandRunnerTests: XCTestCase {
     /// `maxOutputBytes`.
     private static let wideLine = String(repeating: "a", count: 40)
 
+    /// The SIGTERM and pipe-drain graces for the cases that spend them. The
+    /// production values (2 s, 5 s) are sized for a loaded machine; what these
+    /// cases check is that the call comes back after them, not how long they are.
+    private static let shortGrace: TimeInterval = 0.2
+
     private func runOffThread(
         timeoutSeconds: TimeInterval = 30,
         _ body: @escaping @Sendable () throws -> Void
@@ -115,7 +120,9 @@ final class CommandRunnerTests: XCTestCase {
                 try CommandRunner.run(
                     launchPath: "/bin/sh",
                     arguments: ["-c", "trap '' TERM; sleep 30"],
-                    timeout: 0.5
+                    timeout: 0.5,
+                    terminationGrace: Self.shortGrace,
+                    drainJoinGrace: Self.shortGrace
                 )
             ) { error in
                 guard case CommandRunnerError.timedOut = error else {
@@ -129,11 +136,12 @@ final class CommandRunnerTests: XCTestCase {
     /// the pipe open behind it. Returning the prefix as if it were the whole
     /// output would be a silent truncation, so this is reported.
     func testAnOrphanHoldingThePipeIsReportedRatherThanTruncated() {
-        runOffThread(timeoutSeconds: 60) {
+        runOffThread {
             XCTAssertThrowsError(
                 try CommandRunner.run(
                     launchPath: "/bin/sh",
-                    arguments: ["-c", "echo first; sleep 30 & exit 0"]
+                    arguments: ["-c", "echo first; sleep 30 & exit 0"],
+                    drainJoinGrace: Self.shortGrace
                 )
             ) { error in
                 guard case CommandRunnerError.outputIncomplete = error else {
@@ -152,13 +160,16 @@ final class CommandRunnerTests: XCTestCase {
     /// arrived at from the other side. Descriptor count is the observable
     /// proxy: two per call, and they must all come back.
     func testAbandonedDrainsDoNotAccumulate() {
-        runOffThread(timeoutSeconds: 120) {
+        runOffThread {
             // One warm-up first: the first subprocess in a test process opens
             // descriptors that stay open (dyld caches, the Foundation reaper),
             // and counting those as a leak would make this flaky.
-            _ = try? CommandRunner.run(
-                launchPath: "/bin/sh",
-                arguments: ["-c", "echo warm; sleep 20 & exit 0"]
+            XCTAssertThrowsError(
+                try CommandRunner.run(
+                    launchPath: "/bin/sh",
+                    arguments: ["-c", "echo warm; sleep 20 & exit 0"],
+                    drainJoinGrace: 0.05
+                )
             )
 
             let baseline = Self.openDescriptorCount()
@@ -166,7 +177,8 @@ final class CommandRunnerTests: XCTestCase {
                 XCTAssertThrowsError(
                     try CommandRunner.run(
                         launchPath: "/bin/sh",
-                        arguments: ["-c", "echo held; sleep 20 & exit 0"]
+                        arguments: ["-c", "echo held; sleep 20 & exit 0"],
+                        drainJoinGrace: 0.05
                     )
                 )
             }
