@@ -759,7 +759,10 @@ final class SystemDNSManagerTests: XCTestCase {
     }
 
     func testRestoreIfNeededRestoresWhenPort53FreeAndFileExists() throws {
-        let manager = makeManager()
+        // Port 53 free, as the name says, whatever this machine runs there: the
+        // real probe waited two seconds where nothing answered, and skipped
+        // the restore where Conduit's relay did.
+        let manager = SystemDNSManager(privilegeClient: recording, journal: journal, relayIsLive: { false })
         let realServices = try manager.connectedNetworkServices()
         guard let service = realServices.first else {
             throw XCTSkip("No connected network services")
@@ -769,17 +772,8 @@ final class SystemDNSManagerTests: XCTestCase {
 
         _ = manager.restoreIfNeeded(logger: nil)
 
-        if recording.commands.isEmpty {
-            // Port 53 is in use on this machine (e.g., mDNSResponder), so restore was skipped.
-            // This is expected behavior. The test verifies the file isn't blindly deleted.
-            XCTAssertTrue(
-                manager.hasSavedState() || !manager.hasSavedState(),
-                "Either outcome is valid depending on port 53 and DNS state"
-            )
-        } else {
-            let dnsCommands = recording.commands(matching: .setDNSServers)
-            XCTAssertFalse(dnsCommands.isEmpty, "Should restore when port 53 is free")
-        }
+        let dnsCommands = recording.commands(matching: .setDNSServers)
+        XCTAssertFalse(dnsCommands.isEmpty, "Should restore when port 53 is free")
     }
 
     func testRestoreIfNeededForcesRestoreForStaleState() throws {
@@ -949,7 +943,12 @@ final class SystemDNSManagerTests: XCTestCase {
     // MARK: - Liveness probe
 
     func testProbeLivenessReturnsFalseWhenNoListener() {
-        let manager = makeManager()
+        // The real probe with a shorter wait: with nothing listening it waits
+        // the whole poll, and how long does not change the answer.
+        let manager = SystemDNSManager(
+            privilegeClient: recording, journal: journal,
+            respondsOnPort: { SystemDNSManager.dnsResponds(onPort: $0, timeoutMilliseconds: 200) }
+        )
         let port = Int.random(in: 17000..<18000)
         XCTAssertFalse(manager.probeLiveness(port: port), "Should fail with nothing on the port")
     }
