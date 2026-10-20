@@ -800,7 +800,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     body?.cleanup()
                     clientEL.execute { self.refuseLocally(error, context: nil, clientChannel: clientChannel, infoID: infoID) }
                 case .failure(let error):
-                    let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
+                    let report = DirectConnectFailure.report(error, host: host, default: directFailureLevel)
                     connectFailureLog.report(
                         report.event, level: report.level,
                         target: "\(host):\(port)", error: error,
@@ -910,7 +910,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                     body?.cleanup()
                     self.refuseLocally(error, context: ctx, infoID: infoID)
                 case .failure(let error):
-                    let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
+                    let report = DirectConnectFailure.report(error, host: host, default: directFailureLevel)
                     connectFailureLog.report(
                         report.event, level: report.level,
                         target: "\(host):\(port)", error: error,
@@ -950,7 +950,7 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                 case .failure(let error) where Self.isLocalRefusal(error):
                     self.refuseLocally(error, context: ctx, infoID: infoID)
                 case .failure(let error):
-                    let report = Self.directConnectFailureReport(error, host: host, default: directFailureLevel)
+                    let report = DirectConnectFailure.report(error, host: host, default: directFailureLevel)
                     self.connectFailureLog.report(
                         report.event, level: report.level,
                         target: "\(host):\(port)", error: error,
@@ -1172,24 +1172,6 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     static func attributedUpstream(_ upstream: String?, for error: Error) -> String? {
         if ConnectionPoolError.isPoolExhausted(error) || ConnectionPoolError.isAuthHandshakeLimitExceeded(error) { return nil }
         return upstream
-    }
-
-    /// A memo refusal repeats a failure already logged; log it at `.info`.
-    static func directConnectFailureLevel(_ error: Error, default level: LogLevel) -> LogLevel {
-        error is LinkLocalFailureMemo.RecentFailure ? .info : level
-    }
-
-    /// What a failed direct connect reports: always `direct.connect_failed`,
-    /// so structured consumers see every 502. An absent destination (see
-    /// `AbsentDestination`) logs at `.warning` at most; everything else keeps
-    /// `level`. Never raises a level the direct-mode cause or the link-local
-    /// memo lowered.
-    static func directConnectFailureReport(
-        _ error: Error, host: String, default level: LogLevel
-    ) -> (event: String?, level: LogLevel) {
-        let level = directConnectFailureLevel(error, default: level)
-        guard AbsentDestination.matches(error, host: host) else { return ("direct.connect_failed", level) }
-        return ("direct.connect_failed", min(level, .warning))
     }
 
     /// Records a connect failure as an event and then as the log line derived

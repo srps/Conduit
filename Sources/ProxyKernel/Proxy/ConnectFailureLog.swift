@@ -131,6 +131,27 @@ package enum AbsentDestination {
     }
 }
 
+/// How a failed direct connect is reported. Shared by the HTTP direct paths
+/// and pm-sim, so the scenario checks the policy the proxy applies.
+package enum DirectConnectFailure {
+    /// A memo refusal repeats a failure already logged; log it at `.info`.
+    package static func level(_ error: Error, default level: LogLevel) -> LogLevel {
+        error is LinkLocalFailureMemo.RecentFailure ? .info : level
+    }
+
+    /// Always `direct.connect_failed`, so structured consumers see every
+    /// 502. An absent destination (see `AbsentDestination`) logs at
+    /// `.warning` at most; everything else keeps `level`. Never raises a
+    /// level the direct-mode cause or the link-local memo lowered.
+    package static func report(
+        _ error: Error, host: String, default level: LogLevel
+    ) -> (event: String?, level: LogLevel) {
+        let level = Self.level(error, default: level)
+        guard AbsentDestination.matches(error, host: host) else { return ("direct.connect_failed", level) }
+        return ("direct.connect_failed", min(level, .warning))
+    }
+}
+
 /// Coalesces connect-failure reports per target and failure kind (#100).
 ///
 /// The first failure is reported as it happens. Repeats inside `interval`
