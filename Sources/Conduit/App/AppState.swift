@@ -139,6 +139,13 @@ final class AppState: ObservableObject {
     private let helperSocketBindWait: Duration
     /// The trailing debounce before a DNS reconcile runs.
     private let dnsReconcileDebounce: TimeInterval
+    /// The pause after the last Settings edit before it is saved (#171).
+    private let settingsSaveDebounce: Duration
+    /// The timer for the save the last edit scheduled.
+    private var pendingSave: Task<Void, Never>?
+    /// An edit no save has written yet: the timer has not fired, or it
+    /// fired on a config with a problem that blocks a proxy start.
+    private(set) var hasUnsavedEdit = false
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<VPNFlapWindowConfig>
     // AppState's configBox + $config mirror sink were dropped.
@@ -244,6 +251,7 @@ final class AppState: ObservableObject {
         networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         helperSocketBindWait: Duration = .seconds(1),
         dnsReconcileDebounce: TimeInterval = 1.0,
+        settingsSaveDebounce: Duration = .seconds(1),
         homeDirectory: URL,
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
@@ -313,6 +321,7 @@ final class AppState: ObservableObject {
         self.networkMonitor = NetworkMonitor(debounceInterval: networkPathDebounce)
         self.helperSocketBindWait = helperSocketBindWait
         self.dnsReconcileDebounce = dnsReconcileDebounce
+        self.settingsSaveDebounce = settingsSaveDebounce
         self.commandRunner = commandRunner
         self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
@@ -504,6 +513,16 @@ final class AppState: ObservableObject {
                 // Combine sink for the vpnFlapWindowBox mirror above.
             }
             .store(in: &cancellables)
+        // Settings has no Save button, so an edit persists and reconciles on
+        // its own once edits pause (#171). Subscribed after the launch-flag
+        // overrides above, which are a session override and are not saved.
+        Publishers.Merge3(
+            $config.dropFirst().map { _ in () },
+            $platformConfig.dropFirst().map { _ in () },
+            $appPreferences.dropFirst().map { _ in () }
+        )
+        .sink { [weak self] in self?.scheduleSave() }
+        .store(in: &cancellables)
         $config
             .map(\.verboseLogging)
             .removeDuplicates()
@@ -737,8 +756,68 @@ final class AppState: ObservableObject {
 
     // MARK: - Config
 
-    func saveConfig() {
-        guard !rejectUnavailableConfiguration() else { return }
+    /// Saves after edits pause for `settingsSaveDebounce` (#171). Every
+    /// keystroke in a text field already reaches the orchestrator through
+    /// the `$config` sink; the pause keeps a half-typed host from being
+    /// written and reconciled per keystroke. A config with a problem that
+    /// blocks a proxy start is not saved by the timer: a reconcile could
+    /// restart the listener on a half-typed host, fail the start and revert
+    /// every surface. It waits for the next edit, or for the section to
+    /// close. A problem that does not block a start (a bypass entry the
+    /// system settings refuse) is saved and reported as before; holding it
+    /// back would stop every later edit from saving.
+    func scheduleSave() {
+        hasUnsavedEdit = true
+        pendingSave?.cancel()
+        let delay = settingsSaveDebounce
+        pendingSave = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                // Cancelled by a newer edit or by a save that already ran.
+                return
+            }
+            guard let self else { return }
+            self.pendingSave = nil
+            let blocking = self.config.validate().filter(\.blocksProxyStart)
+            guard blocking.isEmpty else {
+                self.logStore.log(.debug, "Autosave waiting: \(blocking.count) problem(s) in the edited configuration would block a proxy start.")
+                return
+            }
+            self.saveConfig()
+        }
+    }
+
+    /// Saves now if an edit has not been saved. A Configure section calls
+    /// this as it goes away, so leaving it never waits, and an edit that
+    /// does not validate is saved and reported as before.
+    func flushPendingSave() {
+        guard hasUnsavedEdit else { return }
+        saveConfig()
+    }
+
+    /// Writes an unsaved edit to disk, without reconciling: at quit,
+    /// termination cleanup is about to tear the surfaces down, and an
+    /// apply started here would race it.
+    func persistPendingEditForTermination() {
+        guard hasUnsavedEdit else { return }
+        cancelPendingSave()
+        guard configurationLoadError == nil else { return }
+        persistConfiguration()
+    }
+
+    /// Waits for the save an edit scheduled, if any. For the harness.
+    func awaitPendingSave() async {
+        await pendingSave?.value
+    }
+
+    private func cancelPendingSave() {
+        pendingSave?.cancel()
+        pendingSave = nil
+        hasUnsavedEdit = false
+    }
+
+    private func persistConfiguration() {
         do {
             try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
             try PlatformConfigPersistence.save(platformConfig, in: runtimeEnvironment)
@@ -748,6 +827,12 @@ final class AppState: ObservableObject {
             lastErrorMessage = error.localizedDescription
             logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
         }
+    }
+
+    func saveConfig() {
+        cancelPendingSave()
+        guard !rejectUnavailableConfiguration() else { return }
+        persistConfiguration()
         reconciler.reconcile(config: config, platformConfig: platformConfig)
         // Surface validation problems at edit time instead of at the next
         // proxy (re)start, where LocalProxyServer would reject the config

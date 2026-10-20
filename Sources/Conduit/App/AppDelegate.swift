@@ -62,6 +62,9 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Before cleanup: an edit typed just before quitting is still
+        // waiting for its pause (#171).
+        appState?.persistPendingEditForTermination()
         appState?.performTerminationCleanup()
         removeShortcutMonitors()
         if let windowCloseObserver {
