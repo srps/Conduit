@@ -796,14 +796,15 @@ final class AppState: ObservableObject {
         saveConfig()
     }
 
-    /// Writes an unsaved edit to disk, without reconciling: at quit,
-    /// termination cleanup is about to tear the surfaces down, and an
-    /// apply started here would race it.
+    /// Writes an unsaved edit to disk without the runtime reconcile: at
+    /// quit, termination cleanup is about to tear the surfaces down, and an
+    /// apply started here would race it. The login item needs no runtime
+    /// and is registered, or the next launch would disagree with the file.
     func persistPendingEditForTermination() {
         guard hasUnsavedEdit else { return }
         cancelPendingSave()
-        guard configurationLoadError == nil else { return }
-        persistConfiguration()
+        guard configurationLoadError == nil, persistConfiguration() else { return }
+        reconciler.reconcileImmediateActions(platformConfig: platformConfig)
     }
 
     /// Waits for the save an edit scheduled, if any. For the harness.
@@ -811,21 +812,27 @@ final class AppState: ObservableObject {
         await pendingSave?.value
     }
 
+    /// Stops the timer. The edit stays unsaved until a write succeeds.
     private func cancelPendingSave() {
         pendingSave?.cancel()
         pendingSave = nil
-        hasUnsavedEdit = false
     }
 
-    private func persistConfiguration() {
+    /// Whether every file was written. A failed write keeps the edit
+    /// unsaved, so leaving the section or quitting tries again.
+    @discardableResult
+    private func persistConfiguration() -> Bool {
         do {
             try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
             try PlatformConfigPersistence.save(platformConfig, in: runtimeEnvironment)
             try AppPreferencesPersistence.save(appPreferences, in: runtimeEnvironment)
+            hasUnsavedEdit = false
             logStore.log(.debug, "Saved configuration.")
+            return true
         } catch {
             lastErrorMessage = error.localizedDescription
             logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
+            return false
         }
     }
 
