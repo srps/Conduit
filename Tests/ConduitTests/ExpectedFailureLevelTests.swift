@@ -45,24 +45,24 @@ final class ExpectedFailureLevelTests: XCTestCase {
 
     func testDirectConnectReportLowersAbsentDestinationsAndNeverRaises() {
         let nxdomain = ResolutionError(host: "gone.example", rc: EAI_NONAME)
-        let absent = HTTPProxyHandler.directConnectFailureReport(nxdomain, host: "gone.example", default: .error)
+        let absent = DirectConnectFailure.report(nxdomain, host: "gone.example", default: .error)
         XCTAssertEqual(absent.event, "direct.connect_failed", "structured consumers still see the 502")
         XCTAssertEqual(absent.level, .warning)
 
-        let offVPN = HTTPProxyHandler.directConnectFailureReport(nxdomain, host: "gone.example", default: .info)
+        let offVPN = DirectConnectFailure.report(nxdomain, host: "gone.example", default: .info)
         XCTAssertEqual(offVPN.level, .info, "the direct-mode cause already lowered it")
 
-        let timeout = HTTPProxyHandler.directConnectFailureReport(
+        let timeout = DirectConnectFailure.report(
             ChannelError.connectTimeout(.seconds(2)), host: "example.test", default: .error)
         XCTAssertEqual(timeout.event, "direct.connect_failed")
         XCTAssertEqual(timeout.level, .error)
 
-        let metadata = HTTPProxyHandler.directConnectFailureReport(
+        let metadata = DirectConnectFailure.report(
             ChannelError.connectTimeout(.seconds(2)), host: "169.254.169.254", default: .error)
         XCTAssertEqual(metadata.event, "direct.connect_failed")
         XCTAssertEqual(metadata.level, .warning)
 
-        let unreachable = HTTPProxyHandler.directConnectFailureReport(
+        let unreachable = DirectConnectFailure.report(
             IOError(errnoCode: ENETUNREACH, reason: "connect"), host: "example.test", default: .error)
         XCTAssertEqual(unreachable.event, "direct.connect_failed")
         XCTAssertEqual(unreachable.level, .error)
@@ -72,7 +72,7 @@ final class ExpectedFailureLevelTests: XCTestCase {
         let logger = RecordingLogSink(minLevel: .debug)
         let events = RuntimeEventLog(capacity: 16)
         let error = IOError(errnoCode: ECONNREFUSED, reason: "connect")
-        let report = HTTPProxyHandler.directConnectFailureReport(error, host: "127.0.0.1", default: .error)
+        let report = DirectConnectFailure.report(error, host: "127.0.0.1", default: .error)
         HTTPProxyHandler.reportConnectFailure(
             report.event, level: report.level, target: "127.0.0.1:11434", error: error,
             message: "Direct connect to 127.0.0.1:11434 failed", logger: logger, eventSink: { events.append($0) }

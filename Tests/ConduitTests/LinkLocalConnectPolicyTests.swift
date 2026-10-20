@@ -118,8 +118,8 @@ final class LinkLocalConnectPolicyTests: XCTestCase {
 
     func testRepeatedFailureIsLoggedQuietly() {
         let failure = LinkLocalFailureMemo.RecentFailure(target: "169.254.169.254:80", secondsAgo: 3, retryAfterSeconds: 60)
-        XCTAssertEqual(HTTPProxyHandler.directConnectFailureLevel(failure, default: .error), .info)
-        XCTAssertEqual(HTTPProxyHandler.directConnectFailureLevel(ChannelError.connectTimeout(.seconds(2)), default: .error), .error)
+        XCTAssertEqual(DirectConnectFailure.level(failure, default: .error), .info)
+        XCTAssertEqual(DirectConnectFailure.level(ChannelError.connectTimeout(.seconds(2)), default: .error), .error)
     }
 
     /// #100: the real install logged 1,350 link-local timeouts and not one

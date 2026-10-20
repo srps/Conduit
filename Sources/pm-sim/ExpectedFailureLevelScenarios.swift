@@ -9,7 +9,9 @@ import ProxyKernel
 /// #149 through a running orchestrator. A direct CONNECT to a loopback port
 /// nobody listens on is the destination's absence: one WARNING line, and its
 /// `direct.connect_failed` event is still emitted. A client that resets its own established upstream
-/// tunnel logs at INFO and still emits `tunnel.relay_failed`.
+/// tunnel logs at INFO and still emits `tunnel.relay_failed`. A cloud
+/// metadata probe that times out is absent too (WARNING, event kept), while
+/// a timeout to another link-local peer stays an ERROR path fault.
 enum ExpectedFailureLevelScenarios {
     private final class Capture: ChannelInboundHandler, @unchecked Sendable {
         typealias InboundIn = ByteBuffer
@@ -86,6 +88,15 @@ enum ExpectedFailureLevelScenarios {
         let relayLines = logger.entries().filter { $0.message.hasPrefix("Tunnel relay:") }
         notes.append("relay events=\(relayEvents.count) levels=\(relayLines.map(\.level.label)) detail=\(relayEvents.first?.detail ?? "none")")
 
+        // Phase 3: link-local timeouts. The orchestrator's direct dial has no
+        // seam, and a real dial to 169.254.169.254 is answered on a cloud CI
+        // runner, so this drives the chain the direct CONNECT path runs —
+        // link-local dial policy, failure report, coalescing log — with a
+        // connect that times out.
+        let probe = try await timeoutLevels(group: group)
+        notes.append("metadata probe levels=\(probe.metadataLevels.map(\.label)) events=\(probe.metadataEvents) "
+                     + "repeat levels=\(probe.repeatLevels.map(\.label)) bridge levels=\(probe.bridgeLevels.map(\.label))")
+
         return ScenarioResult(
             name: name,
             clientCount: 2, clientsOpened: 2, clientsWithFirstByte: established ? 1 : 0, clientsClosedEarly: 0,
@@ -98,9 +109,54 @@ enum ExpectedFailureLevelScenarios {
                 .init("a client reset emits tunnel.relay_failed", relayEvents.count == 1
                       && relayEvents[0].detail?.contains("side=client") == true),
                 .init("a client reset logs at INFO", relayLines.map(\.level) == [.info]),
+                .init("a metadata probe timeout is one WARNING line", probe.metadataLevels == [.warning]),
+                .init("a metadata probe timeout still emits direct.connect_failed", probe.metadataEvents == 1),
+                .init("a repeat probe inside the memo logs at INFO", probe.repeatLevels == [.info]),
+                .init("a link-local bridge peer timeout stays ERROR", probe.bridgeLevels == [.error]),
             ],
             notes: notes
         )
+    }
+
+    private struct TimeoutLevels {
+        var metadataLevels: [LogLevel]
+        var metadataEvents: Int
+        var repeatLevels: [LogLevel]
+        var bridgeLevels: [LogLevel]
+    }
+
+    private static func timeoutLevels(group: EventLoopGroup) async throws -> TimeoutLevels {
+        let logger = RecordingLogSink(minLevel: .debug)
+        let events = RuntimeEventLog(capacity: 32)
+        let log = ConnectFailureLog(logger: logger, eventSink: { events.append($0) })
+        let eventLoop = group.next()
+        // The link-local memo is process-wide; start this phase from empty.
+        LinkLocalFailureMemo.shared.reset()
+
+        func attempt(_ host: String) async {
+            let target = "\(host):80"
+            do {
+                _ = try await LinkLocalConnectPolicy.dial(host: host, port: 80, on: eventLoop, eventSink: { events.append($0) }) { timeout in
+                    eventLoop.makeFailedFuture(ChannelError.connectTimeout(timeout))
+                }.get()
+            } catch {
+                let report = DirectConnectFailure.report(error, host: host, default: .error)
+                log.report(report.event, level: report.level, target: target, error: error,
+                           message: "Direct connect to \(target) failed: \(error.displayDescription)")
+            }
+        }
+        func levels(_ host: String, from index: Int = 0) -> [LogLevel] {
+            Array(logger.entries().filter { $0.message.hasPrefix("Direct connect to \(host):80 failed") }.dropFirst(index)).map(\.level)
+        }
+
+        await attempt("169.254.169.254")
+        let metadataLevels = levels("169.254.169.254")
+        let metadataEvents = events.events.filter { $0.event == "direct.connect_failed" }.count
+        await attempt("169.254.169.254")
+        let repeatLevels = levels("169.254.169.254", from: 1)
+        await attempt("169.254.10.10")
+        return TimeoutLevels(metadataLevels: metadataLevels, metadataEvents: metadataEvents,
+                             repeatLevels: repeatLevels, bridgeLevels: levels("169.254.10.10"))
     }
 
     private static func connect(
