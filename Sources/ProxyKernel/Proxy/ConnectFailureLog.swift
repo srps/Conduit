@@ -135,12 +135,13 @@ package enum AbsentDestination {
 ///
 /// The first failure is reported as it happens. Repeats inside `interval`
 /// are counted, not reported; when the interval closes, one summary carries
-/// the count as `suppressed=N` and the window it covers as `windowSeconds`,
-/// measured on the wall clock rather than taken from `interval`: the flush
-/// timer runs on uptime, which stops while the Mac sleeps, so a summary that
-/// lands after a wake covers far longer than the interval. The event follows
-/// the same bound and still precedes its log line (both come from
-/// `HTTPProxyHandler.reportConnectFailure`).
+/// the count as `suppressed=N` and the age of its window as `windowSeconds`:
+/// wall-clock seconds since the window opened (at its first failure, or at
+/// the previous summary), at least 1. That is about `interval` while awake,
+/// less when an eviction reports a window early, and longer after a sleep:
+/// the flush timer runs on uptime, which stops while the Mac sleeps. The
+/// event follows the same bound and still precedes its log line (both come
+/// from `HTTPProxyHandler.reportConnectFailure`).
 ///
 /// Bounded: at most `capacity` keys. A new key on a full map first drops
 /// quiet expired entries, then evicts the oldest window, reporting any
@@ -177,7 +178,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
         let error: Error
         let message: String
         let suppressed: Int
-        /// How long the summarised window ran; 0 for a first report.
+        /// The summarised window's age; 0 for a report that summarises nothing.
         var windowSeconds = 0
     }
 
@@ -331,7 +332,9 @@ package final class ConnectFailureLog: @unchecked Sendable {
         }
     }
 
+    /// At least 1: a summary always stands for a span, even an evicted
+    /// window a burst of new keys pushed out within the same second.
     private static func seconds(from start: Date, to end: Date) -> Int {
-        Int(max(0, end.timeIntervalSince(start)).rounded())
+        max(1, Int(end.timeIntervalSince(start).rounded()))
     }
 }

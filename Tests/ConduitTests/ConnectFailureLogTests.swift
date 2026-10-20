@@ -197,6 +197,8 @@ final class ConnectFailureLogTests: XCTestCase {
         XCTAssertLessThanOrEqual(fixture.log.count, 4)
         let summaries = fixture.proxyLines().filter { $0.message.contains("suppressed=1") }
         XCTAssertEqual(summaries.count, 6, "each evicted target reported the repeat it had held back")
+        XCTAssertTrue(summaries.allSatisfy { $0.message.hasSuffix("in the last 1s)") },
+                      "an early eviction still reports a span: \(summaries.map(\.message))")
     }
 
     /// Codex on PR #106: one flush task per suppressed key, never cancelled
