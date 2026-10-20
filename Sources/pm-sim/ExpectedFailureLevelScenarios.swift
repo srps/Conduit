@@ -10,8 +10,9 @@ import ProxyKernel
 /// nobody listens on is the destination's absence: one WARNING line, and its
 /// `direct.connect_failed` event is still emitted. A client that resets its own established upstream
 /// tunnel logs at INFO and still emits `tunnel.relay_failed`. A cloud
-/// metadata probe that times out is absent too (WARNING, event kept), while
-/// a timeout to another link-local peer stays an ERROR path fault.
+/// metadata probe that times out is treated as absent by policy (WARNING,
+/// event kept), while a timeout to another link-local peer stays an ERROR
+/// path fault.
 enum ExpectedFailureLevelScenarios {
     private final class Capture: ChannelInboundHandler, @unchecked Sendable {
         typealias InboundIn = ByteBuffer
