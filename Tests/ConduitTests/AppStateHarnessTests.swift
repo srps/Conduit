@@ -41,6 +41,8 @@ final class AppStateHarness {
     var networkPathDebounce = NetworkMonitor.defaultDebounceInterval
     var helperSocketBindWait: Duration = .seconds(1)
     var dnsReconcileDebounce: TimeInterval = 1.0
+    /// Short, so a scenario that awaits the autosave stays fast (#171).
+    var settingsSaveDebounce: Duration = .milliseconds(20)
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
     private(set) var appState: AppState?
@@ -88,6 +90,7 @@ final class AppStateHarness {
             networkPathDebounce: networkPathDebounce,
             helperSocketBindWait: helperSocketBindWait,
             dnsReconcileDebounce: dnsReconcileDebounce,
+            settingsSaveDebounce: settingsSaveDebounce,
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
@@ -576,12 +579,14 @@ final class AppStateHarnessTests: XCTestCase {
     private func launch(
         platform: PlatformIntegrationConfig = PlatformIntegrationConfig(),
         helperSocketBindWait: Duration = .seconds(1),
+        settingsSaveDebounce: Duration = .milliseconds(20),
         configure: (inout ProxyConfig) -> Void = { _ in }
     ) throws -> AppState {
         var config = makeConfig()
         configure(&config)
         harness = try AppStateHarness(config: config, platformConfig: platform)
         harness.helperSocketBindWait = helperSocketBindWait
+        harness.settingsSaveDebounce = settingsSaveDebounce
         return harness.launch()
     }
 
@@ -801,6 +806,99 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
         let zshrc = (try? String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)) ?? ""
         XCTAssertFalse(zshrc.contains("Conduit"), "and no shell block is left behind")
+    }
+
+    /// #171: Settings has no Save button. An edit is saved and reconciled
+    /// once edits pause, with its section still open: the bypass list
+    /// reaches the config file, and the environment switch turned on
+    /// publishes the variables.
+    func testASettingsEditSavesAndReconcilesWhenEditsPause() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: false))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+
+        appState.config.noProxyHosts.append("first.example")
+        appState.config.noProxyHosts.append("autosave.example")
+        appState.platformConfig.manageEnvironmentVariables = true
+        await appState.awaitPendingSave()
+        await appState.reconciler.drain()
+
+        let saved = try ProxyConfigPersistence.load(in: harness.environment)
+        XCTAssertTrue(saved.noProxyHosts.contains("first.example"))
+        XCTAssertTrue(saved.noProxyHosts.contains("autosave.example"), "the last edit before the pause is saved")
+        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).manageEnvironmentVariables)
+        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(appState.config.localPort)",
+                       "the reconcile ran without the section going away")
+        XCTAssertTrue(appState.config.noProxyHosts.allSatisfy { machine.launchdEnvironment["NO_PROXY"]?.contains($0) == true })
+    }
+
+    /// A problem that does not block a start does not hold the save back:
+    /// otherwise one refused bypass entry would stop every later edit from
+    /// saving.
+    func testAPauseOnANonBlockingProblemStillSaves() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig())
+        await harness.launchRecovery()
+
+        appState.config.noProxyHosts = Array(repeating: "short.example", count: ProxyBypassSyntax.maximumEntries + 1)
+        XCTAssertFalse(appState.config.validate().isEmpty)
+        XCTAssertFalse(appState.config.validate().contains(where: \.blocksProxyStart))
+        await appState.awaitPendingSave()
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.count,
+                       ProxyBypassSyntax.maximumEntries + 1)
+        XCTAssertFalse(appState.hasUnsavedEdit)
+    }
+
+    /// A pause on an edit that would block a start saves nothing: a
+    /// half-typed listen host must not reach a reconcile that restarts the
+    /// listener. Leaving the section saves it and reports the problem.
+    func testAPauseOnAnInvalidEditWaitsForTheSectionToClose() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig())
+        await harness.launchRecovery()
+
+        appState.config.localHost = "127.0."
+        await appState.awaitPendingSave()
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.0.1",
+                       "the timer did not save a config that does not validate")
+        XCTAssertTrue(appState.hasUnsavedEdit)
+        XCTAssertNil(appState.lastErrorMessage, "nothing is reported mid-edit")
+
+        appState.flushPendingSave()
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.")
+        XCTAssertNotNil(appState.lastErrorMessage, "leaving the section reports the problem")
+        XCTAssertFalse(appState.hasUnsavedEdit)
+    }
+
+    /// Leaving a section saves a waiting edit at once instead of after the
+    /// pause.
+    func testLeavingASectionSavesAWaitingEditAtOnce() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(), settingsSaveDebounce: .seconds(3600))
+        await harness.launchRecovery()
+
+        appState.config.noProxyHosts.append("leave.example")
+        XCTAssertFalse(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.contains("leave.example"),
+                       "the edit is waiting for its pause")
+        appState.flushPendingSave()
+        XCTAssertTrue(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.contains("leave.example"))
+        await appState.awaitPendingSave()
+    }
+
+    /// Quitting with an edit still waiting writes it to disk but does not
+    /// reconcile it: termination cleanup is tearing the surfaces down, and
+    /// an apply started at quit would race it.
+    func testQuittingPersistsAWaitingEditWithoutReconcilingIt() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: false),
+                                  settingsSaveDebounce: .seconds(3600))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+
+        appState.platformConfig.manageEnvironmentVariables = true
+        appState.persistPendingEditForTermination()
+        await appState.reconciler.drain()
+
+        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).manageEnvironmentVariables,
+                      "the next launch starts from the edit")
+        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "nothing was applied on the way out")
+        await appState.awaitPendingSave()
     }
 
     /// Repeated DNS stops while the first is held on a slow helper. Each

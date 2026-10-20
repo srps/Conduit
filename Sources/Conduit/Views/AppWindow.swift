@@ -88,12 +88,12 @@ struct AppWindow: View {
         }
     }
 
-    /// Edits apply live through `AppState.saveConfig()`, which also persists
-    /// and re-validates. Every Configure section saves when it goes away —
-    /// switching sections or closing the window — so there is no "OK" to
-    /// press and nothing to lose.
+    /// Edits save themselves once they pause (`AppState.scheduleSave()`,
+    /// #171), which also reconciles and re-validates, so there is no "OK"
+    /// to press. A Configure section going away — switching sections or
+    /// closing the window — saves a waiting edit at once.
     private func configure<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
         content()
-            .onDisappear { appState.saveConfig() }
+            .onDisappear { appState.flushPendingSave() }
     }
 }
