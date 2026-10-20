@@ -863,6 +863,8 @@ final class AppStateHarnessTests: XCTestCase {
                        "the timer did not save a config that does not validate")
         XCTAssertTrue(appState.hasUnsavedEdit)
         XCTAssertNil(appState.lastErrorMessage, "nothing is reported mid-edit")
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.autosave_held" }.map(\.detail),
+                       ["reason=start_blocking_problems problems=1"], "the decision not to save is an event")
 
         appState.flushPendingSave()
         XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.")
