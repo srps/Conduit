@@ -168,6 +168,23 @@ final class ConnectFailureLogTests: XCTestCase {
         let lines = fixture.proxyLines()
         XCTAssertEqual(lines.count, 2)
         XCTAssertTrue(lines[1].message.contains("suppressed=2"), lines[1].message)
+        XCTAssertTrue(lines[1].message.hasSuffix("(suppressed=2 in the last 61s)"), lines[1].message)
+    }
+
+    /// The flush timer runs on uptime, which stops while the Mac sleeps. A
+    /// window it closes after a wake covered the sleep too, and the summary
+    /// says so instead of claiming the nominal interval.
+    func testASummaryAfterSleepReportsTheWindowItCovered() {
+        let fixture = Fixture()
+        reportNXDOMAIN(fixture)
+        reportNXDOMAIN(fixture)
+        fixture.advance(983)
+        fixture.runScheduled()
+        let lines = fixture.proxyLines()
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertTrue(lines[1].message.hasSuffix("(suppressed=1 in the last 983s)"), lines[1].message)
+        XCTAssertTrue(fixture.emitted().last?.detail?.hasSuffix("suppressed=1 windowSeconds=983") ?? false,
+                      fixture.emitted().last?.detail ?? "")
     }
 
     func testTheMapIsHardCappedAndAnEvictedCountIsNotLost() {
