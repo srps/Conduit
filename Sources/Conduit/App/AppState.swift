@@ -781,7 +781,11 @@ final class AppState: ObservableObject {
             self.pendingSave = nil
             let blocking = self.config.validate().filter(\.blocksProxyStart)
             guard blocking.isEmpty else {
-                self.logStore.log(.debug, "Autosave waiting: \(blocking.count) problem(s) in the edited configuration would block a proxy start.")
+                // A decision not to save: event first, so the UI, pmctl and
+                // pm-sim see why the edit is still unsaved.
+                self.recordLifecycle(RuntimeEvent(kind: .config, event: "config.autosave_held",
+                                                  detail: "reason=start_blocking_problems problems=\(blocking.count)"),
+                                     level: .info)
                 return
             }
             self.saveConfig()
