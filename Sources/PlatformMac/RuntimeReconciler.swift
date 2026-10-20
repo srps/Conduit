@@ -155,6 +155,20 @@ package final class RuntimeReconciler {
         }
     }
 
+    /// At quit, for an edit no save has reached: runs only the actions that
+    /// need no runtime (the login item), so the next launch is registered
+    /// the way the saved file says. Nothing else is queued; termination
+    /// cleanup is tearing the runtime surfaces down.
+    package func reconcileImmediateActions(platformConfig newPlatform: PlatformIntegrationConfig) {
+        let oldPlatform = lastReconciledPlatformConfig
+        let actions = PlatformIntegrationReconciler.immediateActions(old: oldPlatform, new: newPlatform)
+        guard !actions.isEmpty else { return }
+        lastReconciledPlatformConfig.launchAtLogin = newPlatform.launchAtLogin
+        for action in actions {
+            run(action, config: lastReconciledConfig, previousConfig: lastReconciledConfig, from: oldPlatform, to: newPlatform)
+        }
+    }
+
     package func reconcile(config new: ProxyConfig, platformConfig newPlatform: PlatformIntegrationConfig) {
         let old = lastReconciledConfig
         let oldPlatform = lastReconciledPlatformConfig
