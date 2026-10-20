@@ -33,7 +33,11 @@ final class ExpectedFailureLevelTests: XCTestCase {
         let timeout = ChannelError.connectTimeout(.seconds(2))
         XCTAssertTrue(AbsentDestination.matches(timeout, host: "probe.INVALID."), "the reserved TLD never exists")
         XCTAssertFalse(AbsentDestination.matches(timeout, host: "127.0.0.1"), "a loopback timeout is not a closed port")
-        XCTAssertFalse(AbsentDestination.matches(timeout, host: "169.254.169.254"))
+        XCTAssertTrue(AbsentDestination.matches(timeout, host: "169.254.169.254"), "link-local is never routed")
+        XCTAssertTrue(AbsentDestination.matches(timeout, host: "[fe80::1%en0]"))
+        XCTAssertFalse(AbsentDestination.matches(timeout, host: "10.0.0.1"), "a routed timeout can be a broken path")
+        XCTAssertFalse(AbsentDestination.matches(IOError(errnoCode: ENETUNREACH, reason: "connect"), host: "169.254.169.254"),
+                       "an unreachable network is a path fault even toward link-local")
     }
 
     func testDirectConnectReportLowersAbsentDestinationsAndNeverRaises() {
@@ -49,6 +53,11 @@ final class ExpectedFailureLevelTests: XCTestCase {
             ChannelError.connectTimeout(.seconds(2)), host: "example.test", default: .error)
         XCTAssertEqual(timeout.event, "direct.connect_failed")
         XCTAssertEqual(timeout.level, .error)
+
+        let metadata = HTTPProxyHandler.directConnectFailureReport(
+            ChannelError.connectTimeout(.seconds(2)), host: "169.254.169.254", default: .error)
+        XCTAssertEqual(metadata.event, "direct.connect_failed")
+        XCTAssertEqual(metadata.level, .warning)
 
         let unreachable = HTTPProxyHandler.directConnectFailureReport(
             IOError(errnoCode: ENETUNREACH, reason: "connect"), host: "example.test", default: .error)

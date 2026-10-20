@@ -54,11 +54,15 @@ package enum ConnectFailureKind: String, Sendable {
 
 /// A direct connect that failed only because the destination is absent
 /// (#149): the name does not exist, the host is under the reserved
-/// `.invalid` TLD, or nothing listens on a loopback port. The path worked;
-/// the client asked for something that is not there, so the failure is
-/// worth a warning, not an error line. It still emits its event. DNS server failures (`EAI_AGAIN`,
-/// `EAI_FAIL`), lookup timeouts and connect timeouts are not absent: they
-/// can mean a broken route or resolver.
+/// `.invalid` TLD, nothing listens on a loopback port, or a link-local
+/// literal did not answer. The path worked; the client asked for something
+/// that is not there, so the failure is worth a warning, not an error line.
+/// It still emits its event. DNS server failures (`EAI_AGAIN`, `EAI_FAIL`),
+/// lookup timeouts and other connect timeouts are not absent: they can mean
+/// a broken route or resolver. A link-local address is never routed, so its
+/// timeout cannot: off a cloud instance, the metadata probe cloud SDKs send
+/// to 169.254.169.254 always ends this way, and its every-15-minute cadence
+/// outlives `LinkLocalFailureMemo`.
 package enum AbsentDestination {
     package static func matches(_ error: Error, host: String) -> Bool {
         let name = normalized(host)
@@ -66,6 +70,7 @@ package enum AbsentDestination {
         switch ConnectFailureKind(error) {
         case .dns: return isNoSuchName(error)
         case .refused: return isLoopback(name)
+        case .timeout: return LinkLocalConnectPolicy.isLinkLocal(host: name)
         default: return false
         }
     }
