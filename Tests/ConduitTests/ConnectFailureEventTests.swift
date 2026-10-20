@@ -58,6 +58,16 @@ final class ConnectFailureEventTests: XCTestCase {
         )
     }
 
+    /// A CONNECT failure names its target, so a coalesced summary can be
+    /// traced back to its host; it names no upstream, since the attempt may
+    /// have failed over across the chain.
+    func testTunnelFailureMessageNamesTarget() {
+        XCTAssertEqual(
+            HTTPProxyHandler.tunnelFailureMessage(target: "example.test:443", error: ConnectionPoolError.upstreamResponseTimedOut),
+            "CONNECT tunnel to example.test:443 failed: Timed out waiting for the upstream proxy to respond."
+        )
+    }
+
     /// A local refusal never dialed the selected upstream, so it is not
     /// attributed to one; a real exchange failure keeps its upstream.
     func testLocalRefusalsAreNotAttributedToAnUpstream() {

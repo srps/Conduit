@@ -588,10 +588,11 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
                             self.onConnectionClosed(infoID)
                         } else {
                             let report = Self.upstreamFailureReport("upstream.tunnel_failed", level: upstreamFailureLevel, for: error)
+                            let observableTarget = SensitiveValueSanitizer.observableTarget(head.uri)
                             self.connectFailureLog.report(
                                 report.event, level: report.level,
-                                target: SensitiveValueSanitizer.observableTarget(head.uri), error: error,
-                                message: "CONNECT tunnel failed: \(error.displayDescription)"
+                                target: observableTarget, error: error,
+                                message: Self.tunnelFailureMessage(target: observableTarget, error: error)
                             )
                             self.onRequestCompleted(.failed(Self.upstreamPathFailureClass(error)), nil)
                             self.writeError(status: .badGateway, message: error.displayDescription, context: ctx)
@@ -1155,6 +1156,14 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
     static func exchangeFailureMessage(target: String, upstream: String?, error: Error) -> String {
         let via = upstream.map { " via \($0)" } ?? ""
         return "Proxy exchange for \(target)\(via) failed: \(error.displayDescription)"
+    }
+
+    /// The line for a CONNECT tunnel that failed through the upstream. It
+    /// names the target for the same reason `exchangeFailureMessage` does;
+    /// the failure may have crossed several upstreams in the chain, so it
+    /// names none. `target` arrives sanitized, as the event carries it.
+    static func tunnelFailureMessage(target: String, error: Error) -> String {
+        "CONNECT tunnel to \(target) failed: \(error.displayDescription)"
     }
 
     /// The upstream a failed exchange is attributed to. A pool-exhausted or
