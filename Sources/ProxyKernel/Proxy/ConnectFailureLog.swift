@@ -54,17 +54,20 @@ package enum ConnectFailureKind: String, Sendable {
 
 /// A direct connect that failed only because the destination is absent
 /// (#149): the name does not exist, the host is under the reserved
-/// `.invalid` TLD, nothing listens on a loopback port, or a cloud
-/// instance-metadata endpoint did not answer. The path worked; the client
-/// asked for something that is not there, so the failure is worth a
-/// warning, not an error line. It still emits its event. DNS server
-/// failures (`EAI_AGAIN`, `EAI_FAIL`), lookup timeouts and other connect
-/// timeouts are not absent: they can mean a broken route or resolver, and
-/// that includes other link-local peers, such as a Thunderbolt bridge whose
-/// SYNs a bad route blackholes. A metadata endpoint exists only on a cloud
-/// instance; elsewhere the probe cloud SDKs send on every credential lookup
-/// always times out, and its every-15-minute cadence outlives
-/// `LinkLocalFailureMemo`.
+/// `.invalid` TLD, or nothing listens on a loopback port. The path worked;
+/// the client asked for something that is not there, so the failure is
+/// worth a warning, not an error line. It still emits its event. DNS server
+/// failures (`EAI_AGAIN`, `EAI_FAIL`), lookup timeouts and connect timeouts
+/// are not absent: they can mean a broken route or resolver, and that
+/// includes link-local peers, such as a Thunderbolt bridge whose SYNs a bad
+/// route blackholes.
+///
+/// One timeout is treated as absent by policy rather than proof: a cloud
+/// instance-metadata endpoint. Only a cloud instance serves one, and cloud
+/// SDKs probe it on credential lookups wherever they run, so off a cloud
+/// instance the probe times out as a matter of course, at an interval that
+/// outlives `LinkLocalFailureMemo` (every 15 minutes in the log behind this).
+/// A metadata endpoint behind a broken route would be logged the same way.
 package enum AbsentDestination {
     package static func matches(_ error: Error, host: String) -> Bool {
         let name = normalized(host)
@@ -105,18 +108,26 @@ package enum AbsentDestination {
 
     /// The literals cloud SDKs probe for instance credentials: the shared
     /// IPv4 endpoint (AWS, Azure, GCP, OCI), the ECS task endpoint, and
-    /// EC2's IPv6 one. Compared as addresses, so `[fd00:ec2:0::254]` matches.
+    /// EC2's IPv6 one. Compared as addresses, so `[fd00:ec2:0::254]` and the
+    /// IPv4-mapped `::ffff:169.254.169.254` match.
     package static func isMetadataEndpoint(_ host: String) -> Bool {
         let name = normalized(host)
         var v4 = in_addr()
         if inet_pton(AF_INET, name, &v4) == 1 {
-            let value = UInt32(bigEndian: v4.s_addr)
-            return value == 0xa9fe_a9fe || value == 0xa9fe_aa02 // 169.254.169.254, 169.254.170.2
+            return isMetadataIPv4(UInt32(bigEndian: v4.s_addr))
         }
         var v6 = in6_addr()
         guard inet_pton(AF_INET6, name, &v6) == 1 else { return false }
+        let bytes = withUnsafeBytes(of: &v6) { Array($0) }
+        if bytes[0..<10].allSatisfy({ $0 == 0 }) && bytes[10] == 0xff && bytes[11] == 0xff {
+            return isMetadataIPv4(bytes[12...].reduce(UInt32(0)) { ($0 << 8) | UInt32($1) })
+        }
         let ec2: [UInt8] = [0xfd, 0, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54] // fd00:ec2::254
-        return withUnsafeBytes(of: &v6) { Array($0) } == ec2
+        return bytes == ec2
+    }
+
+    private static func isMetadataIPv4(_ value: UInt32) -> Bool {
+        value == 0xa9fe_a9fe || value == 0xa9fe_aa02 // 169.254.169.254, 169.254.170.2
     }
 
     private static func isLoopback(_ name: String) -> Bool {
@@ -139,10 +150,11 @@ package enum DirectConnectFailure {
         error is LinkLocalFailureMemo.RecentFailure ? .info : level
     }
 
-    /// Always `direct.connect_failed`, so structured consumers see every
-    /// 502. An absent destination (see `AbsentDestination`) logs at
-    /// `.warning` at most; everything else keeps `level`. Never raises a
-    /// level the direct-mode cause or the link-local memo lowered.
+    /// Always names `direct.connect_failed`; whether it is emitted follows
+    /// the level (`.warning` and up) and `ConnectFailureLog`'s coalescing.
+    /// An absent destination (see `AbsentDestination`) logs at `.warning` at
+    /// most; everything else keeps `level`. Never raises a level the
+    /// direct-mode cause or the link-local memo lowered.
     package static func report(
         _ error: Error, host: String, default level: LogLevel
     ) -> (event: String?, level: LogLevel) {
@@ -199,7 +211,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
         let error: Error
         let message: String
         let suppressed: Int
-        /// The summarised window's age; 0 for a report that summarises nothing.
+        /// The window's age; reported only when `suppressed` is nonzero.
         var windowSeconds = 0
     }
 
