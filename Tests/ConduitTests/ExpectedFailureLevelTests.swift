@@ -33,8 +33,11 @@ final class ExpectedFailureLevelTests: XCTestCase {
         let timeout = ChannelError.connectTimeout(.seconds(2))
         XCTAssertTrue(AbsentDestination.matches(timeout, host: "probe.INVALID."), "the reserved TLD never exists")
         XCTAssertFalse(AbsentDestination.matches(timeout, host: "127.0.0.1"), "a loopback timeout is not a closed port")
-        XCTAssertTrue(AbsentDestination.matches(timeout, host: "169.254.169.254"), "link-local is never routed")
-        XCTAssertTrue(AbsentDestination.matches(timeout, host: "[fe80::1%en0]"))
+        XCTAssertTrue(AbsentDestination.matches(timeout, host: "169.254.169.254"), "no metadata endpoint off a cloud instance")
+        XCTAssertTrue(AbsentDestination.matches(timeout, host: "169.254.170.2"))
+        XCTAssertTrue(AbsentDestination.matches(timeout, host: "[fd00:ec2:0::254]"))
+        XCTAssertFalse(AbsentDestination.matches(timeout, host: "169.254.10.10"), "a bridge peer behind a bad route is a path fault")
+        XCTAssertFalse(AbsentDestination.matches(timeout, host: "[fe80::1%en0]"))
         XCTAssertFalse(AbsentDestination.matches(timeout, host: "10.0.0.1"), "a routed timeout can be a broken path")
         XCTAssertFalse(AbsentDestination.matches(IOError(errnoCode: ENETUNREACH, reason: "connect"), host: "169.254.169.254"),
                        "an unreachable network is a path fault even toward link-local")

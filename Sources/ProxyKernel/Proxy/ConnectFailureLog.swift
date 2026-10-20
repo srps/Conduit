@@ -54,15 +54,17 @@ package enum ConnectFailureKind: String, Sendable {
 
 /// A direct connect that failed only because the destination is absent
 /// (#149): the name does not exist, the host is under the reserved
-/// `.invalid` TLD, nothing listens on a loopback port, or a link-local
-/// literal did not answer. The path worked; the client asked for something
-/// that is not there, so the failure is worth a warning, not an error line.
-/// It still emits its event. DNS server failures (`EAI_AGAIN`, `EAI_FAIL`),
-/// lookup timeouts and other connect timeouts are not absent: they can mean
-/// a broken route or resolver. A link-local address is never routed, so its
-/// timeout cannot: off a cloud instance, the metadata probe cloud SDKs send
-/// to 169.254.169.254 always ends this way, and its every-15-minute cadence
-/// outlives `LinkLocalFailureMemo`.
+/// `.invalid` TLD, nothing listens on a loopback port, or a cloud
+/// instance-metadata endpoint did not answer. The path worked; the client
+/// asked for something that is not there, so the failure is worth a
+/// warning, not an error line. It still emits its event. DNS server
+/// failures (`EAI_AGAIN`, `EAI_FAIL`), lookup timeouts and other connect
+/// timeouts are not absent: they can mean a broken route or resolver, and
+/// that includes other link-local peers, such as a Thunderbolt bridge whose
+/// SYNs a bad route blackholes. A metadata endpoint exists only on a cloud
+/// instance; elsewhere the probe cloud SDKs send on every credential lookup
+/// always times out, and its every-15-minute cadence outlives
+/// `LinkLocalFailureMemo`.
 package enum AbsentDestination {
     package static func matches(_ error: Error, host: String) -> Bool {
         let name = normalized(host)
@@ -70,7 +72,7 @@ package enum AbsentDestination {
         switch ConnectFailureKind(error) {
         case .dns: return isNoSuchName(error)
         case .refused: return isLoopback(name)
-        case .timeout: return LinkLocalConnectPolicy.isLinkLocal(host: name)
+        case .timeout: return isMetadataEndpoint(name)
         default: return false
         }
     }
@@ -99,6 +101,22 @@ package enum AbsentDestination {
         default:
             return false
         }
+    }
+
+    /// The literals cloud SDKs probe for instance credentials: the shared
+    /// IPv4 endpoint (AWS, Azure, GCP, OCI), the ECS task endpoint, and
+    /// EC2's IPv6 one. Compared as addresses, so `[fd00:ec2:0::254]` matches.
+    package static func isMetadataEndpoint(_ host: String) -> Bool {
+        let name = normalized(host)
+        var v4 = in_addr()
+        if inet_pton(AF_INET, name, &v4) == 1 {
+            let value = UInt32(bigEndian: v4.s_addr)
+            return value == 0xa9fe_a9fe || value == 0xa9fe_aa02 // 169.254.169.254, 169.254.170.2
+        }
+        var v6 = in6_addr()
+        guard inet_pton(AF_INET6, name, &v6) == 1 else { return false }
+        let ec2: [UInt8] = [0xfd, 0, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54] // fd00:ec2::254
+        return withUnsafeBytes(of: &v6) { Array($0) } == ec2
     }
 
     private static func isLoopback(_ name: String) -> Bool {
