@@ -117,8 +117,12 @@ package enum AbsentDestination {
 ///
 /// The first failure is reported as it happens. Repeats inside `interval`
 /// are counted, not reported; when the interval closes, one summary carries
-/// the count as `suppressed=N`. The event follows the same bound and still
-/// precedes its log line (both come from `HTTPProxyHandler.reportConnectFailure`).
+/// the count as `suppressed=N` and the window it covers as `windowSeconds`,
+/// measured on the wall clock rather than taken from `interval`: the flush
+/// timer runs on uptime, which stops while the Mac sleeps, so a summary that
+/// lands after a wake covers far longer than the interval. The event follows
+/// the same bound and still precedes its log line (both come from
+/// `HTTPProxyHandler.reportConnectFailure`).
 ///
 /// Bounded: at most `capacity` keys. A new key on a full map first drops
 /// quiet expired entries, then evicts the oldest window, reporting any
@@ -155,6 +159,8 @@ package final class ConnectFailureLog: @unchecked Sendable {
         let error: Error
         let message: String
         let suppressed: Int
+        /// How long the summarised window ran; 0 for a first report.
+        var windowSeconds = 0
     }
 
     package let interval: TimeInterval
@@ -227,7 +233,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
                 // the count the window held back.
                 entries[key] = Entry(windowStart: at, suppressed: 0, level: level, error: error, message: message)
                 reports.append(Report(key: key, level: entry.suppressed > 0 ? max(entry.level, level) : level, error: error, message: message,
-                                      suppressed: entry.suppressed))
+                                      suppressed: entry.suppressed, windowSeconds: Self.seconds(from: entry.windowStart, to: at)))
                 return
             }
             if entries.count >= capacity {
@@ -248,7 +254,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
             for (key, entry) in entries where at.timeIntervalSince(entry.windowStart) >= interval {
                 if entry.suppressed > 0 {
                     due.append(Report(key: key, level: entry.level, error: entry.error, message: entry.message,
-                                      suppressed: entry.suppressed))
+                                      suppressed: entry.suppressed, windowSeconds: Self.seconds(from: entry.windowStart, to: at)))
                     // A new window starts: the next repeat is counted
                     // against it rather than reported at once.
                     entries[key] = Entry(windowStart: at, suppressed: 0, level: entry.level, error: entry.error, message: entry.message)
@@ -290,7 +296,7 @@ package final class ConnectFailureLog: @unchecked Sendable {
         if oldest.value.suppressed > 0 {
             let entry = oldest.value
             reports.append(Report(key: oldest.key, level: entry.level, error: entry.error, message: entry.message,
-                                  suppressed: entry.suppressed))
+                                  suppressed: entry.suppressed, windowSeconds: Self.seconds(from: entry.windowStart, to: at)))
         }
         return reports
     }
@@ -302,8 +308,12 @@ package final class ConnectFailureLog: @unchecked Sendable {
                 error: report.error,
                 message: report.message, logger: logger, eventSink: eventSink,
                 eventAtAnyLevel: report.key.eventAtAnyLevel,
-                kind: report.key.kind, suppressed: report.suppressed, windowSeconds: Int(interval)
+                kind: report.key.kind, suppressed: report.suppressed, windowSeconds: report.windowSeconds
             )
         }
+    }
+
+    private static func seconds(from start: Date, to end: Date) -> Int {
+        Int(max(0, end.timeIntervalSince(start)).rounded())
     }
 }
