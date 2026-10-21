@@ -18,6 +18,7 @@ Each record carries three statuses, because merged does not mean it works:
 - An accepted decision is never edited into a different one. Replacing it takes a new record and supersession links. Facts and evidence are corrected in place.
 - A change that makes or replaces an owner decision adds or updates a record in the same PR. A change that implements part of one, or records a validation result, updates its statuses and evidence.
 - Update the index below in the same change.
+- `scripts/check-decisions.py` checks the structure in CI (#177): IDs, and from git history that no record was deleted or its ID reused; statuses, the index, supersession links, evidence and relative links. It cannot judge whether the evidence is enough; review does that.
 
 ## Index
 
