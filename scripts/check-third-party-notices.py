@@ -5,24 +5,34 @@
 Every package in Package.resolved needs its license (and NOTICE, if it has
 one) vendored verbatim under Resources/ThirdPartyLicenses/<package>/ and an
 entry in NOTICE; no vendored directory may outlive its pin; bundle-app.sh must
-copy the files into the app. When SwiftPM checkouts exist (after a build), the
-vendored texts must match them byte for byte, so a dependency bump that
-changes its license fails here instead of shipping the old text.
+copy the files into the app. When SwiftPM checkouts exist (after a build),
+every license, notice or copying file in a checkout, at any depth, must be
+vendored at the same relative path and match byte for byte. That covers
+component licenses a package keeps beside the code it embeds (llhttp in
+SwiftNIO, ed25519 in Sparkle), and a dependency bump that changes a license
+fails here instead of shipping the old text.
 
-Usage: check-third-party-notices.py [ROOT]
+Usage: check-third-party-notices.py [--require-checkouts] [ROOT]
 """
 import json
 import sys
 from pathlib import Path
 
-NOTICE_NAMES = ('LICENSE', 'LICENSE.txt', 'LICENSE.md', 'NOTICE', 'NOTICE.txt', 'NOTICE.md')
+NOTICE_PREFIXES = ('license', 'notice', 'copying')
+SKIPPED_PARTS = {'.git', '.build'}
 
 
 def notice_files(directory):
-    return {p.name for p in directory.iterdir() if p.is_file() and p.name in NOTICE_NAMES}
+    """Relative paths of license-like files under `directory`, at any depth."""
+    return {
+        p.relative_to(directory).as_posix()
+        for p in directory.rglob('*')
+        if p.is_file() and p.name.lower().startswith(NOTICE_PREFIXES)
+        and not SKIPPED_PARTS.intersection(p.relative_to(directory).parts)
+    }
 
 
-def check(root):
+def check(root, require_checkouts=False):
     problems = []
     pins = {pin['identity'] for pin in json.loads((root / 'Package.resolved').read_text())['pins']}
     vendored_root = root / 'Resources' / 'ThirdPartyLicenses'
@@ -37,12 +47,14 @@ def check(root):
             problems.append(f'{pin}: no Resources/ThirdPartyLicenses/{pin}/')
             continue
         files = notice_files(directory)
-        if not any(name.startswith('LICENSE') for name in files):
-            problems.append(f'{pin}: Resources/ThirdPartyLicenses/{pin}/ has no LICENSE file')
+        if not any('/' not in name and name.lower().startswith('license') for name in files):
+            problems.append(f'{pin}: Resources/ThirdPartyLicenses/{pin}/ has no top-level LICENSE file')
         if f'ThirdPartyLicenses/{pin}/' not in notice:
             problems.append(f'{pin}: NOTICE does not list ThirdPartyLicenses/{pin}/')
         checkout = checkout_dirs.get(pin)
         if checkout is None:
+            if require_checkouts:
+                problems.append(f'{pin}: no SwiftPM checkout under .build/checkouts to compare against')
             continue
         upstream = notice_files(checkout)
         for name in sorted(upstream - files):
@@ -61,8 +73,11 @@ def check(root):
 
 
 if __name__ == '__main__':
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent)
-    problems = check(root)
+    arguments = sys.argv[1:]
+    require_checkouts = '--require-checkouts' in arguments
+    arguments = [a for a in arguments if a != '--require-checkouts']
+    root = Path(arguments[0] if arguments else Path(__file__).resolve().parent.parent)
+    problems = check(root, require_checkouts=require_checkouts)
     for problem in problems:
         print(f'FAIL: {problem}', file=sys.stderr)
     if problems:
