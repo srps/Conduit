@@ -801,7 +801,9 @@ final class AppState: ObservableObject {
     /// and so must not be saved now. A decision not to save: event first,
     /// so the UI, pmctl and pm-sim see why the edit is still unsaved.
     private func holdsBackUnsavedEdit(trigger: String) -> Bool {
-        guard hasUnsavedEdit else { return false }
+        // Only an edit to the config: one left invalid by a section close is
+        // already saved, and must not hold back an unrelated toggle.
+        guard hasUnsavedEdit, config != reconciler.requestedConfig else { return false }
         let blocking = config.validate().filter(\.blocksProxyStart)
         guard !blocking.isEmpty else { return false }
         recordLifecycle(RuntimeEvent(kind: .config, event: "config.autosave_held",
@@ -820,7 +822,7 @@ final class AppState: ObservableObject {
         let passWasOut = reconciler.hasPassInFlight
         // Also when everything is written but an action did not land: closing
         // a section retried it before autosave, and nothing else may (#176).
-        if hasUnsavedEdit || reconciler.lags(config: config, platformConfig: platformConfig) {
+        if hasUnsavedEdit || reconciler.requestLags {
             saveConfig()
         }
         // Look again once everything out has drained.
@@ -828,12 +830,10 @@ final class AppState: ObservableObject {
         sectionCloseRetry?.cancel()
         sectionCloseRetry = Task { [weak self] in
             await self?.reconciler.drain()
-            // Only with nothing unsaved: an edit made since the close has its
-            // own debounced save, gated as usual, and that save diffs against
-            // the rewound baseline, so it carries the retry too.
-            guard let self, !Task.isCancelled, !self.hasUnsavedEdit,
-                  self.reconciler.lags(config: self.config, platformConfig: self.platformConfig) else { return }
-            self.saveConfig()
+            // What the close saved, not what is current: an edit made since
+            // has its own debounced save, gated as usual.
+            guard let self, !Task.isCancelled, self.reconciler.requestLags else { return }
+            self.reconciler.retryRequest()
         }
     }
 

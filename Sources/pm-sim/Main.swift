@@ -91,6 +91,7 @@ enum PMSim {
               ntlm-credential-cache   A burst of NTLM fallbacks reads the saved password once, also across a proxy start; a failing store is reported once
               network-location-recovery  inactive-location recovery, external edits, and write races
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
+              settings-retry-request  A refused settings action is retried from its own save, not a later edit (#176)
               update-coordinator      Daily update checks, version-change event, and updater report validation (#111)
               update-preflight        Helper rejection blocks install; a compatible retry recovers (#111)
 
@@ -253,6 +254,7 @@ enum PMSim {
         "helper-caller-identity",
         "network-location-recovery",
         "lifecycle-stop-overtakes-start",
+        "settings-retry-request",
         "update-coordinator",
         "update-preflight",
     ]
@@ -408,6 +410,8 @@ enum PMSim {
             return [try await NetworkLocationScenarios.recovery()]
         case "lifecycle-stop-overtakes-start":
             return [try await LifecycleScenarios.stopOvertakesStart()]
+        case "settings-retry-request":
+            return [try await SettingsRetryScenarios.retryRequest()]
         case "update-coordinator":
             return [try await UpdateScenarios.coordinator()]
         case "update-preflight":
