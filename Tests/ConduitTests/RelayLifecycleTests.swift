@@ -79,10 +79,110 @@ final class RelayLifecycleTests: XCTestCase {
         XCTAssertTrue(client.commands.isEmpty)
     }
 
+    // MARK: - A stop during the probe (#199)
+
+    /// The reassert probe runs off the main actor, for up to its connect
+    /// timeout. A stop that lands meanwhile used to be followed by a fresh
+    /// `startTCPRelay`: the relay came back after it was turned off.
+    @MainActor func testAStopDuringTheProbeIsNotFollowedByAStart() async {
+        let client = RecordingPrivilegeClient()
+        let probe = BlockingRelayProbe()
+        let orchestrator = ProxyOrchestrator(
+            config: GenericDefaults.shared.makeConfig(),
+            privilegeClient: client,
+            relayAcceptProbe: { host, port in probe.accepts(host, port) }
+        )
+        // The first probe answers at once, so the relay comes up.
+        orchestrator.reassertTransparentRelay(host: "127.44.3.0", targetPort: 10443)
+        XCTAssertEqual(client.commands.map(\.0), [.startTCPRelay])
+
+        let pending = Task { @MainActor in
+            await orchestrator.reassertTransparentRelayOffMain(host: "127.44.3.0", targetPort: 10443)
+        }
+        await probe.waitUntilBlocked()
+        await orchestrator.stopDNS()
+        probe.release()
+        await pending.value
+
+        XCTAssertEqual(client.commands.map(\.0), [.startTCPRelay, .stopTCPRelay])
+        let superseded = orchestrator.eventLog.events.filter { $0.event == "tcp_relay.reassert_superseded" }
+        XCTAssertEqual(superseded.map(\.detail), ["host=127.44.3.0 target=10443 relay_active=false"])
+        XCTAssertEqual(orchestrator.eventLog.events.filter { $0.event == "tcp_relay.reasserted" }.count, 1)
+    }
+
+    /// The tick reads the bindings and hands the probe to a task. A stop that
+    /// runs before that task starts must fence it too: the generation is
+    /// taken in the tick's turn, not when the task gets to run.
+    @MainActor func testAStopBeforeTheTickTaskRunsIsNotFollowedByAStart() async {
+        let client = RecordingPrivilegeClient()
+        let orchestrator = ProxyOrchestrator(
+            config: GenericDefaults.shared.makeConfig(),
+            privilegeClient: client,
+            relayAcceptProbe: { _, _ in false }
+        )
+        orchestrator.reassertTransparentRelay(host: "127.44.3.0", targetPort: 10443)
+        let tick = orchestrator.beginTransparentRelayReassert(host: "127.44.3.0", targetPort: 10443)
+        await orchestrator.stopDNS()
+        await tick.value
+
+        XCTAssertEqual(client.commands.map(\.0), [.startTCPRelay, .stopTCPRelay])
+        XCTAssertEqual(
+            orchestrator.eventLog.events.filter { $0.event == "tcp_relay.reassert_superseded" }.count, 1
+        )
+    }
+
+    /// The fence drops only a stale verdict: with nothing in between, the
+    /// off-main probe still restarts a gone relay.
+    @MainActor func testTheOffMainProbeStillReissuesAGoneRelay() async {
+        let client = RecordingPrivilegeClient()
+        let orchestrator = ProxyOrchestrator(
+            config: GenericDefaults.shared.makeConfig(),
+            privilegeClient: client,
+            relayAcceptProbe: { _, _ in false }
+        )
+        await orchestrator.reassertTransparentRelayOffMain(host: "127.44.3.0", targetPort: 10443)
+        XCTAssertEqual(client.commands.map(\.0), [.startTCPRelay])
+        XCTAssertFalse(orchestrator.eventLog.events.contains { $0.event == "tcp_relay.reassert_superseded" })
+    }
+
     func testTheProbeSeesAClosedPortAsNotAccepting() {
         // Port 1 on loopback: reserved, nothing listens there on a developer
         // machine, and a refused connect is the exact signal a gone relay
         // produces.
         XCTAssertFalse(TCPAcceptProbe.accepts(host: "127.0.0.1", port: 1, timeoutMilliseconds: 200))
+    }
+}
+
+/// Answers the first probe at once (not accepting), then holds every later
+/// probe until released, so a test can land a stop while one is out.
+private final class BlockingRelayProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    private let blocked = DispatchSemaphore(value: 0)
+    private let gate = DispatchSemaphore(value: 0)
+
+    func accepts(_ host: String, _ port: Int) -> Bool {
+        let call = lock.withLock { () -> Int in
+            calls += 1
+            return calls
+        }
+        guard call > 1 else { return false }
+        blocked.signal()
+        gate.wait()
+        return false
+    }
+
+    /// Waits off the main actor, which the stop needs.
+    func waitUntilBlocked() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                self.blocked.wait()
+                continuation.resume()
+            }
+        }
+    }
+
+    func release() {
+        gate.signal()
     }
 }

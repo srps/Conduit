@@ -942,6 +942,11 @@ package final class ProxyOrchestrator {
     /// commands in the field log were issued with no relay running — and
     /// tells `reassertTransparentRelay` there is something to reassert.
     private var tcpRelayActive = false
+    /// Advanced by every relay start and stop. The reassert probe runs off
+    /// the main actor; its result is applied only if no start or stop ran
+    /// meanwhile, so a stop during the probe is never followed by a fresh
+    /// start (#199).
+    private var tcpRelayGeneration: UInt64 = 0
     /// See `startTransparentRelayTimer`.
     private var transparentRelayTimer: DispatchSourceTimer?
     private static let transparentRelayProbeInterval: TimeInterval = 30
@@ -2958,6 +2963,7 @@ package final class ProxyOrchestrator {
             )
             return false
         }
+        tcpRelayGeneration &+= 1
         do {
             try privilegeClient.execute(
                 .startTCPRelay,
@@ -2988,6 +2994,9 @@ package final class ProxyOrchestrator {
     /// and worth it. Every other caller gates on the flag.
     private func stopTCPRelay() {
         let wasActive = tcpRelayActive
+        // Advanced whether or not the stop succeeds: the caller wants the
+        // relay gone, so no reassert started before it may restart it.
+        tcpRelayGeneration &+= 1
         do {
             try privilegeClient?.execute(.stopTCPRelay, values: [])
             tcpRelayActive = false
@@ -3026,15 +3035,7 @@ package final class ProxyOrchestrator {
             guard let self, self.tcpRelayActive,
                   let host = self.snapshot.bindings.transparentProxyHost,
                   let port = self.snapshot.bindings.transparentProxyPort else { return }
-            let probe = self.relayAcceptProbe
-            // A connect can sit out its timeout; not on the main thread.
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                let accepting = probe(host, 443)
-                guard !accepting else { return }
-                Task { @MainActor [weak self] in
-                    self?.reissueTransparentRelay(host: host, targetPort: port)
-                }
-            }
+            self.beginTransparentRelayReassert(host: host, targetPort: port)
         }
         transparentRelayTimer = timer
         timer.resume()
@@ -3057,11 +3058,58 @@ package final class ProxyOrchestrator {
     /// The probe-and-restart step on its own, for the test that cannot bind
     /// a transparent proxy.
     package func reassertTransparentRelay(host: String, targetPort: Int) {
+        let generation = tcpRelayGeneration
         guard !relayAcceptProbe(host, 443) else { return }
-        reissueTransparentRelay(host: host, targetPort: targetPort)
+        reissueTransparentRelay(host: host, targetPort: targetPort, probedUnder: generation)
     }
 
-    private func reissueTransparentRelay(host: String, targetPort: Int) {
+    /// The timer's path. The generation is captured now, in the tick's own
+    /// turn, together with the bindings it read: a stop that runs before the
+    /// returned task starts, or while its probe is out, makes the verdict
+    /// stale.
+    @discardableResult
+    package func beginTransparentRelayReassert(host: String, targetPort: Int) -> Task<Void, Never> {
+        let generation = tcpRelayGeneration
+        return Task { @MainActor [weak self] in
+            await self?.reassertTransparentRelayOffMain(host: host, targetPort: targetPort, probedUnder: generation)
+        }
+    }
+
+    /// The probe's connect can sit out its timeout, so it runs off the main
+    /// actor, and a relay start or stop can land before it returns. The
+    /// generation captured here decides whether its verdict still applies.
+    package func reassertTransparentRelayOffMain(host: String, targetPort: Int) async {
+        await reassertTransparentRelayOffMain(host: host, targetPort: targetPort, probedUnder: tcpRelayGeneration)
+    }
+
+    private func reassertTransparentRelayOffMain(host: String, targetPort: Int, probedUnder generation: UInt64) async {
+        let probe = relayAcceptProbe
+        let accepting = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: probe(host, 443))
+            }
+        }
+        guard !accepting else { return }
+        reissueTransparentRelay(host: host, targetPort: targetPort, probedUnder: generation)
+    }
+
+    private func reissueTransparentRelay(host: String, targetPort: Int, probedUnder generation: UInt64) {
+        guard generation == tcpRelayGeneration else {
+            // A start or stop ran while the probe was out. A stop means the
+            // relay is meant to be gone; a start already put up the relay
+            // the current bindings want. Either way this verdict is stale.
+            emitEvent(
+                .health,
+                "tcp_relay.reassert_superseded",
+                detail: "host=\(host) target=\(targetPort) relay_active=\(tcpRelayActive)"
+            )
+            logStore.log(
+                .info,
+                "Dropped a stale TCP relay reassert for \(host):443: the relay was started or stopped while the probe ran.",
+                category: .proxy
+            )
+            return
+        }
         logStore.log(
             .warning,
             "Nothing accepts on \(host):443 — the helper's TCP relay is gone (helper restarted?). Re-issuing relay start.",
