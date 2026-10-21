@@ -828,7 +828,10 @@ final class AppState: ObservableObject {
         sectionCloseRetry?.cancel()
         sectionCloseRetry = Task { [weak self] in
             await self?.reconciler.drain()
-            guard let self, !Task.isCancelled,
+            // Only with nothing unsaved: an edit made since the close has its
+            // own debounced save, gated as usual, and that save diffs against
+            // the rewound baseline, so it carries the retry too.
+            guard let self, !Task.isCancelled, !self.hasUnsavedEdit,
                   self.reconciler.lags(config: self.config, platformConfig: self.platformConfig) else { return }
             self.saveConfig()
         }

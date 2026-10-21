@@ -966,6 +966,26 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(decisions() - before, 2, "A's clear, then the retry after it drained")
     }
 
+    /// An edit made after the close, here one that would block a start,
+    /// stays under its own debounce and gate: the post-drain check must not
+    /// save it.
+    func testThePostDrainCheckLeavesAnEditMadeAfterTheClose() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        try await appState.startProxy()
+        machine.privilege.failing = [.setWebProxyEndpoint]
+        appState.platformConfig.manageSystemProxy = false
+        appState.saveConfig()
+        appState.flushPendingSave()
+
+        appState.config.localHost = "127.0."
+        XCTAssertTrue(appState.hasUnsavedEdit)
+        await appState.reconciler.drain()
+        await appState.awaitSectionCloseRetry()
+
+        XCTAssertTrue(appState.hasUnsavedEdit, "still waiting on its own save")
+        XCTAssertNotEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.")
+    }
+
     func testLeavingASectionSavesAWaitingEditAtOnce() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig())
         await harness.launchRecovery()
