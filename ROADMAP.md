@@ -6,7 +6,10 @@ no rewrite or cross-platform port is planned.
 
 Implementation rationale, dependencies, and acceptance criteria live in
 [`docs/planning.md`](./docs/planning.md). Shipped history lives in
-[`CHANGELOG.md`](./CHANGELOG.md). Later features do not block the current work.
+[`CHANGELOG.md`](./CHANGELOG.md). Owner decisions, with their decision,
+implementation and validation status, are recorded in
+[`docs/decisions/`](./docs/decisions/README.md); items link to them instead of
+repeating their rationale. Later features do not block the current work.
 
 Pillars: **[Rel]** Reliability, **[Sec]** Security, **[Eff]** Efficiency,
 **[Obs]** Observability, **[UI]** Great UI, **[Dmn]** Daemon-first,
@@ -22,7 +25,8 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 In 0.5.6, awaiting install: path-based VPN transition migration (#153, #157,
 #162), the 0.5.5 log-review fixes (#150–#152, #154), the prewarm selection fix
 (#164) and the faster test suite (#166–#168). The path migration was validated
-on the owner's full-tunnel VPN with a pre-release build.
+on the owner's full-tunnel VPN with a pre-release build
+([decision 0011](./docs/decisions/0011-vpn-path-based-socket-sweeps.md)).
 
 1. **Split-DNS repair after a helper outage ([#165](https://github.com/srps/Conduit/issues/165))
    [Rel, Sec, Sim]** — a failed entry-file apply or removal is not retried
@@ -39,11 +43,15 @@ on the owner's full-tunnel VPN with a pre-release build.
    continuation race fix or new suppression is claimed.
 
 Then implement runtime-scoped auth/link-local failure memories (#31) and spool
-ownership/budgets (#81, coordinated with path policy #82). Continue main-actor
-platform offloading with shared app/daemon seams (#47/#79), then exclusive
+ownership/budgets (#81, coordinated with path policy #82;
+[decision 0006](./docs/decisions/0006-module-boundaries.md)). Continue main-actor
+platform offloading with shared app/daemon seams (#47/#79), now by converging
+both hosts on one runtime host (#186,
+[decision 0001](./docs/decisions/0001-one-runtime-host.md)), then exclusive
 mutation authority and durable owner-death recovery (#48). Those are migration
 prerequisites; named profiles/location switching (#114/#115) and broad kernel
-splitting (#85) follow correctness and ownership work.
+splitting (#85, [decision 0007](./docs/decisions/0007-kernel-file-split-first.md))
+follow correctness and ownership work.
 
 Owner acceptance is a separate lane: #99 needs a real KDC-failure recurrence;
 #111's normal 0.5.3→0.5.4 preflight/install passed, but negative paths, platform
@@ -79,18 +87,19 @@ to bundle every daemon and profile item into the same release.
 ## Now
 
 1. [x] **Network-location-safe recovery ([#110](https://github.com/srps/Conduit/issues/110))** — active-location observation independent of path/VPN signals, stable location/service journal identity, compare-and-write helper v5, inactive-location cleanup, conservative legacy migration, and shared app/daemon reconciliation are implemented with unit and simulator coverage. External edits, renames/deletion, failed reapply, loginwindow cleanup, and stale active-location writes are covered. Shipped in 0.4.0 and validated with helper v5 and the corporate VPN client on macOS 26; macOS 27 was waived for that release and remains untested. Same-location drift repair is bounded against programs that keep rewriting proxy settings ([#116](https://github.com/srps/Conduit/issues/116)). Profile associations ([#114](https://github.com/srps/Conduit/issues/114)) and opt-in switching ([#115](https://github.com/srps/Conduit/issues/115)) follow later. See [`docs/design-network-location-recovery.md`](./docs/design-network-location-recovery.md). [Rel, Obs, UI, Sim]
-2. [~] **Secure GitHub Releases updating ([#111](https://github.com/srps/Conduit/issues/111))** — implemented for 0.5: Sparkle 2 in a nested updater process, an EdDSA-signed appcast per release, a project-held release certificate the helper pin admits ([`docs/release-signing.md`](./docs/release-signing.md)), events and simulator coverage. Candidate helper/installation preflight and fixed staging bounds shipped in 0.5.3; owner-installed 0.5.3→0.5.4 logged a successful authenticated preflight and replacement. Owner-installed 0.5.0→0.5.1→0.5.2 updates have logged proxy restoration, relaunch, readiness-before-reapply and resumed authentication on the current macOS 26 Apple Silicon machine (`docs/validation-0.5.3.md`). Remaining: new-preflight/negative-path/platform validation and key-backup evidence. Original scope: manual and opt-in automatic checks, release notes, and explicit Install Update and Restart. Prefer Sparkle 2 with Ed25519-authenticated archives and an embedded verification key. Preserve config/state, preflight helper identity compatibility, restore proxy/DNS before shutdown, and reapply only after readiness. Keep downloads/staging/retries bounded and recover from verification/replacement/launch failures. A brief interruption is acceptable; Developer ID/notarization and zero-downtime handoff do not gate this feature. [OSS, Rel, Sec, UI, Obs, Sim]
+2. [~] **Secure GitHub Releases updating ([#111](https://github.com/srps/Conduit/issues/111))** — implemented for 0.5: Sparkle 2 in a nested updater process, an EdDSA-signed appcast per release, a project-held release certificate the helper pin admits ([`docs/release-signing.md`](./docs/release-signing.md)), events and simulator coverage. Candidate helper/installation preflight and fixed staging bounds shipped in 0.5.3; owner-installed 0.5.3→0.5.4 logged a successful authenticated preflight and replacement. Owner-installed 0.5.0→0.5.1→0.5.2 updates have logged proxy restoration, relaunch, readiness-before-reapply and resumed authentication on the current macOS 26 Apple Silicon machine (`docs/validation-0.5.3.md`). Remaining: new-preflight/negative-path/platform validation and key-backup evidence. Original scope: manual and opt-in automatic checks, release notes, and explicit Install Update and Restart. Prefer Sparkle 2 with Ed25519-authenticated archives and an embedded verification key. Preserve config/state, preflight helper identity compatibility, restore proxy/DNS before shutdown, and reapply only after readiness. Keep downloads/staging/retries bounded and recover from verification/replacement/launch failures. A brief interruption is acceptable; Developer ID/notarization and zero-downtime handoff do not gate this feature. See [decision 0010](./docs/decisions/0010-self-update.md). [OSS, Rel, Sec, UI, Obs, Sim]
 3. [~] **Owner-death recovery and one mutation authority** — app and daemon launch recovery exist. Remaining: exclusive ownership of platform mutations and durable recovery when no replacement runtime starts. Coordinate journal authority, authenticated helper sessions, and any helper-owned leases; preserve later external changes. This is a production daemon-migration gate. [Rel, Sec, Dmn, Sim]
 4. [~] **Request-body replay bounds and isolation** — per-body bounded spooling exists. Remaining: runtime-owned private spool storage, aggregate disk/queued-write budgets, replay backpressure tied to downstream completion/writability, off-event-loop cleanup, and structured failure reporting. Cover slow origins, disk failures, cancellation, and concurrent runtimes. [Rel, Sec, Eff, Sim]
 
 ## Next
 
-Implement the daemon work in the order below. Named profiles, demo UI, and advanced
-metrics do not block the first usable daemon/client slice.
+Implement the daemon work in the order below
+([decision 0002](./docs/decisions/0002-daemon-first-ownership.md)). Named profiles,
+demo UI, and advanced metrics do not block the first usable daemon/client slice.
 
 1. [~] **Production control socket** — protocol, bridge, `DaemonClient`, `pmctl`, versioning, metadata, config generation, and stable error codes exist; `pm-proxy` has an isolated server. Wire a bounded server into `ConduitDaemon` for status/start/stop/reload and event access, then upstream tests. Define subscription limits, cancellation, disconnects, and version mismatch behavior. [Dmn, Obs, Rel]
 2. [~] **User-session daemon and LaunchAgent lifecycle** — `ConduitDaemon` owns an explicit runtime host, platform managers, credential-store seam, launch recovery, and observable files. Remaining: production install/uninstall/upgrade lifecycle, exclusive-owner startup/readiness, state-dir checks, stale-state repair, restart policy, and crash-restart evidence. Confirm logged-in-user Keychain, Kerberos, and CFNetwork behavior. `pm-proxy` stays side-effect-free. [Dmn, Rel, Sec, Sim]
-3. [ ] **App and menu bar adopt the daemon client** — replace app ownership of listeners, monitors, and platform mutations with commands and snapshot/event subscriptions. Bootstrap the LaunchAgent when needed; reconnect after UI restart. Keep any in-process fallback dev-only and remove it from production before 1.0. [Dmn, UI, Rel, Sim]
+3. [ ] **App and menu bar adopt the daemon client** — replace app ownership of listeners, monitors, and platform mutations with commands and snapshot/event subscriptions. Bootstrap the LaunchAgent when needed; reconnect after UI restart. Keep any in-process fallback dev-only and remove it from production before 1.0. After the one-runtime-host stages ([decision 0001](./docs/decisions/0001-one-runtime-host.md)), this swaps the in-process host for `DaemonClient`. [Dmn, UI, Rel, Sim]
 4. [~] **Reload and observability parity** — section diffing, reload paths, capped `events.ndjson`, atomic `snapshot.json`, and offline diagnostics exist. Verify supported unrelated changes preserve active HTTP/CONNECT/SOCKS5/DNS/tunnel sessions. Wire the connection audit sink into `DaemonRuntimeHost`; bounded, redacted audit files already work in the app and `pm-proxy`. [Dmn, Rel, Sec, Obs, Sim]
 5. [~] **Release and daily-driver evidence** — Full debug tests, simulator CI, and cold-start/throughput gates exist. ZIP/DMG packaging, optimized PAC checks, and helper upgrade/rollback guidance ship with 0.4.0; packages are Apple Silicon only after 0.4.1. Remaining: representative release-build latency, idle CPU/RSS and sustained-growth baselines, crash/restart/upgrade evidence, human accessibility validation, and a recorded 90-day reliability window for 1.0. [Rel, Eff, UI, OSS]
 6. [ ] **Release trust and installation** — Developer ID signing/notarization for app and helper, documented identities/upgrade/rollback behavior, and clean-machine installation validation. Local caller-identity signing and the self-signed release certificate CI signs releases with ([`docs/release-signing.md`](./docs/release-signing.md)) are foundations, not completion of public release trust. [OSS, Sec]
