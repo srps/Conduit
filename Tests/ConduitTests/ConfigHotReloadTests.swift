@@ -237,6 +237,39 @@ final class ConfigHotReloadTests: XCTestCase {
                           "DNS was not running, change should not start it")
     }
 
+    /// The forwarder listens where the resolver files and the helper relay
+    /// point, 127.0.0.1, whatever the proxy's listen host. It used to bind
+    /// the listen host, so `::1` left system DNS asking an address nothing
+    /// served. A listen-host edit therefore leaves it alone.
+    @MainActor
+    func testTheDNSForwarderListensOnIPv4LoopbackWhateverTheListenHost() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.proxy.host = "::1"
+        config.proxy.port = 0
+        config.dns.forwarderPort = 0
+        let orchestrator = ProxyOrchestrator(config: config, logger: DiscardingLogSink())
+        await orchestrator.startDNS()
+        XCTAssertEqual(orchestrator.snapshot.dnsRunState, .running)
+        XCTAssertEqual(orchestrator.snapshot.bindings.dnsHost, "127.0.0.1")
+        let port = orchestrator.snapshot.bindings.dnsPort
+
+        var newConfig = orchestrator.config
+        newConfig.proxy.host = "127.0.0.2"
+        await orchestrator.applyConfigChange(newConfig)
+
+        XCTAssertFalse(orchestrator.eventLog.events.contains { $0.event == "config.dns_restart" })
+        XCTAssertEqual(orchestrator.snapshot.bindings.dnsHost, "127.0.0.1")
+        XCTAssertEqual(orchestrator.snapshot.bindings.dnsPort, port)
+
+        var dnsEdit = orchestrator.config
+        dnsEdit.dns.dohProviders.removeLast()
+        await orchestrator.applyConfigChange(dnsEdit)
+        XCTAssertEqual(orchestrator.eventLog.events.filter { $0.event == "config.dns_restart" }.map(\.detail),
+                       ["reason=dns_section"])
+        XCTAssertEqual(orchestrator.snapshot.bindings.dnsHost, "127.0.0.1")
+        await orchestrator.stopDNS()
+    }
+
     // MARK: - Runtime auth outcome lifecycle
 
     /// `applyConfigChange` on the auth section must clear the runtime auth

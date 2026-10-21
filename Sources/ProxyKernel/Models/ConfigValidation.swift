@@ -93,6 +93,12 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
 }
 
 extension ProxyConfig {
+    /// Where the DNS forwarder listens, whatever the proxy's listen host:
+    /// the address the `/etc/resolver` files and the helper's port-53 relay
+    /// name. Following the listen host bound it on `127.0.0.2` or `::1`
+    /// while every client of it asked `127.0.0.1`.
+    package static let dnsForwarderHost = "127.0.0.1"
+
     /// Resolve only IP literals here. Pin the compatibility name `localhost`
     /// instead of trusting ambient DNS or /etc/hosts for listener security.
     package static func loopbackBindHost(_ host: String) -> String? {
