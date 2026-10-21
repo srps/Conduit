@@ -586,6 +586,7 @@ final class AppStateHarnessTests: XCTestCase {
         helperSocketBindWait: Duration = .seconds(1),
         settingsSaveDebounce: Duration = .seconds(3600),
         environmentDriftInterval: Duration = .seconds(3600),
+        networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         configure: (inout ProxyConfig) -> Void = { _ in }
     ) throws -> AppState {
         var config = makeConfig()
@@ -594,6 +595,7 @@ final class AppStateHarnessTests: XCTestCase {
         harness.helperSocketBindWait = helperSocketBindWait
         harness.settingsSaveDebounce = settingsSaveDebounce
         harness.environmentDriftInterval = environmentDriftInterval
+        harness.networkPathDebounce = networkPathDebounce
         return harness.launch()
     }
 
@@ -1148,6 +1150,26 @@ final class AppStateHarnessTests: XCTestCase {
                        ["surfaces=environment"])
     }
 
+    /// With autosave a bypass edit re-applies on every pause, so its
+    /// `launchctl` writes must not run on the main actor.
+    func testABypassEditReappliesOffTheMainActor() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, values in
+            name == "/bin/launchctl" && values.first == "setenv" && values.dropFirst().first == "NO_PROXY"
+        }
+
+        appState.config.noProxyHosts.append("bypass.example")
+        appState.saveConfig()
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread, "held on the platform queue, not let through on main")
+        harness.hold.release()
+        await appState.reconciler.drain()
+
+        XCTAssertTrue(machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
+    }
+
     // MARK: Shell environment drift (#175)
 
     /// What was found on the owner's machine: every block stripped and the
@@ -1176,10 +1198,12 @@ final class AppStateHarnessTests: XCTestCase {
     }
 
     /// No wake, path, VPN or settings report follows a silent wipe for sure;
-    /// the periodic tick finds it anyway.
+    /// the periodic tick finds it anyway. The real path monitor's first
+    /// report would also run a pass, and on a slow runner it wins the race,
+    /// so it is held off past the test.
     func testThePeriodicTickRepairsAWipeNoNotificationReports() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true),
-                                  environmentDriftInterval: .milliseconds(50))
+                                  environmentDriftInterval: .milliseconds(50), networkPathDebounce: 3600)
         await harness.launchRecovery()
         try await appState.startProxy()
         try wipeEnvironment()

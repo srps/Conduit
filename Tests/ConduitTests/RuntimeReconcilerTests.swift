@@ -47,7 +47,7 @@ private final class RecordingHost: RuntimeReconcilerHost {
 
     func runtimeState() -> RuntimeReconciler.RuntimeState { runtime }
 
-    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) {
+    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async {
         calls.append(.reapply(platform: pass.platform))
     }
 
