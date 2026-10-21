@@ -161,6 +161,20 @@ When any of the above changes, [`docs/threat-model.md`](./threat-model.md) gets 
 
 **Scope:** we don't aim for TigerBeetle-level deterministic simulation of the entire runtime — we're not a financial database. We aim for deterministic scenarios under `pm-sim` and deterministic unit tests under `swift test`.
 
+### 11. Liveness comes from events, not from clocks
+
+State that grants authority — an upstream is healthy, the VPN is connected, a host is reachable direct, the runtime owns a system setting — changes on evidence. A clock may bound how long we wait for evidence; it is never the evidence.
+
+- **Slowness is not loss.** An inconclusive observation (a timeout, a missing reply, a late callback) leaves liveness and authority state where it was. The exception is a timeout that *is* the measurement: an upstream connect that misses `upstreamConnectTimeout` is a failed connect. A health check that timed out because the machine was busy is not a dead upstream.
+- **A restart is unproven.** After a launch, wake, helper restart or runtime restart, authority-granting state starts unknown and is earned by an observation. "Unknown" is never read as "granted"; where a gate must default open to avoid a worse failure, the comment says why and names what proves it (as `SplitDNSVPNGate` does).
+- **Revocation takes effect at once.** An event that takes authority away — a path removed, a tunnel gone, a config that no longer names the upstream — applies when it arrives, not on the next tick. The one accepted delay is a short, named, configurable hysteresis on a noisy signal, as the VPN flap windows (`vpnFlapMinVisibleSeconds`, `vpnFlapGraceSeconds`) are: it holds the last verdict and emits when it commits.
+- **Windows are backstops.** A window whose expiry changes authority exists to catch an event that never came. It is long, named (a config field or a `static let` with its rationale), and emits a `RuntimeEvent` when it fires; better still, it asks for evidence (a probe, a sweep, a reconcile) instead of deciding. A window that decides on its own whether something is alive is a design bug, however well tuned. A timeout that only bounds one operation, and a rate limit on a report or a repair, are not authority and need none of this.
+- **Stale results are dropped, with an event.** A control-plane result computed under an older routing or operation generation is discarded and reported (`health.result_superseded`, `connectivity.probe_superseded`, `vpn.observation_stale`, `lifecycle.superseded`), never applied. The fence belongs to the owner of the state, not to one call site. Connected sockets are the exception: no request carries a generation, and a socket is judged by its path (`SocketPathChecking`), never by when it was routed.
+
+**Rationale:** authority from polling plus a time window fails twice. It fails closed on healthy work when the machine is slow, and fails open for the length of the window after a real loss; no tuning removes both. Conduit has learnt this one fix at a time: stranded sockets are judged by their path, not by the routing stamp they were dialled under (#158, then #162), the breaker absorbs synchronized failure bursts (`docs/design-vpn-flap-resilience.md`, Phase 5), and health and probe results are fenced by routing generation (#155). overalls reached the same rules from the other direction ([ADR-0140](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0140-event-driven-liveness-and-single-writer-views.md)).
+
+**Rule of thumb:** if a timer's firing changes what is routed, trusted or owned, ask which event it is standing in for, and whether that event can be delivered instead.
+
 ## How this differs from TIGER_STYLE
 
 STYLE is TIGER_STYLE minus the parts that are over-engineering for a desktop proxy. The historical rationale is in the [April research archive](./archive/planning-research-2026-04.md#57-ghostty--tigerbeetle-architectural-fact-check).
@@ -191,5 +205,6 @@ For reviewers (human or AI). When reviewing a PR, walk this list:
 - [ ] **Side-effect gating.** New system calls go through a protocol, not directly. `ProxyKernel` imports no Apple frameworks beyond SwiftNIO + Foundation. (Rule 8)
 - [ ] **Security.** Credentials use `SecretBytes` (once available); `Authorization` / `Proxy-Authorization` are masked in logs; PAC evaluation is sandboxed. (Rule 9)
 - [ ] **Determinism.** Tests don't depend on wall-clock or ambient state; `pm-sim` scenarios are reproducible. (Rule 10)
+- [ ] **Liveness.** A timeout, missing reply or late callback does not flip health, VPN or ownership state unless the timeout is the measurement. Authority starts unknown after a restart. A new window whose expiry changes authority is a named backstop that emits when it fires. Async control-plane results check the generation they started under. (Rule 11)
 
 If a PR can't check a box, the PR includes a one-line rationale (in the description or an inline comment). That's the audit trail.
