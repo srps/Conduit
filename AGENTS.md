@@ -65,6 +65,7 @@ Executables:
 - Use git. Split commits by concern. A commit that is a fix on its own must build on its own; a multi-commit feature only has to build at the branch tip.
 - The human committer is the author and is accountable for every commit, whatever tool helped write it. Attribution trailers such as `Co-Authored-By:` are optional; reviews do not require or check them.
 - Never put a session, conversation or transcript URL in a commit message; it only resolves for the tool account's owner. Put it in the PR description if it is useful.
+- A change that makes or replaces an owner decision adds a record under `docs/decisions/` in the same PR; never edit an accepted record into a different decision. A change that implements part of a recorded decision, or records an owner or real-machine validation, updates that record's statuses and evidence. See `docs/decisions/README.md`.
 
 ## References
 
@@ -74,3 +75,4 @@ Executables:
 - `ROADMAP.md`: execution queue and product-work status.
 - `docs/planning.md`: implementation rationale, dependencies, and acceptance criteria.
 - `docs/design-*.md`: subsystem designs (module split, VPN flap resilience, tunnel DNS override, DNS intercept and transparent proxy).
+- `docs/decisions/`: owner decisions, each with its authorization and separate decision, implementation and validation status.
