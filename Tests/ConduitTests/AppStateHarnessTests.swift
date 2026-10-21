@@ -258,6 +258,23 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(isRunning(state))
     }
 
+    /// #182/#191: a journal written by a newer Conduit fails closed at
+    /// launch. The app reports why in its own event log and leaves the file
+    /// as it was, so a later upgrade still finds the records.
+    func testAJournalFromANewerConduitIsReportedAndKeptAtLaunch() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        let newer = Data(#"{"version":2,"records":[]}"#.utf8)
+        try newer.write(to: harness.environment.platformStateFile)
+        let state = harness.launch()
+        await harness.launchRecovery()
+
+        XCTAssertEqual(
+            state.eventLog.events.filter { $0.event == "platform.journal_unreadable" }.map(\.detail),
+            ["file=platform-state.json reason=unsupported_version version=2 supported=1"]
+        )
+        XCTAssertEqual(try Data(contentsOf: harness.environment.platformStateFile), newer)
+    }
+
     func testMalformedPlatformSidecarBlocksActivationAndSaving() async throws {
         try await assertMalformedSidecarBlocksActivation("platform.json")
     }
