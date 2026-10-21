@@ -95,6 +95,7 @@ enum PMSim {
               journal-integrity       A journal from a newer Conduit fails closed, is kept and reported; a failing disk is one event per episode; version 1 reads in every shape (#182, #191)
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
               settings-retry-request  A refused settings action is retried from its own save, not a later edit (#176)
+              settings-listener-commit  Listener edits are held for a commit; DNS stays on 127.0.0.1 across a listen-host commit
               update-coordinator      Daily update checks, version-change event, and updater report validation (#111)
               update-preflight        Helper rejection blocks install; a compatible retry recovers (#111)
               helper-busy-status      A helper that takes the ping and never answers is busy, not broken; the update refuses as helper_busy (#197)
@@ -262,6 +263,7 @@ enum PMSim {
         "journal-integrity",
         "lifecycle-stop-overtakes-start",
         "settings-retry-request",
+        "settings-listener-commit",
         "update-coordinator",
         "update-preflight",
         "helper-busy-status",
@@ -426,6 +428,8 @@ enum PMSim {
             return [try await LifecycleScenarios.stopOvertakesStart()]
         case "settings-retry-request":
             return [try await SettingsRetryScenarios.retryRequest()]
+        case "settings-listener-commit":
+            return [try await ListenerCommitScenarios.settingsListenerCommit()]
         case "update-coordinator":
             return [try await UpdateScenarios.coordinator()]
         case "update-preflight":
