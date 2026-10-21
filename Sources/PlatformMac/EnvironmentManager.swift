@@ -225,10 +225,12 @@ package final class EnvironmentManager: @unchecked Sendable {
         package var isClean: Bool { !hasDrift && unsafeProfiles.isEmpty && unreadableLaunchd.isEmpty }
     }
 
-    /// Reads every surface and compares it with `config`. Reads only.
+    /// Reads every surface and compares it with `config`. Reads only, and
+    /// outside the operation lock: a `getenv` that hangs until its runner's
+    /// timeout must not hold up a clear at stop or quit behind it. A clear
+    /// or apply that lands meanwhile advances the generation, so `repair`
+    /// writes nothing from a stale reading.
     package func inspect(config: ProxyConfig) -> Drift {
-        operations.lock()
-        defer { operations.unlock() }
         var drift = Drift()
         let block = renderBlock(config: config)
         for target in ProfileTarget.allCases {

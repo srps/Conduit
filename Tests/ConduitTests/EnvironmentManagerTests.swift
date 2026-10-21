@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOConcurrencyHelpers
 import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
@@ -173,6 +174,39 @@ final class EnvironmentManagerTests: XCTestCase {
         try manager.clear(logger: nil)
 
         XCTAssertEqual(launchctl.environment, foreign, "nothing was ours: a stop or a quit leaves every value as it was")
+    }
+
+    /// A `getenv` that hangs inside an inspection holds no lock, so the
+    /// clear a stop or quit makes meanwhile goes ahead.
+    func testAHungInspectionReadDoesNotHoldUpAClear() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        let reached = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let held = NIOLockedValueBox(true)
+        let run = launchctl.run
+        let blocking = EnvironmentManager(journal: journal, homeDirectory: home, commandRunner: { path, arguments in
+            if arguments.first == "getenv", held.withLockedValue({ let first = $0; $0 = false; return first }) {
+                reached.signal()
+                release.wait()
+            }
+            return try run(path, arguments)
+        })
+        let inspected = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            _ = blocking.inspect(config: self.makeConfig())
+            inspected.signal()
+        }
+        XCTAssertEqual(reached.wait(timeout: .now() + 5), .success)
+
+        let cleared = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            try? blocking.clear(logger: nil)
+            cleared.signal()
+        }
+        XCTAssertEqual(cleared.wait(timeout: .now() + 5), .success, "the clear did not wait for the hung read")
+        XCTAssertNil(launchctl.environment["HTTP_PROXY"])
+        release.signal()
+        XCTAssertEqual(inspected.wait(timeout: .now() + 5), .success)
     }
 
     /// Our own URL, left by an earlier run, with the journal unwritable: it
