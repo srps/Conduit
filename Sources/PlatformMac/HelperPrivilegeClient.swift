@@ -785,6 +785,21 @@ extension PrivilegeRefusal {
     }
 }
 
+extension HelperToolPrivilegeClient.Status {
+    /// The status to hold after `reading`. A `busy` reading proves neither a
+    /// working helper nor a broken one (STYLE rule 11), so it keeps the
+    /// verdict already held. It stands on its own only where there is none:
+    /// before the first conclusive reading, or after one that found no helper
+    /// installed, which the binary that `busy` implies contradicts.
+    package func updated(by reading: Self) -> Self {
+        guard reading == .busy else { return reading }
+        switch self {
+        case .notInstalled, .busy: return .busy
+        default: return self
+        }
+    }
+}
+
 // MARK: - Helper lifecycle seam
 
 /// The helper's lifecycle as the Settings surface sees it: the status it

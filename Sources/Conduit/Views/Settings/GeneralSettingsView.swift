@@ -146,6 +146,13 @@ struct GeneralSettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                if appState.helperCheckingAgain, appState.helperStatus != .busy {
+                    // The held verdict stands; say the latest reading timed out.
+                    Text(HelperStatusPresentation.busyNote)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let remediation = HelperStatusPresentation.remediation(for: appState.helperStatus) {
                     Text(remediation)
                         .font(.callout)

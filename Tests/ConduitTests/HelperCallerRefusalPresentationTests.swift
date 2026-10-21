@@ -48,6 +48,21 @@ final class HelperCallerRefusalPresentationTests: XCTestCase {
         XCTAssertEqual(HelperStatusPresentation.privilegeHint(for: .busy), "(requires admin)")
     }
 
+    /// A busy reading keeps the verdict already held; it stands on its own
+    /// only where there is none.
+    func testABusyReadingKeepsTheLastVerdict() {
+        typealias Status = HelperToolPrivilegeClient.Status
+        let pinned = Status.callerNotAccepted(message: pinMessage)
+        for held: Status in [.installed, .outdated, .notResponding, .waitingForConsoleUser, .unauthorized, pinned] {
+            XCTAssertEqual(held.updated(by: .busy), held, "\(held)")
+        }
+        XCTAssertEqual(Status.notInstalled.updated(by: .busy), .busy)
+        XCTAssertEqual(Status.busy.updated(by: .busy), .busy)
+        for reading: Status in [.installed, .notResponding, .notInstalled, pinned] {
+            XCTAssertEqual(Status.installed.updated(by: reading), reading, "a conclusive reading replaces the verdict")
+        }
+    }
+
     func testOtherStatusesKeepTheirButtonAndNeedNoRemedy() {
         for status: HelperToolPrivilegeClient.Status in [.installed, .outdated, .notInstalled, .notResponding, .waitingForConsoleUser, .unauthorized] {
             XCTAssertNotNil(HelperStatusPresentation.primaryActionTitle(for: status), "\(status)")
