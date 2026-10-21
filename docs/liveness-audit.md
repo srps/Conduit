@@ -25,7 +25,7 @@ Each window gets one question and one verdict.
 
 ## Findings
 
-Ordered by how likely they are to bite. None is changed by this audit; each needs its own issue (see [Suggested issues](#suggested-issues)).
+Ordered by how likely they are to bite. None is changed by this audit; each needs its own issue (see [Follow-up issues](#follow-up-issues)).
 
 1. **The direct-connect cache outlives the network it measured** (D1, D2). A "reachable" verdict routes a host DIRECT for `directConnectTTL` (300 s). It is cleared only on wake (`ProxyOrchestrator.swift:1762`), not on a VPN transition or path change, and a background probe that started before a `clearCache()` writes its verdict after it (`DirectConnectDetector.swift:455`). Only with strict mode off and where PAC has no opinion (`PACRoutePlan.swift:74`, `HTTPProxyHandler.swift:217-227`); strict mode is the default. Fix: clear on every routing transition, and drop, with an event, a probe result that started before the latest transition began. `RoutingTransitionSignal.completed` alone is not enough: it advances in `end()`, not `begin()` (`RoutingTransitionSignal.swift:28-38`), so a probe that lands mid-transition would pass; the fence needs an epoch advanced at `begin()`, or a check of `inFlight`.
 2. **Response timeouts count against the upstream proxy** (B7). `upstreamResponseTimedOut` is not a local failure (`ConnectionPool.swift:101`), so 45 s without response bytes feeds the breaker (`ConnectionPool.swift:1033`, `:393`; CONNECT at `CONNECTHandler.swift:167`). Behind a proxy, a slow origin, a long poll or an origin connect the proxy is still waiting on looks exactly like that, so slow healthy work moves the upstream toward an open breaker. Fix: treat a response timeout as inconclusive for the breaker, or count it separately from connect failures and 5xx; fold into the #184 spike.
@@ -165,14 +165,14 @@ All **bound**: none grants or revokes anything.
 
 Not a window, but found on the way: `DaemonClient` (`ConduitShared/DaemonClient.swift`) connects, writes and reads with no deadline, so `pmctl` blocks for as long as an unresponsive daemon does.
 
-## Suggested issues
+## Follow-up issues
 
-Not filed by this audit; each is a candidate for the owner to file.
+Filed from this audit on 2026-10-21.
 
-1. **Direct-connect cache: invalidate on routing transitions and fence late probes** (finding 1). D1, D2.
-2. **Timeouts read as loss** (findings 2, 3, 5, 6, B12 and E7): one issue with a checklist, or one per surface: response timeouts and the breaker (with #184), the health check's first timeout and the ladder (with #181), the connectivity prober's wait for a `CONNECT` answer granting DIRECT, the DNS health tick's "unresponsive" report, the helper's `.notResponding`, the launchd residue read.
-3. **Invalidate PAC answers on the first path change** (A3): drop answers and reset DNS transports on the leading edge, debounce only the refresh.
-4. **Transparent-relay reassert races a stop** (finding 7). C9.
-5. **DNS response cache: generation-fence stores across a transport reset** (finding 8), with the origin resolver's positive cache (D8) dropped on the same events.
-6. **Launch recovery restores on a timed-out liveness probe** (finding 4): either a sub-item of #48, or a smaller interim change that declines the restore on a timeout and retries next launch.
-7. **`VPNStateFuser` cleanup**: remove the unread `graceExpired` latch, record the post-grace state, and use the injected clock in `DirectConnectDetector.cachedReachability` (finding 9). Small; could ride with any change to those files.
+1. [#196](https://github.com/srps/Conduit/issues/196) **Direct-connect cache: invalidate on routing transitions and fence late probes** (finding 1). D1, D2.
+2. [#197](https://github.com/srps/Conduit/issues/197) **Timeouts read as loss** (findings 2, 3, 5, 6, B12 and E7): one issue with a checklist, or one per surface: response timeouts and the breaker (with #184), the health check's first timeout and the ladder (with #181), the connectivity prober's wait for a `CONNECT` answer granting DIRECT, the DNS health tick's "unresponsive" report, the helper's `.notResponding`, the launchd residue read.
+3. [#198](https://github.com/srps/Conduit/issues/198) **Invalidate PAC answers on the first path change** (A3): drop answers and reset DNS transports on the leading edge, debounce only the refresh.
+4. [#199](https://github.com/srps/Conduit/issues/199) **Transparent-relay reassert races a stop** (finding 7). C9.
+5. [#200](https://github.com/srps/Conduit/issues/200) **DNS response cache: generation-fence stores across a transport reset** (finding 8), with the origin resolver's positive cache (D8) dropped on the same events.
+6. [#201](https://github.com/srps/Conduit/issues/201) **Launch recovery restores on a timed-out liveness probe** (finding 4): either a sub-item of #48, or a smaller interim change that declines the restore on a timeout and retries next launch.
+7. Not filed: **`VPNStateFuser` cleanup**: remove the unread `graceExpired` latch, record the post-grace state, and use the injected clock in `DirectConnectDetector.cachedReachability` (finding 9). Small; rides with any change to those files. The clock part is in #196.
