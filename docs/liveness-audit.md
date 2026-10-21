@@ -175,4 +175,4 @@ Filed from this audit on 2026-10-21.
 4. [#199](https://github.com/srps/Conduit/issues/199) **Transparent-relay reassert races a stop** (finding 7). C9.
 5. [#200](https://github.com/srps/Conduit/issues/200) **DNS response cache: generation-fence stores across a transport reset** (finding 8), with the origin resolver's positive cache (D8) dropped on the same events.
 6. [#201](https://github.com/srps/Conduit/issues/201) **Launch recovery restores on a timed-out liveness probe** (finding 4): either a sub-item of #48, or a smaller interim change that declines the restore on a timeout and retries next launch.
-7. Not filed: **`VPNStateFuser` cleanup**: remove the unread `graceExpired` latch, record the post-grace state, and use the injected clock in `DirectConnectDetector.cachedReachability` (finding 9). Small; rides with any change to those files. The clock part is in #196.
+7. [#202](https://github.com/srps/Conduit/issues/202) **`VPNStateFuser` cleanup**: remove the unread `graceExpired` latch, record the post-grace state, and use the injected clock in `DirectConnectDetector.cachedReachability` (finding 9). The clock part is in #196.
