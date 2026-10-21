@@ -1356,6 +1356,49 @@ final class AppStateHarnessTests: XCTestCase {
                        ["trigger=quit listener_change=true"])
     }
 
+    /// Quit does not make a half-typed value the next launch's config: the
+    /// autosave never saves one. The flags beside it, which that check
+    /// does not cover, are still written and the login item registered.
+    func testQuittingDiscardsAHeldEditThatWouldBlockAStart() async throws {
+        let appState = try launch()
+
+        appState.config.localHost = "127.0."
+        appState.platformConfig.launchAtLogin = true
+        appState.persistPendingEditForTermination()
+
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.0.1",
+                       "the config file is unchanged")
+        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).launchAtLogin)
+        XCTAssertEqual(harness.loginItems.registrations, [true])
+        let discarded = appState.eventLog.events.filter { $0.event == "config.edit_discarded" }.compactMap(\.detail)
+        XCTAssertEqual(discarded.count, 1)
+        XCTAssertTrue(discarded.first?.hasPrefix("trigger=quit reason=start_blocking_problems check=") == true, "\(discarded)")
+        XCTAssertFalse(discarded.first?.contains("127.0.") == true, "names the check, not the value")
+        XCTAssertFalse(appState.eventLog.events.contains { $0.event == "config.edit_committed" })
+    }
+
+    /// A commit whose write failed still advanced the reconciler's
+    /// request, so quit must validate the draft itself rather than trust
+    /// that it matches the request.
+    func testQuittingDiscardsAnInvalidEditWhoseCommitFailedToWrite() async throws {
+        let appState = try launch()
+        let configFile = harness.environment.configFile
+        try FileManager.default.removeItem(at: configFile)
+        try FileManager.default.createDirectory(at: configFile, withIntermediateDirectories: false)
+
+        appState.config.localHost = "127.0."
+        appState.commitPendingEdit(trigger: .submit)
+        XCTAssertTrue(appState.hasUnsavedEdit, "the write failed")
+        XCTAssertEqual(appState.reconciler.requestedConfig, appState.config)
+        try FileManager.default.removeItem(at: configFile)
+
+        appState.persistPendingEditForTermination()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configFile.path), "the invalid draft was not written")
+        XCTAssertEqual(count("config.edit_discarded", in: appState), 1)
+        await appState.reconciler.drain()
+    }
+
     /// A listen-host commit replaces the HTTP listener and leaves the DNS
     /// forwarder where the resolver files and the relay point.
     func testCommittingAListenHostLeavesTheDNSForwarderOnLoopback() async throws {

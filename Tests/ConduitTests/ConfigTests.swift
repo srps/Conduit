@@ -244,4 +244,14 @@ final class ConfigTests: XCTestCase {
         config.noProxyHosts = [String(repeating: "a", count: 254)]
         XCTAssertTrue(bypassProblems().contains { !$0.blocksProxyStart })
     }
+
+    /// `check` goes into events: the field, never the value. A tunnel's
+    /// field carries its label, which names the remote when unlabeled.
+    func testAValidationCheckNamesTheFieldNotTheValue() {
+        var config = ProxyConfig.testFixture()
+        config.tunnels.definitions = [TunnelDefinition(localPort: 70_000, remoteHost: "db.private.example.test", remotePort: 5432)]
+        let checks = config.validate().map(\.check)
+        XCTAssertTrue(checks.contains("invalid_port field=tunnels.definitions[0].localPort"), "\(checks)")
+        XCTAssertFalse(checks.contains { $0.contains("private") || $0.contains("70000") }, "\(checks)")
+    }
 }
