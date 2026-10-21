@@ -929,13 +929,27 @@ final class AppState: ObservableObject {
     /// quit, termination cleanup is about to tear the surfaces down, and an
     /// apply started here would race it. The login item needs no runtime
     /// and is registered, or the next launch would disagree with the file.
+    ///
+    /// A config edit with a problem that would block a proxy start is not
+    /// written: the autosave never saves one, and quit must not make a
+    /// half-typed value the next launch's config. The flags and
+    /// preferences, which that validation does not cover, still are.
     func persistPendingEditForTermination() {
         cancelPendingSave()
         guard configurationLoadError == nil else { return }
         if hasUnsavedEdit {
-            recordCommit(trigger: .quit)
+            // Every unsaved config, even one equal to the last request: a
+            // save whose write failed advanced the request all the same.
+            let blocking = config.validate().filter(\.blocksProxyStart)
+            if let first = blocking.first {
+                recordLifecycle(RuntimeEvent(kind: .config, event: "config.edit_discarded",
+                                             detail: "trigger=quit reason=start_blocking_problems check=\(first.check) problems=\(blocking.count)"),
+                                level: .notice)
+            } else {
+                recordCommit(trigger: .quit)
+            }
             // A flip the platform file does not hold is not registered.
-            guard persistConfiguration().platformSaved else { return }
+            guard persistConfiguration(includingConfig: blocking.isEmpty).platformSaved else { return }
         }
         // Even when a later file failed, and with nothing unsaved: the next
         // launch reads the platform file as its baseline, and would never see
@@ -957,14 +971,20 @@ final class AppState: ObservableObject {
     /// Which files were written. A failed write keeps the edit unsaved, so
     /// leaving the section or quitting tries again.
     @discardableResult
-    private func persistConfiguration() -> (complete: Bool, platformSaved: Bool) {
+    /// Without the config file (`includingConfig: false`, a discarded edit
+    /// at quit) the edit stays unsaved.
+    private func persistConfiguration(includingConfig: Bool = true) -> (complete: Bool, platformSaved: Bool) {
         var platformSaved = false
         do {
-            try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
+            if includingConfig {
+                try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
+            }
             try PlatformConfigPersistence.save(platformConfig, in: runtimeEnvironment)
             platformSaved = true
             try AppPreferencesPersistence.save(appPreferences, in: runtimeEnvironment)
-            hasUnsavedEdit = false
+            if includingConfig {
+                hasUnsavedEdit = false
+            }
             logStore.log(.debug, "Saved configuration.")
             return (true, true)
         } catch {

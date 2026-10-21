@@ -47,6 +47,32 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     /// every error in its banner, and the Settings row still flags the field,
     /// because showing the problem where the user typed it is what #68 asked
     /// for.
+    /// Which check failed, for an event: the case and the config field,
+    /// never the value, which can be a host or a path.
+    package var check: String {
+        switch self {
+        case .invalidPort(let field, _): return "invalid_port field=\(Self.fieldPath(field))"
+        case .invalidLimit(let field, _, _): return "invalid_limit field=\(Self.fieldPath(field))"
+        case .invalidDuration(let field, _): return "invalid_duration field=\(Self.fieldPath(field))"
+        case .invalidHost(let field, _): return "invalid_host field=\(Self.fieldPath(field))"
+        case .invalidInterceptPattern(let index, _, _): return "invalid_intercept_pattern field=dns.interceptRules[\(index)]"
+        case .invalidInterceptIP(let index, _): return "invalid_intercept_ip field=dns.interceptRules[\(index)]"
+        case .invalidTransparentProxyIP: return "invalid_transparent_proxy_ip field=dns.transparentProxyIP"
+        case .invalidSystemProxyBypass: return "invalid_system_proxy_bypass field=routing.noProxyHosts"
+        case .conflict: return "conflict"
+        }
+    }
+
+    /// A field name without the label a tunnel's carries for the message
+    /// (`tunnels.definitions[0](db.example:5432).localPort`), which names
+    /// its remote when it has no label of its own.
+    package static func fieldPath(_ field: String) -> String {
+        guard let open = field.firstIndex(of: "("), let close = field.lastIndex(of: ")"), open < close else {
+            return field
+        }
+        return String(field[..<open]) + String(field[field.index(after: close)...])
+    }
+
     package var blocksProxyStart: Bool {
         switch self {
         case .invalidInterceptPattern, .invalidInterceptIP, .invalidTransparentProxyIP, .invalidSystemProxyBypass:
