@@ -23,3 +23,15 @@ Each record carries three statuses, because merged does not mean it works:
 
 | ID | Title | Decision | Implementation | Validation |
 | --- | --- | --- | --- | --- |
+| [0001](0001-one-runtime-host.md) | One runtime host for the app and the daemon | accepted | planned | none |
+| [0002](0002-daemon-first-ownership.md) | Daemon-first runtime ownership | accepted | partial | pending |
+| [0003](0003-thin-appstate-harness.md) | Thin AppState harness over FakeMachine | accepted | implemented | none |
+| [0004](0004-staged-host-policy-sharing.md) | Share app and daemon platform policy piece by piece | superseded | partial | none |
+| [0005](0005-kernel-import-fence.md) | Kernel import fence, Linux paused | accepted | implemented | none |
+| [0006](0006-module-boundaries.md) | Module boundaries for the helper, shared contracts, Keychain codec, spool and paths | accepted | partial | none |
+| [0007](0007-kernel-file-split-first.md) | Split large kernel files before any target split | accepted | planned | none |
+| [0008](0008-pac-no-usable-answer-and-strict-mode.md) | PAC answers with no usable entry and strict mode | accepted | implemented | none |
+| [0009](0009-helper-caller-identity.md) | Helper caller identity by code signature | accepted | implemented | pending |
+| [0010](0010-self-update.md) | Self-update with a nested Sparkle updater | accepted | implemented | pending |
+| [0011](0011-vpn-path-based-socket-sweeps.md) | Path-based socket sweeps for VPN transitions | accepted | implemented | pending |
+| [0012](0012-commit-attribution.md) | Optional attribution trailers, no session URLs | accepted | implemented | none |
