@@ -150,6 +150,12 @@ package final class RuntimeReconciler {
     /// Whether a pass is queued or running. Tests read it; `drain` waits it out.
     package var hasPassInFlight: Bool { task != nil }
 
+    /// Whether the baseline is behind what is persisted: an action that did
+    /// not land rewound it, so the next save retries that action.
+    package func lags(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) -> Bool {
+        lastReconciledConfig != config || lastReconciledPlatformConfig != platformConfig
+    }
+
     /// Waits for every queued pass, including ones queued while waiting.
     package func drain() async {
         while let task {

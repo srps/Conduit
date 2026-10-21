@@ -902,6 +902,26 @@ final class AppStateHarnessTests: XCTestCase {
 
     /// Leaving a section saves a waiting edit at once instead of after the
     /// pause.
+    /// The edit was written, but the system proxy clear it asked for did not
+    /// land. Leaving the section retries it, as it did before autosave.
+    func testLeavingASectionRetriesAnActionThatDidNotLand() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        try await appState.startProxy()
+        machine.privilege.failing = [.setWebProxyEndpoint]
+        appState.platformConfig.manageSystemProxy = false
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertFalse(appState.hasUnsavedEdit, "written")
+        XCTAssertTrue(wifi.routesThroughAProxy, "but the clear did not land")
+
+        machine.privilege.failing = []
+        appState.flushPendingSave()
+        await appState.reconciler.drain()
+
+        XCTAssertFalse(wifi.routesThroughAProxy, "retried on leaving the section")
+        XCTAssertFalse(appState.reconciler.lags(config: appState.config, platformConfig: appState.platformConfig))
+    }
+
     func testLeavingASectionSavesAWaitingEditAtOnce() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig())
         await harness.launchRecovery()
