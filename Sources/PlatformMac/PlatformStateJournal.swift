@@ -97,13 +97,25 @@ package final class PlatformStateJournal: @unchecked Sendable {
 
     private let fileURL: URL
     private let logger: (any LogSink)?
+    /// Where the journal reports trouble (#191): the host's event log in
+    /// both hosts, a collector in `pm-sim`. Called with the journal's lock
+    /// held, so it must not call back into the journal.
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let lock = NSLock()
     private var loaded: [PlatformStateRecord]?
     private var fileStateBox: FileState = .absent
+    /// Writes that failed since the last one landed. Non-zero is a
+    /// failed-write episode, which is reported once, when it starts, and
+    /// once more when a write lands again.
+    private var failedWrites = 0
+    /// Legacy-import steps already reported, so a snapshot that stays
+    /// unreadable is one event, not one per launch-recovery pass.
+    private var reportedImportSteps: Set<LegacyImportStep> = []
 
-    package init(fileURL: URL, logger: (any LogSink)? = nil) {
+    package init(fileURL: URL, logger: (any LogSink)? = nil, eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil) {
         self.fileURL = fileURL
         self.logger = logger
+        self.eventSink = eventSink
     }
 
     /// Applying new machine settings needs readable prior-state storage.
@@ -116,10 +128,10 @@ package final class PlatformStateJournal: @unchecked Sendable {
     /// Whether the on-disk journal could be read. Callers use this to tell
     /// "we hold nothing on this surface" from "we cannot say what we hold".
     package var fileState: FileState {
-        lock.lock()
-        defer { lock.unlock() }
-        _ = loadLocked()
-        return fileStateBox
+        locked {
+            _ = loadLocked()
+            return fileStateBox
+        }
     }
 
     /// Whether the journal positively knows it holds nothing for `surface` —
@@ -148,14 +160,14 @@ package final class PlatformStateJournal: @unchecked Sendable {
         value: [String: String]?,
         now: Date = .now
     ) {
-        lock.lock()
-        defer { lock.unlock() }
-        var records = loadLocked()
-        guard !records.contains(where: { $0.surface == surface && $0.scope == scope }) else { return }
-        records.append(
-            PlatformStateRecord(surface: surface, scope: scope, priorValue: value, recordedAt: now)
-        )
-        saveLocked(records)
+        locked {
+            var records = loadLocked()
+            guard !records.contains(where: { $0.surface == surface && $0.scope == scope }) else { return }
+            records.append(
+                PlatformStateRecord(surface: surface, scope: scope, priorValue: value, recordedAt: now)
+            )
+            saveLocked(records, operation: .recordPrior, surface: surface)
+        }
     }
 
     /// `recordPrior` for a write that is about to happen (#175): throws when
@@ -171,10 +183,13 @@ package final class PlatformStateJournal: @unchecked Sendable {
         replacingPlaceholder placeholderKey: String,
         now: Date = .now
     ) throws {
-        try lock.withLock {
+        try locked {
             var records = loadLocked()
             let committed = records
-            guard fileStateBox != .unreadable else { throw NetworkSettingsError.persistenceFailed }
+            guard fileStateBox != .unreadable else {
+                noteWriteFailedLocked(operation: .capturePrior, surface: surface, cause: .journalUnreadable)
+                throw NetworkSettingsError.persistenceFailed
+            }
             if let index = records.firstIndex(where: { $0.surface == surface && $0.scope == scope }) {
                 guard records[index].priorValue?[placeholderKey] != nil else { return }
                 records[index].priorValue = value
@@ -182,7 +197,7 @@ package final class PlatformStateJournal: @unchecked Sendable {
             } else {
                 records.append(PlatformStateRecord(surface: surface, scope: scope, priorValue: value, recordedAt: now))
             }
-            guard saveLocked(records) else {
+            guard saveLocked(records, operation: .capturePrior, surface: surface) else {
                 loaded = committed
                 throw NetworkSettingsError.persistenceFailed
             }
@@ -194,10 +209,13 @@ package final class PlatformStateJournal: @unchecked Sendable {
         surface: PlatformSurface, locationID: String, serviceID: String,
         prior: [String: String], applied: [String: String], maximumRecords: Int
     ) throws {
-        try lock.withLock {
+        try locked {
             var records = loadLocked()
             let committed = records
-            guard fileStateBox != .unreadable else { throw NetworkSettingsError.persistenceFailed }
+            guard fileStateBox != .unreadable else {
+                noteWriteFailedLocked(operation: .recordNetworkState, surface: surface, cause: .journalUnreadable)
+                throw NetworkSettingsError.persistenceFailed
+            }
             let scope = locationID + "/" + serviceID
             if let index = records.firstIndex(where: { $0.surface == surface && $0.scope == scope }) {
                 records[index].appliedValue = applied
@@ -211,7 +229,7 @@ package final class PlatformStateJournal: @unchecked Sendable {
                     locationID: locationID, serviceID: serviceID, appliedValue: applied
                 ))
             }
-            guard saveLocked(records) else {
+            guard saveLocked(records, operation: .recordNetworkState, surface: surface) else {
                 loaded = committed
                 throw NetworkSettingsError.persistenceFailed
             }
@@ -219,11 +237,11 @@ package final class PlatformStateJournal: @unchecked Sendable {
     }
 
     package func forgetNetworkState(surface: PlatformSurface, scope: String) throws {
-        try lock.withLock {
+        try locked {
             var records = loadLocked()
             let committed = records
             records.removeAll { $0.surface == surface && $0.scope == scope }
-            guard saveLocked(records) else {
+            guard saveLocked(records, operation: .forgetNetworkState, surface: surface) else {
                 loaded = committed
                 throw NetworkSettingsError.persistenceFailed
             }
@@ -280,39 +298,39 @@ package final class PlatformStateJournal: @unchecked Sendable {
     /// describe what was there before us and must never be overwritten by our
     /// own; ownership describes the present and has to be able to change.
     private func setOwnership(surface: PlatformSurface, ownership: String?, now: Date) {
-        lock.lock()
-        defer { lock.unlock() }
-        var records = loadLocked()
-        let value = ownership.map { [Self.ownershipKey: $0] }
-        if let index = records.firstIndex(where: {
-            $0.surface == surface && $0.scope == Self.appliedMarkerScope
-        }) {
-            records[index].priorValue = value
-            records[index].recordedAt = now
-        } else {
-            records.append(
-                PlatformStateRecord(
-                    surface: surface,
-                    scope: Self.appliedMarkerScope,
-                    priorValue: value,
-                    recordedAt: now
+        locked {
+            var records = loadLocked()
+            let value = ownership.map { [Self.ownershipKey: $0] }
+            if let index = records.firstIndex(where: {
+                $0.surface == surface && $0.scope == Self.appliedMarkerScope
+            }) {
+                records[index].priorValue = value
+                records[index].recordedAt = now
+            } else {
+                records.append(
+                    PlatformStateRecord(
+                        surface: surface,
+                        scope: Self.appliedMarkerScope,
+                        priorValue: value,
+                        recordedAt: now
+                    )
                 )
-            )
+            }
+            saveLocked(records, operation: ownership == nil ? .markApplied : .markReleased, surface: surface)
         }
-        saveLocked(records)
     }
 
     package func ownership(of surface: PlatformSurface) -> SurfaceOwnership {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let marker = loadLocked().first(where: {
-            $0.surface == surface && $0.scope == Self.appliedMarkerScope
-        }) else {
-            return .unknown
+        locked {
+            guard let marker = loadLocked().first(where: {
+                $0.surface == surface && $0.scope == Self.appliedMarkerScope
+            }) else {
+                return .unknown
+            }
+            // A marker written before this key existed carries no payload and meant
+            // exactly "applied", so that is what it keeps meaning.
+            return marker.priorValue?[Self.ownershipKey] == Self.releasedOwnership ? .released : .applied
         }
-        // A marker written before this key existed carries no payload and meant
-        // exactly "applied", so that is what it keeps meaning.
-        return marker.priorValue?[Self.ownershipKey] == Self.releasedOwnership ? .released : .applied
     }
 
     package func isMarkedApplied(surface: PlatformSurface) -> Bool {
@@ -326,25 +344,25 @@ package final class PlatformStateJournal: @unchecked Sendable {
     /// long-lived session has to be able to say "still mine" without
     /// overwriting the prior values it is holding.
     package func touch(surface: PlatformSurface, now: Date = .now) {
-        lock.lock()
-        defer { lock.unlock() }
-        var records = loadLocked()
-        for index in records.indices where records[index].surface == surface {
-            records[index].recordedAt = now
+        locked {
+            var records = loadLocked()
+            for index in records.indices where records[index].surface == surface {
+                records[index].recordedAt = now
+            }
+            saveLocked(records, operation: .touch, surface: surface)
         }
-        saveLocked(records)
     }
 
     // MARK: - Reading
 
     package func prior(surface: PlatformSurface, scope: String) -> RecordedPrior {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let record = loadLocked().first(where: { $0.surface == surface && $0.scope == scope }) else {
-            return .notRecorded
+        locked {
+            guard let record = loadLocked().first(where: { $0.surface == surface && $0.scope == scope }) else {
+                return .notRecorded
+            }
+            guard let value = record.priorValue else { return .wasAbsent }
+            return .wasPresent(value)
         }
-        guard let value = record.priorValue else { return .wasAbsent }
-        return .wasPresent(value)
     }
 
     package func scopes(for surface: PlatformSurface) -> [String] {
@@ -353,9 +371,9 @@ package final class PlatformStateJournal: @unchecked Sendable {
 
     /// Real scopes only — the applied marker is bookkeeping, not a setting.
     package func records(for surface: PlatformSurface) -> [PlatformStateRecord] {
-        lock.lock()
-        defer { lock.unlock() }
-        return loadLocked().filter { $0.surface == surface && $0.scope != Self.appliedMarkerScope }
+        locked {
+            return loadLocked().filter { $0.surface == surface && $0.scope != Self.appliedMarkerScope }
+        }
     }
 
     /// Real scopes only, matching `records(for:)`. The two disagreed before:
@@ -365,23 +383,23 @@ package final class PlatformStateJournal: @unchecked Sendable {
     /// stops being harmless once the marker can say *released*, because then a
     /// surface with nothing outstanding would still report records.
     package func hasRecords(for surface: PlatformSurface) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return loadLocked().contains { $0.surface == surface && $0.scope != Self.appliedMarkerScope }
+        locked {
+            return loadLocked().contains { $0.surface == surface && $0.scope != Self.appliedMarkerScope }
+        }
     }
 
     package var isEmpty: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return loadLocked().isEmpty
+        locked {
+            return loadLocked().isEmpty
+        }
     }
 
     /// Oldest `recordedAt` across a surface, for callers that treat a
     /// long-abandoned record as evidence of a crash rather than a live session.
     package func oldestRecordDate(for surface: PlatformSurface) -> Date? {
-        lock.lock()
-        defer { lock.unlock() }
-        return loadLocked().filter { $0.surface == surface }.map(\.recordedAt).min()
+        locked {
+            return loadLocked().filter { $0.surface == surface }.map(\.recordedAt).min()
+        }
     }
 
     // MARK: - Forgetting
@@ -390,19 +408,19 @@ package final class PlatformStateJournal: @unchecked Sendable {
     /// successful restore: dropping it first turns a failed restore into a
     /// permanently stranded setting with no record that we caused it.
     package func forget(surface: PlatformSurface, scope: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        var records = loadLocked()
-        records.removeAll { $0.surface == surface && $0.scope == scope }
-        saveLocked(records)
+        locked {
+            var records = loadLocked()
+            records.removeAll { $0.surface == surface && $0.scope == scope }
+            saveLocked(records, operation: .forget, surface: surface)
+        }
     }
 
     package func forgetAll(surface: PlatformSurface) {
-        lock.lock()
-        defer { lock.unlock() }
-        var records = loadLocked()
-        records.removeAll { $0.surface == surface }
-        saveLocked(records)
+        locked {
+            var records = loadLocked()
+            records.removeAll { $0.surface == surface }
+            saveLocked(records, operation: .forgetAll, surface: surface)
+        }
     }
 
     // MARK: - Persistence
@@ -416,28 +434,22 @@ package final class PlatformStateJournal: @unchecked Sendable {
             loaded = []
             return []
         }
-        do {
-            let data = try Data(contentsOf: fileURL)
-            let decoded: [PlatformStateRecord]
-            do {
-                decoded = try CanonicalJSON.decoder().decode([PlatformStateRecord].self, from: data)
-            } catch {
-                // Upgrade the historical ISO-8601 journal on its next successful write.
-                decoded = try JSONDecoder.iso8601Decoder.decode([PlatformStateRecord].self, from: data)
-            }
+        switch Self.readRecords(at: fileURL) {
+        case .success(let records):
             fileStateBox = .loaded
-            loaded = decoded
-            return decoded
-        } catch {
+            loaded = records
+            return records
+        case .failure(let failure):
             // Recovery may inspect recognized residue, but cannot attribute
             // prior settings. Keep the file intact for diagnosis and repair.
-            logger?.log(
-                .warning,
-                "Could not read the platform-state journal at \(fileURL.path) (\(error.displayDescription)); recovery will inspect recognized residue; prior settings are unknown and the journal will be preserved.",
-                category: .system
-            )
             fileStateBox = .unreadable
             loaded = []
+            report(
+                "platform.journal_unreadable",
+                detail: "file=\(fileURL.lastPathComponent) \(failure.detail)",
+                level: .warning,
+                message: "Could not read the platform-state journal at \(fileURL.path) (\(failure.diagnostic)); recovery will inspect recognized residue; prior settings are unknown and the journal will be preserved."
+            )
             return []
         }
     }
@@ -445,12 +457,12 @@ package final class PlatformStateJournal: @unchecked Sendable {
     /// Returns whether the records reached disk. Legacy callers retain an
     /// in-memory copy after failure; durable network operations roll it back.
     @discardableResult
-    private func saveLocked(_ records: [PlatformStateRecord]) -> Bool {
+    private func saveLocked(_ records: [PlatformStateRecord], operation: WriteOperation, surface: PlatformSurface) -> Bool {
         // Legacy resolver adoption needs its in-memory evidence for retry even
         // when persistence is unavailable. Never replace the corrupt disk file.
         loaded = records
         guard fileStateBox != .unreadable else {
-            logger?.log(.error, "Refusing to overwrite an unreadable platform-state journal; repair it before recording new state.", category: .system)
+            noteWriteFailedLocked(operation: operation, surface: surface, cause: .journalUnreadable)
             return false
         }
         do {
@@ -463,19 +475,168 @@ package final class PlatformStateJournal: @unchecked Sendable {
             // claim prior values that were never true.
             try data.write(to: fileURL, options: .atomic)
             fileStateBox = .loaded
+            noteWriteLandedLocked()
             return true
         } catch {
+            noteWriteFailedLocked(operation: operation, surface: surface, cause: .io(error))
+            return false
+        }
+    }
+
+    // MARK: - Reporting (#191)
+
+    /// The writes that can fail, named in `platform.journal_write_failed`.
+    private enum WriteOperation: String {
+        case recordPrior = "record_prior"
+        case capturePrior = "capture_prior"
+        case recordNetworkState = "record_network_state"
+        case forgetNetworkState = "forget_network_state"
+        case markApplied = "mark_applied"
+        case markReleased = "mark_released"
+        case touch
+        case forget
+        case forgetAll = "forget_all"
+        case importLegacyDNS = "import_legacy_dns"
+    }
+
+    private enum WriteFailure {
+        /// Refused: the file on disk could not be read, so it is kept.
+        case journalUnreadable
+        case io(Error)
+    }
+
+    private func locked<T>(_ body: () throws -> T) rethrows -> T {
+        try lock.withLock(body)
+    }
+
+    /// Event first, then the log line derived from it. Called with the lock
+    /// held, so events reach the sink in the order the journal decided
+    /// them: a failed-write episode is never reported after the write that
+    /// ended it. The sink must not call back into the journal.
+    private func report(
+        _ name: String, detail: String, level: LogLevel, message: String, logger: (any LogSink)? = nil
+    ) {
+        let event = RuntimeEvent(kind: .config, event: name, detail: detail)
+        eventSink?(event)
+        (logger ?? self.logger)?.log(level, "\(message) \(event.event) \(event.detail ?? "")", category: .system)
+    }
+
+    /// A failing disk is one event, not one per write: the episode is
+    /// reported when it starts and again when a write lands.
+    private func noteWriteFailedLocked(operation: WriteOperation, surface: PlatformSurface, cause: WriteFailure) {
+        failedWrites += 1
+        guard failedWrites == 1 else { return }
+        let base = "operation=\(operation.rawValue) surface=\(surface.rawValue)"
+        switch cause {
+        case .journalUnreadable:
+            report(
+                "platform.journal_write_failed",
+                detail: base + " reason=journal_unreadable",
+                level: .error,
+                message: "Refusing to overwrite an unreadable platform-state journal; it is kept for diagnosis, and new state is held in memory only until it is repaired."
+            )
+        case .io(let error):
             // The in-memory copy still serves this process, so a failed write
             // is survivable *now* — but it means a crash from here on leaves
             // the user's original settings unrecoverable, which nobody would
             // otherwise learn.
-            logger?.log(
-                .error,
-                "Could not write the platform-state journal at \(fileURL.path) (\(error.displayDescription)); if this process dies, the previous system settings cannot be restored.",
-                category: .system
+            report(
+                "platform.journal_write_failed",
+                detail: base + " reason=io error=\(Self.errorToken(error))",
+                level: .error,
+                message: "Could not write the platform-state journal at \(fileURL.path) (\(error.displayDescription)); if this process dies, the previous system settings cannot be restored."
             )
-            return false
         }
+    }
+
+    private func noteWriteLandedLocked() {
+        guard failedWrites > 0 else { return }
+        let failures = failedWrites
+        failedWrites = 0
+        report(
+            "platform.journal_write_recovered",
+            detail: "failures=\(failures)",
+            level: .notice,
+            message: "The platform-state journal is being written again after \(failures) failed write(s)."
+        )
+    }
+
+    // MARK: - Decoding
+
+    /// Why a journal file could not be trusted.
+    private enum ReadFailure: Error {
+        case readFailed(Error)
+        /// Neither date encoding decodes the records.
+        case undecodable(canonical: Error, iso8601: Error)
+
+        /// `key=value` tokens for the event: short, with no spaces.
+        var detail: String {
+            switch self {
+            case .readFailed(let error):
+                "reason=read_failed error=\(PlatformStateJournal.errorToken(error))"
+            case .undecodable(let canonical, let iso8601):
+                "reason=undecodable canonical=\(PlatformStateJournal.errorToken(canonical)) iso8601=\(PlatformStateJournal.errorToken(iso8601))"
+            }
+        }
+
+        /// Every error in full, for the log line.
+        var diagnostic: String {
+            switch self {
+            case .readFailed(let error):
+                error.displayDescription
+            case .undecodable(let canonical, let iso8601):
+                "as records with epoch dates: \(canonical.displayDescription); as records with ISO-8601 dates: \(iso8601.displayDescription)"
+            }
+        }
+    }
+
+    /// Current dates first, then the historical ISO-8601 ones, upgraded on
+    /// the next write. Both errors are kept: the second alone hid that the
+    /// file was most likely a damaged current-format journal.
+    private static func readRecords(at url: URL) -> Result<[PlatformStateRecord], ReadFailure> {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            return .failure(.readFailed(error))
+        }
+        let canonicalError: Error
+        do {
+            return .success(try CanonicalJSON.decoder().decode([PlatformStateRecord].self, from: data))
+        } catch {
+            canonicalError = error
+        }
+        do {
+            return .success(try JSONDecoder.iso8601Decoder.decode([PlatformStateRecord].self, from: data))
+        } catch {
+            return .failure(.undecodable(canonical: canonicalError, iso8601: error))
+        }
+    }
+
+    /// A short, space-free name for an error, for an event's `key=value`
+    /// detail. The log line derived from the event carries the full text.
+    static func errorToken(_ error: Error) -> String {
+        guard let decoding = error as? DecodingError else {
+            let error = error as NSError
+            return "\(error.domain):\(error.code)"
+        }
+        let kind: String
+        let context: DecodingError.Context
+        switch decoding {
+        case .typeMismatch(_, let found):
+            (kind, context) = ("type_mismatch", found)
+        case .valueNotFound(_, let found):
+            (kind, context) = ("value_not_found", found)
+        case .keyNotFound(let key, let found):
+            (kind, context) = ("key_not_found:" + key.stringValue, found)
+        case .dataCorrupted(let found):
+            (kind, context) = ("data_corrupted", found)
+        @unknown default:
+            return "decoding_error"
+        }
+        let path = context.codingPath.map { $0.intValue.map(String.init) ?? $0.stringValue }.joined(separator: ".")
+        let token = path.isEmpty ? kind : kind + "@" + path
+        return String(token.map { $0.isWhitespace ? "_" : $0 })
     }
 }
 
@@ -525,21 +686,51 @@ extension PlatformStateJournal {
     /// would replace it. The snapshot is the last copy of the resolvers, so it
     /// is removed only once the import is on disk — one atomic write, not a
     /// record at a time. Returns whether an import happened.
+    ///
+    /// Every step that does not complete is reported once, as
+    /// `platform.legacy_dns_import_failed`; a completed import is
+    /// `platform.legacy_dns_imported` (#191).
     @discardableResult
-    package func importLegacyDNSSnapshot(at fileURL: URL, logger: (any LogSink)? = nil) -> Bool {
-        guard let data = try? Data(contentsOf: fileURL) else { return false }
+    package func importLegacyDNSSnapshot(at snapshotURL: URL, logger: (any LogSink)? = nil) -> Bool {
+        // No snapshot is the common case: nothing to import, nothing to say.
+        guard FileManager.default.fileExists(atPath: snapshotURL.path) else { return false }
+        return locked { importLegacyDNSSnapshotLocked(at: snapshotURL, logger: logger) }
+    }
+
+    /// A step of the import that did not complete, named in
+    /// `platform.legacy_dns_import_failed`.
+    enum LegacyImportStep: String {
+        case readSnapshot = "read_snapshot"
+        case decodeSnapshot = "decode_snapshot"
+        case journalUnreadable = "journal_unreadable"
+        case journalWrite = "journal_write"
+        case removeSnapshot = "remove_snapshot"
+    }
+
+    private func importLegacyDNSSnapshotLocked(at snapshotURL: URL, logger: (any LogSink)?) -> Bool {
+        let data: Data
+        do {
+            data = try Data(contentsOf: snapshotURL)
+        } catch {
+            reportImportFailed(.readSnapshot, error: error, logger: logger,
+                               message: "Legacy DNS snapshot at \(snapshotURL.path) could not be read (\(error.displayDescription)); leaving it in place.")
+            return false
+        }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .deferredToDate
-        guard let snapshot = try? decoder.decode(LegacyDNSSnapshot.self, from: data) else {
-            logger?.log(.warning, "Legacy DNS snapshot at \(fileURL.path) could not be read; leaving it in place.", category: .system)
+        let snapshot: LegacyDNSSnapshot
+        do {
+            snapshot = try decoder.decode(LegacyDNSSnapshot.self, from: data)
+        } catch {
+            reportImportFailed(.decodeSnapshot, error: error, logger: logger,
+                               message: "Legacy DNS snapshot at \(snapshotURL.path) could not be decoded (\(error.displayDescription)); leaving it in place.")
             return false
         }
 
-        lock.lock()
-        defer { lock.unlock() }
         var records = loadLocked()
         guard fileStateBox != .unreadable else {
-            logger?.log(.warning, "Legacy DNS snapshot found but the platform-state journal is unreadable; leaving both in place.", category: .system)
+            reportImportFailed(.journalUnreadable, error: nil, logger: logger,
+                               message: "Legacy DNS snapshot found but the platform-state journal is unreadable; leaving both in place.")
             return false
         }
         guard !records.contains(where: { $0.surface == .systemDNS }) else { return false }
@@ -558,16 +749,30 @@ extension PlatformStateJournal {
             priorValue: nil,
             recordedAt: snapshot.savedAt
         ))
-        guard saveLocked(records) else {
-            logger?.log(.warning, "Legacy DNS snapshot could not be written into the journal; keeping \(fileURL.path) as the recovery copy.", category: .system)
+        guard saveLocked(records, operation: .importLegacyDNS, surface: .systemDNS) else {
+            reportImportFailed(.journalWrite, error: nil, logger: logger,
+                               message: "Legacy DNS snapshot could not be written into the journal; keeping \(snapshotURL.path) as the recovery copy.")
             return false
         }
+        report("platform.legacy_dns_imported", detail: "interfaces=\(snapshot.interfaces.count)", level: .notice,
+               message: "Imported the 0.1.x DNS snapshot (\(snapshot.interfaces.count) interface(s)) into the platform-state journal.",
+               logger: logger)
         do {
-            try FileManager.default.removeItem(at: fileURL)
+            try FileManager.default.removeItem(at: snapshotURL)
         } catch {
-            logger?.log(.warning, "Imported the legacy DNS snapshot but could not remove \(fileURL.path): \(error.displayDescription)", category: .system)
+            // The journal now knows the surface, so the snapshot is never
+            // imported again; it is only left behind, but say so.
+            reportImportFailed(.removeSnapshot, error: error, logger: logger,
+                               message: "Imported the legacy DNS snapshot but could not remove \(snapshotURL.path) (\(error.displayDescription)).")
         }
-        logger?.log(.notice, "Imported the 0.1.x DNS snapshot (\(snapshot.interfaces.count) interface(s)) into the platform-state journal.", category: .system)
         return true
+    }
+
+    /// Once per step for the journal's lifetime: a snapshot that stays
+    /// unreadable is one event, not one per recovery pass.
+    private func reportImportFailed(_ step: LegacyImportStep, error: Error?, logger: (any LogSink)?, message: String) {
+        guard reportedImportSteps.insert(step).inserted else { return }
+        let detail = "step=\(step.rawValue)" + (error.map { " error=\(Self.errorToken($0))" } ?? "")
+        report("platform.legacy_dns_import_failed", detail: detail, level: .warning, message: message, logger: logger)
     }
 }

@@ -81,7 +81,11 @@ final class DaemonRuntimeHost {
     // back what a crashed run left applied.
     /// Prior values of the platform settings we change, so teardown restores
     /// rather than blanket-clearing. Shared by every side-effect manager.
-    private lazy var platformStateJournal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
+    private lazy var platformStateJournal = PlatformStateJournal(
+        fileURL: environment.platformStateFile,
+        logger: logger,
+        eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
+    )
     private lazy var systemConduit = SystemProxyManager(
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
@@ -1182,7 +1186,7 @@ extension DaemonRuntimeHost {
         let base = privilegeClient ?? HelperToolPrivilegeClient(eventSink: emit)
         let audited = AuditingPrivilegeClient(base: base, eventSink: emit)
         let runner = commandRunner
-        let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
+        let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger, eventSink: emit)
         let locationRecovery = networkLocationStoreFactory(audited).map {
             LocationSettingsRecovery(store: $0, journal: journal, emit: emit)
         }
