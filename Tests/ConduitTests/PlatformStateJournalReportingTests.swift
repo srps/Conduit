@@ -5,8 +5,10 @@ import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
 
-/// How the journal reports trouble (#191): every failure is a
-/// `RuntimeEvent` first, once per episode, and the log line derives from it.
+/// The journal's format version and how it reports trouble (#182, #191).
+/// Every file a release has written so far is a bare array, and it must keep
+/// reading as version 1 with nothing lost; only a file that names a version
+/// this build does not know fails closed, and failing closed keeps the file.
 final class PlatformStateJournalReportingTests: XCTestCase {
     private var directory: URL!
     private let events = NIOLockedValueBox<[RuntimeEvent]>([])
@@ -41,7 +43,7 @@ final class PlatformStateJournalReportingTests: XCTestCase {
         recordedAt: Date(timeIntervalSince1970: 1_780_000_000)
     )
 
-    // MARK: - Both date encodings still read
+    // MARK: - Version 1 reads as it always did
 
     func testABareArrayWithEpochDatesIsVersionOne() throws {
         try CanonicalJSON.encoder().encode([record]).write(to: file)
@@ -61,10 +63,57 @@ final class PlatformStateJournalReportingTests: XCTestCase {
         XCTAssertEqual(names, [])
     }
 
+    /// The envelope a later release will write. This build reads it, and its
+    /// next write keeps every record.
+    func testAVersionOneEnvelopeLoadsAndItsRecordsSurviveTheNextWrite() throws {
+        let records = String(decoding: try CanonicalJSON.encoder().encode([record]), as: UTF8.self)
+        try Data(#"{"version":1,"records":\#(records)}"#.utf8).write(to: file)
+        let journal = makeJournal()
+
+        XCTAssertEqual(journal.fileState, .loaded)
+        journal.markApplied(surface: .systemProxy)
+
+        // Written back as the bare array every earlier release reads, so a
+        // rollback from this patch still finds its records.
+        let written = try CanonicalJSON.decoder().decode([PlatformStateRecord].self, from: Data(contentsOf: file))
+        XCTAssertEqual(written.filter { $0.scope == "Wi-Fi" }, [record])
+        XCTAssertEqual(written.count, 2, "the record and the applied marker")
+        let reread = PlatformStateJournal(fileURL: file)
+        XCTAssertEqual(reread.fileState, .loaded)
+        XCTAssertEqual(reread.records(for: .systemProxy), [record])
+        XCTAssertTrue(reread.isMarkedApplied(surface: .systemProxy))
+        XCTAssertEqual(names, [])
+    }
+
+    // MARK: - A newer version fails closed
+
+    func testANewerVersionIsUnreadableReportedAndNeverOverwritten() throws {
+        let newer = Data(#"{"version":2,"records":[],"somethingNew":true}"#.utf8)
+        try newer.write(to: file)
+        let journal = makeJournal()
+
+        XCTAssertEqual(journal.fileState, .unreadable)
+        XCTAssertEqual(reported("platform.journal_unreadable"),
+                       ["file=platform-state.json reason=unsupported_version version=2 supported=1"])
+        XCTAssertThrowsError(try journal.requireReadableForApply())
+
+        journal.recordPrior(surface: .systemProxy, scope: "Wi-Fi", value: nil)
+        journal.markApplied(surface: .systemProxy)
+        XCTAssertThrowsError(try journal.capturePriorBeforeWrite(
+            surface: .launchdEnvironment, scope: "HTTP_PROXY", value: nil, replacingPlaceholder: "unread"
+        ))
+
+        XCTAssertEqual(try Data(contentsOf: file), newer, "the newer file is kept byte for byte")
+        XCTAssertEqual(reported("platform.journal_write_failed"),
+                       ["operation=record_prior surface=systemProxy reason=journal_unreadable"],
+                       "three refused writes are one episode")
+        XCTAssertEqual(reported("platform.journal_unreadable").count, 1, "reported once")
+    }
+
     /// A refusal in the throwing writes, which check before they save, is
     /// what starts the episode when it comes first.
     func testARefusedCaptureStartsTheEpisode() throws {
-        try Data("not json".utf8).write(to: file)
+        try Data(#"{"version":7}"#.utf8).write(to: file)
         let journal = makeJournal()
 
         XCTAssertThrowsError(try journal.recordNetworkState(
@@ -85,6 +134,7 @@ final class PlatformStateJournalReportingTests: XCTestCase {
         let detail = try XCTUnwrap(reported("platform.journal_unreadable").first)
         XCTAssertTrue(detail.hasPrefix("file=platform-state.json reason=undecodable canonical="), detail)
         XCTAssertTrue(detail.contains(" iso8601=data_corrupted"), detail)
+        XCTAssertTrue(detail.contains(" envelope=data_corrupted"), detail)
         XCTAssertEqual(try Data(contentsOf: file), corrupt)
     }
 
@@ -96,8 +146,25 @@ final class PlatformStateJournalReportingTests: XCTestCase {
 
         XCTAssertEqual(journal.fileState, .unreadable)
         XCTAssertEqual(reported("platform.journal_unreadable"), [
-            "file=platform-state.json reason=undecodable canonical=type_mismatch@0.recordedAt iso8601=type_mismatch@0.recordedAt",
+            "file=platform-state.json reason=undecodable canonical=type_mismatch@0.recordedAt iso8601=type_mismatch@0.recordedAt envelope=type_mismatch",
         ])
+    }
+
+    func testAVersionOneEnvelopeWithBadRecordsIsUndecodableNotUnsupported() throws {
+        try Data(#"{"version":1,"records":[{"surface":"nowhere"}]}"#.utf8).write(to: file)
+        let journal = makeJournal()
+
+        XCTAssertEqual(journal.fileState, .unreadable)
+        let detail = try XCTUnwrap(reported("platform.journal_unreadable").first)
+        XCTAssertTrue(detail.hasPrefix("file=platform-state.json reason=undecodable version=1 records="), detail)
+    }
+
+    func testAVersionThatIsNotAnIntegerIsUndecodable() throws {
+        try Data(#"{"version":"1","records":[]}"#.utf8).write(to: file)
+
+        XCTAssertEqual(makeJournal().fileState, .unreadable)
+        let detail = try XCTUnwrap(reported("platform.journal_unreadable").first)
+        XCTAssertTrue(detail.contains("reason=undecodable") && detail.contains("envelope=type_mismatch@version"), detail)
     }
 
     // MARK: - Failed writes are one episode
@@ -130,7 +197,7 @@ final class PlatformStateJournalReportingTests: XCTestCase {
     /// The event reaches the sink before the log line, and the log line
     /// carries it.
     func testTheLogLineIsDerivedFromTheEvent() throws {
-        try Data("not json".utf8).write(to: file)
+        try Data(#"{"version":3}"#.utf8).write(to: file)
         let logs = RecordingLogSink()
         let events = self.events
         let journal = PlatformStateJournal(fileURL: file, logger: logs, eventSink: { event in
@@ -141,8 +208,8 @@ final class PlatformStateJournalReportingTests: XCTestCase {
         XCTAssertEqual(journal.fileState, .unreadable)
         let entry = try XCTUnwrap(logs.entries().first)
         XCTAssertEqual(entry.level, .warning)
-        XCTAssertTrue(entry.message.contains("platform.journal_unreadable file=platform-state.json reason=undecodable canonical=data_corrupted"), entry.message)
-        XCTAssertTrue(entry.message.contains("as records with ISO-8601 dates:"), entry.message)
+        XCTAssertTrue(entry.message.contains("platform.journal_unreadable file=platform-state.json reason=unsupported_version version=3"), entry.message)
+        XCTAssertTrue(entry.message.contains("newer Conduit"), entry.message)
     }
 
     // MARK: - Legacy DNS snapshot import
@@ -180,7 +247,7 @@ final class PlatformStateJournalReportingTests: XCTestCase {
 
     func testAnUnreadableJournalRefusesTheImportAndSaysSo() throws {
         try writeSnapshot()
-        try Data("not json".utf8).write(to: file)
+        try Data(#"{"version":2}"#.utf8).write(to: file)
         let journal = makeJournal()
 
         XCTAssertFalse(journal.importLegacyDNSSnapshot(at: snapshot))

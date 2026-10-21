@@ -425,6 +425,18 @@ package final class PlatformStateJournal: @unchecked Sendable {
 
     // MARK: - Persistence
 
+    /// The journal format this build reads (#182). Every release so far wrote
+    /// a bare array of records, which is version 1; `{"version": 1,
+    /// "records": [...]}` is the same version in the envelope later releases
+    /// will write. A file that names any other version came from a build
+    /// that knows more than this one, so it is unreadable: kept on disk,
+    /// never overwritten, and reported.
+    ///
+    /// This build still writes the bare array. A release that predates the
+    /// envelope reads it as corrupt, so writing it here would strand anyone
+    /// who rolls back a patch release; the envelope writer ships separately.
+    package static let formatVersion = 1
+
     private func loadLocked() -> [PlatformStateRecord] {
         if let loaded { return loaded }
 
@@ -561,21 +573,28 @@ package final class PlatformStateJournal: @unchecked Sendable {
         )
     }
 
-    // MARK: - Decoding
+    // MARK: - Decoding (#182)
 
     /// Why a journal file could not be trusted.
     private enum ReadFailure: Error {
         case readFailed(Error)
-        /// Neither date encoding decodes the records.
-        case undecodable(canonical: Error, iso8601: Error)
+        /// Neither a version-1 array (either date encoding) nor an envelope.
+        case undecodable(canonical: Error, iso8601: Error, envelope: Error)
+        /// A version-1 envelope whose records do not decode.
+        case undecodableRecords(Error)
+        case unsupportedVersion(Int)
 
         /// `key=value` tokens for the event: short, with no spaces.
         var detail: String {
             switch self {
             case .readFailed(let error):
                 "reason=read_failed error=\(PlatformStateJournal.errorToken(error))"
-            case .undecodable(let canonical, let iso8601):
-                "reason=undecodable canonical=\(PlatformStateJournal.errorToken(canonical)) iso8601=\(PlatformStateJournal.errorToken(iso8601))"
+            case .undecodable(let canonical, let iso8601, let envelope):
+                "reason=undecodable canonical=\(PlatformStateJournal.errorToken(canonical)) iso8601=\(PlatformStateJournal.errorToken(iso8601)) envelope=\(PlatformStateJournal.errorToken(envelope))"
+            case .undecodableRecords(let error):
+                "reason=undecodable version=\(PlatformStateJournal.formatVersion) records=\(PlatformStateJournal.errorToken(error))"
+            case .unsupportedVersion(let version):
+                "reason=unsupported_version version=\(version) supported=\(PlatformStateJournal.formatVersion)"
             }
         }
 
@@ -584,15 +603,29 @@ package final class PlatformStateJournal: @unchecked Sendable {
             switch self {
             case .readFailed(let error):
                 error.displayDescription
-            case .undecodable(let canonical, let iso8601):
-                "as records with epoch dates: \(canonical.displayDescription); as records with ISO-8601 dates: \(iso8601.displayDescription)"
+            case .undecodable(let canonical, let iso8601, let envelope):
+                "as records with epoch dates: \(canonical.displayDescription); as records with ISO-8601 dates: \(iso8601.displayDescription); as a versioned envelope: \(envelope.displayDescription)"
+            case .undecodableRecords(let error):
+                "version \(PlatformStateJournal.formatVersion) envelope, records: \(error.displayDescription)"
+            case .unsupportedVersion(let version):
+                "written in format version \(version) by a newer Conduit; this build reads version \(PlatformStateJournal.formatVersion)"
             }
         }
     }
 
-    /// Current dates first, then the historical ISO-8601 ones, upgraded on
-    /// the next write. Both errors are kept: the second alone hid that the
-    /// file was most likely a damaged current-format journal.
+    private struct VersionProbe: Decodable {
+        let version: Int
+    }
+
+    private struct Envelope: Decodable {
+        let version: Int
+        let records: [PlatformStateRecord]
+    }
+
+    /// Version 1 as a bare array — current dates first, then the historical
+    /// ISO-8601 ones, upgraded on the next write — or as an envelope. An
+    /// object never decodes as an array, so an envelope from a newer build
+    /// can only be read through its version.
     private static func readRecords(at url: URL) -> Result<[PlatformStateRecord], ReadFailure> {
         let data: Data
         do {
@@ -606,10 +639,23 @@ package final class PlatformStateJournal: @unchecked Sendable {
         } catch {
             canonicalError = error
         }
+        let iso8601Error: Error
         do {
             return .success(try JSONDecoder.iso8601Decoder.decode([PlatformStateRecord].self, from: data))
         } catch {
-            return .failure(.undecodable(canonical: canonicalError, iso8601: error))
+            iso8601Error = error
+        }
+        let version: Int
+        do {
+            version = try CanonicalJSON.decoder().decode(VersionProbe.self, from: data).version
+        } catch {
+            return .failure(.undecodable(canonical: canonicalError, iso8601: iso8601Error, envelope: error))
+        }
+        guard version == formatVersion else { return .failure(.unsupportedVersion(version)) }
+        do {
+            return .success(try CanonicalJSON.decoder().decode(Envelope.self, from: data).records)
+        } catch {
+            return .failure(.undecodableRecords(error))
         }
     }
 

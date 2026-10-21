@@ -931,6 +931,49 @@ final class DaemonRuntimeHostTests: XCTestCase {
         )
     }
 
+    /// Twin of `AppStateHarnessTests.testAJournalFromANewerConduitIsReportedAndKeptAtLaunch`.
+    func testAJournalFromANewerConduitIsReportedAndKeptAtLaunch() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        let newer = Data(#"{"version":2,"records":[]}"#.utf8)
+        try newer.write(to: harness.environment.platformStateFile)
+
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+
+        XCTAssertEqual(
+            host.orchestrator.eventLog.events.filter { $0.event == "platform.journal_unreadable" }.map(\.detail),
+            ["file=platform-state.json reason=unsupported_version version=2 supported=1"]
+        )
+        XCTAssertEqual(try Data(contentsOf: harness.environment.platformStateFile), newer)
+    }
+
+    /// The broken-config path builds its own journal, and reports through
+    /// the same `emit` that writes `events.ndjson`.
+    func testRecoveryWithoutConfigurationReportsAJournalFromANewerConduit() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        let newer = Data(#"{"version":2,"records":[]}"#.utf8)
+        try newer.write(to: harness.environment.platformStateFile)
+
+        let machine = harness.machine
+        let events = await DaemonRuntimeHost.recoverWithoutConfiguration(
+            environment: harness.environment,
+            logger: DiscardingLogSink(),
+            privilegeClient: machine,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            dnsResponds: FakeDNSProbe().responds(onPort:),
+            networkLocationStoreFactory: { _ in nil }
+        )
+
+        XCTAssertEqual(events.filter { $0.event == "platform.journal_unreadable" }.count, 1)
+        let written = try String(contentsOf: harness.environment.eventsFile, encoding: .utf8)
+        XCTAssertTrue(written.contains("platform.journal_unreadable"), "the event reaches events.ndjson: \(written)")
+        XCTAssertEqual(try Data(contentsOf: harness.environment.platformStateFile), newer)
+    }
+
     /// Readiness never precedes recovery. `daemon.ready` and
     /// `daemon-ready.json` tell a consumer startup is over; published while
     /// recovery was still out, they announced a machine that could still be
