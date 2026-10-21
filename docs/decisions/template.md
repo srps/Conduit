@@ -35,6 +35,8 @@ None yet. For `partial` or `implemented`, link code, tests or scenarios outside 
 
 Does not prove: what that evidence leaves open, for example behaviour on a real VPN or an installed build.
 
+For `Validation: passed`, add a paragraph starting `Validation:` that says what was checked and links where the result is recorded: a GitHub issue, PR or comment, or a file in the repository.
+
 ## Open questions
 
 Unresolved details, or "None."

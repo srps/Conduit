@@ -54,7 +54,11 @@ def record(record_id, title, decision, implementation, validation, supersedes='n
 
 
 # Evidence by reference, defined at the end of the document.
-REFERENCE_EVIDENCE = 'See [the code][code  label].\n\nDoes not prove: behaviour on a real machine.'
+# and a passed validation whose second paragraph, wrapped after its prefix,
+# links the PR comment that records it.
+VALIDATION_RESULT = 'Validation:\nrecorded on [#2](https://github.com/example/repo/pull/2#issuecomment-1).'
+REFERENCE_EVIDENCE = ('See [the code][code  label].\n\nDoes not prove: behaviour on a real machine.\n\n'
+                      'Validation: the owner checked it on a real machine.\n\n' + VALIDATION_RESULT)
 REFERENCE_TAIL = '\n[Code Label]: ../../Sources/Thing.swift\n'
 
 
@@ -77,14 +81,14 @@ def make_tree(root):
     (decisions / '0002-old-way.md').write_text(record(
         '0002', 'The old way',
         'superseded (owner, 2026-01-02, https://github.com/example/repo/pull/2; superseded 2026-01-03)',
-        'partial', 'none', superseded_by='0001', evidence=REFERENCE_EVIDENCE, tail=REFERENCE_TAIL))
+        'partial', 'passed', superseded_by='0001', evidence=REFERENCE_EVIDENCE, tail=REFERENCE_TAIL))
     (decisions / '0003-later.md').write_text(record(
         '0003', 'Something later', 'proposed', 'planned', 'none', evidence='None yet.'))
     (decisions / 'README.md').write_text(
         '# Decision records\n\nSee [the template](template.md).\n\n'
         '| ID | Title | Decision | Implementation | Validation |\n| --- | --- | --- | --- | --- |\n'
         '| [0001](0001-new-way.md) | The new way | accepted | implemented | pending |\n'
-        '| [0002](0002-old-way.md) | The old way | superseded | partial | none |\n'
+        '| [0002](0002-old-way.md) | The old way | superseded | partial | passed |\n'
         '| [0003](0003-later.md) | Something later | proposed | planned | none |\n')
 
 
@@ -151,7 +155,32 @@ mutations = [
      lambda r: edit(r, '0002-old-way.md', '[Code Label]: ../../Sources/Thing.swift', '[Code Label]: ../design.md')),
     ('evidence reference without a definition', 'link to a file outside docs/',
      lambda r: edit(r, '0002-old-way.md', '[Code Label]: ../../Sources/Thing.swift', '')),
-    ('a first definition under docs wins over a later one', 'link to a file outside docs/',
+    ('authorization with an impossible date', "authorization date '2026-99-99' is not a real date",
+     lambda r: edit(r, '0001-new-way.md', '(owner, 2026-01-01, #1)', '(owner, 2026-99-99, #1)')),
+    ('passed without a recorded result', 'Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, '')),
+    ('passed recorded only in a code fence', 'Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, '```\n' + VALIDATION_RESULT + '\n```')),
+    ('passed recorded at a GitHub URL that is not an issue or PR', 'Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, 'Validation: <https://github.com/example/repo/pull/2abc>')),
+    ('passed recorded by an autolink to a non-GitHub site','Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, 'Validation: <https://example.com/x/y/pull/2>')),
+    ('passed recorded only in a tilde fence','Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, '~~~\n\n' + VALIDATION_RESULT + '\n~~~')),
+    ('passed recorded only after an info-string line inside a fence', 'Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, '~~~\n~~~markdown\n\n' + VALIDATION_RESULT + '\n~~~')),
+    ('passed recorded only in an unclosed fence', 'Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, '```\n\n' + VALIDATION_RESULT)),
+    ('passed recorded only in an indented code block','Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, '    ' + VALIDATION_RESULT.replace('\n', '\n    '))),
+    ('passed recorded outside a Validation paragraph','Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', VALIDATION_RESULT, VALIDATION_RESULT.replace('Validation:\n', 'It was\n'))),
+    ('passed recorded only in a directory', 'Validation passed needs',
+     lambda r: edit(r, '0002-old-way.md', '(https://github.com/example/repo/pull/2#issuecomment-1)',
+                    '(../../Sources/)')),
+    ('a directory as implementation evidence', 'link to a file outside docs/',
+     lambda r: edit(r, '0001-new-way.md', '[the code](../../Sources/Thing.swift)', '[the code](../../Sources/)')),
+    ('a first definition under docs wins over a later one','link to a file outside docs/',
      lambda r: edit(r, '0002-old-way.md', '[Code Label]: ../../Sources/Thing.swift',
                     '[code label]: ../design.md\n[Code Label]: ../../Sources/Thing.swift')),
     ('broken nested parenthesized link', "'../../Sources/Missing(1(2)).swift' does not resolve",
@@ -193,6 +222,21 @@ mutations = [
     ('index row missing', 'no index row for 0003-later.md',
      lambda r: edit(r, 'README.md', '| [0003](0003-later.md) | Something later | proposed | planned | none |\n', '')),
     ('index row without a record', 'index row 0004 has no record', extra_index_row),
+]
+
+
+# Other ways to write a valid record that must still pass.
+variants = [
+    ('validation recorded by an autolink', lambda r: edit(
+        r, '0002-old-way.md', VALIDATION_RESULT, 'Validation: <https://github.com/example/repo/pull/2#issuecomment-1>')),
+    ('validation recorded by a bare URL', lambda r: edit(
+        r, '0002-old-way.md', VALIDATION_RESULT, 'Validation: https://github.com/example/repo/issues/3')),
+    ('validation recorded by a reference link with a query', lambda r: edit(
+        r, '0002-old-way.md', VALIDATION_RESULT,
+        'Validation: checked, [result][validation].\n\n'
+        '[validation]: https://github.com/example/repo/issues/3?notification_referrer_id=1#issuecomment-2')),
+    ('validation recorded in a repository file',lambda r: edit(
+        r, '0002-old-way.md', VALIDATION_RESULT, 'Validation: recorded in [the design](../design.md).')),
 ]
 
 
@@ -289,6 +333,12 @@ with tempfile.TemporaryDirectory(prefix='conduit-decisions-') as directory:
         result = run(root)
         assert result.returncode != 0, (label, result.stdout)
         assert expected in result.stderr, (label, expected, result.stderr)
+    for label, change in variants:
+        root = Path(directory) / label.replace(' ', '-')
+        make_tree(root)
+        change(root)
+        result = run(root)
+        assert result.returncode == 0, (label, result.stderr)
     assert run(base).returncode == 0, 'a tree without git history passes without --require-history'
     result = run(base, '--require-history')
     assert result.returncode != 0 and 'no full git history' in result.stderr, ('--require-history', result.stderr)
@@ -304,5 +354,5 @@ with tempfile.TemporaryDirectory(prefix='conduit-decisions-') as directory:
 
 repository = run(script.resolve().parent.parent)
 assert repository.returncode == 0, ('repository', repository.stderr)
-print(f'PASS: decisions check accepts the repository and a fixture tree, rejects {len(mutations)} mutations, '
-      f'and judges {len(history_cases)} history changes')
+print(f'PASS: decisions check accepts the repository, a fixture tree and {len(variants)} variants, '
+      f'rejects {len(mutations)} mutations, and judges {len(history_cases)} history changes')
