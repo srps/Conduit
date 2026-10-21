@@ -1,0 +1,178 @@
+# Liveness audit: time windows in `Sources/`
+
+**Every timer, timeout, TTL, debounce and cooldown in the shipping targets, judged against [STYLE rule 11](./STYLE.md#11-liveness-comes-from-events-not-from-clocks).**
+
+Audited on 2026-10-21 against `main` at `ebcd881` for #178. Line numbers are from that commit; they drift, the names do not. `pm-sim`, the `pm-*-check` diagnostics and the tests are out of scope.
+
+## How to read it
+
+Each window gets one question and one verdict.
+
+**Authority by window?** Does the window's expiry, on its own, change what is routed, trusted or owned (upstream health, breaker state, VPN state, direct mode, a cache that decides routing, who owns a system setting)? If it does, it can fail closed on healthy work when the machine is slow, or fail open for the length of the window after a real loss; the column says which.
+
+**Verdict:**
+
+| Verdict | Meaning |
+| --- | --- |
+| **bound** | Fine as it is. It bounds one operation, rate-limits a report or a repair, or is hygiene; its expiry grants and revokes nothing, or the thing it decides is the measurement itself (rule 11's connect-timeout exception). |
+| **backstop** | Fine as it is. A named window behind an event or an observation: when it fires it asks for evidence (a probe, a sweep, a reconcile) instead of deciding, and it reports. |
+| **hysteresis** | Accepted exception to "revocation at once": a short, named, configurable hold on a noisy signal that keeps the last verdict and reports when it commits. Only the VPN flap windows. |
+| **inconclusive** | A timeout, missing reply or unreadable value is read as loss (or as absence) and changes state. Should leave state unchanged, or need a second observation, unless the timeout is the measurement. |
+| **event-driven** | The window stands in for an event the code already has or could have; invalidate on that event instead of (or as well as) waiting out the window. |
+| **fence** | A result that started under an older generation can land after the state it measured was replaced. Needs a generation check at the owner, with an event when it drops. |
+
+**Totals:** 65 rows in sections A–G (a row sometimes groups windows of one mechanism): 35 bound, 10 backstop, 2 hysteresis, 9 inconclusive, 5 event-driven, 4 fence. Section H lists the remaining per-operation bounds and report rate limits, all bound.
+
+## Findings
+
+Ordered by how likely they are to bite. None is changed by this audit; each needs its own issue (see [Suggested issues](#suggested-issues)).
+
+1. **The direct-connect cache outlives the network it measured** (D1, D2). A "reachable" verdict routes a host DIRECT for `directConnectTTL` (300 s). It is cleared only on wake (`ProxyOrchestrator.swift:1762`), not on a VPN transition or path change, and a background probe that started before a `clearCache()` writes its verdict after it (`DirectConnectDetector.swift:455`). Only with strict mode off and where PAC has no opinion (`PACRoutePlan.swift:74`, `HTTPProxyHandler.swift:217-227`); strict mode is the default. Fix: clear on every routing transition, and drop, with an event, a probe result that started before the latest transition began. `RoutingTransitionSignal.completed` alone is not enough: it advances in `end()`, not `begin()` (`RoutingTransitionSignal.swift:28-38`), so a probe that lands mid-transition would pass; the fence needs an epoch advanced at `begin()`, or a check of `inFlight`.
+2. **Response timeouts count against the upstream proxy** (B7). `upstreamResponseTimedOut` is not a local failure (`ConnectionPool.swift:101`), so 45 s without response bytes feeds the breaker (`ConnectionPool.swift:1033`, `:393`; CONNECT at `CONNECTHandler.swift:167`). Behind a proxy, a slow origin, a long poll or an origin connect the proxy is still waiting on looks exactly like that, so slow healthy work moves the upstream toward an open breaker. Fix: treat a response timeout as inconclusive for the breaker, or count it separately from connect failures and 5xx; fold into the #184 spike.
+3. **A single slow health check starts the recovery ladder** (B3, B4). The health check connects under `connectionCheckTimeout` (2 s, `ConnectionPool.swift:447`), stricter than the data path's `upstreamConnectTimeout` (5 s). A connect that takes 2–5 s is fine for traffic but makes the check `.unreachable`, which feeds the breaker through `bufferedExchange` and starts the ladder on that one sample (`ProxyOrchestrator.swift:2481`): close stalled connections, switch upstream, then recycle the listener, stopping at the first step after which a check passes (re-authentication is skipped for `.unreachable`). This applies when the check needs a fresh connect; a pooled connection is reused as is. Fix: a timed-out check is inconclusive (keep state, check again sooner, as the adaptive schedule already does); start the ladder on a refused connect, an answer, or a second consecutive timeout. Belongs with #181's primitive.
+4. **Launch recovery decides another runtime is dead from a short timeout** (E1, E2). A UDP DNS query that gets no answer within 2 s (`SystemDNSManager.swift:680`), or a loopback connect that does not complete within 0.25 s (`LoopbackPortProbe.swift:36`), reads as "no live session", and recovery then restores the machine's DNS or proxy settings from under it. The DNS comment knows the risk (`SystemDNSManager.swift:673-679`). The loopback TCP connect is completed by the kernel's backlog and is rarely slow; the UDP query needs the relay to answer and is the real exposure. This is the ownership problem #48's leases solve; until then, a timed-out probe could decline the restore and retry on the next launch, with an event.
+5. **The DNS health tick reports a slow pipeline as unresponsive** (G5, G6). Every 30 s the hosts send one query with a 2 s timeout; one miss asks the helper to start the relay (`AppState.swift:1859-1879`, `DaemonRuntimeHost.swift:1079`). That start is idempotent while the relay runs with the same target (`HelperDaemon.swift:441`), so nothing healthy is torn down. But the outcome is judged by one more 2 s probe (`SystemDNSManager.swift:499`), and a second miss sets the DNS error and posts "DNS Forwarder Degraded", although the relay and forwarder may only be slow. The app emits no `RuntimeEvent` for any of it (the daemon emits `dns.relay_restarted` / `dns.pipeline_unresponsive`). Fix: report "unresponsive" only on a refused or failed start, or after consecutive misses; emit the same events from both hosts; move the tick onto #181's primitive.
+6. **A busy helper is reported as broken** (F1). `status` maps every send error, a turn wait or transaction timeout included, to `.notResponding` through a `try?` (`HelperPrivilegeClient.swift:284`): Settings shows "Installed but not responding" with a red "Repair Helper", and the update preflight refuses to install (`UpdatePreflight.swift:184`). A helper still serving another peer's 20 s operation is not a missing helper. Fix: a separate inconclusive status for a timeout, kept apart from refusal and connect failure, with an event; also clears a `try?` that STYLE rule 6 forbids.
+7. **The transparent-relay reassert can restart a relay after a stop** (C9). The 30 s tick checks `tcpRelayActive`, runs the accept probe off the main actor (`ProxyOrchestrator.swift:3030`), then calls `reissueTransparentRelay` (`:3064`) without checking `tcpRelayActive` again. A stop that lands while the probe is out (up to 1 s, `TCPAcceptProbe.swift:16`) is followed by a fresh `startTCPRelay`, which sets `tcpRelayActive = true` again. Fix: re-check under the same turn as the reissue, or capture a relay generation that `stopTCPRelay` advances.
+8. **DNS answers from the old network can repopulate a flushed cache** (D6). `resetUpstreamTransports()` clears the response cache (`LocalDNSForwarder.swift:538`) on wake and network changes, but a query already out on the old transports stores its answer when it returns (`:938`), for up to 300 s (NXDOMAIN 30 s). Fix: a cache generation advanced by the reset and checked at store.
+9. **Smaller items.**
+   - An unreadable `launchctl getenv` reads as "no residue" when the journal is idle, so teardown skips the environment (`EnvironmentManager.swift:442`, `:574`) (E7). `unrecordedIsOurs` already treats `.failed` as inconclusive (`:534`); the early return should too.
+   - A helper transaction timeout re-runs the rest of the batch through the AppleScript fallback (`HelperPrivilegeClient.swift:390`) while the helper may still be applying it (F2). The 40 s client budget covers one transaction but not time in the helper's backlog behind another process's request (`HelperSubprocess.swift:219-226`), so a second Conduit process (the other host, the update preflight) is enough. Two writers on one surface is what #48 removes. `compareNetworkSettings` never falls back (`:374`).
+   - The transparent proxy's origin cache (`OriginResolver.swift:60`) and the link-local failure memo (`LinkLocalConnectPolicy.swift:168`) are not dropped on a network change (D8, C7); the memo is process-wide (#31).
+   - After the grace window fires, `VPNStateFuser` still records `.reasserting` as its last emission, and its `graceExpired` latch is written but never read (`VPNStateFuser.swift:132`, `:269`) (A2). Harmless today; dead state in a state machine.
+   - `DirectConnectDetector.cachedReachability` reads `Date()` (`:404`) instead of its injected `now`, so the TTL cannot be tested on a virtual clock (rule 10).
+
+## #178 checklist
+
+| Item in #178 | Rows | Result |
+| --- | --- | --- |
+| VPN min-visible and grace timers (`VPNStateFuser`, Advanced settings) | A1, A2 | Hysteresis, compliant. Dead latch noted (finding 9). Interplay with the breaker window is #184. |
+| Breaker burst window `circuitBreakerWindowSeconds` | B5 | Authority by window, both directions; #184. Response timeouts feeding it: finding 2. |
+| Kerberos KDC-unreachable handling (#99) | C10–C13 | Bounds and rate limits; compliant. #99 stays open for installed evidence. |
+| Direct-connect TTL cache and probe timeout (`DirectConnectDetector`) | D1–D3 | Event-driven and fence: finding 1. Probe timeout is a measurement (bound). |
+| PAC revalidation and network-location repair timers | C1–C6, E4, E5, G3, G4 | PAC: compliant, fenced by `routeGeneration`/`scriptVersion`. Location and environment repair budgets: compliant. |
+
+## A. VPN state
+
+| # | Window (default) | Where | What it decides | Authority by window? | Verdict | Covered by |
+| --- | --- | --- | --- | --- | --- | --- |
+| A1 | Flap min-visible, `vpnFlapMinVisibleSeconds` (1 s; Settings offers 0–5 s, the file is not capped) | `ConfigSections.swift:302`; armed `VPNStatusMonitor.swift:389` | Whether an IPv4 loss on a connected utun becomes `.reasserting`. Until it fires, the fused state stays `.connected` (`VPNStateFuser.swift:292`). Cancelled by recovery; a stale firing is a no-op on the phase guard (`VPNStateFuser.swift:206`). | Yes: fails open for ≤ 1 s after a real loss, by design. | hysteresis | #184 |
+| A2 | Flap grace, `vpnFlapGraceSeconds` (5 s) | `ConfigSections.swift:286`; armed `VPNStatusMonitor.swift:355` | `.reasserting` → `.disconnected(.networkLost)`. Routing is held (`DirectModeCause.transientNetworkChange`), split-DNS files kept (`SplitDNSVPNGate`), new CONNECTs still go upstream. Emits `vpn.flap.start` on entry and `vpn.disconnected.lost` on expiry. | Yes: fails open for 5 s from grace entry, about 6 s after the IPv4 loss with A1's default; the loss evidence already exists. | hysteresis | #184; finding 9 |
+| A3 | Network path debounce (2 s, trailing) | `NetworkMonitor.swift:18`; `TrailingDebouncer.swift:38` | Coalesces `NWPath` updates. The delivery it delays is what drops PAC answers and resets DNS transports (`ProxyOrchestrator.swift:2342-2353`); each new update restarts the 2 s, so a churning path defers both indefinitely. VPN transitions invalidate on their own path, undelayed. | Yes: answers from the old path stay in use ≥ 2 s after the change. | event-driven | Invalidate on the first update (leading edge); debounce only the refresh. |
+| A4 | Strict-hint settle window (15 s) | `DirectConnectDetector.swift:58`, `:276`; `RoutingTransitionSignal.swift:57` | Suppresses strict-mode "No-proxy candidate" probes for 15 s after a VPN or direct-mode change. A diagnostic hint, not routing. Emits `routing.strict_direct_reachable_suppressed`. | No routing authority. | bound | |
+
+## B. Upstream health, breaker and recovery
+
+| # | Window (default) | Where | What it decides | Authority by window? | Verdict | Covered by |
+| --- | --- | --- | --- | --- | --- | --- |
+| B1 | Health-check interval, `checkInterval` (30 s, adaptive 0.25×–2×) | `ConfigSections.swift:219`; `HealthChecker.swift:76`, `:92`, `:125-153` | When the next check runs. Results apply under `routingGeneration` (`ProxyOrchestrator.swift:2425`, `health.result_superseded`); `HealthChecker` fences only its reschedule, not `onResult` (`:87`), and `stop()` clears the shared in-flight flag under a running check (`:109`). | No; the check decides, the interval paces it. | backstop | #181 (overlap after stop/start) |
+| B2 | Direct-mode reprobe (15 s unexpected, 60 s expected) | `ProxyOrchestrator.swift:2683`, `:2691`, `:2708` | Re-probes upstreams while direct; the probe commits the cause, fenced by generation and probe serial (`:2622`). Emits `connectivity.reprobe_*`. A backstop for a lost VPN report. | No. | backstop | |
+| B3 | Health-check connect, `connectionCheckTimeout` (2 s) | `ConfigSections.swift:221`; `ConnectionPool.swift:447` | A connect over 2 s fails the check (`.unreachable`) and, through `bufferedExchange`, feeds the breaker. The data path allows 5 s (B6). | Yes: fails closed on a path that is slow but serving. | inconclusive | finding 3; #181 |
+| B4 | Recovery ladder on one failed check | `ProxyOrchestrator.swift:2462-2497`; `AutoRecovery.swift:68-121` | One unhealthy result (a timeout included) runs close-stalled, reauthenticate, switch upstream, recycle listener, each followed by a check; it stops at the first passing check, skips re-authentication for `.unreachable`, and never starts for `.credentialUnavailable` (`ProxyOrchestrator.swift:2472`). Fenced by `routingGeneration` (`recovery.abandoned`). Not itself a timer; listed because a window's expiry triggers it. | Yes, via B3 and the 45 s response timeout. | inconclusive | finding 3 |
+| B5 | Breaker failure window, `circuitBreakerWindowSeconds` (10 s, threshold 5) | `ConfigSections.swift:254`; `UpstreamCircuitBreaker.swift:214`; `ConnectionPool.swift:1157` | From `.closed`, trips only when the consecutive failures span ≥ 10 s. Absorbs synchronized bursts at a flap. Emits `upstream.circuit_opened`. No generation: failures are not tagged with the path they ran on. | Yes, both ways: a real outage keeps getting traffic for ≥ 10 s; failures spread over 10 s on a slow path trip it. | fence | #184 |
+| B6 | Data-path connect, `upstreamConnectTimeout` (5 s, 0.5–600 s) | `ConfigSections.swift:234`; `ConnectionPool.swift:236` | A failed dial feeds the breaker. | The timeout is the measurement. | bound | |
+| B7 | Upstream response, `upstreamResponseTimeout` (45 s) | `ConfigSections.swift:229`; `ConnectionPool.swift:1948`; `CONNECTHandler.swift:477` | No response bytes in 45 s fails the exchange, closes the channel and feeds the breaker (not a local failure, `ConnectionPool.swift:101`). Emits `upstream.response_timeout`. | Yes: a slow origin counts as upstream loss. | inconclusive | finding 2; #184 |
+| B8 | Breaker open interval (30 s doubling to 300 s) | `ConfigSections.swift:271`; `UpstreamCircuitBreaker.swift:226`, `:241`; `ConnectionPool.swift:1244` | Lazily re-admits one half-open probe; the probe's outcome closes or re-opens. `forceHalfOpen` when every upstream is open (`:264`). Reset on flap recovery (`ConnectionPool.swift:1180`). | No; the window re-admits, the probe decides. | backstop | |
+| B9 | Recovery cooldown (60 s) | `AutoRecovery.swift:178`; `ProxyOrchestrator.swift:1143` | No new ladder for 60 s after one exhausts. Cleared by a healthy check and by supersession (`recovery.cooldown_cleared`). Emits `recovery.cooldown_started`, `recovery.suppressed`. | No; rate-limits a disruptive action. | bound | |
+| B10 | Error-rate alarm (20 failures in 5 s; 30 s quiet) | `ProxyOrchestrator.swift:2749`, `:2753` | Triggers a connectivity probe; the probe decides (fenced). Emits `error_rate.alarm`. | No. | backstop | |
+| B11 | Stranded-socket re-sweeps (0 s, +2 s, +10 s) | `ProxyOrchestrator.swift:1230`, `:2172` | After a confirmed transition, re-checks socket paths as routes settle; closes only sockets whose path is gone (`SocketPathChecking`). Cancellation-fenced; emits `vpn.tunnels_migrated`. | No; each pass observes. | backstop | |
+| B12 | Upstream prober (3 s total) | `UpstreamProber.swift:40`, `:68`, `:166` | Connects, sends `CONNECT`, and waits for the response head; at the deadline the upstream is unreachable, whether or not TCP connected. One round decides direct mode (`ProxyOrchestrator.swift:2632`): under VPN `.unknown` or `.disconnected`, no reachable upstream means unconditional DIRECT (`:2667`, `:2675`). Fenced by generation. | Yes: a proxy that connected but answered slowly grants DIRECT. The connect part is a measurement; the wait for the answer is not. | inconclusive | Suggested issue 2 |
+| B13 | Tunnel health probe (30 s; 2 s socket timeout) | `ProxyOrchestrator.swift:1618`; `TunnelForwarder.swift:143`, `:180` | Sets each tunnel's `healthy` flag and `.running`/`.warning`. UI state only; no `RuntimeEvent` when it flips. | UI health only. | bound | #181 (later consumer) |
+| B14 | Credential retry (0.75 s × 2) and outage hold (30 s) | `AuthCredentialRetry.swift:31`, `:32` | During the hold, the first attempt may already use the fallback scheme and the retry delay is skipped; Kerberos is still tried first. Emits `auth.credential_outage`; expiry is silent. | Per-upstream auth scheme, not liveness. | bound | #31 |
+
+## C. Routing caches, PAC and auth
+
+| # | Window (default) | Where | What it decides | Authority by window? | Verdict | Covered by |
+| --- | --- | --- | --- | --- | --- | --- |
+| C1 | PAC route TTL (600 s) | `PACRoutingEngine.swift:55` | An answer is never served after it. Dropped at once by `pac.routes_invalidated` on VPN transitions and path changes; stores fenced by `routeGeneration`, PAC URL and `scriptVersion` (`:838`). | No; events invalidate, the TTL bounds what no event sees. | backstop | |
+| C2 | PAC revalidation age (60 s) | `PACRoutingEngine.swift:59`, `:725` | Serve and re-evaluate in the background; a failed re-evaluation keeps the old answer (`pac.revalidation_failed`). The model for "inconclusive leaves state unchanged". | No. | bound | |
+| C3 | PAC refresh interval (300 s) | `PACRoutingEngine.swift:149` | The next decision after it starts a background fetch. Fenced by `routeGeneration`. | No. | bound | |
+| C4 | PAC fetch backoff (30 s doubling to 600 s) | `PACRoutingEngine.swift:99`, `:100` | Skips `honorBackoff` refreshes; wake, VPN and user action bypass it. Superseded failures do not count. Emits `pac.refresh_backoff`. | No. | bound | |
+| C5 | PAC compile and evaluation timeouts (5 s engine; 2 s CFNetwork; 2 s synchronous `decision(for:)`) | `PACRoutingEngine.swift:150`, `:368`, `:455`, `:704`; `CFPACEvaluator.swift:50` | A compile timeout fails the refresh and keeps the validated script. An evaluation timeout answers `.noUsableAnswer(.timeout)`, is not cached, and the request uses the configured upstreams (`pac.no_usable_route reason=timeout`). | No. | bound | |
+| C6 | PAC fetch, no explicit timeout | `CFPACEvaluator.swift:348`; `curl --max-time 15` for plaintext (`AppState.swift:717`) | URLSession defaults bound the HTTPS fetch. | No. | bound | |
+| C7 | Link-local failure memo (60 s, 256 targets) | `LinkLocalConnectPolicy.swift:168` | A link-local dial that timed out (2 s, `:15`) fails at once for 60 s. Process-wide; not dropped on a network change. | Per-target fail-fast, not routing state. | event-driven | #31; finding 9 |
+| C8 | Direct dial timeouts (10 s; IPv4 fallback resolve 10 s; tunnel dial 10 s) | `LinkLocalConnectPolicy.swift:45`; `HalfOpenChannelFallback.swift:31`; `TunnelForwarder.swift:792` | One connection fails. | No. | bound | |
+| C9 | Transparent relay reassert (30 s; 1 s accept probe) | `ProxyOrchestrator.swift:947`, `:3030`, `:3064`; `TCPAcceptProbe.swift:16` | Nothing accepting on the intercept address re-issues the helper's relay start (idempotent). A backstop for a helper restart that sends no event. Emits `tcp_relay.reasserted`/`unresponsive`. | Restarts the relay; a timed-out probe costs one idempotent start. | fence | finding 7 |
+| C10 | Kerberos KDC recovery rate limit (one per 60 s per factory) | `KerberosKDCRecovery.swift:20` | At most one fresh-process ticket recovery a minute. | No. | bound | #99 |
+| C11 | KDC recovery worker deadline (3 s) | `KerberosTicketRecovery.swift:29` | A timed-out worker fails the recovery (`auth.kerberos_recovery_failed stage=prime`); the original failure stands. | No. | bound | #99 |
+| C12 | GSS cooldown (5 s per target) | `GSSInitiatorGate.swift:27` | A non-credential GSS failure is re-thrown for 5 s without calling GSS. | Short local fail-fast. | bound | #31 |
+| C13 | Mech diagnostic cache (60 s per host) | `KerberosMechDiagnoser.swift:51` | Reuses a diagnosis; classification and fallback unchanged. | No. | bound | #99 |
+| C14 | Keychain read-failure cache (60 s), credential drop limit (60 s), pending read (2 s) | `CredentialManager.swift:96-98` | A failed read is served for 60 s (`denied` and `invalid_payload` until invalidated); a 407 drops credentials at most once a minute; a read still pending after 2 s reports `read_pending` without caching a failure (generation-fenced, `:222`). | No. | bound | |
+
+## D. DNS and direct reachability
+
+| # | Window (default) | Where | What it decides | Authority by window? | Verdict | Covered by |
+| --- | --- | --- | --- | --- | --- | --- |
+| D1 | Direct-connect TTL, `directConnectTTL` (300 s) | `ConfigSections.swift:239`; `DirectConnectDetector.swift:404`; read once at `ProxyOrchestrator.swift:1050` | A cached "reachable" routes the host DIRECT (`HTTPProxyHandler.swift:227`), strict mode off only. Cleared on wake only (`ProxyOrchestrator.swift:1762`). No event. | Yes: fails open for up to 300 s after a path change. | event-driven | finding 1 |
+| D2 | Direct-connect background probe | `DirectConnectDetector.swift:455` | Records its verdict whenever it completes, after a `clearCache()` too. | Yes: a pre-transition verdict lands in the new network's cache. | fence | finding 1 |
+| D3 | Direct-connect probe deadline (`connectionCheckTimeout`, 2 s, doubling to 16 s per host after failures; strict-hint probes use the 16 s cap) | `ProxyOrchestrator.swift:1051`; `DirectConnectDetector.swift:163`, `:265`, `:581` | One deadline covers the lookup and the connects. Expiry caches "unreachable", which routes the host via the upstream. | It changes a routing cache, but only toward the upstream, the side that needs no proof. | bound | |
+| D4 | Internal-domain query timeouts (2 s managed, 1.5 s other) | `LocalDNSForwarder.swift:29`, `:32`, `:747` | SERVFAIL, or the DoH race for public names. | No. | bound | |
+| D5 | DoH request/resource timeouts (4 s / 8 s), TCP idle (10 s), UDP relay pending (10 s) | `DoHSessionFactory.swift:14`; `LocalDNSForwarder.swift:35`; `UDPRelay.swift:13` | One lookup or connection fails or closes. | No. | bound | |
+| D6 | DNS response cache (record TTL ≤ 300 s; NXDOMAIN 30 s) | `LocalDNSForwarder.swift:1271`, `:938` | Flushed by `resetUpstreamTransports()` (`:538`); an answer from a query already out stores after the flush. | Yes: old-network answers for up to 300 s. | fence | finding 8 |
+| D7 | Origin resolver negative cache (5 s) | `OriginResolver.swift:66` | Lookups for a host fail fast for 5 s after every DoH provider failed. | Short local fail-fast. | bound | |
+| D8 | Origin resolver positive cache (answer TTL ≤ 300 s; 60 s when the answer has none) | `OriginResolver.swift:60`, `:61`, `:136` | Which IP the transparent proxy's direct path dials. Not dropped on wake or network change. | Stale origin IP after a path change, up to 300 s. | event-driven | finding 9 |
+| D9 | IPv6 availability cache (5 s) | `AddressFamilyAwareResolver.swift:34` | Whether AAAA lookups are made for upstream and probe connects. | Briefly stale after an interface change. | bound | |
+
+## E. Platform ownership and launch recovery
+
+| # | Window (default) | Where | What it decides | Authority by window? | Verdict | Covered by |
+| --- | --- | --- | --- | --- | --- | --- |
+| E1 | DNS relay liveness probe (2 s UDP) | `SystemDNSManager.swift:680`; used `:362`, `:388`, `:499` | At launch, no answer means "no live session": recovery restores the machine's DNS. Also decides `.unresponsive` after a relay restart. | Yes: a slow live relay reads as dead, and its DNS is taken away. | inconclusive | #48; finding 4 |
+| E2 | Proxy listener liveness probe (0.25 s TCP) | `LoopbackPortProbe.swift:36`; `SystemProxyManager.swift:560`; `LocationSettingsRecovery.swift:362` | At launch, no accept means "no live session": recovery restores proxy settings. | Same shape as E1; the kernel completes loopback connects, so rarely slow. | inconclusive | #48; finding 4 |
+| E3 | Record staleness (7 days) | `SystemDNSManager.swift:368`; `SystemProxyManager.swift:572` | Records older than 7 days are restored without a liveness probe. Only without a location store, which both production hosts always inject (`AppState.swift:137`, `DaemonRuntimeHost.swift:133`); only DNS records are refreshed by `journal.touch`. | Yes, where reachable: ownership by age. | event-driven | #48 (remove with the legacy path) |
+| E4 | Location drift-repair budget (4 per 60 s) | `NetworkLocationStore.swift:14-15`; `LocationSettingsRecovery.swift:164` | Past it, another program's rewrite stands until the window slides; one retry is scheduled. Emits `platform.location_contended`. | No; rate-limits a fight. | bound | |
+| E5 | Environment drift-repair budget (3 per 30 min) | `EnvironmentDriftRepair.swift:51` | Same shape for the shell environment. Generation-fenced; emits `platform.environment_repair_withheld`/`_superseded`. | No. | bound | |
+| E6 | launchd inspection budget (5 s, checked before each read; 2 s per read plus kill and drain grace) | `EnvironmentManager.swift:64`; `CommandRunner.swift:63` | No read starts after 5 s, but one already started can run past it. Unread names are marked unreadable, which is inconclusive: not drift, no repair. | No. | bound | |
+| E7 | launchd residue read at teardown (2 s) | `EnvironmentManager.swift:442`, `:574` | With an idle journal, an unreadable value reads as "not ours", and the environment teardown is skipped. | Yes: an unreadable value is read as absent. | inconclusive | finding 9 |
+| E8 | Termination drain (5 s) | `AppState.swift:208`, `:2078` | Quit stops waiting for platform work and clears anyway, after superseding in-flight starts. Emits `lifecycle.termination_drain_expired`. | Proceeds on teardown, which is the safe direction. | bound | |
+
+## F. Helper and processes
+
+| # | Window (default) | Where | What it decides | Authority by window? | Verdict | Covered by |
+| --- | --- | --- | --- | --- | --- | --- |
+| F1 | Helper status ping (40 s transaction + 40 s turn; 3 s + 3 s in update preflight) | `HelperPrivilegeClient.swift:253`, `:284`, `:605`, `:625`; `UpdatePreflight.swift:178` | Any send error, a timeout included, is `.notResponding` through a `try?`: "Repair Helper" in Settings, an update refused, no event. | Yes: a busy helper reads as broken. | inconclusive | finding 6 |
+| F2 | Helper transaction timeout in `execute(batch:)` | `HelperPrivilegeClient.swift:390` | Treated as unreachable: the rest of the batch re-runs through AppleScript (`auth.privilege_helper_degraded`), except `compareNetworkSettings`, which fails (`:374`). The budget does not cover the helper's backlog behind another process. | Yes: hands the surface to a second writer while the first may still be writing. | inconclusive | #48; finding 9 |
+| F3 | Helper-side budgets (request 5 s, operation 20 s, reply 5 s; kill grace 2 s) | `HelperSubprocess.swift:48`, `:216`, `:217`; `HelperDaemon.swift:124` | One request or command fails. | No. | bound | |
+| F4 | `CommandRunner` timeouts (30 s default, 2 s `launchctl getenv`, 600 s admin prompt) | `CommandRunner.swift:51`, `:57`, `:63` | One command throws `timedOut`; meaning is the caller's (E6, E7). | No. | bound | |
+| F5 | Helper socket bind wait (1 s) | `AppState.swift:269` | One preflight re-read after an install. A not-yet-bound helper then reads as F1. | No. | bound | |
+| F6 | Updater limits (background check 300 s, exit grace 0.5 s, download 30 s/120 s, preflight commands 30 s) | `UpdaterController.swift:15`, `:18`; `UpdatePreflight.swift:37`, `:47` | One check, download or preflight fails and is reported. | No. | bound | |
+| F7 | Update schedule (24 h; 10 min after launch) | `AppUpdates.swift:174`, `:175` | When the next background check runs. | No. | bound | |
+
+## G. Hosts: autosave, reconcile and drift
+
+| # | Window (default) | Where | What it decides | Authority by window? | Verdict | Covered by |
+| --- | --- | --- | --- | --- | --- | --- |
+| G1 | Settings autosave debounce (1 s) | `AppState.swift:271` | Saves after edits pause; a held edit emits `config.autosave_held`. | No. | bound | #194 |
+| G2 | System-DNS reconcile debounce (1 s; none in the daemon) | `AppState.swift:270`, `:2475` | Coalesces wake, network and VPN triggers into one reconcile; superseded passes are fenced by `LifecycleLane` tokens. | No. | bound | |
+| G3 | Environment drift tick (300 s) | `AppState.swift:272`; `DaemonRuntimeHost.swift:214` | A periodic pass behind wake, network, VPN and proxy-settings triggers; repairs only on observed drift (`platform.environment_drift trigger=timer`). | No. | backstop | |
+| G4 | Repair retries (remaining budget window) | `AppState.swift:2392`, `:2443`; daemon twins | Re-run a withheld repair when the budget slides; superseded passes write nothing. | No. | backstop | |
+| G5 | App DNS health tick (30 s; 2 s probe) | `AppState.swift:1842`, `:1859` | One missed answer asks the helper to start the relay, a no-op while it runs (`HelperDaemon.swift:441`). If a second 2 s probe then misses too, the outcome is `.unresponsive`: the DNS error is set and a notification posted; the run state is left alone. No `RuntimeEvent`. | The reassert is a backstop; the "unresponsive" report reads a timeout as loss. | backstop | finding 5; #181 |
+| G6 | Daemon DNS health tick (30 s; 2 s probe) | `DaemonRuntimeHost.swift:1079` | As G5, without the error or notification; emits `dns.relay_restarted`/`dns.pipeline_unresponsive`. | As G5. | backstop | finding 5; #181 |
+| G7 | Snapshot coalescing (100 ms kernel; 1 s presentation) | `ProxyOrchestrator.swift:342`; `RuntimePresentationAdapter.swift:119` | When observers and the UI see counters. | No. | bound | |
+| G8 | pm-proxy status interval (`--status-interval`, ≥ 0.1 s), control socket receive (2 s) | `PMProxy.swift:457`; `ControlSocketServer.swift:361` | Observability cadence; one control request fails. | No. | bound | |
+| G9 | Listener bind retry (1 s × 10) | `LocalProxyServer.swift:570`, `:141` | Start fails with `ListenerBindError` after ten tries. | No. | bound | |
+
+## H. Bounds on one operation and report rate limits
+
+All **bound**: none grants or revokes anything.
+
+- Connection hygiene: pooled connection max age 300 s (`ConnectionPool.swift:233`); stalled idle reap 45 s, run only by the recovery ladder (`ConnectionPool.swift:536`, `stalledConnectionTimeout`); TCP keepalive 60 s + 4 × 15 s (`TCPKeepalive.swift:20`); SOCKS5 handshake 10 s (`LocalProxyServer.swift:142`, `SOCKS5Server.swift:171`); transparent proxy SNI 10 s (`TransparentTCPProxy.swift:120`).
+- Flush deadlines: audit, event and log flushes 2 s (`ProxyOrchestrator.swift:2361`, `BoundedRecordWriter.swift:76`); `observability.flush_timeout` and `observability.audit_flush_timeout` report them.
+- Relay and process plumbing: TCP relay accept poll 1 s, accept retry 100 ms after resource exhaustion, session poll 30 s (`TCPRelay.swift:193`, `:218`, `:307`); UDP relay poll 1 s (`UDPRelay.swift:175`); helper budgets for refused peers 1 s (`HelperDaemon.swift:273`); helper child drain 500 ms and 50 ms poll slices (`HelperSubprocess.swift:55`, `:141`); `CommandRunner` kill grace 2 s, drain join 5 s, drain poll 100 ms, cancel grace 2 s (`CommandRunner.swift:77`, `:95`, `:100`, `:241`).
+- Answer lifetimes and thresholds: synthesized intercept and tunnel DNS answers carry a 5 s TTL (`DNSWireFormat.swift:360`); PAC slow-evaluation threshold 500 ms (`PACRoutingEngine.swift:73`); `ConnectFailureLog` flush margin 50 ms (`ConnectFailureLog.swift:335`); crash reports older than 30 days are left out of diagnostic bundles (`CrashReportCollector.swift:30`).
+- Tools and cosmetics: `pmctl events --follow` polls every 500 ms (`PMCtl.swift:189`); `pm-proxy --assert-ready-under-ms`, off by default, fails a slow start in test runs (`PMProxy.swift:136`); the log view's "copied" feedback resets after 1.5 s (`LogView.swift:242`).
+- Event and log rate limits: `RuntimeEventRepeatGate` 60 s (`RuntimeEventRepeatGate.swift:35`; auth failure, fallback, credential, PAC and tunnel reports), `ConnectFailureLog` 60 s (`ConnectFailureLog.swift:186`), `pac.no_usable_route` 60 s (`PACNoUsableRouteReporter.swift:13`), PAC slow-evaluation 600 s (`PACRoutingEngine.swift:62`), strict-hint cooldowns 600 s and 60 s (`DirectConnectDetector.swift:39`, `:48`, `:62`), inbound-limit warning 10 s (`InboundConnectionBudget.swift:28`), DoH and DNS-TCP log limits 5 s (`LocalDNSForwarder.swift:473`, `:1019`).
+
+Not a window, but found on the way: `DaemonClient` (`ConduitShared/DaemonClient.swift`) connects, writes and reads with no deadline, so `pmctl` blocks for as long as an unresponsive daemon does.
+
+## Suggested issues
+
+Not filed by this audit; each is a candidate for the owner to file.
+
+1. **Direct-connect cache: invalidate on routing transitions and fence late probes** (finding 1). D1, D2.
+2. **Timeouts read as loss** (findings 2, 3, 5, 6, B12 and E7): one issue with a checklist, or one per surface: response timeouts and the breaker (with #184), the health check's first timeout and the ladder (with #181), the connectivity prober's wait for a `CONNECT` answer granting DIRECT, the DNS health tick's "unresponsive" report, the helper's `.notResponding`, the launchd residue read.
+3. **Invalidate PAC answers on the first path change** (A3): drop answers and reset DNS transports on the leading edge, debounce only the refresh.
+4. **Transparent-relay reassert races a stop** (finding 7). C9.
+5. **DNS response cache: generation-fence stores across a transport reset** (finding 8), with the origin resolver's positive cache (D8) dropped on the same events.
+6. **Launch recovery restores on a timed-out liveness probe** (finding 4): either a sub-item of #48, or a smaller interim change that declines the restore on a timeout and retries next launch.
+7. **`VPNStateFuser` cleanup**: remove the unread `graceExpired` latch, record the post-grace state, and use the injected clock in `DirectConnectDetector.cachedReachability` (finding 9). Small; could ride with any change to those files.
