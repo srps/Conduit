@@ -57,6 +57,19 @@ final class AppState: ObservableObject {
     private(set) var pacPreviewTask: Task<Void, Never>?
     @Published private(set) var activationPreflight: ActivationPreflight = .noAdmin
     @Published private(set) var helperStatusState: HelperToolPrivilegeClient.Status = .notInstalled
+    /// The latest helper reading was `busy`: `helperStatusState` holds the
+    /// last conclusive verdict (or `busy`, when there is none yet), and a
+    /// re-read is pending.
+    @Published private(set) var helperCheckingAgain = false
+    /// The one pending re-read after a `busy` reading.
+    private var helperRecheck: Task<Void, Never>?
+    /// How long after a `busy` reading the helper is read again.
+    private let helperBusyRecheckDelay: Duration
+    /// Set when an install or uninstall replaced the helper: the held
+    /// verdict was about the old one, so a `busy` reading must not keep it
+    /// (STYLE rule 11, a restart is unproven). Cleared by the first
+    /// conclusive reading.
+    private var helperVerdictStale = false
     /// The caller policy the last install from Settings reported (#121);
     /// nil before one, and after an uninstall.
     @Published private(set) var helperCallerPolicy: HelperPinOutcome?
@@ -271,6 +284,7 @@ final class AppState: ObservableObject {
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         helperSocketBindWait: Duration = .seconds(1),
+        helperBusyRecheckDelay: Duration = .seconds(15),
         dnsReconcileDebounce: TimeInterval = 1.0,
         settingsSaveDebounce: Duration = .seconds(1),
         environmentDriftInterval: Duration = .seconds(300),
@@ -342,6 +356,7 @@ final class AppState: ObservableObject {
         self.dnsResponds = dnsResponds
         self.networkMonitor = NetworkMonitor(debounceInterval: networkPathDebounce)
         self.helperSocketBindWait = helperSocketBindWait
+        self.helperBusyRecheckDelay = helperBusyRecheckDelay
         self.dnsReconcileDebounce = dnsReconcileDebounce
         self.settingsSaveDebounce = settingsSaveDebounce
         self.environmentDriftInterval = environmentDriftInterval
@@ -1943,9 +1958,12 @@ final class AppState: ObservableObject {
         let systemConduit = self.systemConduit
         let dnsManager = self.dnsManager
         let vpnConnected = splitDNSGate.entriesWanted
+        // `notInstalled` holds no verdict, so `busy` stands on its own.
+        let heldHelperStatus: HelperToolPrivilegeClient.Status = helperVerdictStale ? .notInstalled : helperStatusState
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let helperStatus = helperLifecycle.status
+            let reading = helperLifecycle.status
+            let helperStatus = heldHelperStatus.updated(by: reading)
             let preflight = ActivationPreflightEvaluator.evaluate(
                 config: configSnapshot,
                 platformConfig: platformConfigSnapshot,
@@ -1960,10 +1978,38 @@ final class AppState: ObservableObject {
                 let helperBecameAvailable = helperStatus == .installed && self.helperStatusState != .installed
                 self.helperStatusState = helperStatus
                 self.activationPreflight = preflight
+                self.helperCheckingAgain = reading == .busy
+                if reading != .busy { self.helperVerdictStale = false }
+                if reading == .busy {
+                    self.scheduleHelperRecheck()
+                } else {
+                    self.helperRecheck?.cancel()
+                    self.helperRecheck = nil
+                }
                 if helperBecameAvailable {
                     self.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
                 }
             }
+        }
+    }
+
+    /// A `busy` reading asks for another observation rather than a verdict
+    /// (STYLE rule 11). One re-read at a time; a conclusive reading from any
+    /// refresh cancels it. The client already emitted
+    /// `auth.privilege_helper_busy` for the reading.
+    private func scheduleHelperRecheck() {
+        guard helperRecheck == nil else { return }
+        let delay = helperBusyRecheckDelay
+        helperRecheck = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                // Cancelled: a conclusive reading landed first.
+                return
+            }
+            guard let self else { return }
+            self.helperRecheck = nil
+            self.refreshPreflight()
         }
     }
 
@@ -2036,6 +2082,12 @@ final class AppState: ObservableObject {
                 self.lastErrorMessage = reason
                 return
             case .success(let outcome):
+                // The helper was replaced: what was held, and any reading
+                // still out, describe the old one.
+                self.helperVerdictStale = true
+                self.preflightRefreshID = UUID()
+                self.helperRecheck?.cancel()
+                self.helperRecheck = nil
                 let (event, level) = succeeded(self, outcome)
                 self.orchestrator.eventLog.append(event)
                 self.logStore.log(level, "Helper: \(event.event) \(event.detail ?? "")", category: .system)

@@ -40,6 +40,9 @@ final class AppStateHarness {
     /// against.
     var networkPathDebounce = NetworkMonitor.defaultDebounceInterval
     var helperSocketBindWait: Duration = .seconds(1)
+    /// Long, so a re-read after a busy helper never lands inside a scenario
+    /// about something else; the busy-helper scenarios pass a short one.
+    var helperBusyRecheckDelay: Duration = .seconds(3600)
     var dnsReconcileDebounce: TimeInterval = 1.0
     /// Long, so an autosave never lands inside a scenario about something
     /// else; the autosave scenarios pass a short one (#171).
@@ -93,6 +96,7 @@ final class AppStateHarness {
             dnsResponds: FakeDNSProbe().responds(onPort:),
             networkPathDebounce: networkPathDebounce,
             helperSocketBindWait: helperSocketBindWait,
+            helperBusyRecheckDelay: helperBusyRecheckDelay,
             dnsReconcileDebounce: dnsReconcileDebounce,
             settingsSaveDebounce: settingsSaveDebounce,
             environmentDriftInterval: environmentDriftInterval,
@@ -618,6 +622,61 @@ final class AppStateHarnessTests: XCTestCase {
 
     private var machine: FakeMachine { harness.machine }
     private var wifi: FakeMachine.Service { machine.service("Wi-Fi") }
+
+    // MARK: A busy helper (#197)
+
+    /// A ping that ran out of time is not a verdict: the app keeps the one it
+    /// had, says it is checking again, and reads the helper again until an
+    /// answer comes. A helper still finishing another request used to show
+    /// "Installed but not responding" with "Repair Helper".
+    func testABusyHelperKeepsItsVerdictAndIsReadAgain() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        harness.helperBusyRecheckDelay = .milliseconds(20)
+        let state = harness.launch()
+        await harness.launchRecovery()
+        await harness.settle("the launch preflight found the helper") { state.helperStatus == .installed }
+
+        harness.helper.status = .busy
+        let readsBefore = harness.helper.statusReads
+        state.refreshPreflight()
+        await harness.settle("the busy reading is noted") { state.helperCheckingAgain }
+        XCTAssertEqual(state.helperStatus, .installed, "a timed-out ping does not overturn the verdict")
+        XCTAssertNotNil(HelperStatusPresentation.primaryActionTitle(for: state.helperStatus))
+        await harness.settle("the helper is read again on its own") { self.harness.helper.statusReads >= readsBefore + 2 }
+
+        harness.helper.status = .installed
+        await harness.settle("an answer ends the re-reads") { !state.helperCheckingAgain }
+        XCTAssertEqual(state.helperStatus, .installed)
+    }
+
+    /// A reinstall replaces the helper, so the verdict about the old one is
+    /// not kept across a busy first reading of the new one.
+    func testAReinstalledHelperThatIsBusyDoesNotKeepTheOldVerdict() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        harness.helperSocketBindWait = .zero
+        let state = harness.launch()
+        await harness.launchRecovery()
+        await harness.settle("the launch preflight found the helper") { state.helperStatus == .installed }
+
+        harness.helper.statusAfterInstall = .busy
+        state.installHelper()
+        await harness.settle("the install ran") { self.harness.helper.installs == 1 }
+        await harness.settle("the new helper's busy reading shows") { state.helperStatus == .busy }
+        XCTAssertTrue(state.helperCheckingAgain)
+        XCTAssertNil(HelperStatusPresentation.primaryActionTitle(for: state.helperStatus))
+    }
+
+    /// With no verdict yet, the first reading's `busy` is what shows, and it
+    /// offers no repair.
+    func testABusyHelperAtLaunchShowsBusyWithoutARepair() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        harness.helper.status = .busy
+        let state = harness.launch()
+        await harness.launchRecovery()
+        await harness.settle("the launch preflight read the helper") { state.helperCheckingAgain }
+        XCTAssertEqual(state.helperStatus, .busy)
+        XCTAssertNil(HelperStatusPresentation.primaryActionTitle(for: state.helperStatus))
+    }
 
     private func isRunning(_ appState: AppState) -> Bool {
         appState.runtimeSnapshot.runtimeStatus.state == .running

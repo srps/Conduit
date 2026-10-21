@@ -456,10 +456,12 @@ package final class FakeLoginItems: @unchecked Sendable {
 package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sendable {
     private let lock = NSLock()
     private var _status: HelperToolPrivilegeClient.Status
+    private var _statusReads = 0
     private var _installs = 0
     private var _uninstalls = 0
     private var _fails = false
     private var _callerPolicy: HelperPinOutcome = .enforced
+    private var _statusAfterInstall: HelperToolPrivilegeClient.Status = .installed
 
     package struct Refused: Error, LocalizedError {
         package var errorDescription: String? { "helper lifecycle refused" }
@@ -470,15 +472,30 @@ package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sen
     }
 
     package var status: HelperToolPrivilegeClient.Status {
-        get { lock.withLock { _status } }
+        get {
+            lock.withLock {
+                _statusReads += 1
+                return _status
+            }
+        }
         set { lock.withLock { _status = newValue } }
     }
+
+    /// How many times the status was read, so a test can count re-checks.
+    package var statusReads: Int { lock.withLock { _statusReads } }
 
     package var installs: Int { lock.withLock { _installs } }
     package var uninstalls: Int { lock.withLock { _uninstalls } }
     package var fails: Bool {
         get { lock.withLock { _fails } }
         set { lock.withLock { _fails = newValue } }
+    }
+
+    /// What the helper reads as once an install succeeds; `busy` stands in
+    /// for a new helper whose first ping times out.
+    package var statusAfterInstall: HelperToolPrivilegeClient.Status {
+        get { lock.withLock { _statusAfterInstall } }
+        set { lock.withLock { _statusAfterInstall = newValue } }
     }
 
     /// What the next install reports, as the installer would have.
@@ -490,7 +507,7 @@ package final class FakeHelperLifecycle: HelperLifecycleManaging, @unchecked Sen
     package func installHelper() throws -> HelperPinOutcome {
         let (refused, policy): (Bool, HelperPinOutcome) = lock.withLock {
             _installs += 1
-            if !_fails { _status = .installed }
+            if !_fails { _status = _statusAfterInstall }
             return (_fails, _callerPolicy)
         }
         if refused { throw Refused() }
