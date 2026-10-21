@@ -944,6 +944,28 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(decisions() - before, 2, "the pass, then the close's retry after it drained")
     }
 
+    /// As above, but a newer edit is waiting when the section closes: the
+    /// pass that flush starts began from the advanced baseline and cannot
+    /// retry A's failed clear, so the post-drain check must still run.
+    func testLeavingASectionWithANewerEditDuringAPassStillRetries() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        try await appState.startProxy()
+        machine.privilege.failing = [.setWebProxyEndpoint]
+        func decisions() -> Int { appState.eventLog.events.filter { $0.event == "config.platform_integration" }.count }
+        let before = decisions()
+
+        appState.platformConfig.manageSystemProxy = false
+        appState.saveConfig()
+        appState.config.profileName = "Edited"
+        XCTAssertTrue(appState.hasUnsavedEdit)
+        appState.flushPendingSave()
+        await appState.reconciler.drain()
+        await appState.awaitSectionCloseRetry()
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(decisions() - before, 2, "A's clear, then the retry after it drained")
+    }
+
     func testLeavingASectionSavesAWaitingEditAtOnce() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig())
         await harness.launchRecovery()
@@ -977,6 +999,23 @@ final class AppStateHarnessTests: XCTestCase {
     /// The login item needs no runtime, so quitting with the switch still
     /// unsaved registers it: the next launch reads the saved flag as its
     /// baseline and would never notice the machine disagrees.
+    /// Autosaved, but the registration failed and rewound. Nothing is
+    /// unsaved at quit; the next launch would trust the file. Quit retries.
+    func testQuittingRetriesALoginItemRegistrationThatFailed() async throws {
+        let appState = try launch()
+        harness.loginItems.fails = true
+        appState.platformConfig.launchAtLogin = true
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertFalse(appState.hasUnsavedEdit)
+        XCTAssertEqual(harness.loginItems.registrations, [true], "tried once, refused")
+
+        harness.loginItems.fails = false
+        appState.persistPendingEditForTermination()
+
+        XCTAssertEqual(harness.loginItems.registrations, [true, true], "retried at quit")
+    }
+
     func testQuittingWithAnUnsavedLoginItemFlipRegistersIt() throws {
         let appState = try launch()
 
