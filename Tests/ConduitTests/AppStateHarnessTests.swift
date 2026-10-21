@@ -1102,6 +1102,46 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.contains("retry.example"))
     }
 
+    /// #175: a bypass edit reaches the surfaces that advertise the list to
+    /// other programs while the proxy runs: the shell environment's
+    /// `NO_PROXY`, and in manual mode the system proxy's `ExceptionsList`.
+    /// It used to wait for a listener change or a restart.
+    func testABypassEditReachesTheAdvertisedSurfacesInManualMode() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+
+        appState.config.noProxyHosts.append("bypass.example")
+        appState.saveConfig()
+        await appState.reconciler.drain()
+
+        XCTAssertTrue(machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
+        let zshrc = try String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)
+        XCTAssertTrue(zshrc.contains("bypass.example"))
+        XCTAssertTrue(wifi.bypassDomains.contains("bypass.example"), "manual mode's ExceptionsList follows")
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.advertised_bypass_changed" }.map(\.detail),
+                       ["surfaces=environment,system_proxy"])
+    }
+
+    /// PAC mode's settings do not carry the list, so they are not rewritten.
+    func testABypassEditInPACModeLeavesTheSystemProxyAlone() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .pac))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        let bypassBefore = wifi.bypassDomains
+
+        appState.config.noProxyHosts.append("bypass.example")
+        appState.saveConfig()
+        await appState.reconciler.drain()
+
+        XCTAssertTrue(machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
+        XCTAssertEqual(wifi.bypassDomains, bypassBefore)
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.advertised_bypass_changed" }.map(\.detail),
+                       ["surfaces=environment"])
+    }
+
     /// Repeated DNS stops while the first is held on a slow helper. Each
     /// used to queue its own teardown behind the first, unbounded; now they
     /// join the one in flight, and one teardown runs.
