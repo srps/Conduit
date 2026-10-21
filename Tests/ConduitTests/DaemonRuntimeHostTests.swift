@@ -380,6 +380,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let hold = HeldCall()
         let secrets = InMemorySecretStore()
         private let stateDirectory: URL
+        /// The scratch home the host edits shell profiles in.
+        var homeDirectory: URL { stateDirectory.appendingPathComponent("home", isDirectory: true) }
 
         init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
             let stateDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -1212,6 +1214,25 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(harness.wifi.bypassDomains, bypassBefore)
         XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "config.advertised_bypass_changed" }.map(\.detail),
                        ["surfaces=environment"])
+        await host.stopRuntime()
+    }
+
+    /// Twin of `AppStateHarnessTests.testAWipedEnvironmentIsRepairedOnTheNextSettingsNotification`.
+    func testAWipedEnvironmentIsRepairedOnTheNextSettingsNotification() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let zshrc = harness.homeDirectory.appendingPathComponent(".zshrc")
+        try "export A=1\n".write(to: zshrc, atomically: true, encoding: .utf8)
+        _ = try harness.machine.run("/bin/launchctl", ["unsetenv", "HTTP_PROXY"])
+
+        harness.locationObserver.emitSettingsChange()
+        await host.deliveries.drain()
+
+        XCTAssertNotNil(harness.machine.launchdEnvironment["HTTP_PROXY"])
+        XCTAssertTrue(try String(contentsOf: zshrc, encoding: .utf8).contains("# >>> Conduit >>>"))
+        XCTAssertEqual(host.orchestrator.eventLog.events.map(\.event).filter { $0.hasPrefix("platform.environment_") },
+                       ["platform.environment_drift", "platform.environment_repaired"])
         await host.stopRuntime()
     }
 
