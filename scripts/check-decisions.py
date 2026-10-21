@@ -15,13 +15,16 @@ a record's evidence is enough. It checks that:
   checks out with fetch-depth 0);
 - the front matter has exactly the fields of template.md, each status comes
   from its allowed set and the date is real;
-- an accepted or superseded decision names its authorization, with a date and
-  an issue, PR or commit;
+- an accepted or superseded decision names its authorization, with a real
+  date and an issue, PR or commit;
 - Supersedes / Superseded by name existing records, are reciprocal and
   acyclic, and a record is superseded exactly when it names a successor;
 - the sections are the template's, in order;
-- an implemented or partial record links at least one existing file outside
-  docs/ from its Implementation evidence, and says what it does not prove;
+- an implemented or partial record links at least one existing file (not a
+  directory) outside docs/ from its Implementation evidence, and says what it
+  does not prove;
+- a passed validation has a "Validation: ..." paragraph there linking where
+  the result is recorded: a GitHub issue, PR or comment, or a repository file;
 - the index in README.md has one row per record, matching its link, title
   and statuses;
 - every relative link (inline, with or without a title or <...>, and
@@ -50,18 +53,40 @@ TITLE = re.compile(r'^# (\d{4}): (\S.*)$')
 FIELD = re.compile(r'^- ([A-Za-z ]+): (.*)$')
 DECISION = re.compile(r'^([a-z]+)(?: \((.+)\))?$')
 SOURCE_DATE = re.compile(r'\b\d{4}-\d{2}-\d{2}\b')
-SOURCE_REFERENCE = re.compile(r'#\d+|\b[0-9a-f]{7,40}\b|https://github\.com/\S+/(?:issues|pull)/\d+')
+GITHUB_URL = re.compile(r'(?<![\w/])https://github\.com/[^/\s<>()\[\]]+/[^/\s<>()\[\]]+/(?:issues|pull)/\d+(?!\w)')
+SOURCE_REFERENCE = re.compile(r'#\d+|\b[0-9a-f]{7,40}\b|https://github\.com/\S+/(?:issues|pull)/\d+(?!\w)')
 ID_LIST = re.compile(r'^\d{4}(?:, \d{4})*$')
 REFERENCE = re.compile(r'^ {0,3}\[([^\]\n]+)\]:\s*(<[^>\n]*>|\S+)', re.MULTILINE)
 # [text][label], [label][] and a shortcut [label] that is not a definition.
 REFERENCE_USE = re.compile(r'\[([^\]\n]+)\](?:\[([^\]\n]*)\]|(?![(:\[]))')
 INDEX_ROW = re.compile(r'^\| \[(\d{4})\]\(([^)]+)\) \| (.+?) \| (\S+) \| (\S+) \| (\S+) \|$')
-FENCE = re.compile(r'^```.*?^```', re.MULTILINE | re.DOTALL)
+FENCE_OPEN = re.compile(r'^ {0,3}(`{3,}|~{3,})')
 CODE_SPAN = re.compile(r'`[^`\n]*`')
 
 
+def without_fences(text):
+    """Text with fenced code blocks blanked. A fence closes only on a line of
+    the same character, at least as long and with nothing after it; an
+    unclosed fence runs to the end of the text."""
+    kept, fence = [], None
+    for line in text.split('\n'):
+        if fence is None:
+            opening = FENCE_OPEN.match(line)
+            if opening:
+                fence = opening.group(1)
+                kept.append('')
+            else:
+                kept.append(line)
+        else:
+            closing = re.match(r'^ {0,3}(`{3,}|~{3,})[ \t]*$', line)
+            if closing and closing.group(1)[0] == fence[0] and len(closing.group(1)) >= len(fence):
+                fence = None
+            kept.append('')
+    return '\n'.join(kept)
+
+
 def prose(text):
-    return CODE_SPAN.sub('', FENCE.sub('', text))
+    return CODE_SPAN.sub('', without_fences(text))
 
 
 def inline_targets(text):
@@ -122,13 +147,19 @@ def relative_links(text):
     return paths(inline_targets(prose(text)) + [target for _, target in REFERENCE.findall(prose(text))])
 
 
-def used_links(section, definitions):
-    """Relative paths a section links, inline or through the document's definitions."""
+def used_targets(section, definitions):
+    """Raw link targets a section uses, inline or through the document's definitions."""
     text = prose(section)
     used = [definitions[label_key(label or text_label)]
             for text_label, label in REFERENCE_USE.findall(text)
             if label_key(label or text_label) in definitions]
-    return paths(inline_targets(text) + used)
+    return [target[1:-1].strip() if target.startswith('<') and target.endswith('>') else target
+            for target in inline_targets(text) + used]
+
+
+def used_links(section, definitions):
+    """Relative paths a section links, inline or through the document's definitions."""
+    return paths(used_targets(section, definitions))
 
 
 def resolve(root, source, target):
@@ -198,6 +229,11 @@ def check_fields(name, record, problems):
         source = decision.group(2) or ''
         if not (SOURCE_DATE.search(source) and SOURCE_REFERENCE.search(source)):
             problems.append(f'{name}: an {decision.group(1)} decision names its authorization with a date and an issue, PR or commit, as "(owner, YYYY-MM-DD, #N)"')
+        for source_date in SOURCE_DATE.findall(source):
+            try:
+                datetime.date.fromisoformat(source_date)
+            except ValueError:
+                problems.append(f'{name}: authorization date {source_date!r} is not a real date')
     if fields.get('Implementation') not in IMPLEMENTATIONS:
         problems.append(f'{name}: Implementation must be one of {sorted(IMPLEMENTATIONS)}; found {fields.get("Implementation")!r}')
     if fields.get('Validation') not in VALIDATIONS:
@@ -245,8 +281,32 @@ def check_supersession(records, problems):
             visit(record_id, [])
 
 
+def check_validation(root, path, record, problems):
+    """`passed` needs a "Validation: ..." paragraph in Implementation evidence
+    linking where the result is recorded: a GitHub issue or PR (a comment
+    anchor included) or a file in the repository."""
+    if record['fields'].get('Validation') != 'passed':
+        return
+    evidence = without_fences(record['sections'].get('Implementation evidence', ''))
+    definitions = references(record['text'])
+    paragraphs = [paragraph for paragraph in re.split(r'\n[ \t]*\n', evidence)
+                  if re.match(r' {0,3}Validation:(?:\s|$)', paragraph.lstrip('\n'))]
+    targets = [target for paragraph in paragraphs for target in used_targets(paragraph, definitions)]
+    recorded = [t for t in targets if GITHUB_URL.match(t)]
+    # GitHub also links <https://...> autolinks and bare URLs.
+    recorded += [url for paragraph in paragraphs for url in GITHUB_URL.findall(prose(paragraph))]
+    for target in paths(targets):
+        resolved = resolve(root, path, target)
+        if resolved is not None and resolved.is_file():
+            recorded.append(target)
+    if not recorded:
+        problems.append(f'{path.name}: Validation passed needs a "Validation: ..." paragraph in Implementation '
+                        'evidence linking where the result is recorded (a GitHub issue, PR or comment, or a file)')
+
+
 def check_evidence(root, path, record, problems):
     name = path.name
+    check_validation(root, path, record, problems)
     if record['fields'].get('Implementation') not in ('partial', 'implemented'):
         return
     evidence = record['sections'].get('Implementation evidence', '')
@@ -254,7 +314,7 @@ def check_evidence(root, path, record, problems):
     outside = []
     for target in used_links(evidence, references(record['text'])):
         resolved = resolve(root, path, target)
-        if resolved is not None and resolved.exists() and resolved != docs and docs not in resolved.parents:
+        if resolved is not None and resolved.is_file() and docs not in resolved.parents:
             outside.append(target)
     if not outside:
         problems.append(f'{name}: {record["fields"]["Implementation"]} needs an Implementation evidence link to a file outside docs/')

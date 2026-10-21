@@ -8,7 +8,7 @@ Each record carries three statuses, because merged does not mean it works:
 
 - **Decision:** `proposed`, `accepted`, `rejected` or `superseded`. An accepted or superseded decision names its authorization in parentheses: who, the date, and the issue, PR or commit that records it. A chat session is never a source.
 - **Implementation:** `planned`, `partial` or `implemented`. `partial` and `implemented` link to evidence outside `docs/`: code, tests, scripts or pm-sim scenarios.
-- **Validation:** `none`, `pending` or `passed`. This is the owner or real-machine check that unit tests and pm-sim cannot give. `none` means no such check has been recorded or is due yet; `pending` means one is due and has not passed; `passed` links to where the result is recorded.
+- **Validation:** `none`, `pending` or `passed`. This is the owner or real-machine check that unit tests and pm-sim cannot give. `none` means no such check has been recorded or is due yet; `pending` means one is due and has not passed; `passed` needs a paragraph starting `Validation:` in Implementation evidence that links where the result is recorded: a GitHub issue, PR or comment, or a file in the repository.
 
 `Supersedes` and `Superseded by` name record IDs or `none`, and are kept reciprocal. A superseded record names its successor.
 
@@ -18,7 +18,7 @@ Each record carries three statuses, because merged does not mean it works:
 - An accepted decision is never edited into a different one. Replacing it takes a new record and supersession links. Facts and evidence are corrected in place.
 - A change that makes or replaces an owner decision adds or updates a record in the same PR. A change that implements part of one, or records a validation result, updates its statuses and evidence.
 - Update the index below in the same change.
-- `scripts/check-decisions.py` checks the structure in CI (#177): IDs, and from git history that no record was deleted or its ID reused; statuses, the index, supersession links, evidence and relative links. It cannot judge whether the evidence is enough; review does that.
+- `scripts/check-decisions.py` checks the structure in CI (#177): IDs, and from git history that no record was deleted or its ID reused; statuses and authorization dates, the index, supersession links, implementation and validation evidence, and relative links. It cannot judge whether the evidence is enough; review does that.
 
 ## Index
 
