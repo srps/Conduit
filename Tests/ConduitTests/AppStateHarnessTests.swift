@@ -1200,12 +1200,15 @@ final class AppStateHarnessTests: XCTestCase {
     /// No wake, path, VPN or settings report follows a silent wipe for sure;
     /// the periodic tick finds it anyway. The real path monitor's first
     /// report would also run a pass, and on a slow runner it wins the race,
-    /// so it is held off past the test.
+    /// so it is held off past the test. So would the launch preflight's
+    /// pass on finding the helper, so the test waits it out before wiping.
     func testThePeriodicTickRepairsAWipeNoNotificationReports() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true),
                                   environmentDriftInterval: .milliseconds(50), networkPathDebounce: 3600)
         await harness.launchRecovery()
         try await appState.startProxy()
+        await harness.settle("the launch preflight found the helper") { appState.helperStatusState == .installed }
+        await harness.deliveries()
         try wipeEnvironment()
 
         await harness.settle("the tick repairs the wipe") {
