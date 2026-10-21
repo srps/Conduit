@@ -111,14 +111,27 @@ final class RuntimeReconcilerTests: XCTestCase {
 
     /// A lifecycle flip is already live in the runtime; marking it
     /// reconciled is what keeps its own save from restarting the subsystem.
-    func testAConfigMarkedReconciledDoesNotQueueAPass() async {
-        let flipped = edited(port: 18081)
-        reconciler.markReconciled(config: flipped)
+    func testADNSFlipMarkedReconciledDoesNotQueueAPass() async {
+        var flipped = baseConfig
+        flipped.dnsForwarderEnabled.toggle()
+        reconciler.markReconciled(dnsForwarderEnabled: flipped.dnsForwarderEnabled)
 
         reconciler.reconcile(config: flipped, platformConfig: proxyOn)
 
         XCTAssertFalse(reconciler.hasPassInFlight)
         XCTAssertEqual(host.calls, [])
+    }
+
+    /// Only the flag is absorbed: an edit made beside it still gets its pass.
+    func testMarkingTheDNSFlipLeavesOtherEditsToReconcile() async {
+        var edited = edited(port: 18081)
+        edited.dnsForwarderEnabled.toggle()
+        reconciler.markReconciled(dnsForwarderEnabled: edited.dnsForwarderEnabled)
+
+        reconciler.reconcile(config: edited, platformConfig: proxyOn)
+
+        XCTAssertTrue(reconciler.hasPassInFlight)
+        await reconciler.drain()
     }
 
     /// The login item needs no runtime state and must not wait for the

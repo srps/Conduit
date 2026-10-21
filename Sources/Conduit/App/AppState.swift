@@ -779,17 +779,32 @@ final class AppState: ObservableObject {
             }
             guard let self else { return }
             self.pendingSave = nil
-            let blocking = self.config.validate().filter(\.blocksProxyStart)
-            guard blocking.isEmpty else {
-                // A decision not to save: event first, so the UI, pmctl and
-                // pm-sim see why the edit is still unsaved.
-                self.recordLifecycle(RuntimeEvent(kind: .config, event: "config.autosave_held",
-                                                  detail: "reason=start_blocking_problems problems=\(blocking.count)"),
-                                     level: .info)
-                return
-            }
+            guard !self.holdsBackUnsavedEdit(trigger: "pause") else { return }
             self.saveConfig()
         }
+    }
+
+    /// A save the lifecycle makes for its own state (the DNS flag, a start).
+    /// `config` is one value, so it carries a Settings edit still waiting
+    /// for its pause; one that would block a proxy start must not reach a
+    /// reconcile through here either. The whole save then waits, and the
+    /// edit's own save, or quit, writes both.
+    private func saveLifecycleChange() {
+        guard !holdsBackUnsavedEdit(trigger: "lifecycle") else { return }
+        saveConfig()
+    }
+
+    /// Whether an unsaved edit has a problem that would block a proxy start,
+    /// and so must not be saved now. A decision not to save: event first,
+    /// so the UI, pmctl and pm-sim see why the edit is still unsaved.
+    private func holdsBackUnsavedEdit(trigger: String) -> Bool {
+        guard hasUnsavedEdit else { return false }
+        let blocking = config.validate().filter(\.blocksProxyStart)
+        guard !blocking.isEmpty else { return false }
+        recordLifecycle(RuntimeEvent(kind: .config, event: "config.autosave_held",
+                                     detail: "reason=start_blocking_problems problems=\(blocking.count) trigger=\(trigger)"),
+                        level: .info)
+        return true
     }
 
     /// Saves now if an edit has not been saved. A Configure section calls
@@ -807,8 +822,12 @@ final class AppState: ObservableObject {
     func persistPendingEditForTermination() {
         guard hasUnsavedEdit else { return }
         cancelPendingSave()
-        guard configurationLoadError == nil, persistConfiguration() else { return }
-        reconciler.reconcileImmediateActions(platformConfig: platformConfig)
+        guard configurationLoadError == nil else { return }
+        // Even when a later file failed: the next launch reads the platform
+        // file as its baseline, and would never see the flip it holds.
+        if persistConfiguration().platformSaved {
+            reconciler.reconcileImmediateActions(platformConfig: platformConfig)
+        }
     }
 
     /// Waits for the save an edit scheduled, if any. For the harness.
@@ -822,21 +841,23 @@ final class AppState: ObservableObject {
         pendingSave = nil
     }
 
-    /// Whether every file was written. A failed write keeps the edit
-    /// unsaved, so leaving the section or quitting tries again.
+    /// Which files were written. A failed write keeps the edit unsaved, so
+    /// leaving the section or quitting tries again.
     @discardableResult
-    private func persistConfiguration() -> Bool {
+    private func persistConfiguration() -> (complete: Bool, platformSaved: Bool) {
+        var platformSaved = false
         do {
             try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
             try PlatformConfigPersistence.save(platformConfig, in: runtimeEnvironment)
+            platformSaved = true
             try AppPreferencesPersistence.save(appPreferences, in: runtimeEnvironment)
             hasUnsavedEdit = false
             logStore.log(.debug, "Saved configuration.")
-            return true
+            return (true, true)
         } catch {
             lastErrorMessage = error.localizedDescription
             logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
-            return false
+            return (false, platformSaved)
         }
     }
 
@@ -1243,7 +1264,7 @@ final class AppState: ObservableObject {
             // flag that is already on; `setEnabled` is idempotent.
             loginItemManager.setEnabled(platformConfig.launchAtLogin, logger: logStore)
 
-            saveConfig()
+            saveLifecycleChange()
             if postNotification {
                 notificationManager.post(title: "Proxy Enabled", body: runtime.runtimeStatus.activeUpstream ?? "Local proxy is running.")
             }
@@ -1629,8 +1650,8 @@ final class AppState: ObservableObject {
             // The flag flip above is our own lifecycle work, not a settings
             // edit — absorb it so the save below doesn't restart the
             // forwarder we just started.
-            reconciler.markReconciled(config: config)
-            saveConfig()
+            reconciler.markReconciled(dnsForwarderEnabled: true)
+            saveLifecycleChange()
         } else if let err = snapshot.dnsError {
             notificationManager.post(title: "DNS Forwarder Failed", body: err)
             if manageSystemDNS {
@@ -1701,8 +1722,8 @@ final class AppState: ObservableObject {
 
         config.dnsForwarderEnabled = false
         // Lifecycle flip, not a settings edit — see startDNS.
-        reconciler.markReconciled(config: config)
-        saveConfig()
+        reconciler.markReconciled(dnsForwarderEnabled: false)
+        saveLifecycleChange()
     }
 
     // MARK: - Tunnels Lifecycle
@@ -1733,12 +1754,12 @@ final class AppState: ObservableObject {
         } else if snapshot.tunnelsRunState == .running, let err = snapshot.tunnelsError {
             notificationManager.post(title: "Tunnels Partially Started", body: err)
         }
-        saveConfig()
+        saveLifecycleChange()
     }
 
     func stopTunnels() async {
         await orchestrator.stopTunnels()
-        saveConfig()
+        saveLifecycleChange()
     }
 
     // MARK: - DNS Health & Diagnostics
