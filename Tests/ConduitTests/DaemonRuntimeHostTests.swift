@@ -1176,6 +1176,45 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// Twin of `AppStateHarnessTests.testABypassEditReachesTheAdvertisedSurfacesInManualMode`.
+    func testABypassReloadReachesTheAdvertisedSurfacesInManualMode() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .manual))
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+
+        var edited = host.config
+        edited.noProxyHosts.append("bypass.example")
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+
+        XCTAssertTrue(harness.machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
+        XCTAssertTrue(harness.wifi.bypassDomains.contains("bypass.example"))
+        XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "config.advertised_bypass_changed" }.map(\.detail),
+                       ["surfaces=environment,system_proxy"])
+        await host.stopRuntime()
+    }
+
+    /// Twin of `AppStateHarnessTests.testABypassEditInPACModeLeavesTheSystemProxyAlone`.
+    func testABypassReloadInPACModeLeavesTheSystemProxyAlone() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(
+            manageSystemProxy: true, manageEnvironmentVariables: true, systemProxyMode: .pac))
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let bypassBefore = harness.wifi.bypassDomains
+
+        var edited = host.config
+        edited.noProxyHosts.append("bypass.example")
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+
+        XCTAssertTrue(harness.machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
+        XCTAssertEqual(harness.wifi.bypassDomains, bypassBefore)
+        XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "config.advertised_bypass_changed" }.map(\.detail),
+                       ["surfaces=environment"])
+        await host.stopRuntime()
+    }
+
     /// Twin of `AppStateHarnessTests.testRepeatedDNSStopsWhileTheFirstIsHeldRunOneTeardown`:
     /// stops while a stop is held join it instead of queueing teardowns.
     func testRepeatedStopsWhileTheFirstIsHeldRunOneTeardown() async throws {

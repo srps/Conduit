@@ -17,6 +17,11 @@ package struct ConfigDiff: Sendable {
     /// PAC policy changes can update the existing endpoint once after reload.
     package let proxyListenerChanged: Bool
     package let localPACChanged: Bool
+    /// The bypass list, which the managed shell environment (`NO_PROXY`)
+    /// and manual-mode system proxy (`ExceptionsList`) advertise to other
+    /// programs. Part of `routingChanged`; this names the surfaces it
+    /// reaches beyond the kernel (#175).
+    package let advertisedBypassChanged: Bool
 
     package var hasChanges: Bool {
         proxyChanged || authChanged || upstreamsChanged || routingChanged || pacRouteLimitChanged
@@ -40,6 +45,7 @@ package struct ConfigDiff: Sendable {
             || old.proxy.gatewayMode != new.proxy.gatewayMode
             || old.proxy.socksEnabled != new.proxy.socksEnabled
             || old.proxy.socksPort != new.proxy.socksPort
+        advertisedBypassChanged = old.routing.noProxyHosts != new.routing.noProxyHosts
         localPACChanged = routingChanged
             || old.proxy.strictMode != new.proxy.strictMode
             || old.enabledUpstreams.isEmpty != new.enabledUpstreams.isEmpty

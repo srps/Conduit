@@ -1190,8 +1190,28 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
             )
         }
 
-        if pass.diff.proxyChanged, pass.runtime.proxyIsUp {
-            if platform.manageSystemProxy, !pass.platformActions.contains(.applySystemProxy) {
+        // The listener endpoint is in every advertised surface; the bypass
+        // list is in the shell environment always and in the system proxy
+        // only in manual mode, where it is `ExceptionsList`. PAC mode's
+        // served script is refreshed by the routing reload itself.
+        let systemProxyFollows = pass.diff.proxyChanged
+            || (pass.diff.advertisedBypassChanged && platform.systemProxyMode == .manual)
+        let environmentFollows = pass.diff.proxyChanged || pass.diff.advertisedBypassChanged
+        if pass.runtime.proxyIsUp, pass.diff.advertisedBypassChanged, !pass.diff.proxyChanged {
+            let surfaces = [
+                platform.manageEnvironmentVariables && !pass.platformActions.contains(.applyEnvironment) ? "environment" : nil,
+                platform.manageSystemProxy && systemProxyFollows && !pass.platformActions.contains(.applySystemProxy) ? "system_proxy" : nil,
+            ].compactMap { $0 }
+            if !surfaces.isEmpty {
+                // Event first: the writes below are a config decision.
+                let event = RuntimeEvent(kind: .config, event: "config.advertised_bypass_changed",
+                                         detail: "surfaces=\(surfaces.joined(separator: ","))")
+                orchestrator.eventLog.append(event)
+                logger.log(.notice, "Config reload: bypass list changed; re-applying \(surfaces.joined(separator: " and ")). \(event.event) \(event.detail ?? "")", category: .system)
+            }
+        }
+        if pass.runtime.proxyIsUp {
+            if systemProxyFollows, platform.manageSystemProxy, !pass.platformActions.contains(.applySystemProxy) {
                 do {
                     try systemConduit.apply(
                         config: new,
@@ -1203,7 +1223,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
                     logger.log(.warning, "Could not re-apply system proxy after config reload: \(error.localizedDescription)", category: .system)
                 }
             }
-            if platform.manageEnvironmentVariables, !pass.platformActions.contains(.applyEnvironment) {
+            if environmentFollows, platform.manageEnvironmentVariables, !pass.platformActions.contains(.applyEnvironment) {
                 do {
                     try environmentManager.apply(config: new, logger: logger)
                 } catch {
