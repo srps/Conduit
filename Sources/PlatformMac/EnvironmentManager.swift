@@ -31,46 +31,129 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// had. Mirrors `SystemProxyManager`'s injected `commandRunner`.
     private let homeDirectory: URL
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+    /// Where a profile left alone is reported. Hosts pass their event log.
+    private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
 
     package init(
         journal: PlatformStateJournal,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
-        }
+        },
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
         self.journal = journal
         self.homeDirectory = homeDirectory
         self.commandRunner = commandRunner
+        self.eventSink = eventSink
     }
 
-    private let blockStart = "# >>> Conduit >>>"
-    private let blockEnd = "# <<< Conduit <<<"
+    /// The shell profiles carrying the block, by the name events use.
+    package enum ProfileTarget: String, CaseIterable, Sendable {
+        case zshrc = ".zshrc"
+        case zprofile = ".zprofile"
+        case environmentD = "environment.d"
+
+        var relativePath: String {
+            switch self {
+            case .zshrc: ".zshrc"
+            case .zprofile: ".zprofile"
+            case .environmentD: ".config/environment.d/proxy-manager.conf"
+            }
+        }
+    }
+
+    /// What one operation did to each profile.
+    package enum ProfileOutcome: Equatable, Sendable {
+        case written
+        /// Already in the wanted state; not touched.
+        case unchanged
+        case skipped(ShellProfileBlock.UnsafeReason)
+    }
 
     package var targetFiles: [URL] {
-        let home = homeDirectory
-        return [
-            home.appendingPathComponent(".zshrc"),
-            home.appendingPathComponent(".zprofile"),
-            home.appendingPathComponent(".config/environment.d/proxy-manager.conf")
-        ]
+        ProfileTarget.allCases.map(url(for:))
     }
 
-    package func apply(config: ProxyConfig, logger: (any LogSink)?) throws {
+    private func url(for target: ProfileTarget) -> URL {
+        homeDirectory.appendingPathComponent(target.relativePath)
+    }
+
+    /// Writes the block into every profile that can be edited safely and
+    /// publishes the launchd variables. A profile that cannot be edited is
+    /// left alone and reported; the others are still written. Throws only
+    /// for an unreadable journal or a failed write.
+    @discardableResult
+    package func apply(config: ProxyConfig, logger: (any LogSink)?) throws -> [ProfileTarget: ProfileOutcome] {
         operations.lock()
         defer { operations.unlock() }
         try journal.requireReadableForApply()
         let block = renderBlock(config: config)
-        for file in targetFiles {
-            try ensureParentDirectory(for: file)
-            let existing = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
-            let cleaned = stripManagedBlock(from: existing)
-            let next = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-            let finalContent = next.isEmpty ? block : next + "\n\n" + block + "\n"
-            try finalContent.write(to: file, atomically: true, encoding: .utf8)
+        var outcomes: [ProfileTarget: ProfileOutcome] = [:]
+        for target in ProfileTarget.allCases {
+            outcomes[target] = try rewrite(target, operation: "apply", logger: logger) {
+                ShellProfileBlock.applying(block, to: $0)
+            }
         }
         applyLaunchdEnvironment(config: config, logger: logger)
         logger?.log(.notice, "Updated shell environment proxy variables.", category: .system)
+        return outcomes
+    }
+
+    /// Reads a profile without ever turning a failure into empty text.
+    private func readProfile(_ target: ProfileTarget) -> ShellProfileBlock.Contents {
+        let file = url(for: target)
+        guard FileManager.default.fileExists(atPath: file.path) else { return .missing }
+        let data: Data
+        do {
+            let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            guard size <= ShellProfileBlock.maximumFileBytes else { return .unsafe(.oversized) }
+            data = try Data(contentsOf: file)
+        } catch {
+            return .unsafe(.unreadable)
+        }
+        guard let text = String(data: data, encoding: .utf8) else { return .unsafe(.notUTF8) }
+        return ShellProfileBlock.parse(text)
+    }
+
+    /// Rewrites one profile with `transform`, which returns nil when there is
+    /// nothing to write. Re-reads just before replacing: the lock keeps out
+    /// this process, not an editor, and a file that changed underneath is
+    /// read again once, then left alone.
+    private func rewrite(
+        _ target: ProfileTarget,
+        operation: String,
+        logger: (any LogSink)?,
+        _ transform: (ShellProfileBlock.Contents) -> String?
+    ) throws -> ProfileOutcome {
+        for _ in 0..<2 {
+            let contents = readProfile(target)
+            if case .unsafe(let reason) = contents {
+                reportSkipped(target, reason: reason, operation: operation, logger: logger)
+                return .skipped(reason)
+            }
+            guard let next = transform(contents) else { return .unchanged }
+            if case .unmanaged(let text) = contents, text == next { return .unchanged }
+            if case .managed(let text, _) = contents, text == next { return .unchanged }
+            guard readProfile(target) == contents else { continue }
+            let file = url(for: target)
+            try ensureParentDirectory(for: file)
+            try next.write(to: file, atomically: true, encoding: .utf8)
+            return .written
+        }
+        reportSkipped(target, reason: .changedDuringWrite, operation: operation, logger: logger)
+        return .skipped(.changedDuringWrite)
+    }
+
+    /// Event first: a profile left alone is a decision someone may need to
+    /// act on, since only they can repair it.
+    private func reportSkipped(
+        _ target: ProfileTarget, reason: ShellProfileBlock.UnsafeReason, operation: String, logger: (any LogSink)?
+    ) {
+        let event = RuntimeEvent(kind: .config, event: "platform.environment_file_skipped",
+                                 detail: "file=\(target.rawValue) reason=\(reason.rawValue) operation=\(operation)")
+        eventSink?(event)
+        logger?.log(.warning, "Shell environment: left \(target.relativePath) alone (\(reason.rawValue)); fix the Conduit markers or the file by hand. \(event.event) \(event.detail ?? "")", category: .system)
     }
 
     /// Whether anything of ours is still on the machine: a managed block in
@@ -80,9 +163,14 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// we applied can. The shell half is answered by the marker block, the
     /// launchd half by the journal — the same two sources `clear` uses.
     package func hasManagedState() -> Bool {
-        let shellBlockPresent = targetFiles.contains { file in
-            guard let content = try? String(contentsOf: file, encoding: .utf8) else { return false }
-            return content.contains(blockStart)
+        let shellBlockPresent = ProfileTarget.allCases.contains { target in
+            switch readProfile(target) {
+            case .managed: return true
+            // Marker lines that do not parse are still ours to be told
+            // about: a host that thinks nothing is left would never clear.
+            case .unsafe(.ambiguousMarkers): return true
+            case .missing, .unmanaged, .unsafe: return false
+            }
         }
         return shellBlockPresent || !journal.knowsSurfaceIsIdle(.launchdEnvironment)
     }
@@ -94,16 +182,19 @@ package final class EnvironmentManager: @unchecked Sendable {
         try operations.withLock(body)
     }
 
-    package func clear(logger: (any LogSink)?) throws {
+    /// Removes the block from every profile that holds one and can be
+    /// edited safely; a profile without one is not touched at all.
+    @discardableResult
+    package func clear(logger: (any LogSink)?) throws -> [ProfileTarget: ProfileOutcome] {
         operations.lock()
         defer { operations.unlock() }
-        for file in targetFiles where FileManager.default.fileExists(atPath: file.path) {
-            let existing = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
-            let cleaned = stripManagedBlock(from: existing)
-            try cleaned.trimmingCharacters(in: .whitespacesAndNewlines).appending("\n").write(to: file, atomically: true, encoding: .utf8)
+        var outcomes: [ProfileTarget: ProfileOutcome] = [:]
+        for target in ProfileTarget.allCases {
+            outcomes[target] = try rewrite(target, operation: "clear", logger: logger, ShellProfileBlock.clearing)
         }
         clearLaunchdEnvironment(logger: logger)
         logger?.log(.notice, "Removed managed shell proxy variables.", category: .system)
+        return outcomes
     }
 
     // MARK: - Launchd (GUI app) environment
@@ -269,29 +360,15 @@ package final class EnvironmentManager: @unchecked Sendable {
         let noProxy = config.noProxyHosts.joined(separator: ",")
         let proxyURL = config.localProxyURL.shellQuoted
         return [
-            blockStart,
+            ShellProfileBlock.startMarker,
             "export HTTP_PROXY=\(proxyURL)",
             "export HTTPS_PROXY=\(proxyURL)",
             "export http_proxy=\(proxyURL)",
             "export https_proxy=\(proxyURL)",
             "export NO_PROXY=\(noProxy.shellQuoted)",
             "export no_proxy=\(noProxy.shellQuoted)",
-            blockEnd
+            ShellProfileBlock.endMarker
         ].joined(separator: "\n")
-    }
-
-    private func stripManagedBlock(from content: String) -> String {
-        guard
-            let start = content.range(of: blockStart),
-            let end = content.range(of: blockEnd)
-        else {
-            return content
-        }
-
-        let removalRange = start.lowerBound ..< end.upperBound
-        var updated = content
-        updated.removeSubrange(removalRange)
-        return updated.replacingOccurrences(of: "\n\n\n", with: "\n\n")
     }
 
     private func ensureParentDirectory(for file: URL) throws {

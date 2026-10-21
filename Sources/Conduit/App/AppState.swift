@@ -98,7 +98,8 @@ final class AppState: ObservableObject {
     private lazy var environmentManager = EnvironmentManager(
         journal: platformStateJournal,
         homeDirectory: homeDirectory,
-        commandRunner: commandRunner
+        commandRunner: commandRunner,
+        eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
     )
     private lazy var dnsManager = DNSManager(
         privilegeClient: auditedPrivilegeClient,
