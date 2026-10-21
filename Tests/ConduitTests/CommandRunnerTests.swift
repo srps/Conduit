@@ -40,6 +40,18 @@ final class CommandRunnerTests: XCTestCase {
         wait(for: [done], timeout: timeoutSeconds)
     }
 
+    /// A launchd read gets the short bound; every other command, launchd
+    /// writes included, keeps the ordinary one.
+    func testOnlyLaunchdReadsGetTheShortHostTimeout() {
+        XCTAssertEqual(CommandRunner.hostTimeout(launchPath: "/bin/launchctl", arguments: ["getenv", "HTTP_PROXY"]),
+                       CommandRunner.launchdReadTimeout)
+        XCTAssertEqual(CommandRunner.hostTimeout(launchPath: "/bin/launchctl", arguments: ["setenv", "HTTP_PROXY", "x"]),
+                       CommandRunner.defaultTimeout)
+        XCTAssertEqual(CommandRunner.hostTimeout(launchPath: "/usr/sbin/networksetup", arguments: ["getenv"]),
+                       CommandRunner.defaultTimeout)
+        XCTAssertLessThan(CommandRunner.launchdReadTimeout, CommandRunner.defaultTimeout)
+    }
+
     func testOutputLargerThanThePipeBufferDoesNotDeadlock() {
         runOffThread {
             let result = try? CommandRunner.run(

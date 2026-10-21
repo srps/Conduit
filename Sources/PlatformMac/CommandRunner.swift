@@ -56,6 +56,23 @@ package enum CommandRunner {
     /// This one exists only so a wedged `osascript` cannot outlive the app.
     package static let privilegedTimeout: TimeInterval = 600
 
+    /// Ceiling for a `launchctl getenv` read. A drift pass makes six of them
+    /// on the serial platform queue, ahead of system proxy and DNS repair
+    /// and of a daemon's shutdown; one that hangs must not hold all of
+    /// that for the ordinary bound (#175).
+    package static let launchdReadTimeout: TimeInterval = 2
+
+    /// The timeout `host` gives a command.
+    package static func hostTimeout(launchPath: String, arguments: [String]) -> TimeInterval {
+        launchPath == "/bin/launchctl" && arguments.first == "getenv" ? launchdReadTimeout : defaultTimeout
+    }
+
+    /// The runner both hosts hand their platform managers in production.
+    /// Tests inject fakes instead and never reach this.
+    package static let host: @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
+        try run(launchPath: launchPath, arguments: arguments, timeout: hostTimeout(launchPath: launchPath, arguments: arguments))
+    }
+
     /// How long a child gets to honour `SIGTERM` before it is killed.
     package static let defaultTerminationGrace: TimeInterval = 2
 
