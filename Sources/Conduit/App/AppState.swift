@@ -814,15 +814,17 @@ final class AppState: ObservableObject {
     /// this as it goes away, so leaving it never waits, and an edit that
     /// does not validate is saved and reported as before.
     func flushPendingSave() {
+        // A pass already out advanced the baseline before acting; if one of
+        // its actions fails, it rewinds after this returns, and a pass this
+        // starts began from the advanced baseline, so it cannot retry it.
+        let passWasOut = reconciler.hasPassInFlight
         // Also when everything is written but an action did not land: closing
         // a section retried it before autosave, and nothing else may (#176).
         if hasUnsavedEdit || reconciler.lags(config: config, platformConfig: platformConfig) {
             saveConfig()
-            return
         }
-        // A pass still out advanced the baseline before acting; if an action
-        // fails, it rewinds after this returns. Look again once it drains.
-        guard reconciler.hasPassInFlight else { return }
+        // Look again once everything out has drained.
+        guard passWasOut else { return }
         sectionCloseRetry?.cancel()
         sectionCloseRetry = Task { [weak self] in
             await self?.reconciler.drain()
@@ -842,14 +844,16 @@ final class AppState: ObservableObject {
     /// apply started here would race it. The login item needs no runtime
     /// and is registered, or the next launch would disagree with the file.
     func persistPendingEditForTermination() {
-        guard hasUnsavedEdit else { return }
         cancelPendingSave()
         guard configurationLoadError == nil else { return }
-        // Even when a later file failed: the next launch reads the platform
-        // file as its baseline, and would never see the flip it holds.
-        if persistConfiguration().platformSaved {
-            reconciler.reconcileImmediateActions(platformConfig: platformConfig)
+        if hasUnsavedEdit {
+            // A flip the platform file does not hold is not registered.
+            guard persistConfiguration().platformSaved else { return }
         }
+        // Even when a later file failed, and with nothing unsaved: the next
+        // launch reads the platform file as its baseline, and would never see
+        // a flip it holds whose registration failed and rewound.
+        reconciler.reconcileImmediateActions(platformConfig: platformConfig)
     }
 
     /// Waits for the save an edit scheduled, if any. For the harness.
