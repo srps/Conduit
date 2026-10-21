@@ -54,7 +54,7 @@ Executables:
 
 ### Always
 
-- Emit a `RuntimeEvent` first for every routing, auth, failover, health or config decision, and derive the log line from it. Events are the contract with the UI, `pmctl` and `pm-sim`. They are listed in `docs/events.md`; add new ones there.
+- Emit a `RuntimeEvent` first for every routing, auth, failover, health or config decision, and derive the log line from it. Events are the contract with the UI, `pmctl` and `pm-sim`. They are listed in `docs/events.md`; add new ones there. CI fails on an emitted name the catalogue lacks (`scripts/check-event-catalogue.py`).
 - Put machine side effects behind a protocol in `PlatformMac`, with a fake in `Sources/PlatformMac/PlatformFakes.swift`.
 - Validate at the boundary and trust inside: `ProxyConfig` in `ConfigValidation.swift`, network input in the NIO handlers. Inside, assertions catch bugs, not user errors.
 - New runtime behaviour adds unit tests and a `pm-sim` scenario before it ships.
