@@ -520,18 +520,21 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// identifies our region of the file directly. The launchd domain has no
     /// such marker, so this probe stands in for one.
     /// Whether a variable the journal has no record of is ours to remove;
-    /// `nil` when one we put in place cannot be read to tell.
+    /// `nil` when it cannot be read to tell, which teardown keeps as a
+    /// failure to retry rather than as "not ours".
     private func unrecordedIsOurs(_ name: String, bypassResidue: Bool) -> Bool? {
-        if let launchdOwned {
-            guard let owned = launchdOwned[name] else { return false }
-            switch readLaunchdVariable(name) {
-            case .present(let value): return value == owned
-            case .absent: return false
-            case .failed: return nil
-            }
+        if let launchdOwned, launchdOwned[name] == nil { return false }
+        // Decided beside our proxy URL, without a read: unsetting needs
+        // none, and the URL may be gone by the next teardown.
+        if launchdOwned == nil, bypassResidue, Self.bypassVariableNames.contains(name) { return true }
+        let value: String
+        switch readLaunchdVariable(name) {
+        case .present(let present): value = present
+        case .absent: return false
+        case .failed: return nil
         }
-        if bypassResidue && Self.bypassVariableNames.contains(name) { return true }
-        return isLoopbackProxyValue(readLaunchdValue(name))
+        if let owned = launchdOwned?[name] { return value == owned }
+        return isLoopbackProxyValue(value)
     }
 
     private func loopbackResidueExists() -> Bool {

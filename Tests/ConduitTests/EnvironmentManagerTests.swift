@@ -231,6 +231,34 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertNil(launchctl.environment["HTTP_PROXY"], "the retry still knows it is ours")
     }
 
+    /// Residue of a journal an earlier run lost, judged by the domain: a
+    /// read that fails is not "not ours", so the next teardown retries it.
+    func testAnUnreadableResidueIsRetriedByTheNextTeardown() throws {
+        launchctl.environment["HTTP_PROXY"] = makeConfig().localProxyURL
+        launchctl.environment["HTTPS_PROXY"] = makeConfig().localProxyURL
+        launchctl.failingGetenv = ["HTTP_PROXY"]
+        let manager = makeManager()
+        try manager.clear(logger: nil)
+        XCTAssertNil(launchctl.environment["HTTPS_PROXY"], "readable residue is removed")
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], makeConfig().localProxyURL, "unreadable, so left for now")
+
+        launchctl.failingGetenv = []
+        try manager.clear(logger: nil)
+        XCTAssertNil(launchctl.environment["HTTP_PROXY"], "the stop's failure left the quit something to retry")
+    }
+
+    /// Our bypass list beside our proxy URL needs no read to remove, so
+    /// one that cannot be read goes with the URL rather than outliving it.
+    func testAnUnreadableBypassResidueGoesWithTheProxyURL() throws {
+        launchctl.environment["HTTP_PROXY"] = makeConfig().localProxyURL
+        launchctl.environment["NO_PROXY"] = makeConfig().noProxyHosts.joined(separator: ",")
+        launchctl.failingGetenv = ["NO_PROXY"]
+
+        try makeManager().clear(logger: nil)
+
+        XCTAssertEqual(launchctl.environment, [:])
+    }
+
     /// A journal lost while running: what this manager wrote is still
     /// ours, but a value changed since is not.
     func testTeardownAfterALostJournalRemovesOnlyWhatIsStillOurs() throws {
