@@ -2407,23 +2407,33 @@ package final class ProxyOrchestrator {
         // every 1.5 s (see `RecoveryGate`).
         guard !healthChecker.isRunning else { return }
         // Each check applies its own result on the main actor, judged by the
-        // routing generation it started under: one that straddled a VPN
-        // transition measured the old network, and the transition's own
-        // probe decides routing (#155).
-        healthChecker.start(interval: config.healthCheckIntervalSeconds) { [weak self] in
+        // loop run and the routing generation it started under. One that
+        // outlived its run (a stop, or a restart for new health settings)
+        // belongs to a loop that no longer exists (#181); one that straddled
+        // a VPN transition measured the old network, and the transition's
+        // own probe decides routing (#155).
+        healthChecker.start(interval: config.healthCheckIntervalSeconds) { [weak self] run in
             guard let self else {
                 return .unhealthy(.unreachable(detail: "ProxyOrchestrator deallocated"), responseTimeMS: 0)
             }
             let generation = await MainActor.run { self.routingGeneration }
             let result = await self.localProxyServer.performHealthCheck()
-            await MainActor.run { self.applyHealthCheckResult(result, startedUnder: generation) }
+            await MainActor.run { self.applyHealthCheckResult(result, startedUnder: generation, run: run) }
             return result
         } onResult: { _ in }
     }
 
-    private func applyHealthCheckResult(_ result: HealthCheckResult, startedUnder generation: UInt64) {
-        guard generation == routingGeneration else {
-            let event = RuntimeEvent(kind: .health, event: "health.result_superseded", detail: "healthy=\(result.healthy)")
+    private func applyHealthCheckResult(_ result: HealthCheckResult, startedUnder generation: UInt64, run: HealthCheckRun) {
+        let staleReason: String? = if !run.isCurrent {
+            "restarted"
+        } else if generation != routingGeneration {
+            "routing_changed"
+        } else {
+            nil
+        }
+        if let staleReason {
+            let event = RuntimeEvent(kind: .health, event: "health.result_superseded",
+                                     detail: "reason=\(staleReason) healthy=\(result.healthy)")
             eventLog.append(event)
             logStore.log(.info, "Health check result dropped: \(event.detail ?? "")", category: .network)
             return

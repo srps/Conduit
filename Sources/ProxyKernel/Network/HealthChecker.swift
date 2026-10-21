@@ -51,44 +51,84 @@ package struct HealthCheckResult: Equatable {
     }
 }
 
+/// One `start` of a `HealthChecker`, handed to each check it runs. A check
+/// that outlives its run (`stop`, or a `start` that replaced it) is stale:
+/// its verdict measured under the old run and must not be applied. Check
+/// `isCurrent` on the executor that applies the verdict, the one that also
+/// calls `stop` and `start`, so nothing can replace the run in between.
+package struct HealthCheckRun: Sendable {
+    fileprivate let generation: UInt64
+    fileprivate let state: NIOLockedValueBox<HealthCheckLoopState>
+
+    package var isCurrent: Bool { state.withLockedValue { $0.generation == generation } }
+}
+
+/// The run generation and its one in-flight check. Only the current
+/// generation's check may set or clear `inFlight`, so a check left over
+/// from a stopped run cannot free the slot under a newer run's check (#181).
+fileprivate struct HealthCheckLoopState: Sendable {
+    var generation: UInt64 = 0
+    var inFlight = false
+}
+
 package final class HealthChecker {
     package init() {}
     private var timer: DispatchSourceTimer?
     private let queue = DispatchQueue(label: "io.github.srps.Conduit.HealthChecker")
-    private let checkInFlight = NIOLockedValueBox(false)
-    private let generation = NIOLockedValueBox(0)
+    private let state = NIOLockedValueBox(HealthCheckLoopState())
 
     package func start(
         interval: TimeInterval,
         operation: @escaping @Sendable () async -> HealthCheckResult,
         onResult: @escaping @Sendable (HealthCheckResult) -> Void
     ) {
+        start(interval: interval, operation: { _ in await operation() }, onResult: onResult)
+    }
+
+    /// Runs `operation` now and then on the adaptive interval, at most one
+    /// check of this run at a time; a tick that finds one in flight is
+    /// dropped. A check that finishes after its run was replaced or stopped
+    /// is stale: it leaves the newer run's state alone, is not delivered to
+    /// `onResult` and does not reschedule; `onSuperseded` gets it instead.
+    /// The `onResult` fence is checked off the caller's executor, so a stop
+    /// that lands between the check and the call can still see one late
+    /// delivery. A caller whose state must not take a stale verdict checks
+    /// `HealthCheckRun.isCurrent` where it applies it, as the orchestrator does.
+    package func start(
+        interval: TimeInterval,
+        operation: @escaping @Sendable (HealthCheckRun) async -> HealthCheckResult,
+        onResult: @escaping @Sendable (HealthCheckResult) -> Void,
+        onSuperseded: @escaping @Sendable (HealthCheckResult) -> Void = { _ in }
+    ) {
         stop()
-        let runGeneration = generation.withLockedValue { current in
-            current += 1
-            return current
-        }
-        let inFlight = self.checkInFlight
+        let state = self.state
+        let run = HealthCheckRun(generation: state.withLockedValue { $0.generation }, state: state)
         let adaptiveState = AdaptiveScheduleController(baseInterval: interval)
         let queue = self.queue
-        let generation = self.generation
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: interval)
         timer.setEventHandler {
-            let alreadyRunning = inFlight.withLockedValue { running in
-                if running { return true }
-                running = true
-                return false
+            let claimed = state.withLockedValue { loop in
+                guard loop.generation == run.generation, !loop.inFlight else { return false }
+                loop.inFlight = true
+                return true
             }
-            guard !alreadyRunning else { return }
+            guard claimed else { return }
             Task {
-                let result = await operation()
-                inFlight.withLockedValue { $0 = false }
+                let result = await operation(run)
+                let current = state.withLockedValue { loop in
+                    guard loop.generation == run.generation else { return false }
+                    loop.inFlight = false
+                    return true
+                }
+                guard current else {
+                    onSuperseded(result)
+                    return
+                }
                 onResult(result)
                 let nextInterval = await adaptiveState.nextInterval(after: result)
                 queue.async {
-                    let stillActive = generation.withLockedValue { $0 == runGeneration }
-                    guard stillActive else { return }
+                    guard run.isCurrent else { return }
                     timer.schedule(deadline: .now() + nextInterval, repeating: nextInterval)
                 }
             }
@@ -102,11 +142,20 @@ package final class HealthChecker {
     /// this first instead of restarting it.
     package var isRunning: Bool { timer != nil }
 
+    /// Whether the current run has a check in flight. A stale check from a
+    /// stopped run does not count.
+    package var isCheckInFlight: Bool { state.withLockedValue { $0.inFlight } }
+
+    /// Ends the current run: its timer stops, and a check still in flight
+    /// becomes stale (see `start`). The next run starts with no check in
+    /// flight.
     package func stop() {
         timer?.cancel()
         timer = nil
-        generation.withLockedValue { $0 += 1 }
-        checkInFlight.withLockedValue { $0 = false }
+        state.withLockedValue { loop in
+            loop.generation &+= 1
+            loop.inFlight = false
+        }
     }
 }
 
