@@ -968,7 +968,7 @@ final class AppState: ObservableObject {
     /// Reads `pass.platform` and nothing live. By the time a queued pass
     /// runs, a later save may have moved a flag again; the pass that save
     /// queued owns that flag, and this one acts on the flags of its own.
-    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) {
+    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async {
         guard !rejectUnavailableConfiguration() else { return }
         let old = pass.old
         let new = pass.new
@@ -1014,24 +1014,30 @@ final class AppState: ObservableObject {
                 logStore.log(.notice, "Config change: bypass list changed; re-applying \(surfaces.joined(separator: " and ")). \(event.event) \(event.detail ?? "")", category: .system)
             }
         }
-        if pass.runtime.proxyIsUp {
-            if systemProxyFollows, platform.manageSystemProxy, !pass.platformActions.contains(.applySystemProxy) {
+        guard pass.runtime.proxyIsUp else { return }
+        let reapplySystemProxy = systemProxyFollows && platform.manageSystemProxy
+            && !pass.platformActions.contains(.applySystemProxy)
+        let reapplyEnvironment = environmentFollows && platform.manageEnvironmentVariables
+            && !pass.platformActions.contains(.applyEnvironment)
+        guard reapplySystemProxy || reapplyEnvironment else { return }
+        // Off the main actor: up to twelve `launchctl` calls and a
+        // `networksetup` pass, each bounded only by its runner's timeout,
+        // and with autosave a bypass edit reaches here on every pause.
+        let systemProxy = systemConduit, environment = environmentManager, logger = logStore
+        let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL
+        await platformWork.run {
+            if reapplySystemProxy {
                 do {
-                    try systemConduit.apply(
-                        config: new,
-                        mode: platform.systemProxyMode,
-                        logger: logStore,
-                        localPACURL: orchestrator.snapshot.bindings.localPACURL
-                    )
+                    try systemProxy.apply(config: new, mode: mode, logger: logger, localPACURL: pacURL)
                 } catch {
-                    logStore.log(.warning, "Could not re-apply system proxy after config change: \(error.localizedDescription)", category: .system)
+                    logger.log(.warning, "Could not re-apply system proxy after config change: \(error.localizedDescription)", category: .system)
                 }
             }
-            if environmentFollows, platform.manageEnvironmentVariables, !pass.platformActions.contains(.applyEnvironment) {
+            if reapplyEnvironment {
                 do {
-                    try environmentManager.apply(config: new, logger: logStore)
+                    try environment.apply(config: new, logger: logger)
                 } catch {
-                    logStore.log(.warning, "Could not re-apply environment variables after config change: \(error.localizedDescription)", category: .system)
+                    logger.log(.warning, "Could not re-apply environment variables after config change: \(error.localizedDescription)", category: .system)
                 }
             }
         }

@@ -1246,7 +1246,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
     /// config (a removed split-DNS entry keeps its `/etc/resolver` file until
     /// the next full stop). Reads `pass.platform` and nothing live, as the
     /// reconciler's contract requires.
-    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) {
+    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async {
         let old = pass.old
         let new = pass.new
         let platform = pass.platform
@@ -1291,22 +1291,26 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
                 logger.log(.notice, "Config reload: bypass list changed; re-applying \(surfaces.joined(separator: " and ")). \(event.event) \(event.detail ?? "")", category: .system)
             }
         }
-        if pass.runtime.proxyIsUp {
-            if systemProxyFollows, platform.manageSystemProxy, !pass.platformActions.contains(.applySystemProxy) {
+        guard pass.runtime.proxyIsUp else { return }
+        let reapplySystemProxy = systemProxyFollows && platform.manageSystemProxy
+            && !pass.platformActions.contains(.applySystemProxy)
+        let reapplyEnvironment = environmentFollows && platform.manageEnvironmentVariables
+            && !pass.platformActions.contains(.applyEnvironment)
+        guard reapplySystemProxy || reapplyEnvironment else { return }
+        // Twin of `AppState.reapplyConfigDrivenSurfaces`: off the main actor.
+        let systemProxy = systemConduit, environment = environmentManager, logger = logger
+        let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL
+        await platformWork.run {
+            if reapplySystemProxy {
                 do {
-                    try systemConduit.apply(
-                        config: new,
-                        mode: platform.systemProxyMode,
-                        logger: logger,
-                        localPACURL: orchestrator.snapshot.bindings.localPACURL
-                    )
+                    try systemProxy.apply(config: new, mode: mode, logger: logger, localPACURL: pacURL)
                 } catch {
                     logger.log(.warning, "Could not re-apply system proxy after config reload: \(error.localizedDescription)", category: .system)
                 }
             }
-            if environmentFollows, platform.manageEnvironmentVariables, !pass.platformActions.contains(.applyEnvironment) {
+            if reapplyEnvironment {
                 do {
-                    try environmentManager.apply(config: new, logger: logger)
+                    try environment.apply(config: new, logger: logger)
                 } catch {
                     logger.log(.warning, "Could not re-apply environment variables after config reload: \(error.localizedDescription)", category: .system)
                 }

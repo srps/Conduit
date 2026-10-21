@@ -1197,6 +1197,28 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// Twin of `AppStateHarnessTests.testABypassEditReappliesOffTheMainActor`.
+    func testABypassReloadReappliesOffTheMainActor() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, values in
+            name == "/bin/launchctl" && values.first == "setenv" && values.dropFirst().first == "NO_PROXY"
+        }
+
+        var edited = host.config
+        edited.noProxyHosts.append("bypass.example")
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        let reload = Task { await host.reloadConfiguration() }
+        await harness.hold.waitUntilReached()
+        XCTAssertFalse(harness.hold.reachedOnMainThread)
+        harness.hold.release()
+        await reload.value
+
+        XCTAssertTrue(harness.machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
+        await host.stopRuntime()
+    }
+
     /// Twin of `AppStateHarnessTests.testABypassEditInPACModeLeavesTheSystemProxyAlone`.
     func testABypassReloadInPACModeLeavesTheSystemProxyAlone() async throws {
         let host = try launch(platform: PlatformIntegrationConfig(

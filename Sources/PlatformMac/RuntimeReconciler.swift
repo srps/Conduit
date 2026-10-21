@@ -20,8 +20,9 @@ package protocol RuntimeReconcilerHost: AnyObject {
     /// Re-applies the surfaces whose *contents* the config edit changed —
     /// resolver files, the system proxy, the environment block — using
     /// nothing but what the pass carries. Called only when the config
-    /// changed; a flag-only save skips it.
-    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass)
+    /// changed; a flag-only save skips it. Async so a host can run the
+    /// `networksetup` and `launchctl` writes off the main actor.
+    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async
     /// A platform decision, called before its side effect so the event
     /// stream carries the decision whether or not the side effect lands.
     func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action)
@@ -252,7 +253,7 @@ package final class RuntimeReconciler {
             )
 
             if old != new {
-                host.reapplyConfigDrivenSurfaces(for: pass)
+                await host.reapplyConfigDrivenSurfaces(for: pass)
             }
             for action in pass.platformActions {
                 run(action, config: new, previousConfig: old, from: oldPlatform, to: newPlatform)
