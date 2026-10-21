@@ -111,9 +111,18 @@ final class SystemDNSManagerTests: XCTestCase {
         super.tearDown()
     }
 
-    /// Manager under test, wired to this test's isolated state.
+    /// Manager under test, wired to this test's isolated state, on a machine
+    /// with two services and no DNS servers set. Without a runner it read the
+    /// real `networksetup`, so a test's outcome hung on this host's interfaces
+    /// (one an installed Conduit points at 127.0.0.1 failed the empty-state
+    /// cleanup test).
     private func makeManager() -> SystemDNSManager {
-        SystemDNSManager(privilegeClient: recording, journal: journal)
+        let machine = FakeDNSNetworksetupRunner(dnsServers: ["Wi-Fi": [], "Ethernet": []])
+        return SystemDNSManager(
+            privilegeClient: recording,
+            journal: journal,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) }
+        )
     }
 
     /// Manager under test on a described machine, so the launch-time recovery
