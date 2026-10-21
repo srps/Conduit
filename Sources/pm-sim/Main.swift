@@ -73,6 +73,7 @@ enum PMSim {
               upstream-flap           upstream up/down/up; assert breaker opens, half-opens, closes
               recovery-unreachable-ladder  unreachable upstream: ladder skips re-auth, exhaustion does not blame the password
               recovery-superseded-by-disconnect  a disconnect that routes DIRECT owns the status a superseded ladder left
+              health-restart-superseded  a check from a health loop restarted for new settings is dropped, not applied
               websocket-upgrade       101 upgrade relayed, frames flow both ways
               connect-early-direct    CONNECT with early bytes through a direct tunnel
               connect-early-upstream  CONNECT with early bytes through an authenticated upstream
@@ -236,6 +237,7 @@ enum PMSim {
         "upstream-flap",
         "recovery-unreachable-ladder",
         "recovery-superseded-by-disconnect",
+        "health-restart-superseded",
         "websocket-upgrade",
         "connect-early-direct",
         "connect-early-upstream",
@@ -350,6 +352,8 @@ enum PMSim {
             return [try await RecoveryLadderScenarios.ladderSupersededByDisconnect(verbose: verbose)]
         case "recovery-unreachable-ladder":
             return [try await RecoveryLadderScenarios.unreachableLadder(verbose: verbose)]
+        case "health-restart-superseded":
+            return [try await HealthRestartScenarios.staleCheckAfterRestart(verbose: verbose)]
         case "vpn-transition-migration":
             return [try await VPNTransitionMigrationScenarios.run(verbose: verbose)]
         case "vpn-transition-direct-http":
