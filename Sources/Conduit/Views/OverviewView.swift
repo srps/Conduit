@@ -326,7 +326,7 @@ struct OverviewView: View {
 
     private var dnsDetail: String {
         guard runtime.dnsRunState != .stopped else { return "Stopped" }
-        let host = runtime.bindings.dnsHost ?? appState.config.effectiveClientHost
+        let host = runtime.bindings.dnsHost ?? ProxyConfig.dnsForwarderHost
         let port = runtime.bindings.dnsPort ?? appState.config.dnsForwarderPort
         if appState.platformConfig.manageSystemDNS {
             return "\(host):53 via :\(port) · system DNS active"

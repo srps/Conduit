@@ -62,7 +62,7 @@ enum PMDns {
             exit(1)
         }
         let port = parseIntArg("--port", from: args) ?? config.dnsForwarderPort
-        let host = parseStringArg("--host", from: args) ?? config.localHost
+        let host = parseStringArg("--host", from: args) ?? ProxyConfig.dnsForwarderHost
         let verbose = args.contains("--verbose")
 
         Task { @MainActor in

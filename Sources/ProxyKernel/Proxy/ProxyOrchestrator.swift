@@ -715,8 +715,10 @@ package final class ProxyOrchestrator {
             logStore.log(.notice, "Config reload: PAC route limit updated (\(detail)).", category: .pac)
         }
 
+        // The forwarder binds `ProxyConfig.dnsForwarderHost`, not the proxy's
+        // listen host, so only a DNS section edit restarts it.
         if diff.dnsChanged && snapshot.dnsRunState == .running {
-            emitEvent(.config, "config.dns_restart")
+            emitEvent(.config, "config.dns_restart", detail: "reason=dns_section")
             logStore.log(.notice, "Config reload: DNS config changed, restarting DNS forwarder.", category: .network)
             await stopTransparentProxy()
             await dnsForwarder.stop()
@@ -1489,7 +1491,7 @@ package final class ProxyOrchestrator {
         let currentConfig = config
 
         do {
-            try await dnsForwarder.start(host: currentConfig.localHost, port: currentConfig.dnsForwarderPort)
+            try await dnsForwarder.start(host: ProxyConfig.dnsForwarderHost, port: currentConfig.dnsForwarderPort)
             mutateSnapshot {
                 $0.dnsRunState = .running
                 $0.bindings.dnsHost = self.dnsForwarder.listeningHost
@@ -1501,7 +1503,7 @@ package final class ProxyOrchestrator {
             }
         } catch {
             let message = error.displayDescription
-            logStore.log(.warning, "Could not start DNS forwarder on \(currentConfig.localHost):\(currentConfig.dnsForwarderPort): \(message)", category: .network)
+            logStore.log(.warning, "Could not start DNS forwarder on \(ProxyConfig.dnsForwarderHost):\(currentConfig.dnsForwarderPort): \(message)", category: .network)
             mutateSnapshot {
                 $0.dnsRunState = .failed
                 $0.bindings.dnsHost = nil
