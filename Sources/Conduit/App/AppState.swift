@@ -2250,7 +2250,8 @@ final class AppState: ObservableObject {
             let proxyToken = proxyLane.observationToken
             let dnsToken = dnsLane.observationToken
             let proxy = systemConduit, dns = systemDNSManager
-            let config = self.config, platform = platformConfig
+            // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
+            let config = reconciler.lastReconciledConfig, platform = platformConfig
             let pacURL = orchestrator.snapshot.bindings.localPACURL
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logStore
@@ -2364,7 +2365,8 @@ final class AppState: ObservableObject {
             await proxyLane.waitUntilIdle()
             guard platformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
             let token = proxyLane.observationToken
-            let proxy = systemConduit, config = config, platform = platformConfig
+            // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
+            let proxy = systemConduit, config = reconciler.lastReconciledConfig, platform = platformConfig
             let pacURL = orchestrator.snapshot.bindings.localPACURL
             let events = orchestrator.eventLog, logger = logStore
             let retry = await platformWork.run { () -> Duration? in
@@ -2424,7 +2426,8 @@ final class AppState: ObservableObject {
             await proxyLane.waitUntilIdle()
             guard platformConfig.manageEnvironmentVariables, runtimeState().proxyIsUp else { return }
             let token = proxyLane.observationToken
-            let repair = environmentDriftRepair, config = config
+            // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
+            let repair = environmentDriftRepair, config = reconciler.lastReconciledConfig
             let generation = environmentManager.generation, passTrigger = trigger
             let retry = await platformWork.run {
                 repair.run(config: config, generation: generation, trigger: passTrigger, isCurrent: { !token.isSuperseded })

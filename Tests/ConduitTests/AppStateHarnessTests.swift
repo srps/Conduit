@@ -1215,6 +1215,28 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(appState.eventLog.events.contains { $0.event == "platform.environment_drift" && $0.detail?.hasPrefix("trigger=timer") == true })
     }
 
+    /// A start-blocking edit held back by autosave is a draft in `config`,
+    /// not what the listener runs on: a drift pass repairs the system proxy
+    /// and the environment to the applied endpoint, never the half-typed one.
+    func testADriftPassRepairsToTheAppliedConfigNotAHeldDraft() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true),
+                                  settingsSaveDebounce: .milliseconds(10))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        let applied = "http://127.0.0.1:\(appState.config.localPort)"
+
+        appState.config.localHost = "127.0."
+        await appState.awaitPendingSave()
+        XCTAssertTrue(appState.eventLog.events.contains { $0.event == "config.autosave_held" })
+        try wipeEnvironment()
+        harness.locationObserver.emitSettingsChange()
+        await harness.deliveries()
+
+        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], applied)
+        XCTAssertEqual(wifi.webProxy.host, "127.0.0.1")
+        XCTAssertEqual(wifi.secureWebProxy.host, "127.0.0.1")
+    }
+
     /// The pass belongs to the switch and the running proxy: off, or
     /// stopped, it inspects and writes nothing.
     func testTheDriftPassLeavesTheEnvironmentAloneWhenTheSwitchIsOffOrTheProxyStopped() async throws {
