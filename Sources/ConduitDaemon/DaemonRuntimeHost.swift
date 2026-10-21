@@ -195,10 +195,10 @@ final class DaemonRuntimeHost {
         privilegeClient: (any PrivilegeClient)? = nil,
         credentialStore: (any SecretStore)? = nil,
         kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
-        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
-        homeDirectory: URL? = nil,
+        homeDirectory: URL,
         resolverDirectory: String? = nil
     ) {
         self.dnsResponds = dnsResponds
@@ -211,10 +211,8 @@ final class DaemonRuntimeHost {
         self.config = loadedConfiguration.config
         self.platformConfig = loadedConfiguration.platformConfig
         self.appPreferences = loadedConfiguration.appPreferences
-        self.commandRunner = commandRunner ?? { launchPath, arguments in
-            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
-        }
-        self.homeDirectory = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        self.commandRunner = commandRunner
+        self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
         self.reconciler = RuntimeReconciler(
             config: loadedConfiguration.config,
@@ -1089,7 +1087,7 @@ extension DaemonRuntimeHost {
         environment: RuntimeEnvironment,
         logger: any LogSink,
         privilegeClient: (any PrivilegeClient)? = nil,
-        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) }
     ) async -> [RuntimeEvent] {
@@ -1101,9 +1099,7 @@ extension DaemonRuntimeHost {
         }
         let base = privilegeClient ?? HelperToolPrivilegeClient(eventSink: emit)
         let audited = AuditingPrivilegeClient(base: base, eventSink: emit)
-        let runner = commandRunner ?? { launchPath, arguments in
-            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
-        }
+        let runner = commandRunner
         let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger)
         let locationRecovery = networkLocationStoreFactory(audited).map {
             LocationSettingsRecovery(store: $0, journal: journal, emit: emit)

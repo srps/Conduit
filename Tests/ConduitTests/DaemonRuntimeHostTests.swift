@@ -7,6 +7,19 @@ import ConduitShared
 
 @MainActor
 final class DaemonRuntimeHostTests: XCTestCase {
+    /// The runner for a host whose test does not script any command. It
+    /// fails every one: a host left on the default ran the real `launchctl`
+    /// and `networksetup` and edited the real home's shell profiles, and a
+    /// failed start's revert cleared the developer's own environment block.
+    private static let offMachine: @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
+        throw UnscriptedCommand(launchPath: launchPath, arguments: arguments)
+    }
+
+    private struct UnscriptedCommand: Error {
+        let launchPath: String
+        let arguments: [String]
+    }
+
 
     /// The daemon's credentials come from the injected store, not the login
     /// Keychain. Without the seam a host over a fake machine read and wrote
@@ -35,7 +48,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: true,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: RecordingPrivilegeClient(),
-            credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery()
+            credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
         // Recovery writes the journal under `directory`; let it land before
         // the `defer` removes it.
@@ -142,7 +155,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: true,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(),
-            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
+            privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
 
         XCTAssertEqual(host.status().configGeneration, 0)
@@ -177,7 +190,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: false,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
-            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
+            privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
         // Recovery writes the journal under the state directory; let it land
         // before the `defer` removes it.
@@ -220,7 +233,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: false,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
-            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
+            privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
         await host.awaitLaunchRecovery()
         observer.start()
@@ -261,7 +274,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             configFilePredatesLaunch: false,
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
-            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
+            privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
         // Recovery writes the journal under the state directory; let it land
         // before the `defer` removes it.
@@ -327,7 +340,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(),
             privilegeClient: recording,
-            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery()
+            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
 
         do {
