@@ -190,6 +190,7 @@ exactly these semantics; do not repurpose them.
 | `recovery.abandoned` | A VPN state change ran during the recovery ladder, so the failure that started it is stale; the ladder stops (`reason=superseded`, then `next_step=` the step it did not start or `after_step=` the step whose outcome it discarded), without `recovery.exhausted` or a cooldown (#155). Emitted before its NOTICE log line. |
 | `recovery.exhausted` | Every ladder step ran and the health check still failed (`failure=` one of `unreachable`, `credential_unavailable`, `authentication_rejected`, `upstream_status`, `unknown`; `summary=` the last failure). The ERROR log line is derived from it: only `credential_unavailable` and `authentication_rejected` (an upstream that answered with a final 407) suggest re-entering the password, and `unknown` keeps the conditional hint. Followed by `recovery.cooldown_started`. |
 | `tcp_relay.reasserted` / `tcp_relay.unresponsive` | The transparent-proxy relay probe found the helper's port-443 relay gone and reissued it, or found it bound but not accepting (`host=`, `target=`). |
+| `tcp_relay.reassert_superseded` | The relay probe found nothing accepting, but a relay start or stop ran while the probe was out, so its verdict is dropped and no start is issued (#199). A stop means the relay is meant to be gone; a start already put up what the current bindings want. `host=`, `target=`, `relay_active=` the relay flag now. Emitted before its INFO log line. |
 
 ### config
 | Event | Emitted when |
