@@ -811,7 +811,9 @@ final class AppState: ObservableObject {
     /// this as it goes away, so leaving it never waits, and an edit that
     /// does not validate is saved and reported as before.
     func flushPendingSave() {
-        guard hasUnsavedEdit else { return }
+        // Also when everything is written but an action did not land: closing
+        // a section retried it before autosave, and nothing else may (#176).
+        guard hasUnsavedEdit || reconciler.lags(config: config, platformConfig: platformConfig) else { return }
         saveConfig()
     }
 
