@@ -1268,6 +1268,32 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(appState.runtimeConfig.localPort, port)
     }
 
+    /// Apply ends the field's editing before it commits. The field's write
+    /// may land at once or on a later main-actor turn, and the commit
+    /// carries it either way, leaving no fresh held edit behind.
+    func testApplyCommitsTheTextAFieldWritesWhenEditingEnds() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
+        try await appState.startProxy()
+        let typedPort = try freeLoopbackPort()
+        let typedSOCKSPort = try freeLoopbackPort()
+        appState.config.socksEnabled = true
+        await appState.awaitPendingSave()
+        XCTAssertTrue(appState.listenerEditAwaitingCommit)
+
+        let commit = appState.commitPendingEdit(trigger: .apply) {
+            appState.config.localPort = typedPort
+            Task { @MainActor in appState.config.socksPort = typedSOCKSPort }
+        }
+        await commit.value
+        await appState.reconciler.drain()
+
+        XCTAssertFalse(appState.listenerEditAwaitingCommit, "no edit is left held after Apply")
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.edit_committed" }.map(\.detail),
+                       ["trigger=apply listener_change=true"])
+        XCTAssertEqual(appState.runtimeConfig.localPort, typedPort)
+        XCTAssertEqual(appState.runtimeConfig.socksPort, typedSOCKSPort)
+    }
+
     /// Typing back to the committed value leaves nothing to commit.
     func testTypingBackToTheCommittedPortRebindsNothing() async throws {
         let appState = try launch(settingsSaveDebounce: .milliseconds(20))

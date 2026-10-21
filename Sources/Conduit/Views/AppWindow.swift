@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import AppKit
 import ProxyKernel
 import SwiftUI
 
@@ -102,7 +103,13 @@ struct AppWindow: View {
             .onSubmit { Task { @MainActor in appState.commitPendingEdit(trigger: .submit) } }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if appState.listenerEditAwaitingCommit {
-                    PendingListenerEditNote { appState.commitPendingEdit(trigger: .apply) }
+                    // Clicking Apply leaves the field editing, its typed
+                    // text not yet in the draft: end editing, then commit.
+                    PendingListenerEditNote {
+                        appState.commitPendingEdit(trigger: .apply) {
+                            NSApp.keyWindow?.makeFirstResponder(nil)
+                        }
+                    }
                 }
             }
             .onDisappear { appState.commitPendingEdit(trigger: .sectionClose) }
