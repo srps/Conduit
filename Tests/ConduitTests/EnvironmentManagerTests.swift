@@ -155,10 +155,13 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertEqual(launchctl.environment, ["NO_PROXY": "user.example"], "teardown leaves the foreign value alone")
     }
 
-    /// Every capture withheld, so nothing was written: a loopback proxy URL
-    /// beside it does not make a foreign proxy variable ours.
+    /// Every capture withheld, so nothing was written: a loopback URL that
+    /// was already there is someone else's local proxy, and the bypass list
+    /// beside it theirs too.
     func testTeardownAfterWithheldCapturesLeavesForeignProxyValues() throws {
-        launchctl.environment = ["HTTP_PROXY": "http://127.0.0.1:9999", "HTTPS_PROXY": "http://foreign.example:8080"]
+        let foreign = ["HTTP_PROXY": "http://127.0.0.1:9999", "HTTPS_PROXY": "http://foreign.example:8080",
+                       "NO_PROXY": "user.example", "no_proxy": "user.example"]
+        launchctl.environment = foreign
         let readOnly = home.appendingPathComponent("read-only", isDirectory: true)
         try FileManager.default.createDirectory(at: readOnly, withIntermediateDirectories: false)
         try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: readOnly.path)
@@ -169,7 +172,42 @@ final class EnvironmentManagerTests: XCTestCase {
 
         try manager.clear(logger: nil)
 
-        XCTAssertEqual(launchctl.environment["HTTPS_PROXY"], "http://foreign.example:8080", "not this machine, never recorded")
+        XCTAssertEqual(launchctl.environment, foreign, "nothing was ours: a stop or a quit leaves every value as it was")
+    }
+
+    /// Our own URL, left by an earlier run, with the journal unwritable: it
+    /// cannot be recorded, but it is ours. A stop that cannot read it keeps
+    /// that knowledge, so the quit after it still removes it.
+    func testAnOwnedValueUnreadableAtStopIsRemovedAtQuit() throws {
+        launchctl.environment["HTTP_PROXY"] = makeConfig().localProxyURL
+        let readOnly = home.appendingPathComponent("read-only", isDirectory: true)
+        try FileManager.default.createDirectory(at: readOnly, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: readOnly.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnly.path) }
+        let manager = EnvironmentManager(journal: PlatformStateJournal(fileURL: readOnly.appendingPathComponent("platform-state.json")),
+                                         homeDirectory: home, commandRunner: launchctl.run)
+        try manager.apply(config: makeConfig(), logger: nil)
+
+        launchctl.failingGetenv = ["HTTP_PROXY"]
+        try manager.clear(logger: nil)
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], makeConfig().localProxyURL, "unreadable, so left for now")
+
+        launchctl.failingGetenv = []
+        try manager.clear(logger: nil)
+        XCTAssertNil(launchctl.environment["HTTP_PROXY"], "the retry still knows it is ours")
+    }
+
+    /// A journal lost while running: what this manager wrote is still
+    /// ours, but a value changed since is not.
+    func testTeardownAfterALostJournalRemovesOnlyWhatIsStillOurs() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        journal.forgetAll(surface: .launchdEnvironment)
+        launchctl.environment["no_proxy"] = "user.example"
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(launchctl.environment, ["no_proxy": "user.example"])
     }
 
     /// The user's own bypass list may equal ours. Without our address

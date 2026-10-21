@@ -7,8 +7,9 @@ import ProxyKernel
 /// #175 over `FakeMachine` and a scratch home: a silent wipe of the shell
 /// environment surface is found and repaired with its events; a program
 /// that keeps wiping it is withheld after the budget; an unsafe profile is
-/// left alone and reported once; and a repair overtaken by a clear writes
-/// nothing.
+/// left alone and reported once; a repair overtaken by a clear writes
+/// nothing; and with the journal unwritable, a teardown leaves a local
+/// proxy and bypass list it never wrote alone.
 enum EnvironmentDriftScenarios {
     static func run() throws -> ScenarioResult {
         let began = Date()
@@ -84,6 +85,24 @@ enum EnvironmentDriftScenarios {
             && machine.launchdEnvironment["HTTP_PROXY"] == nil
             && !(try String(contentsOf: zshrc, encoding: .utf8)).contains("Conduit")
 
+        // Phase 5: the journal cannot be written, so every launchd write is
+        // withheld. Someone else's local proxy and bypass list survive a stop.
+        let lockedState = home.appendingPathComponent("read-only", isDirectory: true)
+        try FileManager.default.createDirectory(at: lockedState, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: lockedState.path)
+        defer {
+            do { try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: lockedState.path) }
+            catch { fputs("environment-drift permission reset failed: \(error.localizedDescription)\n", stderr) }
+        }
+        let other = FakeMachine(resolverDirectory: home.appendingPathComponent("resolver-other"))
+        let theirs = ["HTTP_PROXY": "http://127.0.0.1:9999", "NO_PROXY": "user.example", "no_proxy": "user.example"]
+        for (name, value) in theirs { _ = try other.run("/bin/launchctl", ["setenv", name, value]) }
+        let withheldManager = EnvironmentManager(journal: PlatformStateJournal(fileURL: lockedState.appendingPathComponent("platform-state.json")),
+                                                 homeDirectory: home, commandRunner: other.run)
+        let withheldApply = try withheldManager.apply(config: config, logger: nil)
+        try withheldManager.clear(logger: nil)
+        let foreignKept = withheldApply.launchd.written.isEmpty && other.launchdEnvironment == theirs
+
         return ScenarioResult(
             name: "environment-drift", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
@@ -95,6 +114,7 @@ enum EnvironmentDriftScenarios {
                 .init("the retry repairs once the window reopens", reopened),
                 .init("a non-UTF-8 profile is left alone and reported once", unsafeLeftAlone),
                 .init("a repair overtaken by a clear writes nothing", superseded),
+                .init("with every write withheld, a stop leaves a foreign local proxy and bypass list alone", foreignKept),
             ],
             notes: ["events=\(names().joined(separator: ","))"]
         )

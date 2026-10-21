@@ -44,6 +44,14 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// The profiles last reported as left alone, so a repeated pass reports
     /// each once per episode instead of every time it looks.
     private var reportedSkips: [ProfileTarget: ShellProfileBlock.UnsafeReason] = [:]
+    /// The launchd values this manager put in place since its last
+    /// teardown, known without the journal: the ones it wrote and the ones
+    /// it found already holding its value. An unrecorded variable is ours
+    /// only while it still holds the value here; with every write withheld,
+    /// a loopback URL that was already there is someone else's. `nil` until
+    /// an apply or a teardown runs, so launch-time recovery of a journal
+    /// lost by an earlier run still judges by the domain.
+    private var launchdOwned: [String: String]?
     /// The longest an inspection spends on `launchctl getenv` reads. Each
     /// read is already bounded by `CommandRunner`; this bounds the six.
     private let inspectionBudget: Duration
@@ -382,6 +390,8 @@ package final class EnvironmentManager: @unchecked Sendable {
                 outcome.unreadable.append(name)
                 continue
             }
+            // Our exact value is ours whether or not its record can be saved.
+            if let current { launchdOwned = (launchdOwned ?? [:]).merging([name: current]) { $1 } }
             do {
                 try journal.capturePriorBeforeWrite(surface: .launchdEnvironment, scope: name, value: prior,
                                                     replacingPlaceholder: Self.untouchedMarkerKey)
@@ -397,6 +407,8 @@ package final class EnvironmentManager: @unchecked Sendable {
             let result = try? commandRunner("/bin/launchctl", ["setenv", name, value])
             if result?.exitCode == 0 { outcome.written.append(name) } else { outcome.failed.append(name) }
         }
+        let written = outcome.written.compactMap { name in values[name].map { (name, $0) } }
+        launchdOwned = (launchdOwned ?? [:]).merging(written) { $1 }
         if outcome.isComplete {
             logger?.log(.notice, "Published proxy variables to the user launchd domain (GUI apps pick them up on next launch).", category: .system)
         } else {
@@ -444,7 +456,8 @@ package final class EnvironmentManager: @unchecked Sendable {
         // records and wrote nothing, so "no records" alone is not "records
         // lost". Only beside our proxy URL is an unrecorded bypass list our
         // residue from a journal that was lost (#175); an unrecorded proxy
-        // variable is ours only when it names this machine itself.
+        // variable is ours only when it names this machine itself. Once this
+        // manager has applied, it knows what it put there, and only that is.
         let recordsPresent = journal.hasRecords(for: .launchdEnvironment)
         let bypassResidue = !recordsPresent && loopbackResidueExists()
         for name in launchdVariableNames {
@@ -456,10 +469,19 @@ package final class EnvironmentManager: @unchecked Sendable {
             case .wasPresent(let prior):
                 result = try? commandRunner("/bin/launchctl", ["setenv", name, prior["value"] ?? ""])
                 if result?.exitCode == 0 { restored += 1 }
-            case .notRecorded where !(bypassResidue && Self.bypassVariableNames.contains(name))
-                && !isLoopbackProxyValue(readLaunchdValue(name)):
-                continue
-            case .wasAbsent, .notRecorded:
+            case .notRecorded:
+                switch unrecordedIsOurs(name, bypassResidue: bypassResidue) {
+                case false?:
+                    continue
+                case nil:
+                    // Ours, but unreadable now: a failure, so the next
+                    // teardown still knows it is ours and retries.
+                    failed.append(name)
+                    continue
+                case true?:
+                    result = try? commandRunner("/bin/launchctl", ["unsetenv", name])
+                }
+            case .wasAbsent:
                 // Unknown falls back to unsetting: leaving our proxy URL in the
                 // launchd domain would point every GUI app launched afterwards
                 // at a proxy that is no longer running.
@@ -474,6 +496,8 @@ package final class EnvironmentManager: @unchecked Sendable {
         // retry.
         if failed.isEmpty {
             journal.forgetAll(surface: .launchdEnvironment)
+            // Nothing of ours is left, so a second teardown removes nothing.
+            launchdOwned = [:]
         } else {
             logger?.log(
                 .warning,
@@ -495,6 +519,21 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// The shell-profile half of teardown needs no equivalent: its marker block
     /// identifies our region of the file directly. The launchd domain has no
     /// such marker, so this probe stands in for one.
+    /// Whether a variable the journal has no record of is ours to remove;
+    /// `nil` when one we put in place cannot be read to tell.
+    private func unrecordedIsOurs(_ name: String, bypassResidue: Bool) -> Bool? {
+        if let launchdOwned {
+            guard let owned = launchdOwned[name] else { return false }
+            switch readLaunchdVariable(name) {
+            case .present(let value): return value == owned
+            case .absent: return false
+            case .failed: return nil
+            }
+        }
+        if bypassResidue && Self.bypassVariableNames.contains(name) { return true }
+        return isLoopbackProxyValue(readLaunchdValue(name))
+    }
+
     private func loopbackResidueExists() -> Bool {
         launchdVariableNames.contains { isLoopbackProxyValue(readLaunchdValue($0)) }
     }
