@@ -90,6 +90,7 @@ enum PMSim {
               kerberos-kdc-recovery   A process-pinned KDC failure recovers after independent ticket acquisition
               ntlm-credential-cache   A burst of NTLM fallbacks reads the saved password once, also across a proxy start; a failing store is reported once
               network-location-recovery  inactive-location recovery, external edits, and write races
+              environment-drift       A silently wiped shell environment is repaired with its events; repeats are withheld past the budget; an unsafe profile is left alone (#175)
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
               settings-retry-request  A refused settings action is retried from its own save, not a later edit (#176)
               update-coordinator      Daily update checks, version-change event, and updater report validation (#111)
@@ -253,6 +254,7 @@ enum PMSim {
         "ntlm-credential-cache",
         "helper-caller-identity",
         "network-location-recovery",
+        "environment-drift",
         "lifecycle-stop-overtakes-start",
         "settings-retry-request",
         "update-coordinator",
@@ -408,6 +410,8 @@ enum PMSim {
             return [try await CredentialCacheScenarios.burstReadsOnce(verbose: verbose)]
         case "network-location-recovery":
             return [try await NetworkLocationScenarios.recovery()]
+        case "environment-drift":
+            return [try EnvironmentDriftScenarios.run()]
         case "lifecycle-stop-overtakes-start":
             return [try await LifecycleScenarios.stopOvertakesStart()]
         case "settings-retry-request":

@@ -101,6 +101,11 @@ final class AppState: ObservableObject {
         commandRunner: commandRunner,
         eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
     )
+    private lazy var environmentDriftRepair = EnvironmentDriftRepair(
+        manager: environmentManager,
+        eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) },
+        logger: logStore
+    )
     private lazy var dnsManager = DNSManager(
         privilegeClient: auditedPrivilegeClient,
         resolverDirectory: resolverDirectory,
@@ -121,6 +126,14 @@ final class AppState: ObservableObject {
     private let networkLocationLimits: NetworkLocationLimits
     /// At most one pending retry for a drift repair withheld by the contention budget.
     private var proxyRepairRetry: Task<Void, Never>?
+    /// The shell environment drift pass (#175): one in flight, one wanted
+    /// after it, one retry, one periodic tick.
+    private var environmentDriftInFlight = false
+    /// The trigger of the pass wanted after the one in flight.
+    private var environmentDriftPending: EnvironmentDriftRepair.Trigger?
+    private var environmentRepairRetry: Task<Void, Never>?
+    private var environmentDriftTimer: Task<Void, Never>?
+    private let environmentDriftInterval: Duration
     private lazy var locationRecovery: LocationSettingsRecovery? = {
         guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
         let eventLog = orchestrator.eventLog
@@ -256,6 +269,7 @@ final class AppState: ObservableObject {
         helperSocketBindWait: Duration = .seconds(1),
         dnsReconcileDebounce: TimeInterval = 1.0,
         settingsSaveDebounce: Duration = .seconds(1),
+        environmentDriftInterval: Duration = .seconds(300),
         homeDirectory: URL,
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
@@ -326,6 +340,7 @@ final class AppState: ObservableObject {
         self.helperSocketBindWait = helperSocketBindWait
         self.dnsReconcileDebounce = dnsReconcileDebounce
         self.settingsSaveDebounce = settingsSaveDebounce
+        self.environmentDriftInterval = environmentDriftInterval
         self.commandRunner = commandRunner
         self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
@@ -548,6 +563,7 @@ final class AppState: ObservableObject {
             .store(in: &cancellables)
         notificationManager.requestAuthorization()
         startLocationObserver()
+        startEnvironmentDriftTimer()
         networkMonitor.start()
         self.vpnStatusMonitor.start()
         wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -2049,6 +2065,8 @@ final class AppState: ObservableObject {
     func performTerminationCleanup() {
         updateCoordinator.stop()
         sectionCloseRetry?.cancel()
+        environmentDriftTimer?.cancel()
+        environmentRepairRetry?.cancel()
         proxyLane.supersedeAll()
         dnsLane.supersedeAll()
         let deadline = terminationDrainDeadlineMilliseconds
@@ -2328,7 +2346,9 @@ final class AppState: ObservableObject {
 
     /// One pass and one pending retry; never queues a helper call per report.
     private func reconcileSystemProxyIfRunning() async {
-        guard !rejectUnavailableConfiguration(), platformConfig.manageSystemProxy else { return }
+        guard !rejectUnavailableConfiguration() else { return }
+        scheduleEnvironmentDriftPass(trigger: .observed)
+        guard platformConfig.manageSystemProxy else { return }
         guard !proxySettingsReconcileInFlight else { proxySettingsReconcileWanted = true; return }
         proxySettingsReconcileInFlight = true
         defer { proxySettingsReconcileInFlight = false; proxySettingsReconcileWanted = false }
@@ -2367,6 +2387,71 @@ final class AppState: ObservableObject {
             do { try await Task.sleep(for: delay) }
             catch { return } // Cancelled by a newer schedule; that one runs instead.
             await self?.reconcileSystemProxyIfRunning()
+        }
+    }
+
+    // MARK: - Shell environment drift (#175)
+
+    /// One environment drift pass after the work in flight. Fed by every
+    /// trigger of the system proxy drift pass, and by the periodic tick:
+    /// none of those triggers is guaranteed after a silent wipe.
+    private func scheduleEnvironmentDriftPass(trigger: EnvironmentDriftRepair.Trigger) {
+        deliveries.deliver { [weak self] in await self?.reconcileEnvironmentDriftIfRunning(trigger: trigger) }
+    }
+
+    /// Off the main actor: three profile reads and six `launchctl getenv`,
+    /// and a repair only when something drifted. Coalesced like the system
+    /// proxy pass, and checked against the lifecycle under the manager's
+    /// lock before it writes (`EnvironmentManager.repair`).
+    private func reconcileEnvironmentDriftIfRunning(trigger: EnvironmentDriftRepair.Trigger) async {
+        guard platformConfig.manageEnvironmentVariables else { return }
+        guard !environmentDriftInFlight else {
+            environmentDriftPending = trigger.coalesced(with: environmentDriftPending)
+            return
+        }
+        environmentDriftInFlight = true
+        defer { environmentDriftInFlight = false; environmentDriftPending = nil }
+        var trigger = trigger
+        repeat {
+            environmentDriftPending = nil
+            await awaitLaunchRecovery()
+            await proxyLane.waitUntilIdle()
+            guard platformConfig.manageEnvironmentVariables, runtimeState().proxyIsUp else { return }
+            let token = proxyLane.observationToken
+            let repair = environmentDriftRepair, config = config
+            let generation = environmentManager.generation, passTrigger = trigger
+            let retry = await platformWork.run {
+                repair.run(config: config, generation: generation, trigger: passTrigger, isCurrent: { !token.isSuperseded })
+            }
+            if let retry { scheduleEnvironmentRepairRetry(after: retry) }
+            guard let next = environmentDriftPending else { break }
+            trigger = next
+        } while true
+    }
+
+    /// One pass when a withheld repair's window reopens, since no trigger
+    /// may follow. A newer schedule replaces it.
+    private func scheduleEnvironmentRepairRetry(after delay: Duration) {
+        environmentRepairRetry?.cancel()
+        environmentRepairRetry = Task { [weak self] in
+            do { try await Task.sleep(for: delay) }
+            catch { return } // Cancelled by a newer schedule; that one runs instead.
+            await self?.reconcileEnvironmentDriftIfRunning(trigger: .retry)
+        }
+    }
+
+    /// The periodic tick: one task for the host's lifetime. `Task.sleep`
+    /// runs on the continuous clock, so a tick due during sleep fires once
+    /// after wake rather than once per missed interval.
+    private func startEnvironmentDriftTimer() {
+        let interval = environmentDriftInterval
+        environmentDriftTimer = Task { @MainActor [weak self] in
+            while true {
+                do { try await Task.sleep(for: interval) }
+                catch { return }
+                guard let self else { return }
+                self.scheduleEnvironmentDriftPass(trigger: .timer)
+            }
         }
     }
 

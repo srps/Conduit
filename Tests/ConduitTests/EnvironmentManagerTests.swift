@@ -149,6 +149,27 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertEqual(launchctl.environment, ["NO_PROXY": "user.example"], "nothing written without a record")
         XCTAssertEqual(recorder.events().last?.event, "platform.environment_launchd_incomplete")
         XCTAssertTrue(recorder.events().last?.detail?.hasPrefix("withheld=") == true)
+
+        // No records, because nothing was written: not a lost journal.
+        try manager.clear(logger: nil)
+        XCTAssertEqual(launchctl.environment, ["NO_PROXY": "user.example"], "teardown leaves the foreign value alone")
+    }
+
+    /// Every capture withheld, so nothing was written: a loopback proxy URL
+    /// beside it does not make a foreign proxy variable ours.
+    func testTeardownAfterWithheldCapturesLeavesForeignProxyValues() throws {
+        launchctl.environment = ["HTTP_PROXY": "http://127.0.0.1:9999", "HTTPS_PROXY": "http://foreign.example:8080"]
+        let readOnly = home.appendingPathComponent("read-only", isDirectory: true)
+        try FileManager.default.createDirectory(at: readOnly, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: readOnly.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnly.path) }
+        let manager = EnvironmentManager(journal: PlatformStateJournal(fileURL: readOnly.appendingPathComponent("platform-state.json")),
+                                         homeDirectory: home, commandRunner: launchctl.run)
+        try manager.apply(config: makeConfig(), logger: nil)
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(launchctl.environment["HTTPS_PROXY"], "http://foreign.example:8080", "not this machine, never recorded")
     }
 
     /// The user's own bypass list may equal ours. Without our address
@@ -441,6 +462,91 @@ final class EnvironmentManagerTests: XCTestCase {
         try big.write(to: zshrc)
         XCTAssertEqual(try makeManager().apply(config: makeConfig(), logger: nil).profiles[.zshrc], .skipped(.oversized))
         XCTAssertEqual(try Data(contentsOf: zshrc).count, big.count)
+    }
+
+    // MARK: - Drift (#175)
+
+    func testInspectionFindsNothingRightAfterApply() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        XCTAssertTrue(manager.inspect(config: makeConfig()).isClean)
+    }
+
+    /// The wipe that motivated #175: blocks stripped, variables unset.
+    func testInspectionNamesEveryDriftedSurface() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        try "export A=1\n".write(to: zshrc, atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: home.appendingPathComponent(".zprofile"))
+        launchctl.environment["HTTP_PROXY"] = nil
+        launchctl.environment["NO_PROXY"] = "elsewhere.example"
+
+        var edited = makeConfig()
+        edited.noProxyHosts = ["localhost", "*.internal"]
+        let drift = manager.inspect(config: edited)
+        XCTAssertEqual(drift.profiles, [.zshrc: .missing, .zprofile: .missing])
+        XCTAssertEqual(Set(drift.launchd), ["HTTP_PROXY", "NO_PROXY"])
+
+        var changed = makeConfig()
+        changed.noProxyHosts.append("new.example")
+        XCTAssertEqual(manager.inspect(config: changed).profiles[.environmentD], .stale, "a block for another config")
+    }
+
+    /// `launchctl getenv` prints nothing for an unset name and an empty one
+    /// alike, so an applied empty bypass list must not look like drift.
+    func testAnEmptyBypassListIsNotDrift() throws {
+        var config = makeConfig()
+        config.noProxyHosts = []
+        let manager = makeManager()
+        try manager.apply(config: config, logger: nil)
+        XCTAssertTrue(manager.inspect(config: config).isClean)
+    }
+
+    func testAnUnreadableVariableIsReportedNotDrifted() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        launchctl.failingGetenv = ["NO_PROXY"]
+        let drift = manager.inspect(config: makeConfig())
+        XCTAssertFalse(drift.hasDrift)
+        XCTAssertEqual(drift.unreadableLaunchd, ["NO_PROXY"])
+    }
+
+    /// A clear (switch off, stop, quit) or a newer apply after the pass read
+    /// the generation wins: the repair from the older snapshot writes nothing.
+    func testARepairOvertakenByAClearWritesNothing() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        let generation = manager.generation
+        try manager.clear(logger: nil)
+
+        XCTAssertNil(try manager.repair(config: makeConfig(), ifGeneration: generation, isCurrent: { true }, logger: nil))
+        XCTAssertNil(launchctl.environment["HTTP_PROXY"])
+        XCTAssertFalse(try String(contentsOf: zshrc, encoding: .utf8).contains("Conduit"))
+    }
+
+    func testARepairForAStaleLifecycleWritesNothing() throws {
+        let manager = makeManager()
+        let generation = manager.generation
+        XCTAssertNil(try manager.repair(config: makeConfig(), ifGeneration: generation, isCurrent: { false }, logger: nil))
+        XCTAssertTrue(launchctl.environment.isEmpty)
+    }
+
+    /// A repeated pass over the same unsafe profile reports it once.
+    func testAnUnsafeProfileIsReportedOncePerEpisode() throws {
+        try Data([0xff]).write(to: zshrc)
+        let recorder = recordingSink()
+        let manager = EnvironmentManager(journal: journal, homeDirectory: home, commandRunner: launchctl.run,
+                                         eventSink: recorder.sink)
+        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.apply(config: makeConfig(), logger: nil)
+        XCTAssertEqual(recorder.events().filter { $0.event == "platform.environment_file_skipped" }.count, 1)
+
+        try "export A=1\n".write(to: zshrc, atomically: true, encoding: .utf8)
+        try manager.apply(config: makeConfig(), logger: nil)
+        try Data([0xff]).write(to: zshrc)
+        try manager.apply(config: makeConfig(), logger: nil)
+        XCTAssertEqual(recorder.events().filter { $0.event == "platform.environment_file_skipped" }.count, 2,
+                       "a new episode after the file was fine again")
     }
 
     func testRepeatedApplyDoesNotAccumulateBlocks() throws {

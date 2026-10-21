@@ -44,6 +44,9 @@ final class AppStateHarness {
     /// Long, so an autosave never lands inside a scenario about something
     /// else; the autosave scenarios pass a short one (#171).
     var settingsSaveDebounce: Duration = .seconds(3600)
+    /// Long, so the periodic environment drift tick never lands inside a
+    /// scenario about something else; the tick's own scenario passes a short one.
+    var environmentDriftInterval: Duration = .seconds(3600)
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
     private(set) var appState: AppState?
@@ -92,6 +95,7 @@ final class AppStateHarness {
             helperSocketBindWait: helperSocketBindWait,
             dnsReconcileDebounce: dnsReconcileDebounce,
             settingsSaveDebounce: settingsSaveDebounce,
+            environmentDriftInterval: environmentDriftInterval,
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
@@ -581,6 +585,7 @@ final class AppStateHarnessTests: XCTestCase {
         platform: PlatformIntegrationConfig = PlatformIntegrationConfig(),
         helperSocketBindWait: Duration = .seconds(1),
         settingsSaveDebounce: Duration = .seconds(3600),
+        environmentDriftInterval: Duration = .seconds(3600),
         configure: (inout ProxyConfig) -> Void = { _ in }
     ) throws -> AppState {
         var config = makeConfig()
@@ -588,6 +593,7 @@ final class AppStateHarnessTests: XCTestCase {
         harness = try AppStateHarness(config: config, platformConfig: platform)
         harness.helperSocketBindWait = helperSocketBindWait
         harness.settingsSaveDebounce = settingsSaveDebounce
+        harness.environmentDriftInterval = environmentDriftInterval
         return harness.launch()
     }
 
@@ -1140,6 +1146,70 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(wifi.bypassDomains, bypassBefore)
         XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.advertised_bypass_changed" }.map(\.detail),
                        ["surfaces=environment"])
+    }
+
+    // MARK: Shell environment drift (#175)
+
+    /// What was found on the owner's machine: every block stripped and the
+    /// launchd variables unset, by something other than Conduit.
+    private func wipeEnvironment() throws {
+        let zshrc = harness.homeDirectory.appendingPathComponent(".zshrc")
+        try "export A=1\n".write(to: zshrc, atomically: true, encoding: .utf8)
+        _ = try machine.run("/bin/launchctl", ["unsetenv", "HTTP_PROXY"])
+    }
+
+    func testAWipedEnvironmentIsRepairedOnTheNextSettingsNotification() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        try wipeEnvironment()
+
+        harness.locationObserver.emitSettingsChange()
+        await harness.deliveries()
+
+        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(appState.config.localPort)")
+        let zshrc = try String(contentsOf: harness.homeDirectory.appendingPathComponent(".zshrc"), encoding: .utf8)
+        XCTAssertTrue(zshrc.hasPrefix("export A=1\n") && zshrc.contains("# >>> Conduit >>>"))
+        let names = appState.eventLog.events.map(\.event)
+        XCTAssertEqual(names.filter { $0.hasPrefix("platform.environment_") },
+                       ["platform.environment_drift", "platform.environment_repaired"])
+    }
+
+    /// No wake, path, VPN or settings report follows a silent wipe for sure;
+    /// the periodic tick finds it anyway.
+    func testThePeriodicTickRepairsAWipeNoNotificationReports() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true),
+                                  environmentDriftInterval: .milliseconds(50))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        try wipeEnvironment()
+
+        await harness.settle("the tick repairs the wipe") {
+            appState.eventLog.events.contains { $0.event == "platform.environment_repaired" }
+        }
+        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(appState.config.localPort)")
+        XCTAssertTrue(appState.eventLog.events.contains { $0.event == "platform.environment_drift" && $0.detail?.hasPrefix("trigger=timer") == true })
+    }
+
+    /// The pass belongs to the switch and the running proxy: off, or
+    /// stopped, it inspects and writes nothing.
+    func testTheDriftPassLeavesTheEnvironmentAloneWhenTheSwitchIsOffOrTheProxyStopped() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: false))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        harness.locationObserver.emitSettingsChange()
+        await harness.deliveries()
+        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"])
+
+        appState.platformConfig.manageEnvironmentVariables = true
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        await appState.stopProxy()
+        try wipeEnvironment()
+        harness.locationObserver.emitSettingsChange()
+        await harness.deliveries()
+        XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"])
+        XCTAssertFalse(appState.eventLog.events.contains { $0.event == "platform.environment_drift" })
     }
 
     /// Repeated DNS stops while the first is held on a slow helper. Each

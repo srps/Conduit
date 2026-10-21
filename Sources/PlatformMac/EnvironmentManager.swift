@@ -33,6 +33,20 @@ package final class EnvironmentManager: @unchecked Sendable {
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
     /// Where a profile left alone is reported. Hosts pass their event log.
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    /// Bumped by every `apply` and `clear`, under `operations`. A host reads
+    /// it with the config it hands a drift pass, and the repair writes only
+    /// if it is unchanged: a newer apply, a clear on disable, stop or quit,
+    /// already decided the state, and a repair from an older snapshot must
+    /// not undo it (#175). Its own lock, so the main actor can read it while
+    /// an apply holds `operations` across `launchctl`.
+    private var generationValue: UInt64 = 0
+    private let generationLock = NSLock()
+    /// The profiles last reported as left alone, so a repeated pass reports
+    /// each once per episode instead of every time it looks.
+    private var reportedSkips: [ProfileTarget: ShellProfileBlock.UnsafeReason] = [:]
+    /// The longest an inspection spends on `launchctl getenv` reads. Each
+    /// read is already bounded by `CommandRunner`; this bounds the six.
+    private let inspectionBudget: Duration
 
     package init(
         journal: PlatformStateJournal,
@@ -40,13 +54,19 @@ package final class EnvironmentManager: @unchecked Sendable {
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
             try CommandRunner.run(launchPath: launchPath, arguments: arguments)
         },
-        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
+        eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
+        inspectionBudget: Duration = .seconds(5)
     ) {
         self.journal = journal
         self.homeDirectory = homeDirectory
         self.commandRunner = commandRunner
         self.eventSink = eventSink
+        self.inspectionBudget = inspectionBudget
     }
+
+    package var generation: UInt64 { generationLock.withLock { generationValue } }
+
+    private func advanceGeneration() { generationLock.withLock { generationValue &+= 1 } }
 
     /// The shell profiles carrying the block, by the name events use.
     package enum ProfileTarget: String, CaseIterable, Sendable {
@@ -107,6 +127,7 @@ package final class EnvironmentManager: @unchecked Sendable {
     package func apply(config: ProxyConfig, logger: (any LogSink)?) throws -> ApplyResult {
         operations.lock()
         defer { operations.unlock() }
+        advanceGeneration()
         try journal.requireReadableForApply()
         let block = renderBlock(config: config)
         var outcomes: [ProfileTarget: ProfileOutcome] = [:]
@@ -152,6 +173,7 @@ package final class EnvironmentManager: @unchecked Sendable {
                 reportSkipped(target, reason: reason, operation: operation, logger: logger)
                 return .skipped(reason)
             }
+            reportedSkips[target] = nil
             guard let next = transform(contents) else { return .unchanged }
             if case .unmanaged(let text) = contents, text == next { return .unchanged }
             if case .managed(let text, _) = contents, text == next { return .unchanged }
@@ -170,10 +192,83 @@ package final class EnvironmentManager: @unchecked Sendable {
     private func reportSkipped(
         _ target: ProfileTarget, reason: ShellProfileBlock.UnsafeReason, operation: String, logger: (any LogSink)?
     ) {
+        guard reportedSkips[target] != reason else { return }
+        reportedSkips[target] = reason
         let event = RuntimeEvent(kind: .config, event: "platform.environment_file_skipped",
                                  detail: "file=\(target.rawValue) reason=\(reason.rawValue) operation=\(operation)")
         eventSink?(event)
         logger?.log(.warning, "Shell environment: left \(target.relativePath) alone (\(reason.rawValue)); fix the Conduit markers or the file by hand. \(event.event) \(event.detail ?? "")", category: .system)
+    }
+
+    // MARK: - Drift (#175)
+
+    /// How each surface compares with what `apply(config:)` would write.
+    package struct Drift: Equatable, Sendable {
+        package enum ProfileDrift: String, Sendable { case missing, stale }
+        package var profiles: [ProfileTarget: ProfileDrift] = [:]
+        package var unsafeProfiles: [ProfileTarget: ShellProfileBlock.UnsafeReason] = [:]
+        /// Variables not holding our value.
+        package var launchd: [String] = []
+        /// Variables that could not be read, or were not reached within the
+        /// inspection budget. Never acted on.
+        package var unreadableLaunchd: [String] = []
+
+        package var hasDrift: Bool { !profiles.isEmpty || !launchd.isEmpty }
+        package var isClean: Bool { !hasDrift && unsafeProfiles.isEmpty && unreadableLaunchd.isEmpty }
+    }
+
+    /// Reads every surface and compares it with `config`. Reads only.
+    package func inspect(config: ProxyConfig) -> Drift {
+        operations.lock()
+        defer { operations.unlock() }
+        var drift = Drift()
+        let block = renderBlock(config: config)
+        for target in ProfileTarget.allCases {
+            switch readProfile(target) {
+            case .missing, .unmanaged:
+                drift.profiles[target] = .missing
+            case .managed(let text, let range):
+                if text[range] != block { drift.profiles[target] = .stale }
+            case .unsafe(let reason):
+                drift.unsafeProfiles[target] = reason
+            }
+        }
+        let wanted = launchdValues(config: config)
+        let clock = ContinuousClock()
+        let deadline = clock.now + inspectionBudget
+        for name in launchdVariableNames {
+            guard clock.now < deadline else {
+                drift.unreadableLaunchd.append(name)
+                continue
+            }
+            let desired = wanted[name] ?? ""
+            switch readLaunchdVariable(name) {
+            case .present(let value) where value == desired:
+                continue
+            case .absent where desired.isEmpty:
+                // `launchctl getenv` prints nothing for an unset name and
+                // for an empty one alike: an empty bypass list is applied.
+                continue
+            case .present, .absent:
+                drift.launchd.append(name)
+            case .failed:
+                drift.unreadableLaunchd.append(name)
+            }
+        }
+        return drift
+    }
+
+    /// Re-applies `config` when nothing has applied or cleared since
+    /// `generation` was read, and `isCurrent` still holds; both are checked
+    /// under the operation lock, so a disable, stop or quit that lands
+    /// first wins. Nil when superseded.
+    package func repair(
+        config: ProxyConfig, ifGeneration generation: UInt64, isCurrent: () -> Bool, logger: (any LogSink)?
+    ) throws -> ApplyResult? {
+        operations.lock()
+        defer { operations.unlock() }
+        guard self.generation == generation, isCurrent() else { return nil }
+        return try apply(config: config, logger: logger)
     }
 
     /// Whether anything of ours is still on the machine: a managed block in
@@ -208,6 +303,7 @@ package final class EnvironmentManager: @unchecked Sendable {
     package func clear(logger: (any LogSink)?) throws -> [ProfileTarget: ProfileOutcome] {
         operations.lock()
         defer { operations.unlock() }
+        advanceGeneration()
         var outcomes: [ProfileTarget: ProfileOutcome] = [:]
         for target in ProfileTarget.allCases {
             outcomes[target] = try rewrite(target, operation: "clear", logger: logger, ShellProfileBlock.clearing)
@@ -231,14 +327,18 @@ package final class EnvironmentManager: @unchecked Sendable {
         ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"]
     }
 
-    private func applyLaunchdEnvironment(config: ProxyConfig, logger: (any LogSink)?) -> LaunchdOutcome {
+    private func launchdValues(config: ProxyConfig) -> [String: String] {
         let proxyURL = config.localProxyURL
         let noProxy = config.noProxyHosts.joined(separator: ",")
-        let values: [String: String] = [
+        return [
             "HTTP_PROXY": proxyURL, "http_proxy": proxyURL,
             "HTTPS_PROXY": proxyURL, "https_proxy": proxyURL,
             "NO_PROXY": noProxy, "no_proxy": noProxy,
         ]
+    }
+
+    private func applyLaunchdEnvironment(config: ProxyConfig, logger: (any LogSink)?) -> LaunchdOutcome {
+        let values = launchdValues(config: config)
         // Capture before overwriting. A developer with HTTP_PROXY already
         // exported into their launchd domain would otherwise have it silently
         // unset by our teardown, with nothing recording that it existed.
@@ -338,11 +438,15 @@ package final class EnvironmentManager: @unchecked Sendable {
 
         var restored = 0
         var failed: [String] = []
-        // Every write is journaled first, so with records present a name
-        // missing from them was never written: its value is someone else's,
-        // unless it is our own address. Unknown falls back to unsetting only
-        // when the records themselves were lost (#175).
+        // Every write is journaled first, so a name missing from the records
+        // was never written: its value is someone else's, unless it is our
+        // own address. An apply whose every capture was withheld leaves no
+        // records and wrote nothing, so "no records" alone is not "records
+        // lost". Only beside our proxy URL is an unrecorded bypass list our
+        // residue from a journal that was lost (#175); an unrecorded proxy
+        // variable is ours only when it names this machine itself.
         let recordsPresent = journal.hasRecords(for: .launchdEnvironment)
+        let bypassResidue = !recordsPresent && loopbackResidueExists()
         for name in launchdVariableNames {
             let result: CommandResult?
             switch journal.prior(surface: .launchdEnvironment, scope: name) {
@@ -352,7 +456,8 @@ package final class EnvironmentManager: @unchecked Sendable {
             case .wasPresent(let prior):
                 result = try? commandRunner("/bin/launchctl", ["setenv", name, prior["value"] ?? ""])
                 if result?.exitCode == 0 { restored += 1 }
-            case .notRecorded where recordsPresent && !isLoopbackProxyValue(readLaunchdValue(name)):
+            case .notRecorded where !(bypassResidue && Self.bypassVariableNames.contains(name))
+                && !isLoopbackProxyValue(readLaunchdValue(name)):
                 continue
             case .wasAbsent, .notRecorded:
                 // Unknown falls back to unsetting: leaving our proxy URL in the
