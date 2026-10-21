@@ -3,7 +3,7 @@
 - Date: 2026-09-25
 - Decision: accepted (owner, 2026-09-25, #46)
 - Implementation: implemented
-- Validation: pending
+- Validation: passed
 - Supersedes: none
 - Superseded by: none
 
@@ -48,8 +48,13 @@ Landed in #89; #121 made Settings' Install Helper write the pin.
 - [`HelperCallerIdentityTests`](../../Tests/ConduitTests/HelperCallerIdentityTests.swift) and the [`helper-caller-identity`](../../Sources/pm-sim/HelperCallerIdentityScenarios.swift) scenario.
 - [`install-helper.sh`](../../install-helper.sh) writes the pin; [`scripts/create-signing-identity.sh`](../../scripts/create-signing-identity.sh) makes the identity, and [`scripts/test-create-signing-identity.sh`](../../scripts/test-create-signing-identity.sh) checks that it keeps the key secret.
 
-Does not prove: enforcement on an installed helper. #89's manual checklist (pin ownership, same-uid refusal, logout teardown, fast user switching, tamper, rollback) is not recorded as passed in the repository or on the PR.
+Does not prove: enforcement on an installed helper; the owner's validation covers that.
+
+Validation: the owner ran #89's manual checklist on a real install on 2026-09-26 and 2026-09-28, and confirmed the result on 2026-10-21. It is recorded on [#89](https://github.com/srps/Conduit/pull/89#issuecomment-6327604980).
+
+- **Passed:** the pin and its ownership, admission, refusal of an unsigned same-uid process, an ad-hoc build and a build without the hardened runtime, daemon identity, tamper and reinstall, logout teardown, an app update without a helper reinstall, and the hardened-runtime smoke test for PAC and Kerberos.
+- **Not recorded:** fast user switching, rollback to an ad-hoc helper install, and NTLM with Keychain-stored credentials under the hardened runtime.
 
 ## Open questions
 
-None. Validation moves to `passed` once the owner records the #89 checklist result.
+None.

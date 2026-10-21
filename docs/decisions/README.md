@@ -32,7 +32,7 @@ Each record carries three statuses, because merged does not mean it works:
 | [0006](0006-module-boundaries.md) | Module boundaries for the helper, shared contracts, Keychain codec, spool and paths | accepted | partial | none |
 | [0007](0007-kernel-file-split-first.md) | Split large kernel files before any target split | accepted | planned | none |
 | [0008](0008-pac-no-usable-answer-and-strict-mode.md) | PAC answers with no usable entry and strict mode | accepted | implemented | none |
-| [0009](0009-helper-caller-identity.md) | Helper caller identity by code signature | accepted | implemented | pending |
+| [0009](0009-helper-caller-identity.md) | Helper caller identity by code signature | accepted | implemented | passed |
 | [0010](0010-self-update.md) | Self-update with a nested Sparkle updater | accepted | implemented | pending |
 | [0011](0011-vpn-path-based-socket-sweeps.md) | Path-based socket sweeps for VPN transitions | accepted | implemented | pending |
 | [0012](0012-commit-attribution.md) | Optional attribution trailers, no session URLs | accepted | implemented | none |
