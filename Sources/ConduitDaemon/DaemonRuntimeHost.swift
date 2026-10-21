@@ -92,7 +92,8 @@ final class DaemonRuntimeHost {
     private lazy var environmentManager = EnvironmentManager(
         journal: platformStateJournal,
         homeDirectory: homeDirectory,
-        commandRunner: commandRunner
+        commandRunner: commandRunner,
+        eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
     )
     /// With the journal: a resolver file is ours only if we recorded it, and
     /// that record is what lets a stop under a switch that is already off

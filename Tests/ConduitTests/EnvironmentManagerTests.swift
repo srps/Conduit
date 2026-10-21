@@ -280,6 +280,82 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080")
     }
 
+    // MARK: - Profiles that cannot be edited safely (#175)
+
+    private var zshrc: URL { home.appendingPathComponent(".zshrc") }
+
+    private func recordingSink() -> (sink: @Sendable (RuntimeEvent) -> Void, events: () -> [RuntimeEvent]) {
+        let box = LockedEvents()
+        return ({ box.append($0) }, { box.all })
+    }
+
+    /// Reading a non-UTF-8 profile used to fail into "", and the apply then
+    /// replaced the whole file with just the block.
+    func testANonUTF8ProfileIsLeftAloneAndReported() throws {
+        let bytes = Data([0x65, 0x78, 0x70, 0xff, 0xfe, 0x0a])
+        try bytes.write(to: zshrc)
+        let recorder = recordingSink()
+        let manager = EnvironmentManager(journal: journal, homeDirectory: home, commandRunner: launchctl.run,
+                                         eventSink: recorder.sink)
+
+        let outcomes = try manager.apply(config: makeConfig(), logger: nil)
+
+        XCTAssertEqual(try Data(contentsOf: zshrc), bytes, "the user's file is untouched")
+        XCTAssertEqual(outcomes[.zshrc], .skipped(.notUTF8))
+        XCTAssertEqual(outcomes[.zprofile], .written, "the other profiles are still written")
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://127.0.0.1:3128")
+        XCTAssertEqual(recorder.events().map(\.event), ["platform.environment_file_skipped"])
+        XCTAssertEqual(recorder.events().first?.detail, "file=.zshrc reason=not_utf8 operation=apply")
+    }
+
+    /// An end marker before the start made the removal range invalid, which
+    /// traps; a start without an end got a second block appended.
+    func testMarkersThatDoNotPairAreNeitherRemovedNorStacked() throws {
+        let manager = makeManager()
+        for text in ["# <<< Conduit <<<\nexport A=1\n# >>> Conduit >>>\n",
+                     "export A=1\n# >>> Conduit >>>\nexport HTTP_PROXY=x\n"] {
+            try text.write(to: zshrc, atomically: true, encoding: .utf8)
+            XCTAssertEqual(try manager.apply(config: makeConfig(), logger: nil)[.zshrc], .skipped(.ambiguousMarkers))
+            XCTAssertEqual(try manager.clear(logger: nil)[.zshrc], .skipped(.ambiguousMarkers))
+            XCTAssertEqual(try String(contentsOf: zshrc, encoding: .utf8), text)
+        }
+    }
+
+    /// Clear rewrote every profile, trimming the user's own blank lines and
+    /// collapsing runs of them anywhere in the file, block or no block.
+    func testClearLeavesAProfileWithoutABlockByteForByte() throws {
+        let text = "\n\nexport A=1\n\n\n\nexport B=2\n\n"
+        try text.write(to: zshrc, atomically: true, encoding: .utf8)
+
+        XCTAssertEqual(try makeManager().clear(logger: nil)[.zshrc], .unchanged)
+        XCTAssertEqual(try String(contentsOf: zshrc, encoding: .utf8), text)
+    }
+
+    func testApplyThenClearRestoresTheProfileExactly() throws {
+        let text = "export A=1\n\n\n\nexport B=2\n"
+        try text.write(to: zshrc, atomically: true, encoding: .utf8)
+        let manager = makeManager()
+
+        try manager.apply(config: makeConfig(), logger: nil)
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(try String(contentsOf: zshrc, encoding: .utf8), text)
+    }
+
+    func testReapplyingTheSameConfigWritesNoProfile() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        let outcomes = try manager.apply(config: makeConfig(), logger: nil)
+        XCTAssertTrue(outcomes.values.allSatisfy { $0 == .unchanged }, "\(outcomes)")
+    }
+
+    func testAnOversizedProfileIsLeftAlone() throws {
+        let big = Data(repeating: 0x61, count: ShellProfileBlock.maximumFileBytes + 1)
+        try big.write(to: zshrc)
+        XCTAssertEqual(try makeManager().apply(config: makeConfig(), logger: nil)[.zshrc], .skipped(.oversized))
+        XCTAssertEqual(try Data(contentsOf: zshrc).count, big.count)
+    }
+
     func testRepeatedApplyDoesNotAccumulateBlocks() throws {
         let manager = makeManager()
         try manager.apply(config: makeConfig(), logger: nil)
@@ -289,6 +365,13 @@ final class EnvironmentManagerTests: XCTestCase {
         let blockCount = contents.components(separatedBy: "# >>> Conduit >>>").count - 1
         XCTAssertEqual(blockCount, 1, "each apply replaces our block rather than appending another")
     }
+}
+
+private final class LockedEvents: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [RuntimeEvent] = []
+    func append(_ event: RuntimeEvent) { lock.withLock { events.append(event) } }
+    var all: [RuntimeEvent] { lock.withLock { events } }
 }
 
 // MARK: - Fake launchctl
