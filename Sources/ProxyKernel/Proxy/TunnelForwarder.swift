@@ -473,12 +473,7 @@ package final class TunnelForwarder: @unchecked Sendable {
             if let existing = activeDefinitions[def.id] {
                 // Only listener-relevant fields force a rebind. `label` is metadata and can be
                 // propagated in place (see below) without tearing down the socket.
-                let rebindNeeded = existing.localPort != def.localPort
-                    || existing.remoteHost != def.remoteHost
-                    || existing.remotePort != def.remotePort
-                    || existing.proxied != def.proxied
-                    || existing.enabled != def.enabled
-                if rebindNeeded {
+                if def.requiresRebind(from: existing) {
                     toAdd.append(def)
                     if let ch = listenersByID[def.id] {
                         _ = try? await ch.close().get()

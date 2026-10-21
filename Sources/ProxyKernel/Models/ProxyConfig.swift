@@ -810,6 +810,31 @@ package struct TunnelDefinition: Codable, Equatable, Hashable, Identifiable {
         "\(localPort):\(remoteHost):\(remotePort)"
     }
 
+    /// Whether replacing `existing` (same ID) with this definition closes
+    /// its listener and binds a new one. `label` and `preset` are metadata
+    /// and update in place. `TunnelForwarder.reconcile` and `ConfigDiff`
+    /// both read this, so what the editor holds for a commit is what the
+    /// runtime would replace.
+    package func requiresRebind(from existing: TunnelDefinition) -> Bool {
+        existing.localPort != localPort
+            || existing.remoteHost != remoteHost
+            || existing.remotePort != remotePort
+            || existing.proxied != proxied
+            || existing.enabled != enabled
+    }
+
+    /// Whether going from `old` to `new` starts, stops or replaces any
+    /// tunnel listener: an enabled definition added, removed, enabled,
+    /// disabled or given a new ID, or one kept by ID that `requiresRebind`.
+    package static func listenersDiffer(_ old: [TunnelDefinition], _ new: [TunnelDefinition]) -> Bool {
+        let before = Dictionary(old.filter(\.enabled).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        let after = Dictionary(new.filter(\.enabled).map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
+        guard Set(before.keys) == Set(after.keys) else { return true }
+        return after.contains { id, definition in
+            before[id].map { definition.requiresRebind(from: $0) } ?? true
+        }
+    }
+
     package init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
