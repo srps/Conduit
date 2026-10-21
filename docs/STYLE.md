@@ -175,6 +175,8 @@ State that grants authority — an upstream is healthy, the VPN is connected, a 
 
 **Rule of thumb:** if a timer's firing changes what is routed, trusted or owned, ask which event it is standing in for, and whether that event can be delivered instead.
 
+The windows in `Sources/` today, with a verdict for each, are in [`liveness-audit.md`](./liveness-audit.md).
+
 ## How this differs from TIGER_STYLE
 
 STYLE is TIGER_STYLE minus the parts that are over-engineering for a desktop proxy. The historical rationale is in the [April research archive](./archive/planning-research-2026-04.md#57-ghostty--tigerbeetle-architectural-fact-check).
