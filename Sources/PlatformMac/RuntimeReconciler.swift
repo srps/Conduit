@@ -108,8 +108,9 @@ package final class RuntimeReconciler {
     /// sink can't be used for that because it mirrors every keystroke into
     /// `orchestrator.config`, which would make an internally-derived diff
     /// permanently empty. Lifecycle toggles that mutate config themselves
-    /// (start/stopDNS) call `markReconciled(config:)` so their own save
-    /// doesn't re-trigger the subsystem they just started or stopped.
+    /// (start/stopDNS) call `markReconciled(dnsForwarderEnabled:)` so their
+    /// own save doesn't re-trigger the subsystem they just started or
+    /// stopped.
     package private(set) var lastReconciledConfig: ProxyConfig
     /// The platform integration flags the machine was last brought in line
     /// with. Same role as `lastReconciledConfig` for the other half of a
@@ -132,11 +133,12 @@ package final class RuntimeReconciler {
         self.host = host
     }
 
-    /// For a config change that is already live in the runtime — a
-    /// lifecycle flip, or an orchestrator-originated edit — so the next
-    /// save does not re-apply it.
-    package func markReconciled(config: ProxyConfig) {
-        lastReconciledConfig = config
+    /// For the DNS lifecycle's own flag flip, already live in the runtime,
+    /// so the next save does not re-apply it. Only that field: absorbing
+    /// the whole config also absorbed a Settings edit still waiting for its
+    /// save (#171), which then never reached the platform surfaces.
+    package func markReconciled(dnsForwarderEnabled: Bool) {
+        lastReconciledConfig.dnsForwarderEnabled = dnsForwarderEnabled
     }
 
     /// For a flag change nothing was applied under yet: the launch-flag

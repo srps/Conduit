@@ -864,12 +864,40 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(appState.hasUnsavedEdit)
         XCTAssertNil(appState.lastErrorMessage, "nothing is reported mid-edit")
         XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.autosave_held" }.map(\.detail),
-                       ["reason=start_blocking_problems problems=1"], "the decision not to save is an event")
+                       ["reason=start_blocking_problems problems=1 trigger=pause"], "the decision not to save is an event")
 
         appState.flushPendingSave()
         XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.")
         XCTAssertNotNil(appState.lastErrorMessage, "leaving the section reports the problem")
         XCTAssertFalse(appState.hasUnsavedEdit)
+    }
+
+    /// A lifecycle save carries the whole config, so a start-blocking edit
+    /// still waiting must not ride along into a reconcile; the save waits.
+    /// Stopping DNS absorbs only its own flag: a bypass edit waiting beside
+    /// it is still reconciled by its own save.
+    func testALifecycleSaveDoesNotCarryAStartBlockingEdit() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig())
+        await harness.launchRecovery()
+        await appState.startDNS()
+
+        appState.config.localHost = "127.0."
+        await appState.stopDNS()
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.0.1",
+                       "the DNS stop did not save the half-typed host")
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.autosave_held" }.last?.detail,
+                       "reason=start_blocking_problems problems=1 trigger=lifecycle")
+        XCTAssertTrue(appState.hasUnsavedEdit)
+
+        appState.config.localHost = "127.0.0.1"
+        appState.config.noProxyHosts.append("waiting.example")
+        appState.flushPendingSave()
+        let saved = try ProxyConfigPersistence.load(in: harness.environment)
+        XCTAssertFalse(saved.dnsForwarderEnabled, "the held DNS flag is written by the edit's save")
+        XCTAssertTrue(saved.noProxyHosts.contains("waiting.example"))
+        await appState.reconciler.drain()
+        XCTAssertTrue(appState.reconciler.lastReconciledConfig.noProxyHosts.contains("waiting.example"),
+                      "the DNS stop absorbed only its own flag")
     }
 
     /// Leaving a section saves a waiting edit at once instead of after the
@@ -909,6 +937,22 @@ final class AppStateHarnessTests: XCTestCase {
     /// baseline and would never notice the machine disagrees.
     func testQuittingWithAnUnsavedLoginItemFlipRegistersIt() throws {
         let appState = try launch()
+
+        appState.platformConfig.launchAtLogin = true
+        appState.persistPendingEditForTermination()
+
+        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).launchAtLogin)
+        XCTAssertEqual(harness.loginItems.registrations, [true])
+    }
+
+    /// The platform file written but a later one not: the next launch
+    /// reads the flip from the platform file as its baseline, so quit
+    /// registers the login item anyway.
+    func testQuittingWithAPartialWriteStillRegistersTheLoginItem() throws {
+        let appState = try launch()
+        let preferences = harness.environment.preferencesFile
+        try FileManager.default.removeItem(at: preferences)
+        try FileManager.default.createDirectory(at: preferences, withIntermediateDirectories: false)
 
         appState.platformConfig.launchAtLogin = true
         appState.persistPendingEditForTermination()
