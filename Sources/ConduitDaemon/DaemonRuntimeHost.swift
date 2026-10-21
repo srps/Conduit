@@ -1298,21 +1298,21 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
             && !pass.platformActions.contains(.applyEnvironment)
         guard reapplySystemProxy || reapplyEnvironment else { return }
         // Twin of `AppState.reapplyConfigDrivenSurfaces`: off the main actor.
-        let systemProxy = systemConduit, environment = environmentManager, logger = logger
+        let systemProxy = systemConduit, environment = environmentManager, log = logger
         let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL
         await platformWork.run {
             if reapplySystemProxy {
                 do {
-                    try systemProxy.apply(config: new, mode: mode, logger: logger, localPACURL: pacURL)
+                    try systemProxy.apply(config: new, mode: mode, logger: log, localPACURL: pacURL)
                 } catch {
-                    logger.log(.warning, "Could not re-apply system proxy after config reload: \(error.localizedDescription)", category: .system)
+                    log.log(.warning, "Could not re-apply system proxy after config reload: \(error.localizedDescription)", category: .system)
                 }
             }
             if reapplyEnvironment {
                 do {
-                    try environment.apply(config: new, logger: logger)
+                    try environment.apply(config: new, logger: log)
                 } catch {
-                    logger.log(.warning, "Could not re-apply environment variables after config reload: \(error.localizedDescription)", category: .system)
+                    log.log(.warning, "Could not re-apply environment variables after config reload: \(error.localizedDescription)", category: .system)
                 }
             }
         }
