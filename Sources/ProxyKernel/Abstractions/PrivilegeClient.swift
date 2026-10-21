@@ -47,6 +47,13 @@ package enum PrivilegeClientError: Error, LocalizedError {
     case executionFailed(String)
     case helperNotInstalled
     case communicationFailed(String)
+    /// The exchange ran out of its budget: waiting for this process's turn,
+    /// connecting, or waiting for the reply. A helper serving another
+    /// request looks the same as a wedged one here, so a reader of the
+    /// helper's state treats this as inconclusive, not as a dead helper
+    /// (STYLE rule 11). `execute` still falls back on it, as it does on
+    /// any unreachability (#48 owns that).
+    case timedOut(String)
     /// The helper was reached and declined to talk — see `PrivilegeRefusal`.
     /// Not unreachability, and the distinction is the whole point: the
     /// fallback for "unreachable" is an admin password prompt, and a denial
@@ -57,7 +64,8 @@ package enum PrivilegeClientError: Error, LocalizedError {
         switch self {
         case .executionFailed(let message): return message
         case .helperNotInstalled: return "Privileged helper is not installed."
-        case .communicationFailed(let message): return "Helper communication failed: \(message)"
+        case .communicationFailed(let message), .timedOut(let message):
+            return "Helper communication failed: \(message)"
         case .refused(.noConsoleUser, _):
             return "Privileged helper is waiting for a login session before it will act."
         case .refused(.unauthorized, let message):
@@ -70,7 +78,7 @@ package enum PrivilegeClientError: Error, LocalizedError {
     /// run it at all. Only the first is worth retrying by another route.
     package var isHelperUnreachable: Bool {
         switch self {
-        case .helperNotInstalled, .communicationFailed: return true
+        case .helperNotInstalled, .communicationFailed, .timedOut: return true
         case .executionFailed, .refused: return false
         }
     }

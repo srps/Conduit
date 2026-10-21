@@ -219,6 +219,7 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     private let fallback: AppleScriptPrivilegeClient
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let socketPath: String
+    private let binaryPath: String
     private let transactionMilliseconds: Int
 
     // A refusal — either kind — returns on the first reply. There is no
@@ -246,14 +247,19 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     ///     unreachable; injectable so a test can prove it was *not* used.
     ///   - transactionMilliseconds: injectable so a test of a helper that
     ///     never answers does not take the production forty seconds.
+    ///   - binaryPath: where `status` looks for the installed helper;
+    ///     injectable only so a test or pm-sim can read `status` against its
+    ///     own socket without the real install.
     package init(
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         socketPath: String = HelperConstants.socketPath,
         fallback: AppleScriptPrivilegeClient = AppleScriptPrivilegeClient(),
-        transactionMilliseconds: Int = HelperTransactionBudget.clientMilliseconds
+        transactionMilliseconds: Int = HelperTransactionBudget.clientMilliseconds,
+        binaryPath: String = HelperConstants.binaryInstallPath
     ) {
         self.eventSink = eventSink
         self.socketPath = socketPath
+        self.binaryPath = binaryPath
         self.fallback = fallback
         self.transactionMilliseconds = transactionMilliseconds
     }
@@ -263,6 +269,14 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         case outdated
         case notInstalled
         case notResponding
+        /// Installed, but the ping ran out of its budget: the helper is
+        /// serving another request (another process's, or a command that is
+        /// slow to return), or it is wedged. One reading, and inconclusive
+        /// (STYLE rule 11): it proves neither a working helper nor a broken
+        /// one, so a holder of the last verdict keeps it (`updated(by:)`). A
+        /// connect that is refused or a reply that cannot be read is
+        /// `notResponding`.
+        case busy
         /// Reached, healthy, and declining until someone is logged in at the
         /// console. Transient by nature — see `HelperRefusal.noConsoleUser`.
         case waitingForConsoleUser
@@ -278,13 +292,31 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     }
 
     package var status: Status {
-        guard FileManager.default.fileExists(atPath: HelperConstants.binaryInstallPath) else {
+        guard FileManager.default.fileExists(atPath: binaryPath) else {
             return .notInstalled
         }
-        guard let response = try? sendRequest(HelperRequest(command: .ping, values: [])) else {
+        let response: HelperResponse
+        do {
+            response = try sendRequest(HelperRequest(command: .ping, values: []))
+        } catch PrivilegeClientError.timedOut(let message) {
+            emitStatusEvent("auth.privilege_helper_busy", "reason=\(message)")
+            return .busy
+        } catch {
+            emitStatusEvent("auth.privilege_helper_not_responding", "reason=\(error.displayDescription)")
             return .notResponding
         }
-        return Self.status(forPing: response)
+        let status = Self.status(forPing: response)
+        if status == .notResponding {
+            emitStatusEvent(
+                "auth.privilege_helper_not_responding",
+                "reason=ping_failed helper_error=\(response.errorMessage ?? "none")"
+            )
+        }
+        return status
+    }
+
+    private func emitStatusEvent(_ name: String, _ detail: String) {
+        eventSink?(RuntimeEvent(kind: .auth, event: name, detail: detail))
     }
 
     /// What a ping's reply says about the helper. A caller-identity refusal
@@ -603,7 +635,7 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
     /// nothing, so its fallback cannot race a request of its own.
     private func sendRequest(_ request: HelperRequest) throws -> HelperResponse {
         guard Self.turn.wait(timeout: .now() + .milliseconds(transactionMilliseconds)) == .success else {
-            throw PrivilegeClientError.communicationFailed(
+            throw PrivilegeClientError.timedOut(
                 "Timed out waiting for a turn after \(transactionMilliseconds) ms; this process's earlier requests are still with the helper"
             )
         }
@@ -625,12 +657,18 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         let deadline = HelperLineIO.deadline(afterMilliseconds: transactionMilliseconds)
         if let code = HelperLineIO.connect(fd: fd, path: socketPath, deadline: deadline) {
             guard code == ETIMEDOUT else { throw PrivilegeClientError.helperNotInstalled }
-            throw PrivilegeClientError.communicationFailed(Self.timedOut("connecting", transactionMilliseconds))
+            throw PrivilegeClientError.timedOut(Self.timedOut("connecting", transactionMilliseconds))
         }
 
         var requestData = try JSONEncoder().encode(request)
         requestData.append(UInt8(ascii: "\n"))
         guard HelperLineIO.writeAll(fd: fd, requestData, deadline: deadline) else {
+            // `writeAll` reports a spent deadline and a broken socket alike;
+            // the clock tells them apart. Connect and write share the budget,
+            // so a slow connect can leave the write none.
+            guard HelperLineIO.now() < deadline else {
+                throw PrivilegeClientError.timedOut(Self.timedOut("sending the request", transactionMilliseconds))
+            }
             throw PrivilegeClientError.communicationFailed("Write failed")
         }
 
@@ -642,7 +680,7 @@ package final class HelperToolPrivilegeClient: PrivilegeClient, @unchecked Senda
         case .tooLarge:
             throw PrivilegeClientError.communicationFailed("Response too large: exceeded 1,048,576 byte limit")
         case .deadlineExceeded:
-            throw PrivilegeClientError.communicationFailed(Self.timedOut("waiting for the reply", transactionMilliseconds))
+            throw PrivilegeClientError.timedOut(Self.timedOut("waiting for the reply", transactionMilliseconds))
         case .failed(let code):
             throw PrivilegeClientError.communicationFailed("Read failed: \(String(cString: strerror(code)))")
         }

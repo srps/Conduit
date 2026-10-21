@@ -100,6 +100,52 @@ final class HelperRefusalTests: XCTestCase {
         XCTAssertEqual(helper.requestsSeen, 1)
     }
 
+    // MARK: - Status reads (#197)
+
+    private func statusClient(_ helper: FakeHelper, events: NIOLockedBox<[RuntimeEvent]>) -> HelperToolPrivilegeClient {
+        HelperToolPrivilegeClient(
+            eventSink: { event in events.with { $0.append(event) } },
+            socketPath: helper.path,
+            fallback: AppleScriptPrivilegeClient(runner: { _ in XCTFail("fallback ran"); throw CancellationError() }),
+            binaryPath: helper.path
+        )
+    }
+
+    /// A helper that answered the ping and said it failed is a conclusive
+    /// `notResponding`, and the event keeps the helper's own words.
+    func testAFailedPingReplyIsNotRespondingWithTheHelpersReason() throws {
+        let helper = try FakeHelper(replies: [.error("socket wedged")])
+        defer { helper.stop() }
+        let events = NIOLockedBox<[RuntimeEvent]>([])
+        XCTAssertEqual(statusClient(helper, events: events).status, .notResponding)
+        XCTAssertEqual(events.value.map(\.event), ["auth.privilege_helper_not_responding"])
+        XCTAssertEqual(events.value.first?.detail, "reason=ping_failed helper_error=socket wedged")
+    }
+
+    /// A closed connection with no reply is a broken exchange, not a slow one.
+    func testAnEOFPingIsNotRespondingNotBusy() throws {
+        let helper = try FakeHelper(replies: [nil])
+        defer { helper.stop() }
+        let events = NIOLockedBox<[RuntimeEvent]>([])
+        XCTAssertEqual(statusClient(helper, events: events).status, .notResponding)
+        XCTAssertEqual(events.value.map(\.event), ["auth.privilege_helper_not_responding"])
+    }
+
+    /// An answer is a verdict and says nothing more.
+    func testAnAnsweredPingIsInstalledWithoutAnEvent() throws {
+        let helper = try FakeHelper(replies: [.ok()])
+        defer { helper.stop() }
+        let events = NIOLockedBox<[RuntimeEvent]>([])
+        XCTAssertEqual(statusClient(helper, events: events).status, .installed)
+        XCTAssertTrue(events.value.isEmpty)
+    }
+
+    func testATimeoutIsUnreachableForTheFallbackButItsOwnCase() {
+        let error = PrivilegeClientError.timedOut("Timed out waiting for the reply after 1 ms")
+        XCTAssertTrue(error.isHelperUnreachable, "execute keeps its fallback on a timeout; #48 owns that")
+        XCTAssertEqual(error.displayDescription, "Helper communication failed: Timed out waiting for the reply after 1 ms")
+    }
+
     /// The EOF a pre-field helper still produces keeps its old meaning, so
     /// the fallback is still reachable for a helper that is genuinely gone.
     func testEOFStillDegradesToTheFallback() throws {

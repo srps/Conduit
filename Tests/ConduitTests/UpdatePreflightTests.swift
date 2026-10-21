@@ -64,10 +64,17 @@ final class UpdatePreflightTests: XCTestCase {
             XCTAssertEqual(UpdateHelperPreflightWorker.run(arguments: [UpdateHelperPreflightWorker.argument]) { status }, 0)
         }
         let failures: [(HelperToolPrivilegeClient.Status, Int32)] = [(.notResponding, 69), (.outdated, 70),
-            (.unauthorized, 71), (.waitingForConsoleUser, 72), (.callerNotAccepted(message: "pin mismatch"), 73)]
+            (.unauthorized, 71), (.waitingForConsoleUser, 72), (.callerNotAccepted(message: "pin mismatch"), 73), (.busy, 74)]
         for (status, code) in failures {
             XCTAssertEqual(UpdateHelperPreflightWorker.run(arguments: [UpdateHelperPreflightWorker.argument]) { status }, code)
         }
+    }
+
+    /// A busy helper proves no admission, so the install is still refused,
+    /// but as something to try again, not a broken helper (#197).
+    func testABusyHelperRefusesTheUpdateAsBusyNotBroken() {
+        XCTAssertEqual(UpdateHelperPreflightWorker.failureReason(exitCode: 74), "helper_busy")
+        XCTAssertEqual(UpdateHelperPreflightWorker.failureReason(exitCode: 69), "helper_not_responding")
     }
 
     func testProductionURLPolicyPreservesTLSAndRejectsCredentialBearingURLs() {

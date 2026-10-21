@@ -24,7 +24,7 @@ struct DNSSettingsView: View {
                         .controlSize(.small)
                         .disabled(runtime.dnsRunState != .running)
                 }
-                if appState.helperStatus != .installed {
+                if HelperStatusPresentation.suggestsInstall(for: appState.helperStatus) {
                     HelperHintBanner()
                 }
             }

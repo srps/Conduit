@@ -186,6 +186,9 @@ package enum UpdateHelperPreflightWorker {
         case .unauthorized: return 71
         case .waitingForConsoleUser: return 72
         case .callerNotAccepted: return 73
+        // Inconclusive, so it proves no admission either: still a refusal,
+        // with a reason that says to try again rather than to repair.
+        case .busy: return 74
         }
     }
 
@@ -196,6 +199,7 @@ package enum UpdateHelperPreflightWorker {
         case 71: return "helper_caller_unauthorized"
         case 72: return "helper_no_console_user"
         case 73: return "helper_rejects_candidate_identity"
+        case 74: return "helper_busy"
         default: return "candidate_helper_preflight_failed"
         }
     }

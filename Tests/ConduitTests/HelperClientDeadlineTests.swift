@@ -81,6 +81,88 @@ final class HelperClientDeadlineTests: XCTestCase {
         XCTAssertTrue(degraded.first?.detail?.contains("Timed out") ?? false, "\(String(describing: degraded.first?.detail))")
     }
 
+    // MARK: - Status (#197, audit F1)
+
+    /// A client whose `status` reads the stand-in: the socket file is the
+    /// installed binary as far as the check is concerned, so nothing under
+    /// /Library is read.
+    private func statusClient(_ listener: HeldHelper, events: EventBox) -> HelperToolPrivilegeClient {
+        HelperToolPrivilegeClient(
+            eventSink: { events.append($0) },
+            socketPath: listener.path,
+            fallback: AppleScriptPrivilegeClient(runner: { _ in
+                XCTFail("a status read ran the fallback")
+                throw CancellationError()
+            }),
+            transactionMilliseconds: budget,
+            binaryPath: listener.path
+        )
+    }
+
+    /// A helper still in another request's command is busy, not broken: no
+    /// "Repair Helper", and the event says the ping ran out of time.
+    func testAPingThatTimesOutReadsAsBusyWithAnEvent() throws {
+        let helper = try HeldHelper(.readsAndHolds)
+        defer { helper.stop() }
+        let events = EventBox()
+        XCTAssertEqual(statusClient(helper, events: events).status, .busy)
+        XCTAssertEqual(events.all.map(\.event), ["auth.privilege_helper_busy"])
+        XCTAssertTrue(events.all.first?.detail?.contains("Timed out waiting for the reply") ?? false,
+                      "\(String(describing: events.all.first?.detail))")
+    }
+
+    /// A reply that drips in past the deadline is the same timeout.
+    func testADripFedPingReadsAsBusy() throws {
+        let helper = try HeldHelper(.dripsReply)
+        defer { helper.stop() }
+        let events = EventBox()
+        XCTAssertEqual(statusClient(helper, events: events).status, .busy)
+        XCTAssertEqual(events.all.map(\.event), ["auth.privilege_helper_busy"])
+    }
+
+    /// The same process's own held turn: the ping never reached the helper,
+    /// which proves even less than a reply that did not come.
+    func testAPingThatNeverGetsATurnReadsAsBusy() throws {
+        let helper = try HeldHelper(.readsAndHolds)
+        let events = EventBox()
+        let client = statusClient(helper, events: events)
+        // The turn is the process's. The holder's budget is far past the
+        // test, so it keeps the turn until `stop()` closes its connection.
+        let holder = HelperToolPrivilegeClient(socketPath: helper.path, transactionMilliseconds: 60_000)
+        let holderDone = DispatchSemaphore(value: 0)
+        Thread {
+            _ = holder.ping()
+            holderDone.signal()
+        }.start()
+        for _ in 0..<5_000 where helper.connectionsSeen == 0 { usleep(1_000) }
+        XCTAssertEqual(helper.connectionsSeen, 1, "the holder never reached the helper")
+        XCTAssertEqual(client.status, .busy)
+        XCTAssertTrue(events.all.contains { $0.detail?.contains("waiting for a turn") ?? false },
+                      "\(events.all.compactMap(\.detail))")
+        helper.stop()
+        XCTAssertEqual(holderDone.wait(timeout: .now() + 5), .success, "the holder kept the turn past stop()")
+    }
+
+    /// Refused at connect: nothing listens on the installed helper's socket.
+    func testARefusedConnectReadsAsNotRespondingWithAnEvent() throws {
+        let binary = "/tmp/pm-helper-binary-\(UUID().uuidString.prefix(8))"
+        XCTAssertTrue(FileManager.default.createFile(atPath: binary, contents: Data()))
+        defer { unlink(binary) }
+        let events = EventBox()
+        let client = HelperToolPrivilegeClient(
+            eventSink: { events.append($0) },
+            socketPath: binary + ".sock",
+            fallback: AppleScriptPrivilegeClient(runner: { _ in
+                XCTFail("a status read ran the fallback")
+                throw CancellationError()
+            }),
+            transactionMilliseconds: budget,
+            binaryPath: binary
+        )
+        XCTAssertEqual(client.status, .notResponding)
+        XCTAssertEqual(events.all.map(\.event), ["auth.privilege_helper_not_responding"])
+    }
+
     /// The legitimate request after a stuck one: the client's descriptor is
     /// closed at the deadline, so nothing of the first outlives it.
     func testNextTransactionProceedsAfterATimedOutOne() throws {
@@ -163,6 +245,7 @@ private final class HeldHelper: @unchecked Sendable {
     private let lock = NSLock()
     private var held: [Int32] = []
     private var stopped = false
+    private var accepted = 0
     private var open = 0
     private var mostOpen = 0
     private let workerDone = DispatchSemaphore(value: 0)
@@ -190,6 +273,9 @@ private final class HeldHelper: @unchecked Sendable {
             }.start()
         }
     }
+
+    /// Connections `serve` has accepted and read a request from.
+    var connectionsSeen: Int { lock.withLock { accepted } }
 
     /// The most connections this helper had at once, accepted and not yet
     /// answered. Only `.answersAfter` counts.
@@ -247,6 +333,7 @@ private final class HeldHelper: @unchecked Sendable {
             var byte: UInt8 = 0
             while Darwin.read(peer, &byte, 1) == 1, byte != UInt8(ascii: "\n") {}
             served += 1
+            lock.withLock { accepted += 1 }
             switch behaviour {
             case .neverAccepts, .readsAndHolds:
                 hold(peer)
