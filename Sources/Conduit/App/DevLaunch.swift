@@ -27,7 +27,10 @@ extension AppState {
             DevLaunch.fail("\(DevLaunchOptions.flag) is available in debug builds only")
         }
         #endif
-        return AppState()
+        return AppState(
+            commandRunner: { launchPath, arguments in try CommandRunner.run(launchPath: launchPath, arguments: arguments) },
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+        )
     }
 }
 

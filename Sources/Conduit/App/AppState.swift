@@ -239,12 +239,12 @@ final class AppState: ObservableObject {
         helperLifecycle: (any HelperLifecycleManaging)? = nil,
         credentialStore: (any SecretStore)? = nil,
         kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
-        commandRunner: (@Sendable (String, [String]) throws -> CommandResult)? = nil,
+        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         helperSocketBindWait: Duration = .seconds(1),
         dnsReconcileDebounce: TimeInterval = 1.0,
-        homeDirectory: URL? = nil,
+        homeDirectory: URL,
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
         vpnStatusMonitor: VPNStatusObserving? = nil,
@@ -313,10 +313,8 @@ final class AppState: ObservableObject {
         self.networkMonitor = NetworkMonitor(debounceInterval: networkPathDebounce)
         self.helperSocketBindWait = helperSocketBindWait
         self.dnsReconcileDebounce = dnsReconcileDebounce
-        self.commandRunner = commandRunner ?? { launchPath, arguments in
-            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
-        }
-        self.homeDirectory = homeDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        self.commandRunner = commandRunner
+        self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
         self.loginItemManager = loginItemManager ?? LoginItemManager()
         self.config = initialConfig
