@@ -19,6 +19,10 @@ jobs:
 
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        # Full history, so the decision-record check can see that no record
+        # was deleted and no ID reused.
+        fetch-depth: 0
     - name: Build
       # A clean build takes about three minutes; a compiler that stops
       # making progress would otherwise hold the runner for six hours.
@@ -38,6 +42,10 @@ jobs:
       run: |
         python3 scripts/check-event-catalogue.py
         python3 scripts/test-event-catalogue.py
+    - name: Decision records
+      run: |
+        python3 scripts/check-decisions.py --require-history
+        python3 scripts/test-decisions.py
     - name: Run tests
       run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift test -v
     - name: Kerberos worker entry points
