@@ -55,6 +55,7 @@ enum PMSim {
               vpn-user-disconnect     user-initiated disconnect is fast-path (no probe cycle)
               vpn-rapid-flap-burst    6 flaps in 1.5s emit one event pair (coalesce)
               transparent-direct      intercepted SNI client relays direct on VPN-down, upstream otherwise
+              relay-reassert-after-stop  a stop while the relay reassert probe is out is not followed by a fresh relay start (#199)
               vpn-reconnect-routing   intercepted client uses upstream while reconnect probe is held
               vpn-reconnect-reprobe   disconnect migrates the upstream tunnel; failed first reconnect probe retries and keeps new tunnels
               vpn-probe-superseded    a disconnect probe still pending at reconnect never turns routing DIRECT or sweeps
@@ -218,6 +219,7 @@ enum PMSim {
         "vpn-user-disconnect",
         "vpn-rapid-flap-burst",
         "transparent-direct",
+        "relay-reassert-after-stop",
         "vpn-reconnect-routing",
         "vpn-reconnect-reprobe",
         "vpn-probe-superseded",
@@ -362,6 +364,8 @@ enum PMSim {
             return [try await TunnelFailureScenarios.vpnExistingStreamFailure(verbose: verbose)]
         case "browser-retained-pac":
             return [try await BrowserPACScenarios.retainedPAC(verbose: verbose)]
+        case "relay-reassert-after-stop":
+            return [try await RelayReassertScenarios.stopDuringProbe()]
         case "transparent-direct":
             return [try await TransparentProxyScenarios.transparentDirectRouting(verbose: verbose)]
         case "network-transition":
