@@ -108,6 +108,93 @@ final class EnvironmentManagerTests: XCTestCase {
         XCTAssertNil(launchctl.environment["HTTPS_PROXY"])
     }
 
+    /// A read that failed once and works later: the untouched marker used to
+    /// stand forever while the later apply wrote our value, and teardown,
+    /// skipping untouched names, never removed it (#175).
+    func testAVariableUnreadableAtFirstIsCapturedWhenItCanBeRead() throws {
+        launchctl.environment["HTTP_PROXY"] = "http://corp.example:8080"
+        launchctl.failingGetenv = ["HTTP_PROXY"]
+        let manager = makeManager()
+        let first = try manager.apply(config: makeConfig(), logger: nil)
+        XCTAssertEqual(first.launchd.unreadable, ["HTTP_PROXY"])
+
+        launchctl.failingGetenv = []
+        let second = try manager.apply(config: makeConfig(), logger: nil)
+        XCTAssertTrue(second.launchd.written.contains("HTTP_PROXY"))
+        XCTAssertEqual(journal.prior(surface: .launchdEnvironment, scope: "HTTP_PROXY"),
+                       .wasPresent(["value": "http://corp.example:8080"]), "the real prior replaced the marker")
+
+        try manager.clear(logger: nil)
+        XCTAssertEqual(launchctl.environment["HTTP_PROXY"], "http://corp.example:8080", "teardown puts it back")
+    }
+
+    /// A prior that cannot be journaled withholds the write, so teardown
+    /// never has to guess; and teardown leaves a variable the journal never
+    /// recorded alone while it holds other records, since every write is
+    /// journaled first.
+    func testAPriorThatCannotBeJournaledWithholdsTheWrite() throws {
+        launchctl.environment["NO_PROXY"] = "user.example"
+        // Readable (no file yet) but not writable: the state directory is read-only.
+        let readOnly = home.appendingPathComponent("read-only", isDirectory: true)
+        try FileManager.default.createDirectory(at: readOnly, withIntermediateDirectories: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: readOnly.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: readOnly.path) }
+        let recorder = recordingSink()
+        let manager = EnvironmentManager(journal: PlatformStateJournal(fileURL: readOnly.appendingPathComponent("platform-state.json")),
+                                         homeDirectory: home, commandRunner: launchctl.run, eventSink: recorder.sink)
+
+        let result = try manager.apply(config: makeConfig(), logger: nil)
+
+        XCTAssertEqual(Set(result.launchd.withheld), ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"])
+        XCTAssertEqual(launchctl.environment, ["NO_PROXY": "user.example"], "nothing written without a record")
+        XCTAssertEqual(recorder.events().last?.event, "platform.environment_launchd_incomplete")
+        XCTAssertTrue(recorder.events().last?.detail?.hasPrefix("withheld=") == true)
+    }
+
+    /// The user's own bypass list may equal ours. Without our address
+    /// beside it, it is a prior to restore, not residue to remove.
+    func testABypassListEqualToOursIsTheUsersOwnWithoutOurAddress() throws {
+        let config = makeConfig()
+        let list = config.noProxyHosts.joined(separator: ",")
+        launchctl.environment = ["NO_PROXY": list, "no_proxy": list]
+        let manager = makeManager()
+        try manager.apply(config: config, logger: nil)
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(launchctl.environment, ["NO_PROXY": list, "no_proxy": list], "restored as the user's")
+    }
+
+    func testTeardownLeavesAnUnrecordedForeignValueAloneBesideRecords() throws {
+        let manager = makeManager()
+        try manager.apply(config: makeConfig(), logger: nil)
+        journal.forgetAll(surface: .launchdEnvironment)
+        journal.recordPrior(surface: .launchdEnvironment, scope: "HTTP_PROXY", value: nil)
+        launchctl.environment["NO_PROXY"] = "user.example"
+
+        try manager.clear(logger: nil)
+
+        XCTAssertEqual(launchctl.environment["NO_PROXY"], "user.example", "never recorded, so never ours")
+        XCTAssertNil(launchctl.environment["HTTPS_PROXY"], "our own address is still residue")
+        XCTAssertNil(launchctl.environment["HTTP_PROXY"])
+    }
+
+    /// Already our values with no record (a lost journal): our address and,
+    /// beside it, our bypass list are recorded as residue and not rewritten,
+    /// so teardown unsets them instead of restoring them.
+    func testValuesThatAreAlreadyOursAreRecordedAsResidue() throws {
+        launchctl.environment["HTTP_PROXY"] = makeConfig().localProxyURL
+        launchctl.environment["NO_PROXY"] = makeConfig().noProxyHosts.joined(separator: ",")
+        let result = try makeManager().apply(config: makeConfig(), logger: nil)
+        XCTAssertFalse(result.launchd.written.contains("HTTP_PROXY"))
+        XCTAssertFalse(result.launchd.written.contains("NO_PROXY"))
+        XCTAssertEqual(journal.prior(surface: .launchdEnvironment, scope: "NO_PROXY"), .wasAbsent)
+
+        try makeManager().clear(logger: nil)
+        XCTAssertNil(launchctl.environment["HTTP_PROXY"])
+        XCTAssertNil(launchctl.environment["NO_PROXY"])
+    }
+
     /// Variables we introduced are removed, not left pointing at a proxy that
     /// is no longer listening — every GUI app launched afterwards would inherit
     /// a dead proxy.
@@ -298,7 +385,7 @@ final class EnvironmentManagerTests: XCTestCase {
         let manager = EnvironmentManager(journal: journal, homeDirectory: home, commandRunner: launchctl.run,
                                          eventSink: recorder.sink)
 
-        let outcomes = try manager.apply(config: makeConfig(), logger: nil)
+        let outcomes = try manager.apply(config: makeConfig(), logger: nil).profiles
 
         XCTAssertEqual(try Data(contentsOf: zshrc), bytes, "the user's file is untouched")
         XCTAssertEqual(outcomes[.zshrc], .skipped(.notUTF8))
@@ -315,7 +402,7 @@ final class EnvironmentManagerTests: XCTestCase {
         for text in ["# <<< Conduit <<<\nexport A=1\n# >>> Conduit >>>\n",
                      "export A=1\n# >>> Conduit >>>\nexport HTTP_PROXY=x\n"] {
             try text.write(to: zshrc, atomically: true, encoding: .utf8)
-            XCTAssertEqual(try manager.apply(config: makeConfig(), logger: nil)[.zshrc], .skipped(.ambiguousMarkers))
+            XCTAssertEqual(try manager.apply(config: makeConfig(), logger: nil).profiles[.zshrc], .skipped(.ambiguousMarkers))
             XCTAssertEqual(try manager.clear(logger: nil)[.zshrc], .skipped(.ambiguousMarkers))
             XCTAssertEqual(try String(contentsOf: zshrc, encoding: .utf8), text)
         }
@@ -345,14 +432,14 @@ final class EnvironmentManagerTests: XCTestCase {
     func testReapplyingTheSameConfigWritesNoProfile() throws {
         let manager = makeManager()
         try manager.apply(config: makeConfig(), logger: nil)
-        let outcomes = try manager.apply(config: makeConfig(), logger: nil)
+        let outcomes = try manager.apply(config: makeConfig(), logger: nil).profiles
         XCTAssertTrue(outcomes.values.allSatisfy { $0 == .unchanged }, "\(outcomes)")
     }
 
     func testAnOversizedProfileIsLeftAlone() throws {
         let big = Data(repeating: 0x61, count: ShellProfileBlock.maximumFileBytes + 1)
         try big.write(to: zshrc)
-        XCTAssertEqual(try makeManager().apply(config: makeConfig(), logger: nil)[.zshrc], .skipped(.oversized))
+        XCTAssertEqual(try makeManager().apply(config: makeConfig(), logger: nil).profiles[.zshrc], .skipped(.oversized))
         XCTAssertEqual(try Data(contentsOf: zshrc).count, big.count)
     }
 

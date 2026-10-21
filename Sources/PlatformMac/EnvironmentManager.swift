@@ -71,6 +71,26 @@ package final class EnvironmentManager: @unchecked Sendable {
         case skipped(ShellProfileBlock.UnsafeReason)
     }
 
+    /// What happened to the launchd variables. A name in none of these
+    /// lists already had our value or was written.
+    package struct LaunchdOutcome: Equatable, Sendable {
+        package var written: [String] = []
+        /// `launchctl setenv` failed.
+        package var failed: [String] = []
+        /// `launchctl getenv` failed, so the prior value is unknown; not written.
+        package var unreadable: [String] = []
+        /// The prior value could not be journaled; not written, so teardown
+        /// never has to guess what to put back.
+        package var withheld: [String] = []
+
+        package var isComplete: Bool { failed.isEmpty && unreadable.isEmpty && withheld.isEmpty }
+    }
+
+    package struct ApplyResult: Equatable, Sendable {
+        package var profiles: [ProfileTarget: ProfileOutcome]
+        package var launchd: LaunchdOutcome
+    }
+
     package var targetFiles: [URL] {
         ProfileTarget.allCases.map(url(for:))
     }
@@ -84,7 +104,7 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// left alone and reported; the others are still written. Throws only
     /// for an unreadable journal or a failed write.
     @discardableResult
-    package func apply(config: ProxyConfig, logger: (any LogSink)?) throws -> [ProfileTarget: ProfileOutcome] {
+    package func apply(config: ProxyConfig, logger: (any LogSink)?) throws -> ApplyResult {
         operations.lock()
         defer { operations.unlock() }
         try journal.requireReadableForApply()
@@ -95,9 +115,9 @@ package final class EnvironmentManager: @unchecked Sendable {
                 ShellProfileBlock.applying(block, to: $0)
             }
         }
-        applyLaunchdEnvironment(config: config, logger: logger)
+        let launchd = applyLaunchdEnvironment(config: config, logger: logger)
         logger?.log(.notice, "Updated shell environment proxy variables.", category: .system)
-        return outcomes
+        return ApplyResult(profiles: outcomes, launchd: launchd)
     }
 
     /// Reads a profile without ever turning a failure into empty text.
@@ -211,7 +231,7 @@ package final class EnvironmentManager: @unchecked Sendable {
         ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"]
     }
 
-    private func applyLaunchdEnvironment(config: ProxyConfig, logger: (any LogSink)?) {
+    private func applyLaunchdEnvironment(config: ProxyConfig, logger: (any LogSink)?) -> LaunchdOutcome {
         let proxyURL = config.localProxyURL
         let noProxy = config.noProxyHosts.joined(separator: ",")
         let values: [String: String] = [
@@ -225,35 +245,76 @@ package final class EnvironmentManager: @unchecked Sendable {
         //
         // A read that *failed* is not "absent": recording it as absent would
         // have teardown unset a value we never saw. Such a variable is marked
-        // untouched, left alone now, and skipped by teardown.
-        var untouched: Set<String> = []
+        // untouched and left alone now. A later apply that can read it
+        // replaces the marker with the real prior before writing (#175):
+        // the marker used to stand forever while that apply wrote our value,
+        // and teardown, skipping untouched names, then never removed it.
+        //
+        // Every write is journaled durably first. A prior that cannot be
+        // saved withholds that variable's write, so teardown never has to
+        // guess what to put back.
+        var outcome = LaunchdOutcome()
+        var writable: [String] = []
+        let reads = Dictionary(uniqueKeysWithValues: launchdVariableNames.map { ($0, readLaunchdVariable($0)) })
+        // A proxy variable already holding our own address is ownership
+        // evidence. A bypass list equal to ours is not on its own: the user
+        // may have set the same list. It is ours only beside our address.
+        let ourAddressPresent = reads.contains { name, read in
+            guard !Self.bypassVariableNames.contains(name), case .present(let value) = read else { return false }
+            return value == values[name] && isLoopbackProxyValue(value)
+        }
         for name in launchdVariableNames {
-            switch readLaunchdVariable(name) {
+            let prior: [String: String]?
+            var current: String?
+            switch reads[name] ?? .failed {
+            case .present(let value) where value == values[name]
+                && (!Self.bypassVariableNames.contains(name) || ourAddressPresent):
+                // Already ours. With no record (a lost journal), it is our
+                // residue: teardown unsets it rather than "restore" it.
+                prior = nil
+                current = value
             case .present(let value):
-                journal.recordPrior(surface: .launchdEnvironment, scope: name, value: ["value": value])
+                prior = ["value": value]
             case .absent:
-                journal.recordPrior(surface: .launchdEnvironment, scope: name, value: nil)
+                prior = nil
             case .failed:
                 journal.recordPrior(surface: .launchdEnvironment, scope: name, value: [Self.untouchedMarkerKey: "unreadable"])
-                untouched.insert(name)
+                outcome.unreadable.append(name)
+                continue
+            }
+            do {
+                try journal.capturePriorBeforeWrite(surface: .launchdEnvironment, scope: name, value: prior,
+                                                    replacingPlaceholder: Self.untouchedMarkerKey)
+                if current == nil { writable.append(name) }
+            } catch {
+                outcome.withheld.append(name)
             }
         }
         journal.markApplied(surface: .launchdEnvironment)
-        if !untouched.isEmpty {
-            logger?.log(.warning, "Could not read \(untouched.sorted().joined(separator: ", ")) from the launchd domain; leaving them untouched.", category: .system)
-        }
 
-        var failures = 0
-        for name in launchdVariableNames where !untouched.contains(name) {
+        for name in writable {
             guard let value = values[name] else { continue }
             let result = try? commandRunner("/bin/launchctl", ["setenv", name, value])
-            if result?.exitCode != 0 { failures += 1 }
+            if result?.exitCode == 0 { outcome.written.append(name) } else { outcome.failed.append(name) }
         }
-        if failures > 0 {
-            logger?.log(.warning, "launchctl setenv failed for \(failures) proxy variable(s); GUI apps may not see the proxy.", category: .system)
-        } else {
+        if outcome.isComplete {
             logger?.log(.notice, "Published proxy variables to the user launchd domain (GUI apps pick them up on next launch).", category: .system)
+        } else {
+            // Event first: GUI apps launched now miss these variables, and
+            // only this says which and why.
+            let event = RuntimeEvent(kind: .config, event: "platform.environment_launchd_incomplete",
+                                     detail: Self.launchdDetail(outcome))
+            eventSink?(event)
+            logger?.log(.warning, "Some launchd proxy variables were not published; GUI apps may not see the proxy. \(event.event) \(event.detail ?? "")", category: .system)
         }
+        return outcome
+    }
+
+    private static func launchdDetail(_ outcome: LaunchdOutcome) -> String {
+        [("unreadable", outcome.unreadable), ("withheld", outcome.withheld), ("failed", outcome.failed)]
+            .filter { !$0.1.isEmpty }
+            .map { "\($0.0)=\($0.1.joined(separator: ","))" }
+            .joined(separator: " ")
     }
 
     private func clearLaunchdEnvironment(logger: (any LogSink)?) {
@@ -277,6 +338,11 @@ package final class EnvironmentManager: @unchecked Sendable {
 
         var restored = 0
         var failed: [String] = []
+        // Every write is journaled first, so with records present a name
+        // missing from them was never written: its value is someone else's,
+        // unless it is our own address. Unknown falls back to unsetting only
+        // when the records themselves were lost (#175).
+        let recordsPresent = journal.hasRecords(for: .launchdEnvironment)
         for name in launchdVariableNames {
             let result: CommandResult?
             switch journal.prior(surface: .launchdEnvironment, scope: name) {
@@ -286,6 +352,8 @@ package final class EnvironmentManager: @unchecked Sendable {
             case .wasPresent(let prior):
                 result = try? commandRunner("/bin/launchctl", ["setenv", name, prior["value"] ?? ""])
                 if result?.exitCode == 0 { restored += 1 }
+            case .notRecorded where recordsPresent && !isLoopbackProxyValue(readLaunchdValue(name)):
+                continue
             case .wasAbsent, .notRecorded:
                 // Unknown falls back to unsetting: leaving our proxy URL in the
                 // launchd domain would point every GUI app launched afterwards
@@ -323,15 +391,20 @@ package final class EnvironmentManager: @unchecked Sendable {
     /// identifies our region of the file directly. The launchd domain has no
     /// such marker, so this probe stands in for one.
     private func loopbackResidueExists() -> Bool {
-        launchdVariableNames.contains { name in
-            guard let value = readLaunchdValue(name), let host = URL(string: value)?.host else { return false }
-            return host == "localhost" || host == "::1" || host.hasPrefix("127.")
-        }
+        launchdVariableNames.contains { isLoopbackProxyValue(readLaunchdValue($0)) }
+    }
+
+    private func isLoopbackProxyValue(_ value: String?) -> Bool {
+        guard let value, let host = URL(string: value)?.host else { return false }
+        return host == "localhost" || host == "::1" || host.hasPrefix("127.")
     }
 
     /// Journal value for a variable whose current state could not be read.
     /// Same shape as `SystemProxyManager.untouchedMarkerKey`.
     static let untouchedMarkerKey = "\u{0}untouched"
+
+    /// The variables holding the bypass list rather than a proxy URL.
+    static let bypassVariableNames: Set<String> = ["NO_PROXY", "no_proxy"]
 
     enum LaunchdRead: Equatable {
         case present(String)

@@ -158,6 +158,37 @@ package final class PlatformStateJournal: @unchecked Sendable {
         saveLocked(records)
     }
 
+    /// `recordPrior` for a write that is about to happen (#175): throws when
+    /// the record cannot be saved, and caches nothing then, so the caller
+    /// withholds the write rather than make a change it cannot undo. First
+    /// write wins as before, except over a record whose prior value holds
+    /// `placeholderKey`: that scope was recorded without being read, and so
+    /// was never written, and the value read now is its real prior.
+    package func capturePriorBeforeWrite(
+        surface: PlatformSurface,
+        scope: String,
+        value: [String: String]?,
+        replacingPlaceholder placeholderKey: String,
+        now: Date = .now
+    ) throws {
+        try lock.withLock {
+            var records = loadLocked()
+            let committed = records
+            guard fileStateBox != .unreadable else { throw NetworkSettingsError.persistenceFailed }
+            if let index = records.firstIndex(where: { $0.surface == surface && $0.scope == scope }) {
+                guard records[index].priorValue?[placeholderKey] != nil else { return }
+                records[index].priorValue = value
+                records[index].recordedAt = now
+            } else {
+                records.append(PlatformStateRecord(surface: surface, scope: scope, priorValue: value, recordedAt: now))
+            }
+            guard saveLocked(records) else {
+                loaded = committed
+                throw NetworkSettingsError.persistenceFailed
+            }
+        }
+    }
+
     /// Durable write-ahead evidence for identity-scoped network mutations.
     package func recordNetworkState(
         surface: PlatformSurface, locationID: String, serviceID: String,
