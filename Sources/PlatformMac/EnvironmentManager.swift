@@ -59,9 +59,7 @@ package final class EnvironmentManager: @unchecked Sendable {
     package init(
         journal: PlatformStateJournal,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser,
-        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = { launchPath, arguments in
-            try CommandRunner.run(launchPath: launchPath, arguments: arguments)
-        },
+        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult = CommandRunner.host,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil,
         inspectionBudget: Duration = .seconds(5)
     ) {

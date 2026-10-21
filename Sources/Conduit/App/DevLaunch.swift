@@ -28,7 +28,7 @@ extension AppState {
         }
         #endif
         return AppState(
-            commandRunner: { launchPath, arguments in try CommandRunner.run(launchPath: launchPath, arguments: arguments) },
+            commandRunner: CommandRunner.host,
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
     }

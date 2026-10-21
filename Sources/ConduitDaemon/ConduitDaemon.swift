@@ -47,7 +47,7 @@ enum ConduitDaemon {
             // The journal restores need no config; see
             // `DaemonRuntimeHost.recoverWithoutConfiguration`. The exit status
             // is still the load failure's.
-            await DaemonRuntimeHost.recoverWithoutConfiguration(environment: environment, logger: logger, commandRunner: { launchPath, arguments in try CommandRunner.run(launchPath: launchPath, arguments: arguments) })
+            await DaemonRuntimeHost.recoverWithoutConfiguration(environment: environment, logger: logger, commandRunner: CommandRunner.host)
             logger.flush()
             exit(1)
         }
@@ -63,7 +63,7 @@ enum ConduitDaemon {
             logger: logger,
             loadedConfiguration: loaded,
             configFilePredatesLaunch: configFilePredatesLaunch,
-            commandRunner: { launchPath, arguments in try CommandRunner.run(launchPath: launchPath, arguments: arguments) },
+            commandRunner: CommandRunner.host,
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
 
