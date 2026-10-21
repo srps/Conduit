@@ -922,6 +922,28 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(appState.reconciler.lags(config: appState.config, platformConfig: appState.platformConfig))
     }
 
+    /// The section closes while the pass is still out: the baseline has
+    /// already moved, so nothing is unsaved or lagging yet. The clear then
+    /// fails and rewinds. The close still gets its retry, once the pass drains.
+    func testLeavingASectionDuringAPassRetriesWhenItFails() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
+        try await appState.startProxy()
+        machine.privilege.failing = [.setWebProxyEndpoint]
+        func decisions() -> Int { appState.eventLog.events.filter { $0.event == "config.platform_integration" }.count }
+        let before = decisions()
+
+        appState.platformConfig.manageSystemProxy = false
+        appState.saveConfig()
+        XCTAssertTrue(appState.reconciler.hasPassInFlight)
+        XCTAssertFalse(appState.reconciler.lags(config: appState.config, platformConfig: appState.platformConfig))
+        appState.flushPendingSave()
+        await appState.reconciler.drain()
+        await appState.awaitSectionCloseRetry()
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(decisions() - before, 2, "the pass, then the close's retry after it drained")
+    }
+
     func testLeavingASectionSavesAWaitingEditAtOnce() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig())
         await harness.launchRecovery()

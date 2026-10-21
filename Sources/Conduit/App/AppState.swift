@@ -143,6 +143,9 @@ final class AppState: ObservableObject {
     private let settingsSaveDebounce: Duration
     /// The timer for the save the last edit scheduled.
     private var pendingSave: Task<Void, Never>?
+    /// A section closed while a reconcile pass was out: one check after it
+    /// drains, since the pass may yet fail and rewind its baseline.
+    private var sectionCloseRetry: Task<Void, Never>?
     /// An edit no save has written yet: the timer has not fired, or it
     /// fired on a config with a problem that blocks a proxy start.
     private(set) var hasUnsavedEdit = false
@@ -813,8 +816,25 @@ final class AppState: ObservableObject {
     func flushPendingSave() {
         // Also when everything is written but an action did not land: closing
         // a section retried it before autosave, and nothing else may (#176).
-        guard hasUnsavedEdit || reconciler.lags(config: config, platformConfig: platformConfig) else { return }
-        saveConfig()
+        if hasUnsavedEdit || reconciler.lags(config: config, platformConfig: platformConfig) {
+            saveConfig()
+            return
+        }
+        // A pass still out advanced the baseline before acting; if an action
+        // fails, it rewinds after this returns. Look again once it drains.
+        guard reconciler.hasPassInFlight else { return }
+        sectionCloseRetry?.cancel()
+        sectionCloseRetry = Task { [weak self] in
+            await self?.reconciler.drain()
+            guard let self, !Task.isCancelled,
+                  self.reconciler.lags(config: self.config, platformConfig: self.platformConfig) else { return }
+            self.saveConfig()
+        }
+    }
+
+    /// Joins the post-drain check a section close scheduled, for tests.
+    func awaitSectionCloseRetry() async {
+        await sectionCloseRetry?.value
     }
 
     /// Writes an unsaved edit to disk without the runtime reconcile: at
@@ -2000,6 +2020,7 @@ final class AppState: ObservableObject {
     /// recorded as `lifecycle.termination_drain_expired`.
     func performTerminationCleanup() {
         updateCoordinator.stop()
+        sectionCloseRetry?.cancel()
         proxyLane.supersedeAll()
         dnsLane.supersedeAll()
         let deadline = terminationDrainDeadlineMilliseconds
