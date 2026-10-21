@@ -285,19 +285,21 @@ final class HelperContractTests: XCTestCase {
 
     // MARK: - Privilege Client Fallback
 
-    func testHelperClientStatusNotInstalledByDefault() throws {
-        let client = HelperToolPrivilegeClient()
-        try XCTSkipIf(client.status == .installed,
-                       "Helper is installed on this machine; skipping not-installed assertion")
-        XCTAssertNotEqual(client.status, .installed,
-                          "Helper should not appear installed unless actually set up with sudo")
+    /// A socket nothing listens on, so these never reach the installed
+    /// helper: they used to ping the production socket, and skip when it
+    /// answered.
+    private func unreachableHelperClient() -> HelperToolPrivilegeClient {
+        HelperToolPrivilegeClient(socketPath: NSTemporaryDirectory() + "pm-no-helper-\(UUID().uuidString.prefix(8)).sock")
     }
 
-    func testHelperClientPingFailsWithoutHelper() throws {
-        let client = HelperToolPrivilegeClient()
-        try XCTSkipIf(client.status == .installed,
-                       "Helper is installed on this machine; skipping ping-failure assertion")
-        XCTAssertFalse(client.ping())
+    func testHelperClientWithNoHelperListeningIsNotInstalled() {
+        let status = unreachableHelperClient().status
+        XCTAssertTrue(status == .notInstalled || status == .notResponding,
+                      "no binary is not installed, a binary with no listener is not responding: \(status)")
+    }
+
+    func testHelperClientPingFailsWithoutHelper() {
+        XCTAssertFalse(unreachableHelperClient().ping())
     }
 
     // MARK: - Restore operations
