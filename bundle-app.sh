@@ -137,14 +137,10 @@ if [ -f "$SCRIPT_DIR/Resources/AppIcon.icns" ]; then
 fi
 
 # Apache-2.0 and MIT both require their notices to travel with the binaries
-# (#187). scripts/test-third-party-notices.py keeps the set in step with
-# Package.resolved.
-for notice in LICENSE NOTICE Resources/ThirdPartyLicenses; do
-    if [[ ! -e "$SCRIPT_DIR/$notice" ]]; then
-        echo "License notice missing: $SCRIPT_DIR/$notice" >&2
-        exit 1
-    fi
-done
+# (#187). The check runs here, not only in CI, so every bundle — release,
+# install or dev — compares the vendored texts with the checkouts it was
+# built from.
+python3 "$SCRIPT_DIR/scripts/check-third-party-notices.py" --require-checkouts "$SCRIPT_DIR"
 cp "$SCRIPT_DIR/LICENSE" "$SCRIPT_DIR/NOTICE" "$CONTENTS/Resources/"
 cp -R "$SCRIPT_DIR/Resources/ThirdPartyLicenses" "$CONTENTS/Resources/"
 
