@@ -134,6 +134,32 @@ final class RuntimeReconcilerTests: XCTestCase {
         await reconciler.drain()
     }
 
+    /// A failed action rewinds the baseline but not the request, so a
+    /// retry reaches the save's own target, not a later edit.
+    func testARetryRunsTheLastRequestAgain() async {
+        host.failing = [.clearSystemProxy]
+        reconciler.reconcile(config: baseConfig, platformConfig: proxyOff)
+        await reconciler.drain()
+        XCTAssertTrue(reconciler.requestLags)
+        XCTAssertEqual(reconciler.requestedPlatformConfig, proxyOff)
+
+        host.failing = []
+        reconciler.retryRequest()
+        await reconciler.drain()
+
+        XCTAssertEqual(host.performed, [.clearSystemProxy, .clearSystemProxy])
+        XCTAssertFalse(reconciler.requestLags)
+    }
+
+    /// Nothing failed: there is nothing to retry, whatever was edited since.
+    func testARequestThatLandedDoesNotLag() async {
+        reconciler.reconcile(config: edited(port: 18082), platformConfig: proxyOn)
+        await reconciler.drain()
+
+        XCTAssertFalse(reconciler.requestLags)
+        XCTAssertTrue(reconciler.lags(config: edited(port: 18083), platformConfig: proxyOn))
+    }
+
     /// The login item needs no runtime state and must not wait for the
     /// pass: a quit right after the save would lose it.
     func testLaunchAtLoginRunsBeforeThePassIsQueued() async {

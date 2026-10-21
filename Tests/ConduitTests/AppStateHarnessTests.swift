@@ -967,12 +967,14 @@ final class AppStateHarnessTests: XCTestCase {
     }
 
     /// An edit made after the close, here one that would block a start,
-    /// stays under its own debounce and gate: the post-drain check must not
-    /// save it.
-    func testThePostDrainCheckLeavesAnEditMadeAfterTheClose() async throws {
+    /// stays under its own debounce and gate: the post-drain check retries
+    /// what the close saved, and neither saves nor reconciles the edit.
+    func testThePostDrainCheckRetriesTheCloseAndLeavesALaterEdit() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         try await appState.startProxy()
         machine.privilege.failing = [.setWebProxyEndpoint]
+        func decisions() -> Int { appState.eventLog.events.filter { $0.event == "config.platform_integration" }.count }
+        let before = decisions()
         appState.platformConfig.manageSystemProxy = false
         appState.saveConfig()
         appState.flushPendingSave()
@@ -981,9 +983,28 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(appState.hasUnsavedEdit)
         await appState.reconciler.drain()
         await appState.awaitSectionCloseRetry()
+        await appState.reconciler.drain()
 
+        XCTAssertEqual(decisions() - before, 2, "the clear, then its retry")
         XCTAssertTrue(appState.hasUnsavedEdit, "still waiting on its own save")
         XCTAssertNotEqual(try ProxyConfigPersistence.load(in: harness.environment).localHost, "127.0.")
+        XCTAssertNotEqual(appState.reconciler.lastReconciledConfig.localHost, "127.0.", "not reconciled either")
+    }
+
+    /// A config a section close saved invalid holds back only a further
+    /// config edit, not a toggle elsewhere.
+    func testAnInvalidSavedConfigDoesNotHoldBackAPlatformEdit() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(10))
+        appState.config.localHost = "127.0."
+        appState.flushPendingSave()
+        XCTAssertFalse(appState.hasUnsavedEdit)
+
+        appState.platformConfig.launchAtLogin = true
+        await appState.awaitPendingSave()
+
+        XCTAssertFalse(appState.hasUnsavedEdit)
+        XCTAssertTrue(try PlatformConfigPersistence.load(in: harness.environment).launchAtLogin)
+        XCTAssertFalse(appState.eventLog.events.contains { $0.event == "config.autosave_held" })
     }
 
     func testLeavingASectionSavesAWaitingEditAtOnce() async throws {

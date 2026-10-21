@@ -118,6 +118,12 @@ package final class RuntimeReconciler {
     /// not at the next restart (#13). Lifecycle code never writes these
     /// flags, so unlike its sibling nothing has to absorb its own edits.
     package private(set) var lastReconciledPlatformConfig: PlatformIntegrationConfig
+    /// What the last save asked for. The baseline above advances to it
+    /// and rewinds when an action fails; this does not, so `retryRequest`
+    /// can reach it again without whatever the host has been edited to
+    /// since (#176).
+    package private(set) var requestedConfig: ProxyConfig
+    package private(set) var requestedPlatformConfig: PlatformIntegrationConfig
 
     package weak var host: (any RuntimeReconcilerHost)?
 
@@ -130,6 +136,8 @@ package final class RuntimeReconciler {
     package init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig, host: (any RuntimeReconcilerHost)? = nil) {
         self.lastReconciledConfig = config
         self.lastReconciledPlatformConfig = platformConfig
+        self.requestedConfig = config
+        self.requestedPlatformConfig = platformConfig
         self.host = host
     }
 
@@ -139,21 +147,35 @@ package final class RuntimeReconciler {
     /// save (#171), which then never reached the platform surfaces.
     package func markReconciled(dnsForwarderEnabled: Bool) {
         lastReconciledConfig.dnsForwarderEnabled = dnsForwarderEnabled
+        requestedConfig.dnsForwarderEnabled = dnsForwarderEnabled
     }
 
     /// For a flag change nothing was applied under yet: the launch-flag
     /// session overrides.
     package func markReconciled(platformConfig: PlatformIntegrationConfig) {
         lastReconciledPlatformConfig = platformConfig
+        requestedPlatformConfig = platformConfig
     }
 
     /// Whether a pass is queued or running. Tests read it; `drain` waits it out.
     package var hasPassInFlight: Bool { task != nil }
 
-    /// Whether the baseline is behind what is persisted: an action that did
-    /// not land rewound it, so the next save retries that action.
+    /// Whether the baseline is behind `config`: an action that did not
+    /// land rewound it, so the next save retries that action.
     package func lags(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) -> Bool {
         lastReconciledConfig != config || lastReconciledPlatformConfig != platformConfig
+    }
+
+    /// Whether an action the last save asked for did not land.
+    package var requestLags: Bool {
+        lags(config: requestedConfig, platformConfig: requestedPlatformConfig)
+    }
+
+    /// Runs the last save's request again, for an action that did not land.
+    /// Not the host's current config: an edit made since is the host's to
+    /// save, under its own gate.
+    package func retryRequest() {
+        reconcile(config: requestedConfig, platformConfig: requestedPlatformConfig)
     }
 
     /// Waits for every queued pass, including ones queued while waiting.
@@ -172,6 +194,7 @@ package final class RuntimeReconciler {
         let actions = PlatformIntegrationReconciler.immediateActions(old: oldPlatform, new: newPlatform)
         guard !actions.isEmpty else { return }
         lastReconciledPlatformConfig.launchAtLogin = newPlatform.launchAtLogin
+        requestedPlatformConfig.launchAtLogin = newPlatform.launchAtLogin
         for action in actions {
             run(action, config: lastReconciledConfig, previousConfig: lastReconciledConfig, from: oldPlatform, to: newPlatform)
         }
@@ -180,6 +203,8 @@ package final class RuntimeReconciler {
     package func reconcile(config new: ProxyConfig, platformConfig newPlatform: PlatformIntegrationConfig) {
         let old = lastReconciledConfig
         let oldPlatform = lastReconciledPlatformConfig
+        requestedConfig = new
+        requestedPlatformConfig = newPlatform
         guard old != new || oldPlatform != newPlatform else { return }
         lastReconciledConfig = new
         lastReconciledPlatformConfig = newPlatform
