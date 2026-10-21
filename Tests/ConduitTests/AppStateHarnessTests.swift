@@ -1186,6 +1186,217 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.contains("retry.example"))
     }
 
+    // MARK: Listener edits wait for a commit
+
+    /// A loopback port nothing listens on a moment ago, so a scenario can
+    /// type a real port without fixing one the machine may be using.
+    private func freeLoopbackPort() throws -> Int {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw POSIXError(.EBADF) }
+        defer { Darwin.close(fd) }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
+                Darwin.bind(fd, socketAddress, length) == 0 && getsockname(fd, socketAddress, &length) == 0
+            }
+        }
+        guard bound else { throw POSIXError(.EADDRINUSE) }
+        return Int(UInt16(bigEndian: address.sin_port))
+    }
+
+    private func count(_ event: String, in appState: AppState) -> Int {
+        appState.eventLog.events.filter { $0.event == event }.count
+    }
+
+    /// Typing a port, with pauses between the digits, used to restart the
+    /// listener on every value the pause saved. The runtime now sees only
+    /// a committed edit: nothing is saved, rebound or advertised until the
+    /// section closes, which binds the last value once. The commit is
+    /// driven through the call the section's `onDisappear` makes; the
+    /// SwiftUI wiring itself (Return, Apply, disappearance) is not
+    /// reachable from the harness.
+    func testTypingAPortDoesNotRebindUntilTheSectionCloses() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
+        try await appState.startProxy()
+        let boundBefore = try XCTUnwrap(appState.runtimeSnapshot.bindings.proxyPort)
+        let typed = try (0..<3).map { _ in try freeLoopbackPort() }
+
+        for port in typed {
+            appState.config.localPort = port
+            await appState.awaitPendingSave()
+            await appState.reconciler.drain()
+        }
+
+        XCTAssertEqual(count("config.proxy_restart", in: appState), 0, "no intermediate value was bound")
+        XCTAssertEqual(appState.runtimeSnapshot.bindings.proxyPort, boundBefore)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localPort, 0, "nor saved")
+
+        appState.flushPendingSave()
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(count("config.proxy_restart", in: appState), 1, "the commit rebinds once")
+        XCTAssertEqual(appState.runtimeSnapshot.bindings.proxyPort, typed.last)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localPort, typed.last)
+    }
+
+    /// Return commits the held edit, and the decisions are events: each
+    /// pause held it, the Return committed it.
+    func testReturnCommitsAHeldPortEdit() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
+        try await appState.startProxy()
+        let port = try freeLoopbackPort()
+
+        appState.config.localPort = port
+        XCTAssertTrue(appState.listenerEditAwaitingCommit, "the note shows as soon as the draft holds one")
+        await appState.awaitPendingSave()
+        XCTAssertEqual(appState.runtimeConfig.localPort, 0, "the runtime still holds the committed port")
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.autosave_held" }.map(\.detail),
+                       ["reason=listener_change trigger=pause"])
+
+        appState.commitPendingEdit(trigger: .submit)
+        await appState.reconciler.drain()
+
+        XCTAssertFalse(appState.listenerEditAwaitingCommit)
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.edit_committed" }.map(\.detail),
+                       ["trigger=submit listener_change=true"])
+        XCTAssertEqual(count("config.proxy_restart", in: appState), 1)
+        XCTAssertEqual(appState.runtimeSnapshot.bindings.proxyPort, port)
+        XCTAssertEqual(appState.runtimeConfig.localPort, port)
+    }
+
+    /// Typing back to the committed value leaves nothing to commit.
+    func testTypingBackToTheCommittedPortRebindsNothing() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
+        try await appState.startProxy()
+
+        appState.config.localPort = try freeLoopbackPort()
+        await appState.awaitPendingSave()
+        appState.config.localPort = 0
+        XCTAssertFalse(appState.listenerEditAwaitingCommit)
+        await appState.awaitPendingSave()
+        appState.commitPendingEdit(trigger: .submit)
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(count("config.proxy_restart", in: appState), 0)
+    }
+
+    /// A switch has no Return: Apply commits it. Until then the listener
+    /// keeps its committed shape.
+    func testAListenerSwitchWaitsForApply() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(20)) { $0.socksPort = 0 }
+        try await appState.startProxy()
+
+        appState.config.socksEnabled = true
+        await appState.awaitPendingSave()
+        await appState.reconciler.drain()
+        XCTAssertTrue(appState.listenerEditAwaitingCommit)
+        XCTAssertEqual(count("config.proxy_restart", in: appState), 0)
+        XCTAssertNil(appState.runtimeSnapshot.bindings.socksPort)
+
+        appState.commitPendingEdit(trigger: .apply)
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(count("config.proxy_restart", in: appState), 1)
+        XCTAssertNotNil(appState.runtimeSnapshot.bindings.socksPort)
+        XCTAssertFalse(appState.listenerEditAwaitingCommit)
+    }
+
+    /// An edit that replaces nothing still saves on its pause, and reaches
+    /// the runtime only through that save, not keystroke by keystroke.
+    func testAnEditThatReplacesNoListenerReachesTheRuntimeOnItsPause() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
+        try await appState.startProxy()
+
+        appState.config.noProxyHosts.append("pause.example")
+        XCTAssertFalse(appState.runtimeConfig.noProxyHosts.contains("pause.example"), "the draft is not the runtime's")
+        XCTAssertFalse(appState.listenerEditAwaitingCommit)
+        await appState.awaitPendingSave()
+        await appState.reconciler.drain()
+
+        XCTAssertTrue(appState.runtimeConfig.noProxyHosts.contains("pause.example"))
+        XCTAssertFalse(appState.hasUnsavedEdit)
+        XCTAssertFalse(appState.eventLog.events.contains { $0.event == "config.autosave_held" })
+    }
+
+    /// A start binds the committed config, not a port still being typed,
+    /// and its own save does not commit the draft either.
+    func testStartingWithAHeldPortEditBindsTheCommittedPort() async throws {
+        let appState = try launch()
+        let port = try freeLoopbackPort()
+
+        appState.config.localPort = port
+        try await appState.startProxy()
+
+        XCTAssertNotEqual(appState.runtimeSnapshot.bindings.proxyPort, port)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localPort, 0,
+                       "the start's save waited with the edit")
+        XCTAssertTrue(appState.hasUnsavedEdit)
+    }
+
+    /// Quit writes the held edit for the next launch and applies nothing:
+    /// termination cleanup is tearing the surfaces down.
+    func testQuittingWritesAHeldPortEditWithoutBindingIt() async throws {
+        let appState = try launch()
+        try await appState.startProxy()
+        let boundBefore = appState.runtimeSnapshot.bindings.proxyPort
+        let port = try freeLoopbackPort()
+
+        appState.config.localPort = port
+        appState.persistPendingEditForTermination()
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).localPort, port)
+        XCTAssertEqual(appState.runtimeSnapshot.bindings.proxyPort, boundBefore)
+        XCTAssertEqual(count("config.proxy_restart", in: appState), 0)
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.edit_committed" }.map(\.detail),
+                       ["trigger=quit listener_change=true"])
+    }
+
+    /// A listen-host commit replaces the HTTP listener and leaves the DNS
+    /// forwarder where the resolver files and the relay point.
+    func testCommittingAListenHostLeavesTheDNSForwarderOnLoopback() async throws {
+        let appState = try launch()
+        try await appState.startProxy()
+        await appState.startDNS()
+        let dnsPort = appState.runtimeSnapshot.bindings.dnsPort
+
+        appState.config.localHost = "::1"
+        appState.commitPendingEdit(trigger: .submit)
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(count("config.proxy_restart", in: appState), 1)
+        XCTAssertEqual(count("config.dns_restart", in: appState), 0)
+        XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .running)
+        XCTAssertEqual(appState.runtimeSnapshot.bindings.dnsHost, "127.0.0.1")
+        XCTAssertEqual(appState.runtimeSnapshot.bindings.dnsPort, dnsPort)
+    }
+
+    /// The DNS lifecycle's flag reaches the runtime, which reserves the
+    /// forwarder's port by it, and a pass queued before the lifecycle ran
+    /// does not put the old value back.
+    func testTheDNSLifecycleFlagReachesTheRuntimeOverAQueuedPass() async throws {
+        let appState = try launch()
+
+        appState.config.profileName = "queued before the start"
+        appState.saveConfig()
+        await appState.startDNS()
+        await appState.reconciler.drain()
+        XCTAssertTrue(appState.runtimeConfig.dnsForwarderEnabled)
+        XCTAssertEqual(appState.runtimeConfig.profileName, "queued before the start")
+        XCTAssertEqual(count("config.dns_restart", in: appState), 0)
+
+        appState.config.profileName = "queued before the stop"
+        appState.saveConfig()
+        await appState.stopDNS()
+        await appState.reconciler.drain()
+        XCTAssertFalse(appState.runtimeConfig.dnsForwarderEnabled)
+        XCTAssertEqual(appState.runtimeConfig.profileName, "queued before the stop")
+    }
+
     /// #175: a bypass edit reaches the surfaces that advertise the list to
     /// other programs while the proxy runs: the shell environment's
     /// `NO_PROXY`, and in manual mode the system proxy's `ExceptionsList`.
@@ -1703,7 +1914,11 @@ final class AppStateHarnessTests: XCTestCase {
                 manageSystemProxy: true,
                 manageEnvironmentVariables: true,
                 manageDNSResolvers: true
-            )
+            ),
+            // Rejected by `ProxyConfig.validate()`, so the start fails at
+            // once instead of spending the bind retry budget. In the file
+            // it launched from: an unsaved edit never reaches the runtime.
+            configure: { $0.maxConnections = 0 }
         )
         machine.describe("Wi-Fi") { service in
             service.webProxy = FakeMachine.ProxyEndpoint(enabled: true, host: "127.0.0.1", port: "47113")
@@ -1712,10 +1927,6 @@ final class AppStateHarnessTests: XCTestCase {
         machine.launchdEnvironment = ["HTTP_PROXY": "http://127.0.0.1:47113", "https_proxy": "http://127.0.0.1:47113"]
         try machine.strandResolverFile(for: "corp.example", contents: "nameserver 10.0.0.53")
 
-        // Rejected by `ProxyConfig.validate()`, so the start fails at once
-        // instead of spending the bind retry budget. Edited, not saved, so
-        // the failure is the start's alone.
-        appState.config.maxConnections = 0
         do {
             try await appState.startProxy()
             XCTFail("a config the kernel rejects must fail the start")

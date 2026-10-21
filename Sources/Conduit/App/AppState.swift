@@ -178,14 +178,18 @@ final class AppState: ObservableObject {
     /// drains, since the pass may yet fail and rewind its baseline.
     private var sectionCloseRetry: Task<Void, Never>?
     /// An edit no save has written yet: the timer has not fired, or it
-    /// fired on a config with a problem that blocks a proxy start.
+    /// fired on an edit `holdsBackUnsavedEdit` keeps for a commit.
     private(set) var hasUnsavedEdit = false
+    /// The draft holds an edit that would start, stop or replace a bound
+    /// endpoint (`ConfigDiff.replacesListeners`), so it waits for a commit:
+    /// Return in a field, Apply, leaving the section, or quit. Published
+    /// for the note `AppWindow` shows: neither `hasUnsavedEdit` nor the
+    /// reconciler's request is observable.
+    @Published private(set) var listenerEditAwaitingCommit = false
     private let vpnStatusMonitor: VPNStatusObserving
     private let vpnFlapWindowBox: NIOLockedValueBox<VPNFlapWindowConfig>
-    // AppState's configBox + $config mirror sink were dropped.
-    // The auth factory now reads from `orchestrator.configSnapshotProvider`
-    // (single source of truth for the live config); AppState's writes flow
-    // back through `orchestrator.config = newConfig` (Combine sink below).
+    // The auth factory reads `orchestrator.configSnapshotProvider`, the
+    // config the runtime was handed, never the editor's draft.
     /// Active PAC evaluator. `CFPACEvaluator` is the sole production backend
     /// after removing the JavaScriptCore resolver.
     /// The orchestrator and the Settings "Test PAC URL" preview share this
@@ -334,7 +338,13 @@ final class AppState: ObservableObject {
         if loadedConfiguration.migrated {
             logStore.log(.notice, "Configuration files migrated to the current schema.", category: .system)
         }
-        let initialConfig = loadedConfiguration.config
+        var initialConfig = loadedConfiguration.config
+        // Before the reconciler takes its baseline: a `--port` override that
+        // only the editor held would read as a listener edit awaiting a
+        // commit, and hold every later edit with it.
+        if let portArg = AppState.parsePortArgument() {
+            initialConfig.localPort = portArg
+        }
         let privilegeAuditEventSink = PrivilegeAuditEventSink()
         // The sink also carries the "helper unreachable, falling back to an
         // admin prompt" event, which is a recovery the user needs to see: it
@@ -370,8 +380,8 @@ final class AppState: ObservableObject {
         self.appPreferences = loadedConfiguration.appPreferences
         // Mirror the two flap-window values into a thread-safe box so the
         // monitor's monitorQueue callback context can read them without
-        // hopping back to MainActor on every utun event. The `$config` sink
-        // below keeps the box current as Settings sliders edit the values.
+        // hopping back to MainActor on every utun event. A committed edit
+        // updates it, in `applyConfigChange`.
         let flapBox = NIOLockedValueBox(
             VPNFlapWindowConfig(
                 graceSeconds: initialConfig.vpnFlapGraceSeconds,
@@ -479,9 +489,6 @@ final class AppState: ObservableObject {
         )
         orchestrator.setAuthenticatorProvider(authenticatorProvider)
 
-        if let portArg = AppState.parsePortArgument() {
-            self.config.localPort = portArg
-        }
         if AppState.hasFlag("--no-system-proxy") {
             self.platformConfig.manageSystemProxy = false
         }
@@ -533,23 +540,14 @@ final class AppState: ObservableObject {
                 self?.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
             }
         }
+        // `config` is the editor's draft and never reaches the runtime from
+        // here: `orchestrator.config` moves only when a save's reconcile pass
+        // hands it a committed config (`applyConfigChange`). The sink only
+        // says whether the draft holds a listener edit awaiting its commit,
+        // from the emitted value: `@Published` emits before it assigns.
         $config
-            .sink { [weak self] config in
-                guard let self else { return }
-                self.orchestrator.config = config
-                // Mirror the two flap-window fields into the cross-thread box so
-                // the monitor's next link-down/grace timer reads the freshest
-                // user-edited values.
-                self.vpnFlapWindowBox.withLockedValue { window in
-                    window.graceSeconds = config.vpnFlapGraceSeconds
-                    window.minVisibleSeconds = config.vpnFlapMinVisibleSeconds
-                }
-                // AppState no longer maintains its own configBox; the
-                // orchestrator's `config` setter is the single write point
-                // and feeds `orchestrator.configSnapshotProvider` (which
-                // the auth factory captured at AppState init). Kept this
-                // Combine sink for the vpnFlapWindowBox mirror above.
-            }
+            .dropFirst()
+            .sink { [weak self] draft in self?.refreshListenerEditAwaitingCommit(draft: draft) }
             .store(in: &cancellables)
         // Settings has no Save button, so an edit persists and reconciles on
         // its own once edits pause (#171). Subscribed after the launch-flag
@@ -561,16 +559,7 @@ final class AppState: ObservableObject {
         )
         .sink { [weak self] in self?.scheduleSave() }
         .store(in: &cancellables)
-        $config
-            .map(\.verboseLogging)
-            .removeDuplicates()
-            .sink { [weak self] verbose in
-                self?.logStore.minStderrLevel = verbose ? .debug : .notice
-                self?.logStore.minBufferedLevel = verbose ? .debug : .notice
-            }
-            .store(in: &cancellables)
-        logStore.minStderrLevel = config.verboseLogging ? .debug : .notice
-        logStore.minBufferedLevel = config.verboseLogging ? .debug : .notice
+        applyCommittedHostSettings(config)
         updateCoordinator.onStatus = { [weak self] status in self?.updateStatus = status }
         updateCoordinator.start(automaticChecks: appPreferences.automaticUpdateChecks)
         updateStatus = updateCoordinator.status
@@ -795,16 +784,33 @@ final class AppState: ObservableObject {
 
     // MARK: - Config
 
-    /// Saves after edits pause for `settingsSaveDebounce` (#171). Every
-    /// keystroke in a text field already reaches the orchestrator through
-    /// the `$config` sink; the pause keeps a half-typed host from being
-    /// written and reconciled per keystroke. A config with a problem that
-    /// blocks a proxy start is not saved by the timer: a reconcile could
-    /// restart the listener on a half-typed host, fail the start and revert
-    /// every surface. It waits for the next edit, or for the section to
-    /// close. A problem that does not block a start (a bypass entry the
-    /// system settings refuse) is saved and reported as before; holding it
-    /// back would stop every later edit from saving.
+    /// The config the runtime was last handed by a reconcile pass: what a
+    /// start binds and every surface advertises. `config` is the editor's
+    /// draft; it reaches the runtime only through a save.
+    var runtimeConfig: ProxyConfig { orchestrator.config }
+
+    /// The integration flags the last save committed. Lifecycle work reads
+    /// these rather than the editor's `platformConfig`, for the same reason.
+    var committedPlatformConfig: PlatformIntegrationConfig { reconciler.requestedPlatformConfig }
+
+    /// Where a commit of the editor's draft came from, for its event.
+    enum CommitTrigger: String {
+        /// Return in a Settings field.
+        case submit
+        /// The Apply button beside a held listener edit.
+        case apply
+        /// A Configure section went away: another section, or the window closed.
+        case sectionClose = "section_close"
+        /// Quit: written for the next launch, not applied.
+        case quit
+    }
+
+    /// Saves after edits pause for `settingsSaveDebounce` (#171); the
+    /// pause keeps a half-typed value from being written and reconciled per
+    /// keystroke. Two kinds of edit are not saved by the timer, see
+    /// `holdsBackUnsavedEdit`. A problem that does not block a start (a
+    /// bypass entry the system settings refuse) is saved and reported as
+    /// before; holding it back would stop every later edit from saving.
     func scheduleSave() {
         hasUnsavedEdit = true
         pendingSave?.cancel()
@@ -833,24 +839,65 @@ final class AppState: ObservableObject {
         saveConfig()
     }
 
-    /// Whether an unsaved edit has a problem that would block a proxy start,
-    /// and so must not be saved now. A decision not to save: event first,
-    /// so the UI, pmctl and pm-sim see why the edit is still unsaved.
+    /// Whether an unsaved edit must wait for a commit rather than be saved
+    /// now, and so reach the runtime, by a pause or a lifecycle save:
+    ///
+    /// - It has a problem that would block a proxy start: a reconcile could
+    ///   restart the listener on a half-typed host, fail the start and
+    ///   revert every surface.
+    /// - It would start, stop or replace a bound endpoint (a port, a host,
+    ///   the SOCKS or gateway switch, the DNS section, the local PAC
+    ///   server, a tunnel): every intermediate value typed would be bound
+    ///   in turn. The runtime sees it once it is committed.
+    ///
+    /// The whole value waits, flags and other edits included: a partial
+    /// save would persist a config the editor does not show. A decision
+    /// not to save: event first, so the UI, pmctl and pm-sim see why.
     private func holdsBackUnsavedEdit(trigger: String) -> Bool {
         // Only an edit to the config: one left invalid by a section close is
         // already saved, and must not hold back an unrelated toggle.
         guard hasUnsavedEdit, config != reconciler.requestedConfig else { return false }
         let blocking = config.validate().filter(\.blocksProxyStart)
-        guard !blocking.isEmpty else { return false }
-        recordLifecycle(RuntimeEvent(kind: .config, event: "config.autosave_held",
-                                     detail: "reason=start_blocking_problems problems=\(blocking.count) trigger=\(trigger)"),
-                        level: .info)
+        let detail: String
+        if !blocking.isEmpty {
+            detail = "reason=start_blocking_problems problems=\(blocking.count) trigger=\(trigger)"
+        } else if ConfigDiff(old: reconciler.requestedConfig, new: config).replacesListeners {
+            detail = "reason=listener_change trigger=\(trigger)"
+        } else {
+            return false
+        }
+        recordLifecycle(RuntimeEvent(kind: .config, event: "config.autosave_held", detail: detail), level: .info)
         return true
     }
 
-    /// Saves now if an edit has not been saved. A Configure section calls
-    /// this as it goes away, so leaving it never waits, and an edit that
-    /// does not validate is saved and reported as before.
+    /// Commits the editor's draft now: Return in a field, Apply, or a
+    /// section going away. The only way a held listener edit reaches the
+    /// runtime, apart from quit writing it for the next launch. An edit
+    /// that does not validate is saved and reported, as before.
+    func commitPendingEdit(trigger: CommitTrigger) {
+        if hasUnsavedEdit {
+            recordCommit(trigger: trigger)
+        }
+        flushPendingSave()
+    }
+
+    /// Event first: a commit is a config decision.
+    private func recordCommit(trigger: CommitTrigger) {
+        let listener = ConfigDiff(old: reconciler.requestedConfig, new: config).replacesListeners
+        recordLifecycle(RuntimeEvent(kind: .config, event: "config.edit_committed",
+                                     detail: "trigger=\(trigger.rawValue) listener_change=\(listener)"),
+                        level: .info)
+    }
+
+    private func refreshListenerEditAwaitingCommit(draft: ProxyConfig) {
+        let awaiting = ConfigDiff(old: reconciler.requestedConfig, new: draft).replacesListeners
+        if listenerEditAwaitingCommit != awaiting {
+            listenerEditAwaitingCommit = awaiting
+        }
+    }
+
+    /// Saves now if an edit has not been saved; `commitPendingEdit` is the
+    /// entry point for the views.
     func flushPendingSave() {
         // A pass already out advanced the baseline before acting; if one of
         // its actions fails, it rewinds after this returns, and a pass this
@@ -886,6 +933,7 @@ final class AppState: ObservableObject {
         cancelPendingSave()
         guard configurationLoadError == nil else { return }
         if hasUnsavedEdit {
+            recordCommit(trigger: .quit)
             // A flip the platform file does not hold is not registered.
             guard persistConfiguration().platformSaved else { return }
         }
@@ -931,6 +979,7 @@ final class AppState: ObservableObject {
         guard !rejectUnavailableConfiguration() else { return }
         persistConfiguration()
         reconciler.reconcile(config: config, platformConfig: platformConfig)
+        refreshListenerEditAwaitingCommit(draft: config)
         // Surface validation problems at edit time instead of at the next
         // proxy (re)start, where LocalProxyServer would reject the config
         // long after the user closed Settings. The save itself is not
@@ -968,7 +1017,26 @@ final class AppState: ObservableObject {
 
     func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
         guard !rejectUnavailableConfiguration() else { return }
+        // A pass queued before a DNS start or stop carries the flag from
+        // before it; the lifecycle's own value wins on both sides, so the
+        // pass neither reverts it in the runtime nor restarts DNS over it.
+        var new = new, old = old
+        new.dnsForwarderEnabled = config.dnsForwarderEnabled
+        old.dnsForwarderEnabled = config.dnsForwarderEnabled
+        applyCommittedHostSettings(new)
         await orchestrator.applyConfigChange(new, from: old)
+    }
+
+    /// The settings this host keeps outside the orchestrator, from a
+    /// committed config: the VPN flap window the monitor reads off the main
+    /// actor, and the log levels.
+    private func applyCommittedHostSettings(_ config: ProxyConfig) {
+        vpnFlapWindowBox.withLockedValue { window in
+            window.graceSeconds = config.vpnFlapGraceSeconds
+            window.minVisibleSeconds = config.vpnFlapMinVisibleSeconds
+        }
+        logStore.minStderrLevel = config.verboseLogging ? .debug : .notice
+        logStore.minBufferedLevel = config.verboseLogging ? .debug : .notice
     }
 
     /// Read the snapshot, not `runtime`: `applyConfigChange` has just
@@ -1324,9 +1392,9 @@ final class AppState: ObservableObject {
             // gate as it was when it was queued: entry files for servers only
             // the tunnel reaches, left with the tunnel down. Put them where
             // the gate is now.
-            if platformConfig.manageDNSResolvers, splitDNSGate.entriesWanted != entriesWantedAtApply {
+            if committedPlatformConfig.manageDNSResolvers, splitDNSGate.entriesWanted != entriesWantedAtApply {
                 splitDNSGate.reconcileEntryFiles(
-                    config: config,
+                    config: runtimeConfig,
                     dnsManager: dnsManager,
                     logger: logStore,
                     runtimeStarted: true
@@ -1353,7 +1421,7 @@ final class AppState: ObservableObject {
             // `saveConfig()`. This repairs a registration lost outside the
             // app — removed in System Settings, reset by an upgrade — for a
             // flag that is already on; `setEnabled` is idempotent.
-            loginItemManager.setEnabled(platformConfig.launchAtLogin, logger: logStore)
+            loginItemManager.setEnabled(committedPlatformConfig.launchAtLogin, logger: logStore)
 
             saveLifecycleChange()
             if postNotification {
@@ -1480,8 +1548,8 @@ final class AppState: ObservableObject {
     /// Returns the VPN gate's `entriesWanted` the entry files were applied
     /// for, so the caller can tell whether a transition landed meanwhile.
     private func applyProxyStartSurfaces(_ token: LifecycleLane.Token) async -> Bool {
-        let config = self.config
-        let platform = platformConfig
+        let config = runtimeConfig
+        let platform = committedPlatformConfig
         let localPACURL = orchestrator.snapshot.bindings.localPACURL
         let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
         let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
@@ -1567,8 +1635,8 @@ final class AppState: ObservableObject {
     /// ownership reads happen inside the block, after whatever was queued
     /// ahead of it has landed.
     private func clearProxyStopSurfaces(_ token: LifecycleLane.Token) async {
-        let config = self.config
-        let platform = platformConfig
+        let config = runtimeConfig
+        let platform = committedPlatformConfig
         let systemProxy = systemConduit
         let environment = environmentManager
         let resolvers = dnsManager
@@ -1646,7 +1714,7 @@ final class AppState: ObservableObject {
     /// `transparentProxyPort` is nil, `dnsInterceptReady` is false, and the
     /// files get withheld from a fully healthy stack.
     private func refreshInterceptFiles(for config: ProxyConfig) throws {
-        guard platformConfig.manageDNSResolvers else { return }
+        guard committedPlatformConfig.manageDNSResolvers else { return }
         let snapshot = orchestrator.snapshot
         try dnsManager.refreshInterceptFiles(
             config: config,
@@ -1666,7 +1734,7 @@ final class AppState: ObservableObject {
         await awaitLaunchRecovery()
         guard let token = await admit(dnsLane, .start, "dns_start") else { return }
         defer { dnsLane.end(token) }
-        let manageSystemDNS = platformConfig.manageSystemDNS
+        let manageSystemDNS = committedPlatformConfig.manageSystemDNS
         let systemDNS = systemDNSManager
         let logger = logStore
         if manageSystemDNS {
@@ -1692,8 +1760,8 @@ final class AppState: ObservableObject {
         let snapshot = orchestrator.snapshot
         if snapshot.dnsRunState == .running {
             let forwarderPort = effectiveDNSForwarderPort
-            let startConfig = self.config
-            let manageResolvers = platformConfig.manageDNSResolvers
+            let startConfig = runtimeConfig
+            let manageResolvers = committedPlatformConfig.manageDNSResolvers
             let interceptReady = snapshot.bindings.dnsInterceptReady
             let resolvers = dnsManager
             await platformWork.run {
@@ -1730,7 +1798,6 @@ final class AppState: ObservableObject {
             // behind it; a health timer or a persisted "DNS on" now would
             // outlive it.
             guard isCurrent(token, on: dnsLane, "dns_start") else { return }
-            config.dnsForwarderEnabled = true
             if manageSystemDNS {
                 // Whether or not `apply` succeeded: a refused or failed apply
                 // is exactly what the probe's relay restart exists to retry,
@@ -1738,10 +1805,7 @@ final class AppState: ObservableObject {
                 // already worked.
                 startDNSHealthTimer()
             }
-            // The flag flip above is our own lifecycle work, not a settings
-            // edit — absorb it so the save below doesn't restart the
-            // forwarder we just started.
-            reconciler.markReconciled(dnsForwarderEnabled: true)
+            recordDNSForwarderIntent(true)
             saveLifecycleChange()
         } else if let err = snapshot.dnsError {
             notificationManager.post(title: "DNS Forwarder Failed", body: err)
@@ -1772,7 +1836,7 @@ final class AppState: ObservableObject {
         defer { dnsLane.end(token) }
         stopDNSHealthTimer()
 
-        let manageSystemDNS = platformConfig.manageSystemDNS
+        let manageSystemDNS = committedPlatformConfig.manageSystemDNS
         let systemDNS = systemDNSManager
         let logger = logStore
         await platformWork.run {
@@ -1795,8 +1859,8 @@ final class AppState: ObservableObject {
         // set — leaving them behind strands e.g. `*.cursor.sh` pointing at a
         // forwarder that no longer listens, which surfaces as ENOTFOUND /
         // dead lookups in every client that resolved through them.
-        if platformConfig.manageDNSResolvers {
-            let config = self.config
+        if committedPlatformConfig.manageDNSResolvers {
+            let config = runtimeConfig
             let resolvers = dnsManager
             await platformWork.run {
                 resolvers.serialized {
@@ -1811,10 +1875,19 @@ final class AppState: ObservableObject {
             guard isCurrent(token, on: dnsLane, "dns_stop") else { return }
         }
 
-        config.dnsForwarderEnabled = false
-        // Lifecycle flip, not a settings edit — see startDNS.
-        reconciler.markReconciled(dnsForwarderEnabled: false)
+        recordDNSForwarderIntent(false)
         saveLifecycleChange()
+    }
+
+    /// `dnsForwarderEnabled` is the DNS lifecycle's own intent, which no
+    /// Settings field edits: written into the draft for the next save, the
+    /// runtime (which reserves the forwarder's port by it) and the
+    /// reconciler's baseline and request, so the save does not restart the
+    /// forwarder the lifecycle just started or stopped.
+    private func recordDNSForwarderIntent(_ enabled: Bool) {
+        config.dnsForwarderEnabled = enabled
+        orchestrator.config.dnsForwarderEnabled = enabled
+        reconciler.markReconciled(dnsForwarderEnabled: enabled)
     }
 
     // MARK: - Tunnels Lifecycle
@@ -1911,7 +1984,7 @@ final class AppState: ObservableObject {
     func testDNS() {
         let manager = systemDNSManager
         let logger = logStore
-        let port = platformConfig.manageSystemDNS ? 53 : effectiveDNSForwarderPort
+        let port = committedPlatformConfig.manageSystemDNS ? 53 : effectiveDNSForwarderPort
         DispatchQueue.global(qos: .userInitiated).async {
             logger.log(.notice, "DNS test: probing 127.0.0.1:\(port)...", category: .system)
             let alive = manager.probeLiveness(port: port)
@@ -1924,7 +1997,7 @@ final class AppState: ObservableObject {
     }
 
     private var effectiveDNSForwarderPort: Int {
-        orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
+        orchestrator.snapshot.bindings.dnsPort ?? runtimeConfig.dnsForwarderPort
     }
 
     private func handle(orchestratorEvent event: ProxyOrchestratorEvent) {
@@ -1950,8 +2023,8 @@ final class AppState: ObservableObject {
         let isRunning = runtimeState == .running
             || runtimeState == .degraded
             || runtimeState == .recovering
-        let configSnapshot = config
-        let platformConfigSnapshot = platformConfig
+        let configSnapshot = reconciler.requestedConfig
+        let platformConfigSnapshot = committedPlatformConfig
         let refreshID = UUID()
         preflightRefreshID = refreshID
         let helperLifecycle = self.helperLifecycle
@@ -2151,7 +2224,7 @@ final class AppState: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
             self.wakeObserver = nil
         }
-        if platformConfig.manageSystemDNS || systemDNSManager.hasSavedState() {
+        if committedPlatformConfig.manageSystemDNS || systemDNSManager.hasSavedState() {
             do {
                 try systemDNSManager.clear(logger: logStore)
             } catch {
@@ -2163,29 +2236,29 @@ final class AppState: ObservableObject {
         // Flag or ownership, as in `stopProxy` and the system-DNS guard above:
         // quitting cleans up whatever Conduit applied, whatever the switch
         // says now.
-        if platformConfig.manageSystemProxy || systemConduit.hasManagedState() {
+        if committedPlatformConfig.manageSystemProxy || systemConduit.hasManagedState() {
             do {
                 try systemConduit.clear(logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear system proxy: \(error.localizedDescription)", category: .system)
             }
         }
-        if platformConfig.manageEnvironmentVariables || environmentManager.hasManagedState() {
+        if committedPlatformConfig.manageEnvironmentVariables || environmentManager.hasManagedState() {
             do {
                 try environmentManager.clear(logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear environment variables: \(error.localizedDescription)", category: .system)
             }
         }
-        if platformConfig.manageDNSResolvers {
+        if committedPlatformConfig.manageDNSResolvers {
             do {
-                try dnsManager.clear(config: config, logger: logStore)
+                try dnsManager.clear(config: runtimeConfig, logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
         } else if dnsManager.hasManagedState() {
             do {
-                try dnsManager.clearRecorded(configs: [config], logger: logStore)
+                try dnsManager.clearRecorded(configs: [runtimeConfig], logger: logStore)
             } catch {
                 logStore.log(.warning, "Termination cleanup could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
             }
@@ -2260,7 +2333,7 @@ final class AppState: ObservableObject {
         // 30 s liveness probe alone never notices). Reconcile re-pins the
         // interfaces and re-checks relay liveness immediately instead of
         // waiting for the next network-change event.
-        if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
+        if committedPlatformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             scheduleDNSReconcile()
         }
     }
@@ -2307,7 +2380,7 @@ final class AppState: ObservableObject {
             let dnsToken = dnsLane.observationToken
             let proxy = systemConduit, dns = systemDNSManager
             // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
-            let config = reconciler.lastReconciledConfig, platform = platformConfig
+            let config = reconciler.lastReconciledConfig, platform = committedPlatformConfig
             let pacURL = orchestrator.snapshot.bindings.localPACURL
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logStore
@@ -2346,7 +2419,7 @@ final class AppState: ObservableObject {
                 deliveries.deliver { await orchestrator.handleNetworkChange(change) }
             },
             reconcileSystemDNS: { [weak self] in
-                guard let self, self.platformConfig.manageSystemDNS,
+                guard let self, self.committedPlatformConfig.manageSystemDNS,
                       self.orchestrator.snapshot.dnsRunState == .running else { return }
                 self.scheduleDNSReconcile()
             },
@@ -2375,13 +2448,13 @@ final class AppState: ObservableObject {
             await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
         }
 
-        if platformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
+        if committedPlatformConfig.manageSystemDNS, orchestrator.snapshot.dnsRunState == .running {
             scheduleDNSReconcile()
         }
 
         // Entry files live and die with the tunnel (`vpn-gw.corp.example` under a
         // `corp.example` entry deadlocks reconnection otherwise — see `SplitDNSVPNGate`).
-        guard platformConfig.manageDNSResolvers, entriesWantedChanged else { return }
+        guard committedPlatformConfig.manageDNSResolvers, entriesWantedChanged else { return }
 
         // The activation preflight consults the gate (deferred entry files
         // count as applied), so a gating flip invalidates it — recompute even
@@ -2400,7 +2473,7 @@ final class AppState: ObservableObject {
         }
 
         splitDNSGate.reconcileEntryFiles(
-            config: config,
+            config: runtimeConfig,
             dnsManager: dnsManager,
             logger: logStore,
             runtimeStarted: proxyIsUp
@@ -2411,7 +2484,7 @@ final class AppState: ObservableObject {
     private func reconcileSystemProxyIfRunning() async {
         guard !rejectUnavailableConfiguration() else { return }
         scheduleEnvironmentDriftPass(trigger: .observed)
-        guard platformConfig.manageSystemProxy else { return }
+        guard committedPlatformConfig.manageSystemProxy else { return }
         guard !proxySettingsReconcileInFlight else { proxySettingsReconcileWanted = true; return }
         proxySettingsReconcileInFlight = true
         defer { proxySettingsReconcileInFlight = false; proxySettingsReconcileWanted = false }
@@ -2419,10 +2492,10 @@ final class AppState: ObservableObject {
             proxySettingsReconcileWanted = false
             await awaitLaunchRecovery()
             await proxyLane.waitUntilIdle()
-            guard platformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
+            guard committedPlatformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
             let token = proxyLane.observationToken
             // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
-            let proxy = systemConduit, config = reconciler.lastReconciledConfig, platform = platformConfig
+            let proxy = systemConduit, config = reconciler.lastReconciledConfig, platform = committedPlatformConfig
             let pacURL = orchestrator.snapshot.bindings.localPACURL
             let events = orchestrator.eventLog, logger = logStore
             let retry = await platformWork.run { () -> Duration? in
@@ -2468,7 +2541,7 @@ final class AppState: ObservableObject {
     /// proxy pass, and checked against the lifecycle under the manager's
     /// lock before it writes (`EnvironmentManager.repair`).
     private func reconcileEnvironmentDriftIfRunning(trigger: EnvironmentDriftRepair.Trigger) async {
-        guard platformConfig.manageEnvironmentVariables else { return }
+        guard committedPlatformConfig.manageEnvironmentVariables else { return }
         guard !environmentDriftInFlight else {
             environmentDriftPending = trigger.coalesced(with: environmentDriftPending)
             return
@@ -2480,7 +2553,7 @@ final class AppState: ObservableObject {
             environmentDriftPending = nil
             await awaitLaunchRecovery()
             await proxyLane.waitUntilIdle()
-            guard platformConfig.manageEnvironmentVariables, runtimeState().proxyIsUp else { return }
+            guard committedPlatformConfig.manageEnvironmentVariables, runtimeState().proxyIsUp else { return }
             let token = proxyLane.observationToken
             // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
             let repair = environmentDriftRepair, config = reconciler.lastReconciledConfig
@@ -2546,7 +2619,7 @@ final class AppState: ObservableObject {
         deliveries.deliver { [weak self, platformWork, logStore] in
             guard let self else { return }
             await self.dnsLane.waitUntilIdle()
-            guard self.platformConfig.manageSystemDNS, self.orchestrator.snapshot.dnsRunState == .running else {
+            guard self.committedPlatformConfig.manageSystemDNS, self.orchestrator.snapshot.dnsRunState == .running else {
                 self.dnsReconcileInFlight = false
                 self.dnsReconcileWanted = false
                 return
