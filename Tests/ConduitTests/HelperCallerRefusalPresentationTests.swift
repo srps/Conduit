@@ -35,6 +35,19 @@ final class HelperCallerRefusalPresentationTests: XCTestCase {
         XCTAssertEqual(HelperStatusPresentation.label(for: status), "Installed, but not accepting this build")
     }
 
+    /// A ping that ran out of time proves nothing is broken (#197): no
+    /// repair button, no install banner, and a note that the app reads the
+    /// helper again.
+    func testABusyHelperIsNotOfferedARepair() {
+        XCTAssertNil(HelperStatusPresentation.primaryActionTitle(for: .busy))
+        XCTAssertEqual(HelperStatusPresentation.label(for: .busy), "Installed, busy; checking again")
+        XCTAssertEqual(HelperStatusPresentation.remediation(for: .busy), HelperStatusPresentation.busyNote)
+        XCTAssertFalse(HelperStatusPresentation.suggestsInstall(for: .busy))
+        XCTAssertTrue(HelperStatusPresentation.suggestsInstall(for: .notInstalled))
+        // Not "(via helper)": a busy reading has not shown the helper works.
+        XCTAssertEqual(HelperStatusPresentation.privilegeHint(for: .busy), "(requires admin)")
+    }
+
     func testOtherStatusesKeepTheirButtonAndNeedNoRemedy() {
         for status: HelperToolPrivilegeClient.Status in [.installed, .outdated, .notInstalled, .notResponding, .waitingForConsoleUser, .unauthorized] {
             XCTAssertNotNil(HelperStatusPresentation.primaryActionTitle(for: status), "\(status)")

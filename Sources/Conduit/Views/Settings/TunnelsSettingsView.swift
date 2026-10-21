@@ -18,7 +18,7 @@ struct TunnelsSettingsView: View {
                     title: "Tunnels",
                     chips: liveChips
                 )
-                if appState.helperStatus != .installed {
+                if HelperStatusPresentation.suggestsInstall(for: appState.helperStatus) {
                     HelperHintBanner()
                 }
             }

@@ -411,6 +411,7 @@ enum HelperStatusPresentation {
         case .outdated: return "Outdated, reinstall required"
         case .notInstalled: return "Not installed"
         case .notResponding: return "Installed but not responding"
+        case .busy: return "Installed, busy; checking again"
         case .waitingForConsoleUser: return "Installed, waiting for a login session"
         case .unauthorized: return "Installed, but refusing this user"
         case .callerNotAccepted: return "Installed, but not accepting this build"
@@ -423,7 +424,7 @@ enum HelperStatusPresentation {
         case .outdated: return Color(nsColor: .systemOrange)
         case .notInstalled: return Color(nsColor: .systemGray)
         case .notResponding: return Color(nsColor: .systemRed)
-        case .waitingForConsoleUser: return Color(nsColor: .systemYellow)
+        case .waitingForConsoleUser, .busy: return Color(nsColor: .systemYellow)
         case .unauthorized, .callerNotAccepted: return Color(nsColor: .systemOrange)
         }
     }
@@ -437,6 +438,10 @@ enum HelperStatusPresentation {
         case .outdated: return "Update Helper"
         case .notInstalled: return "Install Helper"
         case .notResponding: return "Repair Helper"
+        case .busy:
+            // A ping that ran out of time proves nothing is broken; the app
+            // reads the helper again on its own.
+            return nil
         case .waitingForConsoleUser, .unauthorized:
             // Reinstalling changes nothing about who is at the console.
             return "Reinstall Helper"
@@ -449,9 +454,20 @@ enum HelperStatusPresentation {
         case .callerNotAccepted(let message):
             return "The helper only accepts Conduit builds signed like the one it was installed from. "
                 + "Reinstalling pins it to this build. The helper said: \(message)"
+        case .busy:
+            return busyNote
         default:
             return nil
         }
+    }
+
+    static let busyNote = "The helper did not answer in time; it may be finishing another request. "
+        + "Conduit checks again shortly."
+
+    /// Whether DNS and Tunnels should suggest installing the helper. A busy
+    /// helper is installed; suggesting an install would mislead.
+    static func suggestsInstall(for status: HelperToolPrivilegeClient.Status) -> Bool {
+        status != .installed && status != .busy
     }
 
     /// Who may use the helper, as the last install from here left it.
