@@ -7,16 +7,31 @@ https://github.com/srps/Conduit
 ---
 
 This product includes the following third-party dependencies, each under
-their own license (Apache License, Version 2.0):
+its own license. The full license texts, and each dependency's own NOTICE
+where it has one, are in ThirdPartyLicenses/<package>/ (in the app, under
+Contents/Resources/).
+
+Apache License, Version 2.0:
 
 - SwiftNIO (https://github.com/apple/swift-nio)
   Copyright 2017-2024 Apple Inc.
+  ThirdPartyLicenses/swift-nio/
 
 - Swift Collections (https://github.com/apple/swift-collections)
   Copyright 2021-2024 Apple Inc.
+  ThirdPartyLicenses/swift-collections/
 
 - Swift Atomics (https://github.com/apple/swift-atomics)
   Copyright 2020-2024 Apple Inc.
+  ThirdPartyLicenses/swift-atomics/
 
 - Swift System (https://github.com/apple/swift-system)
   Copyright 2020-2024 Apple Inc.
+  ThirdPartyLicenses/swift-system/
+
+MIT License:
+
+- Sparkle (https://github.com/sparkle-project/Sparkle), in Conduit Updater
+  Copyright 2006-2013 Andy Matuschak and the other holders listed in its
+  license.
+  ThirdPartyLicenses/sparkle/

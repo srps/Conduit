@@ -136,6 +136,18 @@ if [ -f "$SCRIPT_DIR/Resources/AppIcon.icns" ]; then
     cp "$SCRIPT_DIR/Resources/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 fi
 
+# Apache-2.0 and MIT both require their notices to travel with the binaries
+# (#187). scripts/test-third-party-notices.py keeps the set in step with
+# Package.resolved.
+for notice in LICENSE NOTICE Resources/ThirdPartyLicenses; do
+    if [[ ! -e "$SCRIPT_DIR/$notice" ]]; then
+        echo "License notice missing: $SCRIPT_DIR/$notice" >&2
+        exit 1
+    fi
+done
+cp "$SCRIPT_DIR/LICENSE" "$SCRIPT_DIR/NOTICE" "$CONTENTS/Resources/"
+cp -R "$SCRIPT_DIR/Resources/ThirdPartyLicenses" "$CONTENTS/Resources/"
+
 # SwiftPM's generated Bundle.module accessor looks in the app's Resources.
 # Ship dependency resources too (including NIO's privacy manifest), so the
 # installed app never depends on a checkout or build directory.
