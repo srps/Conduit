@@ -881,6 +881,17 @@ final class AppState: ObservableObject {
         flushPendingSave()
     }
 
+    /// Commits after the active field has handed over its text. A
+    /// formatted number field writes its binding only when editing ends,
+    /// and SwiftUI may deliver that write on a later main-actor turn, so
+    /// `endEditing` runs first and the commit one hop after it. A button
+    /// click does not end the field's editing on its own.
+    @discardableResult
+    func commitPendingEdit(trigger: CommitTrigger, afterEnding endEditing: () -> Void) -> Task<Void, Never> {
+        endEditing()
+        return Task { @MainActor in self.commitPendingEdit(trigger: trigger) }
+    }
+
     /// Event first: a commit is a config decision.
     private func recordCommit(trigger: CommitTrigger) {
         let listener = ConfigDiff(old: reconciler.requestedConfig, new: config).replacesListeners
