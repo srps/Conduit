@@ -52,7 +52,7 @@ final class SplitDNSVPNGateTests: XCTestCase {
         _ = gate.update(.connected)
         let recording = RecordingPrivilegeClient()
 
-        gate.reconcileEntryFiles(
+        _ = gate.reconcileEntryFiles(
             config: makeConfig(),
             dnsManager: DNSManager(privilegeClient: recording),
             logger: DiscardingLogSink(),
@@ -68,7 +68,7 @@ final class SplitDNSVPNGateTests: XCTestCase {
         _ = gate.update(.disconnected(reason: .networkLost))
         let recording = RecordingPrivilegeClient()
 
-        gate.reconcileEntryFiles(
+        _ = gate.reconcileEntryFiles(
             config: makeConfig(),
             dnsManager: DNSManager(privilegeClient: recording),
             logger: DiscardingLogSink(),
@@ -95,7 +95,7 @@ final class SplitDNSVPNGateTests: XCTestCase {
         _ = gate.update(.disconnected(reason: .networkLost))
         let recording = RecordingPrivilegeClient()
 
-        gate.reconcileEntryFiles(
+        _ = gate.reconcileEntryFiles(
             config: makeConfig(),
             dnsManager: DNSManager(privilegeClient: recording),
             logger: DiscardingLogSink(),
@@ -116,7 +116,7 @@ final class SplitDNSVPNGateTests: XCTestCase {
         _ = gate.update(.connected)
         let recording = RecordingPrivilegeClient()
 
-        gate.reconcileEntryFiles(
+        _ = gate.reconcileEntryFiles(
             config: makeConfig(),
             dnsManager: DNSManager(privilegeClient: recording),
             logger: DiscardingLogSink(),
