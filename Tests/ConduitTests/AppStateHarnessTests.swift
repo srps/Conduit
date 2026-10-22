@@ -2447,6 +2447,75 @@ final class AppStateHarnessTests: XCTestCase {
         await appState.stopProxy()
     }
 
+    /// Codex review after the rebase onto #212: a refused switch-on whose
+    /// entry file a VPN reconnect writes, not a retry. The repair settles
+    /// there, and turning the switch off must still tear the file down.
+    func testASwitchOnSettledByAVPNFlipIsTornDownWhenTheSwitchTurnsOff() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: false))
+        await harness.launchRecovery()
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        appState.refreshPreflight()
+        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
+        machine.privilege.failingDomains = ["corp.example"]
+        appState.platformConfig.manageDNSResolvers = true
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        await harness.deliveries()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the write was refused")
+
+        machine.privilege.failingDomains = []
+        await harness.setVPN(.disconnected(reason: .networkLost))
+        await harness.setVPN(.connected)
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the reconnect wrote the entry")
+        XCTAssertEqual(events(appState, "platform.split_dns_repaired").last?.contains("by=vpn_transition"), true)
+
+        appState.platformConfig.manageDNSResolvers = false
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "switching off tears the entry down")
+        await appState.stopProxy()
+    }
+
+    /// Codex review after the rebase onto #212: switch-on failed for both
+    /// the entry and the intercept files. The retry writes the entry; the
+    /// intercept refresh fails again and is reported, and the entry is
+    /// still torn down when the switch turns off.
+    func testAnInterceptRefreshThatStillFailsDoesNotStrandARetriedEntry() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: false)) { config in
+            config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.intercept.test", interceptIP: "127.44.3.1", enabled: false)]
+        }
+        await harness.launchRecovery()
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        await appState.startDNS()
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        appState.refreshPreflight()
+        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
+        machine.privilege.failingDomains = ["corp.example", "intercept.test"]
+        appState.platformConfig.manageDNSResolvers = true
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        await harness.deliveries()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the write was refused")
+
+        machine.privilege.failingDomains = ["intercept.test"]
+        harness.helper.status = .installed
+        appState.refreshPreflight()
+        await harness.settle("the retry writes the entry") { machine.resolverFile(for: "corp.example") != nil }
+        await harness.deliveries()
+        XCTAssertEqual(events(appState, "platform.split_dns_intercept_refresh_failed").count, 1)
+
+        machine.privilege.failingDomains = []
+        appState.platformConfig.manageDNSResolvers = false
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "switching off tears the retried entry down")
+        await appState.stopDNS()
+        await appState.stopProxy()
+    }
+
     /// PR #211 review: a busy reading keeps `.installed` on display (#210),
     /// but is no evidence the helper takes writes. No retry until the busy
     /// recheck reads it answering.

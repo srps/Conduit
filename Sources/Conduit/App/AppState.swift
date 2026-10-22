@@ -2684,6 +2684,9 @@ final class AppState: ObservableObject {
         // A new episode starts its check at the first interval, not at the
         // back-off a check left over from the last episode is sleeping on.
         if !wasPending, splitDNSRepair.pending != nil { endSplitDNSHelperCheck() }
+        // Settled by something other than a retry (a VPN flip, a start, a
+        // config change): the switch's action has landed all the same.
+        if wasPending { settleResolverSwitchBaseline(managed: committedPlatformConfig.manageDNSResolvers) }
         scheduleSplitDNSHelperCheck()
     }
 
@@ -2730,12 +2733,32 @@ final class AppState: ObservableObject {
         scheduleSplitDNSHelperCheck()
     }
 
-    /// A settled retry did what the resolver switch's action had to, so the
-    /// reconciler's baseline follows (`markResolverSwitchLanded`). With the
-    /// switch off the retry is the whole teardown; with it on, it writes only
-    /// entry files, so a failed intercept refresh keeps the flag behind.
+    /// A settled repair did what the resolver switch's action had to, so the
+    /// reconciler's baseline follows (`markResolverSwitchLanded`), whatever
+    /// settled it: entry files that landed must be torn down when the switch
+    /// next turns off, and a baseline left behind diffs that flip as no
+    /// change. With the switch off the settling operation is the whole
+    /// teardown. With it on, it writes only entry files, so an intercept
+    /// refresh the switch-on owes is retried here first; one that fails
+    /// again is reported (`platform.split_dns_intercept_refresh_failed`),
+    /// and the next DNS start or DNS-affecting config change rewrites them.
     private func settleResolverSwitchBaseline(managed: Bool) {
-        guard splitDNSRepair.pending == nil, !managed || !resolverSwitchInterceptRefreshFailed else { return }
+        guard splitDNSRepair.pending == nil else { return }
+        if managed, resolverSwitchInterceptRefreshFailed {
+            do {
+                try refreshInterceptFiles(for: runtimeConfig)
+                resolverSwitchInterceptRefreshFailed = false
+            } catch {
+                recordSplitDNSEvent(
+                    RuntimeEvent(
+                        kind: .config,
+                        event: "platform.split_dns_intercept_refresh_failed",
+                        detail: "reason=\(error.localizedDescription)"
+                    ),
+                    level: .warning
+                )
+            }
+        }
         reconciler.markResolverSwitchLanded(manageDNSResolvers: managed)
     }
 
