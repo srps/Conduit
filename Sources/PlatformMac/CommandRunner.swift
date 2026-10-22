@@ -190,17 +190,35 @@ package enum CommandRunner {
 
     @discardableResult
     package static func runPrivilegedShellScript(_ script: String) throws -> CommandResult {
-        let tempFile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("pm-\(UUID().uuidString).sh")
-        try script.write(to: tempFile, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: tempFile) }
-
-        let appleScript = "do shell script \"/bin/sh " + tempFile.path.shellQuoted + "\" with administrator privileges"
-        return try run(
+        try run(
             launchPath: "/usr/bin/osascript",
-            arguments: ["-e", appleScript],
+            arguments: osascriptArguments(running: script),
             timeout: privilegedTimeout
         )
+    }
+
+    /// The script travels as an `osascript` argument, never as a file the root
+    /// shell opens later. Anything the invoking user can write — a file in
+    /// their temporary directory — another process running as that user can
+    /// replace while the password dialog is up, and the user's approval would
+    /// then run its bytes as root. `argv` is copied into the process at exec
+    /// and nothing outside it can change it afterwards.
+    ///
+    /// The script is handed to the `run` handler as `item 1 of argv` rather
+    /// than spliced into the AppleScript source, so no AppleScript escaping is
+    /// involved. `--` keeps a script that happens to start with `-` from being
+    /// read as an `osascript` option.
+    ///
+    /// Internal so a test can run the same invocation without the privilege
+    /// clause, which would raise a password prompt.
+    static func osascriptArguments(running script: String, withAdministratorPrivileges: Bool = true) -> [String] {
+        let clause = withAdministratorPrivileges ? " with administrator privileges" : ""
+        return [
+            "-e", "on run argv",
+            "-e", "do shell script (item 1 of argv)" + clause,
+            "-e", "end run",
+            "--", script,
+        ]
     }
 
     // MARK: - Draining
