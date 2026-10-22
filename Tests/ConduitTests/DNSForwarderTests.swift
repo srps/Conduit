@@ -194,6 +194,33 @@ final class DNSWireFormatTests: XCTestCase {
         XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: response))
     }
 
+    /// Upstream admission, unlike cache reuse, is bound to the transaction
+    /// ID and needs a response: a forged datagram with the right question but
+    /// another ID, or a query-shaped one, must not be accepted.
+    func testIsResponseRequiresTransactionIDAndQRBit() throws {
+        let query = DNSWireFormat.buildQuery(domain: "example.com", txID: 0x1111)
+        let genuine = try XCTUnwrap(DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: "93.184.216.34"))
+        XCTAssertTrue(DNSWireFormat.isResponse(genuine, to: query))
+
+        var wrongID = genuine
+        wrongID[1] ^= 0x01
+        XCTAssertFalse(DNSWireFormat.isResponse(wrongID, to: query))
+        XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: wrongID), "cache reuse still ignores the ID")
+
+        var queryShaped = genuine
+        queryShaped[2] &= 0x7F
+        XCTAssertFalse(DNSWireFormat.isResponse(queryShaped, to: query))
+        XCTAssertFalse(DNSWireFormat.isResponse(query, to: query), "an echoed query is not an answer")
+
+        var otherOpcode = genuine
+        otherOpcode[2] |= 0x10
+        XCTAssertFalse(DNSWireFormat.isResponse(otherOpcode, to: query))
+
+        let otherQuestion = DNSWireFormat.buildQuery(domain: "attacker.example", txID: 0x1111)
+        let forged = try XCTUnwrap(DNSWireFormat.synthesizeDirectResponse(originalQuery: otherQuestion, ip: "203.0.113.10"))
+        XCTAssertFalse(DNSWireFormat.isResponse(forged, to: query))
+    }
+
     func testResponseQuestionMatchesRejectsDomainMismatch() {
         let query = DNSWireFormat.buildQuery(domain: "example.com")
         let poisonedQuery = DNSWireFormat.buildQuery(domain: "attacker.example")

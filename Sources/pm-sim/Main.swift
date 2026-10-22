@@ -84,6 +84,7 @@ enum PMSim {
               audit-socks5-rsv        Audit: SOCKS5 CONNECT non-zero RSV handling
               audit-expect-trailers   Audit: Expect: 100-continue answered, trailers passed through
               dns-doh-blocked         DNS: internal server dead + DoH answering 404 still answers the client
+              dns-upstream-spoof      DNS: wrong-ID and QR-clear replies are dropped, never answered or cached
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
               observable-target-redaction  Query/fragment privacy across observations
               security-boundaries     Auth destinations, config rejection, and loopback listeners
@@ -253,6 +254,7 @@ enum PMSim {
         "audit-socks5-rsv",
         "audit-expect-trailers",
         "dns-doh-blocked",
+        "dns-upstream-spoof",
         "dns-ephemeral-pair-rebind",
         "observable-target-redaction",
         "security-boundaries",
@@ -410,6 +412,8 @@ enum PMSim {
             return [try await AuditScenarios.expectContinueAndTrailers(verbose: verbose)]
         case "dns-doh-blocked":
             return [try await DNSResolverScenarios.dohBlockedStillAnswers(verbose: verbose)]
+        case "dns-upstream-spoof":
+            return [try await DNSResolverScenarios.upstreamSpoofRejected(verbose: verbose)]
         case "dns-ephemeral-pair-rebind":
             return [try await DNSResolverScenarios.ephemeralPairRebind(verbose: verbose)]
         case "observable-target-redaction":

@@ -233,7 +233,161 @@ enum DNSResolverScenarios {
         )
     }
 
+    /// `pm-sim dns-upstream-spoof`. The internal DNS server's socket answers
+    /// every query three times: first with a wrong transaction ID, then with
+    /// QR clear, both carrying the attacker's address, then genuinely. That
+    /// is what a spoofer who has the server's address and the forwarder's
+    /// ephemeral port can send; only the transaction ID and QR stand between
+    /// it and the client or the cache.
+    ///
+    /// | # | condition                                   | expected                          |
+    /// |---|---------------------------------------------|-----------------------------------|
+    /// | A | internal name, forgeries arrive first       | genuine answer, client's own ID   |
+    /// | B | external name, forgeries arrive first       | genuine answer                    |
+    /// | C | the same external name again (cache hit)    | genuine answer; cache not poisoned|
+    /// | D | the forgeries are reported                  | a "possible spoof" warning        |
+    /// | E | the wire ID is the forwarder's, not the client's | random per query             |
+    @MainActor
+    static func upstreamSpoofRejected(verbose: Bool) async throws -> ScenarioResult {
+        let name = "dnsUpstreamSpoofRejected"
+        let start = Date()
+        var notes: [String] = []
+
+        let group = MultiThreadedEventLoopGroup.singleton
+        let logger = RecordingConsoleLogSink(minLevel: verbose ? .debug : .warning)
+
+        let spoofer = SpoofingDNSServer(genuineIP: genuineIP, forgedIP: forgedIP)
+        let server = try await DatagramBootstrap(group: group)
+            .channelInitializer { $0.pipeline.addHandler(spoofer) }
+            .bind(host: "127.0.0.1", port: 0)
+            .get()
+        ScenarioCleanup.register { _ = try? await server.close().get() }
+        let serverPort = server.localAddress?.port ?? 0
+        notes.append("spoofing internal DNS on 127.0.0.1:\(serverPort)")
+
+        var config = ProxyConfig.testFixture()
+        config.dnsEntries = [DomainDNSEntry(domain: "internal.test", servers: ["127.0.0.1"], enabled: true)]
+        // Never consulted: the internal server answers external names too, so
+        // nothing falls through to DoH. Loopback port 9 keeps it off the network.
+        config.dohProviders = ["http://127.0.0.1:9/dns-query"]
+        config.upstreams = []
+        let frozen = config
+        var tuning = DNSForwarderTuning()
+        tuning.internalServerPort = serverPort
+
+        let forwarder = LocalDNSForwarder(group: group, logger: logger, configProvider: { frozen }, tuning: tuning)
+        ScenarioCleanup.register { await forwarder.stop() }
+        try await forwarder.start(host: "127.0.0.1", port: 0)
+        let udpPort = forwarder.listeningPort ?? 0
+
+        func answer(_ domain: String, txID: UInt16) async throws -> (ip: String?, sameID: Bool) {
+            let query = DNSWireFormat.buildQuery(domain: domain, txID: txID, qtype: 1)
+            guard let response = try await DNSProbe.overUDP(query: query, port: udpPort, timeout: 5),
+                  DNSWireFormat.responseQuestionMatches(query: query, response: response) else {
+                return (nil, false)
+            }
+            return (DNSWireFormat.firstIPv4Answer(in: response)?.ip, response[0] == query[0] && response[1] == query[1])
+        }
+
+        let a = try await answer("host.internal.test", txID: 0x5150)
+        notes.append("A internal: ip=\(a.ip ?? "none") sameID=\(a.sameID)")
+        let passA = a.ip == genuineIP && a.sameID
+
+        let b = try await answer("public.example.com", txID: 0x6160)
+        notes.append("B external: ip=\(b.ip ?? "none") sameID=\(b.sameID)")
+        let passB = b.ip == genuineIP && b.sameID
+
+        let queriesBeforeC = spoofer.queryCount
+        let c = try await answer("public.example.com", txID: 0x7170)
+        let servedFromCache = spoofer.queryCount == queriesBeforeC
+        notes.append("C cached: ip=\(c.ip ?? "none") sameID=\(c.sameID) fromCache=\(servedFromCache)")
+        let passC = c.ip == genuineIP && c.sameID && servedFromCache
+
+        let spoofWarnings = logger.entries().filter { $0.level == .warning && $0.message.contains("possible spoof") }
+        notes.append("D warnings=\(spoofWarnings.count)")
+        let passD = spoofWarnings.count >= 2
+
+        let wireIDs = spoofer.wireIDs
+        notes.append("E wire IDs: \(wireIDs.map { String(format: "0x%04X", $0) })")
+        let passE = wireIDs.count == 2 && !wireIDs.contains(0x5150) && !wireIDs.contains(0x6160)
+
+        let checks = [passA, passB, passC, passD, passE]
+        notes.append(checks.allSatisfy { $0 }
+            ? "PASS — forged replies from the server's own address are dropped, never answered and never cached"
+            : "FAIL — see per-case lines above")
+
+        return ScenarioResult(
+            name: name,
+            clientCount: 3,
+            clientsOpened: 3,
+            clientsWithFirstByte: [a.ip, b.ip, c.ip].compactMap { $0 }.count,
+            clientsClosedEarly: [a.ip, b.ip, c.ip].filter { $0 == nil }.count,
+            totalBytes: 0,
+            durationSeconds: Date().timeIntervalSince(start),
+            aggregateMBps: 0,
+            minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: [
+                .init("an internal name gets the genuine answer under the client's ID", passA),
+                .init("an external name gets the genuine answer", passB),
+                .init("the cache holds the genuine answer", passC),
+                .init("discarded forgeries are reported", passD),
+                .init("the forwarder sends its own random transaction ID", passE),
+            ],
+            notes: notes
+        )
+    }
+
+    private static let genuineIP = "10.20.30.40"
+    private static let forgedIP = "203.0.113.66"
+
     private static func verdict(_ pass: Bool) -> String { pass ? "pass" : "FAIL" }
+}
+
+// MARK: - Spoofing internal DNS server
+
+/// Answers each query with a wrong-ID forgery, a QR-clear forgery, then the
+/// genuine reply 50 ms later, all from its own socket.
+private final class SpoofingDNSServer: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = AddressedEnvelope<ByteBuffer>
+    typealias OutboundOut = AddressedEnvelope<ByteBuffer>
+
+    private let genuineIP: String
+    private let forgedIP: String
+    private let seen = NIOLockedValueBox<[UInt16]>([])
+
+    var queryCount: Int { seen.withLockedValue { $0.count } }
+    var wireIDs: [UInt16] { seen.withLockedValue { $0 } }
+
+    init(genuineIP: String, forgedIP: String) {
+        self.genuineIP = genuineIP
+        self.forgedIP = forgedIP
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let envelope = unwrapInboundIn(data)
+        var buffer = envelope.data
+        let query = buffer.readBytes(length: buffer.readableBytes) ?? []
+        guard query.count >= 12 else { return }
+        seen.withLockedValue { if $0.count < 64 { $0.append(UInt16(query[0]) << 8 | UInt16(query[1])) } }
+
+        guard var wrongID = DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: forgedIP),
+              var queryShaped = DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: forgedIP),
+              let genuine = DNSWireFormat.synthesizeDirectResponse(originalQuery: query, ip: genuineIP) else { return }
+        wrongID[1] ^= 0x01
+        queryShaped[2] &= 0x7F
+
+        let channel = context.channel
+        let remote = envelope.remoteAddress
+        func send(_ bytes: [UInt8]) {
+            var out = channel.allocator.buffer(capacity: bytes.count)
+            out.writeBytes(bytes)
+            channel.writeAndFlush(AddressedEnvelope(remoteAddress: remote, data: out), promise: nil)
+        }
+        send(wrongID)
+        send(queryShaped)
+        channel.eventLoop.scheduleTask(in: .milliseconds(50)) { send(genuine) }
+    }
 }
 
 // MARK: - Fake provider
