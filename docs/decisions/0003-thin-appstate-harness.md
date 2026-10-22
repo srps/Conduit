@@ -26,6 +26,7 @@ A `Dependencies` type with a protocol per manager. It would be a larger seam to 
 
 - Lifecycle bugs in `AppState` can be reproduced headless, and the `--dev` instance (#24) reuses the same composition.
 - The premise that the in-process runtime is about to disappear changed with [0001](0001-one-runtime-host.md) on 2026-10-21. The harness rule still holds.
+- A default seam can leak to the real machine. Six daemon-host tests left out the home directory and command runner, and a local `swift test` stripped the developer's shell environment block and launchd proxy variables (#189). Since #190, `AppState` and `DaemonRuntimeHost` take `homeDirectory` and `commandRunner` without defaults, so a test that leaves them out does not compile.
 
 ## Invariants and verification
 
