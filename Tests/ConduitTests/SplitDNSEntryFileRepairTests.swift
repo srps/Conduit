@@ -221,6 +221,27 @@ final class SplitDNSEntryFileRepairTests: XCTestCase {
         XCTAssertFalse(manager.unconfiguredRecordedFilesPresent(config: edited))
     }
 
+    /// Codex review of PR #211: an edit that only recapitalizes an entry,
+    /// with the old spelling's record left by a refused removal. On a
+    /// case-insensitive volume both names are one file, so the retry's
+    /// sweep must not unlink the file its apply just wrote.
+    func testARecapitalizedEntryKeepsItsFileThroughTheRetrysSweep() throws {
+        var config = ProxyConfig.testFixture()
+        config.dnsEntries = [DomainDNSEntry(domain: "Corp.example", servers: ["10.0.0.53"])]
+        try manager.applyEntryFiles(config: config, logger: nil)
+        var edited = config
+        edited.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
+        var repair = SplitDNSEntryFileRepair()
+        repair.record(.failed(.apply, RecordingPrivilegeClient.Refused(operation: .removeDNS, subject: nil)), source: .configChange, report: report)
+        retry(&repair, gate: gate(.connected), config: edited)
+        XCTAssertNil(repair.pending)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: machine.resolverDirectory.appendingPathComponent("corp.example").path),
+            "the entry's override is on disk after the repair"
+        )
+        XCTAssertFalse(manager.unconfiguredRecordedFilesPresent(config: edited))
+    }
+
     /// Any later operation that lands settles the repair, not only a retry.
     func testALaterVPNTransitionThatLandsSettlesTheRepair() {
         var repair = SplitDNSEntryFileRepair()

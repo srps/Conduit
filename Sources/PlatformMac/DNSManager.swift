@@ -713,11 +713,35 @@ package final class DNSManager: @unchecked Sendable {
     /// as an intercept rule. An enabled entry with no servers is never
     /// written, so a file left for its domain is as stale as a deleted
     /// entry's, and no reconcile removes it.
+    ///
+    /// A recorded spelling that differs from a configured domain only in case
+    /// is configured when both names are one file, as on the default
+    /// case-insensitive volume: an edit that only recapitalizes an entry
+    /// leaves the old spelling's record, and removing it would unlink the
+    /// file just written under the new one. On a case-sensitive volume the
+    /// two are distinct files and the old one is stale. A trailing dot is
+    /// not folded: `/etc/resolver/<domain>.` is a different file everywhere.
     private func unconfiguredRecordedDomains(config: ProxyConfig) -> [String] {
         guard let journal else { return [] }
         let written = config.dnsEntries.filter { $0.enabled && !$0.servers.isEmpty }.map(\.domain)
-        let named = Set(written + getInterceptDomains(from: config, forCleanup: true))
-        return journal.scopes(for: .resolverFile).filter { !named.contains($0) }
+        let named = written + getInterceptDomains(from: config, forCleanup: true)
+        let exact = Set(named)
+        var byFolded: [String: [String]] = [:]
+        for domain in named { byFolded[domain.lowercased(), default: []].append(domain) }
+        return journal.scopes(for: .resolverFile).filter { recorded in
+            guard !exact.contains(recorded) else { return false }
+            let sameFile = byFolded[recorded.lowercased(), default: []].contains {
+                isSameFile(resolverFilePath(for: recorded), resolverFilePath(for: $0))
+            }
+            return !sameFile
+        }
+    }
+
+    /// Whether two paths name one existing file (device and inode).
+    private func isSameFile(_ first: String, _ second: String) -> Bool {
+        var a = stat(), b = stat()
+        guard lstat(first, &a) == 0, lstat(second, &b) == 0 else { return false }
+        return a.st_dev == b.st_dev && a.st_ino == b.st_ino
     }
 
     /// Writes only the intercept-rule resolver files. The sole writer of
