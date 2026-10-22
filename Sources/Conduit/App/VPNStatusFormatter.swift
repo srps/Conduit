@@ -63,14 +63,14 @@ enum VPNStatusFormatter {
 
     // MARK: - Active connections split
 
-    /// Render `Active 5 (3 stalled)` when there are stalled tunnels;
-    /// otherwise `Active 5`. The `(N stalled)` suffix is meaningful only
-    /// when `stalled > 0`.
+    /// Render `5 (3 stalled)` when there are stalled tunnels; otherwise
+    /// `5`. The `(N stalled)` suffix is meaningful only when `stalled > 0`.
+    /// The chip that shows it carries the "active" label itself.
     static func activeConnectionsLabel(active: Int, stalled: Int) -> String {
         if stalled > 0 {
-            return "Active \(active) (\(stalled) stalled)"
+            return "\(active) (\(stalled) stalled)"
         }
-        return "Active \(active)"
+        return "\(active)"
     }
 
     /// "Stalled" tunnels = active CONNECT tunnels held alive by kernel

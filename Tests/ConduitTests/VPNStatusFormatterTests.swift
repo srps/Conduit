@@ -40,16 +40,16 @@ final class VPNStatusFormatterTests: XCTestCase {
 
     func testActiveConnectionsLabelOmitsStalledSuffixWhenZero() {
         XCTAssertEqual(VPNStatusFormatter.activeConnectionsLabel(active: 0, stalled: 0),
-                       "Active 0")
+                       "0")
         XCTAssertEqual(VPNStatusFormatter.activeConnectionsLabel(active: 5, stalled: 0),
-                       "Active 5")
+                       "5")
     }
 
     func testActiveConnectionsLabelShowsStalledSuffixWhenPositive() {
         XCTAssertEqual(VPNStatusFormatter.activeConnectionsLabel(active: 5, stalled: 3),
-                       "Active 5 (3 stalled)")
+                       "5 (3 stalled)")
         XCTAssertEqual(VPNStatusFormatter.activeConnectionsLabel(active: 1, stalled: 1),
-                       "Active 1 (1 stalled)")
+                       "1 (1 stalled)")
     }
 
     // MARK: - Stalled tunnel count
