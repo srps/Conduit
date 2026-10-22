@@ -1506,6 +1506,31 @@ final class AppStateHarnessTests: XCTestCase {
                        ["surfaces=environment"])
     }
 
+    /// The local PAC server rebinds on a port edit, and PAC mode's system
+    /// proxy advertises its URL: the URL follows in the same pass, not at
+    /// the next drift trigger (#194).
+    func testALocalPACPortEditRepointsTheSystemProxy() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac)) {
+            $0.localPACEnabled = true
+            $0.localPACPort = 0
+        }
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        let before = try XCTUnwrap(appState.runtimeSnapshot.bindings.localPACURL)
+        XCTAssertEqual(wifi.autoproxyURL, before)
+
+        let port = try reserveLoopbackPort()
+        appState.config.localPACPort = port
+        appState.saveConfig()
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(appState.runtimeSnapshot.bindings.localPACPort, port)
+        XCTAssertEqual(wifi.autoproxyURL, appState.runtimeSnapshot.bindings.localPACURL)
+        XCTAssertTrue(wifi.autoproxyURL.contains(":\(port)/"))
+        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "config.advertised_pac_changed" }.map(\.detail),
+                       ["surfaces=system_proxy"])
+    }
+
     /// With autosave a bypass edit re-applies on every pause, so its
     /// `launchctl` writes must not run on the main actor.
     func testABypassEditReappliesOffTheMainActor() async throws {
@@ -2161,4 +2186,24 @@ extension AppStateHarnessTests {
         state.saveConfig()
         XCTAssertTrue(try AppPreferencesPersistence.load(in: harness.environment).automaticUpdateChecks)
     }
+}
+
+/// A loopback port that was free a moment ago: bound by the OS and released.
+/// For a scenario that has to move a listener to a fixed port.
+func reserveLoopbackPort() throws -> Int {
+    let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+    guard fd >= 0 else { throw POSIXError(.EBADF) }
+    defer { Darwin.close(fd) }
+    var address = sockaddr_in()
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = 0
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let bound = withUnsafeMutablePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
+            Darwin.bind(fd, address, length) == 0 && Darwin.getsockname(fd, address, &length) == 0
+        }
+    }
+    guard bound else { throw POSIXError(.EADDRINUSE) }
+    return Int(UInt16(bigEndian: address.sin_port))
 }
