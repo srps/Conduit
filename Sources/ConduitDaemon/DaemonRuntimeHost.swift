@@ -134,6 +134,19 @@ final class DaemonRuntimeHost {
     private var environmentRepairRetry: Task<Void, Never>?
     private var environmentDriftTimer: Task<Void, Never>?
     private let environmentDriftInterval: Duration
+    /// Twin of `AppState.reapplyRetry` (#194, narrow).
+    private(set) lazy var reapplyRetry: ConfigReapplyRetry = {
+        let retry = ConfigReapplyRetry(schedule: reapplyRetrySchedule) { [weak self] event, level in
+            guard let self else { return }
+            self.orchestrator.eventLog.append(event)
+            self.logger.log(level, "Config: \(event.event) \(event.detail ?? "")", category: .system)
+        }
+        retry.attempt = { [weak self] surface, token in
+            await self?.retryReapply(surface, token: token) ?? .notWanted(reason: "host_gone")
+        }
+        return retry
+    }()
+    private let reapplyRetrySchedule: ConfigReapplyRetry.Schedule
     private lazy var locationRecovery: LocationSettingsRecovery? = {
         guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
         let eventLog = orchestrator.eventLog
@@ -216,11 +229,13 @@ final class DaemonRuntimeHost {
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         environmentDriftInterval: Duration = .seconds(300),
+        reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
         homeDirectory: URL,
         resolverDirectory: String? = nil
     ) {
         self.dnsResponds = dnsResponds
         self.environmentDriftInterval = environmentDriftInterval
+        self.reapplyRetrySchedule = reapplyRetrySchedule
         self.networkMonitor = NetworkMonitor(debounceInterval: networkPathDebounce)
         self.networkLocationObserver = networkLocationObserver
         self.networkLocationStoreFactory = networkLocationStoreFactory
@@ -1027,6 +1042,33 @@ final class DaemonRuntimeHost {
         }
     }
 
+    /// Twin of `AppState.retryReapply` (#194).
+    private func retryReapply(_ surface: ConfigReapplyRetry.Surface, token: LifecycleLane.Token) async -> ConfigReapplyRetry.Outcome {
+        await awaitLaunchRecovery()
+        await runtimeLane.waitUntilIdle()
+        guard !token.isSuperseded else { return .notWanted(reason: "superseded") }
+        guard runtimeState().proxyIsUp else { return .notWanted(reason: "proxy_stopped") }
+        let config = config, platform = platformConfig
+        switch surface {
+        case .systemProxy:
+            guard platform.manageSystemProxy else { return .notWanted(reason: "switch_off") }
+            let (outcome, retry) = await SystemProxyReapplyRetry.run(
+                manager: systemConduit, work: platformWork, config: config, mode: platform.systemProxyMode,
+                localPACURL: orchestrator.snapshot.bindings.localPACURL, token: token,
+                fence: reconciler.platformRequest, events: orchestrator.eventLog, logger: logger)
+            if let retry { scheduleProxyRepairRetry(after: retry) }
+            return outcome
+        case .environment:
+            guard platform.manageEnvironmentVariables else { return .notWanted(reason: "switch_off") }
+            let repair = environmentDriftRepair, generation = environmentManager.generation
+            let pass = await platformWork.run {
+                repair.pass(config: config, generation: generation, trigger: .retry, isCurrent: { !token.isSuperseded })
+            }
+            if let retry = pass.retry { scheduleEnvironmentRepairRetry(after: retry) }
+            return pass.settled ? .applied : .failed(reason: pass.reason ?? "unsettled")
+        }
+    }
+
     /// Twin of `AppState.scheduleProxyRepairRetry`: one pass when a contended
     /// repair budget reopens, since no notification may follow.
     private func scheduleProxyRepairRetry(after delay: Duration) {
@@ -1311,24 +1353,34 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
         let reapplyEnvironment = environmentFollows && platform.manageEnvironmentVariables
             && !pass.platformActions.contains(.applyEnvironment)
         guard reapplySystemProxy || reapplyEnvironment else { return }
-        // Twin of `AppState.reapplyConfigDrivenSurfaces`: off the main actor.
+        // Twin of `AppState.reapplyConfigDrivenSurfaces`: off the main actor,
+        // and a failure, partial environment applies included, is reported
+        // and retried.
         let systemProxy = systemConduit, environment = environmentManager, log = logger
         let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL
-        await platformWork.run {
+        let token = runtimeLane.observationToken
+        let failures = await platformWork.run { () -> [(ConfigReapplyRetry.Surface, String)] in
+            var failures: [(ConfigReapplyRetry.Surface, String)] = []
             if reapplySystemProxy {
                 do {
                     try systemProxy.apply(config: new, mode: mode, logger: log, localPACURL: pacURL)
                 } catch {
-                    log.log(.warning, "Could not re-apply system proxy after config reload: \(error.localizedDescription)", category: .system)
+                    failures.append((.systemProxy, error.localizedDescription))
                 }
             }
             if reapplyEnvironment {
                 do {
-                    try environment.apply(config: new, logger: log)
+                    if let shortfall = try environment.apply(config: new, logger: log).shortfall {
+                        failures.append((.environment, shortfall))
+                    }
                 } catch {
-                    log.log(.warning, "Could not re-apply environment variables after config reload: \(error.localizedDescription)", category: .system)
+                    failures.append((.environment, "apply_error error=\(error.localizedDescription)"))
                 }
             }
+            return failures
+        }
+        for (surface, reason) in failures {
+            reapplyRetry.failed(surface, cause: .configChange, reason: reason, token: token)
         }
     }
 
@@ -1360,14 +1412,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
 
         switch action {
         case .applySystemProxy:
-            return attempt("Could not apply system proxy settings after the setting changed") {
-                try systemConduit.apply(
-                    config: config,
-                    mode: platform.systemProxyMode,
-                    logger: logger,
-                    localPACURL: orchestrator.snapshot.bindings.localPACURL
-                )
-            }
+            return applySystemProxySwitch(config: config, platform: platform)
         case .clearSystemProxy:
             // The managers report a partial teardown by keeping their records,
             // not by throwing, so the journal is the oracle for "landed":
@@ -1376,9 +1421,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
                 try systemConduit.clear(logger: logger)
             } && !systemConduit.hasManagedState()
         case .applyEnvironment:
-            return attempt("Could not apply environment variables after the setting changed") {
-                try environmentManager.apply(config: config, logger: logger)
-            }
+            return applyEnvironmentSwitch(config: config)
         case .clearEnvironment:
             return attempt("Could not clear environment variables after the setting changed") {
                 try environmentManager.clear(logger: logger)
@@ -1429,6 +1472,38 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
             // LaunchDaemon has none to keep, so the flag reconciles by being
             // ignored here; the app applies it when it next runs.
             return true
+        }
+    }
+
+    /// Twin of `AppState.applySystemProxySwitch`: a failure rewinds the flag
+    /// for the next reload, and the retry looks again sooner (#194).
+    private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig) -> Bool {
+        do {
+            try systemConduit.apply(
+                config: config,
+                mode: platform.systemProxyMode,
+                logger: logger,
+                localPACURL: orchestrator.snapshot.bindings.localPACURL
+            )
+            return true
+        } catch {
+            reapplyRetry.failed(.systemProxy, cause: .switchOn, reason: error.localizedDescription, token: runtimeLane.observationToken)
+            return false
+        }
+    }
+
+    /// Twin of `AppState.applyEnvironmentSwitch`: a partial apply lands the
+    /// flag, and is reported and retried like a failure (#194).
+    private func applyEnvironmentSwitch(config: ProxyConfig) -> Bool {
+        do {
+            if let shortfall = try environmentManager.apply(config: config, logger: logger).shortfall {
+                reapplyRetry.failed(.environment, cause: .switchOn, reason: shortfall, token: runtimeLane.observationToken)
+            }
+            return true
+        } catch {
+            reapplyRetry.failed(.environment, cause: .switchOn, reason: "apply_error error=\(error.localizedDescription)",
+                                token: runtimeLane.observationToken)
+            return false
         }
     }
 }

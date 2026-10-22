@@ -151,6 +151,7 @@ Ordered by how likely they are to bite. None is changed by this audit; each need
 | G7 | Snapshot coalescing (100 ms kernel; 1 s presentation) | `ProxyOrchestrator.swift:342`; `RuntimePresentationAdapter.swift:119` | When observers and the UI see counters. | No. | bound | |
 | G8 | pm-proxy status interval (`--status-interval`, ≥ 0.1 s), control socket receive (2 s) | `PMProxy.swift:457`; `ControlSocketServer.swift:361` | Observability cadence; one control request fails. | No. | bound | |
 | G9 | Listener bind retry (1 s × 10) | `LocalProxyServer.swift:570`, `:141` | Start fails with `ListenerBindError` after ten tries. | No. | bound | |
+| G10 | Failed re-apply retry (10 s, 60 s, 300 s; added after this audit) | `ConfigReapplyRetry.swift` (`Schedule.standard`); both hosts' `retryReapply` | After a system-proxy or environment write fails, runs that surface's drift pass once per delay and reads whether it now holds the committed config; emits `config.reapply_retry`, then `config.reapply_recovered` or `config.reapply_abandoned`; a verdict for a request a newer failure replaced is dropped with `config.reapply_result_superseded`. Fenced by the failed run's lifecycle token and, for the system proxy, by the requested switch and mode under the manager's lock. | No; asks for evidence. | backstop | #194 |
 
 ## H. Bounds on one operation and report rate limits
 

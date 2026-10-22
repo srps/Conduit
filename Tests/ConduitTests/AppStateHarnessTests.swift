@@ -50,6 +50,9 @@ final class AppStateHarness {
     /// Long, so the periodic environment drift tick never lands inside a
     /// scenario about something else; the tick's own scenario passes a short one.
     var environmentDriftInterval: Duration = .seconds(3600)
+    /// Long, so a failed re-apply's retry never lands inside a scenario
+    /// about something else; the retry scenarios pass short ones (#194).
+    var reapplyRetrySchedule = ConfigReapplyRetry.Schedule(delays: [.seconds(3600)])
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
     private(set) var appState: AppState?
@@ -100,6 +103,7 @@ final class AppStateHarness {
             dnsReconcileDebounce: dnsReconcileDebounce,
             settingsSaveDebounce: settingsSaveDebounce,
             environmentDriftInterval: environmentDriftInterval,
+            reapplyRetrySchedule: reapplyRetrySchedule,
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
@@ -1549,6 +1553,169 @@ final class AppStateHarnessTests: XCTestCase {
         await appState.reconciler.drain()
 
         XCTAssertTrue(machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
+    }
+
+    // MARK: Failed re-apply retry (#194)
+
+    private func reapplyEvents(_ appState: AppState) -> [String] {
+        appState.eventLog.events.filter { $0.event.hasPrefix("config.reapply_") }.map { "\($0.event) \($0.detail ?? "")" }
+    }
+
+    /// A short schedule: the retry scenarios fix the machine right after the
+    /// failed pass drains, well inside the first delay, and accept recovery
+    /// on any of the three attempts.
+    private static let shortRetries = ConfigReapplyRetry.Schedule(delays: [.milliseconds(100), .milliseconds(100), .milliseconds(100)])
+
+    /// A port edit whose system-proxy write fails used to be a log line:
+    /// the baseline had moved on, and with no periodic tick macOS kept
+    /// pointing at the closed port until the next wake, network, VPN or
+    /// settings report. Now it is reported, and the drift pass runs again
+    /// on its own.
+    func testAFailedSystemProxyReapplyIsReportedAndRetried() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        harness.reapplyRetrySchedule = Self.shortRetries
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        let port = try reserveLoopbackPort()
+
+        locations.refuseWrites(true)
+        appState.config.localPort = port
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertNotEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
+        let failed = try XCTUnwrap(reapplyEvents(appState).first)
+        XCTAssertTrue(failed.hasPrefix("config.reapply_failed surface=system_proxy cause=config_change retry_in_seconds=1 attempts=3 reason="), failed)
+
+        locations.refuseWrites(false)
+        await appState.reapplyRetry.drain()
+
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
+        let events = reapplyEvents(appState)
+        XCTAssertEqual(events.filter { $0.hasPrefix("config.reapply_recovered surface=system_proxy") }.count, 1, "\(events)")
+        XCTAssertFalse(events.contains { $0.hasPrefix("config.reapply_abandoned") }, "\(events)")
+        XCTAssertTrue(appState.reapplyRetry.pending.isEmpty)
+    }
+
+    /// The switch turned on while the proxy runs: a refused write rewinds
+    /// the flag for the next save, as before, and is now also retried.
+    func testASystemProxySwitchThatFailsToApplyIsRetried() async throws {
+        // A fixed port: the system proxy advertises the configured one.
+        var config = makeConfig()
+        config.localPort = try reserveLoopbackPort()
+        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        harness.reapplyRetrySchedule = Self.shortRetries
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        let port = config.localPort
+
+        locations.refuseWrites(true)
+        appState.platformConfig.manageSystemProxy = true
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertTrue(appState.reconciler.requestLags, "the flag is rewound for the next save")
+        XCTAssertEqual(reapplyEvents(appState).first?.hasPrefix("config.reapply_failed surface=system_proxy cause=switch_on"), true,
+                       "\(reapplyEvents(appState))")
+
+        locations.refuseWrites(false)
+        await appState.reapplyRetry.drain()
+
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
+        XCTAssertEqual(reapplyEvents(appState).filter { $0.hasPrefix("config.reapply_recovered surface=system_proxy") }.count, 1,
+                       "\(reapplyEvents(appState))")
+    }
+
+    /// The retry is bounded: past its attempts it says so and stops, and the
+    /// surface is left to the ordinary triggers.
+    func testARetryThatKeepsFailingIsAbandonedAfterItsAttempts() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        harness.reapplyRetrySchedule = .init(delays: [.zero, .zero, .zero])
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        try await appState.startProxy()
+
+        locations.refuseWrites(true)
+        appState.config.localPort = try reserveLoopbackPort()
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        await appState.reapplyRetry.drain()
+
+        let events = reapplyEvents(appState)
+        XCTAssertEqual(events.filter { $0.hasPrefix("config.reapply_retry surface=system_proxy") }.count, 3, "\(events)")
+        XCTAssertEqual(events.last, "config.reapply_abandoned surface=system_proxy reason=exhausted attempts=3")
+        XCTAssertTrue(appState.reapplyRetry.pending.isEmpty)
+    }
+
+    /// `EnvironmentManager.apply` reports a variable it could not publish
+    /// instead of throwing; the re-apply read that as success. It counts as
+    /// a failure now, and the retry's drift pass publishes it.
+    func testAPartialEnvironmentReapplyIsReportedAndRetried() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        let port = try reserveLoopbackPort()
+
+        machine.failingSetenv = ["HTTP_PROXY"]
+        appState.config.localPort = port
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertNotEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(port)")
+        XCTAssertEqual(reapplyEvents(appState).first,
+                       "config.reapply_failed surface=environment cause=config_change retry_in_seconds=3600 attempts=1 "
+                           + "reason=partial profiles_left= launchd_left=HTTP_PROXY")
+        XCTAssertEqual(appState.reapplyRetry.pending, [.environment])
+    }
+
+    func testAPartialEnvironmentReapplyRecoversOnTheRetry() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        harness.reapplyRetrySchedule = Self.shortRetries
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        try await appState.startProxy()
+        let port = try reserveLoopbackPort()
+
+        machine.failingSetenv = ["HTTP_PROXY"]
+        appState.config.localPort = port
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        machine.failingSetenv = []
+        await appState.reapplyRetry.drain()
+
+        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(port)")
+        let events = reapplyEvents(appState)
+        XCTAssertEqual(events.filter { $0.hasPrefix("config.reapply_recovered surface=environment") }.count, 1, "\(events)")
+    }
+
+    /// A stop after the failure owns the surface: the retry gives up rather
+    /// than write behind it.
+    func testAStopAfterAFailedReapplyAbandonsTheRetry() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        harness.reapplyRetrySchedule = Self.shortRetries
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        try await appState.startProxy()
+
+        locations.refuseWrites(true)
+        appState.config.localPort = try reserveLoopbackPort()
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        locations.refuseWrites(false)
+        await appState.stopProxy()
+        let afterStop = try locations.snapshot().services[0].proxies
+        await appState.reapplyRetry.drain()
+
+        XCTAssertEqual(try locations.snapshot().services[0].proxies, afterStop, "nothing written after the stop")
+        XCTAssertEqual(reapplyEvents(appState).last?.hasPrefix("config.reapply_abandoned surface=system_proxy reason=superseded"), true,
+                       "\(reapplyEvents(appState))")
     }
 
     // MARK: Shell environment drift (#175)

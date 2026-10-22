@@ -373,6 +373,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         var locationLimits = NetworkLocationLimits()
         /// The production path debounce unless a scenario waits on a report.
         var networkPathDebounce = NetworkMonitor.defaultDebounceInterval
+        /// As `AppStateHarness.reapplyRetrySchedule`.
+        var reapplyRetrySchedule = ConfigReapplyRetry.Schedule(delays: [.seconds(3600)])
         /// Holds the machine's `networksetup` listings when armed, so a
         /// scenario can keep one system DNS reconcile out while more arrive.
         let listings = HeldListings()
@@ -428,6 +430,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 // As `AppStateHarness`: never the real port 53.
                 dnsResponds: FakeDNSProbe().responds(onPort:),
                 networkPathDebounce: networkPathDebounce,
+                reapplyRetrySchedule: reapplyRetrySchedule,
                 homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
                 resolverDirectory: machine.resolverDirectory.path
             )
@@ -1264,6 +1267,128 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "config.advertised_pac_changed" }.map(\.detail),
                        ["surfaces=system_proxy"])
         await host.stopRuntime()
+    }
+
+    private func reapplyEvents(_ host: DaemonRuntimeHost) -> [String] {
+        host.orchestrator.eventLog.events.filter { $0.event.hasPrefix("config.reapply_") }.map { "\($0.event) \($0.detail ?? "")" }
+    }
+
+    private static let shortRetries = ConfigReapplyRetry.Schedule(delays: [.milliseconds(100), .milliseconds(100), .milliseconds(100)])
+
+    /// Twin of `AppStateHarnessTests.testAFailedSystemProxyReapplyIsReportedAndRetried`.
+    func testAFailedSystemProxyReapplyOnReloadIsReportedAndRetried() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        harness.reapplyRetrySchedule = Self.shortRetries
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let port = try reserveLoopbackPort()
+
+        locations.refuseWrites(true)
+        var edited = host.config
+        edited.localPort = port
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+        XCTAssertNotEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
+        let failed = try XCTUnwrap(reapplyEvents(host).first)
+        XCTAssertTrue(failed.hasPrefix("config.reapply_failed surface=system_proxy cause=config_change retry_in_seconds=1 attempts=3 reason="), failed)
+
+        locations.refuseWrites(false)
+        await host.reapplyRetry.drain()
+
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
+        let events = reapplyEvents(host)
+        XCTAssertEqual(events.filter { $0.hasPrefix("config.reapply_recovered surface=system_proxy") }.count, 1, "\(events)")
+        XCTAssertFalse(events.contains { $0.hasPrefix("config.reapply_abandoned") }, "\(events)")
+        await host.stopRuntime()
+    }
+
+    /// Twin of `AppStateHarnessTests.testASystemProxySwitchThatFailsToApplyIsRetried`.
+    func testASystemProxySwitchThatFailsToApplyOnReloadIsRetried() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = try reserveLoopbackPort()
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        harness.reapplyRetrySchedule = Self.shortRetries
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let port = config.localPort
+
+        locations.refuseWrites(true)
+        try await harness.flip(PlatformIntegrationConfig(manageSystemProxy: true), on: host)
+        XCTAssertEqual(reapplyEvents(host).first?.hasPrefix("config.reapply_failed surface=system_proxy cause=switch_on"), true,
+                       "\(reapplyEvents(host))")
+
+        locations.refuseWrites(false)
+        await host.reapplyRetry.drain()
+
+        XCTAssertEqual(try locations.snapshot().services[0].proxies["HTTPPort"], .number(port))
+        XCTAssertEqual(reapplyEvents(host).filter { $0.hasPrefix("config.reapply_recovered surface=system_proxy") }.count, 1,
+                       "\(reapplyEvents(host))")
+        await host.stopRuntime()
+    }
+
+    /// Twin of `AppStateHarnessTests.testAPartialEnvironmentReapplyIsReportedAndRetried`
+    /// and `…RecoversOnTheRetry`.
+    func testAPartialEnvironmentReapplyOnReloadIsReportedAndRetried() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageEnvironmentVariables: true))
+        harness.reapplyRetrySchedule = Self.shortRetries
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        let port = try reserveLoopbackPort()
+
+        harness.machine.failingSetenv = ["HTTP_PROXY"]
+        var edited = host.config
+        edited.localPort = port
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+        XCTAssertEqual(reapplyEvents(host).first,
+                       "config.reapply_failed surface=environment cause=config_change retry_in_seconds=1 attempts=3 "
+                           + "reason=partial profiles_left= launchd_left=HTTP_PROXY")
+
+        harness.machine.failingSetenv = []
+        await host.reapplyRetry.drain()
+
+        XCTAssertEqual(harness.machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:\(port)")
+        let events = reapplyEvents(host)
+        XCTAssertEqual(events.filter { $0.hasPrefix("config.reapply_recovered surface=environment") }.count, 1, "\(events)")
+        await host.stopRuntime()
+    }
+
+    /// Twin of `AppStateHarnessTests.testAStopAfterAFailedReapplyAbandonsTheRetry`.
+    func testAStopAfterAFailedReloadReapplyAbandonsTheRetry() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        harness.reapplyRetrySchedule = Self.shortRetries
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+
+        locations.refuseWrites(true)
+        var edited = host.config
+        edited.localPort = try reserveLoopbackPort()
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+        locations.refuseWrites(false)
+        await host.stopRuntime()
+        let afterStop = try locations.snapshot().services[0].proxies
+        await host.reapplyRetry.drain()
+
+        XCTAssertEqual(try locations.snapshot().services[0].proxies, afterStop, "nothing written after the stop")
+        XCTAssertEqual(reapplyEvents(host).last?.hasPrefix("config.reapply_abandoned surface=system_proxy reason=superseded"), true,
+                       "\(reapplyEvents(host))")
     }
 
     /// Twin of `AppStateHarnessTests.testABypassEditReappliesOffTheMainActor`.

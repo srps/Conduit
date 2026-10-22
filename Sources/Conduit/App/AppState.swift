@@ -151,6 +151,20 @@ final class AppState: ObservableObject {
     private var environmentRepairRetry: Task<Void, Never>?
     private var environmentDriftTimer: Task<Void, Never>?
     private let environmentDriftInterval: Duration
+    /// A failed re-apply of the system proxy or the environment, reported
+    /// and retried through the drift passes below (#194, narrow).
+    private(set) lazy var reapplyRetry: ConfigReapplyRetry = {
+        let retry = ConfigReapplyRetry(schedule: reapplyRetrySchedule) { [weak self] event, level in
+            guard let self else { return }
+            self.orchestrator.eventLog.append(event)
+            self.logStore.log(level, "Config: \(event.event) \(event.detail ?? "")", category: .system)
+        }
+        retry.attempt = { [weak self] surface, token in
+            await self?.retryReapply(surface, token: token) ?? .notWanted(reason: "host_gone")
+        }
+        return retry
+    }()
+    private let reapplyRetrySchedule: ConfigReapplyRetry.Schedule
     private lazy var locationRecovery: LocationSettingsRecovery? = {
         guard let store = networkLocationStoreFactory(auditedPrivilegeClient) else { return nil }
         let eventLog = orchestrator.eventLog
@@ -292,6 +306,7 @@ final class AppState: ObservableObject {
         dnsReconcileDebounce: TimeInterval = 1.0,
         settingsSaveDebounce: Duration = .seconds(1),
         environmentDriftInterval: Duration = .seconds(300),
+        reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
         homeDirectory: URL,
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
@@ -370,6 +385,7 @@ final class AppState: ObservableObject {
         self.dnsReconcileDebounce = dnsReconcileDebounce
         self.settingsSaveDebounce = settingsSaveDebounce
         self.environmentDriftInterval = environmentDriftInterval
+        self.reapplyRetrySchedule = reapplyRetrySchedule
         self.commandRunner = commandRunner
         self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
@@ -1153,21 +1169,31 @@ final class AppState: ObservableObject {
         // and with autosave a bypass edit reaches here on every pause.
         let systemProxy = systemConduit, environment = environmentManager, logger = logStore
         let mode = platform.systemProxyMode, pacURL = orchestrator.snapshot.bindings.localPACURL
-        await platformWork.run {
+        let token = proxyLane.observationToken
+        let failures = await platformWork.run { () -> [(ConfigReapplyRetry.Surface, String)] in
+            var failures: [(ConfigReapplyRetry.Surface, String)] = []
             if reapplySystemProxy {
                 do {
                     try systemProxy.apply(config: new, mode: mode, logger: logger, localPACURL: pacURL)
                 } catch {
-                    logger.log(.warning, "Could not re-apply system proxy after config change: \(error.localizedDescription)", category: .system)
+                    failures.append((.systemProxy, error.localizedDescription))
                 }
             }
             if reapplyEnvironment {
                 do {
-                    try environment.apply(config: new, logger: logger)
+                    // Partial counts: `apply` reports a profile left alone
+                    // or a variable not published instead of throwing.
+                    if let shortfall = try environment.apply(config: new, logger: logger).shortfall {
+                        failures.append((.environment, shortfall))
+                    }
                 } catch {
-                    logger.log(.warning, "Could not re-apply environment variables after config change: \(error.localizedDescription)", category: .system)
+                    failures.append((.environment, "apply_error error=\(error.localizedDescription)"))
                 }
             }
+            return failures
+        }
+        for (surface, reason) in failures {
+            reapplyRetry.failed(surface, cause: .configChange, reason: reason, token: token)
         }
     }
 
@@ -1201,14 +1227,7 @@ final class AppState: ObservableObject {
 
         switch action {
         case .applySystemProxy:
-            return attempt("Could not apply system proxy settings after the setting changed") {
-                try systemConduit.apply(
-                    config: config,
-                    mode: platform.systemProxyMode,
-                    logger: logStore,
-                    localPACURL: orchestrator.snapshot.bindings.localPACURL
-                )
-            }
+            return applySystemProxySwitch(config: config, platform: platform)
         case .clearSystemProxy:
             // No `isCleared()` gate, unlike `stopProxy`: "every proxy is
             // disabled" is not "nothing to restore" when the journal holds a
@@ -1221,9 +1240,7 @@ final class AppState: ObservableObject {
                 try systemConduit.clear(logger: logStore)
             } && !systemConduit.hasManagedState()
         case .applyEnvironment:
-            return attempt("Could not apply environment variables after the setting changed") {
-                try environmentManager.apply(config: config, logger: logStore)
-            }
+            return applyEnvironmentSwitch(config: config)
         case .clearEnvironment:
             return attempt("Could not clear environment variables after the setting changed") {
                 try environmentManager.clear(logger: logStore)
@@ -1270,6 +1287,41 @@ final class AppState: ObservableObject {
             } && !systemDNSManager.hasSavedState()
         case .setLaunchAtLogin(let enabled):
             return loginItemManager.setEnabled(enabled, logger: logStore)
+        }
+    }
+
+    /// The system proxy switch turned on while the proxy runs. A
+    /// failure rewinds the flag for the next save; the retry looks again
+    /// sooner, since no save may follow (#194).
+    private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig) -> Bool {
+        do {
+            try systemConduit.apply(
+                config: config,
+                mode: platform.systemProxyMode,
+                logger: logStore,
+                localPACURL: orchestrator.snapshot.bindings.localPACURL
+            )
+            return true
+        } catch {
+            reapplyRetry.failed(.systemProxy, cause: .switchOn, reason: error.localizedDescription, token: proxyLane.observationToken)
+            return false
+        }
+    }
+
+    /// The environment switch turned on. A partial apply still lands the
+    /// flag: the switch is on, and a profile that may not be edited is not
+    /// something a later save can fix. It is reported and retried like a
+    /// failure (#194).
+    private func applyEnvironmentSwitch(config: ProxyConfig) -> Bool {
+        do {
+            if let shortfall = try environmentManager.apply(config: config, logger: logStore).shortfall {
+                reapplyRetry.failed(.environment, cause: .switchOn, reason: shortfall, token: proxyLane.observationToken)
+            }
+            return true
+        } catch {
+            reapplyRetry.failed(.environment, cause: .switchOn, reason: "apply_error error=\(error.localizedDescription)",
+                                token: proxyLane.observationToken)
+            return false
         }
     }
 
@@ -2243,6 +2295,7 @@ final class AppState: ObservableObject {
         sectionCloseRetry?.cancel()
         environmentDriftTimer?.cancel()
         environmentRepairRetry?.cancel()
+        reapplyRetry.cancelAll()
         proxyLane.supersedeAll()
         dnsLane.supersedeAll()
         let deadline = terminationDrainDeadlineMilliseconds
@@ -2553,6 +2606,42 @@ final class AppState: ObservableObject {
             }
             if let retry { scheduleProxyRepairRetry(after: retry) }
         } while proxySettingsReconcileWanted
+    }
+
+    /// One retry of a failed re-apply (#194): the drift pass for `surface`,
+    /// run once and judged. Not through the coalescing entry points above,
+    /// so the verdict is this pass's; both go to the same serial queue and
+    /// the managers' locks. Every write is checked under its manager's lock
+    /// against the request's lifecycle token and, for the system proxy,
+    /// against the switch and mode the last save asked for: a flag action
+    /// runs on the main actor, and can clear the surface after this pass
+    /// was queued.
+    private func retryReapply(_ surface: ConfigReapplyRetry.Surface, token: LifecycleLane.Token) async -> ConfigReapplyRetry.Outcome {
+        guard configurationLoadError == nil else { return .notWanted(reason: "config_unavailable") }
+        await awaitLaunchRecovery()
+        await proxyLane.waitUntilIdle()
+        guard !token.isSuperseded else { return .notWanted(reason: "superseded") }
+        guard runtimeState().proxyIsUp else { return .notWanted(reason: "proxy_stopped") }
+        // What was applied, not the editor draft: autosave can hold back a start-blocking edit.
+        let config = reconciler.lastReconciledConfig, platform = committedPlatformConfig
+        switch surface {
+        case .systemProxy:
+            guard platform.manageSystemProxy else { return .notWanted(reason: "switch_off") }
+            let (outcome, retry) = await SystemProxyReapplyRetry.run(
+                manager: systemConduit, work: platformWork, config: config, mode: platform.systemProxyMode,
+                localPACURL: orchestrator.snapshot.bindings.localPACURL, token: token,
+                fence: reconciler.platformRequest, events: orchestrator.eventLog, logger: logStore)
+            if let retry { scheduleProxyRepairRetry(after: retry) }
+            return outcome
+        case .environment:
+            guard platform.manageEnvironmentVariables else { return .notWanted(reason: "switch_off") }
+            let repair = environmentDriftRepair, generation = environmentManager.generation
+            let pass = await platformWork.run {
+                repair.pass(config: config, generation: generation, trigger: .retry, isCurrent: { !token.isSuperseded })
+            }
+            if let retry = pass.retry { scheduleEnvironmentRepairRetry(after: retry) }
+            return pass.settled ? .applied : .failed(reason: pass.reason ?? "unsettled")
+        }
     }
 
     /// A contended repair budget withholds the write. If the other program then
