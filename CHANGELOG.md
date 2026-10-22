@@ -4,6 +4,143 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## 0.5.7
+
+Security fixes for the administrator prompt, the helper's DNS relay, direct
+forwarding and the DNS forwarder (#213, #214); Settings that save as you edit
+without rebinding the running proxy mid-edit (#176, #205); repair of a wiped
+shell environment (#193); retries for platform writes that failed (#211, #212);
+and fixes from the liveness audit (#207, #209, #210). An app update through
+**Check for Updates…** plus a helper reinstall: helper protocol v5 is
+unchanged, but the DNS relay fix is in the helper binary, so **reinstall it
+once** from Settings → General → **Reinstall Helper** (one admin prompt), or
+with `sudo ./install-helper.sh` from a source checkout. Until then the
+installed helper keeps the old relay.
+
+### Security
+
+- Installing or removing the helper, and the password-prompt fallback used when
+  the helper cannot be reached, wrote the privileged script to a temporary file
+  and had the prompt run that file as root. Another program running as you
+  could replace the file while the dialog was open. The script is now passed to
+  `osascript` inline, so there is no file to replace. (#213)
+- The helper's port-53 DNS relay accepted a reply from any sender that matched
+  a pending relay ID, and the IDs were sequential. The relay's socket is now
+  connected to its target, so the kernel drops other senders; IDs are random; a
+  reply must match the question it answers; and a datagram that is not a
+  single-question DNS query is not relayed. A refusal from a target that is down
+  no longer drops the next query. Takes effect after the helper reinstall.
+  (#213)
+- A plain `GET https://…` request (not `CONNECT`) that routed DIRECT, through a
+  No-proxy host, a PAC `DIRECT` or the DIRECT fallback, was sent in plaintext to
+  port 80 with its cookies and `Authorization` header. Direct forwarding now
+  takes only `http` and `ws` targets and answers anything else with 400 before
+  dialling (`routing.direct_scheme_rejected`). `CONNECT` and upstream routing
+  are unchanged. (#214)
+- The DNS forwarder accepted an upstream UDP reply with any transaction ID as
+  long as its question matched, so a forged answer could be served and cached.
+  Each upstream query now carries a random ID, which is swapped back for the
+  client's, and a reply must match the ID, the response flag, the opcode and the
+  question. Anything else is dropped and logged as a possible spoof while the
+  wait continues. (#214)
+
+### Fixed
+
+- Settings edits are saved once they pause for a second, not only when their
+  section closes, so switching something off and on within one visit takes
+  effect. An edit that would block a proxy start, such as a half-typed listen
+  host, is held (`config.autosave_held`) until the next edit or until the
+  section closes. Leaving a section saves at once, and a section close retries a
+  platform change that did not land. Quit writes an unsaved edit without
+  applying it, unless it would block the next start (`config.edit_discarded`).
+  (#171, #176, #205)
+- The running proxy sees only saved settings. Before, each keystroke reached it,
+  so typing a listener port rebound the proxy at every pause, and a start
+  between keystrokes bound the half-typed value. An edit that moves a listener
+  (the proxy listener, DNS, the local PAC server or a tunnel) now waits,
+  with a note and an **Apply** button, until you press Return, click Apply,
+  leave the section or quit (`config.edit_committed`). Other edits keep the
+  one-second autosave. (#205)
+- The DNS forwarder always listens on 127.0.0.1, where the `/etc/resolver` files
+  and the helper's relay send queries. A listen host of `::1` or `127.0.0.2` put
+  it on an address nothing asked, so system DNS reached nothing. (#205)
+- A wiped shell environment is noticed and repaired. Conduit's block in
+  `~/.zshrc`, `~/.zprofile` and `~/.config/environment.d/proxy-manager.conf`,
+  and the six launchd proxy variables, are compared with what was applied on
+  wake, network, VPN and proxy-settings changes and every 5 minutes while the
+  proxy runs with the switch on, and rewritten when they differ
+  (`platform.environment_drift`, `platform.environment_repaired`), at most three
+  times in 30 minutes.
+  (#175, #193)
+- Shell profiles are edited strictly: one that is unreadable, not UTF-8, over
+  1 MiB, has ambiguous markers or changes during the write is left alone and
+  reported (`platform.environment_file_skipped`). A launchd variable's prior
+  value is recorded before it is overwritten, teardown leaves alone a variable
+  Conduit never recorded unless it holds Conduit's own address, and each
+  `launchctl` read gives up after 2 s. A No-proxy edit now reaches the
+  environment and the manual-mode bypass list without a proxy restart
+  (`config.advertised_bypass_changed`). (#192, #193)
+- A system-proxy or environment write that fails, or lands only in part, after a
+  settings change or a switch-on is reported (`config.reapply_failed`) and
+  retried after 10 s, 60 s and 5 minutes. A retry never undoes a later
+  switch-off or mode change. Moving the local PAC server repoints the system
+  proxy at once instead of at the next drift repair
+  (`config.advertised_pac_changed`). (#194, #212)
+- A split-DNS entry file (`/etc/resolver/<domain>`) that could not be written or
+  removed, for example while the helper refused callers, is retried once the
+  helper answers again: at launch, after an install, on a Settings refresh, or
+  from a status check that backs off from 60 s to 16 minutes while a repair is
+  pending. This covers a VPN change, a start or stop, a config edit and the
+  resolver switch, and a retry also removes files left for entries since
+  deleted. A removal that failed while the VPN was down no longer leaves the
+  domain pointed at servers only the tunnel reaches. A retry never falls back to
+  a password prompt and waits out a busy helper (`platform.split_dns_failed`,
+  `platform.split_dns_retry`, `platform.split_dns_repaired`). (#165, #211)
+- A helper busy with another request is no longer reported as broken. A status
+  check that times out reads as busy (`auth.privilege_helper_busy`): Settings
+  keeps the last verdict, says it is checking again, re-reads after 15 s and
+  offers no Repair button. (#197, #210)
+- A health check still running when the health loop restarts can no longer free
+  the new loop's slot, deliver its verdict or reschedule. A stale 503 could
+  degrade a healthy runtime and start the recovery ladder
+  (`health.result_superseded reason=restarted`). (#181, #207)
+- Turning the transparent relay off while its periodic check was probing no
+  longer brings it back (`tcp_relay.reassert_superseded`). (#199, #209)
+- Platform-state journal failures are events, not only log lines: an unreadable
+  journal (`platform.journal_unreadable`), a failed write
+  (`platform.journal_write_failed`, `platform.journal_write_recovered`) and the
+  0.1.x DNS-state import. (#191, #208)
+
+### Changed
+
+- The update preflight refuses a busy helper with exit 74 (`helper_busy`) and
+  says to try again, instead of calling the helper unresponsive. An updater from
+  0.5.6 or earlier, including the one that installs this release, does not know
+  that code and shows its generic preflight failure; it still refuses, so try
+  again once the helper is idle. (#210)
+- The platform-state journal reads a versioned format and fails closed on a
+  version it does not know: the file is kept as is, and writes and applies are
+  refused. This release still writes the old format, so rolling back stays safe;
+  0.6 starts writing the new one. (#182, #208)
+- CONNECT tunnel failure lines name their target. A timeout connecting to a
+  cloud metadata address (`169.254.169.254`, `169.254.170.2`, `fd00:ec2::254`),
+  which cloud SDKs probe every few minutes, logs at WARNING instead of ERROR and
+  still emits `direct.connect_failed`. Coalesced failure summaries report the
+  window they covered instead of always 60 s. (#170)
+- The app bundle carries `LICENSE`, `NOTICE` and the license texts of SwiftNIO,
+  Swift Collections, Atomics and System, and Sparkle, and `NOTICE` lists Sparkle.
+  (#187, #188)
+- Tests no longer touch the developer's shell profiles or launchd variables; a
+  local `swift test` run had wiped Conduit's applied environment (#189, #190).
+
+### Documentation
+
+- `docs/events.md` lists every emitted event, and CI checks it against the
+  sources (#179, #203). `docs/STYLE.md` gains the liveness rules, and
+  `docs/liveness-audit.md` audits every time window against them (#178, #195).
+  Owner decisions are recorded in `docs/decisions/`, also checked in CI (#177,
+  #185, #204).
+
 ## 0.5.6
 
 VPN transitions no longer leave dead connections behind (#153, #157, #162),
