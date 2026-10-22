@@ -195,6 +195,20 @@ final class DaemonRuntimeHost {
     /// shared with `AppState`). Fed by `handleVPNStateChange`; every
     /// resolver-file apply path consults `entriesWanted`.
     private var splitDNSGate = SplitDNSVPNGate()
+    /// A failed entry-file write or removal, retried once the helper is
+    /// seen available (#165). Twin of `AppState.splitDNSRepair`.
+    private var splitDNSRepair = SplitDNSEntryFileRepair()
+    /// While a repair is pending, asks the helper for its status every
+    /// `splitDNSHelperCheckInterval` (backed off); gone otherwise. This host
+    /// hears of no install, so the check is its only helper observation.
+    private var splitDNSHelperCheck: Task<Void, Never>?
+    private let splitDNSHelperCheckInterval: Duration
+    private var splitDNSRetryInFlight = false
+    /// Where the helper check reads the helper's status. The helper client
+    /// this host builds when none is injected; a host given a privilege
+    /// client and no status source makes no observation, so a test never
+    /// reaches the installed helper.
+    private let helperStatusSource: (any HelperLifecycleManaging)?
     /// Stamps VPN reports on the monitor's callback; the split-DNS gate
     /// and the orchestrator each apply only reports newer than the last
     /// they applied, since deliveries can land out of order (#155).
@@ -230,6 +244,8 @@ final class DaemonRuntimeHost {
         networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         environmentDriftInterval: Duration = .seconds(300),
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
+        helperStatus: (any HelperLifecycleManaging)? = nil,
+        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
         homeDirectory: URL,
         resolverDirectory: String? = nil
     ) {
@@ -259,9 +275,12 @@ final class DaemonRuntimeHost {
             )
         )
         self.vpnFlapWindowBox = flapBox
-        self.privilegeClient = privilegeClient ?? HelperToolPrivilegeClient(
-            eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) }
-        )
+        let helperClient = privilegeClient == nil
+            ? HelperToolPrivilegeClient(eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) })
+            : nil
+        self.privilegeClient = privilegeClient ?? helperClient!
+        self.helperStatusSource = helperStatus ?? helperClient
+        self.splitDNSHelperCheckInterval = splitDNSHelperCheckInterval
         self.auditedPrivilegeClient = AuditingPrivilegeClient(
             base: self.privilegeClient,
             eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) }
@@ -474,7 +493,7 @@ final class DaemonRuntimeHost {
         let vpnConnected = splitDNSGate.entriesWanted
         let interceptReadyAtStart = orchestrator.snapshot.bindings.dnsInterceptReady
         let forwarderRunningAtStart = orchestrator.snapshot.dnsRunState == .running
-        await platformWork.run {
+        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
             if platform.manageSystemProxy {
                 systemProxy.serialized {
                     guard !token.isSuperseded else { return }
@@ -495,12 +514,17 @@ final class DaemonRuntimeHost {
                     }
                 }
             }
+            var entryFiles: SplitDNSEntryFileRepair.Outcome?
             if platform.manageDNSResolvers {
                 resolvers.serialized {
                     guard !token.isSuperseded else { return }
+                    // With the VPN down, `apply` sweeps the entry files rather than writing them.
+                    let operation: SplitDNSEntryFileRepair.Operation = vpnConnected ? .apply : .remove
                     do {
                         try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
+                        entryFiles = .succeeded(operation)
                     } catch {
+                        entryFiles = .failed(operation, error)
                         logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
                     }
                     // The forwarder cannot be running yet, so no intercept resolver
@@ -528,7 +552,9 @@ final class DaemonRuntimeHost {
                     }
                 }
             }
+            return entryFiles
         }
+        recordSplitDNS(entryFiles, source: .start)
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
         // rest of a start for a runtime that is down.
@@ -537,12 +563,13 @@ final class DaemonRuntimeHost {
         // entry files then, possibly before the apply wrote them from the
         // gate it was queued with. Twin of the check in `AppState.startProxy`.
         if platform.manageDNSResolvers, splitDNSGate.entriesWanted != vpnConnected {
-            splitDNSGate.reconcileEntryFiles(
+            let outcome = splitDNSGate.reconcileEntryFiles(
                 config: config,
                 dnsManager: dnsManager,
                 logger: logger,
                 runtimeStarted: true
             )
+            recordSplitDNS(outcome, source: .vpnTransition)
         }
 
         if config.dnsForwarderEnabled {
@@ -661,7 +688,7 @@ final class DaemonRuntimeHost {
         // a crash between the flip and the reload, a config file edited by
         // hand (#13). The ownership reads happen inside the block, after
         // whatever was queued ahead of it has landed.
-        await platformWork.run {
+        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
             systemProxy.serialized {
                 guard terminal || !token.isSuperseded else { return }
                 guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return }
@@ -680,14 +707,18 @@ final class DaemonRuntimeHost {
                     logger.log(.warning, "Could not clear environment variables: \(error.localizedDescription)", category: .system)
                 }
             }
-            resolvers.serialized {
-                guard terminal || !token.isSuperseded else { return }
+            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Outcome? in
+                guard terminal || !token.isSuperseded else { return nil }
                 if platform.manageDNSResolvers {
                     do {
                         try resolvers.clear(config: config, logger: logger)
                     } catch {
                         logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
+                        // Only an entry file left on disk is the repair's; an
+                        // intercept file the clear could not remove is not.
+                        if resolvers.entryFilesPresent(config: config) { return .failed(.remove, error) }
                     }
+                    return .succeeded(.remove)
                 } else if resolvers.hasManagedState() {
                     // Switch off: only what the journal names as ours, never a file
                     // for a configured domain we did not write.
@@ -697,8 +728,10 @@ final class DaemonRuntimeHost {
                         logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
                     }
                 }
+                return nil
             }
         }
+        recordSplitDNS(entryFiles, source: .stop)
         guard terminal || isCurrent(token, "runtime_stop") else { return }
 
         logger.log(.notice, "Daemon runtime stopped.", category: .general)
@@ -932,17 +965,84 @@ final class DaemonRuntimeHost {
         // state; the orchestrator still sees it and drops it itself.
         let entriesWantedChanged = splitDNSGateOrder.admit(sequence) ? splitDNSGate.update(state) : false
         if platformConfig.manageDNSResolvers, entriesWantedChanged {
-            splitDNSGate.reconcileEntryFiles(
+            let outcome = splitDNSGate.reconcileEntryFiles(
                 config: config,
                 dnsManager: dnsManager,
                 logger: logger,
                 runtimeStarted: runtimeStarted
             )
+            recordSplitDNS(outcome, source: .vpnTransition)
         }
 
         deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
         await orchestrator.handleVPNStateChange(state, interfaceName: interfaceName, sequence: sequence)
         await reconcileSystemDNSIfRunning()
+    }
+
+    // MARK: - Split-DNS entry-file repair (#165)
+
+    /// Twin of `AppState.recordSplitDNS`.
+    private func recordSplitDNS(_ outcome: SplitDNSEntryFileRepair.Outcome?, source: SplitDNSEntryFileRepair.Source) {
+        guard let outcome else { return }
+        splitDNSRepair.record(outcome, source: source, report: recordSplitDNSEvent)
+        scheduleSplitDNSHelperCheck()
+    }
+
+    private func recordSplitDNSEvent(_ event: RuntimeEvent, level: LogLevel) {
+        orchestrator.eventLog.append(event)
+        logger.log(level, "Split DNS: \(event.event) \(event.detail ?? "")", category: .system)
+    }
+
+    /// Twin of `AppState.observeHelperForSplitDNS`. A retry waits for the
+    /// start or stop in flight, so `runtimeStarted` is settled when it reads it.
+    private func observeHelperForSplitDNS(available: Bool, trigger: String) {
+        guard splitDNSRepair.shouldRetry(helperAvailable: available), !splitDNSRetryInFlight else { return }
+        splitDNSRetryInFlight = true
+        deliveries.deliver { [weak self] in await self?.retrySplitDNSEntryFiles(trigger: trigger) }
+    }
+
+    private func retrySplitDNSEntryFiles(trigger: String) async {
+        defer { splitDNSRetryInFlight = false }
+        await awaitLaunchRecovery()
+        while !runtimeLane.isIdle { await runtimeLane.waitUntilIdle() }
+        // Nothing suspends from here on: the decision and the write see the
+        // same gate state (`SplitDNSEntryFileRepair.retry`).
+        guard splitDNSRepair.pending != nil else { return }
+        splitDNSRepair.retry(
+            trigger: trigger,
+            gate: splitDNSGate,
+            config: config,
+            resolversManaged: platformConfig.manageDNSResolvers,
+            dnsManager: dnsManager,
+            logger: logger,
+            runtimeStarted: runtimeStarted,
+            report: recordSplitDNSEvent
+        )
+        scheduleSplitDNSHelperCheck()
+    }
+
+    /// Twin of `AppState.scheduleSplitDNSHelperCheck`, and this host's only
+    /// way to learn the helper is back: it is told of no install.
+    private func scheduleSplitDNSHelperCheck() {
+        guard splitDNSRepair.pending != nil, splitDNSHelperCheck == nil, let helper = helperStatusSource else { return }
+        let base = splitDNSHelperCheckInterval
+        splitDNSHelperCheck = Task { @MainActor [weak self] in
+            while let delay = self?.splitDNSHelperCheckDelay(base: base) {
+                do { try await Task.sleep(for: delay) }
+                catch { return }
+                guard self?.splitDNSRepair.pending != nil else { break }
+                let status = await withCheckedContinuation { continuation in
+                    DispatchQueue.global(qos: .utility).async { continuation.resume(returning: helper.status) }
+                }
+                self?.observeHelperForSplitDNS(available: status == .installed, trigger: "helper_check")
+            }
+            self?.splitDNSHelperCheck = nil
+        }
+    }
+
+    /// `nil` once nothing is pending, which ends the check.
+    private func splitDNSHelperCheckDelay(base: Duration) -> Duration? {
+        splitDNSRepair.pending == nil ? nil : splitDNSRepair.helperCheckDelay(base: base)
     }
 
     /// Same bounded proxy-drift recovery as the app, guarded against a later stop.
