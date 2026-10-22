@@ -10,6 +10,9 @@ struct AppWindow: View {
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var runtime: RuntimePresentationAdapter
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    /// The listener note's measured height: its text wraps with the
+    /// system text size and the detail column's width.
+    @State private var pendingNoteHeight: CGFloat = 0
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -106,7 +109,7 @@ struct AppWindow: View {
             // past the window when a list row was added: the sidebar and
             // the section scrolled out of place, the note itself off-screen.
             // The margin lets the last rows scroll clear of it.
-            .contentMargins(.bottom, appState.listenerEditAwaitingCommit ? PendingListenerEditNote.height : 0,
+            .contentMargins(.bottom, appState.listenerEditAwaitingCommit ? pendingNoteHeight : 0,
                             for: .scrollContent)
             .overlay(alignment: .bottom) {
                 if appState.listenerEditAwaitingCommit {
@@ -117,6 +120,7 @@ struct AppWindow: View {
                             NSApp.keyWindow?.makeFirstResponder(nil)
                         }
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { pendingNoteHeight = $0 }
                 }
             }
             // Leaving the section can also outrun a field still editing.
@@ -131,9 +135,6 @@ struct AppWindow: View {
 /// Shown while an edit to a port, host, listener switch, the DNS section,
 /// the local PAC server or a tunnel waits for its commit.
 private struct PendingListenerEditNote: View {
-    /// Room the section's scroll content leaves under the note.
-    static let height: CGFloat = 52
-
     let apply: () -> Void
 
     var body: some View {
