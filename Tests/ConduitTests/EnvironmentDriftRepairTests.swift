@@ -68,10 +68,11 @@ final class EnvironmentDriftRepairTests: XCTestCase {
 
         try wipe()
         machine.failingSetenv = ["HTTP_PROXY"]
-        XCTAssertEqual(pass(.retry), .init(retry: nil, settled: false, reason: "partial"), "a variable still not published")
+        XCTAssertEqual(pass(.retry), .init(retry: nil, settled: false, reason: "partial profiles_left= launchd_left=HTTP_PROXY"),
+                       "a variable still not published, named as the apply's shortfall names it")
         XCTAssertEqual(pass(.observed), .init(retry: nil, settled: false, reason: "backing_off"),
                        "after a failure, a notification waits for the tick or a retry")
-        XCTAssertEqual(pass(.retry).reason, "partial")
+        XCTAssertEqual(pass(.retry).reason, "partial profiles_left= launchd_left=HTTP_PROXY")
         let withheld = pass(.retry)
         XCTAssertEqual(withheld.reason, "repair_withheld", "two attempts spent the budget")
         XCTAssertNotNil(withheld.retry)

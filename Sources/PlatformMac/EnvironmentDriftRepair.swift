@@ -199,12 +199,14 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
             lock.withLock { reportedFailure = nil }
             emit("platform.environment_repaired",
                  "trigger=\(trigger.rawValue) profiles=\(drift.profiles.count) launchd=\(drift.launchd.count)", level: .notice)
-        } else {
-            reportFailureOnce(reason: "partial", drift: drift,
-                              extra: "profiles_left=\(profilesLeft.map(\.rawValue).sorted().joined(separator: ",")) "
-                                  + "launchd_left=\(launchdLeft.joined(separator: ","))")
+            return .settledNow
         }
-        return repaired ? .settledNow : .unsettled("partial")
+        let left = "profiles_left=\(profilesLeft.map(\.rawValue).sorted().joined(separator: ",")) "
+            + "launchd_left=\(launchdLeft.joined(separator: ","))"
+        reportFailureOnce(reason: "partial", drift: drift, extra: left)
+        // The names, as `ApplyResult.shortfall` gives them, so a retry's
+        // `config.reapply_failed` says what is still left.
+        return .unsettled("partial \(left)")
     }
 
     /// One attempt against the budget, and the generation it left behind.
