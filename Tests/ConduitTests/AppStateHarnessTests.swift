@@ -1630,6 +1630,26 @@ final class AppStateHarnessTests: XCTestCase {
                        "\(reapplyEvents(appState))")
     }
 
+    /// The switch stays on and only its mode changes: the same apply
+    /// action, but no switch was turned on, and the report says so.
+    func testAFailedSystemProxyModeChangeIsReportedAsOne() async throws {
+        harness = try AppStateHarness(config: makeConfig(),
+                                      platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .manual))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        try await appState.startProxy()
+
+        locations.refuseWrites(true)
+        appState.platformConfig.systemProxyMode = .pac
+        appState.saveConfig()
+        await appState.reconciler.drain()
+
+        XCTAssertEqual(reapplyEvents(appState).first?.hasPrefix("config.reapply_failed surface=system_proxy cause=mode_change"), true,
+                       "\(reapplyEvents(appState))")
+    }
+
     /// The retry is bounded: past its attempts it says so and stops, and the
     /// surface is left to the ordinary triggers.
     func testARetryThatKeepsFailingIsAbandonedAfterItsAttempts() async throws {

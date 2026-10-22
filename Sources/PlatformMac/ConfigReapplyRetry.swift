@@ -41,6 +41,9 @@ package final class ConfigReapplyRetry {
         case configChange = "config_change"
         /// A switch turned on applied its surface while the proxy runs.
         case switchOn = "switch_on"
+        /// The system proxy switch stayed on and its mode changed, which
+        /// rewrites the surface in the other shape.
+        case modeChange = "mode_change"
     }
 
     /// One attempt's verdict, from the host.
