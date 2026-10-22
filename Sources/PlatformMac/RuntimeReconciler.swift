@@ -171,6 +171,17 @@ package final class RuntimeReconciler {
         requestedPlatformConfig = platformConfig
     }
 
+    /// For the split-DNS repair (#165): a retry carried out the resolver
+    /// switch's action that did not land, so the baseline takes the flag the
+    /// last save asked for. Without this the next flip back diffs equal and
+    /// runs nothing: a teardown repaired by a retry, then the switch turned
+    /// on again, wrote no entry files. Only that flag, and only while the
+    /// request still holds the value the retry acted on.
+    package func markResolverSwitchLanded(manageDNSResolvers: Bool) {
+        guard requestedPlatformConfig.manageDNSResolvers == manageDNSResolvers else { return }
+        lastReconciledPlatformConfig.manageDNSResolvers = manageDNSResolvers
+    }
+
     /// Whether a pass is queued or running. Tests read it; `drain` waits it out.
     package var hasPassInFlight: Bool { task != nil }
 

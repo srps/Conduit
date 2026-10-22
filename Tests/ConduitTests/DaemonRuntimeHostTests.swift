@@ -1598,6 +1598,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.deliveries.drain()
         XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the retry ran the teardown")
         XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_repaired" }.count, 1)
+
+        // Codex review: the repaired teardown is the switch's action landing,
+        // so a reload turning it back on is a flip the reconciler acts on.
+        try await harness.flip(PlatformIntegrationConfig(manageDNSResolvers: true), on: host)
+        await host.deliveries.drain()
+        XCTAssertEqual(harness.machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53", "switching back on writes the entry")
         await host.stopRuntime()
     }
 

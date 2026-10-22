@@ -2402,6 +2402,48 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertTrue(events(appState, "platform.split_dns_retry").last?.contains("managed=false") == true)
         XCTAssertEqual(events(appState, "platform.split_dns_repaired").last?.contains("failed=remove"), true)
         XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
+
+        // Codex review: the repaired teardown is the switch's action landing,
+        // so turning the switch back on is a flip the reconciler acts on.
+        await harness.setVPN(.connected)
+        appState.platformConfig.manageDNSResolvers = true
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertEqual(machine.resolverFile(for: "corp.example"), "nameserver 10.0.0.53", "switching back on writes the entry")
+        await appState.stopProxy()
+    }
+
+    /// Codex review, the reverse: the switch turned on while the helper
+    /// refuses, then a retry writes the entry. Turning it off again must
+    /// still run the teardown.
+    func testARetriedSwitchOnIsTornDownWhenTheSwitchTurnsOffAgain() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: false))
+        await harness.launchRecovery()
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"))
+
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        appState.refreshPreflight()
+        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
+        machine.privilege.failingDomains = ["corp.example"]
+        appState.platformConfig.manageDNSResolvers = true
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        await harness.deliveries()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "the write was refused")
+        XCTAssertEqual(events(appState, "platform.split_dns_failed").last?.hasPrefix("operation=apply source=switch_on attempt=1"), true)
+
+        machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        appState.refreshPreflight()
+        await harness.settle("the retry writes the entry") { machine.resolverFile(for: "corp.example") != nil }
+        await harness.deliveries()
+
+        appState.platformConfig.manageDNSResolvers = false
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"), "switching off tears the retried entry down")
         await appState.stopProxy()
     }
 

@@ -270,6 +270,10 @@ final class AppState: ObservableObject {
     private var splitDNSHelperCheck: Task<Void, Never>?
     private let splitDNSHelperCheckInterval: Duration
     private var splitDNSRetryInFlight = false
+    /// Whether the last intercept-file refresh a switch action ran failed.
+    /// The resolver flag's baseline covers it too, and a split-DNS retry
+    /// writes no intercept files, so a repair does not stand in for it.
+    private var resolverSwitchInterceptRefreshFailed = false
     /// Stamps VPN reports on the monitor's callback; the split-DNS gate
     /// and the orchestrator each apply only reports newer than the last
     /// they applied, since deliveries can land out of order (#155).
@@ -1294,9 +1298,11 @@ final class AppState: ObservableObject {
             recordSplitDNS(outcome, source: .switchOn)
             return applied
         case .refreshInterceptFiles:
-            return attempt("Could not apply intercept resolver files after the setting changed") {
+            let refreshed = attempt("Could not apply intercept resolver files after the setting changed") {
                 try refreshInterceptFiles(for: config)
             }
+            resolverSwitchInterceptRefreshFailed = !refreshed
+            return refreshed
         case .clearResolvers:
             // Only what the journal names as ours. The switch is off now, so
             // a file for a configured domain we never wrote is the user's.
@@ -2720,7 +2726,17 @@ final class AppState: ObservableObject {
             runtimeStarted: runtimeState().proxyIsUp,
             report: recordSplitDNSEvent
         )
+        settleResolverSwitchBaseline(managed: committedPlatformConfig.manageDNSResolvers)
         scheduleSplitDNSHelperCheck()
+    }
+
+    /// A settled retry did what the resolver switch's action had to, so the
+    /// reconciler's baseline follows (`markResolverSwitchLanded`). With the
+    /// switch off the retry is the whole teardown; with it on, it writes only
+    /// entry files, so a failed intercept refresh keeps the flag behind.
+    private func settleResolverSwitchBaseline(managed: Bool) {
+        guard splitDNSRepair.pending == nil, !managed || !resolverSwitchInterceptRefreshFailed else { return }
+        reconciler.markResolverSwitchLanded(manageDNSResolvers: managed)
     }
 
     /// While a repair is pending, asks the helper for its status after

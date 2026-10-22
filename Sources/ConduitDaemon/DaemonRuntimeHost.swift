@@ -204,6 +204,10 @@ final class DaemonRuntimeHost {
     private var splitDNSHelperCheck: Task<Void, Never>?
     private let splitDNSHelperCheckInterval: Duration
     private var splitDNSRetryInFlight = false
+    /// Whether the last intercept-file refresh a switch action ran failed.
+    /// The resolver flag's baseline covers it too, and a split-DNS retry
+    /// writes no intercept files, so a repair does not stand in for it.
+    private var resolverSwitchInterceptRefreshFailed = false
     /// Where the helper check reads the helper's status. The helper client
     /// this host builds when none is injected; a host given a privilege
     /// client and no status source makes no observation, so a test never
@@ -1040,7 +1044,17 @@ final class DaemonRuntimeHost {
             runtimeStarted: runtimeStarted,
             report: recordSplitDNSEvent
         )
+        settleResolverSwitchBaseline(managed: platformConfig.manageDNSResolvers)
         scheduleSplitDNSHelperCheck()
+    }
+
+    /// A settled retry did what the resolver switch's action had to, so the
+    /// reconciler's baseline follows (`markResolverSwitchLanded`). With the
+    /// switch off the retry is the whole teardown; with it on, it writes only
+    /// entry files, so a failed intercept refresh keeps the flag behind.
+    private func settleResolverSwitchBaseline(managed: Bool) {
+        guard splitDNSRepair.pending == nil, !managed || !resolverSwitchInterceptRefreshFailed else { return }
+        reconciler.markResolverSwitchLanded(manageDNSResolvers: managed)
     }
 
     /// Twin of `AppState.scheduleSplitDNSHelperCheck`, and this host's only
@@ -1597,9 +1611,11 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
             recordSplitDNS(outcome, source: .switchOn)
             return applied
         case .refreshInterceptFiles:
-            return attempt("Could not apply intercept resolver files after the setting changed") {
+            let refreshed = attempt("Could not apply intercept resolver files after the setting changed") {
                 try refreshInterceptFiles(for: config)
             }
+            resolverSwitchInterceptRefreshFailed = !refreshed
+            return refreshed
         case .clearResolvers:
             // Only what the journal names as ours. The switch is off now, so
             // a file for a configured domain we never wrote is the user's.
