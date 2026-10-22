@@ -88,8 +88,10 @@ package struct SplitDNSVPNGate: Sendable {
 
     /// Acts on the current policy decision: writes the entry files when the VPN
     /// came up under a running proxy, removes them whenever the VPN is down and
-    /// they are still on disk. Failures are logged, not thrown — a VPN
-    /// transition handler has no caller to propagate to.
+    /// they are still on disk. Returns what it did, `nil` for `.nothing`; the
+    /// host feeds that to its `SplitDNSEntryFileRepair`, which reports a
+    /// failure and retries it once the helper is available. Nothing is thrown:
+    /// a VPN transition handler has no caller to propagate to.
     ///
     /// The decision reads the gate's *current* state, so call this
     /// synchronously (same isolation context) right after the `update(_:)`
@@ -100,23 +102,21 @@ package struct SplitDNSVPNGate: Sendable {
         dnsManager: DNSManager,
         logger: any LogSink,
         runtimeStarted: Bool
-    ) {
-        let decision = action(runtimeStarted: runtimeStarted)
+    ) -> SplitDNSEntryFileRepair.Outcome? {
+        let operation: SplitDNSEntryFileRepair.Operation
+        switch action(runtimeStarted: runtimeStarted) {
+        case .apply: operation = .apply
+        case .remove: operation = .remove
+        case .nothing: return nil
+        }
         do {
-            switch decision {
-            case .apply:
-                try dnsManager.applyEntryFiles(config: config, logger: logger)
-            case .remove:
-                try dnsManager.clearEntryFiles(config: config, logger: logger)
-            case .nothing:
-                break
+            switch operation {
+            case .apply: try dnsManager.applyEntryFiles(config: config, logger: logger)
+            case .remove: try dnsManager.clearEntryFiles(config: config, logger: logger)
             }
+            return .succeeded(operation)
         } catch {
-            logger.log(
-                .warning,
-                "Could not \(decision == .apply ? "apply" : "remove") split-DNS entry files on VPN transition: \(error.localizedDescription)",
-                category: .system
-            )
+            return .failed(operation, error)
         }
     }
 }

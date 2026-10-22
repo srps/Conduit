@@ -680,6 +680,24 @@ package final class DNSManager: @unchecked Sendable {
         logger?.log(.notice, "Removed \(entries.count) split-DNS entry file(s) while the VPN is disconnected.", category: .system)
     }
 
+    /// Removes the resolver files the journal names as ours whose domain the
+    /// config no longer names at all, as an enabled entry or an intercept
+    /// rule. For `SplitDNSEntryFileRepair`: a removal that failed during a
+    /// helper outage keeps its record, and if the entry is deleted or
+    /// disabled before the helper comes back, `clearEntryFiles` no longer
+    /// names it, so the retry would report a repair over a file still on disk.
+    /// No-op without a journal.
+    package func clearUnconfiguredRecordedFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
+        operations.lock()
+        defer { operations.unlock() }
+        guard let journal else { return }
+        let named = Set(config.dnsEntries.filter(\.enabled).map(\.domain) + getInterceptDomains(from: config, forCleanup: true))
+        let unconfigured = journal.scopes(for: .resolverFile).filter { !named.contains($0) }
+        guard !unconfigured.isEmpty else { return }
+        try removeAll(unconfigured, logger: logger)
+        logger?.log(.notice, "Removed \(unconfigured.count) resolver file(s) this app had written for domains no longer configured.", category: .system)
+    }
+
     /// Writes only the intercept-rule resolver files. The sole writer of
     /// these files.
     ///
