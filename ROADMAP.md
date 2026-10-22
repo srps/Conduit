@@ -22,27 +22,13 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 
 ## Immediate cleanup priorities (2026-10-22)
 
-In 0.5.7, awaiting release:
+In 0.5.8, awaiting release: the Settings fixes in #216. An edit that brings up
+the listener note no longer shifts the window, a fixed configuration problem clears its Overview
+warning, and the Overview "active" counter no longer repeats the word.
 
-- Security fixes: the AppleScript fallback's root TOCTOU and forged replies in
-  the helper's DNS relay (#213), plaintext direct forwarding of `https://`
-  targets and upstream DNS replies admitted by transaction ID (#214).
-- Settings autosave (#171, #176), with the runtime handed committed config only
-  (#205). Shell-environment drift repair and safe profile and launchd edits
-  (#175, #192, #193).
-- Retries for a failed re-apply and the local PAC repoint (#212, the narrow
-  part of #194), and for split-DNS entry files once the helper is back (#165,
-  #211).
-- Journal failures as events (#191) and the versioned journal reader (#208, the
-  read side of #182).
-- Liveness-audit fixes: the health-loop run fence (#207, #181's bug), the relay
-  reassert fence (#199, #209) and the busy helper (#210, #197's helper item).
-- Project: the event catalogue gate (#179), the liveness rules and audit
-  (#178) and checked decision records (#177, #185).
-
-0.5.7 needs a helper reinstall for the relay fix. The Settings commit
-behaviour of #205 (Return, Apply, section close, quit) is covered only by the
-harness and needs a check in the installed build.
+0.5.7 shipped on 2026-10-22. The #205 Settings commit paths (Return, Apply,
+section close, quit with an invalid port) passed the owner's check in a `--dev`
+build of 0.5.8 on 2026-10-22; the installed build still needs a check.
 
 1. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
    — separate identity/name, automatic fake-machine mode, scratch state and
@@ -66,10 +52,8 @@ to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
 
 ## Proposed release scope
 
-**0.5.7 — security fixes, Settings autosave and audit fixes.** Contents are
-listed above and in [`CHANGELOG.md`](./CHANGELOG.md). An app update plus a
-helper reinstall: the helper's DNS relay changed, and helper protocol v5 did
-not.
+**0.5.8 — Settings fixes for 0.5.7.** Listed above and in
+[`CHANGELOG.md`](./CHANGELOG.md). An app update only; the helper is unchanged.
 
 **0.6 — one runtime host and applied-state tracking.** Roughly in this order;
 each change brings its own tests and pm-sim scenario:

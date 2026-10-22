@@ -4,6 +4,26 @@ All notable changes to Conduit. Released versions come first; below them is the
 pre-release development history that precedes the first public `0.1`, grouped by theme.
 Forward-looking plans live in [`ROADMAP.md`](./ROADMAP.md).
 
+## 0.5.8
+
+Settings fixes for 0.5.7 (#216). An app update through **Check for
+Updates…**; the helper is unchanged and needs no reinstall.
+
+### Fixed
+
+- An edit that waits for its commit, such as adding a DoH provider or a DNS
+  entry, shifted the whole app window: the sidebar got stuck scrolled, the
+  section's scroll bar grew, and the "Listener changes apply…" note the edit
+  brings up sat below the window edge. 0.5.7 placed the note as a bottom inset,
+  which made the window content taller than the window. The note now floats over the bottom of the section. While it shows,
+  the section leaves room under its last rows for the note's height, including
+  when its text wraps.
+- A "Configuration problem" warning on Overview stayed after the edit that
+  caused it was fixed, until it was dismissed or Conduit restarted. A later save
+  that validates now clears it; an error shown since is left alone.
+- The Overview "active" counter read "Active 5 active". It now reads "5 active",
+  or "5 (3 stalled) active" during a VPN flap.
+
 ## 0.5.7
 
 Security fixes for the administrator prompt, the helper's DNS relay, direct
