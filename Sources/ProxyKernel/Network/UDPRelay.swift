@@ -88,6 +88,26 @@ package final class UDPRelay: @unchecked Sendable {
             close(ffd)
             throw UDPRelayError.socketCreationFailed(message)
         }
+        // Connected, so the kernel drops every datagram that does not come
+        // from the target. Unconnected, any local process that found this
+        // ephemeral port could answer a pending query in the target's place,
+        // and the reply would go back to the system resolver as Conduit's.
+        var targetAddr = sockaddr_in()
+        targetAddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        targetAddr.sin_family = sa_family_t(AF_INET)
+        targetAddr.sin_port = UInt16(targetPort).bigEndian
+        targetAddr.sin_addr.s_addr = inet_addr(host)
+        let connectResult = withUnsafePointer(to: &targetAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.connect(ffd, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connectResult == 0 else {
+            let message = errnoMessage
+            close(lfd)
+            close(ffd)
+            throw UDPRelayError.connectFailed(targetPort, message)
+        }
 
         let generation = lock.withLock { () -> UInt64 in
             self.generation &+= 1
@@ -97,7 +117,7 @@ package final class UDPRelay: @unchecked Sendable {
         }
 
         let thread = Thread { [weak self] in
-            self?.runLoop(generation: generation, listenFD: lfd, forwardFD: ffd, targetPort: targetPort, targetHost: host)
+            self?.runLoop(generation: generation, listenFD: lfd, forwardFD: ffd)
         }
         thread.name = "udp-relay-\(listenPort)->\(targetPort)"
         thread.qualityOfService = .userInteractive
@@ -127,6 +147,9 @@ package final class UDPRelay: @unchecked Sendable {
 
     private struct PendingQuery {
         var originalTXID: UInt16
+        /// Header and question as relayed. A response must carry the same
+        /// question, as `LocalDNSForwarder` requires of its upstreams.
+        var question: [UInt8]
         var clientAddr: sockaddr_in
         var clientLen: socklen_t
         var sentAt: Date
@@ -153,16 +176,9 @@ package final class UDPRelay: @unchecked Sendable {
         }
     }
 
-    private func runLoop(generation: UInt64, listenFD: Int32, forwardFD: Int32, targetPort: Int, targetHost: String) {
+    private func runLoop(generation: UInt64, listenFD: Int32, forwardFD: Int32) {
         var buf = [UInt8](repeating: 0, count: 12_288)
         var pending: [UInt16: PendingQuery] = [:]
-        var nextRelayTXID: UInt16 = 0
-
-        var targetAddr = sockaddr_in()
-        targetAddr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        targetAddr.sin_family = sa_family_t(AF_INET)
-        targetAddr.sin_port = UInt16(targetPort).bigEndian
-        targetAddr.sin_addr.s_addr = inet_addr(targetHost)
 
         var fds: [pollfd] = [
             pollfd(fd: listenFD, events: Int16(POLLIN), revents: 0),
@@ -194,30 +210,42 @@ package final class UDPRelay: @unchecked Sendable {
                             recvfrom(listenFD, &buf, buf.count, 0, sockPtr, &clientLen)
                         }
                     }
-                    if n >= 2 {
+                    // Not a single-question query: no response to it could
+                    // be checked, so it is not relayed.
+                    if n >= 12, var question = DNSWireFormat.headerAndQuestion(of: Array(buf[0..<n])) {
                         let originalTXID = UInt16(buf[0]) << 8 | UInt16(buf[1])
-                        let relayTXID = nextAvailableRelayTXID(startingAt: &nextRelayTXID, pending: pending)
+                        let relayTXID = nextAvailableRelayTXID(pending: pending)
                         buf[0] = UInt8(relayTXID >> 8)
                         buf[1] = UInt8(relayTXID & 0xFF)
-                        pending[relayTXID] = PendingQuery(
-                            originalTXID: originalTXID,
-                            clientAddr: clientAddr,
-                            clientLen: clientLen,
-                            sentAt: now
-                        )
-                        withUnsafePointer(to: &targetAddr) { ptr in
-                            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                                _ = sendto(forwardFD, buf, n, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                            }
+                        question[0] = buf[0]
+                        question[1] = buf[1]
+                        var sent = Darwin.send(forwardFD, buf, n, 0)
+                        // A refusal left over from an earlier query to a
+                        // target that was not listening is reported on the
+                        // next call; it says nothing about this one.
+                        if sent < 0, errno == ECONNREFUSED { sent = Darwin.send(forwardFD, buf, n, 0) }
+                        if sent == n {
+                            pending[relayTXID] = PendingQuery(
+                                originalTXID: originalTXID,
+                                question: question,
+                                clientAddr: clientAddr,
+                                clientLen: clientLen,
+                                sentAt: now
+                            )
                         }
                     }
                 }
 
-                if fds[1].revents & Int16(POLLIN) != 0 {
+                // POLLERR too: a refusal from a target that is not listening
+                // stays pending on the connected socket, and poll keeps
+                // reporting it until a read collects it.
+                if fds[1].revents & Int16(POLLIN | POLLERR) != 0 {
                     let n = recv(forwardFD, &buf, buf.count, 0)
-                    if n >= 2 {
+                    if n >= 12 {
                         let relayTXID = UInt16(buf[0]) << 8 | UInt16(buf[1])
-                        if var query = pending.removeValue(forKey: relayTXID) {
+                        if let candidate = pending[relayTXID],
+                           DNSWireFormat.responseQuestionMatches(query: candidate.question, response: Array(buf[0..<n])),
+                           var query = pending.removeValue(forKey: relayTXID) {
                             buf[0] = UInt8(query.originalTXID >> 8)
                             buf[1] = UInt8(query.originalTXID & 0xFF)
                             withUnsafePointer(to: &query.clientAddr) { ptr in
@@ -235,15 +263,18 @@ package final class UDPRelay: @unchecked Sendable {
         loopDidExit()
     }
 
-    private func nextAvailableRelayTXID(startingAt next: inout UInt16, pending: [UInt16: PendingQuery]) -> UInt16 {
+    /// Random, so a reply cannot be forged by counting queries. Only the
+    /// target can reach the connected forward socket; this is defence in
+    /// depth behind that.
+    private func nextAvailableRelayTXID(pending: [UInt16: PendingQuery]) -> UInt16 {
+        var candidate = UInt16.random(in: .min ... .max)
         for _ in 0...UInt16.max {
-            let candidate = next
-            next &+= 1
             if pending[candidate] == nil {
                 return candidate
             }
+            candidate &+= 1
         }
-        return next
+        return candidate
     }
 
     private var errnoMessage: String {
@@ -254,6 +285,7 @@ package final class UDPRelay: @unchecked Sendable {
 package enum UDPRelayError: Error, LocalizedError {
     case socketCreationFailed(String)
     case bindFailed(Int, String)
+    case connectFailed(Int, String)
 
     package var errorDescription: String? {
         switch self {
@@ -261,6 +293,8 @@ package enum UDPRelayError: Error, LocalizedError {
             return "Failed to create UDP socket: \(msg)"
         case .bindFailed(let port, let msg):
             return "Failed to bind port \(port): \(msg)"
+        case .connectFailed(let port, let msg):
+            return "Failed to connect to relay target port \(port): \(msg)"
         }
     }
 }

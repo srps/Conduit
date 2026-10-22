@@ -398,6 +398,17 @@ package enum DNSWireFormat {
         return DNSQuestion(labels: labels, type: type, klass: klass)
     }
 
+    /// The header and single question of `query`, without anything after it.
+    /// Enough to check a response with `responseQuestionMatches` while holding
+    /// far less than the whole datagram. Nil unless there is exactly one
+    /// readable question.
+    package static func headerAndQuestion(of query: [UInt8]) -> [UInt8]? {
+        guard hasExactlyOneQuestion(query) else { return nil }
+        var offset = 12
+        guard readName(in: query, offset: &offset) != nil, offset + 4 <= query.count else { return nil }
+        return Array(query[0..<(offset + 4)])
+    }
+
     private static func hasExactlyOneQuestion(_ bytes: [UInt8]) -> Bool {
         guard bytes.count >= 12, readUInt16(from: bytes, at: 4) == 1 else { return false }
         return readQuestion(in: bytes) != nil
