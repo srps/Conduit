@@ -95,6 +95,7 @@ enum PMSim {
               network-location-recovery  inactive-location recovery, external edits, and write races
               environment-drift       A silently wiped shell environment is repaired with its events; repeats are withheld past the budget; an unsafe profile is left alone (#175)
               journal-integrity       A journal from a newer Conduit fails closed, is kept and reported; a failing disk is one event per episode; version 1 reads in every shape (#182, #191)
+              split-dns-helper-retry  A refused split-DNS entry-file removal is retried once the helper is available, against the VPN state then (#165)
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
               settings-retry-request  A refused settings action is retried from its own save, not a later edit (#176)
               reapply-retry           A failed or partial environment re-apply is reported and retried by its drift pass; repeats are abandoned (#194)
@@ -266,6 +267,7 @@ enum PMSim {
         "network-location-recovery",
         "environment-drift",
         "journal-integrity",
+        "split-dns-helper-retry",
         "lifecycle-stop-overtakes-start",
         "settings-retry-request",
         "reapply-retry",
@@ -434,6 +436,8 @@ enum PMSim {
             return [try EnvironmentDriftScenarios.run()]
         case "journal-integrity":
             return [try JournalIntegrityScenarios.run()]
+        case "split-dns-helper-retry":
+            return [try SplitDNSRepairScenarios.run()]
         case "lifecycle-stop-overtakes-start":
             return [try await LifecycleScenarios.stopOvertakesStart()]
         case "settings-retry-request":
