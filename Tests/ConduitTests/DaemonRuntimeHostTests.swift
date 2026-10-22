@@ -1521,6 +1521,48 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// pending finds the helper available and removes the entry file. While
     /// the helper still refuses, nothing is retried. Twin of
     /// `AppStateHarnessTests.testThePendingRepairsHelperCheckFindsAHelperInstalledOutsideTheApp`.
+    /// PR #211 review, twin of
+    /// `AppStateHarnessTests.testARefusedRemovalOnAConfigEditIsRetriedWhenTheHelperIsAvailable`:
+    /// a reload renames the entry while the helper refuses; the old file,
+    /// named only by the journal, is swept once the check finds the helper.
+    func testARefusedRemovalOnAConfigReloadIsRetriedWhenTheHelperIsAvailable() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
+        harness.splitDNSHelperCheckInterval = .milliseconds(20)
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"))
+
+        harness.machine.privilege.failingDomains = ["corp.example"]
+        config.dnsEntries = [DomainDNSEntry(domain: "renamed.example", servers: ["10.0.0.53"])]
+        try ProxyConfigPersistence.save(config, in: harness.environment)
+        await host.reloadConfiguration()
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the removal was refused")
+        XCTAssertNotNil(harness.machine.resolverFile(for: "renamed.example"))
+        let events = host.orchestrator.eventLog
+        XCTAssertEqual(events.events.first { $0.event == "platform.split_dns_failed" }?.detail?
+            .hasPrefix("operation=apply source=config_change attempt=1"), true)
+
+        harness.machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        for _ in 0..<3_000 where harness.machine.resolverFile(for: "corp.example") != nil {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await host.deliveries.drain()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the old domain's file is swept")
+        XCTAssertNotNil(harness.machine.resolverFile(for: "renamed.example"))
+        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_repaired" }.count, 1)
+        await host.stopRuntime()
+    }
+
     func testAFailedRemovalIsRetriedWhenTheHelperCheckFindsTheHelperAvailable() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0

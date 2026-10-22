@@ -34,6 +34,10 @@ package struct SplitDNSEntryFileRepair: Sendable {
     /// Which path ran the operation.
     package enum Source: String, Sendable, Equatable {
         case vpnTransition = "vpn_transition"
+        /// A live config edit's reconcile (`DNSManager.reconcile`), which
+        /// removes the files of entries deleted or renamed. A refused removal
+        /// there leaves a file only the journal names, which the retry sweeps.
+        case configChange = "config_change"
         case start
         case stop
         case retry

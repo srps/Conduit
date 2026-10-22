@@ -1409,11 +1409,22 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
 
         if pass.diff.dnsChanged, platform.manageDNSResolvers, !pass.resolversFollowTheirFlag,
            pass.runtime.proxyIsUp || pass.runtime.dnsIsUp {
+            // With the tunnel up the reconcile writes the new entries; either
+            // way it removes the files the new config no longer names, and a
+            // refused removal there leaves a file only the journal names.
+            let operation: SplitDNSEntryFileRepair.Operation = splitDNSGate.entriesWanted ? .apply : .remove
+            var entryFiles: SplitDNSEntryFileRepair.Outcome?
             DNSResolverReconciliation.run(
                 after: "config reload",
                 logger: logger,
                 reconcile: {
-                    try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
+                    do {
+                        try dnsManager.reconcile(old: old, new: new, logger: logger, vpnConnected: splitDNSGate.entriesWanted)
+                        entryFiles = .succeeded(operation)
+                    } catch {
+                        entryFiles = .failed(operation, error)
+                        throw error
+                    }
                 },
                 // `applyConfigChange` restarted the forwarder if the DNS
                 // section changed, possibly onto a different port, and
@@ -1425,6 +1436,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
                     try refreshInterceptFiles(for: new)
                 }
             )
+            recordSplitDNS(entryFiles, source: .configChange)
         }
 
         // The listener endpoint is in every advertised surface; the bypass
