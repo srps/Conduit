@@ -115,6 +115,20 @@ package final class EnvironmentManager: @unchecked Sendable {
     package struct ApplyResult: Equatable, Sendable {
         package var profiles: [ProfileTarget: ProfileOutcome]
         package var launchd: LaunchdOutcome
+
+        /// What the apply left short of the config, as an event's `reason=`,
+        /// or nil when it wrote everything. `apply` does not throw for these,
+        /// so a caller that only catches reads a partial apply as a success
+        /// (#194). Names only, never a value.
+        package var shortfall: String? {
+            let profilesLeft = profiles.compactMap { target, outcome -> String? in
+                if case .skipped = outcome { return target.rawValue }
+                return nil
+            }.sorted()
+            let launchdLeft = (launchd.failed + launchd.unreadable + launchd.withheld).sorted()
+            guard !profilesLeft.isEmpty || !launchdLeft.isEmpty else { return nil }
+            return "partial profiles_left=\(profilesLeft.joined(separator: ",")) launchd_left=\(launchdLeft.joined(separator: ","))"
+        }
     }
 
     package var targetFiles: [URL] {
