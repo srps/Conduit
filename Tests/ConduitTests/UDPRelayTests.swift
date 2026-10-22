@@ -63,7 +63,7 @@ final class UDPRelayTests: XCTestCase {
         }
         echoThread.start()
 
-        let payload: [UInt8] = [0x00, 0x01, 0xAB, 0xCD]
+        let payload = DNSWireFormat.buildQuery(domain: "second.example", txID: 0x0001)
         let response = sendAndReceiveUDP(host: "127.0.0.1", port: portB, payload: payload, timeoutSec: 3)
         XCTAssertEqual(response, payload, "the second relay must still forward after the first loop has left")
     }
@@ -143,17 +143,21 @@ final class UDPRelayTests: XCTestCase {
     }
 
     private func send(from fd: Int32, to port: Int, _ payload: [UInt8]) {
+        XCTAssertEqual(Self.sendDatagram(from: fd, to: port, payload), payload.count)
+    }
+
+    /// Static so a `@Sendable` closure can send without capturing the test case.
+    private static func sendDatagram(from fd: Int32, to port: Int, _ payload: [UInt8]) -> Int {
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(port).bigEndian
         addr.sin_addr.s_addr = inet_addr("127.0.0.1")
-        let sent = withUnsafePointer(to: &addr) { ptr in
+        return withUnsafePointer(to: &addr) { ptr in
             ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
                 sendto(fd, payload, payload.count, 0, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
-        XCTAssertEqual(sent, payload.count)
     }
 
     func testRelayFailsOnPortConflict() throws {
@@ -224,7 +228,7 @@ final class UDPRelayTests: XCTestCase {
         }
         echoThread.start()
 
-        let payload: [UInt8] = [0xDE, 0xAD, 0xBE, 0xEF]
+        let payload = DNSWireFormat.buildQuery(domain: "forward.example", txID: 0xDEAD)
         let response = sendAndReceiveUDP(host: "127.0.0.1", port: listenPort, payload: payload, timeoutSec: 3)
 
         relay.stop()
@@ -243,7 +247,7 @@ final class UDPRelayTests: XCTestCase {
 
         // Nothing listens on the target, so nothing comes back. Any reply the
         // relay made up would arrive in well under this wait on loopback.
-        let payload: [UInt8] = [0x01, 0x02]
+        let payload = DNSWireFormat.buildQuery(domain: "unanswered.example", txID: 0x0102)
         let response = Self.sendAndReceiveUDPImpl(
             host: "127.0.0.1", port: listenPort, payload: payload, timeoutMS: 200
         )
@@ -274,7 +278,7 @@ final class UDPRelayTests: XCTestCase {
             }
         }
         echoThread.start()
-        let later: [UInt8] = [0x03, 0x04]
+        let later = DNSWireFormat.buildQuery(domain: "later.example", txID: 0x0304)
         XCTAssertEqual(
             sendAndReceiveUDP(host: "127.0.0.1", port: listenPort, payload: later, timeoutSec: 3), later,
             "The relay must keep forwarding after a query its target never answered"
@@ -319,9 +323,7 @@ final class UDPRelayTests: XCTestCase {
             for i: UInt16 in 0..<3 {
                 let port = listenPort
                 group.addTask {
-                    let txidHi = UInt8(i >> 8)
-                    let txidLo = UInt8(i & 0xFF)
-                    let payload: [UInt8] = [txidHi, txidLo, 0xCA, 0xFE]
+                    let payload = DNSWireFormat.buildQuery(domain: "q\(i).example", txID: i)
                     let response = Self.sendAndReceiveUDPStatic(host: "127.0.0.1", port: port, payload: payload, timeoutSec: 3)
                     return (Int(i), response)
                 }
@@ -344,6 +346,117 @@ final class UDPRelayTests: XCTestCase {
                 XCTAssertEqual(rxTxid, UInt16(i), "Response transaction ID should match query \(i)")
             }
         }
+    }
+
+    // MARK: - Response binding
+
+    /// Only the target may answer. Another local process that finds the
+    /// forward socket's port and sends a reply with the pending relay ID first
+    /// must not reach the client.
+    func testReplyFromAnotherSenderIsDiscarded() throws {
+        let target = createUDPSocket(port: 0)
+        XCTAssertGreaterThanOrEqual(target, 0)
+        defer { close(target) }
+        let relay = UDPRelay()
+        try relay.start(listenPort: 0, targetPort: try boundPort(target))
+        defer { relay.stop() }
+
+        let forger = createUDPSocket(port: 0)
+        XCTAssertGreaterThanOrEqual(forger, 0)
+        defer { close(forger) }
+
+        let query = DNSWireFormat.buildQuery(domain: "bank.example", txID: 0x4242)
+        let answer = respondingTarget(target) { relayed, forwardPort in
+            // NXDOMAIN with the right ID and question, from the wrong socket.
+            var forged = relayed
+            forged[2] |= 0x80
+            forged[3] = (forged[3] & 0xF0) | 3
+            XCTAssertEqual(Self.sendDatagram(from: forger, to: forwardPort, forged), forged.count)
+            Thread.sleep(forTimeInterval: 0.1)
+            var genuine = relayed
+            genuine[2] |= 0x80
+            return genuine
+        }
+
+        let response = try XCTUnwrap(
+            sendAndReceiveUDP(host: "127.0.0.1", port: try XCTUnwrap(relay.listeningPort), payload: query, timeoutSec: 3)
+        )
+        answer.join()
+        XCTAssertEqual(Array(response[0..<2]), [0x42, 0x42], "the client's own transaction ID must come back")
+        XCTAssertEqual(DNSWireFormat.extractRCode(from: response), 0, "the forged NXDOMAIN must not be relayed")
+    }
+
+    /// A reply carrying the pending relay ID but another question is not the
+    /// answer to this query, even from the target.
+    func testReplyWithAnotherQuestionIsDiscarded() throws {
+        let target = createUDPSocket(port: 0)
+        XCTAssertGreaterThanOrEqual(target, 0)
+        defer { close(target) }
+        let relay = UDPRelay()
+        try relay.start(listenPort: 0, targetPort: try boundPort(target))
+        defer { relay.stop() }
+
+        let query = DNSWireFormat.buildQuery(domain: "asked.example", txID: 0x0707)
+        let answer = respondingTarget(target) { relayed, _ in
+            var wrong = DNSWireFormat.buildQuery(domain: "other.example", txID: 0)
+            wrong[0] = relayed[0]
+            wrong[1] = relayed[1]
+            wrong[2] |= 0x80
+            return wrong
+        }
+
+        let response = sendAndReceiveUDP(
+            host: "127.0.0.1", port: try XCTUnwrap(relay.listeningPort), payload: query, timeoutSec: 1
+        )
+        answer.join()
+        XCTAssertNil(response, "an answer to another question must not reach the client")
+    }
+
+    func testNonDNSDatagramIsNotRelayed() throws {
+        let target = createUDPSocket(port: 0)
+        XCTAssertGreaterThanOrEqual(target, 0)
+        defer { close(target) }
+        XCTAssertEqual(fcntl(target, F_SETFL, O_NONBLOCK), 0)
+        let relay = UDPRelay()
+        try relay.start(listenPort: 0, targetPort: try boundPort(target))
+        defer { relay.stop() }
+
+        XCTAssertNil(sendAndReceiveUDP(
+            host: "127.0.0.1", port: try XCTUnwrap(relay.listeningPort), payload: [0xDE, 0xAD, 0xBE, 0xEF], timeoutSec: 1
+        ))
+        var buf = [UInt8](repeating: 0, count: 64)
+        XCTAssertEqual(recv(target, &buf, buf.count, 0), -1, "a datagram with no question must not be forwarded")
+    }
+
+    private final class Responder: @unchecked Sendable {
+        let done = DispatchSemaphore(value: 0)
+        func join() { _ = done.wait(timeout: .now() + 5) }
+    }
+
+    /// Reads one relayed query on `target` and sends back what `reply` makes
+    /// of it, given the query and the relay's forward-socket port.
+    private func respondingTarget(_ target: Int32, reply: @escaping @Sendable ([UInt8], Int) -> [UInt8]) -> Responder {
+        let responder = Responder()
+        let thread = Thread {
+            defer { responder.done.signal() }
+            var tv = timeval(tv_sec: 3, tv_usec: 0)
+            setsockopt(target, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            var buf = [UInt8](repeating: 0, count: 4096)
+            var addr = sockaddr_in()
+            var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+            let n = withUnsafeMutablePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { recvfrom(target, &buf, buf.count, 0, $0, &addrLen) }
+            }
+            guard n > 0 else { return }
+            let response = reply(Array(buf[0..<n]), Int(UInt16(bigEndian: addr.sin_port)))
+            withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    _ = sendto(target, response, response.count, 0, $0, addrLen)
+                }
+            }
+        }
+        thread.start()
+        return responder
     }
 
     // MARK: - Helpers
