@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Foundation
 import ProxyKernel
 
 /// The side of a runtime host (`AppState`, `DaemonRuntimeHost`) a reconcile pass talks to. A protocol rather than
@@ -124,7 +125,15 @@ package final class RuntimeReconciler {
     /// can reach it again without whatever the host has been edited to
     /// since (#176).
     package private(set) var requestedConfig: ProxyConfig
-    package private(set) var requestedPlatformConfig: PlatformIntegrationConfig
+    package private(set) var requestedPlatformConfig: PlatformIntegrationConfig {
+        didSet { platformRequest.set(requestedPlatformConfig) }
+    }
+    /// `requestedPlatformConfig`, readable from the platform queue. A flag
+    /// action runs on the main actor, not on that queue, so platform work
+    /// queued before a save can run after the save's clear: work that must
+    /// not act on a switch a later save moved checks this under its
+    /// manager's lock (#194).
+    package nonisolated let platformRequest: PlatformRequestFence
 
     package weak var host: (any RuntimeReconcilerHost)?
 
@@ -138,6 +147,7 @@ package final class RuntimeReconciler {
         self.lastReconciledConfig = config
         self.lastReconciledPlatformConfig = platformConfig
         self.requestedConfig = config
+        self.platformRequest = PlatformRequestFence(platformConfig)
         self.requestedPlatformConfig = platformConfig
         self.host = host
     }
@@ -307,5 +317,22 @@ package final class RuntimeReconciler {
             guard lastReconciledPlatformConfig.launchAtLogin == new.launchAtLogin else { return }
             lastReconciledPlatformConfig.launchAtLogin = old.launchAtLogin
         }
+    }
+}
+
+/// The platform flags the last save asked for, readable from any thread.
+/// Written only by `RuntimeReconciler`.
+package final class PlatformRequestFence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: PlatformIntegrationConfig
+
+    init(_ value: PlatformIntegrationConfig) {
+        self.value = value
+    }
+
+    package var current: PlatformIntegrationConfig { lock.withLock { value } }
+
+    fileprivate func set(_ value: PlatformIntegrationConfig) {
+        lock.withLock { self.value = value }
     }
 }
