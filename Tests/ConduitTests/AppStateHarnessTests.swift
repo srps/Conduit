@@ -2371,6 +2371,40 @@ final class AppStateHarnessTests: XCTestCase {
         await appState.stopProxy()
     }
 
+    /// PR #211 review: a busy reading keeps `.installed` on display (#210),
+    /// but is no evidence the helper takes writes. No retry until the busy
+    /// recheck reads it answering.
+    func testABusyHelperReadingDoesNotRetryUntilTheRecheckFindsItAnswering() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
+        harness.helperBusyRecheckDelay = .milliseconds(20)
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        await harness.settle("the launch preflight found the helper") { appState.helperStatus == .installed }
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        machine.privilege.failingDomains = ["corp.example"]
+        await harness.setVPN(.disconnected(reason: .networkLost))
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
+        let retriesBefore = events(appState, "platform.split_dns_retry").count
+
+        harness.helper.status = .busy
+        machine.privilege.failingDomains = []
+        appState.refreshPreflight()
+        await harness.settle("the busy reading is noted") { appState.helperCheckingAgain }
+        await harness.deliveries()
+        XCTAssertEqual(appState.helperStatus, .installed, "the held verdict")
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "no retry on a busy reading")
+        XCTAssertEqual(events(appState, "platform.split_dns_retry").count, retriesBefore)
+
+        harness.helper.status = .installed
+        await harness.settle("the recheck reads the helper answering and the retry removes the file") {
+            machine.resolverFile(for: "corp.example") == nil
+        }
+        await harness.deliveries()
+        XCTAssertEqual(events(appState, "platform.split_dns_retry").last?.contains("trigger=helper_available"), true)
+        await appState.stopProxy()
+    }
+
     /// A burst of reports from the observer, delivered without waiting for
     /// each other: every one is stamped on the observer's turn and runs
     /// through both order gates (the split-DNS gate's and the

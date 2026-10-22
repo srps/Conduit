@@ -2203,7 +2203,10 @@ final class AppState: ObservableObject {
                 if helperBecameAvailable {
                     self.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
                 }
-                self.observeHelperForSplitDNS(available: helperStatus == .installed, trigger: "helper_available")
+                // The raw reading, not the held verdict: `.busy` keeps `.installed`
+                // on display, but is no evidence the helper takes writes (#210).
+                // The busy recheck brings the conclusive reading here.
+                self.observeHelperForSplitDNS(available: reading == .installed, trigger: "helper_available")
             }
         }
     }
