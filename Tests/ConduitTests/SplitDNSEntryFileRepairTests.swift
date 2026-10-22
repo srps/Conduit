@@ -221,6 +221,30 @@ final class SplitDNSEntryFileRepairTests: XCTestCase {
         XCTAssertFalse(manager.unconfiguredRecordedFilesPresent(config: edited))
     }
 
+    /// Codex review of PR #211: a live edit disables an intercept rule and
+    /// the helper refuses the removal `reconcile` makes. The rule is still in
+    /// the config, but its file is stale, so the retry's sweep removes it
+    /// rather than settling on a file left in place.
+    func testADisabledInterceptRulesFileIsResidueAndSwept() throws {
+        var config = makeConfig()
+        config.transparentProxyEnabled = true
+        config.dnsInterceptRules = [DNSInterceptRule(pattern: "*.intercept.test")]
+        try manager.applyEntryFiles(config: config, logger: nil)
+        try manager.applyInterceptFiles(config: config, logger: nil)
+        var edited = config
+        edited.dnsInterceptRules[0].enabled = false
+        XCTAssertTrue(manager.unconfiguredRecordedFilesPresent(config: edited), "the disabled rule's file is residue")
+        var repair = SplitDNSEntryFileRepair()
+        repair.record(.failed(.remove, RecordingPrivilegeClient.Refused(operation: .removeDNS, subject: nil)), source: .configChange, report: report)
+        retry(&repair, gate: gate(.connected), config: edited)
+        XCTAssertNil(repair.pending)
+        XCTAssertFalse(manager.unconfiguredRecordedFilesPresent(config: edited))
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: machine.resolverDirectory.appendingPathComponent("intercept.test").path),
+            "the disabled rule's override is gone after the repair"
+        )
+    }
+
     /// Codex review of PR #211: an edit that only recapitalizes an entry,
     /// with the old spelling's record left by a refused removal. On a
     /// case-insensitive volume both names are one file, so the retry's
