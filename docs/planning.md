@@ -142,7 +142,9 @@ Keychain, the user's Kerberos cache, and CFNetwork behavior in the LaunchAgent
 session; a user-space process is not sufficient evidence of every session behavior.
 
 Follow [`design-daemon-first-control-plane.md`](./design-daemon-first-control-plane.md)
-with these delivery boundaries:
+with these delivery boundaries. Before step 3, both hosts converge on one
+host-neutral `RuntimeHost` ([decision 0001](./decisions/0001-one-runtime-host.md),
+#186), so step 3 swaps the in-process host for `DaemonClient`:
 
 1. Wire a bounded production server to the existing protocol/client/bridge. Implement
    status/start/stop/reload and event access, then upstream tests. Validate versions
@@ -168,12 +170,13 @@ Acceptance evidence:
 
 ## Secure GitHub Releases updating
 
-The near-term update feature ([#111](https://github.com/srps/Conduit/issues/111))
-provides manual checks, opt-in automatic checks, release notes, deferral, and an
-explicit Install Update and Restart action. Prefer Sparkle 2 with an HTTPS appcast,
-architecture-specific release ZIPs, Ed25519 archive signatures, and a public
-verification key embedded in the app. Adding the updater dependency requires the
-normal dependency review.
+The update feature ([#111](https://github.com/srps/Conduit/issues/111)) shipped in
+0.5 ([decision 0010](./decisions/0010-self-update.md)). It provides manual checks,
+opt-in automatic checks, release notes, deferral, and an explicit Install Update
+and Restart action. It uses Sparkle 2 in a nested updater process, the only target
+that links it, with an HTTPS appcast, Apple Silicon release ZIPs, EdDSA archive
+signatures, and a public verification key embedded in the app. The acceptance
+evidence below that is still owed is tracked on #111.
 
 Published releases are signed with the self-signed release certificate
 (`docs/release-signing.md`), which the helper pin admits beside the installed
@@ -264,7 +267,7 @@ they mark warning. Event inspectors, upstream history, and connection metrics ne
 bounded retention and redaction. Audit existing unit/scenario coverage before adding
 scenario names; each new runtime behavior still needs tests and a simulator.
 
-**Distribution:** secure archive updating is near-term and independent of
+**Distribution:** secure archive updating shipped in 0.5, independent of
 Developer ID/notarization or zero-downtime handoff. Signed helper lifecycle,
 Data Protection Keychain, and any DNS Network Extension need their own signing,
 access-group, entitlement/distribution, upgrade, and rollback validation. Signing
