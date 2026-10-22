@@ -101,7 +101,14 @@ struct AppWindow: View {
             // its value, and `HostListEditor` tidies its rows, on the same
             // Return, and the commit must carry both.
             .onSubmit { Task { @MainActor in appState.commitPendingEdit(trigger: .submit) } }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+            // An overlay, which takes no part in layout. Inserting the note
+            // as a `safeAreaInset` or a stacked row grew the window content
+            // past the window when a list row was added: the sidebar and
+            // the section scrolled out of place, the note itself off-screen.
+            // The margin lets the last rows scroll clear of it.
+            .contentMargins(.bottom, appState.listenerEditAwaitingCommit ? PendingListenerEditNote.height : 0,
+                            for: .scrollContent)
+            .overlay(alignment: .bottom) {
                 if appState.listenerEditAwaitingCommit {
                     // Clicking Apply leaves the field editing, its typed
                     // text not yet in the draft: end editing, then commit.
@@ -124,6 +131,9 @@ struct AppWindow: View {
 /// Shown while an edit to a port, host, listener switch, the DNS section,
 /// the local PAC server or a tunnel waits for its commit.
 private struct PendingListenerEditNote: View {
+    /// Room the section's scroll content leaves under the note.
+    static let height: CGFloat = 52
+
     let apply: () -> Void
 
     var body: some View {
