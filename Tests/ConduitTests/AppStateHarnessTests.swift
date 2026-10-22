@@ -53,6 +53,9 @@ final class AppStateHarness {
     /// Long, so a failed re-apply's retry never lands inside a scenario
     /// about something else; the retry scenarios pass short ones (#194).
     var reapplyRetrySchedule = ConfigReapplyRetry.Schedule(delays: [.seconds(3600)])
+    /// Long, so a split-DNS helper check never lands inside a scenario about
+    /// something else; the check's own scenario passes a short one (#165).
+    var splitDNSHelperCheckInterval: Duration = .seconds(3600)
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
     private(set) var appState: AppState?
@@ -104,6 +107,7 @@ final class AppStateHarness {
             settingsSaveDebounce: settingsSaveDebounce,
             environmentDriftInterval: environmentDriftInterval,
             reapplyRetrySchedule: reapplyRetrySchedule,
+            splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
             homeDirectory: homeDirectory,
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
@@ -2239,6 +2243,97 @@ final class AppStateHarnessTests: XCTestCase {
 
         await harness.setVPN(.connected)
         XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the entry file is back")
+    }
+
+    private func events(_ appState: AppState, _ name: String) -> [String] {
+        appState.eventLog.events.filter { $0.event == name }.map { $0.detail ?? "" }
+    }
+
+    /// #165, as reported: the helper refuses this build, so the removal on a
+    /// VPN drop fails and the entry file stays with the tunnel down (the
+    /// bootstrap deadlock `SplitDNSVPNGate` exists for). Reinstalling the
+    /// helper from the app removes it, without another VPN report.
+    func testAFailedRemovalIsRetriedWhenAnInstallMakesTheHelperAvailable() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true), helperSocketBindWait: .milliseconds(1))
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        await harness.launchRecovery()
+        appState.refreshPreflight()
+        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
+
+        machine.privilege.failingDomains = ["corp.example"]
+        await harness.setVPN(.disconnected(reason: .networkLost))
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the removal was refused")
+        XCTAssertEqual(events(appState, "platform.split_dns_failed").count, 1)
+
+        machine.privilege.failingDomains = []
+        appState.installHelper()
+        await harness.settle("the reinstalled helper removes the entry file") {
+            machine.resolverFile(for: "corp.example") == nil
+        }
+        await harness.deliveries()
+        XCTAssertEqual(events(appState, "platform.split_dns_retry"), ["operation=remove trigger=helper_available managed=true attempt=2"])
+        XCTAssertEqual(events(appState, "platform.split_dns_repaired"), ["operation=remove by=retry failed=remove attempts=1"])
+        XCTAssertTrue(isRunning(appState), "repaired without restarting the proxy")
+        await appState.stopProxy()
+    }
+
+    /// The other direction: the start's write is refused with the tunnel up,
+    /// and the first preflight that finds the helper available writes it.
+    func testAFailedStartWriteIsRetriedWhenThePreflightFindsTheHelperAvailable() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        await harness.launchRecovery()
+        appState.refreshPreflight()
+        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
+        await harness.setVPN(.connected)
+        machine.privilege.failingDomains = ["corp.example"]
+        try await appState.startProxy()
+        XCTAssertNil(machine.resolverFile(for: "corp.example"))
+        XCTAssertEqual(events(appState, "platform.split_dns_failed").first?.hasPrefix("operation=apply source=start attempt=1"), true)
+
+        machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        appState.refreshPreflight()
+        await harness.settle("the entry file is written") {
+            machine.resolverFile(for: "corp.example") == "nameserver 10.0.0.53"
+        }
+        await harness.deliveries()
+        XCTAssertEqual(events(appState, "platform.split_dns_repaired"), ["operation=apply by=retry failed=apply attempts=1"])
+        await appState.stopProxy()
+    }
+
+    /// A helper installed from outside the app (`sudo ./install-helper.sh`)
+    /// sends it nothing; the check that runs while a repair is pending finds
+    /// it. A check that finds it still refusing retries nothing, so no
+    /// write reaches a helper that is not there to take it.
+    func testThePendingRepairsHelperCheckFindsAHelperInstalledOutsideTheApp() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
+        harness.splitDNSHelperCheckInterval = .milliseconds(20)
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        machine.privilege.failingDomains = ["corp.example"]
+        await harness.setVPN(.disconnected(reason: .userInitiated))
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
+        let removals = machine.privilege.commands(matching: .removeDNS).count
+        try await Task.sleep(for: .milliseconds(200))
+        await harness.deliveries()
+        XCTAssertEqual(machine.privilege.commands(matching: .removeDNS).count, removals, "no retry while the helper refuses")
+
+        machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        await harness.settle("the check finds the helper and the retry removes the file") {
+            machine.resolverFile(for: "corp.example") == nil
+        }
+        await harness.deliveries()
+        XCTAssertEqual(events(appState, "platform.split_dns_retry").first?.contains("trigger=helper_check"), true)
+        XCTAssertEqual(events(appState, "platform.split_dns_repaired").count, 1)
+        await appState.stopProxy()
     }
 
     /// A burst of reports from the observer, delivered without waiting for

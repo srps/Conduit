@@ -137,6 +137,7 @@ Ordered by how likely they are to bite. None is changed by this audit; each need
 | F5 | Helper socket bind wait (1 s) | `AppState.swift:269` | One preflight re-read after an install. A not-yet-bound helper then reads as F1. | No. | bound | |
 | F6 | Updater limits (background check 300 s, exit grace 0.5 s, download 30 s/120 s, preflight commands 30 s) | `UpdaterController.swift:15`, `:18`; `UpdatePreflight.swift:37`, `:47` | One check, download or preflight fails and is reported. | No. | bound | |
 | F7 | Update schedule (24 h; 10 min after launch) | `AppUpdates.swift:174`, `:175` | When the next background check runs. | No. | bound | |
+| F8 | Split-DNS helper check while a repair is pending (60 s, doubling after each failed retry up to 16 min; added after the audit, #165) | `SplitDNSEntryFileRepair.helperCheckInterval`, `.helperCheckBackoffLimit`; `scheduleSplitDNSHelperCheck` in both hosts | Asks the helper for its status; only an `.installed` answer leads to a retry, which acts on the VPN gate and run state of that moment (`platform.split_dns_retry`). An unanswered or refused ping retries nothing. Ends when nothing is pending. | No: it gathers evidence, and the doubling rate-limits a repair. | backstop | |
 
 ## G. Hosts: autosave, reconcile and drift
 

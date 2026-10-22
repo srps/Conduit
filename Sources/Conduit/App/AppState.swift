@@ -262,6 +262,14 @@ final class AppState: ObservableObject {
     /// shared with `DaemonRuntimeHost`). Fed by `handleVPNStateChange`;
     /// every resolver-file apply path consults `entriesWanted`.
     private var splitDNSGate = SplitDNSVPNGate()
+    /// A failed entry-file write or removal, retried once the helper is
+    /// seen available (#165). Twin of `DaemonRuntimeHost.splitDNSRepair`.
+    private var splitDNSRepair = SplitDNSEntryFileRepair()
+    /// While a repair is pending, asks the helper for its status every
+    /// `splitDNSHelperCheckInterval` (backed off); gone otherwise.
+    private var splitDNSHelperCheck: Task<Void, Never>?
+    private let splitDNSHelperCheckInterval: Duration
+    private var splitDNSRetryInFlight = false
     /// Stamps VPN reports on the monitor's callback; the split-DNS gate
     /// and the orchestrator each apply only reports newer than the last
     /// they applied, since deliveries can land out of order (#155).
@@ -307,6 +315,7 @@ final class AppState: ObservableObject {
         settingsSaveDebounce: Duration = .seconds(1),
         environmentDriftInterval: Duration = .seconds(300),
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
+        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
         homeDirectory: URL,
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
@@ -386,6 +395,7 @@ final class AppState: ObservableObject {
         self.settingsSaveDebounce = settingsSaveDebounce
         self.environmentDriftInterval = environmentDriftInterval
         self.reapplyRetrySchedule = reapplyRetrySchedule
+        self.splitDNSHelperCheckInterval = splitDNSHelperCheckInterval
         self.commandRunner = commandRunner
         self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
@@ -1480,7 +1490,8 @@ final class AppState: ObservableObject {
             // its clear; applying now would put the surfaces back after it.
             guard proxyStartIsCurrent(token) else { return false }
 
-            let entriesWantedAtApply = await applyProxyStartSurfaces(token)
+            let (entriesWantedAtApply, entryFiles) = await applyProxyStartSurfaces(token)
+            recordSplitDNS(entryFiles, source: .start)
             // A stop issued while the apply was out queued its clear behind
             // it, so the machine ends cleared; what must not happen now is
             // the rest of a start for a runtime that is down.
@@ -1491,12 +1502,13 @@ final class AppState: ObservableObject {
             // the tunnel reaches, left with the tunnel down. Put them where
             // the gate is now.
             if committedPlatformConfig.manageDNSResolvers, splitDNSGate.entriesWanted != entriesWantedAtApply {
-                splitDNSGate.reconcileEntryFiles(
+                let outcome = splitDNSGate.reconcileEntryFiles(
                     config: runtimeConfig,
                     dnsManager: dnsManager,
                     logger: logStore,
                     runtimeStarted: true
                 )
+                recordSplitDNS(outcome, source: .vpnTransition)
             }
 
             // Bring the DNS forwarder up with the proxy when the user last
@@ -1567,7 +1579,8 @@ final class AppState: ObservableObject {
         // would take them from a runtime that is coming up.
         guard isCurrent(token, on: proxyLane, "proxy_stop") else { return }
 
-        await clearProxyStopSurfaces(token)
+        let entryFiles = await clearProxyStopSurfaces(token)
+        recordSplitDNS(entryFiles, source: .stop)
         guard isCurrent(token, on: proxyLane, "proxy_stop") else { return }
 
         if postNotification {
@@ -1644,8 +1657,10 @@ final class AppState: ObservableObject {
     /// then sees itself superseded) or after it.
     ///
     /// Returns the VPN gate's `entriesWanted` the entry files were applied
-    /// for, so the caller can tell whether a transition landed meanwhile.
-    private func applyProxyStartSurfaces(_ token: LifecycleLane.Token) async -> Bool {
+    /// for, so the caller can tell whether a transition landed meanwhile, and
+    /// what the entry-file step did, for `splitDNSRepair` (`nil` when it did
+    /// not run).
+    private func applyProxyStartSurfaces(_ token: LifecycleLane.Token) async -> (Bool, SplitDNSEntryFileRepair.Outcome?) {
         let config = runtimeConfig
         let platform = committedPlatformConfig
         let localPACURL = orchestrator.snapshot.bindings.localPACURL
@@ -1657,7 +1672,7 @@ final class AppState: ObservableObject {
         let resolvers = dnsManager
         let logger = logStore
 
-        await platformWork.run {
+        let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
             if platform.manageSystemProxy {
                 systemProxy.serialized {
                     guard !token.isSuperseded else { return }
@@ -1682,42 +1697,46 @@ final class AppState: ObservableObject {
                     }
                 }
             }
-            if platform.manageDNSResolvers {
-                resolvers.serialized {
-                    guard !token.isSuperseded else { return }
-                    if resolvers.isApplied(config: config, vpnConnected: vpnConnected) {
-                        // The write is skipped; the record must not be. See `adoptAppliedFiles`.
-                        resolvers.adoptAppliedFiles(config: config, vpnConnected: vpnConnected)
-                        logger.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
-                    } else {
-                        do {
-                            try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
-                        } catch {
-                            logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
-                        }
-                    }
-                    // The DNS forwarder cannot be running yet, so no intercept
-                    // resolver file may exist — sweep any that a previous instance
-                    // left behind. Termination cleanup removes them on a clean
-                    // quit, but a `SIGKILL` (an installer replacing the app, a
-                    // crash) never runs it, and the files it strands blackhole
-                    // their domains for every process on the machine until
-                    // someone deletes them by hand. Only a *start* can be trusted
-                    // to repair that, so repair it here.
+            guard platform.manageDNSResolvers else { return nil }
+            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Outcome? in
+                guard !token.isSuperseded else { return nil }
+                // With the VPN down, `apply` sweeps the entry files rather than writing them.
+                let operation: SplitDNSEntryFileRepair.Operation = vpnConnected ? .apply : .remove
+                var outcome = SplitDNSEntryFileRepair.Outcome.succeeded(operation)
+                if resolvers.isApplied(config: config, vpnConnected: vpnConnected) {
+                    // The write is skipped; the record must not be. See `adoptAppliedFiles`.
+                    resolvers.adoptAppliedFiles(config: config, vpnConnected: vpnConnected)
+                    logger.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
+                } else {
                     do {
-                        try resolvers.refreshInterceptFiles(
-                            config: config,
-                            interceptReady: interceptReady,
-                            forwarderRunning: forwarderRunning,
-                            logger: logger
-                        )
+                        try resolvers.apply(config: config, logger: logger, vpnConnected: vpnConnected)
                     } catch {
-                        logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                        outcome = .failed(operation, error)
+                        logger.log(.warning, "Could not apply DNS resolvers (non-fatal): \(error.localizedDescription)", category: .system)
                     }
                 }
+                // The DNS forwarder cannot be running yet, so no intercept
+                // resolver file may exist — sweep any that a previous instance
+                // left behind. Termination cleanup removes them on a clean
+                // quit, but a `SIGKILL` (an installer replacing the app, a
+                // crash) never runs it, and the files it strands blackhole
+                // their domains for every process on the machine until
+                // someone deletes them by hand. Only a *start* can be trusted
+                // to repair that, so repair it here.
+                do {
+                    try resolvers.refreshInterceptFiles(
+                        config: config,
+                        interceptReady: interceptReady,
+                        forwarderRunning: forwarderRunning,
+                        logger: logger
+                    )
+                } catch {
+                    logger.log(.warning, "Could not sweep stale intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                }
+                return outcome
             }
         }
-        return vpnConnected
+        return (vpnConnected, entryFiles)
     }
 
     /// Everything a proxy stop clears, as one piece of work on
@@ -1732,7 +1751,10 @@ final class AppState: ObservableObject {
     /// still pointing at the listener that is about to stop (#13). The
     /// ownership reads happen inside the block, after whatever was queued
     /// ahead of it has landed.
-    private func clearProxyStopSurfaces(_ token: LifecycleLane.Token) async {
+    ///
+    /// Returns what the clear did to the split-DNS entry files, for
+    /// `splitDNSRepair`: `nil` when it did not run or the switch is off.
+    private func clearProxyStopSurfaces(_ token: LifecycleLane.Token) async -> SplitDNSEntryFileRepair.Outcome? {
         let config = runtimeConfig
         let platform = committedPlatformConfig
         let systemProxy = systemConduit
@@ -1740,7 +1762,7 @@ final class AppState: ObservableObject {
         let resolvers = dnsManager
         let logger = logStore
 
-        await platformWork.run {
+        return await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
             systemProxy.serialized {
                 guard !token.isSuperseded else { return }
                 guard platform.manageSystemProxy || systemProxy.hasManagedState() else { return }
@@ -1763,18 +1785,22 @@ final class AppState: ObservableObject {
                     logger.log(.warning, "Could not clear environment variables: \(error.localizedDescription)", category: .system)
                 }
             }
-            resolvers.serialized {
-                guard !token.isSuperseded else { return }
+            return resolvers.serialized { () -> SplitDNSEntryFileRepair.Outcome? in
+                guard !token.isSuperseded else { return nil }
                 if platform.manageDNSResolvers {
                     if resolvers.isCleared(config: config) {
                         logger.log(.debug, "DNS resolvers already cleared, skipped.", category: .system)
-                        return
+                        return .succeeded(.remove)
                     }
                     do {
                         try resolvers.clear(config: config, logger: logger)
                     } catch {
                         logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
+                        // Only an entry file left on disk is the repair's; an
+                        // intercept file the clear could not remove is not.
+                        if resolvers.entryFilesPresent(config: config) { return .failed(.remove, error) }
                     }
+                    return .succeeded(.remove)
                 } else if resolvers.hasManagedState() {
                     // Switch off: only what the journal names as ours, never a file
                     // for a configured domain we did not write.
@@ -1784,6 +1810,7 @@ final class AppState: ObservableObject {
                         logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
                     }
                 }
+                return nil
             }
         }
     }
@@ -2160,6 +2187,7 @@ final class AppState: ObservableObject {
                 if helperBecameAvailable {
                     self.deliveries.deliver { [weak self] in await self?.reconcileSystemProxyIfRunning() }
                 }
+                self.observeHelperForSplitDNS(available: helperStatus == .installed, trigger: "helper_available")
             }
         }
     }
@@ -2301,6 +2329,7 @@ final class AppState: ObservableObject {
         environmentDriftTimer?.cancel()
         environmentRepairRetry?.cancel()
         reapplyRetry.cancelAll()
+        splitDNSHelperCheck?.cancel()
         proxyLane.supersedeAll()
         dnsLane.supersedeAll()
         let deadline = terminationDrainDeadlineMilliseconds
@@ -2571,12 +2600,85 @@ final class AppState: ObservableObject {
         default: proxyIsUp = false
         }
 
-        splitDNSGate.reconcileEntryFiles(
+        let outcome = splitDNSGate.reconcileEntryFiles(
             config: runtimeConfig,
             dnsManager: dnsManager,
             logger: logStore,
             runtimeStarted: proxyIsUp
         )
+        recordSplitDNS(outcome, source: .vpnTransition)
+    }
+
+    // MARK: - Split-DNS entry-file repair (#165)
+
+    /// Feeds an entry-file outcome to `splitDNSRepair`, event first and the
+    /// log line derived from it, and keeps the helper check running while
+    /// something is pending.
+    private func recordSplitDNS(_ outcome: SplitDNSEntryFileRepair.Outcome?, source: SplitDNSEntryFileRepair.Source) {
+        guard let outcome else { return }
+        splitDNSRepair.record(outcome, source: source, report: recordSplitDNSEvent)
+        scheduleSplitDNSHelperCheck()
+    }
+
+    private func recordSplitDNSEvent(_ event: RuntimeEvent, level: LogLevel) {
+        orchestrator.eventLog.append(event)
+        logStore.log(level, "Split DNS: \(event.event) \(event.detail ?? "")", category: .system)
+    }
+
+    /// One observation of the helper: from the preflight, which runs at
+    /// launch, after an install and on a Settings refresh, or from the check
+    /// below. A retry waits for the start or stop in flight.
+    private func observeHelperForSplitDNS(available: Bool, trigger: String) {
+        guard splitDNSRepair.shouldRetry(helperAvailable: available), !splitDNSRetryInFlight else { return }
+        splitDNSRetryInFlight = true
+        deliveries.deliver { [weak self] in await self?.retrySplitDNSEntryFiles(trigger: trigger) }
+    }
+
+    private func retrySplitDNSEntryFiles(trigger: String) async {
+        defer { splitDNSRetryInFlight = false }
+        await awaitLaunchRecovery()
+        while !proxyLane.isIdle { await proxyLane.waitUntilIdle() }
+        // Nothing suspends from here on: the decision and the write see the
+        // same gate state (`SplitDNSEntryFileRepair.retry`).
+        guard splitDNSRepair.pending != nil, !rejectUnavailableConfiguration() else { return }
+        splitDNSRepair.retry(
+            trigger: trigger,
+            gate: splitDNSGate,
+            config: runtimeConfig,
+            resolversManaged: committedPlatformConfig.manageDNSResolvers,
+            dnsManager: dnsManager,
+            logger: logStore,
+            runtimeStarted: runtimeState().proxyIsUp,
+            report: recordSplitDNSEvent
+        )
+        scheduleSplitDNSHelperCheck()
+    }
+
+    /// While a repair is pending, asks the helper for its status after
+    /// `SplitDNSEntryFileRepair.helperCheckDelay`, one check at a time: an
+    /// install from outside the app (`sudo ./install-helper.sh`) sends this
+    /// host nothing. A backstop that gathers evidence and decides nothing.
+    private func scheduleSplitDNSHelperCheck() {
+        guard splitDNSRepair.pending != nil, splitDNSHelperCheck == nil else { return }
+        let base = splitDNSHelperCheckInterval
+        let helperLifecycle = self.helperLifecycle
+        splitDNSHelperCheck = Task { @MainActor [weak self] in
+            while let delay = self?.splitDNSHelperCheckDelay(base: base) {
+                do { try await Task.sleep(for: delay) }
+                catch { return } // Cancelled at quit.
+                guard self?.splitDNSRepair.pending != nil else { break }
+                let status = await withCheckedContinuation { continuation in
+                    DispatchQueue.global(qos: .utility).async { continuation.resume(returning: helperLifecycle.status) }
+                }
+                self?.observeHelperForSplitDNS(available: status == .installed, trigger: "helper_check")
+            }
+            self?.splitDNSHelperCheck = nil
+        }
+    }
+
+    /// `nil` once nothing is pending, which ends the check.
+    private func splitDNSHelperCheckDelay(base: Duration) -> Duration? {
+        splitDNSRepair.pending == nil ? nil : splitDNSRepair.helperCheckDelay(base: base)
     }
 
     /// One pass and one pending retry; never queues a helper call per report.

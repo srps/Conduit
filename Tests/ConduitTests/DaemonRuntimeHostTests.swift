@@ -381,6 +381,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
         /// Holds one machine call, subprocess or privileged, when armed.
         let hold = HeldCall()
         let secrets = InMemorySecretStore()
+        /// The helper status the split-DNS check reads; never the installed helper.
+        let helper = FakeHelperLifecycle()
+        /// Long, so a split-DNS helper check never lands inside a scenario
+        /// about something else; the check's own scenario passes a short one.
+        var splitDNSHelperCheckInterval: Duration = .seconds(3600)
         private let stateDirectory: URL
         /// The scratch home the host edits shell profiles in.
         var homeDirectory: URL { stateDirectory.appendingPathComponent("home", isDirectory: true) }
@@ -431,6 +436,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 dnsResponds: FakeDNSProbe().responds(onPort:),
                 networkPathDebounce: networkPathDebounce,
                 reapplyRetrySchedule: reapplyRetrySchedule,
+                helperStatus: helper,
+                splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
                 homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
                 resolverDirectory: machine.resolverDirectory.path
             )
@@ -1509,6 +1516,51 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// during its first start, so the drop here is emitted through a fake
     /// the test starts itself, standing in for a delivery already queued.
     /// Twin of `AppStateHarnessTests.testAVPNDropWhileTheStartAppliesLeavesNoEntryFile`.
+    /// #165 in this host, which hears of no helper install: the removal on a
+    /// VPN drop is refused, and the check that runs while the repair is
+    /// pending finds the helper available and removes the entry file. While
+    /// the helper still refuses, nothing is retried. Twin of
+    /// `AppStateHarnessTests.testThePendingRepairsHelperCheckFindsAHelperInstalledOutsideTheApp`.
+    func testAFailedRemovalIsRetriedWhenTheHelperCheckFindsTheHelperAvailable() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
+        harness.splitDNSHelperCheckInterval = .milliseconds(20)
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"))
+
+        harness.machine.privilege.failingDomains = ["corp.example"]
+        harness.vpn.emit(.disconnected(reason: .networkLost))
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the removal was refused")
+        let events = host.orchestrator.eventLog
+        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_failed" }.count, 1)
+        let removals = harness.machine.privilege.commands(matching: .removeDNS).count
+        try await Task.sleep(for: .milliseconds(200))
+        await host.deliveries.drain()
+        XCTAssertEqual(harness.machine.privilege.commands(matching: .removeDNS).count, removals, "no retry while the helper refuses")
+
+        harness.machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        for _ in 0..<3_000 where harness.machine.resolverFile(for: "corp.example") != nil {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await host.deliveries.drain()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "no entry file with the tunnel down")
+        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_retry" }.map(\.detail),
+                       ["operation=remove trigger=helper_check managed=true attempt=2"])
+        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_repaired" }.map(\.detail),
+                       ["operation=remove by=retry failed=remove attempts=1"])
+        await host.stopRuntime()
+    }
+
     func testAVPNDropWhileTheStartAppliesLeavesNoEntryFile() async throws {
         let host = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageDNSResolvers: true))
         await host.awaitLaunchRecovery()
