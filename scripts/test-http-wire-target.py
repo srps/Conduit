@@ -84,6 +84,31 @@ def main():
                                         peer.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                                         assert read_headers(client).startswith(b"HTTP/1.1 200")
                                     checked += 1
+                # The direct path writes plaintext HTTP. An absolute target of
+                # any other scheme is refused before anything is dialled, so
+                # an https:// request's credentials never reach the wire.
+                for upgrade in [False, True]:
+                    for scheme in ["https", "HTTPS", "wss", "ftp"]:
+                        with socket.socket() as origin:
+                            origin.bind(("127.0.0.1", 0))
+                            origin.listen(1)
+                            origin.settimeout(0.5)
+                            target = f"{scheme}://127.0.0.1:{origin.getsockname()[1]}/account"
+                            headers = "Connection: Upgrade\r\nUpgrade: websocket\r\n" if upgrade else "Connection: close\r\n"
+                            with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+                                client.sendall(
+                                    f"GET {target} HTTP/1.1\r\nCookie: session=secret\r\n{headers}\r\n".encode())
+                                response = read_headers(client)
+                                assert response.startswith(b"HTTP/1.1 400"), (target, upgrade, response)
+                            try:
+                                accepted, _ = origin.accept()
+                            except socket.timeout:  # TimeoutError from 3.10; this spelling works on both
+                                pass
+                            else:
+                                accepted.close()
+                                raise AssertionError(f"Origin dialled for {target!r}, upgrade={upgrade}")
+                            checked += 1
+                assert "routing.direct_scheme_rejected" in (state / "proxy.log").read_text()
             finally:
                 process.terminate()
                 try:
@@ -91,7 +116,7 @@ def main():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-    print(f"PASS: {checked} exact wire targets and Host fields across HTTP/Upgrade and absolute/origin forms")
+    print(f"PASS: {checked} exact wire targets, Host fields and refused non-HTTP schemes across HTTP/Upgrade and absolute/origin forms")
 
 
 if __name__ == "__main__":
