@@ -1334,6 +1334,26 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// Twin of `AppStateHarnessTests.testAFailedSystemProxyModeChangeIsReportedAsOne`.
+    func testAFailedSystemProxyModeChangeOnReloadIsReportedAsOne() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .manual))
+        let locations = NetworkLocationFixture.store()
+        harness.locationStore = locations
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+
+        locations.refuseWrites(true)
+        try await harness.flip(PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac), on: host)
+
+        XCTAssertEqual(reapplyEvents(host).first?.hasPrefix("config.reapply_failed surface=system_proxy cause=mode_change"), true,
+                       "\(reapplyEvents(host))")
+        locations.refuseWrites(false)
+        await host.stopRuntime()
+    }
+
     /// Twin of `AppStateHarnessTests.testAPartialEnvironmentReapplyIsReportedAndRetried`
     /// and `…RecoversOnTheRetry`.
     func testAPartialEnvironmentReapplyOnReloadIsReportedAndRetried() async throws {

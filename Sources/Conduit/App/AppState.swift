@@ -1212,7 +1212,8 @@ final class AppState: ObservableObject {
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
-        platform: PlatformIntegrationConfig
+        platform: PlatformIntegrationConfig,
+        previousPlatform: PlatformIntegrationConfig
     ) -> Bool {
         guard !rejectUnavailableConfiguration() else { return false }
         func attempt(_ failure: String, _ body: () throws -> Void) -> Bool {
@@ -1227,7 +1228,9 @@ final class AppState: ObservableObject {
 
         switch action {
         case .applySystemProxy:
-            return applySystemProxySwitch(config: config, platform: platform)
+            // Also for a mode change with the switch left on.
+            return applySystemProxySwitch(config: config, platform: platform,
+                                          cause: previousPlatform.manageSystemProxy ? .modeChange : .switchOn)
         case .clearSystemProxy:
             // No `isCleared()` gate, unlike `stopProxy`: "every proxy is
             // disabled" is not "nothing to restore" when the journal holds a
@@ -1290,10 +1293,12 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// The system proxy switch turned on while the proxy runs. A
-    /// failure rewinds the flag for the next save; the retry looks again
-    /// sooner, since no save may follow (#194).
-    private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig) -> Bool {
+    /// The system proxy switch turned on, or its mode changed, while the
+    /// proxy runs; `cause` says which. A failure rewinds the flag for the
+    /// next save; the retry looks again sooner, since no save may follow
+    /// (#194).
+    private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig,
+                                        cause: ConfigReapplyRetry.Cause) -> Bool {
         do {
             try systemConduit.apply(
                 config: config,
@@ -1303,7 +1308,7 @@ final class AppState: ObservableObject {
             )
             return true
         } catch {
-            reapplyRetry.failed(.systemProxy, cause: .switchOn, reason: error.localizedDescription, token: proxyLane.observationToken)
+            reapplyRetry.failed(.systemProxy, cause: cause, reason: error.localizedDescription, token: proxyLane.observationToken)
             return false
         }
     }

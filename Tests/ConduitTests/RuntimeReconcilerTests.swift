@@ -59,7 +59,8 @@ private final class RecordingHost: RuntimeReconcilerHost {
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
-        platform: PlatformIntegrationConfig
+        platform: PlatformIntegrationConfig,
+        previousPlatform: PlatformIntegrationConfig
     ) -> Bool {
         calls.append(.perform(action, platform: platform))
         return !failing.contains(action)

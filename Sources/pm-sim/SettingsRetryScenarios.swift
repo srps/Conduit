@@ -50,7 +50,8 @@ enum SettingsRetryScenarios {
             _ action: PlatformIntegrationReconciler.Action,
             config: ProxyConfig,
             previousConfig: ProxyConfig,
-            platform: PlatformIntegrationConfig
+            platform: PlatformIntegrationConfig,
+            previousPlatform: PlatformIntegrationConfig
         ) -> Bool {
             do {
                 switch action {

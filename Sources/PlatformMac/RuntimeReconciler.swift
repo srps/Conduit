@@ -28,12 +28,15 @@ package protocol RuntimeReconcilerHost: AnyObject {
     /// stream carries the decision whether or not the side effect lands.
     func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action)
     /// Runs one flag action through the manager the start and stop paths
-    /// use. Returns whether it landed.
+    /// use. `previousPlatform` is the flags it moves from, so a host can say
+    /// whether a switch turned on or only the mode changed. Returns whether
+    /// it landed.
     func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
-        platform: PlatformIntegrationConfig
+        platform: PlatformIntegrationConfig,
+        previousPlatform: PlatformIntegrationConfig
     ) -> Bool
 }
 
@@ -285,7 +288,7 @@ package final class RuntimeReconciler {
     ) {
         guard let host else { return }
         host.recordPlatformDecision(action)
-        if !host.perform(action, config: config, previousConfig: previousConfig, platform: newPlatform) {
+        if !host.perform(action, config: config, previousConfig: previousConfig, platform: newPlatform, previousPlatform: oldPlatform) {
             leaveUnreconciled(action, from: oldPlatform, ifStill: newPlatform)
         }
     }

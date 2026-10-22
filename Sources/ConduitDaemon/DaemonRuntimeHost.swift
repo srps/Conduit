@@ -1398,7 +1398,8 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,
-        platform: PlatformIntegrationConfig
+        platform: PlatformIntegrationConfig,
+        previousPlatform: PlatformIntegrationConfig
     ) -> Bool {
         func attempt(_ failure: String, _ body: () throws -> Void) -> Bool {
             do {
@@ -1412,7 +1413,9 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
 
         switch action {
         case .applySystemProxy:
-            return applySystemProxySwitch(config: config, platform: platform)
+            // Also for a mode change with the switch left on.
+            return applySystemProxySwitch(config: config, platform: platform,
+                                          cause: previousPlatform.manageSystemProxy ? .modeChange : .switchOn)
         case .clearSystemProxy:
             // The managers report a partial teardown by keeping their records,
             // not by throwing, so the journal is the oracle for "landed":
@@ -1477,7 +1480,8 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
 
     /// Twin of `AppState.applySystemProxySwitch`: a failure rewinds the flag
     /// for the next reload, and the retry looks again sooner (#194).
-    private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig) -> Bool {
+    private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig,
+                                        cause: ConfigReapplyRetry.Cause) -> Bool {
         do {
             try systemConduit.apply(
                 config: config,
@@ -1487,7 +1491,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
             )
             return true
         } catch {
-            reapplyRetry.failed(.systemProxy, cause: .switchOn, reason: error.localizedDescription, token: runtimeLane.observationToken)
+            reapplyRetry.failed(.systemProxy, cause: cause, reason: error.localizedDescription, token: runtimeLane.observationToken)
             return false
         }
     }
