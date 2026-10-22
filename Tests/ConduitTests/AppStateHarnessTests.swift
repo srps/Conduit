@@ -2336,6 +2336,41 @@ final class AppStateHarnessTests: XCTestCase {
         await appState.stopProxy()
     }
 
+    /// PR #211 review: a live edit renames the entry while the helper
+    /// refuses, so the reconcile cannot remove the old domain's file. Only
+    /// the journal names it now; the repair must still own it, or no later
+    /// VPN report or helper recovery would ever remove it.
+    func testARefusedRemovalOnAConfigEditIsRetriedWhenTheHelperIsAvailable() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        await harness.launchRecovery()
+        appState.refreshPreflight()
+        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
+
+        machine.privilege.failingDomains = ["corp.example"]
+        appState.config.dnsEntries = [DomainDNSEntry(domain: "renamed.example", servers: ["10.0.0.53"])]
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        await harness.deliveries()
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the removal was refused")
+        XCTAssertNotNil(machine.resolverFile(for: "renamed.example"), "the new entry was written")
+        XCTAssertEqual(events(appState, "platform.split_dns_failed").first?.hasPrefix("operation=apply source=config_change attempt=1"), true)
+
+        machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        appState.refreshPreflight()
+        await harness.settle("the retry sweeps the renamed entry's old file") {
+            machine.resolverFile(for: "corp.example") == nil
+        }
+        await harness.deliveries()
+        XCTAssertNotNil(machine.resolverFile(for: "renamed.example"))
+        XCTAssertEqual(events(appState, "platform.split_dns_repaired"), ["operation=apply by=retry failed=apply attempts=1"])
+        await appState.stopProxy()
+    }
+
     /// A burst of reports from the observer, delivered without waiting for
     /// each other: every one is stamped on the observer's turn and runs
     /// through both order gates (the split-DNS gate's and the
