@@ -204,6 +204,23 @@ final class SplitDNSEntryFileRepairTests: XCTestCase {
         XCTAssertFalse(manager.unconfiguredRecordedFilesPresent(config: edited))
     }
 
+    /// Codex review of the PR #211 fixes: an entry deleted while its removal
+    /// was refused, then re-added with no servers, is never written, so its
+    /// old file is as stale as a deleted entry's. It must count as residue,
+    /// or the config edit's success would settle the repair over it.
+    func testAFileLeftForAnEntryReAddedWithoutServersIsResidueAndSwept() throws {
+        let config = makeConfig()
+        try manager.applyEntryFiles(config: config, logger: nil)
+        var edited = config
+        edited.dnsEntries = config.dnsEntries.map { DomainDNSEntry(domain: $0.domain, servers: []) }
+        XCTAssertTrue(manager.unconfiguredRecordedFilesPresent(config: edited))
+        var repair = SplitDNSEntryFileRepair()
+        repair.record(.failed(.remove, RecordingPrivilegeClient.Refused(operation: .removeDNS, subject: nil)), source: .configChange, report: report)
+        retry(&repair, gate: gate(.connected), config: edited)
+        XCTAssertNil(repair.pending)
+        XCTAssertFalse(manager.unconfiguredRecordedFilesPresent(config: edited))
+    }
+
     /// Any later operation that lands settles the repair, not only a retry.
     func testALaterVPNTransitionThatLandsSettlesTheRepair() {
         var repair = SplitDNSEntryFileRepair()
