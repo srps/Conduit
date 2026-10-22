@@ -38,6 +38,12 @@ package struct SplitDNSEntryFileRepair: Sendable {
         /// removes the files of entries deleted or renamed. A refused removal
         /// there leaves a file only the journal names, which the retry sweeps.
         case configChange = "config_change"
+        /// The resolver switch turned on (`applyResolverEntries`) or off
+        /// (`clearResolvers`, the teardown) in a save or reload. That pass
+        /// skips the config-change reconcile, so the switch action is the
+        /// one entry-file operation it runs.
+        case switchOn = "switch_on"
+        case switchOff = "switch_off"
         case start
         case stop
         case retry
@@ -223,7 +229,10 @@ package struct SplitDNSEntryFileRepair: Sendable {
         record(outcome, source: .retry, report: report)
     }
 
+    /// Why a switch-off teardown that threw nothing still failed.
+    package static let recordedFilesRemainReason = "resolver files this app wrote are still recorded after the switch-off teardown"
+
     private struct RecordedFilesRemain: Error, LocalizedError {
-        var errorDescription: String? { "resolver files this app wrote are still recorded after the switch-off teardown" }
+        var errorDescription: String? { SplitDNSEntryFileRepair.recordedFilesRemainReason }
     }
 }
