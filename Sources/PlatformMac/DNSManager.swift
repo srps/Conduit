@@ -690,12 +690,30 @@ package final class DNSManager: @unchecked Sendable {
     package func clearUnconfiguredRecordedFiles(config: ProxyConfig, logger: (any LogSink)?) throws {
         operations.lock()
         defer { operations.unlock() }
-        guard let journal else { return }
-        let named = Set(config.dnsEntries.filter(\.enabled).map(\.domain) + getInterceptDomains(from: config, forCleanup: true))
-        let unconfigured = journal.scopes(for: .resolverFile).filter { !named.contains($0) }
+        let unconfigured = unconfiguredRecordedDomains(config: config)
         guard !unconfigured.isEmpty else { return }
         try removeAll(unconfigured, logger: logger)
         logger?.log(.notice, "Removed \(unconfigured.count) resolver file(s) this app had written for domains no longer configured.", category: .system)
+    }
+
+    /// Whether a file `clearUnconfiguredRecordedFiles` would remove is still
+    /// on disk. Disk truth, like `entryFilesPresent`, and lock-free like the
+    /// other reads. A host asks it before it settles a pending repair on an
+    /// operation that does not sweep those files (a VPN flip, a start), and
+    /// after a stop's clear failed, which a deleted entry's file can be
+    /// behind even when every configured entry file is gone.
+    package func unconfiguredRecordedFilesPresent(config: ProxyConfig) -> Bool {
+        unconfiguredRecordedDomains(config: config).contains {
+            FileManager.default.fileExists(atPath: resolverFilePath(for: $0))
+        }
+    }
+
+    /// Domains the journal names as ours that the config names neither as an
+    /// enabled entry nor as an intercept rule.
+    private func unconfiguredRecordedDomains(config: ProxyConfig) -> [String] {
+        guard let journal else { return [] }
+        let named = Set(config.dnsEntries.filter(\.enabled).map(\.domain) + getInterceptDomains(from: config, forCleanup: true))
+        return journal.scopes(for: .resolverFile).filter { !named.contains($0) }
     }
 
     /// Writes only the intercept-rule resolver files. The sole writer of

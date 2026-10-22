@@ -167,6 +167,43 @@ final class SplitDNSEntryFileRepairTests: XCTestCase {
         XCTAssertFalse(repair.shouldRetry(helperAvailable: true))
     }
 
+    /// Codex review: a start removes with the tunnel down; meanwhile the
+    /// tunnel comes up and drops again and that removal fails. The start's
+    /// success arrives last and must not forget the newer failure.
+    func testAnOlderStartResultDoesNotOverwriteANewerFailure() {
+        var repair = SplitDNSEntryFileRepair()
+        let queuedAt = repair.generation
+        repair.record(.succeeded(.apply), source: .vpnTransition, report: report)
+        repair.record(.failed(.remove, RecordingPrivilegeClient.Refused(operation: .removeDNS, subject: nil)), source: .vpnTransition, report: report)
+        repair.record(.succeeded(.remove), source: .start, startedAt: queuedAt, report: report)
+        XCTAssertEqual(repair.pending?.operation, .remove, "the newer failure still stands")
+        XCTAssertEqual(events.last?.event, "platform.split_dns_outcome_superseded")
+        XCTAssertEqual(events.last?.detail, "operation=remove source=start failed=false newer=2")
+
+        let current = repair.generation
+        repair.record(.succeeded(.remove), source: .stop, startedAt: current, report: report)
+        XCTAssertNil(repair.pending, "a result with nothing recorded since is applied")
+    }
+
+    /// Codex review: a deleted entry's file is swept only by a retry, so a
+    /// success elsewhere must not settle the repair while it is on disk.
+    func testASuccessThatLeavesAnUnconfiguredRecordedFileDoesNotSettle() throws {
+        let config = makeConfig()
+        try manager.applyEntryFiles(config: config, logger: nil)
+        var edited = config
+        edited.dnsEntries = []
+        XCTAssertTrue(manager.unconfiguredRecordedFilesPresent(config: edited))
+        XCTAssertFalse(manager.unconfiguredRecordedFilesPresent(config: config))
+        var repair = SplitDNSEntryFileRepair()
+        repair.record(.failed(.remove, RecordingPrivilegeClient.Refused(operation: .removeDNS, subject: nil)), source: .vpnTransition, report: report)
+        repair.record(.succeeded(.remove), source: .vpnTransition, residue: true, report: report)
+        XCTAssertNotNil(repair.pending)
+        XCTAssertFalse(names().contains("platform.split_dns_repaired"))
+        retry(&repair, gate: gate(.disconnected(reason: .userInitiated)), config: edited)
+        XCTAssertNil(repair.pending)
+        XCTAssertFalse(manager.unconfiguredRecordedFilesPresent(config: edited))
+    }
+
     /// Any later operation that lands settles the repair, not only a retry.
     func testALaterVPNTransitionThatLandsSettlesTheRepair() {
         var repair = SplitDNSEntryFileRepair()
