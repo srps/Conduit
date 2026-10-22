@@ -261,7 +261,7 @@ exactly these semantics; do not repurpose them.
 | `$state-dir/snapshot.json` | Full `ProxyOrchestratorSnapshot`, written atomically (temp + rename) on the status interval. Superset of what the UI shows. |
 | `$state-dir/ready.json` (`pm-proxy`) / `daemon-ready.json` (daemon) | Written once at startup readiness: bindings / initial status. |
 | `$state-dir/update-state.json` (app) | `{"lastCheck": <epoch seconds>, "lastLaunchedVersion": "…"}`, canonical JSON. When the last update check started and which version last launched (`lifecycle.version_changed`). |
-| `$state-dir/audit.ndjson` *(planned)* | Per-connection audit records (CONNECT target, PAC decision, route, auth method), credential-masked. Separate contract; documented when it ships. |
+| `$state-dir/audit.ndjson` (app, `pm-proxy`) | Opt-in (`auditLogEnabled` in `config.json`, path override `auditLogPath`): one canonical-JSON `ConnectionAuditRecord` per completed client connection (target, route, upstream, auth mechanism, bytes, outcome), never a credential or cookie. Size-capped by `auditLogMaxBytes` (default 10 MiB), oldest records trimmed. The daemon does not write it yet (ROADMAP Next 4). The field set is the contract; see `ConnectionAuditRecord`. |
 
 ## Consumer guidance
 
