@@ -248,4 +248,34 @@ final class CommandRunnerTests: XCTestCase {
             XCTAssertEqual(result?.standardError, "err")
         }
     }
+
+    // MARK: - Privileged script handoff
+
+    /// The root shell must run the bytes that were rendered, not a pathname
+    /// the invoking user can rewrite while the password dialog is up.
+    func testPrivilegedScriptIsPassedInlineNotAsAFile() {
+        let script = "set -e\nnetworksetup -setwebproxystate 'Wi-Fi' off"
+        let arguments = CommandRunner.osascriptArguments(running: script)
+        XCTAssertEqual(arguments.last, script)
+        XCTAssertEqual(arguments.dropLast().last, "--")
+        XCTAssertTrue(arguments.contains("do shell script (item 1 of argv) with administrator privileges"))
+        XCTAssertFalse(
+            arguments.dropLast().contains { $0.contains(FileManager.default.temporaryDirectory.path) || $0.contains(".sh") },
+            "no argument may name a script file"
+        )
+    }
+
+    /// Runs the same invocation without the privilege clause, so no prompt:
+    /// quotes, backslashes and newlines reach the shell intact.
+    func testInlineScriptReachesTheShellVerbatim() {
+        runOffThread {
+            let script = "printf '%s|' \"a'b\" 'c\"d' 'e\\f'\nprintf 'done'"
+            let result = try? CommandRunner.run(
+                launchPath: "/usr/bin/osascript",
+                arguments: CommandRunner.osascriptArguments(running: script, withAdministratorPrivileges: false)
+            )
+            XCTAssertEqual(result?.exitCode, 0, result?.standardError ?? "")
+            XCTAssertEqual(result?.standardOutput, "a'b|c\"d|e\\f|done")
+        }
+    }
 }
