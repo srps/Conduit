@@ -1607,6 +1607,38 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// Twin of `AppStateHarnessTests.testASwitchOnSettledByAVPNFlipIsTornDownWhenTheSwitchTurnsOff`.
+    func testASwitchOnSettledByAVPNFlipIsTornDownWhenAReloadTurnsItOff() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageDNSResolvers: false))
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+
+        harness.machine.privilege.failingDomains = ["corp.example"]
+        try await harness.flip(PlatformIntegrationConfig(manageDNSResolvers: true), on: host)
+        await host.deliveries.drain()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the write was refused")
+
+        harness.machine.privilege.failingDomains = []
+        harness.vpn.emit(.disconnected(reason: .networkLost))
+        await host.deliveries.drain()
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the reconnect wrote the entry")
+
+        try await harness.flip(PlatformIntegrationConfig(manageDNSResolvers: false), on: host)
+        await host.deliveries.drain()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "switching off tears the entry down")
+        await host.stopRuntime()
+    }
+
     func testAFailedRemovalIsRetriedWhenTheHelperCheckFindsTheHelperAvailable() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
