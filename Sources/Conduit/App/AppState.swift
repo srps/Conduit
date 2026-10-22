@@ -2643,7 +2643,11 @@ final class AppState: ObservableObject {
         // Only a retry sweeps a deleted entry's file; nothing else settles it.
         let residue = outcome.failure == nil && splitDNSRepair.pending != nil
             && dnsManager.unconfiguredRecordedFilesPresent(config: runtimeConfig)
+        let wasPending = splitDNSRepair.pending != nil
         splitDNSRepair.record(outcome, source: source, startedAt: startedAt, residue: residue, report: recordSplitDNSEvent)
+        // A new episode starts its check at the first interval, not at the
+        // back-off a check left over from the last episode is sleeping on.
+        if !wasPending, splitDNSRepair.pending != nil { endSplitDNSHelperCheck() }
         scheduleSplitDNSHelperCheck()
     }
 
@@ -2655,10 +2659,18 @@ final class AppState: ObservableObject {
     /// One observation of the helper: from the preflight, which runs at
     /// launch, after an install and on a Settings refresh, or from the check
     /// below. A retry waits for the start or stop in flight.
-    private func observeHelperForSplitDNS(available: Bool, trigger: String) {
-        guard splitDNSRepair.shouldRetry(helperAvailable: available), !splitDNSRetryInFlight else { return }
+    ///
+    /// A dispatched retry ends the helper check: the retry's completion
+    /// schedules the next one from the attempt count it leaves, rather than
+    /// a check sleeping on the count from before it. Returns whether it
+    /// dispatched one.
+    @discardableResult
+    private func observeHelperForSplitDNS(available: Bool, trigger: String) -> Bool {
+        guard splitDNSRepair.shouldRetry(helperAvailable: available), !splitDNSRetryInFlight else { return false }
         splitDNSRetryInFlight = true
+        endSplitDNSHelperCheck()
         deliveries.deliver { [weak self] in await self?.retrySplitDNSEntryFiles(trigger: trigger) }
+        return true
     }
 
     private func retrySplitDNSEntryFiles(trigger: String) async {
@@ -2691,16 +2703,26 @@ final class AppState: ObservableObject {
         let helperLifecycle = self.helperLifecycle
         splitDNSHelperCheck = Task { @MainActor [weak self] in
             while let delay = self?.splitDNSHelperCheckDelay(base: base) {
+                // Cancelled: a retry took over, a new episode restarted the
+                // check, or quit. Whoever cancelled it has cleared the handle.
                 do { try await Task.sleep(for: delay) }
-                catch { return } // Cancelled at quit.
+                catch { return }
                 guard self?.splitDNSRepair.pending != nil else { break }
-                let status = await withCheckedContinuation { continuation in
+                // The raw reading: `.busy` is no evidence the helper takes
+                // writes, whatever verdict is held for display (#210).
+                let reading = await withCheckedContinuation { continuation in
                     DispatchQueue.global(qos: .utility).async { continuation.resume(returning: helperLifecycle.status) }
                 }
-                self?.observeHelperForSplitDNS(available: status == .installed, trigger: "helper_check")
+                guard !Task.isCancelled else { return }
+                if self?.observeHelperForSplitDNS(available: reading == .installed, trigger: "helper_check") == true { return }
             }
             self?.splitDNSHelperCheck = nil
         }
+    }
+
+    private func endSplitDNSHelperCheck() {
+        splitDNSHelperCheck?.cancel()
+        splitDNSHelperCheck = nil
     }
 
     /// `nil` once nothing is pending, which ends the check.

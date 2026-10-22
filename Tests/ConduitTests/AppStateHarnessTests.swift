@@ -2405,6 +2405,52 @@ final class AppStateHarnessTests: XCTestCase {
         await appState.stopProxy()
     }
 
+    /// PR #211 review: a check left sleeping on a long back-off from an
+    /// earlier episode must not delay a new one. Failed retries push the
+    /// back-off to its limit (16 s here); a VPN flip then settles the repair,
+    /// and a new failure gets a check at the first interval (1 s).
+    func testANewFailureGetsAFreshHelperCheckRatherThanAnEarlierBackOff() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
+        harness.splitDNSHelperCheckInterval = .seconds(1)
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        await harness.settle("the launch preflight found the helper") { appState.helperStatus == .installed }
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        machine.privilege.failingDomains = ["corp.example"]
+        await harness.setVPN(.disconnected(reason: .networkLost))
+        for _ in 0..<5 {
+            appState.refreshPreflight()
+            let before = events(appState, "platform.split_dns_failed").count
+            await harness.settle("a retry failed") { self.events(appState, "platform.split_dns_failed").count > before }
+            await harness.deliveries()
+        }
+        XCTAssertGreaterThanOrEqual(events(appState, "platform.split_dns_failed").count, 6, "the back-off is at its limit")
+        // Long enough for a check from the first failure to wake once and
+        // go back to sleep on the limit.
+        try await Task.sleep(for: .milliseconds(1_500))
+        await harness.deliveries()
+
+        machine.privilege.failingDomains = []
+        await harness.setVPN(.connected)
+        XCTAssertEqual(events(appState, "platform.split_dns_repaired").last?.contains("by=vpn_transition"), true)
+
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        appState.refreshPreflight()
+        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
+        machine.privilege.failingDomains = ["corp.example"]
+        await harness.setVPN(.disconnected(reason: .userInitiated))
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
+        machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        await harness.settle("a fresh check finds the helper within a few intervals", timeoutMilliseconds: 5_000) {
+            machine.resolverFile(for: "corp.example") == nil
+        }
+        await harness.deliveries()
+        XCTAssertEqual(events(appState, "platform.split_dns_retry").last?.contains("trigger=helper_check"), true)
+        await appState.stopProxy()
+    }
+
     /// A burst of reports from the observer, delivered without waiting for
     /// each other: every one is stamped on the observer's turn and runs
     /// through both order gates (the split-DNS gate's and the
