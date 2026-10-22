@@ -112,7 +112,12 @@ struct AppWindow: View {
                     }
                 }
             }
-            .onDisappear { appState.commitPendingEdit(trigger: .sectionClose) }
+            // Leaving the section can also outrun a field still editing.
+            .onDisappear {
+                appState.commitPendingEdit(trigger: .sectionClose) {
+                    NSApp.keyWindow?.makeFirstResponder(nil)
+                }
+            }
     }
 }
 
