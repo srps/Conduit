@@ -1563,6 +1563,44 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// PR #211 review, twin of
+    /// `AppStateHarnessTests.testAFailedSwitchOffTeardownIsRetriedWhenTheHelperIsAvailable`:
+    /// a reload turns the switch off while the helper refuses; the check
+    /// finds the helper and the retry runs the teardown.
+    func testAFailedSwitchOffTeardownOnAReloadIsRetriedWhenTheHelperIsAvailable() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageDNSResolvers: true))
+        harness.splitDNSHelperCheckInterval = .milliseconds(20)
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"))
+
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        harness.machine.privilege.failingDomains = ["corp.example"]
+        try await harness.flip(PlatformIntegrationConfig(manageDNSResolvers: false), on: host)
+        await host.deliveries.drain()
+        XCTAssertNotNil(harness.machine.resolverFile(for: "corp.example"), "the teardown did not land")
+        let events = host.orchestrator.eventLog
+        XCTAssertEqual(events.events.last { $0.event == "platform.split_dns_failed" }?.detail?
+            .hasPrefix("operation=remove source=switch_off attempt=1"), true)
+
+        harness.machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        for _ in 0..<3_000 where harness.machine.resolverFile(for: "corp.example") != nil {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        await host.deliveries.drain()
+        XCTAssertNil(harness.machine.resolverFile(for: "corp.example"), "the retry ran the teardown")
+        XCTAssertEqual(events.events.filter { $0.event == "platform.split_dns_repaired" }.count, 1)
+        await host.stopRuntime()
+    }
+
     func testAFailedRemovalIsRetriedWhenTheHelperCheckFindsTheHelperAvailable() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0

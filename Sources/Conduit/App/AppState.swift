@@ -1271,15 +1271,28 @@ final class AppState: ObservableObject {
                 try environmentManager.clear(logger: logStore)
             } && !environmentManager.hasManagedState()
         case .applyResolverEntries:
+            // The switch turned on: entry files follow the gate, as in a
+            // config change. The outcome feeds the split-DNS repair, since
+            // this pass skips the config-change reconcile.
+            let operation: SplitDNSEntryFileRepair.Operation = splitDNSGate.entriesWanted ? .apply : .remove
             if dnsManager.isApplied(config: config, vpnConnected: splitDNSGate.entriesWanted) {
                 // The write is skipped; the record must not be. See `adoptAppliedFiles`.
                 dnsManager.adoptAppliedFiles(config: config, vpnConnected: splitDNSGate.entriesWanted)
                 logStore.log(.debug, "DNS resolvers already configured correctly, skipped.", category: .system)
+                recordSplitDNS(.succeeded(operation), source: .switchOn)
                 return true
             }
-            return attempt("Could not apply DNS resolvers after the setting changed") {
-                try dnsManager.apply(config: config, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
+            var outcome = SplitDNSEntryFileRepair.Outcome.succeeded(operation)
+            let applied = attempt("Could not apply DNS resolvers after the setting changed") {
+                do {
+                    try dnsManager.apply(config: config, logger: logStore, vpnConnected: splitDNSGate.entriesWanted)
+                } catch {
+                    outcome = .failed(operation, error)
+                    throw error
+                }
             }
+            recordSplitDNS(outcome, source: .switchOn)
+            return applied
         case .refreshInterceptFiles:
             return attempt("Could not apply intercept resolver files after the setting changed") {
                 try refreshInterceptFiles(for: config)
@@ -1287,9 +1300,26 @@ final class AppState: ObservableObject {
         case .clearResolvers:
             // Only what the journal names as ours. The switch is off now, so
             // a file for a configured domain we never wrote is the user's.
-            return attempt("Could not clear DNS resolvers after the setting changed") {
-                try dnsManager.clearRecorded(configs: [previousConfig, config], logger: logStore)
+            // The teardown is what a pending repair retries with the switch
+            // off, so a failed one is recorded for it: a later VPN drop no
+            // longer touches entry files with the switch off.
+            var failure: String?
+            let cleared = attempt("Could not clear DNS resolvers after the setting changed") {
+                do {
+                    try dnsManager.clearRecorded(configs: [previousConfig, config], logger: logStore)
+                } catch {
+                    failure = error.localizedDescription
+                    throw error
+                }
             } && !dnsManager.hasManagedState()
+            recordSplitDNS(
+                SplitDNSEntryFileRepair.Outcome(
+                    operation: .remove,
+                    failure: cleared ? nil : failure ?? SplitDNSEntryFileRepair.recordedFilesRemainReason
+                ),
+                source: .switchOff
+            )
+            return cleared
         case .applySystemDNS:
             // The same three steps as `startDNS`, in the same order: the
             // prior state is captured before the interfaces are pointed at

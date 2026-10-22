@@ -2371,6 +2371,40 @@ final class AppStateHarnessTests: XCTestCase {
         await appState.stopProxy()
     }
 
+    /// PR #211 review: the switch turned off with the VPN up while the
+    /// helper refuses. The teardown leaves the entry file, and with the
+    /// switch off no VPN drop touches it again, so the repair must own it.
+    func testAFailedSwitchOffTeardownIsRetriedWhenTheHelperIsAvailable() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(manageDNSResolvers: true))
+        await harness.launchRecovery()
+        await harness.setVPN(.connected)
+        try await appState.startProxy()
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"))
+
+        harness.helper.status = .callerNotAccepted(message: "caller identity is not the pinned one")
+        appState.refreshPreflight()
+        await harness.settle("the refusing helper is seen") { appState.helperStatus != .installed }
+        machine.privilege.failingDomains = ["corp.example"]
+        appState.platformConfig.manageDNSResolvers = false
+        appState.saveConfig()
+        await appState.reconciler.drain()
+        await harness.deliveries()
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "the teardown did not land")
+        XCTAssertEqual(events(appState, "platform.split_dns_failed").last?.hasPrefix("operation=remove source=switch_off attempt=1"), true)
+        await harness.setVPN(.disconnected(reason: .networkLost))
+        XCTAssertNotNil(machine.resolverFile(for: "corp.example"), "a VPN drop with the switch off leaves it")
+
+        machine.privilege.failingDomains = []
+        harness.helper.status = .installed
+        appState.refreshPreflight()
+        await harness.settle("the retry runs the teardown") { machine.resolverFile(for: "corp.example") == nil }
+        await harness.deliveries()
+        XCTAssertTrue(events(appState, "platform.split_dns_retry").last?.contains("managed=false") == true)
+        XCTAssertEqual(events(appState, "platform.split_dns_repaired").last?.contains("failed=remove"), true)
+        XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
+        await appState.stopProxy()
+    }
+
     /// PR #211 review: a busy reading keeps `.installed` on display (#210),
     /// but is no evidence the helper takes writes. No retry until the busy
     /// recheck reads it answering.
