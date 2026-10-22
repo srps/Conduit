@@ -52,6 +52,9 @@ final class AppState: ObservableObject {
     /// popover, the menu commands, and the window agree on it.
     @Published var selectedSection: AppSection = .overview
     @Published var lastErrorMessage: String?
+    /// The "Configuration problem" banner the last save set, so a later
+    /// save that validates clears it and nothing else.
+    private var configProblemMessage: String?
     @Published private(set) var pacPreviewMessage: String?
     @Published private(set) var isPACPreviewRunning = false
     private(set) var pacPreviewTask: Task<Void, Never>?
@@ -1051,9 +1054,17 @@ final class AppState: ObservableObject {
             let summary = validationErrors.count > 1
                 ? "\(first.localizedDescription) (+\(validationErrors.count - 1) more)"
                 : first.localizedDescription
-            lastErrorMessage = "Configuration problem: \(summary)"
+            let message = "Configuration problem: \(summary)"
+            lastErrorMessage = message
+            configProblemMessage = message
             for error in validationErrors {
                 logStore.log(.warning, "Config validation: \(error.localizedDescription)")
+            }
+        } else if let shown = configProblemMessage {
+            // The problem was fixed. An error shown since is left alone.
+            configProblemMessage = nil
+            if lastErrorMessage == shown {
+                lastErrorMessage = nil
             }
         }
         refreshPreflight()

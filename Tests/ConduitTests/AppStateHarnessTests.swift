@@ -1276,6 +1276,38 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(appState.runtimeConfig.localPort, port)
     }
 
+    /// The "Configuration problem" banner a save sets clears once a later
+    /// save validates; it does not wait for a dismiss or a restart.
+    func testFixingAnInvalidEditClearsItsConfigurationProblem() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
+
+        appState.config.localPort = 99999
+        appState.commitPendingEdit(trigger: .submit)
+        await appState.reconciler.drain()
+        XCTAssertTrue(appState.lastErrorMessage?.hasPrefix("Configuration problem:") == true)
+
+        appState.config.localPort = try freeLoopbackPort()
+        appState.commitPendingEdit(trigger: .submit)
+        await appState.reconciler.drain()
+        XCTAssertNil(appState.lastErrorMessage)
+    }
+
+    /// Only the banner the save set is cleared: an error shown after it
+    /// stays until it is dealt with.
+    func testFixingAnInvalidEditLeavesALaterErrorShown() async throws {
+        let appState = try launch(settingsSaveDebounce: .milliseconds(20))
+
+        appState.config.localPort = 99999
+        appState.commitPendingEdit(trigger: .submit)
+        await appState.reconciler.drain()
+        appState.lastErrorMessage = "Helper install failed"
+
+        appState.config.localPort = try freeLoopbackPort()
+        appState.commitPendingEdit(trigger: .submit)
+        await appState.reconciler.drain()
+        XCTAssertEqual(appState.lastErrorMessage, "Helper install failed")
+    }
+
     /// Apply ends the field's editing before it commits. The field's write
     /// may land at once or on a later main-actor turn, and the commit
     /// carries it either way, leaving no fresh held edit behind.
