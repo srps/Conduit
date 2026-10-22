@@ -1240,6 +1240,32 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// Twin of `AppStateHarnessTests.testALocalPACPortEditRepointsTheSystemProxy`.
+    func testALocalPACPortReloadRepointsTheSystemProxy() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.localPACEnabled = true
+        config.localPACPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true, systemProxyMode: .pac))
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+        try await host.startRuntime()
+        XCTAssertEqual(harness.wifi.autoproxyURL, host.orchestrator.snapshot.bindings.localPACURL)
+
+        let port = try reserveLoopbackPort()
+        var edited = host.config
+        edited.localPACPort = port
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+
+        XCTAssertEqual(host.orchestrator.snapshot.bindings.localPACPort, port)
+        XCTAssertEqual(harness.wifi.autoproxyURL, host.orchestrator.snapshot.bindings.localPACURL)
+        XCTAssertTrue(harness.wifi.autoproxyURL.contains(":\(port)/"))
+        XCTAssertEqual(host.orchestrator.eventLog.events.filter { $0.event == "config.advertised_pac_changed" }.map(\.detail),
+                       ["surfaces=system_proxy"])
+        await host.stopRuntime()
+    }
+
     /// Twin of `AppStateHarnessTests.testABypassEditReappliesOffTheMainActor`.
     func testABypassReloadReappliesOffTheMainActor() async throws {
         let host = try launch(platform: PlatformIntegrationConfig(manageEnvironmentVariables: true))

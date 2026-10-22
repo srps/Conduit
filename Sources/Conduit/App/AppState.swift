@@ -1115,8 +1115,11 @@ final class AppState: ObservableObject {
         // The listener endpoint is in every advertised surface; the bypass
         // list is in the shell environment always and in the system proxy
         // only in manual mode, where it is `ExceptionsList`. PAC mode's
-        // served script is refreshed by the routing reload itself.
-        let systemProxyFollows = pass.diff.proxyChanged
+        // served script is refreshed by the routing reload itself, but its
+        // URL is in the system proxy: a local PAC server that started,
+        // stopped or moved has to be advertised where it now listens.
+        let pacEndpointMoved = pass.diff.localPACEndpointChanged && platform.systemProxyMode == .pac
+        let systemProxyFollows = pass.diff.proxyChanged || pacEndpointMoved
             || (pass.diff.advertisedBypassChanged && platform.systemProxyMode == .manual)
         let environmentFollows = pass.diff.proxyChanged || pass.diff.advertisedBypassChanged
         if pass.runtime.proxyIsUp, pass.diff.advertisedBypassChanged, !pass.diff.proxyChanged {
@@ -1131,6 +1134,13 @@ final class AppState: ObservableObject {
                 orchestrator.eventLog.append(event)
                 logStore.log(.notice, "Config change: bypass list changed; re-applying \(surfaces.joined(separator: " and ")). \(event.event) \(event.detail ?? "")", category: .system)
             }
+        }
+        if pass.runtime.proxyIsUp, pacEndpointMoved, !pass.diff.proxyChanged, platform.manageSystemProxy,
+           !pass.platformActions.contains(.applySystemProxy) {
+            // Event first: the write below is a config decision.
+            let event = RuntimeEvent(kind: .config, event: "config.advertised_pac_changed", detail: "surfaces=system_proxy")
+            orchestrator.eventLog.append(event)
+            logStore.log(.notice, "Config change: local PAC endpoint changed; re-applying system proxy. \(event.event) \(event.detail ?? "")", category: .system)
         }
         guard pass.runtime.proxyIsUp else { return }
         let reapplySystemProxy = systemProxyFollows && platform.manageSystemProxy
