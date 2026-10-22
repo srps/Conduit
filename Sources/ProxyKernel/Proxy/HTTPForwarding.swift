@@ -71,6 +71,18 @@ package struct HTTPRequestTarget: Sendable, Equatable {
         directURL
     }
 
+    /// Whether a direct forward can send this request as the client asked
+    /// for it. The direct path writes plaintext HTTP, so only `http` (and
+    /// `ws`, its upgrade form) qualify. An absolute `https://` target sent
+    /// there would put its Cookie and Authorization headers on the wire in
+    /// the clear, to port 80. Clients reach HTTPS origins through CONNECT.
+    package var isPlaintextDirectTarget: Bool {
+        switch directURL?.scheme?.lowercased() {
+        case "http", "ws": return true
+        default: return false
+        }
+    }
+
     /// The HTTP wire target is encoded data, not a decoded filesystem path.
     /// Using URL.path here would turn escaped CRLF into request/header syntax.
     package var originForm: String? {

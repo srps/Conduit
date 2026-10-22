@@ -707,6 +707,42 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
             }
     }
 
+    /// Refuses a direct forward of an absolute-form target the direct path
+    /// would downgrade to plaintext (see `isPlaintextDirectTarget`), before
+    /// anything is dialled or written. True when the request was answered.
+    private func rejectedNonPlaintextDirectTarget(
+        head: HTTPRequestHead,
+        body: HTTPRequestBody?,
+        infoID: UUID,
+        target: HTTPRequestTarget,
+        context: ChannelHandlerContext
+    ) -> Bool {
+        guard !target.isPlaintextDirectTarget else { return false }
+        let scheme = target.directURL?.scheme?.lowercased() ?? "none"
+        let observed = SensitiveValueSanitizer.observableTarget(head.uri)
+        let event = RuntimeEvent(
+            kind: .routing,
+            event: "routing.direct_scheme_rejected",
+            detail: "target=\(observed) scheme=\(scheme)"
+        )
+        eventSink?(event)
+        logger.log(
+            .warning,
+            "Refusing to send \(scheme):// request \(observed) direct as plaintext HTTP; clients reach HTTPS origins through CONNECT. " +
+                "(\(event.event): \(event.detail ?? ""))",
+            category: .proxy
+        )
+        onRequestCompleted(.failed(.local), nil)
+        writeError(
+            status: .badRequest,
+            message: "A \(scheme):// request cannot be forwarded directly over plaintext HTTP. Use CONNECT for HTTPS.",
+            context: context
+        )
+        onConnectionClosed(infoID)
+        body?.cleanup()
+        return true
+    }
+
     private func handleDirectHTTP(
         head: HTTPRequestHead,
         body: HTTPRequestBody?,
@@ -714,6 +750,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         target: HTTPRequestTarget,
         context: ChannelHandlerContext
     ) {
+        if rejectedNonPlaintextDirectTarget(head: head, body: body, infoID: infoID, target: target, context: context) {
+            return
+        }
         guard let url = target.directURL, let directHead = target.directRequestHead(from: head) else {
             writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
             body?.cleanup()
@@ -827,6 +866,9 @@ final class HTTPProxyHandler: ChannelInboundHandler, RemovableChannelHandler, @u
         target: HTTPRequestTarget,
         context: ChannelHandlerContext
     ) {
+        if rejectedNonPlaintextDirectTarget(head: head, body: body, infoID: infoID, target: target, context: context) {
+            return
+        }
         guard let url = target.directURL, let directHead = target.directRequestHead(from: head) else {
             writeError(status: .badRequest, message: "Invalid direct URL for \(SensitiveValueSanitizer.observableTarget(head.uri))", context: context)
             body?.cleanup()

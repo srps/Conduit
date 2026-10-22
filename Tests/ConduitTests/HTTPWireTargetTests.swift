@@ -55,4 +55,25 @@ final class HTTPWireTargetTests: XCTestCase {
             XCTAssertNil(HTTPRequestTarget.parse(HTTPRequestHead(version: .http1_1, method: .GET, uri: uri)), uri)
         }
     }
+
+    /// The direct path writes plaintext HTTP, so only targets meant to travel
+    /// that way may take it; `https://` would leak its headers to port 80.
+    /// `scripts/test-http-wire-target.py` drives the refusal end to end.
+    func testOnlyPlaintextSchemesQualifyForDirectForwarding() throws {
+        let cases: [(uri: String, hosts: [String], plaintext: Bool)] = [
+            ("http://a.example/p", [], true),
+            ("HTTP://a.example/p", [], true),
+            ("ws://a.example/socket", [], true),
+            ("/p", ["a.example"], true),
+            ("https://a.example/p", [], false),
+            ("HTTPS://a.example:8443/p", [], false),
+            ("wss://a.example/socket", [], false),
+            ("ftp://a.example/file", [], false),
+        ]
+        for (uri, hosts, plaintext) in cases {
+            var head = HTTPRequestHead(version: .http1_1, method: .GET, uri: uri)
+            for host in hosts { head.headers.add(name: "Host", value: host) }
+            XCTAssertEqual(try XCTUnwrap(HTTPRequestTarget.parse(head), uri).isPlaintextDirectTarget, plaintext, uri)
+        }
+    }
 }
