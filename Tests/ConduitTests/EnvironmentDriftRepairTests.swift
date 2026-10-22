@@ -57,6 +57,52 @@ final class EnvironmentDriftRepairTests: XCTestCase {
         XCTAssertEqual(events.names.filter { $0.hasPrefix("platform.environment_") }, [])
     }
 
+    /// The verdict a failed re-apply's retry reads (#194): settled only
+    /// when the surface holds what the config asks.
+    func testAPassSaysWhetherTheSurfaceSettled() throws {
+        try manager.apply(config: config, logger: nil)
+        func pass(_ trigger: EnvironmentDriftRepair.Trigger) -> EnvironmentDriftRepair.PassOutcome {
+            repair.pass(config: config, generation: manager.generation, trigger: trigger, isCurrent: { true })
+        }
+        XCTAssertEqual(pass(.retry), .init(retry: nil, settled: true, reason: nil), "clean")
+
+        try wipe()
+        machine.failingSetenv = ["HTTP_PROXY"]
+        XCTAssertEqual(pass(.retry), .init(retry: nil, settled: false, reason: "partial"), "a variable still not published")
+        XCTAssertEqual(pass(.observed), .init(retry: nil, settled: false, reason: "backing_off"),
+                       "after a failure, a notification waits for the tick or a retry")
+        XCTAssertEqual(pass(.retry).reason, "partial")
+        let withheld = pass(.retry)
+        XCTAssertEqual(withheld.reason, "repair_withheld", "two attempts spent the budget")
+        XCTAssertNotNil(withheld.retry)
+        XCTAssertFalse(withheld.settled)
+
+        machine.failingSetenv = []
+        clock.advance(.seconds(600))
+        XCTAssertEqual(pass(.retry), .init(retry: nil, settled: true, reason: nil), "repaired once the window reopens")
+        XCTAssertEqual(machine.launchdEnvironment["HTTP_PROXY"], "http://127.0.0.1:3128")
+    }
+
+    func testAPassOvertakenByAClearIsNotSettled() throws {
+        try manager.apply(config: config, logger: nil)
+        try wipe()
+        let generation = manager.generation
+        try manager.clear(logger: nil)
+        XCTAssertEqual(repair.pass(config: config, generation: generation, trigger: .retry, isCurrent: { true }).reason, "superseded")
+    }
+
+    /// `apply` reports what it left instead of throwing; `shortfall` is how
+    /// a caller that only catches stops reading that as success (#194).
+    func testAnApplyResultNamesWhatItLeft() throws {
+        XCTAssertNil(try manager.apply(config: config, logger: nil).shortfall)
+        machine.failingSetenv = ["HTTP_PROXY", "NO_PROXY"]
+        var changed = config
+        changed.localPort = 3129
+        changed.noProxyHosts.append("bypass.example")
+        XCTAssertEqual(try manager.apply(config: changed, logger: nil).shortfall,
+                       "partial profiles_left= launchd_left=HTTP_PROXY,NO_PROXY")
+    }
+
     func testAWipeIsReportedAndRepaired() throws {
         try manager.apply(config: config, logger: nil)
         try wipe()

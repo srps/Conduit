@@ -99,13 +99,36 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
         }
     }
 
-    /// One pass. Returns when to retry a repair the budget withheld.
-    /// `generation` is the manager's, read by the host together with
-    /// `config` before it queued the pass, so a newer apply that lands first
-    /// supersedes it. `isCurrent` is the host's lifecycle check, evaluated
-    /// under the manager's lock immediately before any write.
+    /// What one pass found and did.
+    package struct PassOutcome: Equatable, Sendable {
+        /// When to retry a repair the budget withheld.
+        package var retry: Duration?
+        /// The surface holds what `config` asks for: it was clean, or a
+        /// repair wrote all of it. Nothing else counts, not even a pass that
+        /// found nothing it could repair beside a profile it may not edit.
+        package var settled: Bool
+        /// Why it is not settled, as an event's `reason=`.
+        package var reason: String?
+
+        static let settledNow = PassOutcome(retry: nil, settled: true, reason: nil)
+        static func unsettled(_ reason: String, retry: Duration? = nil) -> PassOutcome {
+            PassOutcome(retry: retry, settled: false, reason: reason)
+        }
+    }
+
+    /// One pass. Returns when to retry a repair the budget withheld; `pass`
+    /// says more.
     @discardableResult
     package func run(config: ProxyConfig, generation: UInt64, trigger: Trigger, isCurrent: () -> Bool) -> Duration? {
+        pass(config: config, generation: generation, trigger: trigger, isCurrent: isCurrent).retry
+    }
+
+    /// One pass, and its verdict. `generation` is the manager's, read by the
+    /// host together with `config` before it queued the pass, so a newer
+    /// apply that lands first supersedes it. `isCurrent` is the host's
+    /// lifecycle check, evaluated under the manager's lock immediately
+    /// before any write.
+    package func pass(config: ProxyConfig, generation: UInt64, trigger: Trigger, isCurrent: () -> Bool) -> PassOutcome {
         let backingOff: Bool = lock.withLock {
             if episodeGeneration != generation {
                 episodeGeneration = generation
@@ -116,7 +139,7 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
             }
             return lastAttemptFailed && trigger == .observed
         }
-        guard !backingOff else { return nil }
+        guard !backingOff else { return .unsettled("backing_off") }
         let drift = manager.inspect(config: config)
         guard drift.hasDrift else {
             if drift.isClean {
@@ -127,7 +150,8 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
                 // after a partial repair already named it.
                 reportFailureOnce(reason: drift.unsafeProfiles.isEmpty ? "unreadable" : "unsafe_file", drift: drift)
             }
-            return nil
+            if drift.isClean { return .settledNow }
+            return .unsettled(drift.unsafeProfiles.isEmpty ? "unreadable" : "unsafe_file")
         }
         // While withheld, only the first pass of the episode reports: the
         // drift and the withheld repair, once each.
@@ -142,7 +166,7 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
                          + "retry_seconds=\(retry.components.seconds + (retry.components.attoseconds > 0 ? 1 : 0))",
                      level: .warning)
             }
-            return retry
+            return .unsettled("repair_withheld", retry: retry)
         }
 
         let result: EnvironmentManager.ApplyResult?
@@ -152,11 +176,11 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
             // It may have written a profile before it threw: an attempt.
             chargeAttempt(failed: true)
             reportFailureOnce(reason: "apply_error", drift: drift, extra: "error=\(String(describing: error))")
-            return nil
+            return .unsettled("apply_error")
         }
         guard let result else {
             emit("platform.environment_repair_superseded", "trigger=\(trigger.rawValue)", level: .info)
-            return nil
+            return .unsettled("superseded")
         }
         // A profile left alone counts as left, even beside a repaired
         // variable, and even one that turned unsafe after the inspection:
@@ -180,7 +204,7 @@ package final class EnvironmentDriftRepair: @unchecked Sendable {
                               extra: "profiles_left=\(profilesLeft.map(\.rawValue).sorted().joined(separator: ",")) "
                                   + "launchd_left=\(launchdLeft.joined(separator: ","))")
         }
-        return nil
+        return repaired ? .settledNow : .unsettled("partial")
     }
 
     /// One attempt against the budget, and the generation it left behind.

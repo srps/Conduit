@@ -175,6 +175,7 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     private var _launchdEnvironment: [String: String] = [:]
     private var _dnsRelayRunning = false
     private var _refusedScripts: [String] = []
+    private var _failingSetenv: Set<String> = []
 
     package init(services: [String] = ["Wi-Fi"], resolverDirectory: URL) {
         self.serviceNames = services
@@ -205,6 +206,13 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
 
     package var dnsRelayRunning: Bool {
         lock.withLock { _dnsRelayRunning }
+    }
+
+    /// Variable names whose `launchctl setenv` fails, as a launchd that
+    /// refuses the write would: the environment apply's partial outcome.
+    package var failingSetenv: Set<String> {
+        get { lock.withLock { _failingSetenv } }
+        set { lock.withLock { _failingSetenv = newValue } }
     }
 
     /// The `networksetup` scripts that were refused for lack of admin rights.
@@ -257,6 +265,8 @@ package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
         guard let verb = arguments.first else { return Self.failure("launchctl: no verb") }
         return lock.withLock {
             switch verb {
+            case "setenv" where arguments.count >= 3 && _failingSetenv.contains(arguments[1]):
+                return Self.failure("launchctl setenv \(arguments[1]): refused")
             case "setenv" where arguments.count >= 3:
                 _launchdEnvironment[arguments[1]] = arguments[2]
                 return Self.success("")
