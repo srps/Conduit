@@ -710,9 +710,11 @@ package final class DNSManager: @unchecked Sendable {
 
     /// Domains the journal names as ours that the config names neither as an
     /// entry this app writes (enabled, with servers, as in `getEntries`) nor
-    /// as an intercept rule. An enabled entry with no servers is never
-    /// written, so a file left for its domain is as stale as a deleted
-    /// entry's, and no reconcile removes it.
+    /// as an intercept rule it keeps (enabled, under the transparent proxy,
+    /// as `reconcile`'s `newDomains` counts them). An enabled entry with no
+    /// servers is never written, and a disabled rule's file is removed by
+    /// `reconcile`, so a file left for either is as stale as a deleted
+    /// entry's, and no later reconcile removes it.
     ///
     /// A recorded spelling that differs from a configured domain only in case
     /// is configured when both names are one file, as on the default
@@ -724,7 +726,7 @@ package final class DNSManager: @unchecked Sendable {
     private func unconfiguredRecordedDomains(config: ProxyConfig) -> [String] {
         guard let journal else { return [] }
         let written = config.dnsEntries.filter { $0.enabled && !$0.servers.isEmpty }.map(\.domain)
-        let named = written + getInterceptDomains(from: config, forCleanup: true)
+        let named = written + getInterceptDomains(from: config)
         let exact = Set(named)
         var byFolded: [String: [String]] = [:]
         for domain in named { byFolded[domain.lowercased(), default: []].append(domain) }
