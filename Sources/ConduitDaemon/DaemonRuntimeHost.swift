@@ -491,6 +491,7 @@ final class DaemonRuntimeHost {
         let logger = self.logger
         let localPACURL = orchestrator.snapshot.bindings.localPACURL
         let vpnConnected = splitDNSGate.entriesWanted
+        let entryGeneration = splitDNSRepair.generation
         let interceptReadyAtStart = orchestrator.snapshot.bindings.dnsInterceptReady
         let forwarderRunningAtStart = orchestrator.snapshot.dnsRunState == .running
         let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
@@ -554,7 +555,7 @@ final class DaemonRuntimeHost {
             }
             return entryFiles
         }
-        recordSplitDNS(entryFiles, source: .start)
+        recordSplitDNS(entryFiles, source: .start, startedAt: entryGeneration)
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
         // rest of a start for a runtime that is down.
@@ -688,6 +689,7 @@ final class DaemonRuntimeHost {
         // a crash between the flip and the reload, a config file edited by
         // hand (#13). The ownership reads happen inside the block, after
         // whatever was queued ahead of it has landed.
+        let stopGeneration = splitDNSRepair.generation
         let entryFiles = await platformWork.run { () -> SplitDNSEntryFileRepair.Outcome? in
             systemProxy.serialized {
                 guard terminal || !token.isSuperseded else { return }
@@ -716,7 +718,9 @@ final class DaemonRuntimeHost {
                         logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
                         // Only an entry file left on disk is the repair's; an
                         // intercept file the clear could not remove is not.
-                        if resolvers.entryFilesPresent(config: config) { return .failed(.remove, error) }
+                        if resolvers.entryFilesPresent(config: config) || resolvers.unconfiguredRecordedFilesPresent(config: config) {
+                            return .failed(.remove, error)
+                        }
                     }
                     return .succeeded(.remove)
                 } else if resolvers.hasManagedState() {
@@ -731,7 +735,7 @@ final class DaemonRuntimeHost {
                 return nil
             }
         }
-        recordSplitDNS(entryFiles, source: .stop)
+        recordSplitDNS(entryFiles, source: .stop, startedAt: stopGeneration)
         guard terminal || isCurrent(token, "runtime_stop") else { return }
 
         logger.log(.notice, "Daemon runtime stopped.", category: .general)
@@ -982,9 +986,15 @@ final class DaemonRuntimeHost {
     // MARK: - Split-DNS entry-file repair (#165)
 
     /// Twin of `AppState.recordSplitDNS`.
-    private func recordSplitDNS(_ outcome: SplitDNSEntryFileRepair.Outcome?, source: SplitDNSEntryFileRepair.Source) {
+    private func recordSplitDNS(
+        _ outcome: SplitDNSEntryFileRepair.Outcome?,
+        source: SplitDNSEntryFileRepair.Source,
+        startedAt: Int? = nil
+    ) {
         guard let outcome else { return }
-        splitDNSRepair.record(outcome, source: source, report: recordSplitDNSEvent)
+        let residue = outcome.failure == nil && splitDNSRepair.pending != nil
+            && dnsManager.unconfiguredRecordedFilesPresent(config: config)
+        splitDNSRepair.record(outcome, source: source, startedAt: startedAt, residue: residue, report: recordSplitDNSEvent)
         scheduleSplitDNSHelperCheck()
     }
 

@@ -105,14 +105,41 @@ package struct SplitDNSEntryFileRepair: Sendable {
         pending != nil && helperAvailable
     }
 
+    /// Counts recorded outcomes. A host reads it before queueing a start's or
+    /// stop's entry-file work off the actor and passes it back as
+    /// `startedAt`, so a VPN transition recorded meanwhile is not overwritten
+    /// by the older operation's result.
+    package private(set) var generation = 0
+
     /// Records what an entry-file operation did. A failure is reported and
     /// remembered; a success while something was pending reports the repair
-    /// and forgets it.
+    /// and forgets it, unless `residue` says a recorded file for a domain the
+    /// config no longer names is still on disk, which only a retry sweeps.
+    ///
+    /// `startedAt` is the `generation` the operation was queued at. When an
+    /// outcome was recorded since, this one is older than the state on disk
+    /// and is dropped with `platform.split_dns_outcome_superseded` (STYLE
+    /// rule 11): a start's success landing after a VPN-down removal failed
+    /// would otherwise forget that failure.
     package mutating func record(
         _ outcome: Outcome,
         source: Source,
+        startedAt: Int? = nil,
+        residue: Bool = false,
         report: (RuntimeEvent, LogLevel) -> Void
     ) {
+        if let startedAt, startedAt != generation {
+            report(
+                RuntimeEvent(
+                    kind: .config,
+                    event: "platform.split_dns_outcome_superseded",
+                    detail: "operation=\(outcome.operation.rawValue) source=\(source.rawValue) failed=\(outcome.failure != nil) newer=\(generation - startedAt)"
+                ),
+                .info
+            )
+            return
+        }
+        generation += 1
         if let failure = outcome.failure {
             let attempts = (pending?.attempts ?? 0) + 1
             pending = Pending(operation: outcome.operation, source: source, attempts: attempts)
@@ -126,7 +153,7 @@ package struct SplitDNSEntryFileRepair: Sendable {
             )
             return
         }
-        guard let repaired = pending else { return }
+        guard let repaired = pending, !residue else { return }
         pending = nil
         report(
             RuntimeEvent(

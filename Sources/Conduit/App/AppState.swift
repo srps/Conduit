@@ -1490,8 +1490,9 @@ final class AppState: ObservableObject {
             // its clear; applying now would put the surfaces back after it.
             guard proxyStartIsCurrent(token) else { return false }
 
+            let entryGeneration = splitDNSRepair.generation
             let (entriesWantedAtApply, entryFiles) = await applyProxyStartSurfaces(token)
-            recordSplitDNS(entryFiles, source: .start)
+            recordSplitDNS(entryFiles, source: .start, startedAt: entryGeneration)
             // A stop issued while the apply was out queued its clear behind
             // it, so the machine ends cleared; what must not happen now is
             // the rest of a start for a runtime that is down.
@@ -1579,8 +1580,9 @@ final class AppState: ObservableObject {
         // would take them from a runtime that is coming up.
         guard isCurrent(token, on: proxyLane, "proxy_stop") else { return }
 
+        let entryGeneration = splitDNSRepair.generation
         let entryFiles = await clearProxyStopSurfaces(token)
-        recordSplitDNS(entryFiles, source: .stop)
+        recordSplitDNS(entryFiles, source: .stop, startedAt: entryGeneration)
         guard isCurrent(token, on: proxyLane, "proxy_stop") else { return }
 
         if postNotification {
@@ -1798,7 +1800,9 @@ final class AppState: ObservableObject {
                         logger.log(.warning, "Could not clear DNS resolvers: \(error.localizedDescription)", category: .system)
                         // Only an entry file left on disk is the repair's; an
                         // intercept file the clear could not remove is not.
-                        if resolvers.entryFilesPresent(config: config) { return .failed(.remove, error) }
+                        if resolvers.entryFilesPresent(config: config) || resolvers.unconfiguredRecordedFilesPresent(config: config) {
+                            return .failed(.remove, error)
+                        }
                     }
                     return .succeeded(.remove)
                 } else if resolvers.hasManagedState() {
@@ -2613,10 +2617,18 @@ final class AppState: ObservableObject {
 
     /// Feeds an entry-file outcome to `splitDNSRepair`, event first and the
     /// log line derived from it, and keeps the helper check running while
-    /// something is pending.
-    private func recordSplitDNS(_ outcome: SplitDNSEntryFileRepair.Outcome?, source: SplitDNSEntryFileRepair.Source) {
+    /// something is pending. `startedAt` fences a start's or stop's result,
+    /// computed off this actor, against a VPN transition recorded meanwhile.
+    private func recordSplitDNS(
+        _ outcome: SplitDNSEntryFileRepair.Outcome?,
+        source: SplitDNSEntryFileRepair.Source,
+        startedAt: Int? = nil
+    ) {
         guard let outcome else { return }
-        splitDNSRepair.record(outcome, source: source, report: recordSplitDNSEvent)
+        // Only a retry sweeps a deleted entry's file; nothing else settles it.
+        let residue = outcome.failure == nil && splitDNSRepair.pending != nil
+            && dnsManager.unconfiguredRecordedFilesPresent(config: runtimeConfig)
+        splitDNSRepair.record(outcome, source: source, startedAt: startedAt, residue: residue, report: recordSplitDNSEvent)
         scheduleSplitDNSHelperCheck()
     }
 
