@@ -83,6 +83,21 @@ package enum DNSWireFormat {
         return queryQ == responseQ
     }
 
+    /// Whether `response` answers `query` as sent on the wire: same
+    /// transaction ID, QR set, same opcode, same question. Admission for
+    /// plaintext upstream replies. `responseQuestionMatches` ignores the ID
+    /// on purpose, because a cached answer is reused across client IDs, so
+    /// it is not enough to accept a datagram anyone could have sent.
+    package static func isResponse(_ response: [UInt8], to query: [UInt8]) -> Bool {
+        guard query.count >= 12, response.count >= 12,
+              response[0] == query[0], response[1] == query[1],
+              response[2] & 0x80 != 0,
+              response[2] & 0x78 == query[2] & 0x78 else {
+            return false
+        }
+        return responseQuestionMatches(query: query, response: response)
+    }
+
     package static func minimumTTL(in response: [UInt8]) -> UInt32? {
         guard response.count >= 12 else { return nil }
 

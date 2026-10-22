@@ -725,10 +725,35 @@ private final class DNSResolutionCore: @unchecked Sendable {
         return responseBytes
     }
 
-    private func forwardUDP(query: [UInt8], server: String, port: Int, timeout: TimeAmount) async -> [UInt8]? {
+    /// Sends `query` under a fresh random transaction ID and accepts only a
+    /// datagram that answers it (`DNSWireFormat.isResponse`); the reply goes
+    /// back under the client's own ID. The client's ID is not ours to rely
+    /// on: a predictable one would shrink what a spoofer has to guess to the
+    /// ephemeral port. Datagrams that do not answer are dropped and the wait
+    /// goes on, so a forgery arriving first cannot crowd out the real reply.
+    private func forwardUDP(query clientQuery: [UInt8], server: String, port: Int, timeout: TimeAmount) async -> [UInt8]? {
+        guard clientQuery.count >= 12 else { return nil }
+        var query = clientQuery
+        let wireID = UInt16.random(in: .min ... .max)
+        query[0] = UInt8(wireID >> 8)
+        query[1] = UInt8(wireID & 0xFF)
+        let wireQuery = query
+        let collector = NIOLockedValueBox<UDPResponseCollector?>(nil)
+        defer {
+            let discarded = collector.withLockedValue { $0?.discardedCount } ?? 0
+            if discarded > 0 {
+                logger.log(
+                    .warning,
+                    "DNS: discarded \(discarded) datagram(s) from \(server):\(port) that did not answer the query for " +
+                        "\(DNSWireFormat.extractDomainName(from: clientQuery)) (possible spoof).",
+                    category: .network
+                )
+            }
+        }
         do {
-            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[UInt8], Error>) in
-                let handler = UDPResponseCollector(continuation: continuation)
+            let response = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[UInt8], Error>) in
+                let handler = UDPResponseCollector(continuation: continuation) { DNSWireFormat.isResponse($0, to: wireQuery) }
+                collector.withLockedValue { $0 = handler }
                 DatagramBootstrap(group: group)
                     .channelInitializer { channel in
                         channel.pipeline.addHandler(handler)
@@ -737,8 +762,8 @@ private final class DNSResolutionCore: @unchecked Sendable {
                     .whenComplete { result in
                         switch result {
                         case .success(let channel):
-                            var buf = channel.allocator.buffer(capacity: query.count)
-                            buf.writeBytes(query)
+                            var buf = channel.allocator.buffer(capacity: wireQuery.count)
+                            buf.writeBytes(wireQuery)
                             if let addr = try? SocketAddress(ipAddress: server, port: port) {
                                 let envelope = AddressedEnvelope(remoteAddress: addr, data: buf)
                                 channel.writeAndFlush(envelope, promise: nil)
@@ -753,6 +778,7 @@ private final class DNSResolutionCore: @unchecked Sendable {
                         }
                     }
             }
+            return DNSWireFormat.responseByUpdatingTransactionID(response, from: clientQuery)
         } catch {
             return nil
         }
@@ -1324,15 +1350,28 @@ private final class UDPResponseCollector: ChannelInboundHandler, @unchecked Send
 
     private var continuation: CheckedContinuation<[UInt8], Error>?
     private let lock = NSLock()
+    private let accepts: @Sendable ([UInt8]) -> Bool
+    private var discarded = 0
 
-    init(continuation: CheckedContinuation<[UInt8], Error>) {
+    init(continuation: CheckedContinuation<[UInt8], Error>, accepts: @escaping @Sendable ([UInt8]) -> Bool) {
         self.continuation = continuation
+        self.accepts = accepts
+    }
+
+    /// Datagrams dropped for not answering the query. Bounded by what
+    /// arrives before the timeout closes the channel.
+    var discardedCount: Int {
+        lock.withLock { discarded }
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let envelope = unwrapInboundIn(data)
         var buf = envelope.data
         let bytes = buf.readBytes(length: buf.readableBytes) ?? []
+        guard accepts(bytes) else {
+            lock.withLock { discarded += 1 }
+            return
+        }
         complete(with: bytes)
         context.close(promise: nil)
     }
