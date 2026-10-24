@@ -14,10 +14,14 @@ package enum HealthCheckFailure: Error, Equatable, Sendable {
     case authenticationRejected(detail: String)
     /// No usable answer: unreachable, timed out, refused, or the proxy is stopped.
     case unreachable(detail: String)
+    /// The check did not run: a configured duration is one the runtime cannot hold. This says
+    /// nothing about any upstream, so it feeds neither the breaker nor recovery.
+    case configurationRefused(detail: String)
 
     package var summary: String {
         switch self {
-        case .credentialUnavailable(let detail), .authenticationRejected(let detail), .unreachable(let detail):
+        case .credentialUnavailable(let detail), .authenticationRejected(let detail), .unreachable(let detail),
+             .configurationRefused(let detail):
             return detail
         case .upstreamStatus(let code, let upstream):
             return "HTTP \(code) via \(upstream)"

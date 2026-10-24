@@ -44,7 +44,7 @@ final class PrivateConfigBridgeTests: XCTestCase {
         "tunnelDefinitions": "runtime.tunnels.definitions", "maxTunnelSessions": "runtime.tunnels.maxSessions",
         "maxSessionsPerTunnel": "runtime.tunnels.maxSessionsPerTunnel",
         "healthCheckURL": "runtime.health.checkURL", "healthCheckIntervalSeconds": "runtime.health.checkIntervalSeconds",
-        // The legacy millisecond and minute keys truncate. The DTO carries the canonical seconds.
+        // Legacy millisecond and minute keys require whole units. The DTO carries canonical seconds.
         "connectionCheckTimeoutMS": "runtime.health.connectionCheckTimeoutSeconds",
         "upstreamResponseTimeoutSeconds": "runtime.health.upstreamResponseTimeoutSeconds",
         "upstreamConnectTimeoutSeconds": "runtime.health.upstreamConnectTimeoutSeconds",
@@ -62,7 +62,12 @@ final class PrivateConfigBridgeTests: XCTestCase {
     // MARK: - Inventory
 
     func testInventoryMatchesTheKeysTheKernelEncodes() throws {
-        let encoded = try JSONEncoder().encode(richConfig())
+        // The file holds whole minutes, so this encodes a whole-minute TTL. `richConfig`
+        // keeps 90.5 seconds, a valid runtime value that the private frame must carry;
+        // the schema-two file refuses it (decision 0023), so it is not encoded here.
+        var config = richConfig()
+        config.health.directConnectTTL = 600
+        let encoded = try JSONEncoder().encode(config)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         // `schemaVersion` is a file-format marker, so it is the one stored key the DTO omits.
         let expected = Set(Self.legacyKeyPaths.keys).union(["schemaVersion"])

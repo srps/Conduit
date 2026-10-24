@@ -1,6 +1,6 @@
 # Verified store precision checkpoint
 
-Date: 2026-10-24. **Owner selected schema2 with explicit refusal of inexact saves; implementation remains planned.** See [decision0023](decisions/0023-exact-schema-two-persistence.md). Prepared by Codex with an independent read-only Claude Code review using the owner's claude.ai Max subscription. Tracks [#224](https://github.com/srps/Conduit/issues/224) and the store phase of [#186](https://github.com/srps/Conduit/issues/186).
+Date: 2026-10-24. **Owner selected schema2 with explicit refusal of inexact saves; implementation is partial on branch `codex/exact-schema-two-persistence` and not merged.** See [decision0023](decisions/0023-exact-schema-two-persistence.md). Prepared by Codex with an independent read-only Claude Code review using the owner's claude.ai Max subscription. Tracks [#224](https://github.com/srps/Conduit/issues/224) and the store phase of [#186](https://github.com/srps/Conduit/issues/186).
 
 ## Why this choice is needed
 

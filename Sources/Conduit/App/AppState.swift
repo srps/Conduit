@@ -199,6 +199,12 @@ final class AppState: ObservableObject {
     /// An edit no save has written yet: the timer has not fired, or it
     /// fired on an edit `holdsBackUnsavedEdit` keeps for a commit.
     private(set) var hasUnsavedEdit = false
+    /// Temporary editor baseline: the config this editor last wrote, nil before the
+    /// first write (the reconciler's start config then stands in). It answers one
+    /// question, whether an unsaved edit is pending, because a held commit is written
+    /// but not applied. It is not a receipt or verification of what is on disk. The
+    /// durable store that replaces it owns that.
+    private var editorBaseline: ProxyConfig?
     /// The draft holds an edit that would start, stop or replace a bound
     /// endpoint (`ConfigDiff.replacesListeners`), so it waits for a commit:
     /// Return in a field, Apply, leaving the section, or quit. Published
@@ -900,8 +906,8 @@ final class AppState: ObservableObject {
     private func holdsBackUnsavedEdit(trigger: String) -> Bool {
         // Only an edit to the config: one left invalid by a section close is
         // already saved, and must not hold back an unrelated toggle.
-        guard hasUnsavedEdit, config != reconciler.requestedConfig else { return false }
-        let blocking = config.validate().filter(\.blocksProxyStart)
+        guard hasUnsavedEdit, config != (editorBaseline ?? reconciler.requestedConfig) else { return false }
+        let blocking = config.startBlockingProblems
         let detail: String
         if !blocking.isEmpty {
             detail = "reason=start_blocking_problems problems=\(blocking.count) trigger=\(trigger)"
@@ -995,7 +1001,7 @@ final class AppState: ObservableObject {
         if hasUnsavedEdit {
             // Every unsaved config, even one equal to the last request: a
             // save whose write failed advanced the request all the same.
-            let blocking = config.validate().filter(\.blocksProxyStart)
+            let blocking = config.startBlockingProblems
             if let first = blocking.first {
                 recordLifecycle(RuntimeEvent(kind: .config, event: "config.edit_discarded",
                                              detail: "trigger=quit reason=start_blocking_problems check=\(first.check) problems=\(blocking.count)"),
@@ -1023,37 +1029,84 @@ final class AppState: ObservableObject {
         pendingSave = nil
     }
 
-    /// Which files were written. A failed write keeps the edit unsaved, so
-    /// leaving the section or quitting tries again.
+    /// Which files were written. Each file is attempted on its own: a refused
+    /// runtime config does not stop the platform flags or preferences from being
+    /// written, since each file is the next launch's baseline for itself. A
+    /// failed write keeps the edit unsaved, so leaving the section or quitting
+    /// tries again. `configSaved` is false when the config was not written, which
+    /// includes `includingConfig: false` (a discarded edit at quit).
     @discardableResult
-    /// Without the config file (`includingConfig: false`, a discarded edit
-    /// at quit) the edit stays unsaved.
-    private func persistConfiguration(includingConfig: Bool = true) -> (complete: Bool, platformSaved: Bool) {
+    private func persistConfiguration(includingConfig: Bool = true) -> (configSaved: Bool, platformSaved: Bool) {
+        var configSaved = false
+        if includingConfig {
+            do {
+                try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
+                configSaved = true
+                editorBaseline = config
+            } catch {
+                reportSaveFailure(error)
+            }
+        }
         var platformSaved = false
         do {
-            if includingConfig {
-                try ProxyConfigPersistence.save(config, in: runtimeEnvironment)
-            }
             try PlatformConfigPersistence.save(platformConfig, in: runtimeEnvironment)
             platformSaved = true
-            try AppPreferencesPersistence.save(appPreferences, in: runtimeEnvironment)
-            if includingConfig {
-                hasUnsavedEdit = false
-            }
-            logStore.log(.debug, "Saved configuration.")
-            return (true, true)
         } catch {
-            lastErrorMessage = error.localizedDescription
-            logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
-            return (false, platformSaved)
+            reportSaveFailure(error)
+        }
+        var preferencesSaved = false
+        do {
+            try AppPreferencesPersistence.save(appPreferences, in: runtimeEnvironment)
+            preferencesSaved = true
+        } catch {
+            reportSaveFailure(error)
+        }
+        // The edit is saved only when every file it touches was written. A later failure
+        // keeps it unsaved, so the next section close, commit or quit tries the missing
+        // write again. A discarded config (`includingConfig: false`) never marks it saved.
+        let allWritten = configSaved && platformSaved && preferencesSaved
+        if includingConfig && allWritten {
+            hasUnsavedEdit = false
+        }
+        if allWritten || (!includingConfig && platformSaved && preferencesSaved) {
+            logStore.log(.debug, "Saved configuration.")
+        }
+        return (configSaved, platformSaved)
+    }
+
+    /// The banner text and a log line for a failed save. A refusal also has its
+    /// structured event, `config.save_rejected`, which names the field and never
+    /// the value.
+    private func reportSaveFailure(_ error: Error) {
+        lastErrorMessage = error.localizedDescription
+        logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
+        if let refusal = error as? ConfigFileRepresentabilityError {
+            recordLifecycle(refusal.event, level: .warning)
         }
     }
 
     func saveConfig() {
         cancelPendingSave()
         guard !rejectUnavailableConfiguration() else { return }
-        persistConfiguration()
-        reconciler.reconcile(config: config, platformConfig: platformConfig)
+        let persisted = persistConfiguration()
+        // The gate sits before the reconcile, not inside the host's apply. A
+        // reconcile advances its applied baseline when it queues a pass, so a
+        // refusal inside the pass would leave the reconciler believing the value
+        // landed. A refused save, or a value that blocks a proxy start, stays out of
+        // the runtime, which keeps the last config it applied, as a held autosave does.
+        // A held config still reconciles the platform side, at the config the runtime
+        // already applies, so an unrelated toggle is not stranded behind it.
+        let blocking = config.startBlockingProblems
+        if persisted.configSaved, blocking.isEmpty {
+            reconciler.reconcile(config: config, platformConfig: platformConfig)
+        } else {
+            if let first = blocking.first {
+                recordLifecycle(RuntimeEvent(kind: .config, event: "config.apply_held",
+                                             detail: "trigger=commit reason=start_blocking_problems check=\(first.check) problems=\(blocking.count)"),
+                                level: .notice)
+            }
+            reconciler.reconcile(config: reconciler.requestedConfig, platformConfig: platformConfig)
+        }
         refreshListenerEditAwaitingCommit(draft: config)
         // Surface validation problems at edit time instead of at the next
         // proxy (re)start, where LocalProxyServer would reject the config

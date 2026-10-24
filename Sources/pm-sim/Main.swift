@@ -91,6 +91,7 @@ enum PMSim {
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               config-resource-bounds  Approved configuration ceilings: exact and one-over, scanner order, encoder refusal
+              config-exact-persistence  Schema-two saves: whole-unit round trips; inexact durations refused before any write
               auth-identity-length    NTLM identity fields: 16-bit boundary accepted; uppercase expansion and oversized fields refused, not credential-unavailable
               security-boundaries     Auth destinations, config rejection, and loopback listeners
               kerberos-service-ticket A TGT without a service ticket is unreachable, not a missing credential
@@ -267,6 +268,7 @@ enum PMSim {
         "observable-target-redaction",
         "private-config-boundary",
         "config-resource-bounds",
+        "config-exact-persistence",
         "auth-identity-length",
         "security-boundaries",
         "kerberos-service-ticket",
@@ -437,6 +439,8 @@ enum PMSim {
             return [try PrivateConfigBoundaryScenario.run()]
         case "config-resource-bounds":
             return [try ConfigResourceBoundsScenario.run()]
+        case "config-exact-persistence":
+            return [try ConfigExactPersistenceScenario.run()]
         case "auth-identity-length":
             return [try AuthIdentityLengthScenario.run()]
         case "security-boundaries":

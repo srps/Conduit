@@ -8,8 +8,13 @@ package final class DirectConnectDetector: @unchecked Sendable {
     private let logger: any LogSink
     private let eventSink: (@Sendable (RuntimeEvent) -> Void)?
     private let ttlSeconds: TimeInterval
-    private let baseTimeoutMS: Int64
-    private let maxTimeoutMS: Int64
+    /// Where the connect budget comes from. A fixed budget never changes; a provider is
+    /// read until it yields a valid budget, and that budget then latches.
+    private let baseTimeoutSource: @Sendable () -> Int64?
+    /// The latched connect budget, guarded by `lock`. Nil until a valid budget has been
+    /// read; while nil, no probe starts and the refusal is reported
+    /// (`ProbeBlockReason.budgetRefused`) rather than trapped.
+    private var latchedBaseTimeoutMS: Int64?
     private let maxCacheSize: Int
     private let maxConcurrentProbes: Int
     /// Keyed by `cacheKey`: a result is only ever read back under the
@@ -70,6 +75,8 @@ package final class DirectConnectDetector: @unchecked Sendable {
         case busy
         /// The host is on the metadata/loopback blocklist (gateway mode).
         case blocked
+        /// The connect budget is not one the runtime holds, so nothing was probed.
+        case budgetRefused
         /// Routing is changing under the proxy, so the failure says nothing
         /// about the host (#97).
         case suppressed(StrictHintSuppression)
@@ -129,11 +136,14 @@ package final class DirectConnectDetector: @unchecked Sendable {
         case blockedName
         /// The host resolved to (or connected to) a blocked address.
         case blockedAddress(String)
+        /// The config's connect budget is not one the runtime can hold, so no probe is started.
+        case budgetRefused
 
         var detail: String {
             switch self {
             case .blockedName: "reason=blocked_name"
             case .blockedAddress(let ip): "reason=blocked_address address=\(ip)"
+            case .budgetRefused: "reason=budget_refused"
             }
         }
     }
@@ -146,7 +156,8 @@ package final class DirectConnectDetector: @unchecked Sendable {
         group: EventLoopGroup,
         logger: any LogSink,
         ttlSeconds: TimeInterval = 300,
-        baseTimeoutMS: Int64 = 500,
+        baseTimeoutMS: Int64? = 500,
+        baseTimeoutProvider: (@Sendable () -> Int64?)? = nil,
         maxCacheSize: Int = 512,
         maxConcurrentProbes: Int = 16,
         now: @escaping @Sendable () -> Date = { Date() },
@@ -155,12 +166,16 @@ package final class DirectConnectDetector: @unchecked Sendable {
         resolver: (@Sendable (String, Int, EventLoop) -> EventLoopFuture<[SocketAddress]>)? = nil,
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
+        // A provider, when given, replaces the fixed `baseTimeoutMS`. Either way the budget
+        // is read now, and a valid value latches; an invalid one is read again when a probe
+        // needs it, so a later correction is admitted.
+        let source: @Sendable () -> Int64? = baseTimeoutProvider ?? { baseTimeoutMS }
+        self.baseTimeoutSource = source
+        self.latchedBaseTimeoutMS = source()
         self.group = group
         self.logger = logger
         self.eventSink = eventSink
         self.ttlSeconds = ttlSeconds
-        self.baseTimeoutMS = baseTimeoutMS
-        self.maxTimeoutMS = baseTimeoutMS * 8
         self.maxCacheSize = maxCacheSize
         self.maxConcurrentProbes = maxConcurrentProbes
         self.now = now
@@ -186,9 +201,27 @@ package final class DirectConnectDetector: @unchecked Sendable {
 
     /// The connect timeout the next probe of `host:port` gets: the base,
     /// doubled after each consecutive failure up to eight times the base.
-    package func probeTimeoutMS(host: String, port: Int, gatewayMode: Bool) -> Int64 {
+    package func probeTimeoutMS(host: String, port: Int, gatewayMode: Bool) -> Int64? {
         let key = Self.cacheKey(host: host, port: port, gatewayMode: gatewayMode)
-        return lock.withLock { hostTimeouts[key] ?? baseTimeoutMS }
+        if let perHost = lock.withLock({ hostTimeouts[key] }) { return perHost }
+        return resolvedBaseTimeoutMS()
+    }
+
+    /// The connect budget every probe uses. Once a valid budget has latched, it is returned.
+    /// Otherwise the source is read with no lock held, because it is injected code, and a
+    /// valid reading is published under the lock. A valid budget installed by a concurrent
+    /// caller while this one read wins, so the latched value never changes.
+    private func resolvedBaseTimeoutMS() -> Int64? {
+        if let latched = lock.withLock({ latchedBaseTimeoutMS }) { return latched }
+        // The injected source runs with no lock held. Its reading may be nil; that does not
+        // skip the publish step, because a concurrent caller may have latched a valid budget
+        // while this one was reading.
+        let candidate = baseTimeoutSource()
+        return lock.withLock {
+            if let latched = latchedBaseTimeoutMS { return latched }
+            if let candidate { latchedBaseTimeoutMS = candidate }
+            return candidate
+        }
     }
 
     /// Background reachability probes running now (at most `maxConcurrentProbes`).
@@ -244,6 +277,11 @@ package final class DirectConnectDetector: @unchecked Sendable {
             reportBlocked(host: host, port: port, kind: .strictHint, reason: .blockedName)
             return .blocked
         }
+        guard let base = resolvedBaseTimeoutMS() else {
+            reportBlocked(host: host, port: port, kind: .strictHint, reason: .budgetRefused)
+            return .budgetRefused
+        }
+        let ceiling = base * 8
         let key = host.lowercased()
         let cooldown = Self.strictHintCooldown
         let admission = lock.withLock { () -> StrictHintProbe in
@@ -262,7 +300,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
         }
         guard admission == .started else { return admission }
         blocklistAwareProbe(
-            host: host, port: port, timeoutMS: maxTimeoutMS, gatewayMode: gatewayMode, kind: .strictHint
+            host: host, port: port, timeoutMS: ceiling, gatewayMode: gatewayMode, kind: .strictHint
         ).whenComplete { result in
             self.lock.withLock { self.strictHintInFlight -= 1 }
             if case .success(true) = result { onReachable() }
@@ -435,13 +473,17 @@ package final class DirectConnectDetector: @unchecked Sendable {
             reportBlocked(host: host, port: port, kind: .reachability, reason: .blockedName)
             return
         }
+        guard let base = resolvedBaseTimeoutMS() else {
+            reportBlocked(host: host, port: port, kind: .reachability, reason: .budgetRefused)
+            return
+        }
         let key = Self.cacheKey(host: host, port: port, gatewayMode: gatewayMode)
         let admitted = lock.withLock { () -> Int64? in
             if pendingProbes.contains(key) { return nil }
             if pendingProbes.count >= maxConcurrentProbes { return nil }
             pendingProbes.insert(key)
             probesStarted += 1
-            return hostTimeouts[key] ?? baseTimeoutMS
+            return hostTimeouts[key] ?? base
         }
         guard let timeout = admitted else { return }
 
@@ -472,10 +514,14 @@ package final class DirectConnectDetector: @unchecked Sendable {
             return cached
         }
 
+        guard let base = resolvedBaseTimeoutMS() else {
+            reportBlocked(host: host, port: port, kind: .reachability, reason: .budgetRefused)
+            return false
+        }
         let key = Self.cacheKey(host: host, port: port, gatewayMode: gatewayMode)
         let timeout = lock.withLock { () -> Int64 in
             probesStarted += 1
-            return hostTimeouts[key] ?? baseTimeoutMS
+            return hostTimeouts[key] ?? base
         }
         let reachable: Bool
         do {
@@ -501,10 +547,14 @@ package final class DirectConnectDetector: @unchecked Sendable {
     /// while holding `lock`.
     private func record(reachable: Bool, key: String) {
         cache[key] = CacheEntry(reachable: reachable, checkedAt: .now)
-        if reachable {
-            hostTimeouts[key] = baseTimeoutMS
-        } else {
-            hostTimeouts[key] = min((hostTimeouts[key] ?? baseTimeoutMS) * 2, maxTimeoutMS)
+        // A probe runs only with a latched budget, so this adapts only then.
+        if let base = latchedBaseTimeoutMS {
+            let ceiling = base * 8
+            if reachable {
+                hostTimeouts[key] = base
+            } else {
+                hostTimeouts[key] = min((hostTimeouts[key] ?? base) * 2, ceiling)
+            }
         }
         evictIfNeeded()
     }

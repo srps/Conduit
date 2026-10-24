@@ -61,7 +61,9 @@ package final class AutoRecovery: @unchecked Sendable {
     /// `isCurrent` is asked before each step and after each step's outcome:
     /// once it says no (a VPN transition made the triggering evidence
     /// stale), the ladder stops with `recovery.abandoned` and returns `false`
-    /// without declaring exhaustion (#155). The ladder runs on the main
+    /// without declaring exhaustion (#155). A configuration refusal (`.configurationRefused`)
+    /// stops the ladder before any step, or at the first check that returns it, with
+    /// `recovery.skipped`; it is never reported as exhaustion. The ladder runs on the main
     /// actor, where the orchestrator advances its routing generation, so a
     /// check and the outcome it allows happen in one turn.
     @MainActor
@@ -71,6 +73,11 @@ package final class AutoRecovery: @unchecked Sendable {
     ) async -> Bool {
         guard let service else { return false }
         var latestFailure = trigger
+        // A refused check is not an upstream outcome, and no step can supply a configured
+        // duration. Refuse before any side effect, so no step runs for this trigger.
+        if let detail = Self.configurationRefusal(latestFailure) {
+            return refuse(detail: detail)
+        }
 
         for step in RecoveryStep.allCases {
             guard isCurrent() else { return abandon(at: "next_step=\(step.rawValue)") }
@@ -106,6 +113,10 @@ package final class AutoRecovery: @unchecked Sendable {
                     return true
                 }
                 if let failure = health.failure { latestFailure = failure }
+                // The check did not run for a configured duration: stop here, with no later step.
+                if let refusal = Self.configurationRefusal(health.failure) {
+                    return refuse(detail: refusal)
+                }
                 let suffix = detail.map { " \($0);" } ?? ""
                 logger.log(.warning, "Recovery step completed but health check still failing: \(step.description).\(suffix) \(health.summary)", category: .network)
             } catch {
@@ -126,6 +137,25 @@ package final class AutoRecovery: @unchecked Sendable {
         return false
     }
 
+    /// The refusal's detail when `failure` says a configured duration is one the runtime
+    /// cannot hold, or nil. Such a failure is a local configuration fact, not an upstream one.
+    private static func configurationRefusal(_ failure: HealthCheckFailure?) -> String? {
+        if case .configurationRefused(let detail)? = failure { return detail }
+        return nil
+    }
+
+    /// Records the refusal as the existing `recovery.skipped` outcome and returns `false`.
+    /// The ladder is not exhausted: no step ran, or it stopped at a refused check.
+    private func refuse(detail: String) -> Bool {
+        emit("recovery.skipped", detail: "reason=configuration_refused summary=\(detail)")
+        logger.log(.error, Self.configurationRefusalMessage(detail), category: .network)
+        return false
+    }
+
+    private static func configurationRefusalMessage(_ detail: String) -> String {
+        "Automatic recovery stopped: a configured duration is one the runtime cannot hold (\(detail)). Correct the configuration; health checks continue."
+    }
+
     /// The exhaustion event's `failure=` value and the log line derived from
     /// it. Only a credential failure or rejection points at the password; an unclassified
     /// failure keeps the conditional hint.
@@ -137,6 +167,9 @@ package final class AutoRecovery: @unchecked Sendable {
         case .authenticationRejected:
             return ("authentication_rejected",
                     "Automatic recovery exhausted all steps: the upstream rejected authentication. Your password may have changed — re-enter it in Settings.")
+        case .configurationRefused(let detail):
+            // `recover` never reaches exhaustion with this failure; this keeps the mapping total.
+            return ("configuration_refused", configurationRefusalMessage(detail))
         case .unreachable(let detail):
             return ("unreachable",
                     "Automatic recovery exhausted all steps: no upstream proxy answered (\(detail)). Health checks continue and routing resumes when an upstream is reachable.")

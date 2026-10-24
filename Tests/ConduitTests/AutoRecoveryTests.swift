@@ -181,6 +181,53 @@ final class AutoRecoveryTests: XCTestCase {
         XCTAssertEqual(exhausted?.message.contains("Your password may have changed"), true)
     }
 
+    /// A refused trigger is decided before the first step: no side effect and no health
+    /// check run, and the outcome is the skip, never exhaustion.
+    @MainActor func testConfigurationRefusedTriggerRunsNoStepAndIsNotExhausted() async {
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.reauthenticateShouldSucceed = true
+        service.switchUpstreamShouldSucceed = true
+        service.recycleListenerShouldSucceed = true
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink(), eventSink: events.record)
+
+        let result = await recovery.recover(trigger: .configurationRefused(detail: "health.upstreamResponseTimeout"))
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.closeStalledCallCount, 0)
+        XCTAssertEqual(service.reauthenticateCallCount, 0)
+        XCTAssertEqual(service.switchUpstreamCallCount, 0)
+        XCTAssertEqual(service.recycleListenerCallCount, 0)
+        XCTAssertEqual(service.healthCheckCallCount, 0)
+        XCTAssertEqual(events.names, ["recovery.skipped"])
+        XCTAssertEqual(events.details.first, "reason=configuration_refused summary=health.upstreamResponseTimeout")
+    }
+
+    /// A check that returns the refusal mid-ladder stops the ladder there: the step that
+    /// ran is the last side effect, and no later step or check runs.
+    @MainActor func testConfigurationRefusalFromAStepCheckStopsTheLadder() async {
+        let events = EventRecorder()
+        let service = MockRecoverableService()
+        service.closeStalledShouldSucceed = true
+        service.reauthenticateShouldSucceed = true
+        service.switchUpstreamShouldSucceed = true
+        service.recycleListenerShouldSucceed = true
+        service.healthResults = [.unhealthy(.configurationRefused(detail: "health.connectionCheckTimeout"), responseTimeMS: 5)]
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink(), eventSink: events.record)
+
+        let result = await recovery.recover(trigger: .upstreamStatus(code: 502, upstream: "proxy.example.test:8080"))
+
+        XCTAssertFalse(result)
+        XCTAssertEqual(service.closeStalledCallCount, 1)
+        XCTAssertEqual(service.reauthenticateCallCount, 0)
+        XCTAssertEqual(service.switchUpstreamCallCount, 0)
+        XCTAssertEqual(service.recycleListenerCallCount, 0)
+        XCTAssertEqual(service.healthCheckCallCount, 1)
+        XCTAssertEqual(events.names, ["recovery.skipped"])
+        XCTAssertEqual(events.details.first, "reason=configuration_refused summary=health.connectionCheckTimeout")
+    }
+
     func testHealthCheckClassifiesAFinal407AsRejectionNotUnreachable() {
         XCTAssertEqual(
             ConnectionPool.healthFailure(for: ConnectionPoolError.authenticationRejected, detail: "rejected"),

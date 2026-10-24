@@ -50,6 +50,14 @@ enum PMTunnel {
                 failureLogger.flush()
                 exit(1)
             }
+            // The tunnels' exchange converts these durations, so one the runtime cannot hold stops
+            // the start here. Only the field is named; the value is not echoed.
+            if let field = ConnectionPool.firstUnrepresentableExchangeDuration(in: config) {
+                let failureLogger = ConsoleLogSink(minLevel: .notice)
+                RuntimeDurationRefusal(scope: .pmTunnel, field: field).report(to: failureLogger)
+                failureLogger.flush()
+                exit(1)
+            }
 
             // See pm-proxy for the AppLogStore → ConsoleLogSink rationale.
             let verbose = args.contains("--verbose")

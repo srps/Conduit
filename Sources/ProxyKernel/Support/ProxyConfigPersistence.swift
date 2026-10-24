@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-private let prettyEncoder: JSONEncoder = {
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    return encoder
-}()
-
+/// Persisted JSON uses the canonical pair (AGENTS: files that leave the process
+/// use `CanonicalJSON`). A fresh encoder and decoder per call, so no shared
+/// instance carries state between saves.
 private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
+    try writeData(CanonicalJSON.encoder(prettyPrinted: true).encode(value), to: url)
+}
+
+/// Writes bytes that already exist. A caller encodes first, so a value that
+/// cannot be encoded leaves the directory and any existing file untouched.
+private func writeData(_ data: Data, to url: URL) throws {
     let directory = url.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    try prettyEncoder.encode(value).write(to: url, options: .atomic)
+    try data.write(to: url, options: .atomic)
 }
 
 private func loadJSON<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
@@ -23,7 +26,7 @@ private func loadJSON<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? 
         throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read.")
     }
     do {
-        return try JSONDecoder().decode(type, from: data)
+        return try CanonicalJSON.decoder().decode(type, from: data)
     } catch {
         throw ConfigurationLoadError(source: url.path, reason: "The configuration is not valid Conduit JSON.")
     }
@@ -143,7 +146,7 @@ package enum ProxyConfigPersistence {
         }
         let decoded = try decode(data, source: url.path)
 
-        let previousVersion = (try? JSONDecoder().decode(SchemaVersionEnvelope.self, from: data).schemaVersion) ?? 0
+        let previousVersion = (try? CanonicalJSON.decoder().decode(SchemaVersionEnvelope.self, from: data).schemaVersion) ?? 0
         let needsMigration = previousVersion < ProxyConfig.currentSchemaVersion
         guard needsMigration else {
             return ProxyConfigMigrationResult(config: decoded, migrated: false, warnings: [])
@@ -169,7 +172,7 @@ package enum ProxyConfigPersistence {
     package static func decode(_ data: Data, source: String) throws -> ProxyConfig {
         let decoded: ProxyConfig
         do {
-            decoded = try JSONDecoder().decode(ProxyConfig.self, from: data)
+            decoded = try CanonicalJSON.decoder().decode(ProxyConfig.self, from: data)
         } catch {
             // Do not echo configuration content (which may contain secrets).
             throw ConfigurationLoadError(source: source, reason: "The configuration is not valid Conduit JSON.")
@@ -201,8 +204,33 @@ package enum ProxyConfigPersistence {
         return migrated
     }
 
+    /// Saves `config` only after its bytes are staged and checked. A refusal
+    /// throws before any directory or file is created or replaced.
     package static func save(_ config: ProxyConfig, to url: URL) throws {
-        try writeJSON(config, to: url)
+        try writeData(stagedFileData(for: config), to: url)
+    }
+
+    /// The exact bytes a save writes, checked in memory (decision 0023). The
+    /// config must be representable in the schema-two file, the bytes must
+    /// decode through the same format, and the decoded sections must equal the
+    /// input. No deliberate marker difference is excluded: the file writes each
+    /// section's values as given, so any difference is a silent change, and a
+    /// silent change is refused.
+    package static func stagedFileData(for config: ProxyConfig) throws -> Data {
+        if let refusal = config.fileRepresentabilityRefusal() { throw refusal }
+        let data = try CanonicalJSON.encoder(prettyPrinted: true).encode(config)
+        let decoded: ProxyConfig
+        do {
+            decoded = try CanonicalJSON.decoder().decode(ProxyConfig.self, from: data)
+        } catch {
+            // The encoder just produced these bytes. A failure here is a bug in the
+            // format, not in the input, so it is refused under the generic field.
+            throw ConfigFileRepresentabilityError(field: "config", requirement: .unchangedDecoding)
+        }
+        if let mismatch = ConfigFileRepresentabilityError.firstMismatch(frozen: config, decoded: decoded) {
+            throw mismatch
+        }
+        return data
     }
 
     package static func save(_ config: ProxyConfig, in environment: RuntimeEnvironment) throws {
@@ -237,6 +265,87 @@ package struct ConfigurationLoadError: Error, LocalizedError, Sendable {
             logger.log(.error, "Could not encode config rejection event: \(error.localizedDescription)", category: .general)
         }
         logger.log(.error, event.detail ?? event.event, category: .general)
+    }
+}
+
+/// A save refused because the schema-two file cannot hold a required value
+/// exactly. It is raised before any byte is written, so the previous file is
+/// unchanged. `field` is a config path and `requirement` is fixed text; the
+/// value itself is never echoed.
+package struct ConfigFileRepresentabilityError: Error, LocalizedError, Sendable {
+    package enum Requirement: String, Sendable {
+        case finiteNumber = "finite numbers"
+        case runtimeRange = "durations inside the runtime's nanosecond range"
+        case wholeMilliseconds = "whole milliseconds"
+        case wholeMinutes = "whole minutes"
+        case unchangedDecoding = "values that decode unchanged"
+    }
+
+    package let field: String
+    package let requirement: Requirement
+
+    package init(field: String, requirement: Requirement) {
+        self.field = field
+        self.requirement = requirement
+    }
+
+    package var errorDescription: String? {
+        "Cannot save \(field): the schema 2 file holds \(requirement.rawValue) exactly, so nothing was written and the previous file is unchanged. Change the value to one the file can hold."
+    }
+
+    /// Emitted by `AppState.persistConfiguration`, the app's save path, when a
+    /// save is refused. Its `saveConfig` also holds the apply, so the runtime keeps
+    /// the last config it applied (`config.apply_held` covers the validation case).
+    package var event: RuntimeEvent {
+        RuntimeEvent(kind: .config, event: "config.save_rejected", detail: errorDescription)
+    }
+
+    /// The first field that the schema-two file cannot hold exactly, or nil.
+    /// Finiteness comes first, so a NaN is refused as a non-finite value, not as
+    /// a unit mismatch. Then the runtime's range: a finite JSON number round-trips,
+    /// but a value the runtime cannot hold would be written and then refused at
+    /// the boundary, so the save refuses it first (decision 0023). Only the two
+    /// legacy keys have a unit (whole ms and whole minutes).
+    fileprivate static func firstRefusal(for config: ProxyConfig) -> ConfigFileRepresentabilityError? {
+        // Both checks read the one duration inventory. Finiteness is checked over all of it
+        // before the runtime range, so a NaN is never reported as a range problem.
+        if let nonFinite = RuntimeDurationField.allCases.first(where: { !$0.seconds(in: config).isFinite }) {
+            return ConfigFileRepresentabilityError(field: nonFinite.path, requirement: .finiteNumber)
+        }
+        if let outOfRange = config.firstUnrepresentableDuration() {
+            return ConfigFileRepresentabilityError(field: outOfRange.path, requirement: .runtimeRange)
+        }
+        if DurationUnits.exactMilliseconds(config.health.connectionCheckTimeout) == nil {
+            return ConfigFileRepresentabilityError(field: "health.connectionCheckTimeout", requirement: .wholeMilliseconds)
+        }
+        if DurationUnits.exactMinutes(config.health.directConnectTTL) == nil {
+            return ConfigFileRepresentabilityError(field: "health.directConnectTTL", requirement: .wholeMinutes)
+        }
+        return nil
+    }
+
+    /// The first section whose decoded value differs from the input, or nil.
+    fileprivate static func firstMismatch(frozen: ProxyConfig, decoded: ProxyConfig) -> ConfigFileRepresentabilityError? {
+        let sections: [(name: String, matches: Bool)] = [
+            ("schemaVersion", frozen.schemaVersion == decoded.schemaVersion),
+            ("profileName", frozen.profileName == decoded.profileName),
+            ("proxy", frozen.proxy == decoded.proxy),
+            ("auth", frozen.auth == decoded.auth),
+            ("upstreams", frozen.upstreams == decoded.upstreams),
+            ("routing", frozen.routing == decoded.routing),
+            ("dns", frozen.dns == decoded.dns),
+            ("tunnels", frozen.tunnels == decoded.tunnels),
+            ("health", frozen.health == decoded.health),
+            ("logging", frozen.logging == decoded.logging),
+        ]
+        guard let changed = sections.first(where: { !$0.matches }) else { return nil }
+        return ConfigFileRepresentabilityError(field: changed.name, requirement: .unchangedDecoding)
+    }
+}
+
+extension ProxyConfig {
+    fileprivate func fileRepresentabilityRefusal() -> ConfigFileRepresentabilityError? {
+        ConfigFileRepresentabilityError.firstRefusal(for: self)
     }
 }
 

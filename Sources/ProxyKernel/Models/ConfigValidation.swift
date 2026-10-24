@@ -7,6 +7,9 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     case invalidPort(field: String, value: Int)
     case invalidLimit(field: String, value: Int, min: Int)
     case invalidDuration(field: String, value: TimeInterval)
+    /// NaN, an infinity, or a finite value past the nanosecond range the runtime
+    /// converts to. Named by field only: the value is not echoed.
+    case unrepresentableDuration(field: String)
     case invalidHost(field: String, value: String)
     /// An intercept pattern whose derived resolver domain is unusable. Carries
     /// the index so the Settings row can be pointed at, and the reason so it
@@ -54,6 +57,7 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
         case .invalidPort(let field, _): return "invalid_port field=\(Self.fieldPath(field))"
         case .invalidLimit(let field, _, _): return "invalid_limit field=\(Self.fieldPath(field))"
         case .invalidDuration(let field, _): return "invalid_duration field=\(Self.fieldPath(field))"
+        case .unrepresentableDuration(let field): return "unrepresentable_duration field=\(Self.fieldPath(field))"
         case .invalidHost(let field, _): return "invalid_host field=\(Self.fieldPath(field))"
         case .invalidInterceptPattern(let index, _, _): return "invalid_intercept_pattern field=dns.interceptRules[\(index)]"
         case .invalidInterceptIP(let index, _): return "invalid_intercept_ip field=dns.interceptRules[\(index)]"
@@ -80,7 +84,7 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             // bound to it is `startTransparentProxy`, whose failure is already
             // a logged warning rather than a start failure.
             return false
-        case .invalidPort, .invalidLimit, .invalidDuration, .invalidHost, .conflict:
+        case .invalidPort, .invalidLimit, .invalidDuration, .unrepresentableDuration, .invalidHost, .conflict:
             return true
         }
     }
@@ -93,6 +97,8 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             return "\(field): \(value) is below minimum (\(min))"
         case .invalidDuration(let field, let value):
             return "\(field): \(value)s is not a valid duration"
+        case .unrepresentableDuration(let field):
+            return "\(field) must be a finite duration that the runtime can hold"
         case .invalidHost(let field, let value):
             return "\(field): '\(value)' is not a valid host"
         case .invalidInterceptPattern(let index, let pattern, let reason):
@@ -115,6 +121,128 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
         case .invalidSystemProxyBypass(let reason):
             return "routing.noProxyHosts: Manual system-proxy bypass settings: \(reason) Routing and PAC proxying remain available."
         }
+    }
+}
+
+/// Every duration the runtime converts to its integer units, by config path. This is
+/// the one inventory. Validation, the save refusal and the direct consumers ask it,
+/// so the set cannot drift between them. Declaration order is the order both
+/// validation and the save refuse in. The unit conversions in `DurationUnits` are the
+/// mechanism; this type decides which values are asked about.
+package enum RuntimeDurationField: CaseIterable, Sendable {
+    case stalledConnectionTimeout
+    case checkInterval
+    case connectionCheckTimeout
+    case upstreamResponseTimeout
+    case upstreamConnectTimeout
+    case directConnectTTL
+    case circuitBreakerWindow
+    case circuitBaseOpenInterval
+    case circuitMaxOpenInterval
+    case vpnFlapGrace
+    case vpnFlapMinVisible
+
+    package var path: String {
+        switch self {
+        case .stalledConnectionTimeout: "proxy.stalledConnectionTimeout"
+        case .checkInterval: "health.checkInterval"
+        case .connectionCheckTimeout: "health.connectionCheckTimeout"
+        case .upstreamResponseTimeout: "health.upstreamResponseTimeout"
+        case .upstreamConnectTimeout: "health.upstreamConnectTimeout"
+        case .directConnectTTL: "health.directConnectTTL"
+        case .circuitBreakerWindow: "health.circuitBreakerWindowSeconds"
+        case .circuitBaseOpenInterval: "health.circuitBaseOpenIntervalSeconds"
+        case .circuitMaxOpenInterval: "health.circuitMaxOpenIntervalSeconds"
+        case .vpnFlapGrace: "health.vpnFlapGraceSeconds"
+        case .vpnFlapMinVisible: "health.vpnFlapMinVisibleSeconds"
+        }
+    }
+
+    package func seconds(in config: ProxyConfig) -> TimeInterval {
+        switch self {
+        case .stalledConnectionTimeout: config.proxy.stalledConnectionTimeout
+        case .checkInterval: config.health.checkInterval
+        case .connectionCheckTimeout: config.health.connectionCheckTimeout
+        case .upstreamResponseTimeout: config.health.upstreamResponseTimeout
+        case .upstreamConnectTimeout: config.health.upstreamConnectTimeout
+        case .directConnectTTL: config.health.directConnectTTL
+        case .circuitBreakerWindow: config.health.circuitBreakerWindowSeconds
+        case .circuitBaseOpenInterval: config.health.circuitBaseOpenIntervalSeconds
+        case .circuitMaxOpenInterval: config.health.circuitMaxOpenIntervalSeconds
+        case .vpnFlapGrace: config.health.vpnFlapGraceSeconds
+        case .vpnFlapMinVisible: config.health.vpnFlapMinVisibleSeconds
+        }
+    }
+
+    /// Whether the runtime holds `seconds` in its nanosecond integer. The one
+    /// representability predicate: validation and the save both ask it.
+    package static func isRuntimeRepresentable(_ seconds: TimeInterval) -> Bool {
+        DurationUnits.nanoseconds(seconds) != nil
+    }
+}
+
+/// A config duration refused at a runtime entry because the runtime cannot hold it. One
+/// value serves every entry: the structured event is the record, and any log line is
+/// derived from it. It names the scope and the field, never the value.
+package struct RuntimeDurationRefusal: Error, LocalizedError, Sendable {
+    package enum Scope: String, Sendable {
+        case healthCheck = "health_check"
+        case tunnels
+        case pmTunnel = "pm_tunnel"
+    }
+
+    package let scope: Scope
+    package let field: RuntimeDurationField
+
+    package init(scope: Scope, field: RuntimeDurationField) {
+        self.scope = scope
+        self.field = field
+    }
+
+    package var errorDescription: String? {
+        "\(field.path) is not a duration the runtime can hold. Correct it and retry; nothing was started on it."
+    }
+
+    /// `config.duration_refused`. Its detail names the scope and the field.
+    package var event: RuntimeEvent {
+        RuntimeEvent(kind: .config, event: "config.duration_refused", detail: "scope=\(scope.rawValue) field=\(field.path)")
+    }
+
+    /// For a headless entry with no event log: the event as one canonical NDJSON line on
+    /// stderr, then its log line. The same shape as `ConfigurationLoadError.report`.
+    package func report(to logger: any LogSink) {
+        let event = self.event
+        do {
+            let data = try CanonicalJSON.encoder().encode(event)
+            FileHandle.standardError.write(data + Data([0x0a]))
+        } catch {
+            logger.log(.error, "Could not encode duration refusal event: \(error.localizedDescription)", category: .general)
+        }
+        logger.log(.error, event.detail ?? event.event, category: .general)
+    }
+}
+
+extension ProxyConfig {
+    /// The first duration among `fields` the runtime cannot hold, or nil. It stops
+    /// at the first hit and builds no failure list, so a consumer that tests one
+    /// duration pays for one check.
+    package func firstUnrepresentableDuration<Fields: Sequence>(among fields: Fields) -> RuntimeDurationField?
+        where Fields.Element == RuntimeDurationField
+    {
+        fields.first(where: { !RuntimeDurationField.isRuntimeRepresentable($0.seconds(in: self)) })
+    }
+
+    /// The first duration in the whole inventory the runtime cannot hold, or nil.
+    package func firstUnrepresentableDuration() -> RuntimeDurationField? {
+        firstUnrepresentableDuration(among: RuntimeDurationField.allCases)
+    }
+
+    /// The validation errors that `ConfigValidationError.blocksProxyStart` classifies as
+    /// stopping a proxy start, in validation order. The predicate is the authority; this
+    /// property is a convenience over it. Some callers still filter `validate()` with the
+    /// same predicate directly.
+    package var startBlockingProblems: [ConfigValidationError] {
+        validate().filter(\.blocksProxyStart)
     }
 }
 
@@ -173,22 +301,25 @@ extension ProxyConfig {
         validateMinimum("health.circuitFailureThreshold", health.circuitFailureThreshold, min: 1, into: &errors)
         validateMinimum("logging.auditLogMaxBytes", logging.auditLogMaxBytes, min: 1, into: &errors)
 
-        validateNonNegative("proxy.stalledConnectionTimeout", proxy.stalledConnectionTimeout, into: &errors)
-        validateNonNegative("health.checkInterval", health.checkInterval, into: &errors)
-        validateNonNegative("health.connectionCheckTimeout", health.connectionCheckTimeout, into: &errors)
-        validateNonNegative("health.upstreamResponseTimeout", health.upstreamResponseTimeout, into: &errors)
-        validateBounded("health.upstreamConnectTimeout", health.upstreamConnectTimeout, max: HealthSection.maximumUpstreamConnectTimeout, into: &errors)
-        validateNonNegative("health.directConnectTTL", health.directConnectTTL, into: &errors)
+        validateNonNegative(.stalledConnectionTimeout, into: &errors)
+        validateNonNegative(.checkInterval, into: &errors)
+        validateNonNegative(.connectionCheckTimeout, into: &errors)
+        validateNonNegative(.upstreamResponseTimeout, into: &errors)
+        validateBounded(.upstreamConnectTimeout, max: HealthSection.maximumUpstreamConnectTimeout, into: &errors)
+        validateNonNegative(.directConnectTTL, into: &errors)
         // Non-negative, not positive: 0 is the documented "no window" value
         // (`UpstreamCircuitBreaker` treats `windowSeconds <= 0` as the guard
         // being off), and the tests that pin the legacy burst-trip behaviour
         // rely on it.
-        validateNonNegative("health.circuitBreakerWindowSeconds", health.circuitBreakerWindowSeconds, into: &errors)
-        validatePositive("health.circuitBaseOpenIntervalSeconds", health.circuitBaseOpenIntervalSeconds, into: &errors)
-        validatePositive("health.circuitMaxOpenIntervalSeconds", health.circuitMaxOpenIntervalSeconds, into: &errors)
+        validateNonNegative(.circuitBreakerWindow, into: &errors)
+        validatePositive(.circuitBaseOpenInterval, into: &errors)
+        validatePositive(.circuitMaxOpenInterval, into: &errors)
         if health.circuitMaxOpenIntervalSeconds < health.circuitBaseOpenIntervalSeconds {
             errors.append(.conflict(description: "health.circuitMaxOpenIntervalSeconds (\(health.circuitMaxOpenIntervalSeconds)s) must be ≥ health.circuitBaseOpenIntervalSeconds (\(health.circuitBaseOpenIntervalSeconds)s)"))
         }
+        validateNonNegative(.vpnFlapGrace, into: &errors)
+        // `vpnFlapMinVisibleSeconds` documents its range as 0...30 (0 disables the debounce).
+        validateBounded(.vpnFlapMinVisible, max: 30, into: &errors)
 
         if !Self.isSafeHostToken(proxy.host, allowWildcard: false) {
             errors.append(.invalidHost(field: "proxy.host", value: proxy.host))
@@ -213,6 +344,10 @@ extension ProxyConfig {
         }
 
         validateInterceptRules(into: &errors)
+
+        for (i, upstream) in upstreams.enumerated() {
+            validatePort("upstreams[\(i)].port", upstream.port, into: &errors)
+        }
 
         for (i, tunnel) in tunnels.definitions.enumerated() {
             let label = tunnel.effectiveLabel
@@ -330,17 +465,39 @@ extension ProxyConfig {
         }
     }
 
-    private func validateNonNegative(_ field: String, _ value: TimeInterval, into errors: inout [ConfigValidationError]) {
+    /// Records `unrepresentableDuration` and returns false for NaN, an infinity,
+    /// or a finite value the runtime's nanosecond integer cannot hold. Every
+    /// duration check below runs this first, so no comparison sees a NaN (which
+    /// is false against every bound) and no consumer converts an out-of-range value.
+    private func isRepresentableDuration(_ field: RuntimeDurationField, into errors: inout [ConfigValidationError]) -> Bool {
+        guard RuntimeDurationField.isRuntimeRepresentable(field.seconds(in: self)) else {
+            errors.append(.unrepresentableDuration(field: field.path))
+            return false
+        }
+        return true
+    }
+
+    private func validateNonNegative(_ field: RuntimeDurationField, into errors: inout [ConfigValidationError]) {
+        guard isRepresentableDuration(field, into: &errors) else { return }
+        let value = field.seconds(in: self)
         if value < 0 {
-            errors.append(.invalidDuration(field: field, value: value))
+            errors.append(.invalidDuration(field: field.path, value: value))
         }
     }
 
-    /// Non-negative and at most `max`. Use for durations the kernel converts
-    /// to integer milliseconds, which traps on a value outside `Int64`.
-    private func validateBounded(_ field: String, _ value: TimeInterval, max: TimeInterval, into errors: inout [ConfigValidationError]) {
+    /// Non-negative and at most `max`. Use for durations with a documented
+    /// upper bound, and for durations the kernel converts to integer
+    /// milliseconds, which must stay inside the range of the conversion. A finite
+    /// value past `max` is the bound's refusal (`invalidDuration`), not an
+    /// unrepresentable one; only a NaN or an infinity is unrepresentable here.
+    private func validateBounded(_ field: RuntimeDurationField, max: TimeInterval, into errors: inout [ConfigValidationError]) {
+        let value = field.seconds(in: self)
+        guard value.isFinite else {
+            errors.append(.unrepresentableDuration(field: field.path))
+            return
+        }
         if !(value >= 0 && value <= max) {
-            errors.append(.invalidDuration(field: field, value: value))
+            errors.append(.invalidDuration(field: field.path, value: value))
         }
     }
 
@@ -348,9 +505,11 @@ extension ProxyConfig {
     /// must be positive (e.g. circuit-breaker open intervals — a zero
     /// interval would let a tripped breaker re-probe immediately, defeating
     /// the backoff).
-    private func validatePositive(_ field: String, _ value: TimeInterval, into errors: inout [ConfigValidationError]) {
+    private func validatePositive(_ field: RuntimeDurationField, into errors: inout [ConfigValidationError]) {
+        guard isRepresentableDuration(field, into: &errors) else { return }
+        let value = field.seconds(in: self)
         if value <= 0 {
-            errors.append(.invalidDuration(field: field, value: value))
+            errors.append(.invalidDuration(field: field.path, value: value))
         }
     }
 

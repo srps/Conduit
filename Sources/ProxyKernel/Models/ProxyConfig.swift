@@ -269,9 +269,12 @@ package struct ProxyConfig: Codable, Equatable {
         set { health.checkInterval = newValue }
     }
 
-    /// Legacy accessor: milliseconds as Int. Canonical storage is seconds in `health.connectionCheckTimeout`.
+    /// Legacy accessor: nearest whole milliseconds. Canonical storage is seconds in
+    /// `health.connectionCheckTimeout`. A save refuses a value that is not whole
+    /// milliseconds (`ConfigFileRepresentabilityError`), so this reading is for
+    /// display and legacy callers, not a decision about what is stored.
     package var connectionCheckTimeoutMS: Int {
-        get { Int(health.connectionCheckTimeout * 1000) }
+        get { DurationUnits.nearestMilliseconds(health.connectionCheckTimeout) }
         set { health.connectionCheckTimeout = TimeInterval(newValue) / 1000.0 }
     }
 
@@ -290,9 +293,11 @@ package struct ProxyConfig: Codable, Equatable {
         set { health.upstreamConnectTimeout = newValue }
     }
 
-    /// Legacy accessor: minutes as Int. Canonical storage is seconds in `health.directConnectTTL`.
+    /// Legacy accessor: nearest whole minutes. Canonical storage is seconds in
+    /// `health.directConnectTTL`. Like `connectionCheckTimeoutMS`, this is a
+    /// reading only; a save refuses a value that is not whole minutes.
     package var directConnectTTLMinutes: Int {
-        get { Int(health.directConnectTTL / 60) }
+        get { DurationUnits.nearestMinutes(health.directConnectTTL) }
         set { health.directConnectTTL = TimeInterval(newValue) * 60 }
     }
 
@@ -577,13 +582,20 @@ package struct ProxyConfig: Codable, Equatable {
         try c.encode(tunnels.maxSessions, forKey: .maxTunnelSessions)
         try c.encode(tunnels.maxSessionsPerTunnel, forKey: .maxSessionsPerTunnel)
 
-        // health (encode in legacy units for backward compat)
+        // health (encode in legacy units for backward compat). An inexact value throws
+        // rather than truncating: the file must never hold a value other than the one given.
+        guard let connectionCheckTimeoutMS = DurationUnits.exactMilliseconds(health.connectionCheckTimeout) else {
+            throw ConfigFileRepresentabilityError(field: "health.connectionCheckTimeout", requirement: .wholeMilliseconds)
+        }
+        guard let directConnectTTLMinutes = DurationUnits.exactMinutes(health.directConnectTTL) else {
+            throw ConfigFileRepresentabilityError(field: "health.directConnectTTL", requirement: .wholeMinutes)
+        }
         try c.encode(health.checkURL, forKey: .healthCheckURL)
         try c.encode(health.checkInterval, forKey: .healthCheckIntervalSeconds)
-        try c.encode(Int(health.connectionCheckTimeout * 1000), forKey: .connectionCheckTimeoutMS)
+        try c.encode(connectionCheckTimeoutMS, forKey: .connectionCheckTimeoutMS)
         try c.encode(health.upstreamResponseTimeout, forKey: .upstreamResponseTimeoutSeconds)
         try c.encode(health.upstreamConnectTimeout, forKey: .upstreamConnectTimeoutSeconds)
-        try c.encode(Int(health.directConnectTTL / 60), forKey: .directConnectTTLMinutes)
+        try c.encode(directConnectTTLMinutes, forKey: .directConnectTTLMinutes)
         try c.encode(health.circuitBreakerWindowSeconds, forKey: .circuitBreakerWindowSeconds)
         try c.encode(health.circuitFailureThreshold, forKey: .circuitFailureThreshold)
         try c.encode(health.circuitBaseOpenIntervalSeconds, forKey: .circuitBaseOpenIntervalSeconds)

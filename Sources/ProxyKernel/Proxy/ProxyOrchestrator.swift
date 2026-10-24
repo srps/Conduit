@@ -1056,8 +1056,16 @@ package final class ProxyOrchestrator {
         DirectConnectDetector(
             group: MultiThreadedEventLoopGroup.singleton,
             logger: logStore,
-            ttlSeconds: TimeInterval(configBox.current.directConnectTTLMinutes * 60),
-            baseTimeoutMS: Int64(configBox.current.connectionCheckTimeoutMS),
+            // The TTL is canonical seconds: an integer-minute reading would cut 90.5 seconds to 60.
+            ttlSeconds: configBox.current.health.directConnectTTL,
+            // The detector's connect budget is whole milliseconds at the socket layer, so the
+            // canonical probe timeout rounds to the nearest millisecond here. Only the probe budget
+            // is rounded; the stored value and the save refusal keep the exact value. The budget is
+            // read until a valid value appears, and then latches: a launch with a value the runtime
+            // cannot hold refuses probes, and a corrected value is admitted without a relaunch.
+            baseTimeoutProvider: { [configBox] in
+                DurationUnits.checkedMilliseconds(configBox.current.health.connectionCheckTimeout)
+            },
             routingTransitions: routingTransitions,
             strictHintSettleWindow: strictHintSettleWindow,
             eventSink: { [eventLog] event in eventLog.append(event) }
@@ -1542,6 +1550,21 @@ package final class ProxyOrchestrator {
                 $0.tunnelSessionCount = 0
                 $0.tunnelDNSOverrideStatus = .notNeeded
                 $0.bindings.tunnels = []
+            }
+            return
+        }
+
+        // The tunnels' connect path reads the same durations the health check does. A
+        // persisted value the runtime cannot hold stops the start here, not in a conversion.
+        if let field = ConnectionPool.firstUnrepresentableExchangeDuration(in: currentConfig) {
+            let refusal = RuntimeDurationRefusal(scope: .tunnels, field: field)
+            eventLog.append(refusal.event)
+            logStore.log(.error, refusal.event.detail ?? refusal.event.event, category: .tunnel)
+            mutateSnapshot {
+                $0.tunnelsError = refusal.errorDescription
+                $0.tunnelsRunState = .failed
+                $0.tunnelActiveCount = 0
+                $0.tunnelSessionCount = 0
             }
             return
         }
@@ -2488,6 +2511,14 @@ package final class ProxyOrchestrator {
             }
         }
         refreshUpstreamStatuses()
+
+        // The check did not run: a configured duration is one the runtime cannot hold. No upstream
+        // answered, so the ladder would repeat the refusal, and the breaker is not fed by a check.
+        // `config.duration_refused` (emitted by the pool) says why.
+        if case .configurationRefused = result.failure {
+            emitEvent(.config, "recovery.skipped", detail: "reason=configuration_refused summary=\(result.summary)")
+            return
+        }
 
         // The ladder cannot supply a credential; report once and keep checking.
         if case .credentialUnavailable = result.failure {
