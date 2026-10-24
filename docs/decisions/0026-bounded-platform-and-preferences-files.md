@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 sidecar file-boundary checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -85,7 +85,33 @@ the serving app/helper. No global memory or real-machine validation is inferred.
 
 ## Implementation evidence
 
-None yet. Shared sidecar filtering and preference-save enforcement are planned.
+Partial, on branch `codex/bounded-configuration-sidecars`, not merged:
+
+- Shared reader, gate and schema. [ConfigurationFileReader](../../Sources/ProxyKernel/Support/ConfigurationFileReader.swift)
+  (its file keeps the name `ConfigurationFileReader.swift` until the parent moves it) reads any file under a caller's
+  budget. [ConfigurationFileFilter.swift](../../Sources/ProxyKernel/Support/ConfigurationFileFilter.swift) holds the one format gate,
+  `ConfigurationFileGate`, which applies the budget and then the strict filter. [ConfigurationFileSchema.swift](../../Sources/ProxyKernel/Support/ConfigurationFileSchema.swift)
+  builds each root from the real `CodingKeys`: the runtime file, and the platform and preferences sidecars, which refuse a wrong
+  kind instead of falling back. The sidecar budget is `DomainResourceLimits.sidecarFileBytes`, 131,072 bytes, in
+  [DomainResourceLimits.swift](../../Sources/ConduitShared/DomainResourceLimits.swift).
+- Sidecar read, staging and save, in [ProxyConfigPersistence.swift](../../Sources/ProxyKernel/Support/ProxyConfigPersistence.swift).
+  Both sidecars read through the gate and never through `Data(contentsOf:)`. Preferences check the raw browser URL before
+  encoding, and every sidecar byte is staged and checked before its one write. A combined migration stages every candidate
+  first. If any stage fails, no migration file is written. Physical failures after all stages succeed are reported without
+  rollback.
+- The save refusal is `ConfigurationSidecarSaveRefusal`. It names the file and the field, never the value. AppState reports it
+  through the existing save path, in [AppState.swift](../../Sources/Conduit/App/AppState.swift). The runtime save and apply are
+  not vetoed by it.
+- Tests: [ConfigSidecarBoundaryTests.swift](../../Tests/ConduitTests/ConfigSidecarBoundaryTests.swift) and
+  [AppStateHarnessSidecarRefusalTests.swift](../../Tests/ConduitTests/AppStateHarnessSidecarRefusalTests.swift). The runtime
+  reader, filter and gate tests were updated for the shared names.
+- Headless scenario: [ScenarioConfigSidecarBoundary.swift](../../Sources/pm-sim/ScenarioConfigSidecarBoundary.swift), `pm-sim config-sidecar-boundary`.
+- The run and its counts are recorded in [the verification note](../verification-config-sidecar-boundary-2026-10-24.md). That is
+  a local run on synthetic files, not owner validation.
+
+Does not prove: the asynchronous sole store, physical sidecar replacement or read-back, writer and startup adoption beyond these
+reads, journal or diagnostic bounds, global memory, Stop or status fairness, real-machine behavior, or release readiness. No owner
+or real-machine validation is claimed.
 
 ## Open questions
 

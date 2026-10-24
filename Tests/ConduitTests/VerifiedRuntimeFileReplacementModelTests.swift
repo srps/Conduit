@@ -19,8 +19,8 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
     private static let largerPrior = Data(repeating: 0x4C, count: 64)
     private static let longEdit = Data(repeating: 0x58, count: 128)
     private static let writeErrno: Int32 = ENOSPC
-    private static let ioFailure = RuntimeConfigurationFileError.unreadable(.readFailed(EIO), closeErrno: nil)
-    private static let budget = RuntimeConfigurationFileReader.maximumBytes
+    private static let ioFailure = ConfigurationFileError.unreadable(.readFailed(EIO), closeErrno: nil)
+    private static let budget = ConfigurationFileReader.maximumBytes
 
     private enum PriorKind: CaseIterable {
         case absent, same, small, larger
@@ -66,7 +66,7 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
     private enum Seen: Equatable {
         case bytes(Data)
         case missing
-        case failed(RuntimeConfigurationFileError)
+        case failed(ConfigurationFileError)
     }
 
     private struct LeaseUnavailable: Error {}
@@ -395,7 +395,7 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
             self.staged = staged
         }
 
-        func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, RuntimeConfigurationFileError> {
+        func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
             let index = lock.withLock { () -> Int in
                 reads += 1
                 return reads
@@ -404,7 +404,7 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
             case .echoStagedOnReadBack where index == 2:
                 return .success(staged)
             case .unboundedReadBack:
-                return fake.readRuntimeFile(file, limit: RuntimeConfigurationFileReader.maximumBytes)
+                return fake.readRuntimeFile(file, limit: ConfigurationFileReader.maximumBytes)
             case .readFailureAsMissing:
                 let result = fake.readRuntimeFile(file, limit: limit)
                 if case .failure = result { return .failure(.missing) }

@@ -2,57 +2,67 @@
 import ConduitShared
 import Foundation
 
-/// Persisted JSON uses the canonical pair (AGENTS: files that leave the process
-/// use `CanonicalJSON`). A fresh encoder and decoder per call, so no shared
-/// instance carries state between saves.
-private func writeJSON<T: Encodable>(_ value: T, to url: URL) throws {
-    try writeData(CanonicalJSON.encoder(prettyPrinted: true).encode(value), to: url)
-}
-
 /// Writes bytes that already exist. A caller encodes first, so a value that
-/// cannot be encoded leaves the directory and any existing file untouched.
+/// cannot be encoded leaves the directory and any existing file untouched. Every physical configuration write goes through
+/// here, the runtime file and both sidecars alike.
 private func writeData(_ data: Data, to url: URL) throws {
     let directory = url.deletingLastPathComponent()
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     try data.write(to: url, options: .atomic)
 }
 
-/// Reads one sidecar JSON file. A file that is absent is nil. A file that exists but cannot be read or decoded is refused.
-private func loadJSON<T: Decodable>(_ type: T.Type, from url: URL) throws -> T? {
-    let data: Data
-    do {
-        data = try Data(contentsOf: url)
-    } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-        return nil
-    } catch {
-        throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read.")
-    }
-    do {
-        return try CanonicalJSON.decoder().decode(type, from: data)
-    } catch {
-        throw ConfigurationLoadError(source: url.path, reason: "The configuration is not valid Conduit JSON.")
-    }
-}
-
-/// The bytes of the runtime file, or its absence. A missing file is an outcome, so the caller decides what it means.
-private enum RuntimeFileRead {
+/// The bytes of one configuration file, or its absence. A missing file is an outcome, so the caller decides what it means.
+private enum ConfigurationFileRead {
     case missing
     case present(Data)
 }
 
-/// Reads the runtime file through the bounded reader (decision 0021). Only a missing file is an outcome. Every other read
-/// failure is refused with a fixed reason, and no path or byte is echoed.
-private func readRuntimeFile(at url: URL) throws -> RuntimeFileRead {
-    do {
-        return .present(try RuntimeConfigurationFileReader.read(at: url))
-    } catch let failure as RuntimeConfigurationFileError {
-        if case .missing = failure {
+/// Reads one configuration file through the bounded reader under its root's budget (decisions 0021 and 0026). Only a missing
+/// file is an outcome. Every other read failure is refused with a fixed reason, and no path or byte is echoed.
+private func readConfigurationFile(at url: URL, root: ConfigurationFileRoot) throws -> ConfigurationFileRead {
+    do throws(ConfigurationFileError) {
+        return .present(try ConfigurationFileReader.read(at: url, limit: root.maximumBytes))
+    } catch {
+        if case .missing = error {
             return .missing
         }
         // Every failure keeps its step, its errno and a close failure that followed it (`summary`). Only fixed words are
         // reported, with the source path the loader already names.
-        throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read: \(failure.summary).")
+        throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read: \(error.summary).")
     }
+}
+
+/// Reads and gates one sidecar (decision 0026). The read is bounded by the sidecar budget, then the strict filter and one
+/// typed decode follow, so a refusal happens before the typed value exists. A missing sidecar is nil. Nothing is written here.
+private func loadSidecar<Value: Decodable>(_ type: Value.Type, root: ConfigurationFileRoot, from url: URL) throws -> Value? {
+    switch try readConfigurationFile(at: url, root: root) {
+    case .missing:
+        return nil
+    case .present(let data):
+        let filtered = try ConfigurationFileGate.filter(data, root: root, source: url.path)
+        do {
+            return try CanonicalJSON.decoder().decode(type, from: filtered.bytes)
+        } catch {
+            throw ConfigurationLoadError(source: url.path, reason: "The configuration is not valid Conduit JSON.")
+        }
+    }
+}
+
+/// The warning for a migration file that could not be staged or written. It names the file and the error, and nothing else.
+private func migrationWarning(_ label: String, _ url: URL, _ error: Error) -> String {
+    "\(label) migrated in memory but could not be written to \(url.path): \(error.localizedDescription)"
+}
+
+/// The exact bytes a sidecar save writes (decision 0026): canonical pretty JSON, checked against the approved sidecar budget
+/// before any byte is written. Only the typed `stagedData` functions of the two sidecars call this, so the budget is never a
+/// caller's choice. The value's own checks run before it, in the typed function.
+private func stagedSidecarData<Value: Encodable>(_ value: Value, file: ConfigurationSidecarFile) throws -> Data {
+    let data = try CanonicalJSON.encoder(prettyPrinted: true).encode(value)
+    let limit = DomainResourceLimits.sidecarFileBytes
+    guard data.count <= limit else {
+        throw ConfigurationSidecarSaveRefusal(file: file, cause: .fileSize(encodedBytes: data.count, limit: limit))
+    }
+    return data
 }
 
 /// The in-memory migration of one document. The schema transforms run from the version the file says it was written at,
@@ -76,10 +86,10 @@ private struct RuntimeFileLoad {
 /// Reads and gates the runtime file once. A missing file is defaults when `allowMissing` is set, and a refusal otherwise.
 /// Nothing is written here.
 private func loadRuntimeFile(at url: URL, requirements: RuntimeFileRequirements, allowMissing: Bool) throws -> RuntimeFileLoad {
-    switch try readRuntimeFile(at: url) {
+    switch try readConfigurationFile(at: url, root: ConfigurationFileSchema.runtime(requirements)) {
     case .missing:
         guard allowMissing else {
-            throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read: \(RuntimeConfigurationFileError.missing.summary).")
+            throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read: \(ConfigurationFileError.missing.summary).")
         }
         return RuntimeFileLoad(
             result: ProxyConfigMigrationResult(config: GenericDefaults.shared.makeConfig(), migrated: false, warnings: []),
@@ -155,7 +165,7 @@ package enum ProxyConfigPersistence {
 
     /// Loads every configuration component from one pass. Each sidecar is read once, and the runtime file is read once. A
     /// legacy component is taken from the runtime read only where its sidecar was absent, so the sidecar read decides what
-    /// the runtime read keeps. Every candidate is staged before the first write, and the writes keep their order.
+    /// the runtime read keeps. Every migration write is staged before the first write, and the writes keep their order.
     package static func loadAllMigrating(
         in environment: RuntimeEnvironment,
         allowMissing: Bool = true,
@@ -175,25 +185,58 @@ package enum ProxyConfigPersistence {
         let preferences = AppPreferencesPersistence.resolve(sidecar: preferencesSidecar, legacy: loaded.preferences)
         try validateRuntime(runtime.config)
         var warnings = platform.warnings + preferences.warnings + runtime.warnings
+        // Stage every migration write before the first physical write (decision 0026). One candidate that cannot be staged stops
+        // every migration write, so no sidecar or runtime rewrite is made from a partial set. That failure is kept apart from the
+        // legacy warnings, and the in-memory result and the original files stay as they are.
+        var stagingFailures: [String] = []
+        var platformBytes: Data?
+        var preferencesBytes: Data?
+        var runtimeBytes: Data?
         if platform.migrated {
             do {
-                try PlatformConfigPersistence.save(platform.config, in: environment)
+                platformBytes = try PlatformConfigPersistence.stagedData(for: platform.config)
             } catch {
-                warnings.append("Platform config migrated in memory but could not be written to \(environment.platformConfigFile.path): \(error.localizedDescription)")
+                stagingFailures.append(migrationWarning("Platform config", environment.platformConfigFile, error))
             }
         }
         if preferences.migrated {
             do {
-                try AppPreferencesPersistence.save(preferences.preferences, in: environment)
+                preferencesBytes = try AppPreferencesPersistence.stagedData(for: preferences.preferences)
             } catch {
-                warnings.append("App preferences migrated in memory but could not be written to \(environment.preferencesFile.path): \(error.localizedDescription)")
+                stagingFailures.append(migrationWarning("App preferences", environment.preferencesFile, error))
             }
         }
-        if runtime.migrated && warnings.isEmpty {
+        if runtime.migrated {
             do {
-                try save(runtime.config, in: environment)
+                runtimeBytes = try stagedFileData(for: runtime.config)
             } catch {
-                warnings.append("Config schema migrated in memory but could not be written to \(environment.configFile.path): \(error.localizedDescription)")
+                stagingFailures.append(migrationWarning("Config schema", environment.configFile, error))
+            }
+        }
+        warnings += stagingFailures
+        // After every stage has succeeded, a physical failure is reported and not rolled back: each write is attempted on its own.
+        if stagingFailures.isEmpty {
+            if let platformBytes {
+                do {
+                    try writeData(platformBytes, to: environment.platformConfigFile)
+                } catch {
+                    warnings.append(migrationWarning("Platform config", environment.platformConfigFile, error))
+                }
+            }
+            if let preferencesBytes {
+                do {
+                    try writeData(preferencesBytes, to: environment.preferencesFile)
+                } catch {
+                    warnings.append(migrationWarning("App preferences", environment.preferencesFile, error))
+                }
+            }
+            // The runtime rewrite waits until every other migration write has succeeded, as it always did.
+            if let runtimeBytes, warnings.isEmpty {
+                do {
+                    try writeStagedRuntimeFile(runtimeBytes, to: environment.configFile)
+                } catch {
+                    warnings.append(migrationWarning("Config schema", environment.configFile, error))
+                }
             }
         }
         return RuntimeConfigurationLoadResult(
@@ -224,8 +267,8 @@ package enum ProxyConfigPersistence {
         }
     }
 
-    /// Decodes bytes that came from argv or a caller, through the same gate as a file: the physical cap, the strict
-    /// filter, one typed decode, the newer-schema refusal and the in-memory migration. Nothing is written.
+    /// Decodes bytes that came from argv or a caller, through the same gate as a file: the physical cap, the strict filter,
+    /// one typed decode, the newer-schema refusal and the in-memory migration. Nothing is written.
     package static func decode(_ data: Data, source: String) throws -> ProxyConfig {
         let document = try RuntimeFileDocument.decode(data, requirements: .runtimeOnly, source: source)
         return migratedConfig(document).config
@@ -285,8 +328,8 @@ package enum ProxyConfigPersistence {
         let data = try CanonicalJSON.encoder(prettyPrinted: true).encode(config)
         // The loader refuses any runtime file past the physical budget, so the writer refuses to create one. This is the same
         // budget, checked on the bytes it would write, not a new cap.
-        guard data.count <= RuntimeConfigurationFileReader.maximumBytes else {
-            throw ConfigurationFileSizeRefusal(encodedBytes: data.count, limit: RuntimeConfigurationFileReader.maximumBytes)
+        guard data.count <= ConfigurationFileReader.maximumBytes else {
+            throw ConfigurationFileSizeRefusal(encodedBytes: data.count, limit: ConfigurationFileReader.maximumBytes)
         }
         let decoded: ProxyConfig
         do {
@@ -361,33 +404,49 @@ package struct ConfigurationFileSizeRefusal: Error, LocalizedError, Sendable {
     }
 }
 
-package struct ConfigurationLoadError: Error, LocalizedError, Sendable {
-    package let source: String
-    package let reason: String
+/// The sidecar a save writes. Its label is what a refusal names, so the banner says which file kept its previous contents.
+package enum ConfigurationSidecarFile: Sendable, Equatable {
+    case platform
+    case preferences
 
-    package init(source: String, reason: String) {
-        self.source = source
-        self.reason = reason
+    package var label: String {
+        switch self {
+        case .platform: "the platform settings"
+        case .preferences: "the app preferences"
+        }
+    }
+}
+
+/// A sidecar save refused before any byte is written (decision 0026). It names the sidecar and the ceiling that crossed, never
+/// the value. The sidecar keeps its previous contents. The runtime file is saved separately, so the message says only that.
+package struct ConfigurationSidecarSaveRefusal: Error, LocalizedError, Sendable {
+    package enum Cause: Sendable, Equatable {
+        case resourceLimit(DomainResourceViolation)
+        case fileSize(encodedBytes: Int, limit: Int)
+    }
+
+    package let file: ConfigurationSidecarFile
+    package let cause: Cause
+
+    package init(file: ConfigurationSidecarFile, cause: Cause) {
+        self.file = file
+        self.cause = cause
     }
 
     package var errorDescription: String? {
-        "Cannot load \(source). \(reason) Repair the file and retry; no replacement configuration was applied."
-    }
-
-    package var event: RuntimeEvent {
-        RuntimeEvent(kind: .config, event: "config.load_rejected", detail: errorDescription)
-    }
-
-    /// Startup failures have no orchestrator yet. Still emit canonical NDJSON.
-    package func report(to logger: any LogSink) {
-        let event = self.event
-        do {
-            let data = try CanonicalJSON.encoder().encode(event)
-            FileHandle.standardError.write(data + Data([0x0a]))
-        } catch {
-            logger.log(.error, "Could not encode config rejection event: \(error.localizedDescription)", category: .general)
+        let detail: String
+        switch cause {
+        case .resourceLimit(let violation):
+            detail = violation.description
+        case .fileSize(let encodedBytes, let limit):
+            detail = "its encoded form is \(encodedBytes) bytes, past the \(limit)-byte sidecar limit"
         }
-        logger.log(.error, event.detail ?? event.event, category: .general)
+        return "Cannot save \(file.label): \(detail). The file keeps its previous contents; the other settings are saved separately."
+    }
+
+    /// Emitted with the refusal under the save path's event name, `config.save_rejected`, which names the field and never the value.
+    package var event: RuntimeEvent {
+        RuntimeEvent(kind: .config, event: "config.save_rejected", detail: errorDescription)
     }
 }
 
@@ -472,6 +531,37 @@ extension ProxyConfig {
     }
 }
 
+/// A load refused with a fixed reason. Every sidecar and runtime load reports one of these, and it names no value.
+package struct ConfigurationLoadError: Error, LocalizedError, Sendable {
+    package let source: String
+    package let reason: String
+
+    package init(source: String, reason: String) {
+        self.source = source
+        self.reason = reason
+    }
+
+    package var errorDescription: String? {
+        "Cannot load \(source). \(reason) Repair the file and retry; no replacement configuration was applied."
+    }
+
+    package var event: RuntimeEvent {
+        RuntimeEvent(kind: .config, event: "config.load_rejected", detail: errorDescription)
+    }
+
+    /// Startup failures have no orchestrator yet. Still emit canonical NDJSON.
+    package func report(to logger: any LogSink) {
+        let event = self.event
+        do {
+            let data = try CanonicalJSON.encoder().encode(event)
+            FileHandle.standardError.write(data + Data([0x0a]))
+        } catch {
+            logger.log(.error, "Could not encode config rejection event: \(error.localizedDescription)", category: .general)
+        }
+        logger.log(.error, event.detail ?? event.event, category: .general)
+    }
+}
+
 // MARK: - Platform Config Persistence
 
 package struct PlatformConfigMigrationResult {
@@ -492,8 +582,8 @@ package enum PlatformConfigPersistence {
         return result.config
     }
 
-    /// The platform config with its migration state. The runtime file is read only when the sidecar is absent, and a
-    /// migrated value is written back when `saveMigrated` is set.
+    /// The platform config with its migration state. The runtime file is read only when the sidecar is absent, and a migrated
+    /// value is written back when `saveMigrated` is set.
     package static func loadMigrating(in environment: RuntimeEnvironment, saveMigrated: Bool = true) throws -> PlatformConfigMigrationResult {
         if let sidecar = try readSidecar(in: environment) {
             return resolve(sidecar: sidecar, legacy: .notRequired)
@@ -514,9 +604,9 @@ package enum PlatformConfigPersistence {
         }
     }
 
-    /// The platform sidecar, read once. Nil when the file is absent.
+    /// The platform sidecar, read once through the bounded sidecar gate (decision 0026). Nil when the file is absent.
     package static func readSidecar(in environment: RuntimeEnvironment) throws -> PlatformIntegrationConfig? {
-        try loadJSON(PlatformIntegrationConfig.self, from: environment.platformConfigFile)
+        try loadSidecar(PlatformIntegrationConfig.self, root: ConfigurationFileSchema.platformSidecar, from: environment.platformConfigFile)
     }
 
     /// The platform candidate: the sidecar when one was read, else the runtime file's legacy value. A refused legacy value
@@ -539,8 +629,13 @@ package enum PlatformConfigPersistence {
         }
     }
 
+    /// The exact bytes a platform save writes, staged and checked against the sidecar budget before any write.
+    package static func stagedData(for config: PlatformIntegrationConfig) throws -> Data {
+        try stagedSidecarData(config, file: .platform)
+    }
+
     package static func save(_ config: PlatformIntegrationConfig, in environment: RuntimeEnvironment) throws {
-        try writeJSON(config, to: environment.platformConfigFile)
+        try writeData(try stagedData(for: config), to: environment.platformConfigFile)
     }
 }
 
@@ -585,9 +680,9 @@ package enum AppPreferencesPersistence {
         }
     }
 
-    /// The preferences sidecar, read once. Nil when the file is absent.
+    /// The preferences sidecar, read once through the bounded sidecar gate (decision 0026). Nil when the file is absent.
     package static func readSidecar(in environment: RuntimeEnvironment) throws -> AppPreferences? {
-        try loadJSON(AppPreferences.self, from: environment.preferencesFile)
+        try loadSidecar(AppPreferences.self, root: ConfigurationFileSchema.preferencesSidecar, from: environment.preferencesFile)
     }
 
     /// The preferences candidate: the sidecar when one was read, else the runtime file's legacy value. Follows
@@ -610,7 +705,16 @@ package enum AppPreferencesPersistence {
         }
     }
 
+    /// The exact bytes a preferences save writes. The browser URL is checked as raw UTF-8 before any encoding and before the
+    /// typed decode's blank fallback (decision 0026). No other value is normalized, so the bytes hold what the caller gave.
+    package static func stagedData(for prefs: AppPreferences) throws -> Data {
+        if let violation = DomainResourceCheck.text(prefs.preferredBrowserTestURL, .browserTestURL) {
+            throw ConfigurationSidecarSaveRefusal(file: .preferences, cause: .resourceLimit(violation))
+        }
+        return try stagedSidecarData(prefs, file: .preferences)
+    }
+
     package static func save(_ prefs: AppPreferences, in environment: RuntimeEnvironment) throws {
-        try writeJSON(prefs, to: environment.preferencesFile)
+        try writeData(try stagedData(for: prefs), to: environment.preferencesFile)
     }
 }

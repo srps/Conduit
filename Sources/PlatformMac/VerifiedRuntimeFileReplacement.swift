@@ -21,7 +21,7 @@ package enum RuntimeFileUnknownReason: Error, Equatable, Sendable {
     /// Read-back found no file where a prior was observed, or after a replacement that reported success with no prior.
     case readbackMissing
     /// Read-back failed, and the failure is not a missing file.
-    case readbackFailed(RuntimeConfigurationFileError)
+    case readbackFailed(ConfigurationFileError)
 }
 
 /// The physical outcome of one verified replacement (decision 0015). It carries no bytes and no path. `writeError` is what the
@@ -30,7 +30,7 @@ package enum RuntimeFileReplacementOutcome: Equatable, Sendable {
     /// Refused before any I/O.
     case refused(RuntimeFileReplacementRefusal)
     /// The prior could not be read, so nothing was written.
-    case notStarted(RuntimeConfigurationFileError)
+    case notStarted(ConfigurationFileError)
     /// Read-back equals the staged bytes. This holds even when the replacement reported an error, because the staged bytes are
     /// what the file holds. It does not say that this call wrote them.
     case verifiedPersisted(writeError: RuntimeFileWriteError?)
@@ -57,7 +57,7 @@ package enum VerifiedRuntimeFileReplacement {
         // Every refusal comes before the first I/O, so a bad input leaves the root untouched.
         guard file.role == .config else { return .refused(.wrongRole(file.role)) }
         guard file.path.hasPrefix(lease.root.path + "/") else { return .refused(.outsideLeasedRoot) }
-        let budget = RuntimeConfigurationFileReader.maximumBytes
+        let budget = ConfigurationFileReader.maximumBytes
         guard staged.count <= budget else { return .refused(.stagedTooLarge(limit: budget)) }
 
         let prior: ObservedPrior

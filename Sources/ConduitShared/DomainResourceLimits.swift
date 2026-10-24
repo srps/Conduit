@@ -49,6 +49,10 @@ package enum DomainResourceLimits {
     /// The physical bytes of one runtime configuration file, read or refused (decision 0021). It is a file budget, not a
     /// field ceiling, and it is separate from the private frame cap even though both are 8 MiB today.
     package static let runtimeConfigurationFileBytes = 8_388_608
+    /// The physical bytes of one platform or preferences sidecar, read or staged for a write (decision 0026). Each sidecar holds
+    /// six settings, and the largest approved value, a 16 KiB browser URL with every byte escaped as `\u00XX`, encodes to under
+    /// 98 KiB, so this budget fits every typed value with headroom and refuses only excess unknown content.
+    package static let sidecarFileBytes = 131_072
     /// The prefix a wildcard intercept pattern starts with, as UTF-8.
     package static let wildcardPrefix: [UInt8] = Array("*.".utf8)
 }

@@ -48,7 +48,7 @@ full suite above passed after those test corrections.
 
 ## Concrete evidence and limits
 
-[RuntimeFileFilter.swift](../Sources/ProxyKernel/Support/RuntimeFileFilter.swift)
+[ConfigurationFileFilter.swift](../Sources/ProxyKernel/Support/ConfigurationFileFilter.swift)
 uses the shared strict cursor and scalar/list resource budgets. One filtered Data
 buffer reaches a single typed document decode; unknown dense arrays and later
 values are skipped without constructing their object graphs. Actual opened-file

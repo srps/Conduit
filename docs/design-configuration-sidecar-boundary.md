@@ -2,8 +2,9 @@
 
 Status: owner selected 128 KiB per sidecar with strict shared filtering; see
 [decision 0026](decisions/0026-bounded-platform-and-preferences-files.md). Codex and Claude reviewed the actual persistence/field
-inventory using Claude Code on the owner's claude.ai Max subscription. No sidecar
-reader/filter adoption is implemented by this draft.
+inventory using Claude Code on the owner's claude.ai Max subscription. The shared reader, gate and schema now serve both sidecar
+reads, the preference URL check and staged saves, and the combined migration stages before it writes. The async store, physical
+sidecar replacement and startup or writer adoption beyond these reads remain separate work.
 
 ## Current boundary and ownership
 

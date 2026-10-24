@@ -184,7 +184,7 @@ final class VerifiedRuntimeFileReplacementOSTests: XCTestCase {
         let scratch = try LeasedScratch.open("replace-budget")
         defer { scratch.close() }
         let file = target(scratch.root)
-        let limit = RuntimeConfigurationFileReader.maximumBytes
+        let limit = ConfigurationFileReader.maximumBytes
 
         XCTAssertEqual(replace(Data(count: limit + 1), file, scratch.lease), .refused(.stagedTooLarge(limit: limit)))
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))

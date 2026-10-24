@@ -180,7 +180,7 @@ final class ConfigurationFileGateTests: XCTestCase {
     // MARK: - Physical budget
 
     func testAFileOfExactlyTheBudgetIsAcceptedAndOneByteOverIsRefusedUnchanged() throws {
-        let cap = RuntimeConfigurationFileReader.maximumBytes
+        let cap = ConfigurationFileReader.maximumBytes
         let prefix = Data(#"{"profileName":"P","pad":""#.utf8)
         let padding = cap - prefix.count - suffix.count
         let exact = prefix + Data(repeating: 0x20, count: padding) + suffix
@@ -202,13 +202,13 @@ final class ConfigurationFileGateTests: XCTestCase {
     func testALargeUnknownArrayUnderTheBudgetIsSkippedWithoutTypedExpansion() throws {
         let items = Array(repeating: "0", count: 500_000).joined(separator: ",")
         let data = Data(#"{"profileName":"P","junk":["#.utf8) + Data(items.utf8) + Data("]}".utf8)
-        XCTAssertLessThan(data.count, RuntimeConfigurationFileReader.maximumBytes)
+        XCTAssertLessThan(data.count, ConfigurationFileReader.maximumBytes)
         XCTAssertEqual(profile(try gate(data, "large-unknown")), "P")
 
         let filtered = try data.withUnsafeBytes { raw in
-            try RuntimeFileFilter.filter(
+            try ConfigurationFileFilter.filter(
                 UnsafeBufferPointer(start: raw.baseAddress?.assumingMemoryBound(to: UInt8.self), count: raw.count),
-                root: RuntimeFileSchema.root(.runtimeOnly)
+                root: ConfigurationFileSchema.runtime(.runtimeOnly)
             )
         }
         XCTAssertEqual(String(decoding: filtered.bytes, as: UTF8.self), #"{"profileName":"P"}"#, "no element of the array is retained")
@@ -233,12 +233,12 @@ final class ConfigurationFileGateTests: XCTestCase {
     }
 
     func testEachReadFailureSummaryKeepsItsStepErrnoAndACloseFailureThatFollowedIt() {
-        XCTAssertEqual(RuntimeConfigurationFileError.unreadable(.notRegularFile, closeErrno: nil).summary, "not a regular file")
-        let both = RuntimeConfigurationFileError.unreadable(.tooLarge(limit: 4), closeErrno: EIO).summary
-        XCTAssertTrue(both.contains("exceeds the runtime file size limit of 4 bytes"), both)
+        XCTAssertEqual(ConfigurationFileError.unreadable(.notRegularFile, closeErrno: nil).summary, "not a regular file")
+        let both = ConfigurationFileError.unreadable(.tooLarge(limit: 4), closeErrno: EIO).summary
+        XCTAssertTrue(both.contains("exceeds the size limit of 4 bytes"), both)
         XCTAssertTrue(both.contains("close also failed"), both)
         XCTAssertTrue(both.contains("errno \(EIO)"), both)
-        XCTAssertTrue(RuntimeConfigurationFileError.unreadable(.readFailed(EIO), closeErrno: nil).summary.hasPrefix("read failed"))
-        XCTAssertTrue(RuntimeConfigurationFileError.closeFailed(EIO).summary.hasPrefix("close failed"))
+        XCTAssertTrue(ConfigurationFileError.unreadable(.readFailed(EIO), closeErrno: nil).summary.hasPrefix("read failed"))
+        XCTAssertTrue(ConfigurationFileError.closeFailed(EIO).summary.hasPrefix("close failed"))
     }
 }

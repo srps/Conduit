@@ -32,7 +32,7 @@ package struct UpstreamProxy: Codable, Hashable, Identifiable {
     package var enabled: Bool
     package var priority: Int
 
-    /// The file keys of one upstream, which the runtime file schema reads (`RuntimeFileSchema`).
+    /// The file keys of one upstream, which the runtime file schema reads (`ConfigurationFileSchema`).
     package enum CodingKeys: String, CodingKey, CaseIterable {
         case id, name, host, port, enabled, priority
     }
@@ -68,7 +68,7 @@ package struct DomainDNSEntry: Codable, Hashable, Identifiable {
     package var servers: [String]
     package var enabled: Bool
 
-    /// The file keys of one DNS entry, which the runtime file schema reads (`RuntimeFileSchema`).
+    /// The file keys of one DNS entry, which the runtime file schema reads (`ConfigurationFileSchema`).
     package enum CodingKeys: String, CodingKey, CaseIterable {
         case id, domain, servers, enabled
     }

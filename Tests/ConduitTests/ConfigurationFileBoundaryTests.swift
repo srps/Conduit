@@ -60,7 +60,7 @@ final class ConfigurationFileBoundaryTests: XCTestCase {
             }
         }
         // The root object is the first container, so the deepest accepted total is `accepted + 1`.
-        XCTAssertEqual(accepted + 1, RuntimeFileFilter.maximumDepth, "the filter's depth limit is the typed decoder's")
+        XCTAssertEqual(accepted + 1, ConfigurationFileFilter.maximumDepth, "the filter's depth limit is the typed decoder's")
         XCTAssertEqual(gateAccepts(nestedUnknown(accepted)), typedAccepts(nestedUnknown(accepted)))
         XCTAssertEqual(gateAccepts(nestedUnknown(accepted + 1)), typedAccepts(nestedUnknown(accepted + 1)))
         XCTAssertTrue(gateAccepts(nestedUnknown(accepted)))
@@ -73,9 +73,9 @@ final class ConfigurationFileBoundaryTests: XCTestCase {
         let text = #"{ "profileName" : "P" , "junk" : [ 1 , 2 , 3 ] , "profileName" : "later" }"#
         let data = Data(text.utf8)
         let filtered = try data.withUnsafeBytes { raw in
-            try RuntimeFileFilter.filter(
+            try ConfigurationFileFilter.filter(
                 UnsafeBufferPointer(start: raw.baseAddress?.assumingMemoryBound(to: UInt8.self), count: raw.count),
-                root: RuntimeFileSchema.root(.runtimeOnly)
+                root: ConfigurationFileSchema.runtime(.runtimeOnly)
             )
         }
         XCTAssertLessThanOrEqual(filtered.bytes.count, data.count)
@@ -140,7 +140,7 @@ final class ConfigurationFileBoundaryTests: XCTestCase {
     func testLegacyComponentsComeFromTheBytesReadOnceEvenAfterTheFileIsRemoved() throws {
         let env = try environment("frozen")
         try Data(#"{"profileName":"P","manageSystemProxy":true}"#.utf8).write(to: env.configFile)
-        let bytes = try RuntimeConfigurationFileReader.read(at: env.configFile)
+        let bytes = try ConfigurationFileReader.read(at: env.configFile)
         try FileManager.default.removeItem(at: env.configFile)
         let document = try RuntimeFileDocument.decode(
             bytes, requirements: RuntimeFileRequirements(platform: true, preferences: false), source: "frozen"

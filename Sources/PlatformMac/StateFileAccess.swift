@@ -16,8 +16,8 @@ package enum RuntimeFileWriteError: Error, Equatable, Sendable {
 /// testable against `FakeStateFileAccess` without touching the disk.
 package protocol StateFileAccessing: Sendable {
     /// Reads at most `limit` bytes of the resolved file. A missing file is `.missing`. Every other refusal keeps its step and
-    /// errno, as `RuntimeConfigurationFileReader` reports it.
-    func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, RuntimeConfigurationFileError>
+    /// errno, as `ConfigurationFileReader` reports it.
+    func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError>
 
     /// Replaces the resolved file with `bytes` through the shared atomic write. The caller has staged and checked the bytes.
     /// A failure does not say whether the file was replaced, so the caller must read back.
@@ -33,9 +33,9 @@ package enum StateFileAccess {
 
 /// The OS adapter. It reads through the bounded runtime reader and writes through the one shared atomic write.
 struct OSStateFileAccess: StateFileAccessing {
-    func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, RuntimeConfigurationFileError> {
-        do throws(RuntimeConfigurationFileError) {
-            return .success(try RuntimeConfigurationFileReader.read(at: URL(fileURLWithPath: file.path), limit: limit))
+    func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
+        do throws(ConfigurationFileError) {
+            return .success(try ConfigurationFileReader.read(at: URL(fileURLWithPath: file.path), limit: limit))
         } catch {
             return .failure(error)
         }

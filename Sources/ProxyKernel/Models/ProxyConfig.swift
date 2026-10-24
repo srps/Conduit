@@ -406,7 +406,7 @@ package struct ProxyConfig: Codable, Equatable {
 
     // MARK: - Flat JSON Codable (backward-compatible)
 
-    /// The file's root keys. The runtime file schema derives its known-key table from these cases (`RuntimeFileSchema`).
+    /// The file's root keys. The runtime file schema derives its known-key table from these cases (`ConfigurationFileSchema`).
     package enum CodingKeys: String, CodingKey, CaseIterable {
         case schemaVersion
         case profileName
@@ -656,7 +656,7 @@ package struct DNSInterceptRule: Codable, Hashable, Identifiable, Sendable {
     package var interceptIP: String
     package var enabled: Bool
 
-    /// The file keys of one intercept rule, which the runtime file schema reads (`RuntimeFileSchema`).
+    /// The file keys of one intercept rule, which the runtime file schema reads (`ConfigurationFileSchema`).
     package enum CodingKeys: String, CodingKey, CaseIterable {
         case id, pattern, interceptIP, enabled
     }
@@ -800,7 +800,7 @@ package struct TunnelDefinition: Codable, Equatable, Hashable, Identifiable {
     package var label: String
     package var preset: TunnelPreset?
 
-    /// The file keys of one tunnel definition, which the runtime file schema reads (`RuntimeFileSchema`).
+    /// The file keys of one tunnel definition, which the runtime file schema reads (`ConfigurationFileSchema`).
     package enum CodingKeys: String, CodingKey, CaseIterable {
         case id, localPort, remoteHost, remotePort, enabled, proxied, label, preset
     }

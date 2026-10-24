@@ -22,23 +22,11 @@ package struct RuntimeFileDocument: Sendable {
     package let platform: LegacyComponent<PlatformIntegrationConfig>
     package let preferences: LegacyComponent<AppPreferences>
 
-    /// Decodes a file's bytes through the format gate: the physical cap, the strict filter for the keys this read needs,
+    /// Decodes a runtime file's bytes through the format gate: the physical cap, the strict filter for the keys this read needs,
     /// one Foundation decode and the newer-schema refusal. The bytes are the caller's, and nothing is written here.
     package static func decode(_ bytes: Data, requirements: RuntimeFileRequirements, source: String) throws -> RuntimeFileDocument {
-        guard bytes.count <= RuntimeConfigurationFileReader.maximumBytes else {
-            throw ConfigurationLoadError(source: source, reason: "The configuration exceeds the runtime file size limit.")
-        }
-        let filtered: RuntimeFileFiltered
-        do {
-            filtered = try bytes.withUnsafeBytes { raw in
-                try RuntimeFileFilter.filter(
-                    UnsafeBufferPointer(start: raw.baseAddress?.assumingMemoryBound(to: UInt8.self), count: raw.count),
-                    root: RuntimeFileSchema.root(requirements)
-                )
-            }
-        } catch let refusal as RuntimeFileRefusal {
-            throw ConfigurationLoadError(source: source, reason: refusal.reason)
-        }
+        let root = ConfigurationFileSchema.runtime(requirements)
+        let filtered = try ConfigurationFileGate.filter(bytes, root: root, source: source)
         // The requirements travel with the decoder, so the envelope builds only the legacy components this read keeps.
         let decoder = CanonicalJSON.decoder()
         decoder.userInfo[RuntimeFileRequirements.userInfoKey] = requirements
@@ -64,8 +52,8 @@ package struct RuntimeFileDocument: Sendable {
     /// filter refused its value, and otherwise carries what its decoder read.
     private static func legacy<Value: Sendable>(
         _ required: Bool,
-        _ component: RuntimeFileComponent,
-        in filtered: RuntimeFileFiltered,
+        _ component: ConfigurationComponent,
+        in filtered: ConfigurationFileFiltered,
         decoded: LegacyComponent<Value>
     ) -> LegacyComponent<Value> {
         guard required else {
@@ -75,18 +63,6 @@ package struct RuntimeFileDocument: Sendable {
             return .refused
         }
         return decoded
-    }
-}
-
-extension RuntimeFileRefusal {
-    /// The fixed reason a loader reports. It names the limit, never the value that crossed it.
-    var reason: String {
-        switch self {
-        case .malformed:
-            "The configuration is not valid Conduit JSON."
-        case .resourceLimit(let violation):
-            "The configuration exceeds a resource limit. \(violation.description)."
-        }
     }
 }
 
