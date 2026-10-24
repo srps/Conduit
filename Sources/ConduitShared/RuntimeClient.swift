@@ -23,9 +23,11 @@ package struct RuntimeDeadline: Sendable, Equatable {
     }
 
     /// The budget to send at `now`: the time remaining, capped at `cap` and rounded
-    /// down to whole milliseconds. Zero once the deadline has passed. A negative cap is
-    /// refused before any arithmetic, so the seconds-to-milliseconds product below only ever
-    /// sees a non-negative seconds value clamped to `Int32.max`.
+    /// down to whole milliseconds. Zero once the deadline has passed. It is also zero when
+    /// the time left or the cap is under one millisecond, because of that rounding. Zero is
+    /// a valid wire value, and a caller that must not send it refuses it itself. A negative
+    /// cap is refused before any arithmetic, so the seconds-to-milliseconds product below only
+    /// ever sees a non-negative seconds value clamped to `Int32.max`.
     package func wireBudget(at now: ContinuousClock.Instant, cappedAt cap: Duration) throws -> ControlWireBudget {
         guard cap >= .zero else { throw ControlRuntimeWireError.invalidValue }
         let remaining = remaining(at: now)
@@ -46,7 +48,7 @@ package struct RuntimeDeadline: Sendable, Equatable {
 /// The reason does not decide the outcome alone: a reason is reported as `notSent` only
 /// when the request never reached the transport, and as `admissionUnknown` once it may
 /// have. A caller that sees `disconnected` after a possible send must not resend a mutation.
-package enum RuntimeWaitEnd: Sendable, Equatable {
+package enum RuntimeWaitEnd: Sendable, Equatable, Error {
     case deadlineExpired
     case cancelled
     /// The transport closed while the caller waited. Before a send, nothing was admitted;
@@ -60,6 +62,11 @@ package enum RuntimeWaitEnd: Sendable, Equatable {
 /// waits within the caller's deadline for the next frame the implementation has
 /// ready, and `cancel` releases the implementation's registration. Neither method
 /// creates a task per event.
+///
+/// Single pull: at most one `next` is in flight on a handle. A second one is refused
+/// locally as `readInProgress` and consumes nothing. A `next` that ends on its deadline
+/// or on a cancel consumes no frame, so the frame is still there for the next call.
+/// `cancel` is idempotent and never stops the host.
 package struct RuntimeSubscription: Sendable {
     package let next: @Sendable (RuntimeDeadline) async throws -> ControlRuntimeFrame
     package let cancel: @Sendable () -> Void
@@ -83,12 +90,25 @@ package enum RuntimeClientError: Error, Sendable, Equatable {
     /// request ID or resubscribe to learn more. A disconnect or an invalid reply after
     /// a send lands here, never in `notSent`.
     case admissionUnknown(ControlRequestID, RuntimeWaitEnd)
-    /// The host answered with a stable wire-level failure.
+    /// The host answered with a stable wire-level failure, with the correlation of the request.
+    /// The host saw the request. A refusal made locally, before any send, is `localRefusal`
+    /// and never this case.
     case wire(ControlRuntimeErrorCode)
     /// The host answered with a message that does not belong to this request.
     case unexpectedReply
     /// The stream ended with a typed reason. The runtime itself keeps running.
     case streamClosed(ControlStreamEndReason)
+    /// The client refused the request before any send: it could not be encoded within the
+    /// caller's frame limit. The host never saw it. This says nothing about admission, so it
+    /// is not `admissionUnknown`, and it is not a host answer, so it is not `wire`.
+    case localRefusal(ControlRuntimeErrorCode)
+    /// A read, or a stream wait, ended after a request may have been sent. Reads are idempotent,
+    /// so the caller may repeat them within its own deadline. A stream wait that ends on its
+    /// deadline or a cancel consumed no frame.
+    case readAborted(RuntimeWaitEnd)
+    /// A second `next` was called while one was in flight on the same subscription. Nothing was
+    /// consumed. This is a local rejection, not a host failure.
+    case readInProgress
 }
 
 /// The async, typed client the app and the daemon use. This file defines only the

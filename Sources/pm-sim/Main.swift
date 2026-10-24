@@ -105,6 +105,7 @@ enum PMSim {
               journal-integrity       A journal from a newer Conduit fails closed, is kept and reported; a failing disk is one event per episode; version 1 reads in every shape (#182, #191)
               state-writer-lease      Real OS writer lease and root layout in a scratch directory: busy while held, atomic replacement keeps the lock, outside config refused for writing (0017, 0020)
               runtime-file-replacement  Verified runtime config replacement: refusals before I/O, read-back classification over the OS adapter and a fake (0015, 0021)
+              framed-runtime-client   Framed client over a simulated host: a lost reply is one send with no replay, a lookup recovers it, an oversize request never reaches the host, a stream ends typed (0014)
               split-dns-helper-retry  A refused split-DNS entry-file removal is retried once the helper is available, against the VPN state then (#165)
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
               settings-retry-request  A refused settings action is retried from its own save, not a later edit (#176)
@@ -286,6 +287,7 @@ enum PMSim {
         "journal-integrity",
         "state-writer-lease",
         "runtime-file-replacement",
+        "framed-runtime-client",
         "split-dns-helper-retry",
         "lifecycle-stop-overtakes-start",
         "settings-retry-request",
@@ -473,6 +475,8 @@ enum PMSim {
             return [try StateWriterLeaseScenario.run()]
         case "runtime-file-replacement":
             return [try RuntimeFileReplacementScenario.run()]
+        case "framed-runtime-client":
+            return [try await FramedRuntimeClientScenario.run()]
         case "split-dns-helper-retry":
             return [try SplitDNSRepairScenarios.run()]
         case "lifecycle-stop-overtakes-start":

@@ -86,6 +86,11 @@ not a requirement to finish every event or property test before extraction:
    family through producer, codec, bridge, consumer and assertions. Define
    deadlines, unknown outcomes, subscription gaps and config ownership here.
    The existing synchronous `DaemonClient` is not the finished client.
+   The framed adapter now runs the v2 codec over an injected byte transport behind
+   one `RuntimeClient` factory; its concrete implementation is private. The final
+   combined local workflow passed all 39 checks (2,936 tests, two skips; 95 simulator
+   records and perf). See [adapter evidence](./docs/runtime-framed-client-2026-10-24.md).
+   This does not implement the service/ledger/stream engine or host adoption.
    The owner-selected persistence policy is save-before-apply for durable edits,
    with Stop/Quit admitted despite save failure. Define separate durable/session/
    applied outcomes and stop-fenced retries; Quit does not persist a disable.
@@ -134,13 +139,22 @@ not a requirement to finish every event or property test before extraction:
    preserving rejected originals. The integrated focused suite passed 697 tests;
    the full Swift suite passed 2846 tests with two skips. See the
    [verification record](./docs/verification-configuration-boundary-2026-10-24.md).
-   Normal preferences browser-URL enforcement and sidecar raw-read bounds remain open. The next store/client
+   PR #229 merged the bounded runtime replacement/read-back primitive and its
+   independent 432-case classifier model. PR #230 merged the shared 128 KiB
+   sidecar boundary and raw browser-URL check; its complete local workflow passed
+   2,897 tests (two skips) and all 94 simulator records. It merged at `2e75d94`
+   after hosted Swift and CodeQL passed.
+   The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding
    a mixed runtime/platform apply until required inputs verify in
    [0025](./docs/decisions/0025-hold-mixed-configuration-apply.md); the gate remains
    planned, with independent effect groups deferred. Exact schema-two
-   staging and safe duration conversions are also committed locally. These counts do not establish a verified
+   staging and safe duration conversions merged in PR #228. External-file edit
+   conflicts must refuse ordinary saves pending explicit reload/review under
+   [0027](./docs/decisions/0027-refuse-external-configuration-edits.md); the check
+   remains planned with the store.
+   These counts do not establish a verified
    asynchronous store, read-back receipts, writer coverage or release readiness.
    The owner selected a 128 KiB cap for each platform/preferences sidecar with the
    same strict reader/filter contract, valid unknown fields and first-key behavior

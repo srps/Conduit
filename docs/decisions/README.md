@@ -50,3 +50,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0024](0024-strict-configuration-file-grammar.md) | Strict syntax and Unicode throughout configuration files | accepted | implemented | none |
 | [0025](0025-hold-mixed-configuration-apply.md) | Hold a mixed configuration apply until required inputs verify | accepted | planned | none |
 | [0026](0026-bounded-platform-and-preferences-files.md) | Bound platform and preferences files through the shared file contract | accepted | implemented | none |
+| [0027](0027-refuse-external-configuration-edits.md) | Refuse ordinary saves over changed configuration files | accepted | planned | none |

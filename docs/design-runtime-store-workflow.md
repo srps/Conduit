@@ -31,8 +31,8 @@ actor alone does not make an awaited operation atomic.
 
 Preserve the existing Settings repair baseline: a representable draft with an
 invalid listener port can be saved, reported and held from runtime apply. A
-non-blocking DNS/intercept problem does not become a proxy-start refusal. At
-base `fd1491e` the unadopted private bridge no longer runs the full `validate()`
+non-blocking DNS/intercept problem does not become a proxy-start refusal. In
+merged PR #228 the unadopted private bridge no longer runs the full `validate()`
 gate. It refuses only what the wire cannot carry or an approved ceiling forbids,
 and it carries bounded editable Int port drafts through one private request. That
 is transport and storage, not runtime eligibility and not authority to run:
@@ -76,8 +76,9 @@ are within the approved 8 MiB budget. The bound must include the prior, because 
 write that throws and leaves a larger prior unchanged still has to read that prior
 back in full, so the result is verified not-persisted rather than unknown. The
 pre-read uses the approved budget as its ceiling, and the read-back bound never exceeds it. This does
-not introduce a startup cap for platform/preferences sidecars or the journal, which
-have no runtime-file budget here. Keep staged bytes only through the active
+not apply the runtime-file ceiling to sidecars. Decision 0026 separately caps
+platform/preferences startup reads and staged output at 128 KiB; journal policy
+remains separate. Keep staged bytes only through the active
 write/read-back verification that needs them, then release them. Compare authoritative read-back with the exact staged input; distinguish
 verified persistence, verified non-persistence and unknown. A caller timeout or
 cancellation only detaches its wait. Started physical work and its lease survive
@@ -109,6 +110,15 @@ execution or safe mutation retry after eviction. Clients never blindly replay a
 mutation. Fingerprints are identity checks, not writer authority. Read-before-write
 checks may detect an external edit but cannot exclude a nonparticipating editor
 racing the replacement; the advisory lease excludes cooperating writers only.
+
+**Selected conflict policy:** [0027](decisions/0027-refuse-external-configuration-edits.md)
+requires an ordinary save to refuse observed byte changes since the verified
+baseline, preserving the file/draft and holding the new apply until explicit
+reload/review. Formatting-only edits conflict. A failed pre-read cannot authorize
+a replacement. Reload uses the same owner and cannot bypass eligibility or
+Stop/shutdown fences. This is a planned store check, not filesystem compare-and-swap;
+nonparticipating editors can still race after it. The owner selected this over
+legacy overwrite authority on 2026-10-24.
 
 ## Apply granularity: whole mixed unit selected
 
@@ -153,10 +163,11 @@ it must be a deliberate tested refinement, not inferred from individual saved fl
 
 ## Verification and sequence
 
-The bounded file boundary, the precision correction and the bridge validation
-boundary are done at base `fd1491e`. The physical store seam and its read-back
-outcome matrix come next, as one unwired building block with no startup or host
-adoption. Add the sole leased writer,
+The runtime boundary, exact schema-two staging and bridge correction merged in
+PR #228; the runtime physical replacement seam/model merged in PR #229. The
+shared sidecar boundary merged in PR #230. These are building blocks, not the async
+store. Implement the selected external-edit check (0027) alongside expected-prior revisions.
+Add the sole leased writer,
 intent/revision fencing and bounded metadata, followed by the client workflow and
 host adoption. Startup must acquire authority before migration/recovery, and every
 journal/configuration writer must participate before shipping lease enforcement.
