@@ -142,7 +142,7 @@ supported-case memory/latency; writer coverage and Stop/status responsiveness.
 Does not prove: complete all-boundary enforcement,
 working-memory maxima, actual write quiescence or real-machine behavior.
 
-Runtime-file replacement read-back (2026-10-24): the package `RuntimeConfigurationFileReader.read(at:limit:)` lets the verified replacement's pre-read and read-back use the same reader, with the approved 8 MiB ceiling as the pre-read limit. The read-back limit is `max(staged length, observed prior length)`, and the reader adds its single probe byte. A larger unchanged prior therefore reads back in full after a failed write. Sidecars and the journal get no cap from this, and the startup and import boundaries stay open. See [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
+Runtime-file replacement read-back (2026-10-24): the package `RuntimeConfigurationFileReader.read(at:limit:)` lets the verified replacement's pre-read and read-back use the same reader, with the approved 8 MiB ceiling as the pre-read limit. The read-back limit is `max(staged length, observed prior length)`, and the reader adds its single probe byte. A larger unchanged prior therefore reads back in full after a failed write. The replacement primitive is unwired: no startup, host, AppState or store path calls it. Sidecar physical budgets and writer-lease adoption at startup and in the journal remain separate, and the replacement adds no sidecar cap. See [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
 
 ## Open questions
 

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-import Darwin
 import Foundation
 import ProxyKernel
 
-/// A replacement that threw. It keeps the POSIX code only: never the path, the bytes or the system's description. A failure
-/// that reports no POSIX code is `EIO`.
+/// A replacement that threw. It keeps a closed code only: never the path, the bytes, the error's domain or the system's
+/// description. `writeFailed` is a POSIX code that fits `Int32`. `cocoaFailed` is the Cocoa code of a Cocoa error with no usable
+/// POSIX cause. `unclassified` is every other failure, including an unusable POSIX code under a non-Cocoa error.
 package enum RuntimeFileWriteError: Error, Equatable, Sendable {
     case writeFailed(errno: Int32)
+    case cocoaFailed(code: Int)
+    case unclassified
 }
 
 /// Byte-level access to one authoritative runtime file (decisions 0017, 0020 and 0021). Every operation names the resolved
@@ -44,21 +46,30 @@ struct OSStateFileAccess: StateFileAccessing {
             try ProxyConfigPersistence.writeStagedRuntimeFile(bytes, to: URL(fileURLWithPath: file.path))
             return .success(())
         } catch {
-            return .failure(.writeFailed(errno: posixCode(of: error)))
+            return .failure(Self.writeError(for: error))
         }
     }
 
-    /// Foundation wraps a failed atomic write in a Cocoa error whose underlying error holds the POSIX code. The chain is
-    /// followed for a bounded depth. A failure with no POSIX code, or a code that does not fit `Int32`, is reported as `EIO`
-    /// rather than converted with a trap.
-    private func posixCode(of error: any Error) -> Int32 {
-        var current = error as NSError
+    /// The number of underlying links the classifier follows. A cyclic chain stops here too, so no chain can loop.
+    static let maximumUnderlyingDepth = 4
+
+    /// Classifies a failed atomic write without retaining its description. Foundation wraps the POSIX code of a failed write in
+    /// a Cocoa error, so the underlying chain is followed for at most `maximumUnderlyingDepth` links. A POSIX code is kept when it
+    /// is positive and fits `Int32`. Otherwise an outer Cocoa error keeps its own code, which is not an errno. Any other failure is
+    /// `unclassified`. An unusable POSIX code is never converted and is never reported as `EIO`.
+    static func writeError(for error: any Error) -> RuntimeFileWriteError {
+        let outer = error as NSError
+        var current = outer
         var depth = 0
-        while current.domain != NSPOSIXErrorDomain, depth < 4, let underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError {
+        while current.domain != NSPOSIXErrorDomain, depth < maximumUnderlyingDepth,
+              let underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError {
             current = underlying
             depth += 1
         }
-        guard current.domain == NSPOSIXErrorDomain else { return EIO }
-        return Int32(exactly: current.code) ?? EIO
+        if current.domain == NSPOSIXErrorDomain, let code = Int32(exactly: current.code), code > 0 {
+            return .writeFailed(errno: code)
+        }
+        if outer.domain == NSCocoaErrorDomain { return .cocoaFailed(code: outer.code) }
+        return .unclassified
     }
 }

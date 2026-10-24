@@ -15,19 +15,26 @@ fallback and no external-edit policy. It is not the mixed-apply hold of
 - `ProxyKernel/Support/RuntimeConfigurationFileReader.swift`: package `read(at:limit:)`
   delegates to the three-argument reader with `Darwin.close`. The approved 8 MiB precondition
   and the existing entry points are unchanged.
-- `PlatformMac/StateFileAccess.swift`: `RuntimeFileWriteError.writeFailed(errno:)`, the
-  `StateFileAccessing` protocol over a resolved `StateRootFile`, the package factory
-  `StateFileAccess.operatingSystem()` and the internal OS adapter. The adapter keeps the POSIX
-  code only, found through a bounded `NSUnderlyingError` walk. A code that does not fit `Int32`,
-  or a failure with no POSIX code, is `EIO`.
+- `PlatformMac/StateFileAccess.swift`: `RuntimeFileWriteError`, the `StateFileAccessing` protocol
+  over a resolved `StateRootFile`, the package factory `StateFileAccess.operatingSystem()` and the
+  internal OS adapter. The error keeps a closed code only: `writeFailed(errno:)` for a positive POSIX
+  code that fits `Int32`, `cocoaFailed(code:)` for a Cocoa error with no usable POSIX cause, and
+  `unclassified` for anything else. The classifier is `OSStateFileAccess.writeError(for:)`. It follows
+  the `NSUnderlyingError` chain for at most four links, and it never retains a domain, description,
+  path, bytes or user info. An unusable POSIX code (outside `Int32`, or not positive) is never
+  converted or called `EIO`: under an outer Cocoa error the outer Cocoa code is kept, and under any
+  other error the result is `unclassified`. No failure is mapped to `EIO` for lack of information.
+  These mapping cases are synthetic witnesses of the classifier's input contract, not a claim that
+  each shape occurs on this OS.
 - `PlatformMac/VerifiedRuntimeFileReplacement.swift`: the operation, its refusals, its
   unknown reasons and its outcome. The outcome carries no bytes and no path.
 - `PlatformMac/PlatformFakes.swift`: `FakeStateFileAccess`, a low-level fake with scripted
   reads and writes, external edits before and after a write, and an observation log.
 - `pm-sim/ScenarioRuntimeFileReplacement.swift`, registered in `pm-sim/Main.swift` as
   `runtime-file-replacement`.
-- Tests: `VerifiedRuntimeFileReplacementModelTests.swift` and
-  `VerifiedRuntimeFileReplacementOSTests.swift`.
+- Tests: `VerifiedRuntimeFileReplacementModelTests.swift`,
+  `VerifiedRuntimeFileReplacementOSTests.swift` and `StateFileAccessWriteErrorTests.swift`, the last
+  one a synthetic-witness test of the write-error classifier that writes no file.
 
 ## Algorithm
 
@@ -112,13 +119,16 @@ Wrapper: `bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-repla
 once on the frozen source. Logs are under
 `/private/tmp/conduit-runtime-stage1-20261024/runtime-replacement-checks`.
 
-Final run on the frozen source: the wrapper exited 0 and printed `PASS: runtime replacement focused
-checks`.
+Final run on the frozen source (the write-error mapper with the unusable-POSIX fallback to the outer
+Cocoa code, the read-back doc and the ADR 0021 wording): the wrapper exited 0 and printed
+`PASS: runtime replacement focused checks`. An earlier run predates the fallback change and is superseded.
+The counts below are from the run on this source.
 
 - `build.log`: `Build complete`.
 - `tests.log`: the filter `State|Writer|Replacement|ConfigurationFile|ConfigSaveGate|Duration`
-  executed 431 tests with 0 failures, including `VerifiedRuntimeFileReplacementModelTests` (4 tests)
-  and `VerifiedRuntimeFileReplacementOSTests` (7 tests, none skipped: the test user is not root).
+  executed 439 tests with 0 failures. That includes `StateFileAccessWriteErrorTests` (8 tests, new
+  in this change), `VerifiedRuntimeFileReplacementModelTests` (4 tests) and
+  `VerifiedRuntimeFileReplacementOSTests` (7 tests, none skipped: the test user is not root).
   Its `probe:` lines are existing diagnostic output from the OS probe tests. One of them reports that
   an atomic write through a symbolic-link leaf replaces the link, which is why the operation writes
   the resolved target.

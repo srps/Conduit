@@ -14,7 +14,9 @@ package enum RuntimeFileReplacementRefusal: Error, Equatable, Sendable {
 
 /// Why a replacement cannot be classified as persisted or not persisted. None of these is a rollback claim.
 package enum RuntimeFileUnknownReason: Error, Equatable, Sendable {
-    /// Read-back returned bytes that are neither the staged bytes nor the prior the caller observed.
+    /// Read-back returned bytes that are not the staged bytes, and that do not classify as a failed replacement holding the
+    /// observed prior. This covers bytes that are neither staged nor prior, and the observed prior after a replacement that
+    /// reported success: the file does not show the staged bytes, so neither persisted nor not persisted is established.
     case readbackDiffers
     /// Read-back found no file where a prior was observed, or after a replacement that reported success with no prior.
     case readbackMissing
