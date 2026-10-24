@@ -48,7 +48,8 @@ final class RuntimeEventTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-event-writer-\(UUID().uuidString)", isDirectory: true)
         let file = tempDir.appendingPathComponent("events.ndjson")
-        let writer = RuntimeEventFileWriter(fileURL: file, maxBytes: 180, logger: DiscardingLogSink())
+        let writer = RuntimeEventFileWriter(fileURL: file, maxBytes: 180, logger: DiscardingLogSink(),
+                                            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
 
         for i in 0..<8 {
             writer.record(RuntimeEvent(kind: .lifecycle, event: "event-\(i)"))
