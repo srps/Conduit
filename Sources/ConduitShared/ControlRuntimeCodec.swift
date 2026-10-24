@@ -5,11 +5,13 @@ import Foundation
 /// The same bytes serve the in-memory transport and a later socket.
 ///
 /// Order of checks on decode: size, then the envelope version, then the envelope kind,
-/// then the body's type and nested command discriminator, then the typed body. Each
-/// check runs before the next can see its input, so an oversize frame is never parsed, a
-/// version this build does not speak is reported as such even when its body is malformed,
-/// an unknown kind is refused before its body is read, and an unknown command is never
-/// reported as a malformed payload. Each probe reads only the fields its check needs.
+/// then the body's type and nested command discriminator, then the strict JSON grammar of
+/// the whole payload, then the typed body. Each check runs before the next can see its input,
+/// so an oversize frame is never parsed, a version this build does not speak is reported as
+/// such even when its body is malformed, an unknown kind is refused before its body is read,
+/// and an unknown command is never reported as a malformed payload. Each probe reads only the
+/// fields its check needs. The strict walk covers unknown and ignored values too, so a malformed
+/// extension refuses a known frame, while a valid unknown extension stays legal.
 ///
 /// Bounds on encode, for a caller limit `L` (`maxFrameBytes`): the free text of a message
 /// is refused above `L` bytes, and its element count above `L / 2`, both before any
@@ -19,6 +21,8 @@ import Foundation
 ///
 /// Bounds on decode work: each parse reads at most the `L` bytes of one payload, and at most
 /// five parses run over it (version, kind, body type, submit command, then the typed decode).
+/// The strict grammar walk is one more linear pass over the same bytes. It allocates only its
+/// container stack, one bit per open level.
 package enum ControlRuntimeCodec {
     static let lineFeed: UInt8 = 0x0A
 
@@ -122,11 +126,46 @@ package enum ControlRuntimeCodec {
             throw ControlRuntimeWireError.malformedMessage
         }
         try classify(kind, type: type, payload: payload)
+        // Strict grammar for the whole payload, unknown and ignored values included. Foundation defers some checks
+        // on values it never reads, so it can accept a lone surrogate or a raw control character there.
+        try requireStrictJSON(payload)
         do {
             return try makeDecoder().decode(ControlRuntimeMessage.self, from: payload)
         } catch {
             throw ControlRuntimeWireError.malformedMessage
         }
+    }
+
+    /// Walks the whole payload with the shared lexical cursor, without materializing any value. Every byte must
+    /// follow the JSON grammar, the UTF-8 rules and the escape rules, and nothing may follow the value. The depth
+    /// bound is the payload size: each open container takes at least one byte, so no valid payload is refused.
+    private static func requireStrictJSON(_ payload: Data) throws {
+        try payload.withUnsafeBytes { raw in
+            var cursor = JSONByteCursor(raw.bindMemory(to: UInt8.self))
+            do {
+                try cursor.skipValue(maxDepth: payload.count)
+                try cursor.expectEnd()
+            } catch {
+                throw ControlRuntimeWireError.malformedMessage
+            }
+        }
+    }
+
+    /// Decodes one complete frame: a payload and exactly one trailing line feed. The size is
+    /// checked before anything is parsed. A second line feed is a concatenated or trailing frame,
+    /// which is malformed rather than split, so a reader never accepts bytes past the frame it asked for.
+    package static func decodeFullFrame(_ frame: Data, limits: ControlFrameLimits) throws -> ControlRuntimeMessage {
+        guard frame.count <= limits.maxFrameBytes else {
+            throw ControlRuntimeWireError.frameTooLarge
+        }
+        guard frame.last == lineFeed else {
+            throw ControlRuntimeWireError.frameIncomplete
+        }
+        let payload = Data(frame.dropLast())
+        guard !payload.contains(lineFeed) else {
+            throw ControlRuntimeWireError.malformedMessage
+        }
+        return try decodeFrame(payload, limits: limits)
     }
 
     /// Refuses a request, response, or frame type that this build does not define. The
