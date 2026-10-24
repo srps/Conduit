@@ -35,16 +35,18 @@ The April ecosystem and competitive research is retained in an
 [archive](./archive/planning-research-2026-04.md). It supplies historical context,
 not current dependency versions, market claims, or a second implementation plan.
 
-## Shared runtime program: planning checkpoint, 2026-10-24
+## Shared runtime program: implementation checkpoint, 2026-10-24
 
 The owner requested a staged plan that reduces development defects while daily
 use is stable: typed contracts and model-based tests accompany the shared
 `RuntimeHost` work (#186), rather than waiting in separate later projects.
-The [architecture and API review draft](./design-runtime-host-contract.md)
-records the Codex/Claude recommendations and the choices awaiting owner review.
-It is not an ADR, an implementation claim or authorization to start coding.
-Existing accepted decisions remain unchanged; approve refinements and record any
-necessary new decisions before implementation.
+The [runtime design](./design-runtime-host-contract.md) records the selected
+architecture and remaining slice-specific gates. On 2026-10-24 the owner agreed
+with the recommendations and authorized staged implementation with Claude after
+a final overalls cross-check. Decisions 0013–0016 record accepted refinements;
+existing accepted records retain their decisions. Claude implements and verifies
+bounded slices on the owner's subscription, and Codex reviews each checkpoint.
+Implementation and real-machine validation remain separate evidence.
 
 Module/isolation shape selected by the owner on 2026-10-24: a new ConduitRuntime
 hosts the shared runtime; Foundation-only RuntimeEvents holds producer events;
@@ -54,8 +56,9 @@ the runtime control-owner cluster after behavior-preserving extraction and
 lifecycle adoption. MainActor remains for UI; NIO loops and PlatformWork retain
 their responsibilities. Per-runtime resource ownership remains explicit. Broad
 kernel splitting and subsystem actors follow evidence, not a prerequisite.
-This records selected planning shape; the client/stream contract is the next
-owner decision and ADRs/implementation remain on hold.
+The client/stream semantics are also selected (decision 0014); exact payload
+classification, ownership/handoff refinements and sized bounds remain gates for
+the affected slices.
 
 The 0.6 core is the async client boundary, behavior-preserving shared-host
 extraction, AppState adoption by lifecycle (DNS, tunnels, proxy), then runtime
@@ -91,8 +94,14 @@ Report actual stop/cleanup success separately from persistence failure. Quit
 does not itself persist a disable, and later daemon-mode UI Quit only disconnects.
 Partial config-file writes are not a transaction; gate coupled inputs on verified
 components and validation. The review draft specifies failure cases and the #183
-model obligations. This is a selected planning policy, not an implemented change
-or approval to write ADRs yet.
+model obligations. Decision 0015 records the selected policy; current behavior
+is not claimed to enforce it before its tested migration slice.
+
+The final overalls review adds explicit status/Stop responsiveness under slow
+effects and sustained observer load, bounded work per owner turn, diagnostic-sink
+failure independent of control, and typed dispatch/completion fencing. Attach
+verification to the actual source/build checkpoint, using independent production
+adapters and reference models; do not count an earlier build as later evidence.
 
 Moving `RuntimeHost` alone does not remove main-actor runtime work:
 `ProxyOrchestrator`, `LifecycleLane` and `RuntimeReconciler` are isolated there

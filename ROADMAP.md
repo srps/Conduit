@@ -45,10 +45,14 @@ build of 0.5.8 on 2026-10-22; the installed build still needs a check.
 The owner reports stable daily use. The next development effort reduces bugs
 found while changing the runtime: typed contracts and model-based verification
 accompany host convergence instead of becoming separate projects to finish first.
-The staged plan below is the planning direction; concrete API and dependency
-shapes are in the [review draft](./docs/design-runtime-host-contract.md), pending
-the owner's decision before new ADRs or implementation. Existing accepted
-decisions retain their status.
+The owner authorized staged implementation on 2026-10-24 after the final overalls
+cross-check. Selected shapes and remaining slice-specific gates are in the
+[runtime design](./docs/design-runtime-host-contract.md), with accepted refinements
+in decisions [0013](./docs/decisions/0013-runtime-module-isolation.md),
+[0014](./docs/decisions/0014-runtime-client-stream.md) and
+[0015](./docs/decisions/0015-save-before-apply.md). Claude implements and verifies
+each slice on the owner's subscription; Codex reviews the checkpoint. Existing
+accepted decisions retain their status.
 
 The path-based VPN migration shipped in 0.5.6 was validated on the owner's
 full-tunnel VPN with a pre-release build; split-tunnel and the released build
@@ -84,7 +88,7 @@ not a requirement to finish every event or property test before extraction:
    suite and explicit composition dependencies. The owner selected ConduitRuntime
    for the host and an event-only RuntimeEvents target; control values/client/
    codec stay in ConduitShared with ProxyControlBridge mapping. Broad kernel/file
-   splitting is not a prerequisite. Client/stream behavior remains for review.
+   splitting is not a prerequisite. Client/stream semantics are selected in decision 0014.
 3. **Stage 3 — AppState adopts the client, one lifecycle at a time.** Move DNS,
    tunnels and proxy onto the shared host, deleting each old implementation.
    AppState retains editor drafts and UI responsibilities. Migrate the event
@@ -101,8 +105,8 @@ not a requirement to finish every event or property test before extraction:
    The owner selected one shared RuntimeActor declared in ProxyKernel for the
    full runtime control-owner cluster. UI remains MainActor, NIO stays on its
    loops, and blocking effects stay on PlatformWork. Preserve serialized platform
-   operations and bounded total termination. This is planning approval, not an
-   implementation or new ADR; the concrete client/stream contract is next.
+   operations and bounded total termination. Bound work per turn and prove status/Stop
+   responsiveness under observer load; diagnostics cannot gate control progress.
 
 **Stage 5 — strengthen the shared implementation (separately scoped follow-ups).**
 A bounded applied-state slice may join 0.6 once defined and validated; the full

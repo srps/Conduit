@@ -1,34 +1,24 @@
 # Shared runtime contracts and host: owner review draft
 
-Date: 2026-10-24. Status: **proposal for owner review, not an ADR or implementation authorization**.
+Date: 2026-10-24. Status: **selected architecture; staged implementation authorized**.
 
-Prepared by Codex with three Claude Code architecture-review passes, using the owner's
-`claude.ai` Max subscription. The review used read-only repository tools, disabled
-API/provider overrides and hooks, and made no source changes. The staging was
-requested by the owner. The selected checkpoints below record approved planning
-choices; other concrete types, compatibility rules and limits remain proposals.
-Existing accepted
-[decision 0001](./decisions/0001-one-runtime-host.md) and
-[decision 0002](./decisions/0002-daemon-first-ownership.md) retain their status.
-No new ADR is written by this document. [ROADMAP](../ROADMAP.md) remains the queue.
+Prepared by Codex with Claude Code architecture and persistence-policy review,
+using the owner's `claude.ai` Max subscription. The owner selected the module and
+isolation shape, save-before-apply with Stop/Quit exceptions, and the current
+client/stream recommendations, then authorized staged implementation after a
+final check against overalls' lessons ([#186](https://github.com/srps/Conduit/issues/186)).
+Claude implements and verifies bounded slices; Codex reviews each checkpoint.
 
-Policy checkpoint (2026-10-24): the owner selected **save-before-apply for durable
-settings, with Stop/Quit exceptions**, and requested a Claude review before ADRs
-or implementation. The policy below records that planning choice; the remaining
-architecture/API decisions at the end are still open.
-
-Module/isolation checkpoint (2026-10-24): the owner selected **ConduitRuntime,
-event-only RuntimeEvents, control values/client/codec in ConduitShared, and a
-shared RuntimeActor declared in a low-level ProxyKernel abstraction**. RuntimeHost,
-ProxyOrchestrator and runtime-owned lifecycle/reconciler/retry decision state
-share that isolation after staged migration. The UI stays MainActor; NIO work
-stays on its loops and blocking effects on PlatformWork. This selects the target
-shape, not the client/stream semantics or authorization to write ADRs/code.
-
-Claude's two focused policy-review passes accept this basis and withdraw its earlier
-act-first preference for ordinary durable edits/enables. Its requested safeguards
-are included below: three-valued save outcomes, generation-ordered writes,
-explicit in-flight-write handling, and one total monotonic shutdown deadline.
+The accepted refinements are recorded in
+[0013](./decisions/0013-runtime-module-isolation.md),
+[0014](./decisions/0014-runtime-client-stream.md), and
+[0015](./decisions/0015-save-before-apply.md).
+[0016](./decisions/0016-isolated-development-bundle.md) records the first dev-bundle
+slice. Existing accepted records retain their decisions. Illustrative type names,
+config field projection, writer lifetime, listener handoff and unmeasured resource
+limits remain design work, with explicit gates below. Authorization is not an
+implementation or real-machine validation claim. [ROADMAP](../ROADMAP.md) remains
+the queue.
 
 ## Purpose and current constraints
 
@@ -87,8 +77,7 @@ flowchart TD
     Bridge --> Events
 ```
 
-Owner-selected target placement (2026-10-24); exact client/stream behavior remains
-the next decision:
+Owner-selected target placement (2026-10-24):
 
 - Add **ConduitRuntime** for the shared host. Putting it in PlatformMac would
   broaden PlatformMac's dependency graph to auth, PAC and control mapping;
@@ -249,7 +238,7 @@ package enum ControlRuntimeFrame: Codable, Sendable {
 }
 ```
 
-Proposed stream semantics:
+Selected stream semantics:
 
 1. Capture the baseline and event high-water cursor and register the subscriber
    atomically in the runtime owner's isolation. The first frame is the baseline.
@@ -292,7 +281,7 @@ composition. Measure its cost before proposing a fast path.
 ### Compatibility
 
 Preserve existing v1 commands, response behavior, codes and the 16 KiB frame
-limit. Propose an explicit v2 for the new command and streaming shapes, including
+limit. Use an explicit v2 for the new command and streaming shapes, including
 the in-memory codec and its fixtures. This does not ship a production v2 socket
 in 0.6; that server remains part of the daemon milestone. In-process peers are
 the same binary; external peers later negotiate deliberately. Unknown/missing versions or commands
@@ -308,6 +297,30 @@ helper and control codecs retain their existing timestamp contract. Helper IPC
 and app/daemon control are separately versioned protocols: control v2 does not
 change the installed helper's IPC version. The in-memory codec validates its
 version even though same-binary peers need no network negotiation.
+
+### Responsiveness and diagnostic independence
+
+The authoritative snapshot and bounded operation lookup are read models owned by
+one runtime writer. A slow helper, disk effect or full observation queue must not
+hold a lock or monopolize the owner so status/Stop cannot be admitted. A cached
+snapshot includes its incarnation/revision; client disconnect or stale data is
+reported as unavailable/last-known, never synthesized as a stopped runtime.
+
+Bound bytes/items **and work per owner turn**. Replay, page projection, counter
+publication and periodic health ticks yield bounded service opportunities to
+control. Stop has a bounded reserved/coalesced admission path, without an
+unbounded priority queue or a claim to preempt a physical effect already running.
+Verify this under sustained observer/health load, not only with an empty queue.
+Periodic ticks are dropped during an active run; explicit requests may request
+one follow-up where the scheduler policy allows it (#181).
+
+Typed decision creation/publication and diagnostic sink I/O are separate. File,
+log or observer failures cannot gate a successful physical outcome, state
+publication or subsequent control. Report bounded diagnostic loss/overflow
+through independent counters/health without recursive logging. Replay is an
+explanation, never a durable command log or authority for cleanup/recovery. This
+does not weaken authoritative platform-journal write-before-mutation requirements.
+No new durable telemetry spool/exporter is part of this program.
 
 ## Typed events, without an untyped producer escape hatch
 
@@ -594,6 +607,12 @@ so stop/start/config interleavings become controllable.
 | Health scheduling | #181 | One physical run across restart, dropped ticks, one explicit follow-up, stale result/pool-effect fencing |
 | Breaker, VPNStateFuser, ConfigDiff | Their state owners are touched | Preserve #183's original model scope; bounded exhaustive or seeded mode as appropriate |
 
+Effects crossing an await have typed inputs/completions with the applicable
+incarnation, generation and lifecycle token. Check authority at dispatch and on
+completion; actor isolation alone does not fence stale external work. Model
+adapters expose those completion steps instead of hiding an entire opaque task.
+Keep this small and specific to each owner, without a generic durable-job engine.
+
 Small finite spaces use breadth-first bounded exploration with complete
 model-relevant deduplication keys, discrete time and stated depth/state/transition
 budgets. Exceeding a budget fails the exploration's coverage assertion. Larger
@@ -641,18 +660,18 @@ slices after owner approval and the necessary decisions:
    LaunchAgent lifecycle and real user-session evidence. One implementation is
    distinct from one production owner.
 
-Every implementation slice runs the repository-required checks, full host parity
-where still applicable, pm-sim and performance gates. This planning-only change
-runs documentation/decision checks; it makes no runtime-validation claim.
+Every implementation slice records its source/build checkpoint, exact checks,
+failures and remaining limits. Run the repository-required checks, full host
+parity where still applicable, pm-sim and performance gates. A passing earlier
+snapshot or partial test prefix is not evidence for a later tree. Keep automated
+model/native evidence separate from owner or serving-machine validation.
 
-Two choices are selected: save-before-apply with Stop/Quit exceptions, and the
-module/isolation shape above. The client and streaming contract is next. The
-owner should decide the following remaining shapes before ADRs and implementation:
+Module/isolation, persistence ordering and the client/stream semantics above are
+selected. The owner authorized staged implementation; these details remain gates
+for their affected slices, not blockers to independent work:
 
 | Choice | Recommendation or remaining owner choice | Consequence |
 | --- | --- | --- |
-| Contract and compatibility | Encoded in-memory transport, explicit v2 command/stream contract, lifecycle first | Exercises future daemon semantics now; keeps v1 compatibility deliberate |
-| Admission and stream semantics | Admission separate from settlement, no blind mutation retry; baseline/replay/live ordering and explicit overflow termination | Honest unknown outcomes and bounded memory; no exactly-once claim |
 | Config payload and commit granularity | AppState remains interim writer; prefer secret-free committed values with component receipts; exact-revision store if projection is unsuitable; identify coupled components | Selected save-before-apply policy needs field classification and explicit partial-write handling; later daemon writer handoff stays separate |
 | Writer lifetime at relaunch/update | Prove old-writer exit/quiescence before new writes, or design bounded exclusive state-directory write ownership; no new pending marker by default | A process-local queue or digest does not prevent overlapping instances from overwriting each other |
 | Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
@@ -662,5 +681,19 @@ owner should decide the following remaining shapes before ADRs and implementatio
 Concrete limit values and the full command/field inventory require stage-1 sizing
 and compatibility fixtures before those APIs are considered settled. Any owner
 choice that refines an accepted decision receives a new ADR or the appropriate
-implementation/evidence update only after approval; no accepted record is rewritten
+implementation/evidence update when that choice is approved; no accepted record is rewritten
 into a different decision.
+
+## Final overalls cross-check (2026-10-24)
+
+The source review found reinforcing obligations, not a different target shape:
+
+- [ADR-0140](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0140-event-driven-liveness-and-single-writer-views.md): versioned single-writer views, restart authority begins unproven, and explicit requests differ from periodic ticks. Applied above as responsive read models, honest unavailable state and bounded scheduler fairness.
+- [ADR-0176](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0176-host-concurrency-single-writers-and-effects.md): separate state ownership, observation and physical effects; check generation/epoch authority at real effect boundaries. Applied as short owner turns and typed fenced completions, without adopting its distributed host-job machinery.
+- [ADR-0149](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0149-independent-observability.md): diagnostic custody/outages confer no control authority and must not stall lifecycle. Its legacy-format portions are superseded by overalls ADR-0159; the cited independence requirement is expressly carried forward. Conduit keeps bounded visible diagnostic gaps, not a new observability backend.
+- [ADR-0191](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0191-elixir-hegel-property-verification.md): bounded typed generators, deterministic replay, isolated fixtures and an explicit production/model/oracle boundary. Applied to #183 with redacted counterexamples and exact-checkpoint evidence; no Elixir property-test dependency is imported.
+
+These are source design lessons, not claims that overalls or Conduit's target
+architecture has passed deployment validation. Existing Conduit constraints on
+machine fakes, GSS serialization, path-based socket handling and helper authority
+remain controlling.

@@ -8,7 +8,7 @@ in [ROADMAP](../ROADMAP.md): converge on a shared in-process host first, with
 typed contracts and model-based tests alongside it, then satisfy production
 ownership/recovery and LaunchAgent gates before adopting the daemon. Concrete
 refinements are in the [runtime contract review draft](./design-runtime-host-contract.md),
-pending owner review before new ADRs or implementation. This historical design
+with selected refinements in decisions 0013–0015 and staged implementation authorized. This historical design
 does not establish that the installed daemon/client transition has shipped.
 
 ## Problem
