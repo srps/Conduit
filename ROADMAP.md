@@ -81,8 +81,10 @@ not a requirement to finish every event or property test before extraction:
    applied outcomes and stop-fenced retries; Quit does not persist a disable.
 2. **Stage 2 — extract the shared host.** Extract `RuntimeHost` from
    `DaemonRuntimeHost` with no policy change. Retain the daemon fake-machine
-   suite and explicit composition dependencies. Target placement is proposed
-   in the review draft; broad kernel/file splitting is not a prerequisite.
+   suite and explicit composition dependencies. The owner selected ConduitRuntime
+   for the host and an event-only RuntimeEvents target; control values/client/
+   codec stay in ConduitShared with ProxyControlBridge mapping. Broad kernel/file
+   splitting is not a prerequisite. Client/stream behavior remains for review.
 3. **Stage 3 — AppState adopts the client, one lifecycle at a time.** Move DNS,
    tunnels and proxy onto the shared host, deleting each old implementation.
    AppState retains editor drafts and UI responsibilities. Migrate the event
@@ -96,7 +98,11 @@ not a requirement to finish every event or property test before extraction:
    [#79](https://github.com/srps/Conduit/issues/79)'s remaining acceptance lists.
    `ProxyOrchestrator`, `LifecycleLane` and `RuntimeReconciler` are currently
    main-actor isolated too: moving the host alone does not complete this stage.
-   Preserve serialized platform operations and bounded total termination.
+   The owner selected one shared RuntimeActor declared in ProxyKernel for the
+   full runtime control-owner cluster. UI remains MainActor, NIO stays on its
+   loops, and blocking effects stay on PlatformWork. Preserve serialized platform
+   operations and bounded total termination. This is planning approval, not an
+   implementation or new ADR; the concrete client/stream contract is next.
 
 **Stage 5 — strengthen the shared implementation (separately scoped follow-ups).**
 A bounded applied-state slice may join 0.6 once defined and validated; the full

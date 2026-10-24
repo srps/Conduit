@@ -46,6 +46,17 @@ It is not an ADR, an implementation claim or authorization to start coding.
 Existing accepted decisions remain unchanged; approve refinements and record any
 necessary new decisions before implementation.
 
+Module/isolation shape selected by the owner on 2026-10-24: a new ConduitRuntime
+hosts the shared runtime; Foundation-only RuntimeEvents holds producer events;
+ConduitShared holds control values/client/codec and ProxyControlBridge maps them.
+A shared RuntimeActor, declared in a low-level ProxyKernel abstraction, isolates
+the runtime control-owner cluster after behavior-preserving extraction and
+lifecycle adoption. MainActor remains for UI; NIO loops and PlatformWork retain
+their responsibilities. Per-runtime resource ownership remains explicit. Broad
+kernel splitting and subsystem actors follow evidence, not a prerequisite.
+This records selected planning shape; the client/stream contract is the next
+owner decision and ADRs/implementation remain on hold.
+
 The 0.6 core is the async client boundary, behavior-preserving shared-host
 extraction, AppState adoption by lifecycle (DNS, tunnels, proxy), then runtime
 isolation off the main actor. Test-suite consolidation follows demonstrated

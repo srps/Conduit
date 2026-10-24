@@ -5,8 +5,9 @@ Date: 2026-10-24. Status: **proposal for owner review, not an ADR or implementat
 Prepared by Codex with three Claude Code architecture-review passes, using the owner's
 `claude.ai` Max subscription. The review used read-only repository tools, disabled
 API/provider overrides and hooks, and made no source changes. The staging was
-requested by the owner; concrete types, targets, compatibility rules and limits
-below remain recommendations until the owner decides. Existing accepted
+requested by the owner. The selected checkpoints below record approved planning
+choices; other concrete types, compatibility rules and limits remain proposals.
+Existing accepted
 [decision 0001](./decisions/0001-one-runtime-host.md) and
 [decision 0002](./decisions/0002-daemon-first-ownership.md) retain their status.
 No new ADR is written by this document. [ROADMAP](../ROADMAP.md) remains the queue.
@@ -15,6 +16,14 @@ Policy checkpoint (2026-10-24): the owner selected **save-before-apply for durab
 settings, with Stop/Quit exceptions**, and requested a Claude review before ADRs
 or implementation. The policy below records that planning choice; the remaining
 architecture/API decisions at the end are still open.
+
+Module/isolation checkpoint (2026-10-24): the owner selected **ConduitRuntime,
+event-only RuntimeEvents, control values/client/codec in ConduitShared, and a
+shared RuntimeActor declared in a low-level ProxyKernel abstraction**. RuntimeHost,
+ProxyOrchestrator and runtime-owned lifecycle/reconciler/retry decision state
+share that isolation after staged migration. The UI stays MainActor; NIO work
+stays on its loops and blocking effects on PlatformWork. This selects the target
+shape, not the client/stream semantics or authorization to write ADRs/code.
 
 Claude's two focused policy-review passes accept this basis and withdraw its earlier
 act-first preference for ordinary durable edits/enables. Its requested safeguards
@@ -57,7 +66,7 @@ The current sources establish several constraints:
   reapply retries/PAC repointing already shipped in 0.5.7. They are baseline
   behavior to preserve and model, not work awaiting a sequencing decision.
 
-## Proposed ownership and dependency shape
+## Selected ownership and dependency shape
 
 ```mermaid
 flowchart TD
@@ -78,7 +87,8 @@ flowchart TD
     Bridge --> Events
 ```
 
-Recommended target placement, pending owner approval:
+Owner-selected target placement (2026-10-24); exact client/stream behavior remains
+the next decision:
 
 - Add **ConduitRuntime** for the shared host. Putting it in PlatformMac would
   broaden PlatformMac's dependency graph to auth, PAC and control mapping;
@@ -90,7 +100,7 @@ Recommended target placement, pending owner approval:
   typed wire projection, not RuntimeEvents producer cases. ConduitShared does not
   import RuntimeEvents; exhaustive bridge switches and compatibility fixtures
   check the mapping.
-- Prefer a small **RuntimeEvents** target for reusable domain event cases and
+- Add a small **RuntimeEvents** target for reusable domain event cases and
   safe diagnostic text. It has Foundation only, no commands, sockets, platform
   services or kernel objects. ProxyKernel must not import a combined
   event/control-client target. Introduce this small target with the first family,
@@ -104,6 +114,14 @@ The composition boundary injects existing managers/services, paths, fakes, clock
 credential provider, observer seams and shutdown policy. It does not introduce a
 protocol per manager or a generic service locator. AppState cannot obtain a live
 manager/orchestrator through the client.
+
+This establishes the intermediate AppState → client → in-memory transport →
+RuntimeHost shape and the later client → daemon transport → same host shape.
+Exclusive production ownership, user-session validation and recovery remain
+separate daemon gates. RuntimeActor supplies an isolation domain, not a singleton
+runtime or dedicated thread: each host still owns its bounded resources. Splitting
+kernel modules or subsystem actors follows demonstrated state/dependency seams
+and measured contention; it is not required up front or a cost-free later change.
 
 ## Client, commands and outcomes
 
@@ -540,7 +558,7 @@ runtime stop, logout and update shutdown have separately specified policies.
 
 ## Isolation and verification alongside each slice
 
-Extract with current isolation first. Proposed stage-4 end shape is a shared
+Extract with current isolation first. The selected stage-4 end shape is a shared
 `RuntimeActor` for the runtime control-owner cluster, declared in a low-level
 ProxyKernel abstraction so PlatformMac and ConduitRuntime can use it without a
 control/transport dependency. Move orchestrator, host, lifecycle, reconciler and
@@ -627,19 +645,18 @@ Every implementation slice runs the repository-required checks, full host parity
 where still applicable, pm-sim and performance gates. This planning-only change
 runs documentation/decision checks; it makes no runtime-validation claim.
 
-The persistence ordering choice is selected: save-before-apply with the Stop/Quit
-exceptions above. The owner should decide the following remaining shapes before
-ADRs and implementation:
+Two choices are selected: save-before-apply with Stop/Quit exceptions, and the
+module/isolation shape above. The client and streaming contract is next. The
+owner should decide the following remaining shapes before ADRs and implementation:
 
 | Choice | Recommendation or remaining owner choice | Consequence |
 | --- | --- | --- |
-| Module shape | ConduitRuntime plus a small event-only RuntimeEvents; control DTOs/client stay ConduitShared | Avoids updater dependency growth and a kernel-to-control dependency |
 | Contract and compatibility | Encoded in-memory transport, explicit v2 command/stream contract, lifecycle first | Exercises future daemon semantics now; keeps v1 compatibility deliberate |
 | Admission and stream semantics | Admission separate from settlement, no blind mutation retry; baseline/replay/live ordering and explicit overflow termination | Honest unknown outcomes and bounded memory; no exactly-once claim |
 | Config payload and commit granularity | AppState remains interim writer; prefer secret-free committed values with component receipts; exact-revision store if projection is unsuitable; identify coupled components | Selected save-before-apply policy needs field classification and explicit partial-write handling; later daemon writer handoff stays separate |
 | Writer lifetime at relaunch/update | Prove old-writer exit/quiescence before new writes, or design bounded exclusive state-directory write ownership; no new pending marker by default | A process-local queue or digest does not prevent overlapping instances from overwriting each other |
 | Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
-| Isolation and scope | RuntimeActor for the full control-owner cluster in 0.6 core; applied state/scheduler separately scoped; leases later | Moving only the host cannot be called completion |
+| Follow-up release scope | Keep full control-owner isolation in the 0.6 core; decide the bounded #194 applied-state slice, with full scheduler/leases separately scoped | Selected module/isolation shape does not silently expand the remaining release scope |
 | Resource and shutdown limits | Size frame/page/queue/retention bounds and a total shutdown budget including helper calls and manager locks | Provisional numbers above are review inputs, not validated shipping defaults |
 
 Concrete limit values and the full command/field inventory require stage-1 sizing
