@@ -129,6 +129,7 @@ graph TD
     PMSim --> Kernel
     PMSim --> Auth
     PMSim --> PAC
+    PMSim --> Bridge
     PMSim --> Platform
     PMSim --> Shared
     PMSim --> Events
@@ -173,7 +174,7 @@ graph TD
 | `ConduitRuntime` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
 | `ConduitUpdater`       | —           | —         | —        | ✓           | ✓             | —             | —                  | — | —    |
 | `pm-proxy`             | ✓           | ✓         | ✓        | —           | ✓             | —             | ✓                  | — | —    |
-| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | —                  | — | ✓    |
+| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | — | ✓    |
 | `pm-tunnel`            | ✓           | ✓         | —        | —           | —             | —             | —                  | — | —    |
 | `pm-dns`               | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
 | `pmctl`                | —           | —         | —        | —           | ✓             | —             | —                  | — | —    |
