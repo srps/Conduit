@@ -26,7 +26,7 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
 warning, and the Overview "active" counter no longer repeats the word.
 
-Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has a foundation implemented on this branch: typed `lifecycle.*` events, the v2 control value codec and snapshot projection, and the `RuntimeClient` protocol. It has no in-memory client, admission or subscription engine, production v2 socket or AppState adoption. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
+Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has a foundation merged in PR #220 (`fd630d1`): typed `lifecycle.*` events, the v2 control value codec and snapshot projection, and the `RuntimeClient` protocol. It has no in-memory client, admission or subscription engine, production v2 socket or AppState adoption. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
 
 0.5.7 shipped on 2026-10-22. The #205 Settings commit paths (Return, Apply,
 section close, quit with an invalid port) passed the owner's check in a `--dev`
@@ -95,10 +95,18 @@ not a requirement to finish every event or property test before extraction:
    engine, the production v2 socket, the config commit/start DTO, and AppState
    adoption. v1 control and helper IPC are unchanged. Writer lifetime is selected in
    [0017](./docs/decisions/0017-exclusive-state-directory-writer.md); its implementation
-   is planned. Open owner gates: config
-   projection and coupling, listener handoff, and measured
+   is planned. The private configuration shape is selected in
+   [0018](./docs/decisions/0018-private-configuration-request.md): one explicitly
+   encoded request containing full frozen values, with neutral SecretBytes in
+   ConduitShared. Save, runtime admission and apply outcomes remain distinct.
+   The owner selected the eight-MiB private request cap in
+   [0019](./docs/decisions/0019-private-configuration-frame-budget.md), with independent
+   Stop/status work and explicit oversize refusal before saving. Open gates:
+   measured memory/capacity/latency and complete writer coverage under
+   the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
+   listener handoff, and measured
    bounds and shutdown.
-2. **Stage 2 — extract the shared host.** Branch checkpoint: `RuntimeHost` now lives
+2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move keeps MainActor and current policy. Extract `RuntimeHost` from
    `DaemonRuntimeHost` with no policy change. Retain the daemon fake-machine
