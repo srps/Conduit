@@ -2,6 +2,7 @@
 import ConduitShared
 import Foundation
 import ProxyKernel
+import ProxyControlBridge
 
 /// #222: a diagnostic destination that aliases a protected resource is refused before
 /// anything is written, the protected bytes survive, one fixed event names the refusal,
@@ -19,8 +20,10 @@ enum DiagnosticDestinationGuardScenarios {
         let external = FileManager.default.temporaryDirectory
             .appendingPathComponent("conduit-dest-guard-external-\(UUID().uuidString)", isDirectory: true)
         defer {
-            try? FileManager.default.removeItem(at: root)
-            try? FileManager.default.removeItem(at: external)
+            for directory in [root, external] where FileManager.default.fileExists(atPath: directory.path) {
+                do { try FileManager.default.removeItem(at: directory) }
+                catch { fputs("scenario=diagnostic-destination-guard phase=cleanup result=failed reason=\(error.localizedDescription)\n", stderr) }
+            }
         }
         let environment = RuntimeEnvironment(configDirectory: root)
         try ProxyConfigPersistence.save(GenericDefaults.shared.makeConfig(), in: environment)
@@ -134,27 +137,9 @@ enum DiagnosticDestinationGuardScenarios {
             eventLog: log)
     }
 
-    /// pm-sim has no `ProxyControlBridge` edge on this branch, so it mirrors that target's
-    /// `protectedDiagnosticResources` mapping. Keep the two in step; the bridge is the source.
+    /// Exercise the same protected-resource composition as the app and headless hosts.
     private static func guardFor(_ sink: RecordFileDiagnosticSink, in environment: RuntimeEnvironment) -> any RecordFileDestinationGuarding {
-        let all: [ProtectedRecordFile] = [
-            ProtectedRecordFile(resource: .config, url: environment.configFile),
-            ProtectedRecordFile(resource: .platformState, url: environment.platformStateFile),
-            ProtectedRecordFile(resource: .platformConfig, url: environment.platformConfigFile),
-            ProtectedRecordFile(resource: .preferences, url: environment.preferencesFile),
-            ProtectedRecordFile(resource: .snapshot, url: environment.snapshotFile),
-            ProtectedRecordFile(resource: .legacySavedDNS, url: environment.legacySavedDNSFile),
-            ProtectedRecordFile(resource: .events, url: environment.eventsFile),
-            ProtectedRecordFile(resource: .ready, url: environment.configDirectory.appendingPathComponent("ready.json")),
-            ProtectedRecordFile(resource: .daemonReady,
-                                url: environment.configDirectory.appendingPathComponent("daemon-ready.json")),
-            ProtectedRecordFile(resource: .control,
-                                url: environment.configDirectory.appendingPathComponent(ControlSocket.fileName)),
-            ProtectedRecordFile(resource: .updateState, url: environment.updateStateFile),
-            ProtectedRecordFile(resource: .log, url: environment.logFile),
-        ]
-        let protected = sink == .runtimeEvents ? all.filter { $0.resource != .events } : all
-        return systemRecordFileDestinationGuard(protected: protected)
+        diagnosticDestinationGuard(for: sink, in: environment)
     }
 
     private static func counts(_ sink: FileConnectionAuditSink) -> (written: UInt64, failed: UInt64) {

@@ -159,3 +159,9 @@ reconciled against this 158 beyond the per-suite counts above.
   descriptor check narrows the window and does not close it.
 - The pm-sim mirror of the bridge mapping must be replaced by the bridge call once the
   other branch's `pm-sim` → `ProxyControlBridge` edge lands.
+
+## Codex composition follow-up
+
+After Claude's158-test/9-assertion focused checkpoint, Codex executed the [actual pm-proxy loopback probe](experiments/diagnostic-destination/README.md): two local HTTP requests succeeded despite an audit-on-config refusal, one refusal event was emitted, config bytes stayed unchanged, and the child stopped normally. The initial probe's EOF assumption timed out and was corrected; only the successful bounded-response run is counted.
+
+After stacking over the private-codec branch's existing pm-sim-to-Bridge edge, the diagnostic simulator uses the production bridge factory instead of a copied protected-resource mapping. Fixture cleanup errors are surfaced instead of discarded. Final integrated checks follow these source edits; earlier focused results do not cover those edits.
