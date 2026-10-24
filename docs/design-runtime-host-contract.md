@@ -395,33 +395,32 @@ policy during in-process convergence. An injected configuration store has one
 write authority; RuntimeHost receives immutable committed inputs. It does not
 keep a second independently mutable config-file cache.
 
-A proposed `ControlConfigurationCommit` carries the actual successfully persisted
-runtime component values (config/platform integration) plus per-component durable
-receipts and a runtime revision precondition. Values for failed component writes
-do not masquerade as committed. The host validates this typed control projection
-and applies exactly those values, not newer bytes read from mutable paths. UI
-preferences are separate. Partial multi-file persistence stays explicit; no
-atomicity is claimed and #182 is not repurposed to provide it.
+The owner selected one private, explicitly encoded configuration update request
+carrying the full frozen values; see [0018](decisions/0018-private-configuration-request.md)
+and the [review and measurements](design-runtime-config-transfer-review.md).
+The update workflow uses the sole injected store to validate, save and verify the
+required components before runtime admission. The host applies the exact verified
+inputs, not newer bytes read from mutable paths. Failed component values do not
+masquerade as committed; unrelated UI preferences stay separate. Partial multi-file
+persistence is explicit and #182 is not repurposed to provide atomicity.
 
-Before introducing that payload, classify every field in the config projection:
-absence of a property called `password` does not prove URLs or free text contain
-no secrets. Secret-bearing values must remain in the private credential/config
-provider rather than this Codable payload. If this prevents a useful value
-projection, the alternative is a bounded exact-revision store reference. Such a
-store must resolve the original immutable inputs or reject as superseded; an
-opaque revision followed by a read of newer files is insufficient. The value
-projection is the preferred shape; its complete field inventory remains an owner
-review and stage-1 design obligation, not a claim that raw ProxyConfig is wire-safe.
+Keep secret-bearing URLs inside the deliberate private codec. The private request
+does not conform to generic Codable; ordinary events, status, admission and outcome
+lookup stay secret-free. Neutral SecretBytes belongs in ConduitShared, with package
+compatibility access from ProxyKernel. JSON may create temporary plaintext copies;
+the private codec does not promise to zero every serialization allocation.
 
 Stage-1 source inventory and measurement obligations are recorded in
 [runtime-client-stage1-inventory.md](runtime-client-stage1-inventory.md). The owner
 favors the future daemon architecture and asks for a decision when a concrete
 trade-off is needed. A full pinned-config registry was considered but is not
-selected or implemented; save-before-apply does not require it. Keep the original
-explicit-value preference and private sensitive bindings while measuring. V1
-remains 16 KiB; the v2 bound is provisional. Bring back measured larger-frame
-versus chunked-transfer alternatives before implementing affected config apply,
-without introducing incidental config-count or query-string restrictions.
+selected or implemented; save-before-apply does not require it. The single private
+request removes public/private pairing and reference expiry. V1 remains 16 KiB;
+the v2 bound is provisional. The owner selected one private frame capped at eight MiB in
+[0019](decisions/0019-private-configuration-frame-budget.md), with independent
+Stop/status work. Refuse oversize updates before save while preserving existing-file
+startup validation. Verify actual memory/capacity/latency before adoption, without
+introducing incidental config-count or query-string restrictions.
 
 For actions that persist DNS/tunnel/proxy intent, the AppState action adapter
 remains the persistence authority and passes the committed intent through the
@@ -721,7 +720,7 @@ for their affected slices, not blockers to independent work:
 
 | Choice | Recommendation or remaining owner choice | Consequence |
 | --- | --- | --- |
-| Config payload and commit granularity | AppState remains interim writer; prefer secret-free committed values with component receipts; exact-revision store if projection is unsuitable; identify coupled components | Selected save-before-apply policy needs field classification and explicit partial-write handling; later daemon writer handoff stays separate |
+| Config payload — selected; budgets open | One private explicit request with full frozen values; neutral SecretBytes in ConduitShared; sole injected store app-owned now and daemon-owned later ([0018](decisions/0018-private-configuration-request.md)) | Save, runtime admission and apply remain distinct; frame/total/decode limits and exact required-component handling still need evidence; no snapshot registry |
 | Writer lifetime at relaunch/update — selected | Exclusive OS-backed state-directory writer lease; busy hosts refuse runtime startup and reconciliation; keep authority until write quiescence or exit ([0017](./decisions/0017-exclusive-state-directory-writer.md)) | No snapshot registry or new generation schema selected; legacy releases still require old-process-exit handoff; implementation/upgrade validation remain due |
 | Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
 | Follow-up release scope | Keep full control-owner isolation in the 0.6 core; decide the bounded #194 applied-state slice, with full scheduler/leases separately scoped | Selected module/isolation shape does not silently expand the remaining release scope |

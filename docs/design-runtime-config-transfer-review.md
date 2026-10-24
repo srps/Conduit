@@ -1,13 +1,16 @@
 # Configuration update boundary: owner review
 
-Status: proposal, 2026-10-24. No ADR or production configuration client/codec is
-implemented. This is the next API decision before config apply/start adoption,
-following decisions 0014, 0015 and the selected writer lease in 0017.
+Status: owner-selected 2026-10-24 by [decision 0018](decisions/0018-private-configuration-request.md)
+(#186 private configuration checkpoint). Implementation planned; validation none. No
+production configuration client, codec or store is implemented. The neutral
+`SecretBytes` move is implemented on this branch with focused tests; see 0018. This
+was the next API decision before config apply/start adoption, following decisions 0014,
+0015 and the selected writer lease in 0017.
 
 ## Recommendation
 
-Use **one private configuration update request containing explicit frozen values**,
-with an explicit private encoder. Ordinary lifecycle controls, status, events,
+Selected by 0018: use **one private configuration update request containing explicit
+frozen values**, with an explicit private encoder. Ordinary lifecycle controls, status, events,
 admission replies and outcome lookup stay secret-free. No snapshot registry,
 reference expiry or matching public/private halves is required.
 
@@ -56,7 +59,7 @@ budget or authorize raw configuration in diagnostics.
 
 ## Module shape
 
-Proposed: private configuration values, client contract and explicit codec belong
+Selected by 0018: private configuration values, client contract and explicit codec belong
 beside the existing control contract in ConduitShared; mapping stays in
 ProxyControlBridge. Move the neutral, non-Codable SecretBytes implementation from
 ProxyKernel to ConduitShared, retaining a package typealias during migration so
@@ -70,13 +73,19 @@ kernel/bridge graph. Adding an app-to-bridge edge is not inherently forbidden;
 its dependency cost is the tradeoff. Do not add a weaker duplicate secret wrapper
 or a Shared-to-Kernel cycle.
 
-If selected, record the private-codec exception and neutral-value placement in a
-new refining decision referencing 0006/0014. Accepted records are not rewritten
-into a different choice.
+Recorded by [decision 0018](decisions/0018-private-configuration-request.md), which
+refines 0006 and 0014 for the private-codec exception and neutral-value placement.
+Accepted records are not rewritten into a different choice; 0006 is unchanged.
 
 ## Executed sizing input
 
-The [test-only candidate](experiments/runtime-config-transfer/README.md) was run
+Historical: this table measures the superseded two-envelope split. The single-envelope
+shape selected by 0018 is measured by
+[`SingleRequestCandidate.swift`](experiments/runtime-config-transfer/SingleRequestCandidate.swift),
+whose executed numbers are recorded in the experiment README (largest fixture
+5,584,533 bytes, eleven equal runtime/platform round trips).
+
+The [test-only split candidate](experiments/runtime-config-transfer/README.md) was run
 against the actual Swift encoder and built foundation modules. All eleven
 fixtures pass existing validation and reconstruct an equal runtime config.
 Artificial tokens appear only in the provisional confidential encoding.
@@ -91,8 +100,8 @@ Artificial tokens appear only in the provisional confidential encoding.
 | 1 MiB private health URL | 2,381 B | 1,048,869 B |
 
 These are complete **provisional two-envelope** encodings, not raw-config size
-claims or an accepted schema. The recommended single envelope has not been
-encoded. The probe's generic JSON-value mirror is not the production typed DTO.
+claims or an accepted schema. The single envelope has not been encoded by an
+executed run yet. The probe's generic JSON-value mirror is not the production typed DTO.
 The chunk experiment checks frame sizes, not a production reassembly engine:
 the 10,000-per-collection input uses 463 provisional 16 KiB frames across both
 envelopes, versus 1,941 at 4 KiB.
@@ -103,10 +112,12 @@ truncated. Frame size, total staging, decode memory, active transfers and work p
 turn need separate bounds. Bounded presentation summaries with an explicit full
 inspection path are distinct from configuration transfer.
 
-## Later gates, not selected by this proposal
+## Budget refinement and remaining gates
 
-- Choose frame/segmentation and total-transfer/staging budgets after the envelope
-  shape. Any new configuration byte ceiling needs explicit owner approval.
+- [0019](decisions/0019-private-configuration-frame-budget.md) now selects one
+  private frame capped at eight MiB, with work/capacity independent of Stop/status.
+  Refuse oversize updates before save, preserve existing-file startup validation.
+  Measured staging/decode-memory, concurrency and lifetime bounds remain due.
 - Complete canonical writer-authority coverage: RuntimeEnvironment permits
   outside config/platform/preferences/journal paths. Different state directories
   can therefore share a component. A per-directory lease alone does not exclude

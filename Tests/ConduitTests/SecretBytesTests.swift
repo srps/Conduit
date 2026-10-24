@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import XCTest
+@testable import ConduitShared
 @testable import ProxyKernel
 
 /// Tests for the SecretBytes opaque credential container. Covers the
@@ -264,5 +265,20 @@ final class SecretBytesTests: XCTestCase {
     func testSecretBytesIsSendableCompileCheck() {
         func requireSendable<T: Sendable>(_: T.Type) {}
         requireSendable(SecretBytes.self)
+    }
+
+    // MARK: - One type under two names (decision 0018)
+
+    /// The `ProxyKernel` alias and the `ConduitShared` name must be the same
+    /// type. The typed helpers are the compile check: a value passes either
+    /// way with no conversion or copy, and the bytes survive the round trip.
+    func testKernelAliasAndSharedNameAreOneType() {
+        func asShared(_ secret: ProxyKernel.SecretBytes) -> ConduitShared.SecretBytes { secret }
+        func asKernel(_ secret: ConduitShared.SecretBytes) -> ProxyKernel.SecretBytes { secret }
+
+        let shared = ConduitShared.SecretBytes([0x5A, 0xA5])
+        let viaKernel = asKernel(shared)
+        XCTAssertEqual(asShared(viaKernel), shared)
+        XCTAssertEqual(viaKernel.count, 2)
     }
 }

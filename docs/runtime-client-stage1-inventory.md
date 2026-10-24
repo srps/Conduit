@@ -2,11 +2,11 @@
 
 Checkpoint: 2026-10-24, before AppState adopts the client. This is an inventory and
 measurement plan, not an additional accepted decision or a claim of release
-completion. Decisions 0013–0015 remain the authority.
+completion. Decisions 0013–0019 record the selected shapes and separate implementation status.
 
-## Implementation status (branch foundation)
+## Implementation status
 
-Implemented on this branch; not merged at this checkpoint:
+Foundation merged in PR #220 (`fd630d1`), with hosted Swift/CodeQL checks passed:
 
 - Typed `lifecycle.*` events, four names: the `RuntimeEvents` values, the kernel `RuntimeEvent.typed` field, the producers in `LifecycleLane`, the termination drain and `AppUpdates`, the wire projection and the strict or unknown wire record.
 - The `ControlRuntime*` value types, the v2 envelope (version 2, separate from v1's version 1) and its frame codec, which writes `Date` values as epoch seconds on the scale of `ControlTimestamp`, plus pages and the snapshot projection.
@@ -14,11 +14,14 @@ Implemented on this branch; not merged at this checkpoint:
 
 Not implemented: the in-memory client and its admission, lookup and subscription engine; the production v2 socket; a config commit or start DTO; AppState adoption. Request lookup and admission exist only as protocol shapes, so their behavior is unverified. v1 control, helper IPC and the installed helper are unchanged, and no production peer uses v2.
 
-The shared-host extraction subsequently added ConduitRuntime, with its own [verification checkpoint](verification-runtime-host-extraction-2026-10-24.md). AppState still runs its twin; this inventory does not claim client adoption.
+The shared-host extraction merged in PR #221 (`3d566d8`) and added ConduitRuntime, with its own [verification checkpoint](verification-runtime-host-extraction-2026-10-24.md). AppState still runs its twin; this inventory does not claim client adoption.
 
-Not selected: shipping numeric limits for frames, pages, queues or retention. The v1 16 KiB frame (`ControlSocket.maxFrameBytes`) is retained. The design's 16 KiB v2 figure and 64-row pages remain review inputs.
+Selected for private configuration: one full frozen request (0018), capped at eight
+MiB with independent Stop/status work (0019); its production codec is not implemented.
+Not selected: ordinary v2 frame/page/queue/retention limits. The v1 16 KiB frame (`ControlSocket.maxFrameBytes`) is retained. The design's 16 KiB v2 figure and 64-row pages remain review inputs.
 
-Open owner gates: config projection and coupling, listener handoff, and measured bounds and shutdown. No registry is selected.
+Open gates: exact required-component handling, external-path writer coverage, listener
+handoff, measured memory/capacity/latency and total shutdown. No registry is selected.
 
 ## Focused evidence
 
