@@ -18,3 +18,16 @@ All four inputs pass the current domain validator and round-trip equal. Empty pr
 The codec remains unconnected to any runtime client, store, or transport. Before adoption, measure release builds and receiver-only lifetime separately, define active/pending request capacity and working-memory/lifetime limits, and verify Stop/status latency independently of configuration work. Avoid retaining all pipeline forms at once. If dense valid frames still exceed the selected operational budget, compare an incremental typed decoder/less allocation-heavy private value storage with revisiting transfer limits. A lower frame cap or new item-count restrictions change owner-selected compatibility and need an explicit decision; they are not silently introduced here. Chunking alone would not reduce decoded object amplification.
 
 `ResourceProbe.swift` is the exact executed probe. `resource-probe-results.json` contains the numeric stage output and process exit statuses. It was linked with `-package-name conduit` against the worktree's existing debug `ProxyKernel`, `ProxyControlBridge`, `ConduitShared`, `RuntimeEvents`, and transitive SwiftNIO dependency objects, using their existing generated/header module maps. Its source is experiment-only and is not a product target or a CI memory assertion. Reproduction requires a normal Xcode-prefixed debug build first, then linking those existing objects with the probe; the test-only compilation does not widen product access.
+
+## Proposed domain bounds probe
+
+After the owner rejected supporting millions of DoH providers, Codex ran two additional fresh-process fixtures using the same codec. `ProposedBoundsProbe.swift` and `proposed-bounds-results.json` preserve the executed source/output. No product limits were changed by this experiment.
+
+Both fixtures use the proposed count ceilings: 8 DoH providers, 8 DNS servers per domain across 256 entries, 32 upstreams, 64 tunnels, 256 intercept rules, 256 allowed clients, 256 bypass entries and 256 forced-proxy patterns. Hosts/patterns are 253-byte valid names where used; private URLs are 16,384 bytes; profile/upstream/tunnel labels are 1,024 bytes. Allowed clients are valid loopback literals; bypass entries fit their existing encoded-byte cap. The second fixture uses escaped control bytes in display labels. Both pass today's domain validator and reconstruct equal configs. These are upper-count fixtures, not an exhaustive byte-maximum search or a claim that every future semantic rule has been selected.
+
+| Proposed-profile fixture | Complete frame | Whole-process peak RSS | Cumulative end-to-end time |
+| --- | ---: | ---: | ---: |
+| Long ordinary strings | 639,291 B | 17,399,808 B | 0.250 s |
+| Escaped display labels | 1,135,932 B | 19,349,504 B | 0.445 s |
+
+As in the earlier probe, every pipeline form is deliberately retained until the end. The debug-process baseline is about 7 MB. These observations support early domain bounds and do not prove a universal memory bound, release performance, receiver-only cost, busy-peer capacity or Stop/status latency. The earlier 575 MB result remains evidence of the uncapped input shape; no allocator optimization is claimed.

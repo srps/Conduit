@@ -206,3 +206,9 @@ On corrected source: Xcode-prefixed debug build, **174 selected tests with zero 
 - Full workflow-equivalent and hosted checks remain separately tracked until complete. The independent review was read-only, not a second execution of the suite.
 - The SecretBytes scrub covers only the buffers the codec allocates. It does not cover
   the `Data`, `String` or `JSONDecoder` copies made later.
+
+## Stable full checkpoint and owner limits review
+
+The corrected codec stacked over the lease foundation passed all 39 local workflow-equivalent gates on unchanged source at206e478: 2,631 tests, two skips, zero failures;87 simulator results; perf10.14s /34,078,720B RSS. Relevant-source SHA256 before/after: `8827441b6fe8ed002c95a0ca4566579e693e797278f5b7b819450a3650ebfe89`. This is correctness evidence for an unadopted foundation, not memory-budget acceptance.
+
+The owner then explicitly rejected supporting millions of providers and requested sane limits. The [resource-bounds review](design-runtime-configuration-bounds-review.md) proposes early schema-aware rejection and shared domain limits before further adoption. The speculative packed-array optimization was stopped before it edited source. Two proposed-profile fixtures measured17.4/19.3MB peak RSS with the same codec, as recorded in the [probe note](experiments/private-configuration-codec/README.md). No new limits, startup compatibility policy or ADR are selected yet.
