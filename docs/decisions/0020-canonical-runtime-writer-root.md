@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 canonical writer-root checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -96,11 +96,47 @@ does not establish behavior on the owner's deployment storage.
 
 ## Implementation evidence
 
-None yet. The inventory and scratch audit reproduction do not implement writer
-coverage, the OS lease or the asynchronous store.
+Partial: the canonical root resolver and its file-system effect exist and are tested.
+The four authoritative paths are checked for containment, custom names, reserved
+runtime names and disjointness; a read-only external config is accepted without
+owning it. Names are compared by the object they name, not their spelling. An
+existing name is compared by device and inode, so a case alias, a symbolic link or
+a hard link of another role is an overlap. A name that does not exist yet is compared
+by its parent directory and leaf. Canonically equivalent leaves (NFC and NFD) are one
+name on any volume. Leaves that match only after Unicode case folding in a fixed locale
+(final sigma, micro sign, long s and ordinary case) are one name only on a volume that
+reports that it folds case. A volume that does not answer is refused only when a folded
+collision needs the answer. Headless hosts (pm-proxy and a `--config` with no writer)
+resolve the root and their input through `resolveReadOnlyInput`. That entry point does
+not resolve, read or write the sidecars, so an unused sidecar cannot refuse startup.
+A missing parent is refused as a preflight result. The layout creates nothing, and the
+refusal is not a claim that a store cannot create the directory: the existing save
+paths do create parents. A store that does must take the lease first and resolve the
+created path again. Nothing calls the resolver at startup, and no writer persists
+through the root yet.
+Code: [`StateRootLayout.swift`](../../Sources/PlatformMac/StateRootLayout.swift) (canonical root,
+plan, input plan, typed refusals), [`StateRootFileSystem.swift`](../../Sources/PlatformMac/StateRootFileSystem.swift)
+(lstat identity, realpath, volume case query and owner-only mkdir behind a protocol, with fake in
+[`PlatformFakes.swift`](../../Sources/PlatformMac/PlatformFakes.swift)). Tests:
+[`StateRootLayoutTests.swift`](../../Tests/ConduitTests/StateRootLayoutTests.swift) (scripted case-sensitive,
+folding and unknown volumes, links, hard links, input-only resolution),
+[`StateRootOSProbeTests.swift`](../../Tests/ConduitTests/StateRootOSProbeTests.swift) (real APFS aliases,
+atomic replacement, the `lstat`, `realpath` and case-query behavior, and mode handling in scratch directories),
+and [`StateWriterReviewRegressionTests.swift`](../../Tests/ConduitTests/StateWriterReviewRegressionTests.swift)
+(real case-alias, reserved-alias, link and headless-lease cases). pm-sim: [`ScenarioStateWriterLease.swift`](../../Sources/pm-sim/ScenarioStateWriterLease.swift)
+exercises the real layout with an alias root, a custom config name and an outside
+config. Results and limits are in [the verification note](../verification-state-writer-lease-2026-10-24.md).
 
-Does not prove: cross-process exclusion, complete writer coverage, startup
-ordering or real-machine recovery.
+Does not prove: cross-process exclusion by a writer, complete writer coverage,
+startup ordering, the daemon split-path refusal in a running process, or
+real-machine recovery. It does not prove exact APFS folding equivalence. The folding
+comparison for a missing name is Foundation's case folding in `en_US_POSIX`, chosen
+conservatively: it may refuse a pair APFS keeps apart, and it may miss an alias that
+APFS folds and this comparison does not. Normalization sensitivity of a volume is not
+queryable, so canonical spellings are refused on every volume. Also not proved: mount
+points beneath the root, or behavior on the owner's deployment storage. A reserved name that is itself a symbolic link is compared
+by the link, not its target. A store that writes a link-named file must write the
+resolved `path`, as the verification note records.
 
 ## Open questions
 
