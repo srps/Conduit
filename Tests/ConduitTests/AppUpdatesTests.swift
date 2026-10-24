@@ -2,6 +2,7 @@
 import Foundation
 import XCTest
 import ConduitShared
+import RuntimeEvents
 @testable import Conduit
 @testable import PlatformMac
 @testable import ProxyKernel
@@ -235,6 +236,69 @@ final class UpdateCoordinatorTests: XCTestCase {
         events = []
         coordinator().start(automaticChecks: false)
         XCTAssertFalse(names().contains("lifecycle.version_changed"))
+    }
+
+    /// The change is a typed value whose fields are the two versions, and whose human line is the
+    /// legacy one, byte for byte.
+    func testAVersionChangeIsATypedValueWithItsTwoVersions() throws {
+        try store.save(UpdateState(lastLaunchedVersion: "0.5.7"))
+        coordinator(version: "0.5.8-rc.1+7").start(automaticChecks: false)
+        let change = try XCTUnwrap(events.first { $0.event == "lifecycle.version_changed" })
+        XCTAssertEqual(change.kind, .lifecycle)
+        XCTAssertEqual(change.typed, .lifecycle(.versionChanged(LifecycleVersionChanged(from: "0.5.7", to: "0.5.8-rc.1+7"))))
+        XCTAssertEqual(change.detail, "from=0.5.7 to=0.5.8-rc.1+7")
+    }
+
+    /// The typed field holds a sanitized plain version whose line survives the sanitizer, or nothing. A
+    /// value that is not one, on either side, is reported as the update-state failure with its reason, and
+    /// no typed value or version line is written. A `from` ending in `Bearer` is a plain token on its own,
+    /// but `from=Bearer to=…` reads as a bearer credential, so the typed pair rule refuses it here.
+    func testAVersionThatIsNotAPlainTokenNeverReachesATypedField() throws {
+        let crafted = [
+            "token=abc123", "Bearer abcdefghijklmnop", "https://user:secret@updates.example.test/feed",
+            "Authorization: Basic c2VjcmV0", "0.4.1 beta", "", String(repeating: "Q", count: 70),
+            String(repeating: "a", count: LifecycleVersionChanged.maximumVersionBytes + 1),
+            "Bearer", "a-Bearer", "a.bearer",
+        ]
+        for value in crafted {
+            events = []
+            try store.save(UpdateState(lastLaunchedVersion: value))
+            coordinator().start(automaticChecks: false)
+            XCTAssertEqual(names(), ["update.state_unreadable"], value)
+            XCTAssertEqual(events.first?.detail, "reason=unrepresentable_version", value)
+            XCTAssertNil(events.first?.typed, value)
+        }
+    }
+
+    /// The near misses the sanitizer leaves alone reach a typed field, with the line the typed value renders.
+    func testABearerNearMissStillReachesATypedField() throws {
+        for value in LifecycleVersionFixtures.bearerNearMiss {
+            events = []
+            try store.save(UpdateState(lastLaunchedVersion: value))
+            coordinator().start(automaticChecks: false)
+            let change = try XCTUnwrap(events.first { $0.event == "lifecycle.version_changed" }, value)
+            XCTAssertEqual(change.typed, .lifecycle(.versionChanged(LifecycleVersionChanged(from: value, to: "0.5.0"))), value)
+            XCTAssertEqual(change.detail, "from=\(value) to=0.5.0", value)
+        }
+    }
+
+    /// The longest version a typed field carries still reaches one, with its line equal to the typed value's.
+    func testTheLongestVersionStillReachesATypedField() throws {
+        let longest = String(repeating: "a", count: LifecycleVersionChanged.maximumVersionBytes)
+        try store.save(UpdateState(lastLaunchedVersion: longest))
+        coordinator().start(automaticChecks: false)
+        let change = try XCTUnwrap(events.first { $0.event == "lifecycle.version_changed" })
+        XCTAssertEqual(change.typed, .lifecycle(.versionChanged(LifecycleVersionChanged(from: longest, to: "0.5.0"))))
+        XCTAssertEqual(change.detail, "from=\(longest) to=0.5.0")
+        XCTAssertEqual(names(), ["lifecycle.version_changed"])
+    }
+
+    func testAnUnrepresentableCurrentVersionIsReportedTheSameWay() throws {
+        try store.save(UpdateState(lastLaunchedVersion: "0.4.1"))
+        coordinator(version: "https://updates.example.test/?sig=abc").start(automaticChecks: false)
+        XCTAssertEqual(names(), ["update.state_unreadable"])
+        XCTAssertEqual(events.first?.detail, "reason=unrepresentable_version")
+        XCTAssertNil(events.first?.typed)
     }
 
     func testAnUnreadableStateFileIsAnEventNotASilentReset() throws {

@@ -3,11 +3,12 @@ import ConduitShared
 import Foundation
 import PlatformMac
 import ProxyKernel
+import RuntimeEvents
 
 /// The app's update policy (#111) over fakes and a virtual clock: three
 /// simulated days of automatic checks, a relaunch on a new version, the
 /// updater's reports (well formed, malformed, and another copy's), and a
-/// build that cannot update itself. The updater process and Sparkle are
+/// build that cannot update itself, and malformed version metadata in its state. The updater process and Sparkle are
 /// covered end to end by scripts/test-updater-e2e.sh.
 enum UpdateScenarios {
     @MainActor
@@ -129,14 +130,37 @@ enum UpdateScenarios {
         await locked.check(.interactive, source: .user)
         locked.stop()
 
+        // Malformed version metadata is refused with one fixed reason: no typed version change, no raw value in
+        // what is recorded, and no updater started. Each case has its own state file and coordinator, with the
+        // shapes of LifecycleVersionFixtures: a 60-byte token, and a bearer-shaped `from`.
+        let malformedVersions = [String(repeating: "a", count: 60), "0.5.Bearer"]
+        var malformedRuns: [(token: String, events: [RuntimeEvent], encoded: String, launches: Int)] = []
+        for (index, token) in malformedVersions.enumerated() {
+            let file = directory.appendingPathComponent("malformed-version-\(index).json")
+            try UpdateStateStore(file: file).save(UpdateState(lastLaunchedVersion: token))
+            let caseLauncher = FakeUpdaterLauncher()
+            var caseEvents: [RuntimeEvent] = []
+            let caseCoordinator = UpdateCoordinator(
+                hostIdentifier: "io.github.srps.Conduit", hostPath: host, currentVersion: "0.5.0",
+                availability: .available, launcher: caseLauncher, store: UpdateStateStore(file: file),
+                reports: FakeUpdateReports(), now: { clock.now }, sleep: { try await clock.sleep($0) },
+                record: { caseEvents.append($0) }
+            )
+            caseCoordinator.start(automaticChecks: false)
+            caseCoordinator.stop()
+            let encoded = try caseEvents.map { String(decoding: try CanonicalJSON.encoder().encode($0), as: UTF8.self) }
+            malformedRuns.append((token: token, events: caseEvents, encoded: encoded.joined(separator: "\n"),
+                                  launches: caseLauncher.starts.count))
+        }
+
         let count = { (event: String) in events.filter { $0.event == event }.count }
         return ScenarioResult(
             name: name, clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: [
-                .init("the new version is recorded once: lifecycle.version_changed from=0.4.1 to=0.5.0",
-                      events.filter { $0.event == "lifecycle.version_changed" }.map(\.detail) == ["from=0.4.1 to=0.5.0"]),
+                .init("the new version is recorded once, as a typed version change from=0.4.1 to=0.5.0",
+                      events.compactMap(\.typed) == [.lifecycle(.versionChanged(LifecycleVersionChanged(from: "0.4.1", to: "0.5.0")))]),
                 .init("three simulated days make three background checks and nothing interactive",
                       scheduled == [.background, .background, .background]),
                 .init("the first waits for the launch delay, the rest a day apart",
@@ -151,6 +175,17 @@ enum UpdateScenarios {
                 .init("nothing is handled after stop", events.count == afterStop),
                 .init("a build without the key never starts the updater",
                       lockedLauncher.starts.isEmpty && lockedEvents.contains { $0.event == "update.check_unavailable" }),
+                .init("two malformed version fixtures are each checked", malformedRuns.count == malformedVersions.count),
+                .init("malformed version metadata is one fixed update.state_unreadable",
+                      malformedRuns.allSatisfy { run in
+                          run.events.map(\.event) == ["update.state_unreadable"]
+                              && run.events.allSatisfy { $0.detail == "reason=unrepresentable_version" }
+                      }),
+                .init("malformed version metadata is never a typed version change",
+                      malformedRuns.allSatisfy { run in run.events.allSatisfy { $0.typed == nil } }),
+                .init("no raw malformed version reaches a canonical encoded record",
+                      malformedRuns.allSatisfy { !$0.encoded.contains($0.token) }),
+                .init("a malformed version starts no updater", malformedRuns.allSatisfy { $0.launches == 0 }),
             ],
             notes: notes
         )

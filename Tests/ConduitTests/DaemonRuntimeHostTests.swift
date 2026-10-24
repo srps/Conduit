@@ -4,6 +4,7 @@ import ConduitShared
 @testable import ConduitDaemon
 @testable import PlatformMac
 @testable import ProxyKernel
+import RuntimeEvents
 
 @MainActor
 final class DaemonRuntimeHostTests: XCTestCase {
@@ -1187,8 +1188,15 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.wifi.routesThroughAProxy, "the stop's clear landed after the start's apply")
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .stopped)
-        let superseded = host.orchestrator.eventLog.events.filter { $0.event == "lifecycle.superseded" }
-        XCTAssertEqual(superseded.map(\.detail), ["operation=runtime_start generation=1 current=2 reason=superseded"])
+        XCTAssertEqual(
+            host.orchestrator.eventLog.events.supersededValues,
+            [LifecycleSuperseded(operation: .runtimeStart, generation: 1, current: 2, reason: .superseded)]
+        )
+        XCTAssertEqual(
+            host.orchestrator.eventLog.events.filter { $0.event == "lifecycle.superseded" }.map(\.detail),
+            ["operation=runtime_start generation=1 current=2 reason=superseded"],
+            "golden: the human line operators read"
+        )
 
         // The overtaken start never started the VPN monitor, so a transition
         // now reaches nothing.
@@ -1494,7 +1502,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertFalse(harness.hold.reachedOnMainThread)
         let more = (0..<4).map { _ in Task { await host.stopRuntime() } }
         let events = host.orchestrator.eventLog
-        for _ in 0..<5_000 where events.events.filter({ $0.event == "lifecycle.coalesced" }).count < 4 && host.lifecycleGeneration < 6 {
+        for _ in 0..<5_000 where events.events.coalescedValues.count < 4 && host.lifecycleGeneration < 6 {
             try await Task.sleep(nanoseconds: 1_000_000)
         }
         harness.hold.release()
@@ -1503,8 +1511,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         XCTAssertEqual(host.lifecycleGeneration, 2, "the start and one stop")
         XCTAssertEqual(
+            events.events.coalescedValues,
+            Array(repeating: LifecycleCoalesced(operation: .runtimeStop, joined: 2), count: 4)
+        )
+        XCTAssertEqual(
             events.events.filter { $0.event == "lifecycle.coalesced" }.map(\.detail),
-            Array(repeating: "operation=runtime_stop joined=2", count: 4)
+            Array(repeating: "operation=runtime_stop joined=2", count: 4),
+            "golden: the human line operators read"
         )
         XCTAssertFalse(harness.wifi.routesThroughAProxy)
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))

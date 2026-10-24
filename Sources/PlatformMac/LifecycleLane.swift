@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import ProxyKernel
+import RuntimeEvents
 
 /// The starts and stops of one runtime — the app's proxy, the app's DNS
 /// forwarder, the daemon's whole runtime — and which of them is the latest.
@@ -69,6 +70,8 @@ package final class LifecycleLane {
     /// How many callers are in `waitUntilIdle()`. For a test that has to
     /// know a reconcile pass is waiting, not time it.
     package var idleWaiterCount: Int { idleWaiters.count }
+    /// How many callers are in `join(_:)`, the same kind of count for a test.
+    package var joinerCount: Int { endWaiters.values.reduce(0) { $0 + $1.count } }
 
     /// - Parameter coalescing: `false` for an operation that must run even
     ///   when its twin is out — the daemon's stop on the way to `exit`, which
@@ -123,21 +126,22 @@ package final class LifecycleLane {
     /// `lifecycle.superseded`: `operation` stopped after its last suspension
     /// instead of going on. `reason` is `superseded` when a later start or
     /// stop overtook it, or the runtime state that made its follow-ups moot.
-    package func supersededEvent(operation: String, token: Token, reason: String = "superseded") -> RuntimeEvent {
-        RuntimeEvent(
-            kind: .lifecycle,
-            event: "lifecycle.superseded",
-            detail: "operation=\(operation) generation=\(token.generation) current=\(latest.value) reason=\(reason)"
-        )
+    package func supersededEvent(
+        operation: LifecycleOperation,
+        token: Token,
+        reason: LifecycleSupersessionReason = .superseded
+    ) -> RuntimeEvent {
+        RuntimeEvent(payload: .lifecycle(.superseded(LifecycleSuperseded(
+            operation: operation,
+            generation: token.generation,
+            current: latest.value,
+            reason: reason
+        ))))
     }
 
     /// `lifecycle.coalesced`: `operation` joined the identical one in flight.
-    package func coalescedEvent(operation: String, joining generation: Int) -> RuntimeEvent {
-        RuntimeEvent(
-            kind: .lifecycle,
-            event: "lifecycle.coalesced",
-            detail: "operation=\(operation) joined=\(generation)"
-        )
+    package func coalescedEvent(operation: LifecycleOperation, joining generation: Int) -> RuntimeEvent {
+        RuntimeEvent(payload: .lifecycle(.coalesced(LifecycleCoalesced(operation: operation, joined: generation))))
     }
 }
 

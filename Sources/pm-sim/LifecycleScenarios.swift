@@ -2,6 +2,7 @@
 import Foundation
 import PlatformMac
 import ProxyKernel
+import RuntimeEvents
 
 /// Issue #47. The hosts apply and clear the machine's proxy settings on a
 /// serial `PlatformWork` queue, ordered by a `LifecycleLane`. This drives the
@@ -81,7 +82,7 @@ enum LifecycleScenarios {
         }
 
         func start() async {
-            guard let token = await admit(.start, "proxy_start") else { return }
+            guard let token = await admit(.start, .proxyStart) else { return }
             defer { lane.end(token) }
             let manager = self.manager, config = self.config, failures = self.failures
             await work.run {
@@ -95,7 +96,7 @@ enum LifecycleScenarios {
                 }
             }
             guard !token.isSuperseded else {
-                events.append(lane.supersededEvent(operation: "proxy_start", token: token))
+                events.append(lane.supersededEvent(operation: .proxyStart, token: token))
                 return
             }
             // What a start does next: the forwarder, the save, the notice.
@@ -103,7 +104,7 @@ enum LifecycleScenarios {
         }
 
         func stop() async {
-            guard let token = await admit(.stop, "proxy_stop") else { return }
+            guard let token = await admit(.stop, .proxyStop) else { return }
             defer { lane.end(token) }
             let manager = self.manager, failures = self.failures
             await work.run {
@@ -117,11 +118,11 @@ enum LifecycleScenarios {
                 }
             }
             if token.isSuperseded {
-                events.append(lane.supersededEvent(operation: "proxy_stop", token: token))
+                events.append(lane.supersededEvent(operation: .proxyStop, token: token))
             }
         }
 
-        private func admit(_ kind: LifecycleLane.Kind, _ operation: String) async -> LifecycleLane.Token? {
+        private func admit(_ kind: LifecycleLane.Kind, _ operation: LifecycleOperation) async -> LifecycleLane.Token? {
             switch lane.begin(kind) {
             case .run(let token):
                 return token
@@ -132,8 +133,26 @@ enum LifecycleScenarios {
             }
         }
 
-        func count(_ event: String) -> Int {
-            events.events.filter { $0.event == event }.count
+        /// The lifecycle values this host recorded, read from their typed payloads.
+        var lifecycle: [LifecycleEvent] {
+            events.events.compactMap { event -> LifecycleEvent? in
+                guard case .lifecycle(let value)? = event.typed else { return nil }
+                return value
+            }
+        }
+
+        var superseded: [LifecycleSuperseded] {
+            lifecycle.compactMap { value -> LifecycleSuperseded? in
+                guard case .superseded(let superseded) = value else { return nil }
+                return superseded
+            }
+        }
+
+        var coalescedCount: Int {
+            lifecycle.count(where: { value in
+                if case .coalesced = value { return true }
+                return false
+            })
         }
     }
 
@@ -186,8 +205,8 @@ enum LifecycleScenarios {
         await start.value
         await stop.value
         let clearedAfterOvertake = !machine.service("Wi-Fi").routesThroughAProxy && journal.knowsSurfaceIsIdle(.systemProxy)
-        let oneSuperseded = host.events.events.filter { $0.event == "lifecycle.superseded" }.map(\.detail)
-            == ["operation=proxy_start generation=1 current=2 reason=superseded"]
+        let oneSuperseded = host.superseded
+            == [LifecycleSuperseded(operation: .proxyStart, generation: 1, current: 2, reason: .superseded)]
         let followUpsAfterOvertake = host.startFollowUps
         notes.append("overtake: stopBegan=\(stopBegan) routed=\(machine.service("Wi-Fi").routesThroughAProxy) followUps=\(followUpsAfterOvertake)")
 
@@ -198,11 +217,11 @@ enum LifecycleScenarios {
         let firstStop = Task { await host.stop() }
         await gate.waitUntilReached()
         let repeats = (0..<3).map { _ in Task { await host.stop() } }
-        let repeatsArrived = await yield { host.count("lifecycle.coalesced") == 3 || host.lane.current > 4 }
+        let repeatsArrived = await yield { host.coalescedCount == 3 || host.lane.current > 4 }
         gate.release()
         await firstStop.value
         for task in repeats { await task.value }
-        notes.append("coalesce: generations=\(host.lane.current) coalesced=\(host.count("lifecycle.coalesced")) arrived=\(repeatsArrived)")
+        notes.append("coalesce: generations=\(host.lane.current) coalesced=\(host.coalescedCount) arrived=\(repeatsArrived)")
         notes.append(contentsOf: host.failures.all.map { "manager step threw: \($0)" })
 
         return ScenarioResult(
@@ -214,7 +233,7 @@ enum LifecycleScenarios {
                 .init("the stop's clear landed after the start's apply: machine cleared, journal released", clearedAfterOvertake),
                 .init("the overtaken start recorded one lifecycle.superseded and did nothing more", oneSuperseded && followUpsAfterOvertake == 0),
                 .init("a later start applied again", appliedAgain),
-                .init("three stops during a held stop joined it: one teardown", host.lane.current == 4 && host.count("lifecycle.coalesced") == 3),
+                .init("three stops during a held stop joined it: one teardown", host.lane.current == 4 && host.coalescedCount == 3),
                 .init("and the machine ended cleared", !machine.service("Wi-Fi").routesThroughAProxy && journal.knowsSurfaceIsIdle(.systemProxy)),
                 .init("no manager step threw", host.failures.all.isEmpty),
             ],

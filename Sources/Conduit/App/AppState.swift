@@ -5,6 +5,7 @@ import ConduitShared
 import ProxyAuth
 import ProxyKernel
 import ProxyPAC
+import RuntimeEvents
 import Combine
 import Foundation
 import NIOConcurrencyHelpers
@@ -1539,7 +1540,7 @@ final class AppState: ObservableObject {
         }
         await awaitLaunchRecovery()
         guard orchestrator.snapshot.runtimeStatus.state != .starting && orchestrator.snapshot.runtimeStatus.state != .running else { return false }
-        guard let token = await admit(proxyLane, .start, "proxy_start") else { return false }
+        guard let token = await admit(proxyLane, .start, .proxyStart) else { return false }
         defer { proxyLane.end(token) }
 
         do {
@@ -1632,17 +1633,17 @@ final class AppState: ObservableObject {
 
     private func stopProxy(postNotification: Bool) async {
         await awaitLaunchRecovery()
-        guard let token = await admit(proxyLane, .stop, "proxy_stop") else { return }
+        guard let token = await admit(proxyLane, .stop, .proxyStop) else { return }
         defer { proxyLane.end(token) }
         await orchestrator.stopProxy()
         // A start issued since owns the surfaces now; clearing them here
         // would take them from a runtime that is coming up.
-        guard isCurrent(token, on: proxyLane, "proxy_stop") else { return }
+        guard isCurrent(token, on: proxyLane, .proxyStop) else { return }
 
         let entryGeneration = splitDNSRepair.generation
         let entryFiles = await clearProxyStopSurfaces(token)
         recordSplitDNS(entryFiles, source: .stop, startedAt: entryGeneration)
-        guard isCurrent(token, on: proxyLane, "proxy_stop") else { return }
+        guard isCurrent(token, on: proxyLane, .proxyStop) else { return }
 
         if postNotification {
             notificationManager.post(title: "Proxy Disabled", body: "System proxy settings have been cleared.")
@@ -1655,7 +1656,7 @@ final class AppState: ObservableObject {
     private func admit(
         _ lane: LifecycleLane,
         _ kind: LifecycleLane.Kind,
-        _ operation: String
+        _ operation: LifecycleOperation
     ) async -> LifecycleLane.Token? {
         switch lane.begin(kind) {
         case .run(let token):
@@ -1671,15 +1672,15 @@ final class AppState: ObservableObject {
     /// start has overtaken it, and the listeners it started are still up.
     /// When not, says so with a `lifecycle.superseded` event.
     private func proxyStartIsCurrent(_ token: LifecycleLane.Token) -> Bool {
-        guard isCurrent(token, on: proxyLane, "proxy_start") else { return false }
+        guard isCurrent(token, on: proxyLane, .proxyStart) else { return false }
         guard runtimeState().proxyIsUp else {
-            recordLifecycle(proxyLane.supersededEvent(operation: "proxy_start", token: token, reason: "runtime_down"))
+            recordLifecycle(proxyLane.supersededEvent(operation: .proxyStart, token: token, reason: .runtimeDown))
             return false
         }
         return true
     }
 
-    private func isCurrent(_ token: LifecycleLane.Token, on lane: LifecycleLane, _ operation: String) -> Bool {
+    private func isCurrent(_ token: LifecycleLane.Token, on lane: LifecycleLane, _ operation: LifecycleOperation) -> Bool {
         guard !token.isSuperseded else {
             recordLifecycle(lane.supersededEvent(operation: operation, token: token))
             return false
@@ -1920,7 +1921,7 @@ final class AppState: ObservableObject {
     func startDNS() async {
         guard !rejectUnavailableConfiguration() else { return }
         await awaitLaunchRecovery()
-        guard let token = await admit(dnsLane, .start, "dns_start") else { return }
+        guard let token = await admit(dnsLane, .start, .dnsStart) else { return }
         defer { dnsLane.end(token) }
         let manageSystemDNS = committedPlatformConfig.manageSystemDNS
         let systemDNS = systemDNSManager
@@ -1936,11 +1937,11 @@ final class AppState: ObservableObject {
                     }
                 }
             }
-            guard isCurrent(token, on: dnsLane, "dns_start") else { return }
+            guard isCurrent(token, on: dnsLane, .dnsStart) else { return }
         }
 
         await orchestrator.startDNS()
-        guard isCurrent(token, on: dnsLane, "dns_start") else { return }
+        guard isCurrent(token, on: dnsLane, .dnsStart) else { return }
 
         // Read the orchestrator, not `runtime`: the mirror is one async hop
         // behind and still reports `.starting` here when no `await` inside
@@ -1985,7 +1986,7 @@ final class AppState: ObservableObject {
             // A stop issued while the apply was out queued its restore
             // behind it; a health timer or a persisted "DNS on" now would
             // outlive it.
-            guard isCurrent(token, on: dnsLane, "dns_start") else { return }
+            guard isCurrent(token, on: dnsLane, .dnsStart) else { return }
             if manageSystemDNS {
                 // Whether or not `apply` succeeded: a refused or failed apply
                 // is exactly what the probe's relay restart exists to retry,
@@ -2020,7 +2021,7 @@ final class AppState: ObservableObject {
         await awaitLaunchRecovery()
         // A stop already out is joined, not repeated: while a helper is slow
         // every toggle used to queue another teardown behind the first.
-        guard let token = await admit(dnsLane, .stop, "dns_stop") else { return }
+        guard let token = await admit(dnsLane, .stop, .dnsStop) else { return }
         defer { dnsLane.end(token) }
         stopDNSHealthTimer()
 
@@ -2038,10 +2039,10 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        guard isCurrent(token, on: dnsLane, "dns_stop") else { return }
+        guard isCurrent(token, on: dnsLane, .dnsStop) else { return }
 
         await orchestrator.stopDNS()
-        guard isCurrent(token, on: dnsLane, "dns_stop") else { return }
+        guard isCurrent(token, on: dnsLane, .dnsStop) else { return }
 
         // Remove intercept resolver files while we still can compute their
         // set — leaving them behind strands e.g. `*.cursor.sh` pointing at a
@@ -2060,7 +2061,7 @@ final class AppState: ObservableObject {
                     }
                 }
             }
-            guard isCurrent(token, on: dnsLane, "dns_stop") else { return }
+            guard isCurrent(token, on: dnsLane, .dnsStop) else { return }
         }
 
         recordDNSForwarderIntent(false)
@@ -2401,7 +2402,7 @@ final class AppState: ObservableObject {
         let deadline = terminationDrainDeadlineMilliseconds
         if !platformWork.waitUntilIdle(timeout: .milliseconds(deadline)) {
             recordLifecycle(
-                RuntimeEvent(kind: .lifecycle, event: "lifecycle.termination_drain_expired", detail: "deadline_ms=\(deadline)"),
+                RuntimeEvent(payload: .lifecycle(.terminationDrainExpired(LifecycleTerminationDrainExpired(deadlineMilliseconds: deadline)))),
                 level: .warning
             )
         }
