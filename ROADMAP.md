@@ -133,9 +133,10 @@ not a requirement to finish every event or property test before extraction:
    adoption. The file filter and startup/import integration are in progress;
    preservation of rejected originals remains an adoption gate. The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
-   and separates storage from runtime eligibility. Owner review is pending on
-   holding a mixed runtime/platform apply after partial persistence; implement
-   neither affected apply policy until that answer. Exact schema-two
+   and separates storage from runtime eligibility. The owner selected holding
+   a mixed runtime/platform apply until required inputs verify in
+   [0025](./docs/decisions/0025-hold-mixed-configuration-apply.md); the gate remains
+   planned, with independent effect groups deferred. Exact schema-two
    staging and safe duration conversions are also committed locally, with 440
    focused tests before integration. These counts do not establish a verified
    asynchronous store, read-back receipts, writer coverage or release readiness.

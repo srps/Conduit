@@ -2,8 +2,9 @@
 
 Status: reviewed with Claude Code through the owner's claude.ai Max subscription;
 proposed APIs, with no store or client-engine implementation claimed. This refines
-implementation planning for decisions 0014, 0015, 0017 and 0018. The remaining
-mixed-update choice below needs owner review before its apply path is implemented.
+implementation planning for decisions 0014, 0015, 0017 and 0018. The owner selected
+holding a mixed apply in [0025](decisions/0025-hold-mixed-configuration-apply.md);
+the affected apply path remains unimplemented.
 
 ## One path and clear owners
 
@@ -99,7 +100,7 @@ mutation. Fingerprints are identity checks, not writer authority. Read-before-wr
 checks may detect an external edit but cannot exclude a nonparticipating editor
 racing the replacement; the advisory lease excludes cooperating writers only.
 
-## Apply granularity: owner choice pending
+## Apply granularity: whole mixed unit selected
 
 Existing `RuntimeReconciler.reconcile` advances runtime and platform baselines in
 one pass. A change to a listener, PAC, DNS entries or intercept rules can also
@@ -120,6 +121,14 @@ The runtime file verifies; the platform write fails or remains unknown:
   whose complete receipt set verified. This needs an explicit dependency plan,
   per-group baselines and partial settlement/repair tests; handing the current
   reconciler a mixture of old/new fields is insufficient.
+
+Effort comparison for owner review: independent groups add roughly two or three
+substantial slices now: dependency planning, per-group baselines/repair and
+partial-settlement model/harness/client integration. Most of that work is needed
+in either timing. Deferring it adds replacement of the whole-update apply gate,
+while the store, receipts and transport remain reusable. This is a scope estimate,
+not a validated calendar commitment. After reviewing this comparison, the owner
+selected holding the mixed apply; independent groups remain a revisit option.
 
 A runtime-only update needs its runtime receipt and any existing verified platform
 input its effects depend on. UI preferences remain independent under both options.
