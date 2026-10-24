@@ -57,7 +57,7 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
 
     /// Everything a case determines: the outcome, every call with its budget or byte count, and the stored bytes afterwards.
     private struct Expectation: Equatable {
-        let outcome: RuntimeFileReplacementOutcome
+        let outcome: ConfigurationFileReplacementOutcome
         let observations: [FakeStateFileAccess.Observation]
         let stored: Data?
     }
@@ -96,7 +96,7 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
         if case .bytes(let bytes) = prePrior { priorCount = bytes.count } else { priorCount = 0 }
         observations.append(.write(path: path, count: staged.count))
 
-        let writeError: RuntimeFileWriteError? = c.write == .lands ? nil : .writeFailed(errno: writeErrno)
+        let writeError: ConfigurationFileWriteError? = c.write == .lands ? nil : .writeFailed(errno: writeErrno)
         // A failed write leaves the stored file alone. A landed write puts the staged bytes there. The edit comes after.
         var stored: Data? = c.write == .failsBefore ? storedBefore : staged
         switch c.edit {
@@ -122,7 +122,7 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
             }
         }
 
-        let outcome: RuntimeFileReplacementOutcome
+        let outcome: ConfigurationFileReplacementOutcome
         switch readSeen {
         case .bytes(let bytes) where bytes == staged:
             outcome = .verifiedPersisted(writeError: writeError)
@@ -145,6 +145,16 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
     }
 
     // MARK: - Driving the production replacement
+
+    /// The baseline a case is replaced against: the prior its own pre-read observes. That keeps this matrix on the classifier's rules, so
+    /// every outcome here is one the classifier reaches after the pre-read. The baseline comparison and its conflicts have their own tests
+    /// in ConfigurationFileConditionalReplacementTests.
+    private static func baseline(_ c: Case) -> ConfigurationFileBaseline {
+        switch c.preRead {
+        case .actual: ConfigurationFileBaseline(observing: c.prior.stored.map { ConfigurationFileInput.present($0) } ?? .missing)
+        case .missing, .failed: ConfigurationFileBaseline(observing: .missing)
+        }
+    }
 
     private static func makeFake(for c: Case) -> FakeStateFileAccess {
         let initial: [String: Data] = c.prior.stored.map { [path: $0] } ?? [:]
@@ -184,8 +194,8 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
         let fake = makeFake(for: c)
         let access: any StateFileAccessing
         if let wrap { access = wrap(fake) } else { access = fake }
-        let outcome = VerifiedRuntimeFileReplacement.replace(
-            staged, at: StateRootFile(role: .config, path: path), under: lease, access: access
+        let outcome = VerifiedConfigurationFileReplacement.replace(
+            staged, at: StateRootFile(role: .config, path: path), under: lease, access: access, expecting: baseline(c)
         )
         return Expectation(outcome: outcome, observations: fake.observations, stored: fake.storedBytes(at: path))
     }
@@ -193,8 +203,9 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
     /// Runs one replacement that a refusal must stop before any I/O.
     private static func refuse(role: StateRootRole, path: String, staged: Data, stored: Data?) -> Expectation {
         let fake = FakeStateFileAccess(files: stored.map { [path: $0] } ?? [:])
-        let outcome = VerifiedRuntimeFileReplacement.replace(
-            staged, at: StateRootFile(role: role, path: path), under: leaseForRefusals, access: fake
+        let outcome = VerifiedConfigurationFileReplacement.replace(
+            staged, at: StateRootFile(role: role, path: path), under: leaseForRefusals, access: fake,
+            expecting: ConfigurationFileBaseline(observing: .missing)
         )
         return Expectation(outcome: outcome, observations: fake.observations, stored: fake.storedBytes(at: path))
     }
@@ -236,10 +247,11 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
         return cases
     }
 
-    private static func label(_ outcome: RuntimeFileReplacementOutcome) -> String {
+    private static func label(_ outcome: ConfigurationFileReplacementOutcome) -> String {
         switch outcome {
         case .refused: "refused"
         case .notStarted: "notStarted"
+        case .conflict: "conflict"
         case .verifiedPersisted: "verifiedPersisted"
         case .verifiedNotPersisted: "verifiedNotPersisted"
         case .unknown: "unknown"
@@ -277,7 +289,7 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
     func testHandWrittenWitnessesStayFixed() throws {
         let lease = try acquireLease()
         defer { XCTAssertEqual(lease.release(), .released) }
-        let writeError = RuntimeFileWriteError.writeFailed(errno: Self.writeErrno)
+        let writeError = ConfigurationFileWriteError.writeFailed(errno: Self.writeErrno)
         let budget = Self.budget
         let staged = Self.staged
         let path = Self.path
@@ -336,12 +348,15 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
 
         // Another writer changes the prior after the pre-read and before a failed write. The read-back shows that other content,
         // which is neither the staged bytes nor the prior the observer saw, so the result is unknown. Expected freshness is not
-        // checked by this operation, so nothing here decides which writer should win.
+        // checked by this operation, so nothing here decides which writer should win. The baseline is the prior the pre-read saw.
         let racing = FakeStateFileAccess(files: [path: Self.smallPrior])
         racing.scheduleReads([.actual, .actual])
         racing.scheduleWrites([.init(landing: .failsBeforeLanding(errno: Self.writeErrno), editBeforeWrite: .replace(Self.other))])
         XCTAssertEqual(
-            VerifiedRuntimeFileReplacement.replace(staged, at: StateRootFile(role: .config, path: path), under: lease, access: racing),
+            VerifiedConfigurationFileReplacement.replace(
+                staged, at: StateRootFile(role: .config, path: path), under: lease, access: racing,
+                expecting: ConfigurationFileBaseline(observing: .present(Self.smallPrior))
+            ),
             .unknown(.readbackDiffers, writeError: writeError)
         )
         XCTAssertEqual(racing.storedBytes(at: path), Self.other)
@@ -395,7 +410,7 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
             self.staged = staged
         }
 
-        func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
+        func readConfigurationFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
             let index = lock.withLock { () -> Int in
                 reads += 1
                 return reads
@@ -404,20 +419,24 @@ final class VerifiedRuntimeFileReplacementModelTests: XCTestCase {
             case .echoStagedOnReadBack where index == 2:
                 return .success(staged)
             case .unboundedReadBack:
-                return fake.readRuntimeFile(file, limit: ConfigurationFileReader.maximumBytes)
+                return fake.readConfigurationFile(file, limit: ConfigurationFileReader.maximumBytes)
             case .readFailureAsMissing:
-                let result = fake.readRuntimeFile(file, limit: limit)
+                let result = fake.readConfigurationFile(file, limit: limit)
                 if case .failure = result { return .failure(.missing) }
                 return result
             case .hideWriteFailure, .echoStagedOnReadBack:
-                return fake.readRuntimeFile(file, limit: limit)
+                return fake.readConfigurationFile(file, limit: limit)
             }
         }
 
-        func replaceRuntimeFile(_ file: StateRootFile, bytes: Data) -> Result<Void, RuntimeFileWriteError> {
-            let result = fake.replaceRuntimeFile(file, bytes: bytes)
+        func replaceConfigurationFile(_ file: StateRootFile, bytes: Data) -> Result<Void, ConfigurationFileWriteError> {
+            let result = fake.replaceConfigurationFile(file, bytes: bytes)
             if mutant == .hideWriteFailure { return .success(()) }
             return result
+        }
+
+        func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
+            fake.entryPresence(file)
         }
     }
 

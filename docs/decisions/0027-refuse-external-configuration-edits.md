@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 external-file edit checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -96,8 +96,35 @@ alone establishes real-machine behavior or physical compare-and-swap.
 
 ## Implementation evidence
 
-None yet. The existing runtime replacement primitive classifies read-back but
-deliberately has no expected-baseline policy. Store/client adoption remains planned.
+Partial: the store core implements the check before a replacement, for all three
+configuration files, in [`ConfigurationStore.swift`](../../Sources/ConduitRuntime/ConfigurationStore.swift)
+and its `ConfigurationStore*.swift` siblings. A baseline is the verified bytes the
+store observed or wrote. Each conditional replacement, and each verification, compares
+the observed bytes with that baseline first. A change refuses the replacement, reports
+`conflict`, and keeps the observed file and latches the component until an explicit
+reload. A formatting-only edit conflicts, because the check compares bytes. Creation
+and deletion relative to a verified absent or present baseline also conflict. A failed
+pre-read authorizes no write (`preReadFailed`). The replacement itself is
+[`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift),
+which runs the pre-read against an opaque baseline and then the existing write and read-back
+classifier. Parsed-value equality, with unknown fields and formatting ignored, decides
+only verify-without-rewrite, never whether a file counts as changed.
+
+Tests: [`ConfigurationStoreTests.swift`](../../Tests/ConduitTests/ConfigurationStoreTests.swift)
+drives the production store over the fake: an external change latches until a reload
+even when the old bytes return; an unchanged formatted file is verified and not rewritten;
+an external platform change holds the runtime write; the coupled matrix covers
+platform and runtime faults with byte, baseline and write-count assertions; the bounded
+models cover reload, conditional writes, stale tokens, busy refusal, missing files and
+partial results. The classifier matrix and the scratch witnesses remain
+([`ScenarioConfigFileConditionalReplacement.swift`](../../Sources/pm-sim/ScenarioConfigFileConditionalReplacement.swift)).
+Results, seeds and limits are in [the verification note](../verification-configuration-store-2026-10-25.md).
+
+Does not prove: a nonparticipating editor racing after the check (the check is not
+compare-and-swap), power-loss durability, cross-process exclusion, the Stop, Quit or
+incarnation fences, or the mixed-apply hold of 0025. No app, daemon or `pm-proxy` path
+constructs the store yet, so no live configuration save is protected by it. Owner
+validation is none.
 
 ## Open questions
 

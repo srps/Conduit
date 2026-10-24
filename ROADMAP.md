@@ -1,7 +1,7 @@
 # Conduit Roadmap
 
 The execution queue and sole tracker of product-work status. Reviewed against the
-checkout and open issues on 2026-10-24. Conduit remains a macOS-native Swift corporate proxy manager;
+checkout and open issues on 2026-10-25. Conduit remains a macOS-native Swift corporate proxy manager;
 no rewrite or cross-platform port is planned.
 
 Implementation rationale, dependencies, and acceptance criteria live in
@@ -26,7 +26,7 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
 warning, and the Overview "active" counter no longer repeats the word.
 
-Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has a foundation merged in PR #220 (`fd630d1`): typed `lifecycle.*` events, the v2 control value codec and snapshot projection, and the `RuntimeClient` protocol. It has no in-memory client, admission or subscription engine, production v2 socket or AppState adoption. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
+Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has its typed lifecycle/value foundation merged in PR #220 (`fd630d1`) and the framed `RuntimeClient` adapter merged in PR #231 (`3195be6`). The working service behind the adapter, admission and subscription engine, production v2 socket and AppState adoption remain open. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
 
 0.5.7 shipped on 2026-10-22. The #205 Settings commit paths (Return, Apply,
 section close, quit with an invalid port) passed the owner's check in a `--dev`
@@ -118,16 +118,17 @@ not a requirement to finish every event or property test before extraction:
    PR #227 merged the private scanner and one shared typed resource traversal
    at `f427255`, with hosted Swift and CodeQL passing. Automated Codex reviews
    failed to run and supply no review evidence; Claude and Codex source review
-   accompanied the local workflow checks. Runtime-file startup/import adoption is
-   implemented locally through the shared lexical/resource policy. Open gates:
+   accompanied the local workflow checks. Runtime-file startup/import adoption merged in PR #228 through the
+   shared lexical/resource policy. Open gates:
    measured memory/capacity/latency and complete writer coverage under
    the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
-   listener handoff, and measured bounds and shutdown. Before adopting the
-   verified store, implement exact legacy duration representability ([#224](https://github.com/srps/Conduit/issues/224));
-   the [review draft](./docs/design-runtime-store-precision-review.md) compares explicit
-   refusal with schema evolution and records revisit triggers. The owner selected schema2 and explicit refusal of inexact saves in
-   [0023](./docs/decisions/0023-exact-schema-two-persistence.md); fix whole-millisecond
-   round trips and safe conversion before adoption. No schema3 migration is selected.
+   listener handoff, and measured bounds and shutdown. Exact legacy duration representability
+   ([#224](https://github.com/srps/Conduit/issues/224)) merged in PR #228. The
+   [review draft](./docs/design-runtime-store-precision-review.md) records the
+   alternatives and revisit triggers. The selected schema-two refusal of inexact
+   saves, whole-millisecond round trips and safe conversions are implemented under
+   [0023](./docs/decisions/0023-exact-schema-two-persistence.md). No schema-three
+   migration is selected.
    Integration also requires [cohesive ownership](./docs/design-runtime-host-contract.md#cohesion-and-implementation-ownership):
    retain the single kernel/private typed resource walk, reuse policy across file/wire
    boundaries, and keep exact representation and commit coordination out of host
@@ -159,9 +160,10 @@ not a requirement to finish every event or property test before extraction:
    The owner selected a 128 KiB cap for each platform/preferences sidecar with the
    same strict reader/filter contract, valid unknown fields and first-key behavior
    in [0026](./docs/decisions/0026-bounded-platform-and-preferences-files.md).
-   Implement the existing 16 KiB browser-URL bound before sidecar decode/save;
-   preserve rejected inputs. The journal is separate. No second parser or host
-   persistence path is selected. Sidecar implementation remains planned.
+   PR #230 implements the existing 16 KiB browser-URL bound before sidecar
+   decode/save and preserves rejected inputs. The journal is separate. No second
+   parser or host persistence path is selected. Verified-store and host adoption
+   remain open.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move keeps MainActor and current policy. Extract `RuntimeHost` from

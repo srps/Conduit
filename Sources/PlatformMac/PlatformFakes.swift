@@ -1057,6 +1057,7 @@ package final class FakeStateFileAccess: StateFileAccessing, @unchecked Sendable
     private var readScripts: [ReadScript] = []
     private var writeScripts: [WriteScript] = []
     private var log: [Observation] = []
+    private var presenceFailure: ConfigurationPresenceError?
 
     package init(files: [String: Data] = [:]) {
         for (path, bytes) in files { store(bytes, at: path) }
@@ -1110,7 +1111,31 @@ package final class FakeStateFileAccess: StateFileAccessing, @unchecked Sendable
         }
     }
 
-    package func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
+    /// Another party's change to the stored file, applied now. It is not an observation, so it does not consume the log.
+    package func externalEdit(_ edit: ExternalEdit, at path: String) {
+        lock.withLock { apply(edit, at: path) }
+    }
+
+    /// Presence only: it is not an observation, so it does not consume the observation log. A presence failure set by
+    /// `schedulePresence` is reported in place of the stored state, until it is cleared.
+    package func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
+        lock.withLock { () -> Result<Bool, ConfigurationPresenceError> in
+            if let presenceFailure { return .failure(presenceFailure) }
+            return .success(files[file.path] != nil)
+        }
+    }
+
+    /// Makes every presence check fail with `failure`, or restores the stored state when nil.
+    package func schedulePresence(_ failure: ConfigurationPresenceError?) {
+        lock.withLock { presenceFailure = failure }
+    }
+
+    /// Empties the observation log, so a bounded trace can run past its capacity in segments. The stored files and the scripts stay.
+    package func clearObservations() {
+        lock.withLock { log.removeAll() }
+    }
+
+    package func readConfigurationFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
         lock.withLock { () -> Result<Data, ConfigurationFileError> in
             record(.read(path: file.path, limit: limit))
             let script = readScripts.isEmpty ? ReadScript.actual : readScripts.removeFirst()
@@ -1127,12 +1152,13 @@ package final class FakeStateFileAccess: StateFileAccessing, @unchecked Sendable
         }
     }
 
-    package func replaceRuntimeFile(_ file: StateRootFile, bytes: Data) -> Result<Void, RuntimeFileWriteError> {
-        lock.withLock { () -> Result<Void, RuntimeFileWriteError> in
+    package func replaceConfigurationFile(_ file: StateRootFile, bytes: Data) -> Result<Void, ConfigurationFileWriteError> {
+        lock.withLock { () -> Result<Void, ConfigurationFileWriteError> in
             record(.write(path: file.path, count: bytes.count))
             let script = writeScripts.isEmpty ? WriteScript(landing: .lands) : writeScripts.removeFirst()
+            // An edit before the write lands is an external change after the caller's pre-read check (decision 0027).
             if let edit = script.editBeforeWrite { apply(edit, at: file.path) }
-            let result: Result<Void, RuntimeFileWriteError>
+            let result: Result<Void, ConfigurationFileWriteError>
             switch script.landing {
             case .lands:
                 store(bytes, at: file.path)

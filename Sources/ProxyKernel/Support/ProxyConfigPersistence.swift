@@ -12,39 +12,147 @@ private func writeData(_ data: Data, to url: URL) throws {
 }
 
 /// The bytes of one configuration file, or its absence. A missing file is an outcome, so the caller decides what it means.
-private enum ConfigurationFileRead {
+package enum ConfigurationFileInput: Sendable, Equatable {
     case missing
     case present(Data)
 }
 
-/// Reads one configuration file through the bounded reader under its root's budget (decisions 0021 and 0026). Only a missing
-/// file is an outcome. Every other read failure is refused with a fixed reason, and no path or byte is echoed.
-private func readConfigurationFile(at url: URL, root: ConfigurationFileRoot) throws -> ConfigurationFileRead {
+/// Reads one configuration file through the bounded reader under `root`'s budget (decisions 0021 and 0026). Only a missing file
+/// is an outcome, and every other read failure is returned as its typed error. Nothing is decoded or written here.
+package func observeConfigurationFile(at url: URL, root: ConfigurationFileRoot) -> Result<ConfigurationFileInput, ConfigurationFileError> {
     do throws(ConfigurationFileError) {
-        return .present(try ConfigurationFileReader.read(at: url, limit: root.maximumBytes))
+        return .success(.present(try ConfigurationFileReader.read(at: url, limit: root.maximumBytes)))
     } catch {
         if case .missing = error {
-            return .missing
+            return .success(.missing)
         }
-        // Every failure keeps its step, its errno and a close failure that followed it (`summary`). Only fixed words are
-        // reported, with the source path the loader already names.
-        throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read: \(error.summary).")
+        return .failure(error)
     }
 }
 
-/// Reads and gates one sidecar (decision 0026). The read is bounded by the sidecar budget, then the strict filter and one
-/// typed decode follow, so a refusal happens before the typed value exists. A missing sidecar is nil. Nothing is written here.
-private func loadSidecar<Value: Decodable>(_ type: Value.Type, root: ConfigurationFileRoot, from url: URL) throws -> Value? {
-    switch try readConfigurationFile(at: url, root: root) {
-    case .missing:
+/// The refusal a failed read carries. Every failure keeps its step, its errno and a close failure that followed it (`summary`).
+/// Only fixed words are reported, with the source path the loader already names.
+private func unreadableConfigurationError(_ error: ConfigurationFileError, source: String) -> ConfigurationLoadError {
+    ConfigurationLoadError(source: source, reason: "The configuration file could not be read: \(error.summary).")
+}
+
+/// Decodes one sidecar's observed bytes (decision 0026). The strict filter and one typed decode follow, so a refusal happens
+/// before the typed value exists. A missing sidecar is nil. Nothing is read or written here.
+private func decodeSidecar<Value: Decodable>(
+    _ type: Value.Type,
+    root: ConfigurationFileRoot,
+    observed: ConfigurationFileObservation
+) throws -> Value? {
+    switch observed.read {
+    case .failure(let error):
+        throw unreadableConfigurationError(error, source: observed.source)
+    case .success(.missing):
         return nil
-    case .present(let data):
-        let filtered = try ConfigurationFileGate.filter(data, root: root, source: url.path)
-        do {
-            return try CanonicalJSON.decoder().decode(type, from: filtered.bytes)
-        } catch {
-            throw ConfigurationLoadError(source: url.path, reason: "The configuration is not valid Conduit JSON.")
-        }
+    case .success(.present(let data)):
+        return try decodePresentSidecar(type, root: root, data: data, source: observed.source)
+    }
+}
+
+/// The strict filter and one typed decode of a sidecar's bytes. Both the observed path and the store's post-write path use it.
+private func decodePresentSidecar<Value: Decodable>(_ type: Value.Type, root: ConfigurationFileRoot, data: Data, source: String) throws -> Value {
+    let filtered = try ConfigurationFileGate.filter(data, root: root, source: source)
+    do {
+        return try CanonicalJSON.decoder().decode(type, from: filtered.bytes)
+    } catch {
+        throw ConfigurationLoadError(source: source, reason: "The configuration is not valid Conduit JSON.")
+    }
+}
+
+/// Reads and gates one sidecar from its file (decision 0026). A missing sidecar is nil. Nothing is written here.
+private func loadSidecar<Value: Decodable>(_ type: Value.Type, root: ConfigurationFileRoot, from url: URL) throws -> Value? {
+    try decodeSidecar(type, root: root, observed: ConfigurationFileObservation(source: url.path, read: observeConfigurationFile(at: url, root: root)))
+}
+
+/// One configuration file as one read observed it: the path the loader names in its errors, and the typed read result.
+package struct ConfigurationFileObservation: Sendable {
+    package let source: String
+    package let read: Result<ConfigurationFileInput, ConfigurationFileError>
+
+    package init(source: String, read: Result<ConfigurationFileInput, ConfigurationFileError>) {
+        self.source = source
+        self.read = read
+    }
+}
+
+/// The three configuration files, and whether the journal exists, as one observation (decisions 0021, 0023 and 0026). The store
+/// and the legacy loader decode the same value through `ConfigurationFrozenLoader`, so neither has a second parser.
+package struct ConfigurationFrozenObservation: Sendable {
+    package let runtime: ConfigurationFileObservation
+    package let platform: ConfigurationFileObservation
+    package let preferences: ConfigurationFileObservation
+    /// Whether the journal exists. It decides only whether a missing runtime file may be defaults, as it always did.
+    package let journalPresent: Bool
+
+    package init(
+        runtime: ConfigurationFileObservation,
+        platform: ConfigurationFileObservation,
+        preferences: ConfigurationFileObservation,
+        journalPresent: Bool
+    ) {
+        self.runtime = runtime
+        self.platform = platform
+        self.preferences = preferences
+        self.journalPresent = journalPresent
+    }
+
+    /// Observes the three files of a runtime environment, each under its own budget, and the journal's presence. Each file is
+    /// read once.
+    package static func observe(in environment: RuntimeEnvironment) -> ConfigurationFrozenObservation {
+        ConfigurationFrozenObservation(
+            runtime: ConfigurationFileObservation(
+                source: environment.configFile.path,
+                read: observeConfigurationFile(at: environment.configFile, root: ConfigurationFileSchema.runtime(.runtimeOnly))
+            ),
+            platform: ConfigurationFileObservation(
+                source: environment.platformConfigFile.path,
+                read: observeConfigurationFile(at: environment.platformConfigFile, root: ConfigurationFileSchema.platformSidecar)
+            ),
+            preferences: ConfigurationFileObservation(
+                source: environment.preferencesFile.path,
+                read: observeConfigurationFile(at: environment.preferencesFile, root: ConfigurationFileSchema.preferencesSidecar)
+            ),
+            journalPresent: FileManager.default.fileExists(atPath: environment.platformStateFile.path)
+        )
+    }
+}
+
+/// The components one frozen observation decodes to. Nothing here is written: staging and writing belong to the caller.
+package struct ConfigurationFrozenLoad: Sendable {
+    package let runtime: ProxyConfigMigrationResult
+    package let platform: PlatformConfigMigrationResult
+    package let preferences: AppPreferencesMigrationResult
+    package let runtimeFilePresent: Bool
+    package let platformSidecarPresent: Bool
+    package let preferencesSidecarPresent: Bool
+}
+
+/// The one pure load and decode over a frozen observation (decisions 0021, 0023 and 0026). It is the only place that decodes the
+/// runtime file and the sidecars at startup: the legacy loader and the verified store both call it. The order of checks, the
+/// refusals and the legacy fallbacks are the ones the loader always had. Nothing is read, staged or written here.
+package enum ConfigurationFrozenLoader {
+    package static func decode(_ observation: ConfigurationFrozenObservation, allowMissing: Bool) throws -> ConfigurationFrozenLoad {
+        let platformSidecar = try decodeSidecar(PlatformIntegrationConfig.self, root: ConfigurationFileSchema.platformSidecar,
+                                                observed: observation.platform)
+        let preferencesSidecar = try decodeSidecar(AppPreferences.self, root: ConfigurationFileSchema.preferencesSidecar,
+                                                   observed: observation.preferences)
+        let requirements = RuntimeFileRequirements(platform: platformSidecar == nil, preferences: preferencesSidecar == nil)
+        let hasState = platformSidecar != nil || preferencesSidecar != nil || observation.journalPresent
+        let loaded = try loadRuntimeFile(observed: observation.runtime, requirements: requirements, allowMissing: allowMissing && !hasState)
+        let runtimeFilePresent: Bool
+        if case .success(.present) = observation.runtime.read { runtimeFilePresent = true } else { runtimeFilePresent = false }
+        return ConfigurationFrozenLoad(
+            runtime: loaded.result,
+            platform: PlatformConfigPersistence.resolve(sidecar: platformSidecar, legacy: loaded.platform),
+            preferences: AppPreferencesPersistence.resolve(sidecar: preferencesSidecar, legacy: loaded.preferences),
+            runtimeFilePresent: runtimeFilePresent,
+            platformSidecarPresent: platformSidecar != nil,
+            preferencesSidecarPresent: preferencesSidecar != nil
+        )
     }
 }
 
@@ -83,21 +191,27 @@ private struct RuntimeFileLoad {
     let preferences: LegacyComponent<AppPreferences>
 }
 
-/// Reads and gates the runtime file once. A missing file is defaults when `allowMissing` is set, and a refusal otherwise.
+/// Decodes the runtime file's observed bytes once. A missing file is defaults when `allowMissing` is set, and a refusal otherwise.
 /// Nothing is written here.
-private func loadRuntimeFile(at url: URL, requirements: RuntimeFileRequirements, allowMissing: Bool) throws -> RuntimeFileLoad {
-    switch try readConfigurationFile(at: url, root: ConfigurationFileSchema.runtime(requirements)) {
-    case .missing:
+private func loadRuntimeFile(
+    observed: ConfigurationFileObservation,
+    requirements: RuntimeFileRequirements,
+    allowMissing: Bool
+) throws -> RuntimeFileLoad {
+    switch observed.read {
+    case .failure(let error):
+        throw unreadableConfigurationError(error, source: observed.source)
+    case .success(.missing):
         guard allowMissing else {
-            throw ConfigurationLoadError(source: url.path, reason: "The configuration file could not be read: \(ConfigurationFileError.missing.summary).")
+            throw ConfigurationLoadError(source: observed.source, reason: "The configuration file could not be read: \(ConfigurationFileError.missing.summary).")
         }
         return RuntimeFileLoad(
             result: ProxyConfigMigrationResult(config: GenericDefaults.shared.makeConfig(), migrated: false, warnings: []),
             platform: .notRequired,
             preferences: .notRequired
         )
-    case .present(let data):
-        let document = try RuntimeFileDocument.decode(data, requirements: requirements, source: url.path)
+    case .success(.present(let data)):
+        let document = try RuntimeFileDocument.decode(data, requirements: requirements, source: observed.source)
         let (config, migrated) = migratedConfig(document)
         return RuntimeFileLoad(
             result: ProxyConfigMigrationResult(config: config, migrated: migrated, warnings: []),
@@ -107,7 +221,16 @@ private func loadRuntimeFile(at url: URL, requirements: RuntimeFileRequirements,
     }
 }
 
-package struct ProxyConfigMigrationResult {
+/// The runtime file read from `url` under the runtime budget, decoded for `requirements`. Used by the single-file entry points.
+private func loadRuntimeFile(at url: URL, requirements: RuntimeFileRequirements, allowMissing: Bool) throws -> RuntimeFileLoad {
+    try loadRuntimeFile(
+        observed: ConfigurationFileObservation(source: url.path, read: observeConfigurationFile(at: url, root: ConfigurationFileSchema.runtime(requirements))),
+        requirements: requirements,
+        allowMissing: allowMissing
+    )
+}
+
+package struct ProxyConfigMigrationResult: Sendable {
     package let config: ProxyConfig
     package let migrated: Bool
     package let warnings: [String]
@@ -171,18 +294,12 @@ package enum ProxyConfigPersistence {
         allowMissing: Bool = true,
         validateRuntime: (ProxyConfig) throws -> Void = { _ in }
     ) throws -> RuntimeConfigurationLoadResult {
-        let platformSidecar = try PlatformConfigPersistence.readSidecar(in: environment)
-        let preferencesSidecar = try AppPreferencesPersistence.readSidecar(in: environment)
-        let requirements = RuntimeFileRequirements(platform: platformSidecar == nil, preferences: preferencesSidecar == nil)
-        let hasState = platformSidecar != nil || preferencesSidecar != nil
-            || FileManager.default.fileExists(atPath: environment.platformStateFile.path)
-        let loaded = try loadRuntimeFile(at: environment.configFile, requirements: requirements,
-                                         allowMissing: allowMissing && !hasState)
-        let runtime = loaded.result
-        // Stage every candidate before migration can write any files. A valid runtime file must not hide a broken
-        // sidecar, and the sidecars were read above, so nothing is read again here.
-        let platform = PlatformConfigPersistence.resolve(sidecar: platformSidecar, legacy: loaded.platform)
-        let preferences = AppPreferencesPersistence.resolve(sidecar: preferencesSidecar, legacy: loaded.preferences)
+        // Each file is read once, then decoded by the one frozen loader. A valid runtime file must not hide a broken sidecar,
+        // so every candidate is resolved before migration can write any file.
+        let frozen = try ConfigurationFrozenLoader.decode(ConfigurationFrozenObservation.observe(in: environment), allowMissing: allowMissing)
+        let runtime = frozen.runtime
+        let platform = frozen.platform
+        let preferences = frozen.preferences
         try validateRuntime(runtime.config)
         var warnings = platform.warnings + preferences.warnings + runtime.warnings
         // Stage every migration write before the first physical write (decision 0026). One candidate that cannot be staged stops
@@ -233,7 +350,7 @@ package enum ProxyConfigPersistence {
             // The runtime rewrite waits until every other migration write has succeeded, as it always did.
             if let runtimeBytes, warnings.isEmpty {
                 do {
-                    try writeStagedRuntimeFile(runtimeBytes, to: environment.configFile)
+                    try writeStagedConfigurationFile(runtimeBytes, to: environment.configFile)
                 } catch {
                     warnings.append(migrationWarning("Config schema", environment.configFile, error))
                 }
@@ -302,13 +419,13 @@ package enum ProxyConfigPersistence {
 
     /// Saves `config` only after its bytes are staged and checked. A refusal throws before any directory or file is created or replaced.
     package static func save(_ config: ProxyConfig, to url: URL) throws {
-        try writeStagedRuntimeFile(stagedFileData(for: config), to: url)
+        try writeStagedConfigurationFile(stagedFileData(for: config), to: url)
     }
 
-    /// Replaces the runtime file with bytes a caller already staged and checked, through the same atomic write a save uses.
-    /// The verified replacement in PlatformMac calls this, so there is one physical write path. It does not check the bytes:
-    /// the caller owns that, and the caller must hold the root's writer lease (decision 0017).
-    package static func writeStagedRuntimeFile(_ data: Data, to url: URL) throws {
+    /// Replaces a configuration file (the runtime file or a sidecar) with bytes a caller already staged and checked, through the
+    /// same atomic write a save uses. The verified replacement in PlatformMac calls this, so there is one physical write path. It
+    /// does not check the bytes: the caller owns that, and the caller must hold the root's writer lease (decision 0017).
+    package static func writeStagedConfigurationFile(_ data: Data, to url: URL) throws {
         try writeData(data, to: url)
     }
 
@@ -319,6 +436,12 @@ package enum ProxyConfigPersistence {
     /// section's values as given, so any difference is a silent change, and a
     /// silent change is refused.
     package static func stagedFileData(for config: ProxyConfig) throws -> Data {
+        try stagedFile(for: config).bytes
+    }
+
+    /// The bytes a save writes, and the value those bytes decode to. The exact round-trip below already decodes them, so that value
+    /// is returned as it is: a store adopts it without a second decode of the same bytes.
+    package static func stagedFile(for config: ProxyConfig) throws -> StagedFile {
         // The resource policy comes first: an over-limit config is refused before it is encoded, and before any directory
         // is created, so the save writes nothing.
         if let violation = config.resourceViolation() {
@@ -342,7 +465,13 @@ package enum ProxyConfigPersistence {
         if let mismatch = ConfigFileRepresentabilityError.firstMismatch(frozen: config, decoded: decoded) {
             throw mismatch
         }
-        return data
+        return StagedFile(bytes: data, value: decoded)
+    }
+
+    /// Staged bytes and the value they decode to. The value equals the input, because the exact round-trip checked it.
+    package struct StagedFile: Sendable {
+        package let bytes: Data
+        package let value: ProxyConfig
     }
 
     package static func save(_ config: ProxyConfig, in environment: RuntimeEnvironment) throws {
@@ -564,10 +693,40 @@ package struct ConfigurationLoadError: Error, LocalizedError, Sendable {
 
 // MARK: - Platform Config Persistence
 
-package struct PlatformConfigMigrationResult {
+/// The fallback the shared loader takes when it refuses a legacy component's value (decisions 0023 and 0026). The fixed text of
+/// that fallback is written only here: `warning` is the legacy `[String]` text, and the store carries the case itself.
+package enum ConfigurationLegacyFallback: Equatable, Sendable {
+    case legacyPlatformRefusedUsingDefaults
+    case legacyPreferencesRefusedUsingDefaults
+
+    package var warning: String {
+        switch self {
+        case .legacyPlatformRefusedUsingDefaults:
+            "Legacy platform settings in the configuration file could not be read; default platform settings are used."
+        case .legacyPreferencesRefusedUsingDefaults:
+            "Legacy app preferences in the configuration file could not be read; default preferences are used."
+        }
+    }
+}
+
+package struct PlatformConfigMigrationResult: Sendable {
     package let config: PlatformIntegrationConfig
     package let migrated: Bool
     package let warnings: [String]
+    /// The fallback taken for a refused legacy value, or nil. Only `resolve` sets it, and the same case's text is then in `warnings`.
+    package let fallback: ConfigurationLegacyFallback?
+
+    package init(
+        config: PlatformIntegrationConfig,
+        migrated: Bool,
+        warnings: [String],
+        fallback: ConfigurationLegacyFallback? = nil
+    ) {
+        self.config = config
+        self.migrated = migrated
+        self.warnings = warnings
+        self.fallback = fallback
+    }
 }
 
 package enum PlatformConfigPersistence {
@@ -609,6 +768,12 @@ package enum PlatformConfigPersistence {
         try loadSidecar(PlatformIntegrationConfig.self, root: ConfigurationFileSchema.platformSidecar, from: environment.platformConfigFile)
     }
 
+    /// The typed value of bytes a platform save staged, through the same gate and decode as a read. A store adopts its values from
+    /// the bytes it verified, so it never decodes a second way.
+    package static func decode(_ data: Data, source: String) throws -> PlatformIntegrationConfig {
+        try decodePresentSidecar(PlatformIntegrationConfig.self, root: ConfigurationFileSchema.platformSidecar, data: data, source: source)
+    }
+
     /// The platform candidate: the sidecar when one was read, else the runtime file's legacy value. A refused legacy value
     /// falls back to the defaults, with a warning that names no value. Nothing is written.
     package static func resolve(sidecar: PlatformIntegrationConfig?, legacy: LegacyComponent<PlatformIntegrationConfig>) -> PlatformConfigMigrationResult {
@@ -619,10 +784,12 @@ package enum PlatformConfigPersistence {
         case .decoded(let migrated):
             return PlatformConfigMigrationResult(config: migrated, migrated: true, warnings: [])
         case .refused:
+            let fallback = ConfigurationLegacyFallback.legacyPlatformRefusedUsingDefaults
             return PlatformConfigMigrationResult(
                 config: PlatformIntegrationConfig(),
                 migrated: false,
-                warnings: ["Legacy platform settings in the configuration file could not be read; default platform settings are used."]
+                warnings: [fallback.warning],
+                fallback: fallback
             )
         case .notRequired:
             return PlatformConfigMigrationResult(config: PlatformIntegrationConfig(), migrated: false, warnings: [])
@@ -641,10 +808,24 @@ package enum PlatformConfigPersistence {
 
 // MARK: - App Preferences Persistence
 
-package struct AppPreferencesMigrationResult {
+package struct AppPreferencesMigrationResult: Sendable {
     package let preferences: AppPreferences
     package let migrated: Bool
     package let warnings: [String]
+    /// The fallback taken for a refused legacy value, or nil. Only `resolve` sets it, and the same case's text is then in `warnings`.
+    package let fallback: ConfigurationLegacyFallback?
+
+    package init(
+        preferences: AppPreferences,
+        migrated: Bool,
+        warnings: [String],
+        fallback: ConfigurationLegacyFallback? = nil
+    ) {
+        self.preferences = preferences
+        self.migrated = migrated
+        self.warnings = warnings
+        self.fallback = fallback
+    }
 }
 
 package enum AppPreferencesPersistence {
@@ -685,6 +866,11 @@ package enum AppPreferencesPersistence {
         try loadSidecar(AppPreferences.self, root: ConfigurationFileSchema.preferencesSidecar, from: environment.preferencesFile)
     }
 
+    /// The typed preferences of bytes a preferences save staged, through the same gate and decode as a read (see the platform form).
+    package static func decode(_ data: Data, source: String) throws -> AppPreferences {
+        try decodePresentSidecar(AppPreferences.self, root: ConfigurationFileSchema.preferencesSidecar, data: data, source: source)
+    }
+
     /// The preferences candidate: the sidecar when one was read, else the runtime file's legacy value. Follows
     /// `PlatformConfigPersistence.resolve`.
     package static func resolve(sidecar: AppPreferences?, legacy: LegacyComponent<AppPreferences>) -> AppPreferencesMigrationResult {
@@ -695,10 +881,12 @@ package enum AppPreferencesPersistence {
         case .decoded(let migrated):
             return AppPreferencesMigrationResult(preferences: migrated, migrated: true, warnings: [])
         case .refused:
+            let fallback = ConfigurationLegacyFallback.legacyPreferencesRefusedUsingDefaults
             return AppPreferencesMigrationResult(
                 preferences: AppPreferences(),
                 migrated: false,
-                warnings: ["Legacy app preferences in the configuration file could not be read; default preferences are used."]
+                warnings: [fallback.warning],
+                fallback: fallback
             )
         case .notRequired:
             return AppPreferencesMigrationResult(preferences: AppPreferences(), migrated: false, warnings: [])

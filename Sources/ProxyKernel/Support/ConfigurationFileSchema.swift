@@ -10,7 +10,7 @@ import Foundation
 
 /// The decoder that owns a known key. Only the runtime file's own keys are always read. The legacy components are read
 /// only when their sidecar is absent, so their keys are not in the table otherwise. A sidecar's keys carry its own component.
-package enum ConfigurationComponent: Sendable, Hashable {
+package enum ConfigurationComponent: CaseIterable, Sendable, Hashable {
     case runtime
     case platform
     case preferences

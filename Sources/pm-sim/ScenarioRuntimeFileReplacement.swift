@@ -81,11 +81,19 @@ enum RuntimeFileReplacementScenario {
         let config = plan.config
         let fakeFile = plan.config
         let osAccess = StateFileAccess.operatingSystem()
-        func replaceOnDisk(_ bytes: Data, _ file: StateRootFile) -> RuntimeFileReplacementOutcome {
-            VerifiedRuntimeFileReplacement.replace(bytes, at: file, under: held, access: osAccess)
+        // The baseline is observed through the same reader the replacement's pre-read uses. A file that cannot be observed has no
+        // baseline; the sentinel is not a claim, because the pre-read repeats the read and reports its failure before any compare.
+        func observedBaseline(_ file: StateRootFile) -> ConfigurationFileBaseline {
+            switch VerifiedConfigurationFileReplacement.observe(file, access: osAccess) {
+            case .observed(let input): return ConfigurationFileBaseline(observing: input)
+            case .refused, .notObserved: return ConfigurationFileBaseline(observing: .present(Data()))
+            }
         }
-        func classify(_ fake: FakeStateFileAccess) -> RuntimeFileReplacementOutcome {
-            VerifiedRuntimeFileReplacement.replace(staged, at: fakeFile, under: held, access: fake)
+        func replaceOnDisk(_ bytes: Data, _ file: StateRootFile) -> ConfigurationFileReplacementOutcome {
+            VerifiedConfigurationFileReplacement.replace(bytes, at: file, under: held, access: osAccess, expecting: observedBaseline(file))
+        }
+        func classify(_ fake: FakeStateFileAccess, expecting baseline: ConfigurationFileBaseline) -> ConfigurationFileReplacementOutcome {
+            VerifiedConfigurationFileReplacement.replace(staged, at: fakeFile, under: held, access: fake, expecting: baseline)
         }
 
         // Real OS: create, overwrite with a larger prior, and the refusal before any I/O for an oversize staged value.
@@ -144,7 +152,8 @@ enum RuntimeFileReplacementScenario {
         landed.scheduleReads([.actual, .actual])
         landed.scheduleWrites([.init(landing: .landsThenFails(errno: ENOSPC))])
         verdict.check("a write that threw after landing is verified persisted, and its error is kept",
-                      classify(landed) == .verifiedPersisted(writeError: .writeFailed(errno: ENOSPC)))
+                      classify(landed, expecting: ConfigurationFileBaseline(observing: .missing))
+                          == .verifiedPersisted(writeError: .writeFailed(errno: ENOSPC)))
         verdict.check("the read-back is bounded by the staged length, the larger of the two counts",
                       landed.observations == [
                           .read(path: fakePath, limit: budget),
@@ -156,7 +165,8 @@ enum RuntimeFileReplacementScenario {
         unchanged.scheduleReads([.actual, .actual])
         unchanged.scheduleWrites([.init(landing: .failsBeforeLanding(errno: ENOSPC))])
         verdict.check("an unchanged larger prior after a failed write is verified not persisted",
-                      classify(unchanged) == .verifiedNotPersisted(writeError: .writeFailed(errno: ENOSPC)))
+                      classify(unchanged, expecting: ConfigurationFileBaseline(observing: .present(Data(repeating: 0x4C, count: 64))))
+                          == .verifiedNotPersisted(writeError: .writeFailed(errno: ENOSPC)))
         verdict.check("the read-back covers the 64-byte prior in full",
                       unchanged.observations.last == .read(path: fakePath, limit: 64))
 
@@ -164,12 +174,14 @@ enum RuntimeFileReplacementScenario {
         ambiguous.scheduleReads([.actual, .actual])
         ambiguous.scheduleWrites([.init(landing: .lands, editAfterWrite: .replace(Data("other-writer".utf8)))])
         verdict.check("a successful write followed by other bytes is unknown, not persisted",
-                      classify(ambiguous) == .unknown(.readbackDiffers, writeError: nil))
+                      classify(ambiguous, expecting: ConfigurationFileBaseline(observing: .present(Data("old".utf8))))
+                          == .unknown(.readbackDiffers, writeError: nil))
 
         let unreadable = FakeStateFileAccess(files: [fakePath: Data("old".utf8)])
         unreadable.scheduleReads([.failed(.unreadable(.readFailed(EIO), closeErrno: nil))])
         verdict.check("an unreadable prior is not started, and no write is made",
-                      classify(unreadable) == .notStarted(.unreadable(.readFailed(EIO), closeErrno: nil))
+                      classify(unreadable, expecting: ConfigurationFileBaseline(observing: .present(Data("old".utf8))))
+                          == .notStarted(.unreadable(.readFailed(EIO), closeErrno: nil))
                           && unreadable.observations == [.read(path: fakePath, limit: budget)])
     }
 

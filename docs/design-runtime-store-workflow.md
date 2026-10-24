@@ -1,7 +1,9 @@
 # Verified store and client workflow: architecture checkpoint
 
-Status: reviewed with Claude Code through the owner's claude.ai Max subscription;
-proposed APIs, with no store or client-engine implementation claimed. This refines
+Status: reviewed with Claude Code through the owner's claude.ai Max subscription.
+The store core below is implemented and checked in focused tests (2026-10-25, see
+[the verification note](verification-configuration-store-2026-10-25.md)). The client
+engine, host adoption and the apply path are still proposed. This refines
 implementation planning for decisions 0014, 0015, 0017 and 0018. The owner selected
 holding a mixed apply in [0025](decisions/0025-hold-mixed-configuration-apply.md);
 the affected apply path remains unimplemented.
@@ -245,3 +247,25 @@ and does not invent a parallel configuration/lifecycle coordinator.
 
 Measure actual memory/copies during composition. Compact retained identities and
 nominal Data lengths alone do not establish RSS, transport capacity or Stop fairness.
+
+### Implemented store core (2026-10-25)
+
+- Ownership: `ConfigurationComponent` is the kernel's existing identity. The loader
+  and `ConfigurationLegacyFallback` own each refused legacy component's classification
+  and fixed text. `VerifiedConfigurationFileReplacement` owns the observation, the
+  baseline pre-read and the write with read-back. `ConfigurationStore` owns the parsed
+  values, one baseline record and version per file, and the one busy slot.
+- Absence: a missing file is an explicit absent baseline. A missing sidecar beside a
+  present runtime file takes that component's valid legacy value when the runtime file
+  carries one, and the defaults when its keys are absent. Neither case warns. A malformed
+  legacy value refuses only that component, with a typed fallback.
+- Latch: a conflict, an unknown read-back or an observed change latches the component
+  until a reload. A latch does not change the version. A reload after a latch always takes
+  a newer version, even when the bytes are the old ones, so every token issued before the
+  latch stays refused. A version at its maximum refuses a write before any I/O.
+- Partial results: the platform file is written first, and the runtime file is written
+  only after the platform verifies. An unverified platform holds the runtime write. A
+  failed write keeps what landed, with no rollback and no retry.
+- Not implemented: the Start/Stop fences, the apply path and the mixed-apply hold, the
+  RuntimeClient configuration submission, the configuration event emitter, lease
+  acquisition at startup, and host adoption. Those remain owner adoption work.

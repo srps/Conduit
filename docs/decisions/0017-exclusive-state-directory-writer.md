@@ -73,9 +73,10 @@ storage; select bounded drain behavior with measured shutdown budgets.
 
 ## Implementation evidence
 
-Partial: the OS lease primitive, its typed outcomes and a fake exist. No configuration,
-platform-preference or journal writer calls the lease, and no app, daemon or pm-proxy
-startup path acquires it yet. Code: [`StateWriterLease.swift`](../../Sources/PlatformMac/StateWriterLease.swift)
+Partial: the OS lease primitive, its typed outcomes and a fake exist. The configuration
+store core borrows a held root lease and refuses a root it does not hold, but no app,
+daemon or pm-proxy startup path acquires the lease or constructs that store yet, and no
+journal writer calls the lease. See [the store verification note](../verification-configuration-store-2026-10-25.md). Code: [`StateWriterLease.swift`](../../Sources/PlatformMac/StateWriterLease.swift)
 (protocol, opaque lease, typed outcomes), [`StateWriterLeaseOS.swift`](../../Sources/PlatformMac/StateWriterLeaseOS.swift)
 (non-blocking `flock` on a fixed `O_NOFOLLOW` lock file, close-on-exec, no unlink,
 no `LOCK_UN`). Release is terminal: an unconfirmed close is returned to every later caller and never retried, a call during an in-flight close waits for its outcome, and a dropped lease reports an unconfirmed close once. The fake is in [`PlatformFakes.swift`](../../Sources/PlatformMac/PlatformFakes.swift).
@@ -90,7 +91,7 @@ Does not prove: legacy upgrade ordering, cross-process exclusion on the owner's
 storage, complete writer coverage, asynchronous write quiescence, Stop/Quit or deadline
 behavior, or real-machine cleanup after a deadline.
 
-The verified runtime-file replacement takes a held `StateWriterLease` and refuses a file outside that lease's root before any I/O ([`VerifiedRuntimeFileReplacement.swift`](../../Sources/PlatformMac/VerifiedRuntimeFileReplacement.swift)). No writer calls it yet, and the lease still excludes only cooperating writers. The lease has no held-state query, so the caller proves that it still holds the root. See [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
+The verified runtime-file replacement takes a held `StateWriterLease` and refuses a file outside that lease's root before any I/O ([`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift)). The configuration store core is its only caller, and only in the focused checks, and the lease still excludes only cooperating writers. The lease has no held-state query, so the caller proves that it still holds the root. See [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
 
 ## Open questions
 
