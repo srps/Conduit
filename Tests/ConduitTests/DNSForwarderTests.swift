@@ -461,7 +461,25 @@ final class DNSWireFormatTests: XCTestCase {
 
 // MARK: - Integration tests
 
+@MainActor
 final class DNSForwarderIntegrationTests: XCTestCase {
+    /// The one forwarder this test owns. A test registers it before `start`,
+    /// so `tearDown` stops it when the body throws as well as when it returns.
+    private var ownedForwarder: LocalDNSForwarder?
+
+    override func tearDown() async throws {
+        await stopOwnedForwarder()
+        try await super.tearDown()
+    }
+
+    /// Stops and forgets the owned forwarder. The slot is cleared before the
+    /// await, so a second call does nothing. `stop()` does not join resolutions
+    /// still in flight; this drains the listeners and their child channels.
+    private func stopOwnedForwarder() async {
+        guard let forwarder = ownedForwarder else { return }
+        ownedForwarder = nil
+        await forwarder.stop()
+    }
 
     @MainActor
     func testForwarderStartsAndStops() async throws {
@@ -474,8 +492,9 @@ final class DNSForwarderIntegrationTests: XCTestCase {
             configProvider: { config }
         )
 
+        ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
-        await forwarder.stop()
+        await stopOwnedForwarder()
     }
 
     @MainActor
@@ -490,12 +509,13 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         )
 
         let port = 16_000 + Int.random(in: 0..<1000)
+        ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: port)
 
         let hasLogEntry = logger.entries().contains { $0.message.contains(":\(port)") }
         XCTAssertTrue(hasLogEntry, "Log should mention the bound port")
 
-        await forwarder.stop()
+        await stopOwnedForwarder()
     }
 
     @MainActor
@@ -536,8 +556,8 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         )
 
         let port = 16_000 + Int.random(in: 0..<1000)
+        ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: port)
-        defer { Task { @MainActor in await forwarder.stop() } }
 
         let preEntries = logger.entries().count
         forwarder.resetUpstreamTransports(reason: "system_wake")
@@ -566,8 +586,8 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         )
 
         let port = 16_000 + Int.random(in: 0..<1000)
+        ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: port)
-        defer { Task { @MainActor in await forwarder.stop() } }
 
         // Cache count starts at zero (no queries have been issued).
         XCTAssertEqual(forwarder.cachedResponseCount, 0)
@@ -599,8 +619,8 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         )
 
         let port = 16_000 + Int.random(in: 0..<1000)
+        ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: port)
-        defer { Task { @MainActor in await forwarder.stop() } }
 
         let resetCount = 8
         for i in 0..<resetCount {
@@ -637,6 +657,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
             configProvider: { frozen }
         )
 
+        ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
         let port = try XCTUnwrap(forwarder.listeningPort)
 
@@ -666,7 +687,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
         XCTAssertTrue(DNSWireFormat.responseQuestionMatches(query: query, response: response))
         XCTAssertEqual(DNSWireFormat.firstIPv4Answer(in: response)?.ip, "127.44.3.9")
 
-        await forwarder.stop()
+        await stopOwnedForwarder()
     }
 
     /// A DoH outage is one condition, but it is discovered once per query, and
@@ -705,6 +726,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
             configProvider: { frozen },
             tuning: try Self.quickInternalAttempt(against: silentServer)
         )
+        ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
         let port = try XCTUnwrap(forwarder.listeningPort)
 
@@ -741,7 +763,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
             "\(queryCount) failing queries produced \(warnings.count) warnings — the throttle is not holding"
         )
 
-        await forwarder.stop()
+        await stopOwnedForwarder()
         try await client.close().get()
     }
 
@@ -805,6 +827,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
             configProvider: { [config] in config },
             tuning: try Self.quickInternalAttempt(against: silentServer)
         )
+        ownedForwarder = forwarder
         try await forwarder.start(host: "127.0.0.1", port: 0)
         let port = try XCTUnwrap(forwarder.listeningPort)
 
@@ -845,7 +868,7 @@ final class DNSForwarderIntegrationTests: XCTestCase {
 
         // Stop while fetches are still pending in the tarpit — exercises the
         // retire path in `invalidateSessions()` too.
-        await forwarder.stop()
+        await stopOwnedForwarder()
         try await client.close().get()
         try await tarpit.close().get()
 
