@@ -3,6 +3,7 @@ import AppKit
 import PlatformMac
 import ConduitShared
 import ProxyAuth
+import ProxyControlBridge
 import ProxyKernel
 import ProxyPAC
 import RuntimeEvents
@@ -454,10 +455,14 @@ final class AppState: ObservableObject {
         // manager so they can capture `orchestrator.configSnapshotProvider`.
         // Single source of truth for the live config replaces the former
         // AppState `configBox` mirror + `$config` Combine sink.
+        // One event log shared with the audit sink, so a refused audit destination
+        // is reported through the same stream as every other event (#222).
+        let orchestratorEventLog = RuntimeEventLog()
         let auditSink = AppState.makeAuditSink(
             for: initialConfig,
             environment: runtimeEnvironment,
-            logger: logStore
+            logger: logStore,
+            eventLog: orchestratorEventLog
         )
         let tunnelResolverManager = TunnelResolverManager(
             privilegeClient: auditedPrivilegeClient,
@@ -470,6 +475,7 @@ final class AppState: ObservableObject {
             authenticatorProvider: nil,  // Wired below via setAuthenticatorProvider.
             pacEvaluator: pacEvaluator,
             auditSink: auditSink,
+            eventLog: orchestratorEventLog,
             resolverManager: tunnelResolverManager,
             portHolderProbe: PortHolderProbe()
         )
@@ -699,7 +705,8 @@ final class AppState: ObservableObject {
     private nonisolated static func makeAuditSink(
         for config: ProxyConfig,
         environment: RuntimeEnvironment,
-        logger: any LogSink
+        logger: any LogSink,
+        eventLog: RuntimeEventLog
     ) -> any ConnectionAuditSink {
         guard config.auditLogEnabled else {
             return DiscardingConnectionAuditSink()
@@ -710,10 +717,13 @@ final class AppState: ObservableObject {
         } else {
             url = environment.configDirectory.appendingPathComponent("audit.ndjson")
         }
+        // An explicit path may leave the state directory, never land on a protected resource (#222).
         return FileConnectionAuditSink(
             fileURL: url,
             maxBytes: config.auditLogMaxBytes,
-            logger: logger
+            logger: logger,
+            destinationGuard: diagnosticDestinationGuard(for: .connectionAudit, in: environment),
+            eventLog: eventLog
         )
     }
 

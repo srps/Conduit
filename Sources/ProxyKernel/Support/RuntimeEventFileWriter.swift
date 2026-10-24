@@ -7,20 +7,33 @@ package final class RuntimeEventFileWriter: @unchecked Sendable {
     private let writer: BoundedRecordWriter
     private let maxBytes: Int
     private let logger: any LogSink
+    private let gate: RecordFileDestinationGate
 
+    /// `eventLog` receives the refusal event. When it is this writer's own log, that event
+    /// reaches the latched gate and is counted as a drop (#222).
     package init(fileURL: URL, maxBytes: Int = RuntimeEventFileWriter.defaultMaxBytes,
-                 logger: any LogSink, limits: RecordWriterLimits = .init()) {
+                 logger: any LogSink, limits: RecordWriterLimits = .init(),
+                 destinationGuard: any RecordFileDestinationGuarding, eventLog: RuntimeEventLog) {
         precondition(maxBytes > 0)
         self.maxBytes = maxBytes
         self.logger = logger
-        let file = RotatingRecordFile(fileURL: fileURL, maxBytes: maxBytes)
-        writer = BoundedRecordWriter(limits: limits, write: { try file.append($0) },
-            reportFailure: { logger.log(.warning, "Failed to write events.ndjson: \($0)", category: .general) })
+        let gate = RecordFileDestinationGate(sink: .runtimeEvents, eventLog: eventLog, logger: logger)
+        self.gate = gate
+        let file = RotatingRecordFile(fileURL: fileURL, maxBytes: maxBytes, destinationGuard: destinationGuard)
+        writer = BoundedRecordWriter(limits: limits, write: { try gate.write($0, to: file) },
+            reportFailure: { message in
+                guard !gate.isRefused else { return }
+                logger.log(.warning, "Failed to write events.ndjson: \(message)", category: .general)
+            })
     }
 
     package var statistics: RecordWriterStatistics { writer.statistics }
 
     package func record(_ event: RuntimeEvent) {
+        guard !gate.isRefused else {
+            writer.recordDrop()
+            return
+        }
         do {
             var data = try CanonicalJSON.encoder().encode(event)
             data.append(0x0A)

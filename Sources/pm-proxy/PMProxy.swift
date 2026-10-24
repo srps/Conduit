@@ -105,17 +105,23 @@ enum PMProxy {
             // `configSnapshotProvider` for the auth factory. Single source of
             // truth for the live config — no second NIOLockedValueBox in
             // pm-proxy.
-            let auditSink = makeAuditSink(for: config, environment: environment, logger: logger)
+            // One event log for the audit sink, the orchestrator and the events writer: a refused
+            // destination's event reaches the same ring and sink as every other event (#222).
+            let eventLog = RuntimeEventLog()
+            let auditSink = makeAuditSink(for: config, environment: environment, logger: logger, eventLog: eventLog)
             let orchestrator = ProxyOrchestrator(
                 config: config,
                 logger: logger,
                 authenticatorProvider: nil,  // Wired below via setAuthenticatorProvider.
                 pacEvaluator: pacEvaluator,
-                auditSink: auditSink
+                auditSink: auditSink,
+                eventLog: eventLog
             )
             let eventFileWriter = RuntimeEventFileWriter(
                 fileURL: environment.eventsFile,
-                logger: logger
+                logger: logger,
+                destinationGuard: diagnosticDestinationGuard(for: .runtimeEvents, in: environment),
+                eventLog: eventLog
             )
             writerStatistics = {
                 ["events": eventFileWriter.statistics, "audit": auditSink.statistics, "console": logger.statistics]
@@ -355,7 +361,8 @@ enum PMProxy {
     private static func makeAuditSink(
         for config: ProxyConfig,
         environment: RuntimeEnvironment,
-        logger: any LogSink
+        logger: any LogSink,
+        eventLog: RuntimeEventLog
     ) -> any ConnectionAuditSink {
         guard config.auditLogEnabled else {
             return DiscardingConnectionAuditSink()
@@ -366,10 +373,13 @@ enum PMProxy {
         } else {
             url = environment.configDirectory.appendingPathComponent("audit.ndjson")
         }
+        // An explicit path may be outside the state dir, but never onto a protected resource (#222).
         return FileConnectionAuditSink(
             fileURL: url,
             maxBytes: config.auditLogMaxBytes,
-            logger: logger
+            logger: logger,
+            destinationGuard: diagnosticDestinationGuard(for: .connectionAudit, in: environment),
+            eventLog: eventLog
         )
     }
 

@@ -309,7 +309,14 @@ package final class RuntimeHost {
             base: self.privilegeClient,
             eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) }
         )
-        self.eventWriter = RuntimeEventFileWriter(fileURL: environment.eventsFile, logger: logger)
+        // Shared with the orchestrator below: a refused events destination reports through this log (#222).
+        let diagnosticsEventLog = RuntimeEventLog()
+        self.eventWriter = RuntimeEventFileWriter(
+            fileURL: environment.eventsFile,
+            logger: logger,
+            destinationGuard: diagnosticDestinationGuard(for: .runtimeEvents, in: environment),
+            eventLog: diagnosticsEventLog
+        )
         self.vpnStatusMonitor = vpnStatusMonitor ?? VPNStatusMonitor(
             graceSecondsProvider: { flapBox.withLockedValue { $0.graceSeconds } },
             minVisibleSecondsProvider: { flapBox.withLockedValue { $0.minVisibleSeconds } }
@@ -326,6 +333,7 @@ package final class RuntimeHost {
             privilegeClient: auditedPrivilegeClient,
             authenticatorProvider: nil,
             pacEvaluator: pacEvaluator,
+            eventLog: diagnosticsEventLog,
             resolverManager: tunnelResolverManager,
             portHolderProbe: PortHolderProbe()
         )
@@ -1408,8 +1416,13 @@ extension RuntimeHost {
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) }
     ) async -> [RuntimeEvent] {
-        let writer = RuntimeEventFileWriter(fileURL: environment.eventsFile, logger: logger)
         let emitted = RuntimeEventLog(capacity: 2048)
+        let writer = RuntimeEventFileWriter(
+            fileURL: environment.eventsFile,
+            logger: logger,
+            destinationGuard: diagnosticDestinationGuard(for: .runtimeEvents, in: environment),
+            eventLog: emitted
+        )
         let emit: @Sendable (RuntimeEvent) -> Void = { event in
             emitted.append(event)
             writer.record(event)

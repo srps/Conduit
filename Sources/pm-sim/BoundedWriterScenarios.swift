@@ -64,8 +64,9 @@ enum BoundedWriterScenarios {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("conduit-flush-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("events.ndjson")
-        let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink())
         let events = RuntimeEventLog(capacity: 8)
+        let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink(),
+                                            destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
         events.setSink { writer.record($0) }
         guard !writer.flushReportingTimeout(auditFlushed: false, eventLog: events) else {
             throw Failure(message: "Shutdown concealed the audit flush failure")
@@ -83,7 +84,7 @@ enum BoundedWriterScenarios {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("conduit-writer-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("events.ndjson")
-        let file = RotatingRecordFile(fileURL: url, maxBytes: 32_768)
+        let file = RotatingRecordFile(fileURL: url, maxBytes: 32_768, destinationGuard: UncheckedRecordFileDestination())
         let writer = BoundedRecordWriter(write: { try file.append($0) }, reportFailure: { _ in })
         var submittedBytes = 0
         let started = Date()

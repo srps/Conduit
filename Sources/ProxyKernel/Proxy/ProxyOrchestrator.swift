@@ -264,7 +264,9 @@ package final class ProxyOrchestrator {
     package var onConfigChange: ((ProxyConfig) -> Void)?
 
     package let logStore: any LogSink
-    package let eventLog = RuntimeEventLog()
+    /// Injected so a composition can give its diagnostic writers the same log before
+    /// the orchestrator exists (#222). Defaults to a private log.
+    package let eventLog: RuntimeEventLog
     /// Rate-limits `auth.kerberos_fallback_ntlm` and its log line per host
     /// and reason: every handshake through a proxy Kerberos cannot ticket
     /// falls back, and one line each flooded `proxy.log` and the bounded
@@ -1225,6 +1227,7 @@ package final class ProxyOrchestrator {
         authenticatorProvider: (@Sendable (UpstreamProxy) throws -> ProxyAuthenticator)? = nil,
         pacEvaluator: (any PacEvaluator)? = nil,
         auditSink: any ConnectionAuditSink = DiscardingConnectionAuditSink(),
+        eventLog: RuntimeEventLog = RuntimeEventLog(),
         resolverManager: (any TunnelResolverApplying)? = nil,
         portHolderProbe: (any ListenerPortHolderProbing)? = nil,
         relayAcceptProbe: @escaping @Sendable (String, Int) -> Bool = { host, port in
@@ -1247,6 +1250,7 @@ package final class ProxyOrchestrator {
         self.portHolderProbe = portHolderProbe
         self.resolverManager = resolverManager
         self.auditSink = auditSink
+        self.eventLog = eventLog
         let configBox = ProxyConfigBox(config)
         self.configBox = configBox
         // Capture the box once at init for the snapshot-provider closure.

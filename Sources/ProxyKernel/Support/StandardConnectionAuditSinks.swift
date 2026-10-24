@@ -71,25 +71,39 @@ package final class RecordingConnectionAuditSink: ConnectionAuditSink, @unchecke
 // MARK: - FileConnectionAuditSink
 
 /// Bounded asynchronous NDJSON writer using batched append and record-aligned rotation.
+/// A destination the guard refuses is latched: the sink emits one refusal event and
+/// counts later records as dropped. The runtime keeps running (#222).
 package final class FileConnectionAuditSink: ConnectionAuditSink, @unchecked Sendable {
     package static let defaultMaxBytes = 10 * 1_048_576
     private let writer: BoundedRecordWriter
     private let maxBytes: Int
     private let logger: any LogSink
+    private let gate: RecordFileDestinationGate
 
     package init(fileURL: URL, maxBytes: Int = FileConnectionAuditSink.defaultMaxBytes,
-                 logger: any LogSink, limits: RecordWriterLimits = .init()) {
+                 logger: any LogSink, limits: RecordWriterLimits = .init(),
+                 destinationGuard: any RecordFileDestinationGuarding, eventLog: RuntimeEventLog) {
         precondition(maxBytes > 0)
         self.maxBytes = maxBytes
         self.logger = logger
-        let file = RotatingRecordFile(fileURL: fileURL, maxBytes: maxBytes)
-        writer = BoundedRecordWriter(limits: limits, write: { try file.append($0) },
-            reportFailure: { logger.log(.warning, "Failed to write audit.ndjson: \($0)", category: .general) })
+        let gate = RecordFileDestinationGate(sink: .connectionAudit, eventLog: eventLog, logger: logger)
+        self.gate = gate
+        let file = RotatingRecordFile(fileURL: fileURL, maxBytes: maxBytes, destinationGuard: destinationGuard)
+        writer = BoundedRecordWriter(limits: limits, write: { try gate.write($0, to: file) },
+            reportFailure: { message in
+                // A refused batch is already reported by its event; logging it again would repeat the loss.
+                guard !gate.isRefused else { return }
+                logger.log(.warning, "Failed to write audit.ndjson: \(message)", category: .general)
+            })
     }
 
     package var statistics: RecordWriterStatistics { writer.statistics }
 
     package func record(_ record: ConnectionAuditRecord) {
+        guard !gate.isRefused else {
+            writer.recordDrop()
+            return
+        }
         do {
             var data = try CanonicalJSON.encoder().encode(record)
             data.append(0x0A)

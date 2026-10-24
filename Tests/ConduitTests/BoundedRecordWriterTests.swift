@@ -76,7 +76,7 @@ final class BoundedRecordWriterTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("events.ndjson")
-        let file = RotatingRecordFile(fileURL: url, maxBytes: 12)
+        let file = RotatingRecordFile(fileURL: url, maxBytes: 12, destinationGuard: UncheckedRecordFileDestination())
         try file.append([Data("one\n".utf8), Data("two\n".utf8)])
         try file.append([Data("tri\n".utf8)])
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "one\ntwo\ntri\n")
@@ -91,7 +91,7 @@ final class BoundedRecordWriterTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent("events.ndjson")
         try Data("{\"ok\":true}\n{\"torn\":".utf8).write(to: url)
-        let file = RotatingRecordFile(fileURL: url, maxBytes: 128)
+        let file = RotatingRecordFile(fileURL: url, maxBytes: 128, destinationGuard: UncheckedRecordFileDestination())
         try file.append([Data("{\"new\":true}\n".utf8)])
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "{\"new\":true}\n")
         XCTAssertEqual(file.rotationCount, 1)
@@ -102,7 +102,8 @@ final class BoundedRecordWriterTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("audit.ndjson")
-        let sink = FileConnectionAuditSink(fileURL: url, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, logger: DiscardingLogSink(),
+                                           destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         let record = ConnectionAuditRecord(id: UUID(), timestamp: Date(), clientAddress: "127.0.0.1",
             scheme: .https, target: "fixture.test:443", pacDecision: nil, chosenUpstream: "DIRECT",
             authMethod: nil, bytesSent: 1, bytesReceived: 1, durationMS: 1, outcome: .success)
@@ -137,8 +138,9 @@ final class BoundedRecordWriterTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("events.ndjson")
-        let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink())
         let events = RuntimeEventLog(capacity: 8)
+        let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink(),
+                                            destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
         events.setSink { writer.record($0) }
         XCTAssertFalse(writer.flushReportingTimeout(auditFlushed: false, eventLog: events))
         let rows = try Data(contentsOf: url).split(separator: 0x0A).map {
