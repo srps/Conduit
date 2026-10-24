@@ -90,6 +90,7 @@ exclusive ownership across processes or machine cleanup after a deadline.
 ## Open questions
 
 Classify secret-free committed fields and coupled components before their client
-commands. Settle writer lifetime across overlapping launches and listener handoff
-failure/retirement policy before changing those paths. Size total shutdown and
+commands. Decision [0017](0017-exclusive-state-directory-writer.md) settles writer lifetime
+with an exclusive lease; its adapter, writer coverage and upgrade evidence remain
+due. Settle listener handoff failure/retirement policy before changing those paths. Size total shutdown and
 helper/lock budgets with evidence.

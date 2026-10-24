@@ -12,31 +12,37 @@ target graph. See [ROADMAP](../ROADMAP.md) for execution order.
 
 Conduit is a macOS application that runs a local HTTP/SOCKS5 proxy server with corporate proxy authentication (Kerberos/NTLM), PAC-aware routing, DNS-over-HTTPS forwarding, protocol tunnels, and system integration. It bridges the gap between corporate proxy infrastructure and macOS applications that don't natively support authenticated proxies.
 
-The codebase is a SwiftPM package with five library targets and eight executable targets, totaling ~21,000 lines of Swift across ~100 source files plus ~12,000 lines of tests. Post-split, every cross-target call goes through a `package protocol` in `Sources/ProxyKernel/Abstractions/` — the macOS-specific code cannot be reached from headless or portable targets without an explicit conformer.
+The codebase is a SwiftPM package. `Package.swift` is the authority for its targets and their direct dependencies; this document does not keep line or test counts, which go stale. Machine effects cross explicit protocol seams; kernel-facing contracts live in `Sources/ProxyKernel/Abstractions/` and macOS-specific collaborators in `PlatformMac`. Control and event values cross targets as package types.
 
 ```
 Conduit/
 ├── Sources/
-│   ├── ProxyKernel/          50 files, 10.6k LOC  — portable library (Foundation + NIO)
-│   ├── ProxyAuth/             3 files,    0.8k LOC  — NTLM/Kerberos (GSS + CommonCrypto)
-│   ├── ProxyPAC/              1 file,     0.4k LOC  — PAC evaluator (CFNetwork)
-│   ├── PlatformMac/          15 files,   2.1k LOC  — macOS glue (Security, SC, SMAppService…)
-│   ├── ConduitShared/    1 file,     0.2k LOC  — helper wire contract (no deps)
-│   ├── Conduit/         14 files,   3.8k LOC  — SwiftUI GUI + wiring layer
-│   ├── ConduitHelper/    4 files,    0.4k LOC  — privileged LaunchDaemon
-│   ├── pm-proxy/              1 file,     0.3k LOC  — headless HTTP/SOCKS5/DNS/tunnel CLI
-│   ├── pm-dns/                1 file,     0.1k LOC  — standalone DoH forwarder
-│   ├── pm-tunnel/             1 file,     0.2k LOC  — standalone TCP tunnel forwarder
-│   ├── pm-sim/                13 files,  3.4k LOC  — fault-injection simulator
-│   ├── pm-vpn-check/          1 file,     0.1k LOC  — VPN status diagnostic
-│   └── pm-auth-check/         1 file,     0.5k LOC  — auth diagnostic
+│   ├── ProxyKernel/          portable library (Foundation + NIO)
+│   ├── ProxyAuth/            NTLM/Kerberos (GSS + CommonCrypto)
+│   ├── ProxyPAC/             PAC evaluator (CFNetwork)
+│   ├── ProxyControlBridge/   kernel and typed-event values → control wire values
+│   ├── RuntimeEvents/        Foundation-only typed event values (decision 0013)
+│   ├── PlatformMac/          macOS glue (Security, SC, SMAppService…)
+│   ├── ConduitShared/        helper IPC and control wire contracts (no dependencies)
+│   ├── Conduit/              SwiftUI GUI + wiring layer
+│   ├── ConduitDaemon/        user-session daemon host
+│   ├── ConduitUpdater/       nested Sparkle updater
+│   ├── ConduitHelper/        privileged LaunchDaemon
+│   ├── pm-proxy/             headless HTTP/SOCKS5/DNS/tunnel CLI
+│   ├── pm-dns/               standalone DoH forwarder
+│   ├── pm-tunnel/            standalone TCP tunnel forwarder
+│   ├── pm-sim/               fault-injection simulator
+│   ├── pmctl/                control-socket command-line client
+│   ├── pm-vpn-check/         VPN status diagnostic
+│   ├── pm-auth-check/        auth diagnostic
+│   └── pm-tls-check/         TLS-inspection diagnostic
 └── Tests/
-    └── ConduitTests/    unit, integration, and harness tests (counts/skips in CI)
+    └── ConduitTests/         unit, integration, and harness tests
 ```
 
-SwiftNIO is a remote SwiftPM dependency (`https://github.com/apple/swift-nio.git`), resolved at build time — there is no vendored copy in-tree.
+SwiftNIO is a remote SwiftPM dependency (`https://github.com/apple/swift-nio.git`), resolved at build time — there is no vendored copy in-tree. Sparkle is a remote dependency too, and only `ConduitUpdater` declares it.
 
-LOC and file counts approximate; the source-of-truth is `swift test` and `find Sources -name '*.swift' | wc -l`. The suite has grown past 1,100 tests across the CFNetwork PAC evaluator and `SecretBytes` work, the security-hardening wave, the perf cleanup, and the security-foundation batch.
+Line and test counts are not kept here. `swift test` and `find Sources -name '*.swift'` are the sources of truth.
 
 ## Target Dependency Graph
 
@@ -45,91 +51,143 @@ The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. CI 
 ```mermaid
 graph TD
     SwiftNIO["SwiftNIO (SPM)"]
-    Shared["ConduitShared<br/>(helper IPC contract)"]
+    Sparkle["Sparkle (SPM)"]
+    Shared["ConduitShared<br/>(helper and control wire contracts)"]
+    Events["RuntimeEvents<br/>(Foundation-only typed events)"]
     Kernel["ProxyKernel<br/>(portable, Foundation + NIO)"]
     Auth["ProxyAuth<br/>(GSS, CommonCrypto)"]
     PAC["ProxyPAC<br/>(CFNetwork)"]
+    Bridge["ProxyControlBridge<br/>(kernel to wire mapping)"]
     Platform["PlatformMac<br/>(Security, SC, SMAppService…)"]
 
     App["Conduit<br/>(SwiftUI GUI)"]
+    Daemon["ConduitDaemon<br/>(user-session host)"]
+    Updater["ConduitUpdater<br/>(nested Sparkle updater)"]
     Helper["ConduitHelper<br/>(LaunchDaemon)"]
-    PMProxy["pm-proxy<br/>(headless daemon)"]
+    PMProxy["pm-proxy<br/>(headless proxy)"]
     PMSim["pm-sim<br/>(simulator)"]
     PMTunnel["pm-tunnel"]
     PMDns["pm-dns"]
+    PMCtl["pmctl<br/>(control client)"]
     PMVPN["pm-vpn-check"]
     PMAuthCheck["pm-auth-check"]
-    Tests["ConduitTests<br/>(1,100+ tests)"]
+    PMTLS["pm-tls-check"]
+    Tests["ConduitTests"]
 
     Kernel --> SwiftNIO
     Kernel --> Shared
+    Kernel --> Events
+    Bridge --> Kernel
+    Bridge --> Shared
+    Bridge --> Events
     Auth --> Kernel
     PAC --> Kernel
     Platform --> Kernel
     Platform --> Shared
+    Platform --> Events
+    Updater --> Shared
+    Updater --> Platform
+    Updater --> Sparkle
 
     App --> Kernel
     App --> Auth
     App --> PAC
     App --> Platform
+    App --> Shared
+    App --> Events
 
+    Daemon --> Bridge
+    Daemon --> Kernel
+    Daemon --> Auth
+    Daemon --> PAC
+    Daemon --> Platform
+    Daemon --> Shared
+    Daemon --> Events
+    Daemon --> SwiftNIO
+
+    PMProxy --> Bridge
     PMProxy --> Kernel
     PMProxy --> Auth
     PMProxy --> PAC
+    PMProxy --> Shared
 
     PMSim --> Kernel
     PMSim --> Auth
+    PMSim --> PAC
     PMSim --> Platform
+    PMSim --> Shared
+    PMSim --> Events
     PMSim --> SwiftNIO
 
     PMTunnel --> Kernel
     PMTunnel --> Auth
 
     PMDns --> Kernel
+    PMCtl --> Shared
     PMVPN --> Kernel
     PMVPN --> Platform
+    PMVPN --> SwiftNIO
     PMAuthCheck --> Kernel
+    PMTLS --> Platform
 
     Helper --> Kernel
     Helper --> Shared
 
     Tests --> App
+    Tests --> Daemon
+    Tests --> Bridge
     Tests --> Kernel
     Tests --> Auth
     Tests --> PAC
     Tests --> Platform
     Tests --> Shared
+    Tests --> Events
     Tests --> SwiftNIO
 ```
 
-| Target               | ProxyKernel | ProxyAuth | ProxyPAC | PlatformMac | Shared | NIO* |
-| -------------------- | :---------: | :-------: | :------: | :---------: | :----: | :--: |
-| `ProxyKernel`        | —           | —         | —        | —           | ✓      | ✓    |
-| `ProxyAuth`          | ✓           | —         | —        | —           | —      | —    |
-| `ProxyPAC`           | ✓           | —         | —        | —           | —      | —    |
-| `PlatformMac`        | ✓           | —         | —        | —           | ✓      | —    |
-| `pm-proxy`           | ✓           | ✓         | ✓        | —           | —      | —    |
-| `pm-sim`             | ✓           | ✓         | ✓        | ✓           | ✓      | ✓    |
-| `pm-tunnel`          | ✓           | ✓         | —        | —           | —      | —    |
-| `pm-dns`             | ✓           | —         | —        | —           | —      | —    |
-| `pm-vpn-check`       | ✓           | —         | —        | ✓           | —      | ✓    |
-| `pm-auth-check`      | ✓           | —         | —        | —           | —      | —    |
-| `ConduitHelper` | ✓           | —         | —        | —           | ✓      | —    |
-| `Conduit` (app) | ✓           | ✓         | ✓        | ✓           | —      | —    |
-| `ConduitTests`  | ✓           | ✓         | ✓        | ✓           | ✓      | ✓    |
+| Target                 | ProxyKernel | ProxyAuth | ProxyPAC | PlatformMac | ConduitShared | RuntimeEvents | ProxyControlBridge | NIO* |
+| ---------------------- | :---------: | :-------: | :------: | :---------: | :-----------: | :-----------: | :----------------: | :--: |
+| `ConduitShared`        | —           | —         | —        | —           | —             | —             | —                  | —    |
+| `RuntimeEvents`        | —           | —         | —        | —           | —             | —             | —                  | —    |
+| `ProxyKernel`          | —           | —         | —        | —           | ✓             | ✓             | —                  | ✓    |
+| `ProxyControlBridge`   | ✓           | —         | —        | —           | ✓             | ✓             | —                  | —    |
+| `ProxyAuth`            | ✓           | —         | —        | —           | —             | —             | —                  | —    |
+| `ProxyPAC`             | ✓           | —         | —        | —           | —             | —             | —                  | —    |
+| `PlatformMac`          | ✓           | —         | —        | —           | ✓             | ✓             | —                  | —    |
+| `ConduitUpdater`       | —           | —         | —        | ✓           | ✓             | —             | —                  | —    |
+| `pm-proxy`             | ✓           | ✓         | ✓        | —           | ✓             | —             | ✓                  | —    |
+| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | —                  | ✓    |
+| `pm-tunnel`            | ✓           | ✓         | —        | —           | —             | —             | —                  | —    |
+| `pm-dns`               | ✓           | —         | —        | —           | —             | —             | —                  | —    |
+| `pmctl`                | —           | —         | —        | —           | ✓             | —             | —                  | —    |
+| `pm-vpn-check`         | ✓           | —         | —        | ✓           | —             | —             | —                  | ✓    |
+| `pm-auth-check`        | ✓           | —         | —        | —           | —             | —             | —                  | —    |
+| `pm-tls-check`         | —           | —         | —        | ✓           | —             | —             | —                  | —    |
+| `ConduitHelper`        | ✓           | —         | —        | —           | ✓             | —             | —                  | —    |
+| `Conduit` (app)        | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | —                  | —    |
+| `ConduitDaemon`        | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓    |
+| `ConduitTests`         | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓    |
 
-The matrix shows **direct** dependencies declared in `Package.swift`. Transitive reach differs: `Conduit` (app) reaches `ConduitShared` through `PlatformMac → Shared` and so can use the helper wire types without declaring a direct dep; `pm-proxy` and the other headless tools have no such transitive path, which is the invariant the fence is built to guarantee.
+The matrix lists **direct** dependencies declared in `Package.swift`. `ConduitUpdater` is the only target that declares Sparkle. `Conduit` (app) and `ConduitDaemon` declare `ConduitShared` and `RuntimeEvents` themselves rather than reaching them through `PlatformMac`. Transitive reach is a separate question: `pm-proxy` declares no `PlatformMac`, and none of its declared targets (`ProxyKernel`, `ProxyAuth`, `ProxyPAC`, `ProxyControlBridge`, `ConduitShared`, `RuntimeEvents`) depends on it, so its closure contains no `PlatformMac`, Sparkle or `ConduitDaemon`. The kernel import fence in CI covers `ProxyKernel` and `RuntimeEvents`; the target graph is what keeps `PlatformMac` out of `pm-proxy`.
+
+`ConduitRuntime`, the target decision 0013 selects for the shared host, does not exist yet. `RuntimeClient` (in `ConduitShared`) is a protocol with no production or in-memory conformer. Neither is a running host.
 
 ### What each target owns
 
-- **`ConduitShared`** — zero-dependency wire contract between the app and the privileged helper. Defines `HelperCommand`, `HelperRequest`, `HelperResponse`, input validation. Imported by both sides so they can't drift.
-- **`ProxyKernel`** — portable library: proxy server, connection pool, PAC routing engine, DNS forwarder, transparent TCP proxy, tunnel forwarder, auto-recovery ladder, health checks, VPN state fusion, upstream probing, routing decisions, metadata blocklist, kernel-side abstractions. Imports only Foundation, Dispatch, NIO modules, Darwin/Glibc and `ConduitShared` for domain-name grammar. CI runs `scripts/check-kernel-imports.py` to enforce this allowlist; `Process` is unavailable inside the kernel, and the script rejects a qualified `Foundation.Process` in the built object.
+- **`ConduitShared`** — zero-dependency wire contracts. The helper IPC (`HelperCommand`, `HelperRequest`, `HelperResponse`, input validation) is imported by the app and the helper so they can't drift. The control protocol carries the v1 socket types and the v2 runtime values (`ControlRuntime*.swift`), frame codec and `RuntimeClient` protocol (`RuntimeClient.swift`). The v2 files are stage-1 foundation only (decision 0014): there is no in-memory client, admission or subscription engine, and no production v2 socket. Helper IPC and v1 control keep their own versions.
+- **`ProxyKernel`** — portable library: proxy server, connection pool, PAC routing engine, DNS forwarder, transparent TCP proxy, tunnel forwarder, auto-recovery ladder, health checks, VPN state fusion, upstream probing, routing decisions, metadata blocklist, kernel-side abstractions. Imports only Foundation, Dispatch, NIO modules, Darwin/Glibc, `ConduitShared` (domain-name grammar) and `RuntimeEvents` (typed event values). CI runs `scripts/check-kernel-imports.py` to enforce this allowlist; `Process` is unavailable inside the kernel, and the script rejects a qualified `Foundation.Process` in the built object.
+- **`RuntimeEvents`** — Foundation-only typed event values (decision 0013), with no dependencies. `LifecycleEvent` types the four `lifecycle.*` names with closed operation and reason enums and numeric fields; `RuntimeEventPayload` is the envelope's `typed` value. `ProxyKernel` carries it on `RuntimeEvent`. The shapes and bounds are in [`events.md`](./events.md#typed-lifecycle-payloads). `scripts/check-kernel-imports.py` limits this target to Foundation.
+- **`ProxyControlBridge`** — maps kernel and `RuntimeEvents` values onto `ConduitShared` wire values, with exhaustive switches and no default cases. `ControlStatusMapping.swift` covers v1 status; `RuntimeEventControlProjection.swift` and `RuntimeSnapshotControlProjection.swift` cover the v2 values. Depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`.
 - **`ProxyAuth`** — opt-in capability layer. NTLM message generation (`NTLMAuth.swift`, CommonCrypto for MD4/HMAC-MD5), Kerberos/Negotiate (`KerberosAuth.swift`, GSS.framework), and `AuthenticatorFactory.swift` which assembles a `ProxyAuthenticator` from the active config + a `CredentialProvider`.
 - **`ProxyPAC`** — opt-in capability layer with the CFNetwork-backed `CFPACEvaluator` (`CFNetworkExecuteProxyAutoConfigurationScript` on a private CFRunLoop, paired with `CFPacScriptEvaluator`). This is the sole production `PacEvaluator` implementation after the CFNetwork evaluator graduated; the JavaScriptCore-backed resolver was removed.
-- **`PlatformMac`** — macOS-only glue. Keychain, `networksetup` wrappers, `SMAppService`, `SCDynamicStore`-based VPN monitor, `NWPathMonitor`, `/etc/resolver/*` writer, helper XPC client, shell runner, first-run example-corp preset injection. Only the GUI app and the `pm-vpn-check` diagnostic link this target.
-- **`Conduit`** (app target) — SwiftUI GUI + `AppState`, the wiring layer that owns every `PlatformMac` concrete and passes protocol-typed references into the orchestrator. Also hosts `AppLogStore` (the `@MainActor` ring-buffered log store) because it imports `Combine` and can't live in the kernel.
+- **`PlatformMac`** — macOS-only glue. Keychain, `networksetup` wrappers, `SMAppService`, `SCDynamicStore`-based VPN monitor, `NWPathMonitor`, `/etc/resolver/*` writer, helper XPC client, shell runner, first-run example-corp preset injection. It depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`, and is linked by the GUI app, `ConduitDaemon`, `ConduitUpdater`, `pm-sim`, `pm-vpn-check` and `pm-tls-check`. `pm-proxy` does not link it.
+- **`Conduit`** (app target) — SwiftUI GUI + `AppState`, the wiring layer that owns every `PlatformMac` concrete and passes protocol-typed references into the orchestrator. It declares `ProxyKernel`, `ProxyAuth`, `ProxyPAC`, `PlatformMac`, `ConduitShared` and `RuntimeEvents` directly. Also hosts `AppLogStore` (the `@MainActor` ring-buffered log store) because it imports `Combine` and can't live in the kernel.
 - **`ConduitHelper`** — privileged LaunchDaemon at `/Library/PrivilegedHelperTools/io.github.srps.Conduit.Helper`. Communicates with the app over a Unix-domain socket at `/var/run/io.github.srps.Conduit.Helper.sock` using the `ConduitShared` contract. Depends on the kernel for `UDPRelay` / `TCPRelay` implementations.
-- **Executables: `pm-proxy`, `pm-dns`, `pm-tunnel`, `pm-sim`, `pm-vpn-check`, `pm-auth-check`** — each is a narrow tool. `pm-proxy` is the flagship: it runs the full HTTP/SOCKS5/DNS/tunnel stack off `ProxyKernel + ProxyAuth + ProxyPAC` with no system-side effects (no Keychain, no `networksetup`, no `/etc/resolver`). `pm-sim` is the fault-injection harness used by CI.
+- **Executables: `pm-proxy`, `pm-dns`, `pm-tunnel`, `pm-sim`, `pm-vpn-check`, `pm-auth-check`** — each is a narrow tool. `pm-proxy` is the flagship: it runs the full HTTP/SOCKS5/DNS/tunnel stack off `ProxyKernel`, `ProxyAuth` and `ProxyPAC`, and declares `ProxyControlBridge` and `ConduitShared` for its control socket, with no system-side effects (no Keychain, no `networksetup`, no `/etc/resolver`). `pm-sim` is the fault-injection harness used by CI.
+- **`ConduitDaemon`** — the user-session daemon host (`DaemonRuntimeHost`) over `PlatformMac`, with the same platform-ownership rules as the app. It is not yet the production owner; the daemon milestones are in [ROADMAP](../ROADMAP.md).
+- **`ConduitUpdater`** — the nested Sparkle updater. It is the only target that links Sparkle; see the updater section below.
+- **`pmctl`** — command-line client for the control socket. It depends only on `ConduitShared`.
+- **`pm-tls-check`** — TLS-inspection diagnostic over `PlatformMac`.
 
 ## Kernel Internals
 
@@ -182,7 +240,7 @@ Notes:
 | `ConfigDiff.swift`           | Subsystem-level delta between two `ProxyConfig`s; the planned targeted reload will reuse this                          |
 | `ProxyStatus.swift`          | `ProxyRuntimeStatus`, `ProxyMetrics`, `DirectModeCause` — the runtime snapshot fields                                  |
 | `UpstreamProxy.swift`        | `Hashable` value type — the key for `CredentialProvider` conformers                                                    |
-| `RuntimeEvent.swift`         | Structured event kinds + `RuntimeEventLog` (NIO-safe ring buffer). See STYLE rule 3.                              |
+| `RuntimeEvent.swift`         | Structured event kinds + `RuntimeEventLog` (NIO-safe ring buffer). Optional typed `RuntimeEventPayload` (`typed`) for migrated `lifecycle.*` names; the legacy initializer refuses that namespace. See STYLE rule 3 and [`events.md`](./events.md#typed-lifecycle-payloads). |
 | `LogTypes.swift`             | `LogEntry`, `LogLevel`, `LogCategory` — consumed by every `LogSink` conformer                                          |
 | `TunnelResolverPort.swift`   | `TunnelResolverPort.port = 15053` — the one constant shared between kernel (`TunnelForwarder`) and PlatformMac (`TunnelResolverManager`) |
 
@@ -190,7 +248,7 @@ Notes:
 
 NIO handlers, the orchestrator, routing, and tunneling.
 
-- **`ProxyOrchestrator.swift`** (1.7k LOC, the largest file) — composes `LocalProxyServer`, `LocalDNSForwarder`, `TunnelForwarder`, `TransparentTCPProxy`, `TunnelDNSResponder`, `ConnectionPool`, `HealthChecker`, `AutoRecovery`, and `UpstreamProber` into one runtime. Takes `LogSink`, `CredentialProvider`, `PacEvaluator`, `PrivilegeClient`, `authenticatorProvider` — all protocol-typed; no `PlatformMac` concretes referenced. Exposes `configSnapshotProvider: @Sendable () -> ProxyConfig` — the one authoritative mirror of the live config, readable from any thread. **Two-tier snapshot emission** (added during the UI performance cleanup): state-transition callsites use `emitSnapshotImmediate()` (synchronous fire); per-request / per-connection / per-DNS-tick callsites use `emitSnapshotCoalesced()` (100 ms `DispatchSourceTimer` throttle). Counter-tier bursts collapse from N MainActor fan-outs/s to ≤10/s without changing what the UI shows (the `RuntimePresentationAdapter` re-coalesces published values at 1 Hz on top). State-transition emissions cancel pending coalesced flushes so there's no double-emit. See "Cross-target wiring" below.
+- **`ProxyOrchestrator.swift`** — composes `LocalProxyServer`, `LocalDNSForwarder`, `TunnelForwarder`, `TransparentTCPProxy`, `TunnelDNSResponder`, `ConnectionPool`, `HealthChecker`, `AutoRecovery`, and `UpstreamProber` into one runtime. Takes `LogSink`, `CredentialProvider`, `PacEvaluator`, `PrivilegeClient`, `authenticatorProvider` — all protocol-typed; no `PlatformMac` concretes referenced. Exposes `configSnapshotProvider: @Sendable () -> ProxyConfig` — the one authoritative mirror of the live config, readable from any thread. **Two-tier snapshot emission** (added during the UI performance cleanup): state-transition callsites use `emitSnapshotImmediate()` (synchronous fire); per-request / per-connection / per-DNS-tick callsites use `emitSnapshotCoalesced()` (100 ms `DispatchSourceTimer` throttle). Counter-tier bursts collapse from N MainActor fan-outs/s to ≤10/s without changing what the UI shows (the `RuntimePresentationAdapter` re-coalesces published values at 1 Hz on top). State-transition emissions cancel pending coalesced flushes so there's no double-emit. See "Cross-target wiring" below.
 - **`LocalProxyServer.swift`** — binds the HTTP proxy listener (default `127.0.0.1:3128`, configurable; gateway mode binds `0.0.0.0`). NIO pipeline: `ClientIPFilter?` → `HTTPRequestDecoder` → `HTTPResponseEncoder` → `HTTPProxyHandler`. Conforms to `RecoverableProxyService` so `AutoRecovery` can restart it.
 - **`HTTPProxyHandler.swift`** — per-request routing. Consults `NoProxyMatcher` (wildcards like `*.local`, `10.*`), `ForceProxy` overrides (e.g., `aka.ms` must always proxy), `PACRoutingEngine`, and `DirectConnectDetector` to decide direct vs upstream. Streams non-CONNECT requests through `ConnectionPool`.
 - **`CONNECTHandler.swift`** + **`ConnectionPool.swift`** — dedicated raw-TCP CONNECT tunnels through upstream proxies, with the 407 handshake done in raw bytes (not NIO's HTTP parser state, which would corrupt on the retry). `ConnectionPool` tracks Keep-Alive reuse, `authenticated` flag, stalled-reaper lifecycle, per-upstream failover, and max-connection limit. Configured upstream priority is user-owned: Settings exposes it as draggable top-to-bottom order, and reachability probes do not rewrite it.
@@ -378,7 +436,7 @@ Two factory methods coexist:
 
 ## Testing
 
-Tests live in `Tests/ConduitTests/` — 83 files, ~13k LOC, 1,100+ tests, 5 skipped, 0 failures as of the security-foundation batch.
+Tests live in `Tests/ConduitTests/`. Counts and skips are not recorded here: `swift test` and CI report the current run. The stage-1 runtime foundation's tests and focused evidence are listed in [`runtime-client-stage1-inventory.md`](./runtime-client-stage1-inventory.md).
 
 Coverage includes:
 
@@ -416,8 +474,9 @@ python3 scripts/check-kernel-imports.py
 python3 scripts/test-kernel-imports.py
 ```
 
-The allowlist is Foundation, Dispatch, NIO modules, Darwin/Glibc and
-`ConduitShared` for domain-name grammar. Attributed, scoped and conditional
+The allowlist is Foundation, Dispatch, NIO modules, Darwin/Glibc,
+`ConduitShared` (domain-name grammar) and `RuntimeEvents` (typed event values).
+`RuntimeEvents` itself may import Foundation only. Attributed, scoped and conditional
 imports are checked too. The Process scan conservatively includes literals and
 interpolations. The script fails if no Swift sources are found. Platform
 frameworks and machine side effects belong behind protocols in `ProxyAuth`,

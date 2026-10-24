@@ -241,8 +241,9 @@ final class LifecycleLaneModelTests: XCTestCase {
         let unresumed: Int
     }
 
-    /// Runs `history` on a fresh lane. Every path ends in the release, passing or
-    /// diverging, so no task outlives the history that made it.
+    /// Runs `history` on a fresh lane and attempts release on both passing and
+    /// diverging paths. Passing and injected-fault histories join their owned tasks;
+    /// a corrupt production continuation is reported as unresumed rather than awaited forever.
     private func replayHistory(
         _ history: [LifecycleCommand],
         fault: LifecycleFault?,

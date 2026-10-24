@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 implementation checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -66,7 +66,15 @@ production ownership/recovery (#48) remain independent obligations.
 
 ## Implementation evidence
 
-None yet. The target/control-owner migration has not started.
+Partial: the stage-1 foundation is implemented on this branch.
+
+- Targets in [`Package.swift`](../../Package.swift): `RuntimeEvents` and `ConduitShared` have no dependencies. `ProxyControlBridge` depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`. `ProxyKernel`, `PlatformMac`, the app and `ConduitDaemon` depend on `RuntimeEvents`.
+- Typed values: [`LifecycleEvents.swift`](../../Sources/RuntimeEvents/LifecycleEvents.swift) and [`RuntimeEventPayload.swift`](../../Sources/RuntimeEvents/RuntimeEventPayload.swift); the kernel carries them on `RuntimeEvent` ([`RuntimeEvent.swift`](../../Sources/ProxyKernel/Models/RuntimeEvent.swift)).
+- Exhaustive projection: [`RuntimeEventControlProjection.swift`](../../Sources/ProxyControlBridge/RuntimeEventControlProjection.swift) and [`RuntimeSnapshotControlProjection.swift`](../../Sources/ProxyControlBridge/RuntimeSnapshotControlProjection.swift), mapping onto the wire types in [`ControlRuntimeEventTyped.swift`](../../Sources/ConduitShared/ControlRuntimeEventTyped.swift).
+- Producers: [`LifecycleLane.swift`](../../Sources/PlatformMac/LifecycleLane.swift), the termination drain in [`AppState.swift`](../../Sources/Conduit/App/AppState.swift), and [`AppUpdates.swift`](../../Sources/PlatformMac/AppUpdates.swift) (`lifecycle.version_changed`).
+- Fences: [`check-kernel-imports.py`](../../scripts/check-kernel-imports.py) (ProxyKernel and RuntimeEvents) and [`check-event-catalogue.py`](../../scripts/check-event-catalogue.py) (closed `lifecycle.` namespace).
+
+Not implemented: `ConduitRuntime`, the RuntimeHost extraction, AppState or `DaemonRuntimeHost` adoption, and the lifecycle lane's isolation (stage 4). No running host serves the v2 values yet.
 
 Does not prove: production daemon ownership, real-session auth/PAC behavior or
 machine-side concurrency safety.

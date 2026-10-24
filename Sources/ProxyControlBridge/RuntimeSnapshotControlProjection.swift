@@ -9,8 +9,8 @@ import ConduitShared
 /// URL loses its query and fragment.
 ///
 /// The scalar snapshot is a read model of one orchestrator value. It is not the
-/// configuration: no `ProxyConfig` value reaches it, so no URL in the configuration
-/// can appear in its output.
+/// configuration: it never serializes a `ProxyConfig`. Runtime diagnostics may
+/// contain configuration-derived URLs; their query and fragment are redacted too.
 package enum RuntimeSnapshotControlProjection {
     /// The scalar snapshot for one kernel snapshot. Lists are referenced by the
     /// revisions in `collectionRevisions`, never inlined.
