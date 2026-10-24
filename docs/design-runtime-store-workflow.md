@@ -31,9 +31,13 @@ actor alone does not make an awaited operation atomic.
 
 Preserve the existing Settings repair baseline: a representable draft with an
 invalid listener port can be saved, reported and held from runtime apply. A
-non-blocking DNS/intercept problem does not become a proxy-start refusal. The
-current unadopted private bridge's full `validate()` gate is too broad for this
-workflow and needs correction before adoption.
+non-blocking DNS/intercept problem does not become a proxy-start refusal. At
+base `fd1491e` the unadopted private bridge no longer runs the full `validate()`
+gate. It refuses only what the wire cannot carry or an approved ceiling forbids,
+and it carries bounded editable Int port drafts through one private request. That
+is transport and storage, not runtime eligibility and not authority to run:
+schema-two staging decides what may be stored, and `startBlockingProblems` with the
+subsystem gates decide what may run.
 
 Format/resource admission and exact schema-two staging decide whether values can
 be stored. Existing `startBlockingProblems` and subsystem gates decide what may
@@ -65,10 +69,16 @@ writer/incarnation, intent generation, component and revision; it is not proof o
 power-loss durability. Keep content fingerprints private to the implementation,
 away from status/events/wire outcomes. An ordinal is correlation, not authentication.
 
-Bound self-write verification by the staged byte length plus one probe byte.
-This does not introduce a startup cap for platform/preferences sidecars or the
-journal. Keep staged bytes only through the active write/read-back verification
-that needs them, then release them. Compare authoritative read-back with the exact staged input; distinguish
+Bound runtime-file self-write read-back by `max(staged byte length, observed prior
+byte length)`, with the reader's single probe byte added by the reader itself and
+no second probe. The observed prior is what the pre-read reported, and both counts
+are within the approved 8 MiB budget. The bound must include the prior, because a
+write that throws and leaves a larger prior unchanged still has to read that prior
+back in full, so the result is verified not-persisted rather than unknown. The
+pre-read uses the approved budget as its ceiling, and the read-back bound never exceeds it. This does
+not introduce a startup cap for platform/preferences sidecars or the journal, which
+have no runtime-file budget here. Keep staged bytes only through the active
+write/read-back verification that needs them, then release them. Compare authoritative read-back with the exact staged input; distinguish
 verified persistence, verified non-persistence and unknown. A caller timeout or
 cancellation only detaches its wait. Started physical work and its lease survive
 until quiescent or process exit. Lease release also requires journal/runtime
@@ -143,9 +153,10 @@ it must be a deliberate tested refinement, not inferred from individual saved fl
 
 ## Verification and sequence
 
-Finish the bounded file boundary and precision correction, correct the bridge
-validation boundary without changing repair-draft behavior, then implement the
-physical store seam and its read-back outcome matrix. Add the sole leased writer,
+The bounded file boundary, the precision correction and the bridge validation
+boundary are done at base `fd1491e`. The physical store seam and its read-back
+outcome matrix come next, as one unwired building block with no startup or host
+adoption. Add the sole leased writer,
 intent/revision fencing and bounded metadata, followed by the client workflow and
 host adoption. Startup must acquire authority before migration/recovery, and every
 journal/configuration writer must participate before shipping lease enforcement.

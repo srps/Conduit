@@ -138,6 +138,8 @@ points beneath the root, or behavior on the owner's deployment storage. A reserv
 by the link, not its target. A store that writes a link-named file must write the
 resolved `path`, as the verification note records.
 
+The verified runtime-file replacement writes only the resolved `StateRootFile.path`. A symbolic-link config is therefore written at its target, and the link is kept. It refuses any role other than the runtime configuration, and any path outside the leased root, before I/O. The evidence is in [the verification note](../verification-runtime-file-replacement-2026-10-24.md), with no change to the root rules above.
+
 ## Open questions
 
 Revisit this decision if an actual workflow requires authoritative writable
