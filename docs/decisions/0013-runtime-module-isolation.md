@@ -76,6 +76,8 @@ Partial: the stage-1 foundation is implemented on this branch.
 
 The behavior-preserving extraction adds [`RuntimeHost.swift`](../../Sources/ConduitRuntime/RuntimeHost.swift) in `ConduitRuntime`, composed by [`ConduitDaemon.swift`](../../Sources/ConduitDaemon/ConduitDaemon.swift). The entry point injects process start time and terminal exit, preserving exit placement before lifecycle defer. [`NetworkPathObserving.swift`](../../Sources/PlatformMac/NetworkPathObserving.swift) keeps observer setup/lifecycle owner-confined, with callback values crossing via the delivery adapter and a fake in [`PlatformFakes.swift`](../../Sources/PlatformMac/PlatformFakes.swift). The migrated [`DaemonRuntimeHostTests.swift`](../../Tests/ConduitTests/DaemonRuntimeHostTests.swift) retains the FakeMachine suite and tests the new seams.
 
+The [host verification checkpoint](../verification-runtime-host-extraction-2026-10-24.md) records all 39 passing workflow-equivalent gates on an unchanged relevant-source fingerprint (2,509 tests, two skips; 85 simulator results and perf).
+
 Not implemented: AppState adoption, the in-memory client/stream engine and RuntimeActor isolation (stage 4). The updater does not depend on ConduitRuntime; no running host serves v2 yet.
 
 Does not prove: production daemon ownership, real-session auth/PAC behavior or
