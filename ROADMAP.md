@@ -108,7 +108,9 @@ not a requirement to finish every event or property test before extraction:
    Tunnels mean native-protocol local forwards: primary performance case64,
    hard ceiling128. Early schema-aware refusal precedes decoded object expansion;
    one active private body/decode and independent Stop/status capacity remain
-   adoption obligations. The limits are selected but not yet implemented. Open gates:
+   adoption obligations. String categories and legacy compatibility are completed in
+   [0022](./docs/decisions/0022-configuration-identity-path-and-host-bounds.md).
+   The limits are selected and under implementation; adoption remains pending. Open gates:
    measured memory/capacity/latency and complete writer coverage under
    the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
    listener handoff, and measured bounds and shutdown. Before adopting the

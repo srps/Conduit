@@ -22,6 +22,48 @@ limits remain design work, with explicit gates below. Authorization is not an
 implementation or real-machine validation claim. [ROADMAP](../ROADMAP.md) remains
 the queue.
 
+## Selected refinements and current evidence (2026-10-24)
+
+The private payload and canonical writer root are selected in0018/0020. The owner
+subsequently selected resource limits at update/startup/import boundaries in
+[0021](decisions/0021-bounded-configuration-at-all-boundaries.md), completed string
+categories and legacy-file compatibility in
+[0022](decisions/0022-configuration-identity-path-and-host-bounds.md), and selected
+schema2 exact persistence in
+[0023](decisions/0023-exact-schema-two-persistence.md). These records override earlier
+provisional/no-count/startup-unchanged assumptions in this working design.
+
+The profile caps DoH providers8, DNS servers/domain8, upstreams32, configured local
+tunnel forwards128 (primary performance case64), and DNS entries/intercepts/client/
+forced-proxy lists256. Existing bypass bounds remain. Display/identity strings are
+1024UTF-8 bytes, URLs16384, audit path1023, host/domain/address253 and wildcard
+intercept patterns255 with leading `*.`; retain stricter grammars. Keep the complete
+8MiB private frame and bound actual runtime-file reads at8MiB. Count disabled/raw
+stored values, reject before typed JSON expansion/save, and preserve rejected
+files. Legacy unknown fields and first-known-duplicate-wins semantics survive
+bounded filtering; private wire remains strict. One active private body/decode
+must leave Stop/status independent. No snapshot registry or chunking is selected.
+
+Schema2 stays. Fix whole-millisecond round trips; refuse a durable value that
+cannot reproduce required frozen runtime fields after bounded encode/decode.
+Private/domain values remain canonical seconds. No silent normalization/schema3.
+The alternatives and revisit triggers are in the records above.
+
+PR225 merged the unadopted layout/OS-lease primitives at1bb79b7; no shipping startup
+or persistence writer acquires them yet. PR226 merged diagnostic destination
+guards at e5156b2 after local/hosted checks; #222 is closed. The private codec/bridge
+is local and unadopted. Claude is implementing approved private resource bounds
+and exact persistence as separate reviewable slices using verified claude.ai Max;
+Codex reviews and verifies integration. No async client/store/admission engine,
+AppState adoption, RuntimeActor move or release readiness is claimed.
+
+Release scratch probes distinguish high-water RSS, current footprint and live
+allocator bytes. All-forms128-tunnel fixtures peaked17.3/21.0MB RSS; a separate
+staged-lifetime probe retained roughly1.1MB additional live allocator bytes with
+only final values, while RSS remained15.6/20.4MB. These are single-run synthetic
+codec observations, not active-listener, traffic, steady-app, busy-peer, exhaustive
+maximum or Stop-latency evidence. See the [sources and raw results](experiments/private-configuration-codec/README.md).
+
 ## Purpose and current constraints
 
 Daily use is stable. Reduce defects discovered during development by combining
@@ -49,7 +91,7 @@ The current sources establish several constraints:
   [RuntimePresentationAdapter](../Sources/Conduit/App/RuntimePresentationAdapter.swift).
   Reusing that thin status as the entire UI contract would lose behavior.
 - [RuntimeEvent](../Sources/ProxyKernel/Models/RuntimeEvent.swift) has string names
-  and details. A search on this checkout found 108 detail-matching expressions
+  and details. The initial inventory before the first typed-family migration found 108 detail-matching expressions
   across 47 simulator/test files; these are migration inventory, not 108 proven bugs.
 - AppState persists config, platform integration and UI preferences in separate
   writes. They are not one atomic transaction. #182 versions the platform-state
@@ -720,8 +762,9 @@ for their affected slices, not blockers to independent work:
 
 | Choice | Recommendation or remaining owner choice | Consequence |
 | --- | --- | --- |
-| Config payload — selected; budgets open | One private explicit request with full frozen values; neutral SecretBytes in ConduitShared; sole injected store app-owned now and daemon-owned later ([0018](decisions/0018-private-configuration-request.md)) | Save, runtime admission and apply remain distinct; frame/total/decode limits and exact required-component handling still need evidence; no snapshot registry |
+| Config payload and domain bounds — selected; adoption evidence open | One private explicit request with full frozen values; neutral SecretBytes in ConduitShared; sole injected store app-owned now and daemon-owned later ([0018](decisions/0018-private-configuration-request.md)) | Save, runtime admission and apply remain distinct;0021/0022 select frame/domain/startup limits and legacy compatibility, with actual admission/copy/latency evidence still due; no snapshot registry |
 | Writer lifetime at relaunch/update — selected | Exclusive OS-backed state-directory writer lease; busy hosts refuse runtime startup and reconciliation; keep authority until write quiescence or exit ([0017](./decisions/0017-exclusive-state-directory-writer.md)) | No snapshot registry or new generation schema selected; legacy releases still require old-process-exit handoff; implementation/upgrade validation remain due |
+| Persistence precision — selected | Keep schema2 and refuse inexact saves; fix safe whole-unit conversions ([0023](decisions/0023-exact-schema-two-persistence.md)) | Implementation/read-back/physical-writer evidence remains due; no schema3 migration or silent normalization |
 | Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
 | Follow-up release scope | Keep full control-owner isolation in the 0.6 core; decide the bounded #194 applied-state slice, with full scheduler/leases separately scoped | Selected module/isolation shape does not silently expand the remaining release scope |
 | Resource and shutdown limits | Size frame/page/queue/retention bounds and a total shutdown budget including helper calls and manager locks | Provisional numbers above are review inputs, not validated shipping defaults |
