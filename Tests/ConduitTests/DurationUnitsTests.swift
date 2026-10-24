@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import NIOCore
 import XCTest
 @testable import ProxyKernel
 
@@ -100,6 +101,76 @@ final class DurationUnitsTests: XCTestCase {
         XCTAssertEqual(DurationUnits.nearestMilliseconds(.nan), 0)
         XCTAssertEqual(DurationUnits.nearestMinutes(300), 5)
         XCTAssertEqual(DurationUnits.nearestMinutes(.infinity), Int(Int64.max))
+    }
+
+    // MARK: - Connect budget and its adaptive ceiling
+
+    /// The literal arithmetic, worked by hand: 2^63 - 1 nanoseconds is 9_223_372_036_854_775_807.
+    /// Divided by 10^6 that is 9_223_372_036_854 ms; divided by 8 it is 1_152_921_504_606.75,
+    /// so the largest budget is 1_152_921_504_606 ms. Its ceiling is 9_223_372_036_848 ms,
+    /// which is 9_223_372_036_848_000_000 ns.
+    func testDerivedBudgetLimitAndFactorAreTheLiteralArithmetic() {
+        XCTAssertEqual(DurationUnits.adaptiveCeilingFactor, 8)
+        XCTAssertEqual(DurationUnits.maxConnectBudgetMilliseconds, 1_152_921_504_606)
+        XCTAssertEqual(DurationUnits.adaptiveCeilingMilliseconds(1_152_921_504_606), 9_223_372_036_848)
+        XCTAssertLessThanOrEqual(9_223_372_036_848_000_000, Int64.max)
+        // One millisecond more would put the ceiling past Int64.max nanoseconds. Double, so the test itself cannot trap.
+        XCTAssertGreaterThan(Double(1_152_921_504_607) * 8 * 1_000_000, Double(Int64.max))
+    }
+
+    /// Largest accepted and first rejected budget, for both the integer and the seconds input.
+    /// The seconds literals are the nearest Double to the decimal text, so the conversion's rounding
+    /// is the thing under test, not the expectation.
+    func testLargestAcceptedAndFirstRejectedBudgetForNonNilInput() {
+        XCTAssertEqual(DurationUnits.connectBudgetMilliseconds(1_152_921_504_606), 1_152_921_504_606)
+        XCTAssertNil(DurationUnits.connectBudgetMilliseconds(1_152_921_504_607))
+        XCTAssertEqual(DurationUnits.checkedMilliseconds(1_152_921_504.606), 1_152_921_504_606)
+        XCTAssertNil(DurationUnits.checkedMilliseconds(1_152_921_504.607))
+    }
+
+    /// Zero and sub-millisecond values take the one-millisecond floor `ConnectionPool` already applies,
+    /// so a setting that rounds to zero never becomes a budget that expires before a connect can answer.
+    func testZeroAndSubMillisecondBudgetsFloorToOneMillisecond() {
+        XCTAssertEqual(DurationUnits.connectBudgetMilliseconds(0), 1)
+        XCTAssertEqual(DurationUnits.connectBudgetMilliseconds(1), 1)
+        XCTAssertEqual(DurationUnits.checkedMilliseconds(0), 1)
+        XCTAssertEqual(DurationUnits.checkedMilliseconds(-0.0), 1)
+        XCTAssertEqual(DurationUnits.checkedMilliseconds(0.0004), 1, "0.4 ms rounds to zero, so it takes the floor")
+        XCTAssertEqual(DurationUnits.checkedMilliseconds(0.0016), 2, "1.6 ms rounds to the nearest whole millisecond")
+    }
+
+    /// Negative and out-of-range values have no budget. Each is refused rather than latched or saturated.
+    func testNegativeAndOverflowingBudgetsAreRefused() {
+        XCTAssertNil(DurationUnits.connectBudgetMilliseconds(-1))
+        XCTAssertNil(DurationUnits.connectBudgetMilliseconds(Int64.min))
+        XCTAssertNil(DurationUnits.connectBudgetMilliseconds(Int64.max))
+        XCTAssertNil(DurationUnits.checkedMilliseconds(-0.001))
+        XCTAssertNil(DurationUnits.checkedMilliseconds(-1))
+        XCTAssertNil(DurationUnits.checkedMilliseconds(1e10))
+        XCTAssertNil(DurationUnits.checkedMilliseconds(.infinity))
+        XCTAssertNil(DurationUnits.checkedMilliseconds(.greatestFiniteMagnitude))
+    }
+
+    /// Every admitted budget and its adaptive ceiling reach `TimeAmount.milliseconds` as the
+    /// nanosecond count the multiplication gives. NIO would saturate a value past `Int64.max`
+    /// without trapping, so this is what keeps the configured ceiling the one that runs.
+    func testEveryAdmittedBudgetAndItsCeilingConvertToNIOWithoutSaturation() {
+        var generator = SeededGenerator(seed: 0x4004)
+        var budgets: [Int64] = [1, 2, 1_000, 1_152_921_504_605, 1_152_921_504_606]
+        budgets += (0..<5_000).map { _ in Int64.random(in: 1...1_152_921_504_606, using: &generator) }
+        for budget in budgets {
+            let ceiling = DurationUnits.adaptiveCeilingMilliseconds(budget)
+            XCTAssertEqual(ceiling, budget * 8, "the ceiling is the base times eight")
+            XCTAssertEqual(TimeAmount.milliseconds(budget).nanoseconds, budget * 1_000_000)
+            XCTAssertEqual(TimeAmount.milliseconds(ceiling).nanoseconds, ceiling * 1_000_000)
+        }
+    }
+
+    /// The first refused budget's ceiling is past `Int64.max` nanoseconds. NIO would saturate it
+    /// to `Int64.max` without trapping, which is the silent substitution the derived limit prevents.
+    func testFirstRefusedBudgetsCeilingWouldSaturateInNIO() {
+        let firstRefused: Int64 = 1_152_921_504_607
+        XCTAssertEqual(TimeAmount.milliseconds(firstRefused * 8).nanoseconds, Int64.max)
     }
 
     // MARK: - Seeded properties

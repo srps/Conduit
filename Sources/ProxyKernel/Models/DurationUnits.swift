@@ -35,13 +35,55 @@ package enum DurationUnits {
         return whole
     }
 
-    /// Whole milliseconds, nearest, for a consumer that takes milliseconds (the
-    /// direct-connect budget). Nil when the runtime cannot hold the duration, so
-    /// the consumer refuses rather than trapping. Within the nanosecond range the
-    /// millisecond value is in range too.
+    /// The factor by which a host's adaptive connect timeout may grow past its
+    /// base: the detector doubles on each failure and holds at `base * factor`.
+    /// This is the only copy of the number; the ceiling and the budget limit below
+    /// both derive from it.
+    package static let adaptiveCeilingFactor: Int64 = 8
+
+    /// The largest connect budget, in whole milliseconds, the runtime holds. The
+    /// adaptive ceiling reaches NIO as a `TimeAmount`, and NIO saturates a
+    /// nanosecond count past `Int64.max` instead of trapping, so a larger budget
+    /// would run with a ceiling nobody configured. The limit is `Int64.max`
+    /// nanoseconds, in milliseconds, divided by the factor and rounded down: the
+    /// largest budget whose ceiling still converts exactly.
+    package static let maxConnectBudgetMilliseconds: Int64 = Int64.max / 1_000_000 / adaptiveCeilingFactor
+
+    /// Whole milliseconds for the connect budget, for a consumer that takes
+    /// milliseconds (the direct-connect probe). Nil when the value is not finite,
+    /// is negative, or is past `maxConnectBudgetMilliseconds`, so the consumer
+    /// refuses rather than trapping or saturating. A positive value under half a
+    /// millisecond rounds to zero and takes the one-millisecond floor; see
+    /// `connectBudgetMilliseconds`.
     package static func checkedMilliseconds(_ seconds: TimeInterval) -> Int64? {
-        guard nanoseconds(seconds) != nil else { return nil }
-        return Int64((seconds * 1_000).rounded())
+        guard seconds.isFinite, seconds >= 0 else { return nil }
+        let scaled = (seconds * 1_000).rounded()
+        guard scaled < integerLimit else { return nil }
+        return connectBudgetMilliseconds(Int64(scaled))
+    }
+
+    /// The connect budget an integer millisecond count denotes, or nil when the
+    /// runtime cannot hold it: negative, or past `maxConnectBudgetMilliseconds`.
+    /// Zero is raised to one millisecond. That is the floor `ConnectionPool`
+    /// already applies to the same setting (`max(…, 1_000_000)` nanoseconds), so a
+    /// zero or sub-millisecond setting is never a zero budget, which would expire
+    /// before any connect could answer. The detector admits every reading through
+    /// this before it can latch, so an injected value gets the same answer as a
+    /// configured one.
+    package static func connectBudgetMilliseconds(_ milliseconds: Int64) -> Int64? {
+        guard (0...maxConnectBudgetMilliseconds).contains(milliseconds) else { return nil }
+        return max(milliseconds, 1)
+    }
+
+    /// The adaptive ceiling of an admitted connect budget, in milliseconds. Its
+    /// nanoseconds fit an `Int64` by the derivation of `maxConnectBudgetMilliseconds`,
+    /// so NIO converts it exactly. A value that was not admitted is a bug in the
+    /// gate, and it traps, as `runtimeNanoseconds` does.
+    package static func adaptiveCeilingMilliseconds(_ budget: Int64) -> Int64 {
+        guard (0...maxConnectBudgetMilliseconds).contains(budget) else {
+            preconditionFailure("A connect budget the runtime did not admit reached its adaptive ceiling.")
+        }
+        return budget * adaptiveCeilingFactor
     }
 
     /// Whole milliseconds that the schema-two file decodes back to exactly

@@ -7,8 +7,9 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
     case invalidPort(field: String, value: Int)
     case invalidLimit(field: String, value: Int, min: Int)
     case invalidDuration(field: String, value: TimeInterval)
-    /// NaN, an infinity, or a finite value past the nanosecond range the runtime
-    /// converts to. Named by field only: the value is not echoed.
+    /// NaN, an infinity, or a finite value past the range the runtime holds for
+    /// that field (the nanosecond range, or for the connect budget, its tighter
+    /// budget range). Named by field only: the value is not echoed.
     case unrepresentableDuration(field: String)
     case invalidHost(field: String, value: String)
     /// An intercept pattern whose derived resolver domain is unusable. Carries
@@ -174,10 +175,21 @@ package enum RuntimeDurationField: CaseIterable, Sendable {
         }
     }
 
-    /// Whether the runtime holds `seconds` in its nanosecond integer. The one
-    /// representability predicate: validation and the save both ask it.
-    package static func isRuntimeRepresentable(_ seconds: TimeInterval) -> Bool {
-        DurationUnits.nanoseconds(seconds) != nil
+    /// Whether the runtime holds `seconds` for this field. Every duration needs
+    /// its nanosecond integer. `connectionCheckTimeout` is also the direct-connect
+    /// budget, which the probe holds in whole milliseconds with an adaptive
+    /// ceiling, so it must pass that narrower bound too. This is the one
+    /// predicate: validation and the save refusal (through
+    /// `firstUnrepresentableDuration`) both ask it.
+    package func isRepresentable(_ seconds: TimeInterval) -> Bool {
+        guard DurationUnits.nanoseconds(seconds) != nil else { return false }
+        switch self {
+        case .connectionCheckTimeout:
+            // A negative value is a sign error that `validateNonNegative` reports, not a range error.
+            return seconds < 0 || DurationUnits.checkedMilliseconds(seconds) != nil
+        default:
+            return true
+        }
     }
 }
 
@@ -229,7 +241,7 @@ extension ProxyConfig {
     package func firstUnrepresentableDuration<Fields: Sequence>(among fields: Fields) -> RuntimeDurationField?
         where Fields.Element == RuntimeDurationField
     {
-        fields.first(where: { !RuntimeDurationField.isRuntimeRepresentable($0.seconds(in: self)) })
+        fields.first(where: { !$0.isRepresentable($0.seconds(in: self)) })
     }
 
     /// The first duration in the whole inventory the runtime cannot hold, or nil.
@@ -466,11 +478,11 @@ extension ProxyConfig {
     }
 
     /// Records `unrepresentableDuration` and returns false for NaN, an infinity,
-    /// or a finite value the runtime's nanosecond integer cannot hold. Every
-    /// duration check below runs this first, so no comparison sees a NaN (which
-    /// is false against every bound) and no consumer converts an out-of-range value.
+    /// or a finite value the field's runtime range cannot hold. Every duration
+    /// check below runs this first, so no comparison sees a NaN (which is false
+    /// against every bound) and no consumer converts an out-of-range value.
     private func isRepresentableDuration(_ field: RuntimeDurationField, into errors: inout [ConfigValidationError]) -> Bool {
-        guard RuntimeDurationField.isRuntimeRepresentable(field.seconds(in: self)) else {
+        guard field.isRepresentable(field.seconds(in: self)) else {
             errors.append(.unrepresentableDuration(field: field.path))
             return false
         }

@@ -167,9 +167,11 @@ package final class DirectConnectDetector: @unchecked Sendable {
         eventSink: (@Sendable (RuntimeEvent) -> Void)? = nil
     ) {
         // A provider, when given, replaces the fixed `baseTimeoutMS`. Either way the budget
-        // is read now, and a valid value latches; an invalid one is read again when a probe
-        // needs it, so a later correction is admitted.
-        let source: @Sendable () -> Int64? = baseTimeoutProvider ?? { baseTimeoutMS }
+        // is read now. A reading latches only once it is admitted by `DurationUnits`: a
+        // negative or out-of-range value is refused like a missing one, and it is read again
+        // when a probe needs it, so a later correction is admitted.
+        let provider: @Sendable () -> Int64? = baseTimeoutProvider ?? { baseTimeoutMS }
+        let source: @Sendable () -> Int64? = { provider().flatMap(DurationUnits.connectBudgetMilliseconds) }
         self.baseTimeoutSource = source
         self.latchedBaseTimeoutMS = source()
         self.group = group
@@ -200,7 +202,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
     }
 
     /// The connect timeout the next probe of `host:port` gets: the base,
-    /// doubled after each consecutive failure up to eight times the base.
+    /// doubled after each consecutive failure up to `DurationUnits.adaptiveCeilingFactor` times the base.
     package func probeTimeoutMS(host: String, port: Int, gatewayMode: Bool) -> Int64? {
         let key = Self.cacheKey(host: host, port: port, gatewayMode: gatewayMode)
         if let perHost = lock.withLock({ hostTimeouts[key] }) { return perHost }
@@ -281,7 +283,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
             reportBlocked(host: host, port: port, kind: .strictHint, reason: .budgetRefused)
             return .budgetRefused
         }
-        let ceiling = base * 8
+        let ceiling = DurationUnits.adaptiveCeilingMilliseconds(base)
         let key = host.lowercased()
         let cooldown = Self.strictHintCooldown
         let admission = lock.withLock { () -> StrictHintProbe in
@@ -549,7 +551,7 @@ package final class DirectConnectDetector: @unchecked Sendable {
         cache[key] = CacheEntry(reachable: reachable, checkedAt: .now)
         // A probe runs only with a latched budget, so this adapts only then.
         if let base = latchedBaseTimeoutMS {
-            let ceiling = base * 8
+            let ceiling = DurationUnits.adaptiveCeilingMilliseconds(base)
             if reachable {
                 hostTimeouts[key] = base
             } else {
