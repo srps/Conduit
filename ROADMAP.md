@@ -119,6 +119,10 @@ not a requirement to finish every event or property test before extraction:
    refusal with schema evolution and records revisit triggers. The owner selected schema2 and explicit refusal of inexact saves in
    [0023](./docs/decisions/0023-exact-schema-two-persistence.md); fix whole-millisecond
    round trips and safe conversion before adoption. No schema3 migration is selected.
+   Integration also requires [cohesive ownership](./docs/design-runtime-host-contract.md#cohesion-and-implementation-ownership):
+   consolidate parallel kernel/private resource walks, reuse policy across file/wire
+   boundaries, and keep exact representation and commit coordination out of host
+   adapters. Shared constants and parity tests do not complete that requirement.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move keeps MainActor and current policy. Extract `RuntimeHost` from

@@ -171,6 +171,38 @@ runtime or dedicated thread: each host still owns its bounded resources. Splitti
 kernel modules or subsystem actors follows demonstrated state/dependency seams
 and measured contention; it is not required up front or a cost-free later change.
 
+## Cohesion and implementation ownership
+
+Owner clarification (2026-10-24): this convergence must remove competing policy
+paths, not merely put similar implementations behind different interfaces. Deep,
+focused modules should hide their decisions and expose the small operations their
+callers need. A new protocol is justified by a real representation or execution
+boundary; splitting files alone does not establish one.
+
+| Concern | Authoritative owner | Boundary responsibility |
+| --- | --- | --- |
+| Resource ceilings, decoded string measurement and canonical bypass-list width | Neutral configuration resource policy in ConduitShared | Typed kernel and private values expose their existing storage without eagerly copying lists or revealing private URL values. Byte scanners enforce that policy before allocating decoded values. |
+| Runtime configuration semantics | ProxyKernel configuration validation | File and control adapters call it; they do not reimplement runtime eligibility. |
+| File grammar, schema compatibility and exact representability | Configuration persistence boundary | One bounded runtime-file reader/decoder serves startup, reload and import; schema-two units and read-back equality stay out of RuntimeHost and wire codecs. |
+| Save-before-apply, component receipts and writer lifetime | The injected configuration workflow/store | App-owned during convergence, daemon-owned later. Hosts consume verified frozen inputs; AppState presents errors and edits drafts. |
+| Runtime command admission, ordering, fences and settlement | ConduitRuntime | In-memory and future socket transports adapt to the same engine. Stop/Quit retain their selected independent paths. |
+| Producer events and client projection | RuntimeEvents and ProxyControlBridge respectively | Exhaustive projections translate domain values; adapters do not infer state from diagnostic strings. |
+
+Distinct file and wire grammars are necessary: legacy files retain ignored unknown
+fields and first-duplicate-wins compatibility, whereas private requests are strict.
+That difference must not create independent resource-limit or duration policies.
+Repeated checks at independent trust boundaries may be necessary; each should
+invoke the same policy rather than maintain another copy of its rules.
+
+Before integration, review each slice for duplicated field walks, implicit copies,
+and policy added to AppState. The current resource slice has two parallel typed
+walks; their consolidation is an open implementation task, not completed by the
+shared constants or parity tests. The exact-save correction needs an explicit
+migration into the sole shared workflow, without introducing another coordinator.
+Tests should exercise the real adapters against independent expected outcomes and
+models, including refusal before side effects; they should not merely compare two
+copies of production policy.
+
 ## Client, commands and outcomes
 
 Illustrative names below describe the intended shape; these snippets are not
