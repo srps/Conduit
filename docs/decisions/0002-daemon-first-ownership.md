@@ -37,7 +37,7 @@ The proxy runtime runs inside the SwiftUI app. An AppKit termination, force-quit
 
 ## Implementation evidence
 
-- [`ConduitDaemon`](../../Sources/ConduitDaemon/ConduitDaemon.swift) and [`DaemonRuntimeHost`](../../Sources/ConduitDaemon/DaemonRuntimeHost.swift) host the runtime over the same managers as the app.
+- [`ConduitDaemon`](../../Sources/ConduitDaemon/ConduitDaemon.swift) and [`DaemonRuntimeHost`](../../Sources/ConduitRuntime/RuntimeHost.swift) host the runtime over the same managers as the app.
 - [`ControlProtocol`](../../Sources/ConduitShared/ControlProtocol.swift), [`DaemonClient`](../../Sources/ConduitShared/DaemonClient.swift) and [`pmctl`](../../Sources/pmctl/PMCtl.swift) exist; [`ControlProtocolTests`](../../Tests/ConduitTests/ControlProtocolTests.swift) and [`DaemonRuntimeHostTests`](../../Tests/ConduitTests/DaemonRuntimeHostTests.swift) cover them over `FakeMachine`.
 - ROADMAP Next 1 and 2 are partial; Next 3 (the app adopts the client) has not started.
 

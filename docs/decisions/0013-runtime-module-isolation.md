@@ -74,7 +74,9 @@ Partial: the stage-1 foundation is implemented on this branch.
 - Producers: [`LifecycleLane.swift`](../../Sources/PlatformMac/LifecycleLane.swift), the termination drain in [`AppState.swift`](../../Sources/Conduit/App/AppState.swift), and [`AppUpdates.swift`](../../Sources/PlatformMac/AppUpdates.swift) (`lifecycle.version_changed`).
 - Fences: [`check-kernel-imports.py`](../../scripts/check-kernel-imports.py) (ProxyKernel and RuntimeEvents) and [`check-event-catalogue.py`](../../scripts/check-event-catalogue.py) (closed `lifecycle.` namespace).
 
-Not implemented: `ConduitRuntime`, the RuntimeHost extraction, AppState or `DaemonRuntimeHost` adoption, and the lifecycle lane's isolation (stage 4). No running host serves the v2 values yet.
+The behavior-preserving extraction adds [`RuntimeHost.swift`](../../Sources/ConduitRuntime/RuntimeHost.swift) in `ConduitRuntime`, composed by [`ConduitDaemon.swift`](../../Sources/ConduitDaemon/ConduitDaemon.swift). The entry point injects process start time and terminal exit, preserving exit placement before lifecycle defer. [`NetworkPathObserving.swift`](../../Sources/PlatformMac/NetworkPathObserving.swift) keeps observer setup/lifecycle owner-confined, with callback values crossing via the delivery adapter and a fake in [`PlatformFakes.swift`](../../Sources/PlatformMac/PlatformFakes.swift). The migrated [`DaemonRuntimeHostTests.swift`](../../Tests/ConduitTests/DaemonRuntimeHostTests.swift) retains the FakeMachine suite and tests the new seams.
+
+Not implemented: AppState adoption, the in-memory client/stream engine and RuntimeActor isolation (stage 4). The updater does not depend on ConduitRuntime; no running host serves v2 yet.
 
 Does not prove: production daemon ownership, real-session auth/PAC behavior or
 machine-side concurrency safety.

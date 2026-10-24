@@ -1,7 +1,7 @@
 # Shared runtime contracts and host: owner review draft
 
 Date: 2026-10-24. Status: **selected architecture; staged implementation authorized**.
-Implementation status: the stage-1 foundation (typed lifecycle events, control value types and codec, the `RuntimeClient` protocol) is implemented on this branch. No `ConduitRuntime` target, in-memory client or production v2 socket exists yet. See the [stage-1 inventory](./runtime-client-stage1-inventory.md).
+Implementation status: the stage-1 foundation (typed lifecycle events, control value types and codec, the `RuntimeClient` protocol) is implemented on this branch. `ConduitRuntime` now holds the mechanically extracted RuntimeHost on this branch; an in-memory client, AppState adoption and production v2 socket remain pending. See the [stage-1 inventory](./runtime-client-stage1-inventory.md).
 
 Prepared by Codex with Claude Code architecture and persistence-policy review,
 using the owner's `claude.ai` Max subscription. The owner selected the module and
@@ -33,7 +33,7 @@ before extraction.
 The current sources establish several constraints:
 
 - [AppState](../Sources/Conduit/App/AppState.swift) and
-  [DaemonRuntimeHost](../Sources/ConduitDaemon/DaemonRuntimeHost.swift) are separate
+  [RuntimeHost](../Sources/ConduitRuntime/RuntimeHost.swift) are separate
   main-actor runtime hosts. The existing daemon is not the installed production
   owner and has no production control server.
 - [ProxyOrchestrator](../Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift),
@@ -372,7 +372,7 @@ package enum LifecycleEvent: Codable, Sendable, Equatable {
 
 The implemented family is in [`LifecycleEvents.swift`](../Sources/RuntimeEvents/LifecycleEvents.swift),
 with its wire layout and bounds in [`events.md`](./events.md#typed-lifecycle-payloads). It types
-all four `lifecycle.*` names in the working tree. The other families stay legacy.
+all four `lifecycle.*` names in the foundation. The other families stay legacy.
 
 Credentials, cookies, authorization headers and SecretBytes never enter Codable
 event values. Diagnostic text/targets use deliberately sanitized representations;

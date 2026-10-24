@@ -26,7 +26,7 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
 warning, and the Overview "active" counter no longer repeats the word.
 
-Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has a foundation implemented on this branch: typed `lifecycle.*` events, the v2 control value codec and snapshot projection, and the `RuntimeClient` protocol. It has no in-memory client, admission or subscription engine, production v2 socket, `ConduitRuntime` target or AppState adoption. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
+Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has a foundation implemented on this branch: typed `lifecycle.*` events, the v2 control value codec and snapshot projection, and the `RuntimeClient` protocol. It has no in-memory client, admission or subscription engine, production v2 socket or AppState adoption. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
 
 0.5.7 shipped on 2026-10-22. The #205 Settings commit paths (Return, Apply,
 section close, quit with an invalid port) passed the owner's check in a `--dev`
@@ -98,7 +98,9 @@ not a requirement to finish every event or property test before extraction:
    is planned. Open owner gates: config
    projection and coupling, listener handoff, and measured
    bounds and shutdown.
-2. **Stage 2 — extract the shared host.** Extract `RuntimeHost` from
+2. **Stage 2 — extract the shared host.** Branch checkpoint: `RuntimeHost` now lives
+   in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
+   The move keeps MainActor and current policy. Extract `RuntimeHost` from
    `DaemonRuntimeHost` with no policy change. Retain the daemon fake-machine
    suite and explicit composition dependencies. The owner selected ConduitRuntime
    for the host and an event-only RuntimeEvents target; control values/client/
