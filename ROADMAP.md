@@ -131,7 +131,11 @@ not a requirement to finish every event or property test before extraction:
    and first-key-wins remain. The shared strict cursor and fixed-cap regular-file
    reader are committed locally, with 537 focused tests passing before caller
    adoption. The file filter and startup/import integration are in progress;
-   preservation of rejected originals remains an adoption gate. Exact schema-two
+   preservation of rejected originals remains an adoption gate. The next store/client
+   [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
+   and separates storage from runtime eligibility. Owner review is pending on
+   holding a mixed runtime/platform apply after partial persistence; implement
+   neither affected apply policy until that answer. Exact schema-two
    staging and safe duration conversions are also committed locally, with 440
    focused tests before integration. These counts do not establish a verified
    asynchronous store, read-back receipts, writer coverage or release readiness.
