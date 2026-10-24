@@ -111,15 +111,14 @@ mutation. Fingerprints are identity checks, not writer authority. Read-before-wr
 checks may detect an external edit but cannot exclude a nonparticipating editor
 racing the replacement; the advisory lease excludes cooperating writers only.
 
-**Open owner decision: edits by other programs.** If a file changes after the store
-verified its baseline, should an ordinary save refuse the stale draft or overwrite
-the changed file? The recommendation under review is a private exact-byte
-baseline check before replacement: preserve the changed file and draft, hold the
-new apply, and require explicit reload/review. Formatting-only edits would also
-conflict. The alternative retains legacy overwrite authority and can lose manual
-edits. This is a pending policy choice, not an implemented expected-prior check
-or a filesystem compare-and-swap guarantee. Stop/Quit keep their selected
-exceptions. No receipt or current API is claimed to have settled this choice.
+**Selected conflict policy:** [0027](decisions/0027-refuse-external-configuration-edits.md)
+requires an ordinary save to refuse observed byte changes since the verified
+baseline, preserving the file/draft and holding the new apply until explicit
+reload/review. Formatting-only edits conflict. A failed pre-read cannot authorize
+a replacement. Reload uses the same owner and cannot bypass eligibility or
+Stop/shutdown fences. This is a planned store check, not filesystem compare-and-swap;
+nonparticipating editors can still race after it. The owner selected this over
+legacy overwrite authority on 2026-10-24.
 
 ## Apply granularity: whole mixed unit selected
 
@@ -167,7 +166,7 @@ it must be a deliberate tested refinement, not inferred from individual saved fl
 The runtime boundary, exact schema-two staging and bridge correction merged in
 PR #228; the runtime physical replacement seam/model merged in PR #229. The
 shared sidecar boundary merged in PR #230. These are building blocks, not the async
-store. Settle the external-edit policy before its affected expected-prior check.
+store. Implement the selected external-edit check (0027) alongside expected-prior revisions.
 Add the sole leased writer,
 intent/revision fencing and bounded metadata, followed by the client workflow and
 host adoption. Startup must acquire authority before migration/recovery, and every

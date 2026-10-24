@@ -2,7 +2,7 @@
 
 Checkpoint: 2026-10-24, before AppState adopts the client. This is an inventory and
 measurement plan, not an additional accepted decision or a claim of release
-completion. Decisions 0013–0026 record the selected shapes and separate implementation status.
+completion. Decisions 0013–0027 record the selected shapes and separate implementation status.
 
 ## Implementation status
 
@@ -37,7 +37,8 @@ Not selected: ordinary v2 frame/page/queue/retention limits. The v1 16 KiB frame
 Open gates: verified component receipts and the selected mixed-apply gate (0025),
 complete writer adoption under the selected canonical root (0020), listener
 handoff, measured admission/capacity/latency and total shutdown. External-file
-edit conflicts remain an owner decision before expected-prior store checks. No
+edit conflicts must refuse ordinary saves pending explicit reload/review (0027);
+the expected-prior store check remains planned. No
 registry is selected. Runtime and sidecar input/staging boundaries merged in
 PR #228/#230; the runtime replacement/read-back primitive/model merged in PR #229.
 These foundations are not the asynchronous store.

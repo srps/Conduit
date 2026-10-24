@@ -146,7 +146,9 @@ not a requirement to finish every event or property test before extraction:
    [0025](./docs/decisions/0025-hold-mixed-configuration-apply.md); the gate remains
    planned, with independent effect groups deferred. Exact schema-two
    staging and safe duration conversions merged in PR #228. External-file edit
-   conflict behavior remains an owner decision before expected-prior store checks.
+   conflicts must refuse ordinary saves pending explicit reload/review under
+   [0027](./docs/decisions/0027-refuse-external-configuration-edits.md); the check
+   remains planned with the store.
    These counts do not establish a verified
    asynchronous store, read-back receipts, writer coverage or release readiness.
    The owner selected a 128 KiB cap for each platform/preferences sidecar with the
