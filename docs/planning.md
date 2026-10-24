@@ -375,3 +375,16 @@ contract; verbose logs are a secondary view.
 Changing this scope requires recording the product need, alternatives, maintenance
 cost, validation plan, and effect on the daily-driver queue here. Historical
 research or a language-learning preference does not create an implementation track.
+
+
+## Shared-runtime refinement checkpoint, 2026-10-24
+
+The owner selected resource/startup limits and legacy compatibility (decisions
+0021/0022), and schema2 exact committed durations with explicit refusal rather
+than silent normalization (0023). The [current contract checkpoint](design-runtime-host-contract.md#selected-refinements-and-current-evidence-2026-10-24)
+links the authoritative records, alternatives and probe limits. Frame/domain
+budgets are now selected; actual global private admission, control responsiveness,
+write quiescence and total shutdown remain implementation/verification work.
+The lease/layout foundation and diagnostic guard merged in225/226; the former
+is not adopted by a shipping writer. Private codec/resource and precision slices
+remain under implementation. ROADMAP remains the execution queue.

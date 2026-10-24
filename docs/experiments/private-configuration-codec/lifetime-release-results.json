@@ -1,0 +1,14 @@
+[
+  {
+    "kind": "supported",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=3.7958e-05 peakRSSBytes=6127616 residentBytes=6176768 physicalFootprintBytes=1622376 mallocInUseBytes=89248\nframeBytes=730811\nstage=sender-overlap seconds=0.040276166 peakRSSBytes=11567104 residentBytes=11567104 physicalFootprintBytes=5243360 mallocInUseBytes=1443392\nstage=wire-only seconds=0.040336666 peakRSSBytes=11567104 residentBytes=11567104 physicalFootprintBytes=5243360 mallocInUseBytes=921056\nstage=receiver-body-only seconds=0.13601325 peakRSSBytes=13385728 residentBytes=13385728 physicalFootprintBytes=6259192 mallocInUseBytes=920288\nstage=decoded-request-only seconds=0.142052291 peakRSSBytes=15564800 residentBytes=15564800 physicalFootprintBytes=8241656 mallocInUseBytes=1125024\nstage=runtime-values-only seconds=0.150667958 peakRSSBytes=15646720 residentBytes=15646720 physicalFootprintBytes=8307192 mallocInUseBytes=1165568\nstage=after-release seconds=0.150773625 peakRSSBytes=15646720 residentBytes=15646720 physicalFootprintBytes=8307192 mallocInUseBytes=188000\n",
+    "stderr": ""
+  },
+  {
+    "kind": "escaped-supported",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=3.325e-05 peakRSSBytes=6094848 residentBytes=6144000 physicalFootprintBytes=1589608 mallocInUseBytes=89312\nframeBytes=1555132\nstage=sender-overlap seconds=0.05554225 peakRSSBytes=14073856 residentBytes=14073856 physicalFootprintBytes=6947296 mallocInUseBytes=2275344\nstage=wire-only seconds=0.055615125 peakRSSBytes=14073856 residentBytes=14073856 physicalFootprintBytes=6947296 mallocInUseBytes=1753008\nstage=receiver-body-only seconds=0.252050708 peakRSSBytes=16760832 residentBytes=16760832 physicalFootprintBytes=9634296 mallocInUseBytes=1753440\nstage=decoded-request-only seconds=0.265133917 peakRSSBytes=20365312 residentBytes=20365312 physicalFootprintBytes=13042168 mallocInUseBytes=1180192\nstage=runtime-values-only seconds=0.285814125 peakRSSBytes=20430848 residentBytes=20430848 physicalFootprintBytes=13091320 mallocInUseBytes=1220736\nstage=after-release seconds=0.285908667 peakRSSBytes=20430848 residentBytes=20430848 physicalFootprintBytes=13091320 mallocInUseBytes=201952\n",
+    "stderr": ""
+  }
+]

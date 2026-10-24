@@ -1,6 +1,6 @@
 # Verified store precision checkpoint
 
-Date: 2026-10-24. **Owner decision pending; this is a review draft, not an ADR or authorization to change the file schema.** Prepared by Codex with an independent read-only Claude Code review using the owner's claude.ai Max subscription. Tracks [#224](https://github.com/srps/Conduit/issues/224) and the store phase of [#186](https://github.com/srps/Conduit/issues/186).
+Date: 2026-10-24. **Owner selected schema2 with explicit refusal of inexact saves; implementation remains planned.** See [decision0023](decisions/0023-exact-schema-two-persistence.md). Prepared by Codex with an independent read-only Claude Code review using the owner's claude.ai Max subscription. Tracks [#224](https://github.com/srps/Conduit/issues/224) and the store phase of [#186](https://github.com/srps/Conduit/issues/186).
 
 ## Why this choice is needed
 
@@ -15,7 +15,7 @@ Codex executed both cases through the actual `ProxyConfigPersistence` in an owne
 
 Separate source review found nonfinite/huge-duration validation gaps and unsafe integer conversions, plus missing upstream-port checks. These need ordinary boundary safety fixes before adoption, regardless of the precision decision. No arbitrary product-duration ceiling is selected by this draft. Wire requests keep canonical seconds and no generic Codable conformance.
 
-## Recommended next step: preserve schema 2 and refuse inexact ordinary saves
+## Selected policy: preserve schema 2 and refuse inexact ordinary saves
 
 Fix representable integer-millisecond round trips and conversion safety. Before writing, stage the exact file encoding and decode it through the same format, then require equality with the frozen input for the required runtime fields. If the format cannot reproduce the value, refuse explicitly with a field code before any write or runtime admission. A 90.5-second TTL would receive that error. Stop/Quit still proceed independently of save failure.
 
@@ -42,4 +42,4 @@ Before affected store adoption: fix duration/port boundary safety, reproduce sta
 
 ## Review provenance and limits
 
-Claude's review was read-only and did not execute the probes. Codex verified the actual conversion, persistence and schema-gate source. The recommendation remains proposed. No owner approval, schema 3 migration, normalization UI, async store or new receipt authority is claimed.
+Claude's review was read-only and did not execute the probes. Codex verified the actual conversion, persistence and schema-gate source. The owner subsequently selected optionA. No schema3 migration, normalization UI, async store or new receipt authority is claimed.

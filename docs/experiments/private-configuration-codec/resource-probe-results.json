@@ -1,0 +1,30 @@
+[
+  {
+    "kind": "dense",
+    "count": 100000,
+    "exit": 0,
+    "stdout": "stage=baseline seconds=0.000150708 maxRSSBytes=6995968\nstage=validated seconds=0.008512583 maxRSSBytes=11681792\nstage=frozen seconds=0.0264295 maxRSSBytes=19234816\nframeBytes=302177\nstage=encoded seconds=0.088279 maxRSSBytes=20054016\nstage=framed seconds=0.146945792 maxRSSBytes=20709376\nstage=decoded seconds=0.178492917 maxRSSBytes=34390016\nstage=thawed seconds=0.213006458 maxRSSBytes=34455552\n",
+    "stderr": ""
+  },
+  {
+    "kind": "dense",
+    "count": 1000000,
+    "exit": 0,
+    "stdout": "stage=baseline seconds=7.208e-06 maxRSSBytes=6979584\nstage=validated seconds=0.006263458 maxRSSBytes=26181632\nstage=frozen seconds=0.170352292 maxRSSBytes=98779136\nframeBytes=3002178\nstage=encoded seconds=0.786565583 maxRSSBytes=105021440\nstage=framed seconds=1.33770325 maxRSSBytes=111296512\nstage=decoded seconds=1.634900417 maxRSSBytes=239108096\nstage=thawed seconds=1.979146583 maxRSSBytes=239173632\n",
+    "stderr": ""
+  },
+  {
+    "kind": "dense",
+    "count": 2700000,
+    "exit": 0,
+    "stdout": "stage=baseline seconds=7.083e-06 maxRSSBytes=6979584\nstage=validated seconds=0.009847458 maxRSSBytes=53116928\nstage=frozen seconds=0.435228083 maxRSSBytes=248676352\nframeBytes=8102178\nstage=encoded seconds=2.09159275 maxRSSBytes=265109504\nstage=framed seconds=3.536443958 maxRSSBytes=275251200\nstage=decoded seconds=4.340448041 maxRSSBytes=553484288\nstage=thawed seconds=5.268536458 maxRSSBytes=574554112\n",
+    "stderr": ""
+  },
+  {
+    "kind": "profile",
+    "count": 8000000,
+    "exit": 0,
+    "stdout": "stage=baseline seconds=7.334e-06 maxRSSBytes=6979584\nstage=validated seconds=0.074680834 maxRSSBytes=18153472\nstage=frozen seconds=0.074925584 maxRSSBytes=18432000\nframeBytes=8002255\nstage=encoded seconds=0.770135334 maxRSSBytes=34668544\nstage=framed seconds=2.326270959 maxRSSBytes=46727168\nstage=decoded seconds=2.379944292 maxRSSBytes=55099392\nstage=thawed seconds=2.539830917 maxRSSBytes=55164928\n",
+    "stderr": ""
+  }
+]

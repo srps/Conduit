@@ -1,13 +1,17 @@
 # 0019: One private configuration frame capped at eight MiB
 
 - Date: 2026-10-24
-- Decision: accepted (owner, 2026-10-24, #186 private transfer budget checkpoint)
-- Implementation: planned
+- Decision: superseded (owner, 2026-10-24, #186 configuration resource profile checkpoint)
+- Implementation: partial
 - Validation: none
 - Supersedes: none
-- Superseded by: none
+- Superseded by: 0021
 
 ## Context
+
+Decision [0021](0021-bounded-configuration-at-all-boundaries.md) retains the frame
+choice and replaces the no-count-limit/startup-unchanged policy. This record
+preserves the original accepted reasoning.
 
 [0018](0018-private-configuration-request.md) selects one private request with full
 frozen configuration values. Current validation accepts strings and collection
@@ -73,11 +77,24 @@ The synthetic generic mirror does not establish these production properties.
 
 ## Implementation evidence
 
-None yet. The candidate under `docs/experiments/` is test-only sizing evidence,
-outside Package.swift. No production private codec or transfer engine exists.
+Partial: the eight-MiB cap is implemented in the headless codec. The reader refuses an
+oversize declared length in its header, before any body byte is stored. The decoder checks
+the same exact frame size before it scans, copies or allocates. Both use
+`PrivateConfigurationFrame.frameByteCount`, which counts the prefix, the decimal length, the
+line feed, the body and the terminator. The sources are
+[`PrivateConfigurationFrame.swift`](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationFrame.swift)
+and [`PrivateConfigurationDecoder.swift`](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift).
+The arithmetic, the limits and the copy inventory are in [the codec notes](../private-configuration-codec.md).
 
-Does not prove: codec allocation bounds, control responsiveness, writer coverage
-or real-machine behavior.
+The scratch resource probe measured the production codec, in a debug build, on synthetic
+values. The densest fixture, a valid frame of 8,102,178 bytes, reached a peak of
+574,554,112 bytes resident memory. That is recorded in the
+[experiment README](../experiments/private-configuration-codec/README.md). The cap is not a
+memory budget.
+
+Does not prove: codec allocation bounds, release-build memory, control responsiveness, writer
+coverage or real-machine behavior. The corrected local source passed all workflow-equivalent gates; those are
+unit/simulator checks, not owner or real-machine validation.
 
 ## Open questions
 

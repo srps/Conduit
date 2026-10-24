@@ -101,15 +101,28 @@ not a requirement to finish every event or property test before extraction:
    encoded request containing full frozen values, with neutral SecretBytes in
    ConduitShared. Save, runtime admission and apply outcomes remain distinct.
    The owner selected the eight-MiB private request cap in
-   [0019](./docs/decisions/0019-private-configuration-frame-budget.md), with independent
-   Stop/status work and explicit oversize refusal before saving. Open gates:
+   [0019](./docs/decisions/0019-private-configuration-frame-budget.md), refined by
+   [0021](./docs/decisions/0021-bounded-configuration-at-all-boundaries.md): retain the
+   complete eight-MiB frame, add selected domain counts/byte limits and apply them
+   at startup/import too, with bounded actual reads and rejected files preserved.
+   Tunnels mean native-protocol local forwards: primary performance case64,
+   hard ceiling128. Early schema-aware refusal precedes decoded object expansion;
+   one active private body/decode and independent Stop/status capacity remain
+   adoption obligations. String categories and legacy compatibility are completed in
+   [0022](./docs/decisions/0022-configuration-identity-path-and-host-bounds.md).
+   The limits are selected and under implementation; adoption remains pending. Open gates:
    measured memory/capacity/latency and complete writer coverage under
    the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
-   listener handoff, and measured bounds and shutdown. Before implementing the
-   verified store, settle legacy duration representability ([#224](https://github.com/srps/Conduit/issues/224));
+   listener handoff, and measured bounds and shutdown. Before adopting the
+   verified store, implement exact legacy duration representability ([#224](https://github.com/srps/Conduit/issues/224));
    the [review draft](./docs/design-runtime-store-precision-review.md) compares explicit
-   refusal with schema evolution and records revisit triggers. No new precision/schema
-   policy is selected yet.
+   refusal with schema evolution and records revisit triggers. The owner selected schema2 and explicit refusal of inexact saves in
+   [0023](./docs/decisions/0023-exact-schema-two-persistence.md); fix whole-millisecond
+   round trips and safe conversion before adoption. No schema3 migration is selected.
+   Integration also requires [cohesive ownership](./docs/design-runtime-host-contract.md#cohesion-and-implementation-ownership):
+   consolidate parallel kernel/private resource walks, reuse policy across file/wire
+   boundaries, and keep exact representation and commit coordination out of host
+   adapters. Shared constants and parity tests do not complete that requirement.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move keeps MainActor and current policy. Extract `RuntimeHost` from

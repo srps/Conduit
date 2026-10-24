@@ -1,0 +1,14 @@
+[
+  {
+    "kind": "supported",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=9.459e-06 maxRSSBytes=6864896\nstage=validated seconds=0.012634084 maxRSSBytes=10240000\nstage=frozen seconds=0.01914375 maxRSSBytes=10633216\nframeBytes=639291\nstage=encoded seconds=0.028003084 maxRSSBytes=12124160\nstage=framed seconds=0.110831959 maxRSSBytes=12861440\nstage=decoded seconds=0.116937209 maxRSSBytes=15450112\nstage=thawed seconds=0.125081084 maxRSSBytes=15581184\n",
+    "stderr": ""
+  },
+  {
+    "kind": "escaped-supported",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=6.583e-06 maxRSSBytes=6864896\nstage=validated seconds=0.010293083 maxRSSBytes=10174464\nstage=frozen seconds=0.0153725 maxRSSBytes=10551296\nframeBytes=1135932\nstage=encoded seconds=0.04009825 maxRSSBytes=13025280\nstage=framed seconds=0.19662675 maxRSSBytes=14254080\nstage=decoded seconds=0.206314583 maxRSSBytes=17645568\nstage=thawed seconds=0.221788708 maxRSSBytes=17776640\n",
+    "stderr": ""
+  }
+]
