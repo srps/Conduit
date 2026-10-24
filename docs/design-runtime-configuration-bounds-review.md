@@ -56,6 +56,13 @@ Before adoption: exact-limit and one-over fixtures for every field, escaped-byte
 
 Revisit only for a demonstrated configuration needing more entries/bytes, a measured supported-case budget failure, or a new runtime matching/listener execution model. Record changed compatibility and capacity as a new decision. This review does not choose the separate store precision policy in#224.
 
-## Executed candidate-profile sizing (64 tunnels; 128 not measured yet)
+## Executed candidate-profile sizing
 
 Using the same unmodified codec, Codex executed two synthetic proposed-count-ceiling fixtures with long valid hostnames,16KiB URLs and1KiB display labels. Both validated and round-tripped equal while retaining all pipeline forms. Debug peaks were17,399,808B and19,349,504B; release peaks were15,581,184B and17,776,640B. Frames were639,291B and1,135,932B. These are single-process observations, not exhaustive maximum-memory proofs, an accepted threshold or an allocation-strategy improvement. Full sources, raw stage output and limits are in the [experiment note](experiments/private-configuration-codec/README.md#proposed-domain-bounds-probe).
+
+
+The approved128-tunnel headroom was subsequently measured with otherwise identical
+fixtures: release whole-process peaks17,334,272B /21,004,288B over6,946,816B baseline;
+frames730,811B /1,555,132B; cumulative times0.163s /0.299s. All forms were deliberately
+retained and both round-tripped equal. This does not measure128 active listeners
+or steady app memory. Exact sources/output are in the experiment note above.

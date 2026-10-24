@@ -39,4 +39,26 @@ The same two fixtures were also compiled with `-O` and linked against an Xcode-p
 | Long ordinary strings |15,581,184B |0.125s |
 | Escaped display labels |17,776,640B |0.222s |
 
-Baseline was6,864,896B. These are single runs, not medians, limits or latency guarantees. The fixtures reach proposed collection-count ceilings but do not exhaust every byte/uniqueness combination; they include repeated host/label strings and remain a sizing experiment. They do not exercise concurrent busy peers, runtime DoH fan-out, or Stop/status. The owner subsequently selected domain caps and startup enforcement in [decision0021](../../decisions/0021-bounded-configuration-at-all-boundaries.md), with128 tunnels as the hard ceiling. These fixtures have64; the higher ceiling has not been measured yet. The original results remain unchanged.
+Baseline was6,864,896B. These are single runs, not medians, limits or latency guarantees. The fixtures reach proposed collection-count ceilings but do not exhaust every byte/uniqueness combination; they include repeated host/label strings and remain a sizing experiment. They do not exercise concurrent busy peers, runtime DoH fan-out, or Stop/status. The owner subsequently selected domain caps and startup enforcement in [decision0021](../../decisions/0021-bounded-configuration-at-all-boundaries.md), with128 tunnels as the hard ceiling. These fixtures have64; the subsequent128-case measurements are below. The original results remain unchanged.
+
+
+## Approved 128-tunnel headroom probe
+
+After the owner selected128 configured forwards as the hard ceiling, Codex reran
+the same synthetic release cases with128 instead of64 tunnel definitions.
+`ApprovedBounds128Probe.swift` and `approved128-release-results.json` preserve the
+executed source and numeric output. Both validated and reconstructed equal.
+
+| Fixture | Complete frame | Whole-process peak RSS | End-to-end time |
+| --- | ---: | ---: | ---: |
+| Long ordinary strings |730,811B |17,334,272B |0.163s |
+| Escaped display labels |1,555,132B |21,004,288B |0.299s |
+
+Baseline was6,946,816B. All pipeline forms were retained again. These single-run
+high-water marks do not measure steady configuration storage, runtime listeners,
+traffic, receiver-only lifetime, uniqueness/byte maxima, or Stop/status. They use
+the unadopted pre-domain-limit codec: product enforcement remains separate work.
+The source differs from the earlier64-case probe only in tunnel count. Two
+initial compilation attempts lacked dependency header module maps and did not
+run; adding the existing _AtomicsShims/CNIOWindows maps allowed compilation.
+No product source or dependency was changed for this experiment.
