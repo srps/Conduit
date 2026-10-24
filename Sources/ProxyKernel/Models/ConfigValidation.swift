@@ -105,7 +105,7 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
             // and never the value. The save banner and the validation log both show this text; events carry
             // only the `check` code. The Settings field already shows what was typed.
             if field == "routing.pacURL" {
-                return "routing.pacURL: the URL carries a username or password. Remove them; the value is not shown here."
+                return "routing.pacURL must not include a username or password."
             }
             return "\(field): '\(value)' is not a valid host"
         case .invalidInterceptPattern(let index, let pattern, let reason):

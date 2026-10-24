@@ -391,7 +391,7 @@ package struct ConfigurationLoadError: Error, LocalizedError, Sendable {
 package struct ConfigFileRepresentabilityError: Error, LocalizedError, Sendable {
     package enum Requirement: String, Sendable {
         case finiteNumber = "finite numbers"
-        case runtimeRange = "durations inside the runtime budget range, with its derived 8x guard"
+        case runtimeRange = "durations within this field's supported range"
         case wholeMilliseconds = "whole milliseconds"
         case wholeMinutes = "whole minutes"
         case unchangedDecoding = "values that decode unchanged"
