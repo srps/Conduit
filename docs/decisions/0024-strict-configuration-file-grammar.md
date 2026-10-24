@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 strict file-preflight checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -83,9 +83,19 @@ the actual decoder; the private schema's depth-eight bound is not a file limit.
 
 ## Implementation evidence
 
-None yet. The preserved witness proves the pre-change ignored-value behavior,
-not implementation of the selected filter. Bounded reads, lexical extraction,
-file filtering and startup/import adoption remain planned.
+Partial lexical/reader foundation: [JSONByteCursor.swift](../../Sources/ConduitShared/Grammar/JSONByteCursor.swift)
+provides strict syntax, UTF-8/Unicode and bounded iterative skipping, shared by the
+[private scanner](../../Sources/ConduitShared/PrivateConfiguration/PrivateJSONScanner.swift).
+[RuntimeConfigurationFileReader.swift](../../Sources/ProxyKernel/Support/RuntimeConfigurationFileReader.swift)
+enforces the fixed 8 MiB physical read cap, checks the opened descriptor and preserves
+simultaneous read/close failures. It is not yet adopted by runtime file loading.
+[BoundedJSONByteCursorTests.swift](../../Tests/ConduitTests/BoundedJSONByteCursorTests.swift)
+and [ConfigurationFileReaderTests.swift](../../Tests/ConduitTests/ConfigurationFileReaderTests.swift)
+passed 12 and 19 tests respectively. The combined focused wrapper passed 537 tests,
+plus the existing private-boundary and resource-bound scenarios and the import,
+event and decision checks. This is not the full workflow or owner validation.
+The preserved witness establishes old acceptance only. File filtering and
+startup/reload/import adoption remain planned.
 
 Does not prove: final-parser parity, bounded typed expansion, writer admission,
 real-machine startup or release readiness.

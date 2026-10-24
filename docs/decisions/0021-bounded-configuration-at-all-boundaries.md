@@ -114,15 +114,22 @@ of global admission, physical write quiescence or running-app memory.
 
 ## Implementation evidence
 
+Reader foundation, not adoption: [RuntimeConfigurationFileReader.swift](../../Sources/ProxyKernel/Support/RuntimeConfigurationFileReader.swift)
+bounds actual reads at the selected 8 MiB, rejects nonregular opened descriptors,
+keeps the probe byte out of the returned buffer, and reports simultaneous read
+and close failures. [ConfigurationFileReaderTests.swift](../../Tests/ConduitTests/ConfigurationFileReaderTests.swift)
+passed 19 tests. Startup/reload/import still await the filter and caller adoption;
+this does not close all-boundary enforcement or memory/Stop-status acceptance.
+
 Partial, for the private request boundary and the kernel's typed check only:
 
-- Scanner count, item, and aggregate bypass-width checks, and the token guard: [PrivateConfigurationDecoder.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift). The shared ceilings and the canonical width counter are in [DomainResourceLimits.swift](../../Sources/ConduitShared/DomainResourceLimits.swift).
+- Scanner count, item, and aggregate bypass-width checks, and the token guard: [PrivateJSONScanner.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateJSONScanner.swift). The shared ceilings and the canonical width counter are in [DomainResourceLimits.swift](../../Sources/ConduitShared/DomainResourceLimits.swift).
 - Typed checks over the private request and over `ProxyConfig`: [PrivateConfigurationResourceCheck.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationResourceCheck.swift) and [ConfigResourceLimits.swift](../../Sources/ProxyKernel/Models/ConfigResourceLimits.swift).
 - Tests: [ConfigurationResourceCanonicalWidthTests.swift](../../Tests/ConduitTests/ConfigurationResourceCanonicalWidthTests.swift), [ConfigurationResourceLimitsTests.swift](../../Tests/ConduitTests/ConfigurationResourceLimitsTests.swift), [PrivateConfigResourceReviewTests.swift](../../Tests/ConduitTests/PrivateConfigResourceReviewTests.swift), and [PrivateConfigGrammarDifferentialTests.swift](../../Tests/ConduitTests/PrivateConfigGrammarDifferentialTests.swift).
 - Headless scenario: [ScenarioConfigResourceBounds.swift](../../Sources/pm-sim/ScenarioConfigResourceBounds.swift).
 - Codec notes: [private-configuration-codec.md](../private-configuration-codec.md), "Canonical bypass width and token guard".
 
-"Encoded bytes" means the default output of `JSONEncoder`, counted without a buffer. The app's `ProxyBypassSyntax` still encodes with `JSONEncoder`, and tests pin it to the same boundary.
+"Encoded bytes" means the default output of `JSONEncoder`, counted without a buffer. The app's `ProxyBypassSyntax` uses the shared canonical byte counter, and tests pin it to the same boundary.
 
 Does not prove: startup, file load or import refusal with preserved bytes; runtime admission; global memory; writer coverage; control responsiveness; or complete startup/import boundary enforcement. No owner or real-machine validation is claimed.
 
@@ -133,8 +140,8 @@ coverage, control responsiveness or complete startup/import boundary enforcement
 
 ## Open questions
 
-The field inventory is completed by accepted [0022](0022-configuration-identity-path-and-host-bounds.md); its implementation remains planned. Persistence precision/schema policy in #224 is
-separate and unselected. Revisit resource ceilings for a demonstrated supported
+The field inventory is completed by accepted [0022](0022-configuration-identity-path-and-host-bounds.md); its implementation is partial. Persistence precision/schema policy in #224 is
+selected in [0023](0023-exact-schema-two-persistence.md) and implemented locally; store adoption remains separate. Revisit resource ceilings for a demonstrated supported
 workflow, measured supported-case memory failure, or a changed matching/listener
 model. A changed compatibility/capacity policy needs a new record. Later daemon
 peer admission and total shutdown validation remain adoption gates.

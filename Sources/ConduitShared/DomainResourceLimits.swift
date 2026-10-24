@@ -46,6 +46,9 @@ package enum DomainResourceLimits {
     /// derives the 36-byte and enumeration widths from the decoder's own types.
     package static let token = 64
     package static let noProxyList = ProxyBypassSyntax.maximumJSONBytes
+    /// The physical bytes of one runtime configuration file, read or refused (decision 0021). It is a file budget, not a
+    /// field ceiling, and it is separate from the private frame cap even though both are 8 MiB today.
+    package static let runtimeConfigurationFileBytes = 8_388_608
     /// The prefix a wildcard intercept pattern starts with, as UTF-8.
     package static let wildcardPrefix: [UInt8] = Array("*.".utf8)
 }
