@@ -23,7 +23,9 @@ private configuration, AppState adoption or production socket.
 | --- | --- |
 | Encoding or size refusal, before any send | `localRefusal(code)`, transport not called |
 | Deadline passed or task cancelled, before a send | `notSent(end)`, transport not called |
+| Budgeted call (`submit`, `lookupAdmission`, `outcome`) whose budget rounds to zero, before a send | `notSent(deadlineExpired)`, transport not called; a cancelled task is `notSent(cancelled)` first |
 | Typed `notSent` from the transport | `notSent(end)` |
+| Raw `RuntimeWaitEnd` from the transport (possible send) | keeps its reason: `admissionUnknown(requestID, end)` for a mutation, `readAborted(end)` for a read or a stream open |
 | Submit: sent failure, or untyped error | `admissionUnknown(requestID, end)`, one call, never resent |
 | Submit: malformed, incomplete, overlimit, multi-frame, wrong correlation, wrong kind | `admissionUnknown(requestID, invalidReply)` |
 | Submit: host failure with the request's correlation | `wire(code)` |
@@ -54,6 +56,35 @@ private configuration, AppState adoption or production socket.
 - Locks are `NSLock` leaf locks. Nothing is held across an await, and no external callback runs under a lock.
 - No task is created per frame. No queue or collection grows.
 
+## Independent-review corrections
+
+Three narrow corrections. They touch only `FramedRuntimeClient`, the `wireBudget` doc in `RuntimeClient.swift`,
+`ControlRuntimeCodec.decodeFullFrame`, and the framed-client tests.
+
+- Raw wait ends keep their reason. A `RuntimeWaitEnd` thrown by the transport from `exchange` or `openStream` is a
+  possible send, so it maps to `.sent(end)`. A mutation gives `admissionUnknown(requestID, end)`. A read or a stream
+  open gives `readAborted(end)`. Only a typed `ControlRuntimeTransportFailure.notSent` asserts that nothing was sent.
+  An untyped error stays `disconnected`. Host failures, local refusals and typed `notSent` keep their meanings.
+- A zero wire budget is never sent. The budget is still the existing `RuntimeDeadline.wireBudget` arithmetic, read
+  through `ControlWireBudget.rawValue`. Zero also comes from under a millisecond left, or a cap under one millisecond,
+  because the rounding is down. `submit`, `lookupAdmission` and `outcome` refuse zero as `notSent(.deadlineExpired)`
+  before the transport is called. A cancelled task is `notSent(.cancelled)`, checked first. The budget reads the clock
+  once per call, and the live check after encoding reads it again, so an expiry in between sends nothing.
+  `readPage`, `readSnapshot` and `subscribe` carry no budget and keep the absolute-deadline check.
+- `decodeFullFrame` scans the payload once. It keeps the size check and the required single trailing line feed. Then
+  `decodeFrame` refuses any line feed left in the payload, as it did before. Priority is unchanged: size, trailing
+  feed, payload line feed, then version, kind and body.
+
+Limits of these claims:
+
+- The wire budget is the time left when the request was encoded. It is an upper bound on the receiver's wait, not an
+  exact figure at the moment of send.
+- The client passes the same absolute deadline to the transport and starts no timer. No production transport exists in
+  this slice, so no deadline enforcement is measured here. The contract is only that the transport receives the
+  deadline and owns the wait.
+- No host zero-budget policy is defined, and the wire schema is unchanged. Zero is still a valid wire value. This
+  client just never sends it.
+
 ## Verification
 
 Authorized command: `bash /private/tmp/conduit-runtime-stage1-20261024/verify-framed-client.sh`
@@ -72,13 +103,25 @@ Result, final freeze run, 2026-10-24, on this checkout's working tree after the 
 - `check-decisions.py --require-history`: passed.
 - `pm-sim framed-runtime-client`: PASS, 10 of 10 assertions.
 
+Correction run, 2026-10-24, after the three corrections above, the header and note edits, and the fixed-shape
+clock fixture. It used the same wrapper and overwrote the logs in `framed-client-checks`. The script printed PASS.
+
+- `swift build`: complete, with no compiler warnings in the changed files.
+- Focused `swift test`: 163 tests, 0 failures (0 unexpected). `FramedRuntimeClientTests` ran 33 of 33, which is the
+  26 from the freeze run plus 7 new methods. `ControlRuntimeStrictJSONTests` ran 6 of 6.
+- `check-kernel-imports.py`: passed (103 Swift files).
+- `check-event-catalogue.py`: passed (207 event names).
+- `check-decisions.py --require-history`: passed.
+- `pm-sim framed-runtime-client`: PASS, 10 of 10 assertions.
+
 Strict-JSON boundary witness, before the fix (same wrapper, same tests): `ControlRuntimeStrictJSONTests`
-ran 6 tests with 14 failures. The current codec accepted 14 malformed values inside an unknown field of
+ran 6 tests with 14 failures. The pre-fix codec accepted 14 malformed values inside an unknown field of
 an otherwise valid known v2 frame: a lone high surrogate, a lone low surrogate, a high surrogate before a
 non-surrogate escape, a high surrogate before a literal character, an unknown escape letter, a raw
 control character, invalid UTF-8, an overlong sequence, an encoded surrogate, a truncated sequence, a
-leading-zero number, a number with no fraction digit, a misspelled literal, a trailing comma, and a
-malformed string nested in an object. Only an unterminated string was refused, by Foundation. The valid
+leading-zero number, a number with no fraction digit, a trailing comma, and a malformed string nested in
+an object. Of the 17 malformed cases in that corpus, three were already refused by Foundation: a short
+unicode escape, an unterminated string, and a misspelled literal. The valid
 extensions, the byte fixtures and the priority tests passed before the fix, as they do after it.
 
 The fix is in the same decode path, `ControlRuntimeCodec.decodeFrame`. After classification and before the
@@ -95,4 +138,5 @@ workflow-equivalent gates. Those belong to the broader gate, and they are not cl
 
 Production host fences, admission order, retention, global body admission, working-memory bounds,
 the engine, the full client-engine behavior, or any machine effect. The tests and the simulator run
-over synthetic transports only.
+over synthetic transports only. It also does not prove the host or store, a production socket transport,
+any model, or that a real transport enforces a deadline or the exact remaining time at send.

@@ -152,8 +152,9 @@ package enum ControlRuntimeCodec {
     }
 
     /// Decodes one complete frame: a payload and exactly one trailing line feed. The size is
-    /// checked before anything is parsed. A second line feed is a concatenated or trailing frame,
-    /// which is malformed rather than split, so a reader never accepts bytes past the frame it asked for.
+    /// checked before anything is parsed, then the trailing line feed. `decodeFrame` refuses any
+    /// line feed left in the payload, so a second line feed, which is a concatenated or trailing
+    /// frame, is malformed rather than split. A reader never accepts bytes past the frame it asked for.
     package static func decodeFullFrame(_ frame: Data, limits: ControlFrameLimits) throws -> ControlRuntimeMessage {
         guard frame.count <= limits.maxFrameBytes else {
             throw ControlRuntimeWireError.frameTooLarge
@@ -161,11 +162,7 @@ package enum ControlRuntimeCodec {
         guard frame.last == lineFeed else {
             throw ControlRuntimeWireError.frameIncomplete
         }
-        let payload = Data(frame.dropLast())
-        guard !payload.contains(lineFeed) else {
-            throw ControlRuntimeWireError.malformedMessage
-        }
-        return try decodeFrame(payload, limits: limits)
+        return try decodeFrame(Data(frame.dropLast()), limits: limits)
     }
 
     /// Refuses a request, response, or frame type that this build does not define. The

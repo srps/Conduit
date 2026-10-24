@@ -10,7 +10,11 @@ import Foundation
 /// deadline down, so one budget covers a whole call and no nested phase starts a fresh one.
 ///
 /// Limits are explicit. `limits` bounds every request this client sends and every reply or stream
-/// frame it accepts. A request carries the caller's remaining time, capped at `wireBudgetCap`.
+/// frame it accepts. A budgeted call (`submit`, `lookupAdmission`, `outcome`) carries the caller's
+/// remaining time, capped at `wireBudgetCap` and rounded down to whole milliseconds. A budget that
+/// rounds to zero is refused before any send. The transport receives the same absolute deadline and
+/// owns the wait. This client does not claim that it was enforced. The budget is the time left when
+/// the request was encoded, an upper bound on the receiver's wait, not an exact figure at send.
 ///
 /// A mutation is sent once. A submit whose send may have happened and whose answer is lost is
 /// `admissionUnknown`, and the client never resends it.
@@ -194,12 +198,18 @@ package struct FramedRuntimeClient: RuntimeClient {
     }
 
     /// The budget a request carries: the caller's remaining time, capped. It is read once per call.
+    /// A cancelled task is refused first. A budget of zero, which happens when under a millisecond
+    /// is left or the cap is under one, carries no time, so it is refused as an expired deadline.
     private func requestBudget(for deadline: RuntimeDeadline) throws -> ControlWireBudget {
+        if Task.isCancelled { throw RuntimeClientError.notSent(.cancelled) }
+        let budget: ControlWireBudget
         do {
-            return try deadline.wireBudget(at: now(), cappedAt: wireBudgetCap)
+            budget = try deadline.wireBudget(at: now(), cappedAt: wireBudgetCap)
         } catch {
             throw RuntimeClientError.localRefusal(wireCode(error))
         }
+        guard budget.rawValue > 0 else { throw RuntimeClientError.notSent(.deadlineExpired) }
+        return budget
     }
 
     /// Why a call must not be sent: its task was cancelled, or its deadline has passed. Either way
@@ -230,8 +240,9 @@ private enum ExchangeFailure: Error {
     case hostFailure(ControlRuntimeErrorCode)
 }
 
-/// A typed transport failure keeps its meaning. Any other error counts as a possible send, since
-/// bytes may already have left the client. A cancellation is reported as one.
+/// A typed transport failure keeps its meaning. A raw wait end keeps its reason, and it is a possible
+/// send, since only a typed `notSent` asserts that no byte left the client. Any other error counts as
+/// a possible send with `disconnected`. A cancellation is reported as one.
 private func sendFailure(_ error: any Error) -> ExchangeFailure {
     if let failure = error as? ControlRuntimeTransportFailure {
         switch failure {
@@ -239,6 +250,7 @@ private func sendFailure(_ error: any Error) -> ExchangeFailure {
         case .sent(let end): return .sent(end)
         }
     }
+    if let end = error as? RuntimeWaitEnd { return .sent(end) }
     return .sent(error is CancellationError ? .cancelled : .disconnected)
 }
 

@@ -23,9 +23,11 @@ package struct RuntimeDeadline: Sendable, Equatable {
     }
 
     /// The budget to send at `now`: the time remaining, capped at `cap` and rounded
-    /// down to whole milliseconds. Zero once the deadline has passed. A negative cap is
-    /// refused before any arithmetic, so the seconds-to-milliseconds product below only ever
-    /// sees a non-negative seconds value clamped to `Int32.max`.
+    /// down to whole milliseconds. Zero once the deadline has passed. It is also zero when
+    /// the time left or the cap is under one millisecond, because of that rounding. Zero is
+    /// a valid wire value, and a caller that must not send it refuses it itself. A negative
+    /// cap is refused before any arithmetic, so the seconds-to-milliseconds product below only
+    /// ever sees a non-negative seconds value clamped to `Int32.max`.
     package func wireBudget(at now: ContinuousClock.Instant, cappedAt cap: Duration) throws -> ControlWireBudget {
         guard cap >= .zero else { throw ControlRuntimeWireError.invalidValue }
         let remaining = remaining(at: now)

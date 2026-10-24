@@ -77,14 +77,16 @@ final class FramedRuntimeClientTests: XCTestCase {
     private func makeClient(
         _ transport: ScriptedTransport,
         limits: ControlFrameLimits? = nil,
-        epoch: ContinuousClock.Instant
+        wireBudgetCap: Duration = .seconds(60),
+        epoch: ContinuousClock.Instant,
+        now: (@Sendable () -> ContinuousClock.Instant)? = nil
     ) throws -> FramedRuntimeClient {
         let minted = self.minted
         return try FramedRuntimeClient(
             transport: transport,
             limits: limits ?? self.limits,
-            wireBudgetCap: .seconds(60),
-            now: { epoch },
+            wireBudgetCap: wireBudgetCap,
+            now: now ?? { epoch },
             makeCorrelation: { minted }
         )
     }
@@ -97,6 +99,21 @@ final class FramedRuntimeClientTests: XCTestCase {
         } catch {
             return error as? RuntimeClientError
         }
+    }
+
+    /// The `RuntimeClientError` a call throws when its task is already cancelled as the call starts.
+    private func errorWhenCancelled(_ body: @escaping @Sendable () async throws -> Void) async -> RuntimeClientError? {
+        await Task { () -> RuntimeClientError? in
+            withUnsafeCurrentTask { task in
+                if let task { task.cancel() }
+            }
+            do {
+                try await body()
+                return nil
+            } catch {
+                return error as? RuntimeClientError
+            }
+        }.value
     }
 
     /// Waits until the scripted stream has a `next` parked on it. No sleeping is involved.
@@ -166,6 +183,9 @@ final class FramedRuntimeClientTests: XCTestCase {
             ("deadline", .fail(.sent(.deadlineExpired)), .deadlineExpired),
             ("cancel", .fail(.sent(.cancelled)), .cancelled),
             ("untyped error", .untyped, .disconnected),
+            ("raw deadline", .rawWaitEnd(.deadlineExpired), .deadlineExpired),
+            ("raw cancel", .rawWaitEnd(.cancelled), .cancelled),
+            ("raw disconnect", .rawWaitEnd(.disconnected), .disconnected),
             ("malformed", .reply(Data("not a frame\n".utf8)), .invalidReply),
             ("incomplete", .reply(incomplete), .invalidReply),
             ("overlimit", .reply(oversize), .invalidReply),
@@ -221,6 +241,180 @@ final class FramedRuntimeClientTests: XCTestCase {
         }.value
         XCTAssertEqual(result, .notSent(.cancelled))
         XCTAssertEqual(transport.callCount, 0)
+    }
+
+    // MARK: - Raw wait ends and typed refusals
+
+    func testARawWaitEndFromTheTransportKeepsItsReasonForMutationsAndReads() async throws {
+        let epoch = ContinuousClock.now
+        for end in [RuntimeWaitEnd.deadlineExpired, .cancelled] {
+            let id = requestID(20)
+
+            let submitting = ScriptedTransport(steps: [.rawWaitEnd(end)])
+            let submitClient = try makeClient(submitting, epoch: epoch)
+            let submitError = await thrownError {
+                try await submitClient.submit(.stop(.dns), requestID: id, expectedIncarnation: incarnation(1), deadline: deadline(epoch))
+            }
+            XCTAssertEqual(submitError, .admissionUnknown(id, end), "\(end): a mutation keeps its request ID and its reason")
+            XCTAssertEqual(submitting.callCount, 1, "\(end): a mutation is sent once")
+
+            let looking = ScriptedTransport(steps: [.rawWaitEnd(end)])
+            let lookupClient = try makeClient(looking, epoch: epoch)
+            let lookupError = await thrownError {
+                try await lookupClient.lookupAdmission(of: id, expectedIncarnation: incarnation(1), deadline: deadline(epoch))
+            }
+            XCTAssertEqual(lookupError, .readAborted(end), "\(end): a lookup is a read")
+
+            let outcomeTransport = ScriptedTransport(steps: [.rawWaitEnd(end)])
+            let outcomeClient = try makeClient(outcomeTransport, epoch: epoch)
+            let outcomeError = await thrownError {
+                try await outcomeClient.outcome(of: operation(9), expectedIncarnation: incarnation(1), deadline: deadline(epoch))
+            }
+            XCTAssertEqual(outcomeError, .readAborted(end), "\(end): an outcome is a read")
+
+            let pageTransport = ScriptedTransport(steps: [.rawWaitEnd(end)])
+            let pageClient = try makeClient(pageTransport, epoch: epoch)
+            let pageRequest = ControlPageRequest(expectedIncarnation: incarnation(1), collection: .activeConnections)
+            let pageError = await thrownError {
+                try await pageClient.readPage(pageRequest, deadline: deadline(epoch))
+            }
+            XCTAssertEqual(pageError, .readAborted(end), "\(end): a page read is a read")
+
+            let snapshotTransport = ScriptedTransport(steps: [.rawWaitEnd(end)])
+            let snapshotClient = try makeClient(snapshotTransport, epoch: epoch)
+            let snapshotError = await thrownError { try await snapshotClient.readSnapshot(deadline: deadline(epoch)) }
+            XCTAssertEqual(snapshotError, .readAborted(end), "\(end): a snapshot read is a read")
+        }
+    }
+
+    func testOpeningAStreamKeepsARawWaitReasonAndATypedRefusalAndSendsOnce() async throws {
+        let epoch = ContinuousClock.now
+        let cases: [(label: String, failure: any Error, expected: RuntimeClientError)] = [
+            ("raw deadline", RuntimeWaitEnd.deadlineExpired, .readAborted(.deadlineExpired)),
+            ("raw cancel", RuntimeWaitEnd.cancelled, .readAborted(.cancelled)),
+            ("typed not sent", ControlRuntimeTransportFailure.notSent(.deadlineExpired), .notSent(.deadlineExpired)),
+            ("typed sent", ControlRuntimeTransportFailure.sent(.disconnected), .readAborted(.disconnected)),
+            ("untyped", ScriptedTransportError.untyped, .readAborted(.disconnected)),
+        ]
+        for testCase in cases {
+            let transport = ScriptedTransport(openFailure: testCase.failure)
+            let client = try makeClient(transport, epoch: epoch)
+            let error = await thrownError { try await client.subscribe(.live, deadline: deadline(epoch)) }
+            XCTAssertEqual(error, testCase.expected, testCase.label)
+            XCTAssertEqual(transport.callCount, 1, "\(testCase.label): the open is sent once and never resent")
+        }
+    }
+
+    // MARK: - Wire budget
+
+    func testABudgetThatRoundsToZeroSendsNoBytesFromAnyBudgetedCall() async throws {
+        let epoch = ContinuousClock.now
+        let refused: [(label: String, remaining: Duration, cap: Duration)] = [
+            ("no time left", .zero, .seconds(60)),
+            ("half a millisecond left", .nanoseconds(500_000), .seconds(60)),
+            ("999999 nanoseconds left", .nanoseconds(999_999), .seconds(60)),
+            ("a cap of 999999 nanoseconds", .seconds(5), .nanoseconds(999_999)),
+        ]
+        for testCase in refused {
+            let transport = ScriptedTransport()
+            let client = try makeClient(transport, wireBudgetCap: testCase.cap, epoch: epoch)
+            let lapsing = RuntimeDeadline.after(testCase.remaining, from: epoch)
+
+            let submitError = await thrownError {
+                try await client.submit(.stop(.dns), requestID: requestID(30), expectedIncarnation: incarnation(1), deadline: lapsing)
+            }
+            let lookupError = await thrownError {
+                try await client.lookupAdmission(of: requestID(30), expectedIncarnation: incarnation(1), deadline: lapsing)
+            }
+            let outcomeError = await thrownError {
+                try await client.outcome(of: operation(9), expectedIncarnation: incarnation(1), deadline: lapsing)
+            }
+
+            XCTAssertEqual(submitError, .notSent(.deadlineExpired), testCase.label)
+            XCTAssertEqual(lookupError, .notSent(.deadlineExpired), testCase.label)
+            XCTAssertEqual(outcomeError, .notSent(.deadlineExpired), testCase.label)
+            XCTAssertEqual(transport.callCount, 0, "\(testCase.label): a zero budget is never sent")
+        }
+    }
+
+    func testABudgetOfAtLeastOneMillisecondIsSentAndAFractionRoundsDown() async throws {
+        let epoch = ContinuousClock.now
+        let id = requestID(31)
+        let sent: [(label: String, remaining: Duration, cap: Duration, milliseconds: Int)] = [
+            ("exactly one millisecond", .milliseconds(1), .seconds(60), 1),
+            ("1.9 milliseconds", .nanoseconds(1_900_000), .seconds(60), 1),
+            ("a cap of exactly one millisecond", .seconds(5), .milliseconds(1), 1),
+        ]
+        for testCase in sent {
+            let transport = ScriptedTransport(steps: [
+                .reply(try frame(.response(.admission(.accepted(operation(9)))), correlation: id)),
+            ])
+            let client = try makeClient(transport, wireBudgetCap: testCase.cap, epoch: epoch)
+            _ = try await client.submit(
+                .stop(.dns),
+                requestID: id,
+                expectedIncarnation: incarnation(3),
+                deadline: RuntimeDeadline.after(testCase.remaining, from: epoch)
+            )
+
+            let call = try XCTUnwrap(transport.recordedCalls.first)
+            let sentFrame = try ControlRuntimeCodec.decodeFullFrame(call.frame, limits: limits)
+            let expected = ControlRuntimeBody.request(.submit(ControlOperationRequest(
+                requestID: id,
+                expectedIncarnation: incarnation(3),
+                command: .stop(.dns),
+                budget: try ControlWireBudget(testCase.milliseconds)
+            )))
+            XCTAssertEqual(sentFrame.body, expected, testCase.label)
+        }
+    }
+
+    func testACancelledTaskWithAZeroBudgetIsReportedAsCancelledNotAsAnExpiredDeadline() async throws {
+        let epoch = ContinuousClock.now
+        let transport = ScriptedTransport()
+        let client = try makeClient(transport, epoch: epoch)
+        let lapsing = RuntimeDeadline.after(.nanoseconds(1), from: epoch)
+        let id = requestID(34)
+        let expectedIncarnation = incarnation(1)
+
+        let error = await errorWhenCancelled {
+            _ = try await client.submit(.stop(.dns), requestID: id, expectedIncarnation: expectedIncarnation, deadline: lapsing)
+        }
+
+        XCTAssertEqual(error, .notSent(.cancelled), "cancellation is checked before the budget is read")
+        XCTAssertEqual(transport.callCount, 0)
+    }
+
+    func testTheBudgetIsReadOnceAndAnExpiryAfterEncodingStillSendsNothing() async throws {
+        let epoch = ContinuousClock.now
+        let id = requestID(33)
+        let oneMillisecond = RuntimeDeadline(instant: epoch.advanced(by: .milliseconds(1)))
+
+        // The clock reads the epoch both for the budget and for the live check, so one millisecond is sent.
+        let sending = ScriptedTransport(steps: [
+            .reply(try frame(.response(.admission(.accepted(operation(9)))), correlation: id)),
+        ])
+        let sendingClock = ClockSequence(first: epoch, then: epoch)
+        let sendingClient = try makeClient(sending, epoch: epoch, now: { sendingClock.read() })
+        _ = try await sendingClient.submit(.stop(.dns), requestID: id, expectedIncarnation: incarnation(3), deadline: oneMillisecond)
+        let sentFrame = try ControlRuntimeCodec.decodeFullFrame(try XCTUnwrap(sending.recordedCalls.first).frame, limits: limits)
+        XCTAssertEqual(sentFrame.body, .request(.submit(ControlOperationRequest(
+            requestID: id,
+            expectedIncarnation: incarnation(3),
+            command: .stop(.dns),
+            budget: try ControlWireBudget(1)
+        ))))
+
+        // The budget reads the epoch and sees one millisecond. The live check reads one millisecond later, after
+        // encoding, and sees none. The frame is refused before the transport is called.
+        let lapsing = ScriptedTransport()
+        let lapsingClock = ClockSequence(first: epoch, then: epoch.advanced(by: .milliseconds(1)))
+        let lapsingClient = try makeClient(lapsing, epoch: epoch, now: { lapsingClock.read() })
+        let error = await thrownError {
+            try await lapsingClient.submit(.stop(.dns), requestID: id, expectedIncarnation: incarnation(3), deadline: oneMillisecond)
+        }
+        XCTAssertEqual(error, .notSent(.deadlineExpired))
+        XCTAssertEqual(lapsing.callCount, 0, "an expiry after encoding is caught by the live check before any send")
     }
 
     // MARK: - Replies
@@ -613,6 +807,32 @@ final class FramedRuntimeClientTests: XCTestCase {
         }
     }
 
+    func testAnInteriorLineFeedIsRefusedByThePayloadCheckAfterSizeAndTheTrailingFeed() throws {
+        let valid = try frame(.request(.readSnapshot), correlation: requestID(1))
+        var split = valid
+        split.insert(0x0A, at: 1)
+        XCTAssertThrowsError(try ControlRuntimeCodec.decodeFullFrame(split, limits: limits)) { error in
+            XCTAssertEqual(error as? ControlRuntimeWireError, .malformedMessage, "a raw line feed inside the payload is never parsed")
+        }
+
+        // The payload check runs before the version is read, so a version this build does not speak is still malformed here.
+        let unsupported = Data("{\"version\":99,\n\"kind\":\"request\"}\n".utf8)
+        XCTAssertThrowsError(try ControlRuntimeCodec.decodeFullFrame(unsupported, limits: limits)) { error in
+            XCTAssertEqual(error as? ControlRuntimeWireError, .malformedMessage)
+        }
+
+        var oversize = Data(repeating: 0x61, count: limits.maxFrameBytes)
+        oversize[10] = 0x0A
+        oversize.append(0x0A)
+        XCTAssertThrowsError(try ControlRuntimeCodec.decodeFullFrame(oversize, limits: limits)) { error in
+            XCTAssertEqual(error as? ControlRuntimeWireError, .frameTooLarge, "size still comes before the line feed checks")
+        }
+
+        XCTAssertThrowsError(try ControlRuntimeCodec.decodeFullFrame(Data("{\n}".utf8), limits: limits)) { error in
+            XCTAssertEqual(error as? ControlRuntimeWireError, .frameIncomplete, "a missing trailing feed is reported before an interior one")
+        }
+    }
+
     func testConstructionRefusesABudgetCapThatIsNotPositive() throws {
         XCTAssertThrowsError(try FramedRuntimeClient(transport: ScriptedTransport(), limits: limits, wireBudgetCap: .zero))
         XCTAssertThrowsError(try FramedRuntimeClient(transport: ScriptedTransport(), limits: limits, wireBudgetCap: .seconds(-1)))
@@ -628,12 +848,36 @@ private enum ScriptedTransportError: Error {
     case overCapacity
 }
 
+/// A clock whose first read returns `first` and whose later reads return `then`. A test uses it to decide
+/// what the budget read and the live check each see.
+private final class ClockSequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private let first: ContinuousClock.Instant
+    private let then: ContinuousClock.Instant
+    private var didReadFirst = false
+
+    init(first: ContinuousClock.Instant, then: ContinuousClock.Instant) {
+        self.first = first
+        self.then = then
+    }
+
+    func read() -> ContinuousClock.Instant {
+        lock.withLock {
+            if didReadFirst { return then }
+            didReadFirst = true
+            return first
+        }
+    }
+}
+
 /// A bounded scripted transport. Each exchange takes the next scripted step, so a test decides what
 /// the wire did. Calls are recorded up to a fixed capacity, and a call beyond it is refused.
 private final class ScriptedTransport: ControlRuntimeTransport, @unchecked Sendable {
     enum Step: Sendable {
         case reply(Data)
         case fail(ControlRuntimeTransportFailure)
+        /// Throws a raw wait end, which is not a typed transport failure. The adapter keeps its reason as a possible send.
+        case rawWaitEnd(RuntimeWaitEnd)
         /// Throws an error that is not typed, which the adapter must count as a possible send.
         case untyped
     }
@@ -648,12 +892,12 @@ private final class ScriptedTransport: ControlRuntimeTransport, @unchecked Senda
     private let lock = NSLock()
     private var steps: [Step]
     private var calls: [Call] = []
-    private let openFailure: ControlRuntimeTransportFailure?
+    private let openFailure: (any Error)?
     private let stream: ScriptedStream
 
     init(
         steps: [Step] = [],
-        openFailure: ControlRuntimeTransportFailure? = nil,
+        openFailure: (any Error)? = nil,
         stream: ScriptedStream = ScriptedStream()
     ) {
         self.steps = steps
@@ -674,6 +918,7 @@ private final class ScriptedTransport: ControlRuntimeTransport, @unchecked Senda
         switch step {
         case .reply(let bytes): return bytes
         case .fail(let failure): throw failure
+        case .rawWaitEnd(let end): throw end
         case .untyped: throw ScriptedTransportError.untyped
         }
     }
