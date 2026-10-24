@@ -134,13 +134,19 @@ not a requirement to finish every event or property test before extraction:
    preserving rejected originals. The integrated focused suite passed 697 tests;
    the full Swift suite passed 2846 tests with two skips. See the
    [verification record](./docs/verification-configuration-boundary-2026-10-24.md).
-   Normal preferences browser-URL enforcement and sidecar raw-read bounds remain open. The next store/client
+   PR #229 merged the bounded runtime replacement/read-back primitive and its
+   independent 432-case classifier model. PR #230 implements the shared 128 KiB
+   sidecar boundary and raw browser-URL check; its complete local workflow passed
+   2,897 tests (two skips) and all 94 simulator records, with hosted CI pending.
+   The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding
    a mixed runtime/platform apply until required inputs verify in
    [0025](./docs/decisions/0025-hold-mixed-configuration-apply.md); the gate remains
    planned, with independent effect groups deferred. Exact schema-two
-   staging and safe duration conversions are also committed locally. These counts do not establish a verified
+   staging and safe duration conversions merged in PR #228. External-file edit
+   conflict behavior remains an owner decision before expected-prior store checks.
+   These counts do not establish a verified
    asynchronous store, read-back receipts, writer coverage or release readiness.
    The owner selected a 128 KiB cap for each platform/preferences sidecar with the
    same strict reader/filter contract, valid unknown fields and first-key behavior
