@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Darwin
 import Foundation
 import ProxyKernel
 import ConduitShared
@@ -801,5 +802,191 @@ package final class FakeUpdateReports: UpdateReportSource {
 
     package func deliver(_ userInfo: [AnyHashable: Any]?) {
         handler?(UpdaterContract.parseReport(userInfo, hostPath: hostPath))
+    }
+}
+
+// MARK: - State root and writer lease
+
+/// A scripted directory tree for `StateRootLayout`, built per test. Entries are
+/// keyed by absolute path, a symbolic link resolves through one table (a link
+/// to a link is not modelled), and any path can be made to fail with an errno.
+///
+/// Each entry has an inode, and `addHardLink` shares one. Lookups fold case unless
+/// the volume is scripted as case-sensitive, with the same folding the layout uses,
+/// so final sigma, long s and micro sign are one name. A volume scripted as unknown
+/// (nil) folds case and answers nil to the case query, so the layout must refuse
+/// rather than assume either answer.
+package final class FakeStateRootFileSystem: StateRootFileSystem, @unchecked Sendable {
+    private let lock = NSLock()
+    private let caseSensitiveNames: Bool?
+    private var entries: [String: StateRootEntryKind] = [:]
+    private var links: [String: String] = [:]
+    private var inodes: [String: UInt64] = [:]
+    private var nextInode: UInt64 = 1
+    private var failures: [String: Int32] = [:]
+    private var caseQueryFailure: Int32?
+
+    /// - Parameter caseSensitiveNames: the volume's answer to the case query. Nil
+    ///   is an unknown volume.
+    package init(caseSensitiveNames: Bool? = true) {
+        self.caseSensitiveNames = caseSensitiveNames
+    }
+
+    /// The key a path is stored under. A volume that does not distinguish case
+    /// stores every spelling of a name under one key.
+    private func key(_ path: String) -> String {
+        caseSensitiveNames == true
+            ? path
+            : path.folding(options: [.caseInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    /// Caller holds `lock`. Gives the entry `inode`, or a fresh one.
+    private func store(_ kind: StateRootEntryKind, at path: String, inode: UInt64? = nil) {
+        let name = key(path)
+        entries[name] = kind
+        if let inode {
+            inodes[name] = inode
+        } else {
+            inodes[name] = nextInode
+            nextInode += 1
+        }
+    }
+
+    package func addDirectory(_ path: String) {
+        lock.withLock { store(.directory, at: path) }
+    }
+
+    package func addFile(_ path: String) {
+        lock.withLock { store(.regularFile, at: path) }
+    }
+
+    package func addSymbolicLink(_ path: String, to target: String) {
+        lock.withLock {
+            store(.symbolicLink, at: path)
+            links[key(path)] = target
+        }
+    }
+
+    /// A second name for the object `existing` already names, as `link(2)` makes one.
+    package func addHardLink(_ path: String, to existing: String) {
+        lock.withLock {
+            guard let inode = inodes[key(existing)] else {
+                preconditionFailure("hard link target \(existing) is not in the tree")
+            }
+            store(.regularFile, at: path, inode: inode)
+        }
+    }
+
+    package func failPath(_ path: String, errno: Int32) {
+        lock.withLock { failures[path] = errno }
+    }
+
+    /// Every case query fails with this errno.
+    package func failCaseQuery(errno: Int32) {
+        lock.withLock { caseQueryFailure = errno }
+    }
+
+    package func entryKind(at path: String) throws(StateRootFileSystemError) -> StateRootEntryKind {
+        let (failure, kind) = lock.withLock { (failures[path], entries[key(path)] ?? .missing) }
+        if let failure { throw StateRootFileSystemError(errno: failure) }
+        return kind
+    }
+
+    package func identity(at path: String) throws(StateRootFileSystemError) -> StateRootFileIdentity? {
+        let (failure, inode) = lock.withLock { () -> (Int32?, UInt64?) in
+            guard entries[key(path)] != nil else { return (failures[path], nil) }
+            return (failures[path], inodes[key(path)])
+        }
+        if let failure { throw StateRootFileSystemError(errno: failure) }
+        return inode.map { StateRootFileIdentity(device: 1, inode: $0) }
+    }
+
+    package func canonicalPath(of path: String) throws(StateRootFileSystemError) -> String {
+        let (failure, resolved) = lock.withLock { () -> (Int32?, String?) in
+            guard entries[key(path)] != nil else { return (failures[path], nil) }
+            return (failures[path], links[key(path)] ?? path)
+        }
+        if let failure { throw StateRootFileSystemError(errno: failure) }
+        guard let resolved else { throw StateRootFileSystemError(errno: ENOENT) }
+        return resolved
+    }
+
+    package func volumeSupportsCaseSensitiveNames(at directory: String) throws(StateRootFileSystemError) -> Bool? {
+        let failure = lock.withLock { caseQueryFailure }
+        if let failure { throw StateRootFileSystemError(errno: failure) }
+        return caseSensitiveNames
+    }
+
+    package func createDirectory(at path: String) throws(StateRootFileSystemError) {
+        let failure: Int32? = lock.withLock { () -> Int32? in
+            if let failure = failures[path] { return failure }
+            if entries[key(path)] != nil { return EEXIST }
+            store(.directory, at: path)
+            return nil
+        }
+        if let failure { throw StateRootFileSystemError(errno: failure) }
+    }
+}
+
+/// A scripted writer lease: one holder per canonical root, counted attempts and
+/// refusals, and injected failures for the next acquisition or close. Nothing
+/// touches the disk. A close that reports failure still releases the root in
+/// the fake, as the OS does when close(2) returns an error.
+package final class FakeStateWriterLeasing: StateWriterLeasing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: Set<String> = []
+    private var nextFailure: StateWriterFailure?
+    private var nextClose: StateWriterRelease?
+    private var attempts = 0
+    private var refusals = 0
+
+    package init() {}
+
+    package var acquireCount: Int { lock.withLock { attempts } }
+    package var busyCount: Int { lock.withLock { refusals } }
+
+    package func isHeld(_ root: CanonicalStateRoot) -> Bool {
+        lock.withLock { held.contains(root.path) }
+    }
+
+    package func failNextAcquisition(_ failure: StateWriterFailure) {
+        lock.withLock { nextFailure = failure }
+    }
+
+    /// The next close reports `releaseUnknown` with this errno.
+    package func failNextRelease(errno: Int32) {
+        lock.withLock { nextClose = .releaseUnknown(errno: errno) }
+    }
+
+    package func acquire(
+        root: CanonicalStateRoot,
+        onReleaseFailure: @escaping @Sendable (StateWriterReleaseFailure) -> Void
+    ) -> StateWriterAcquisition {
+        let refusal: StateWriterAcquisition? = lock.withLock { () -> StateWriterAcquisition? in
+            attempts += 1
+            if let failure = nextFailure {
+                nextFailure = nil
+                return .failed(failure)
+            }
+            if held.contains(root.path) {
+                refusals += 1
+                return .busy
+            }
+            held.insert(root.path)
+            return nil
+        }
+        if let refusal { return refusal }
+        return .acquired(StateWriterLease(root: root, onReleaseFailure: onReleaseFailure) { [self] in
+            finishRelease(root)
+        })
+    }
+
+    private func finishRelease(_ root: CanonicalStateRoot) -> StateWriterRelease {
+        lock.withLock { () -> StateWriterRelease in
+            held.remove(root.path)
+            let outcome = nextClose ?? .released
+            nextClose = nil
+            return outcome
+        }
     }
 }

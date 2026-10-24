@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 writer-authority checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -73,11 +73,22 @@ storage; select bounded drain behavior with measured shutdown budgets.
 
 ## Implementation evidence
 
-None yet. No lock, lease or asynchronous persistence policy is implemented by
-this record. The current client/event foundation is independent.
+Partial: the OS lease primitive, its typed outcomes and a fake exist. No configuration,
+platform-preference or journal writer calls the lease, and no app, daemon or pm-proxy
+startup path acquires it yet. Code: [`StateWriterLease.swift`](../../Sources/PlatformMac/StateWriterLease.swift)
+(protocol, opaque lease, typed outcomes), [`StateWriterLeaseOS.swift`](../../Sources/PlatformMac/StateWriterLeaseOS.swift)
+(non-blocking `flock` on a fixed `O_NOFOLLOW` lock file, close-on-exec, no unlink,
+no `LOCK_UN`). Release is terminal: an unconfirmed close is returned to every later caller and never retried, a call during an in-flight close waits for its outcome, and a dropped lease reports an unconfirmed close once. The fake is in [`PlatformFakes.swift`](../../Sources/PlatformMac/PlatformFakes.swift).
+Tests: [`StateWriterLeaseTests.swift`](../../Tests/ConduitTests/StateWriterLeaseTests.swift)
+and [`StateWriterLeaseProcessTests.swift`](../../Tests/ConduitTests/StateWriterLeaseProcessTests.swift)
+(owned `python3 -I` contenders, process-exit release, descriptor inheritance with a
+positive control). pm-sim: [`ScenarioStateWriterLease.swift`](../../Sources/pm-sim/ScenarioStateWriterLease.swift),
+run as `pm-sim state-writer-lease` over a scratch directory. Results and limits are in
+[the verification note](../verification-state-writer-lease-2026-10-24.md).
 
 Does not prove: legacy upgrade ordering, cross-process exclusion on the owner's
-storage, complete writer coverage or real-machine cleanup after a deadline.
+storage, complete writer coverage, asynchronous write quiescence, Stop/Quit or deadline
+behavior, or real-machine cleanup after a deadline.
 
 ## Open questions
 

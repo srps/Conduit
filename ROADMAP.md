@@ -94,8 +94,9 @@ not a requirement to finish every event or property test before extraction:
    implemented: the in-memory client and its admission, lookup and subscription
    engine, the production v2 socket, the config commit/start DTO, and AppState
    adoption. v1 control and helper IPC are unchanged. Writer lifetime is selected in
-   [0017](./docs/decisions/0017-exclusive-state-directory-writer.md); its implementation
-   is planned. The private configuration shape is selected in
+   [0017](./docs/decisions/0017-exclusive-state-directory-writer.md). The OS lease and
+   canonical-layout foundation exist with scratch/process tests; no shipping writer
+   or host startup path acquires the lease yet. The private configuration shape is selected in
    [0018](./docs/decisions/0018-private-configuration-request.md): one explicitly
    encoded request containing full frozen values, with neutral SecretBytes in
    ConduitShared. Save, runtime admission and apply outcomes remain distinct.
@@ -104,8 +105,11 @@ not a requirement to finish every event or property test before extraction:
    Stop/status work and explicit oversize refusal before saving. Open gates:
    measured memory/capacity/latency and complete writer coverage under
    the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
-   listener handoff, and measured
-   bounds and shutdown.
+   listener handoff, and measured bounds and shutdown. Before implementing the
+   verified store, settle legacy duration representability ([#224](https://github.com/srps/Conduit/issues/224));
+   the [review draft](./docs/design-runtime-store-precision-review.md) compares explicit
+   refusal with schema evolution and records revisit triggers. No new precision/schema
+   policy is selected yet.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move keeps MainActor and current policy. Extract `RuntimeHost` from

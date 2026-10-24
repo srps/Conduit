@@ -40,7 +40,7 @@ Each record carries three statuses, because merged does not mean it works:
 | [0014](0014-runtime-client-stream.md) | Async runtime client and bounded observation contract | accepted | partial | none |
 | [0015](0015-save-before-apply.md) | Save durable intent before apply, with Stop and Quit exceptions | accepted | planned | none |
 | [0016](0016-isolated-development-bundle.md) | Isolated ad-hoc development app bundle | accepted | implemented | passed |
-| [0017](0017-exclusive-state-directory-writer.md) | Exclusive writer authority per state directory | accepted | planned | none |
+| [0017](0017-exclusive-state-directory-writer.md) | Exclusive writer authority per state directory | accepted | partial | none |
 | [0018](0018-private-configuration-request.md) | Private configuration request with frozen explicit values | accepted | partial | none |
 | [0019](0019-private-configuration-frame-budget.md) | One private configuration frame capped at eight MiB | accepted | planned | none |
-| [0020](0020-canonical-runtime-writer-root.md) | Keep runtime persistence within one canonical writer root | accepted | planned | none |
+| [0020](0020-canonical-runtime-writer-root.md) | Keep runtime persistence within one canonical writer root | accepted | partial | none |
