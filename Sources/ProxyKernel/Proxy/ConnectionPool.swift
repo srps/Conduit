@@ -439,12 +439,23 @@ package final class ConnectionPool: @unchecked Sendable {
     }
 
     package func healthCheck(urlString: String) async -> HealthCheckResult {
+        // The explicit check runs whether or not the proxy was started, so it cannot rely on
+        // the start's validation. A persisted duration past the runtime's range is refused
+        // here, with its field, before any conversion or connect.
+        if let field = Self.firstUnrepresentableExchangeDuration(in: configProvider()) {
+            let refusal = RuntimeDurationRefusal(scope: .healthCheck, field: field)
+            eventSink?(refusal.event)
+            logger.log(.error, refusal.event.detail ?? refusal.event.event, category: .network)
+            return .unhealthy(.configurationRefused(detail: refusal.errorDescription ?? ""), responseTimeMS: 0)
+        }
         let start = Date()
         var head = HTTPRequestHead(version: .http1_1, method: .HEAD, uri: urlString)
         head.headers.add(name: "Host", value: URL(string: urlString)?.host ?? "example.com")
         // The probe timeout bounds a connect made for this check; a pooled
         // connection is reused as is.
-        let probeTimeout = TimeAmount.milliseconds(Int64(max(configProvider().connectionCheckTimeoutMS, 1)))
+        // Canonical seconds, not the whole-millisecond legacy reading: a 1.001-second
+        // probe keeps its millisecond, and the floor is still one millisecond.
+        let probeTimeout = TimeAmount.nanoseconds(max(DurationUnits.runtimeNanoseconds(configProvider().health.connectionCheckTimeout), 1_000_000))
         do {
             let response = try await bufferedExchange(
                 head: head, requestBody: nil, forcedProxy: nil, allowRetry: true,
@@ -462,6 +473,20 @@ package final class ConnectionPool: @unchecked Sendable {
             let detail = error.displayDescription
             return .unhealthy(Self.healthFailure(for: error, detail: detail), responseTimeMS: elapsed)
         }
+    }
+
+    /// The durations an exchange converts: the probe budget, the response wait, and the
+    /// connect budget. Every entry that can run an exchange (the explicit health check,
+    /// tunnel start, `pm-tunnel`) asks `firstUnrepresentableExchangeDuration` before it
+    /// converts anything, and refuses by field. Proxy start is validated already.
+    package static let exchangeDurations: [RuntimeDurationField] = [
+        .connectionCheckTimeout, .upstreamResponseTimeout, .upstreamConnectTimeout,
+    ]
+
+    /// The first exchange duration the runtime cannot hold, or nil. Only the field is
+    /// returned, never the value.
+    package static func firstUnrepresentableExchangeDuration(in config: ProxyConfig) -> RuntimeDurationField? {
+        config.firstUnrepresentableDuration(among: exchangeDurations)
     }
 
     /// Recovery branches on this: only `.unreachable` skips re-authentication,
@@ -599,7 +624,7 @@ package final class ConnectionPool: @unchecked Sendable {
 
     package var upstreamResponseTimeout: TimeAmount {
         let seconds = max(configProvider().upstreamResponseTimeoutSeconds, 0.1)
-        return .nanoseconds(Int64(seconds * 1_000_000_000))
+        return .nanoseconds(DurationUnits.runtimeNanoseconds(seconds))
     }
 
     package var allConnectionSnapshot: [PooledUpstreamConnection] {
@@ -857,12 +882,14 @@ package final class ConnectionPool: @unchecked Sendable {
         )
     }
 
-    /// `configured`, clamped to `minimum ... maximumUpstreamConnectTimeout`.
-    /// Clamped as well as validated: `Int64(_:)` traps on an out-of-range
-    /// Double.
+    /// `configured`, clamped to `minimum ... maximumUpstreamConnectTimeout`,
+    /// kept to the nanosecond: a whole-millisecond truncation here would turn a
+    /// configured 1.001 seconds into 1 second. The clamp keeps the documented
+    /// minimum and maximum; the value itself was admitted by validation, so the
+    /// nanosecond conversion's precondition holds.
     static func dataPathConnectTimeout(configured: TimeInterval, minimum: TimeInterval) -> TimeAmount {
         let seconds = min(max(configured, minimum), HealthSection.maximumUpstreamConnectTimeout)
-        return .milliseconds(Int64(seconds * 1000))
+        return .nanoseconds(DurationUnits.runtimeNanoseconds(seconds))
     }
 
     private func upstreamProxyBootstrap(

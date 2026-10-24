@@ -114,27 +114,38 @@ of global admission, physical write quiescence or running-app memory.
 
 ## Implementation evidence
 
+Runtime file adoption is implemented in
+[ProxyConfigPersistence.swift](../../Sources/ProxyKernel/Support/ProxyConfigPersistence.swift):
+load/reload, migration, import and pm-proxy argv input share a bounded regular-file
+reader and schema-aware filter. Known field checks precede typed expansion; unknown
+and later duplicate values retain strict grammar through the shared lexical cursor.
+Legacy extraction reuses one frozen document and stages candidates before writes.
+[ConfigurationFileBoundaryTests.swift](../../Tests/ConduitTests/ConfigurationFileBoundaryTests.swift),
+[ConfigurationFileGateTests.swift](../../Tests/ConduitTests/ConfigurationFileGateTests.swift)
+and [ScenarioConfigFileBoundary.swift](../../Sources/pm-sim/ScenarioConfigFileBoundary.swift)
+cover refusal and original-byte preservation. See the
+[combined verification record](../verification-configuration-boundary-2026-10-24.md).
+
 Partial, for the private request boundary and the kernel's typed check only:
 
-- Scanner count, item, and aggregate bypass-width checks, and the token guard: [PrivateConfigurationDecoder.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift). The shared ceilings and the canonical width counter are in [DomainResourceLimits.swift](../../Sources/ConduitShared/DomainResourceLimits.swift).
+- Scanner count, item, and aggregate bypass-width checks, and the token guard: [PrivateJSONScanner.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateJSONScanner.swift). The shared ceilings and the canonical width counter are in [DomainResourceLimits.swift](../../Sources/ConduitShared/DomainResourceLimits.swift).
 - Typed checks over the private request and over `ProxyConfig`: [PrivateConfigurationResourceCheck.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationResourceCheck.swift) and [ConfigResourceLimits.swift](../../Sources/ProxyKernel/Models/ConfigResourceLimits.swift).
 - Tests: [ConfigurationResourceCanonicalWidthTests.swift](../../Tests/ConduitTests/ConfigurationResourceCanonicalWidthTests.swift), [ConfigurationResourceLimitsTests.swift](../../Tests/ConduitTests/ConfigurationResourceLimitsTests.swift), [PrivateConfigResourceReviewTests.swift](../../Tests/ConduitTests/PrivateConfigResourceReviewTests.swift), and [PrivateConfigGrammarDifferentialTests.swift](../../Tests/ConduitTests/PrivateConfigGrammarDifferentialTests.swift).
 - Headless scenario: [ScenarioConfigResourceBounds.swift](../../Sources/pm-sim/ScenarioConfigResourceBounds.swift).
 - Codec notes: [private-configuration-codec.md](../private-configuration-codec.md), "Canonical bypass width and token guard".
 
-"Encoded bytes" means the default output of `JSONEncoder`, counted without a buffer. The app's `ProxyBypassSyntax` still encodes with `JSONEncoder`, and tests pin it to the same boundary.
+"Encoded bytes" means the default output of `JSONEncoder`, counted without a buffer. The app's `ProxyBypassSyntax` uses the shared canonical byte counter, and tests pin it to the same boundary.
 
-Does not prove: startup, file load or import refusal with preserved bytes; runtime admission; global memory; writer coverage; control responsiveness; or complete startup/import boundary enforcement. No owner or real-machine validation is claimed.
-
-Earlier notes, before this slice: the local codec and probes motivated the choice but did not enforce these limits.
-
-Does not prove: exhaustive working-memory maxima, real-machine behavior, writer
-coverage, control responsiveness or complete startup/import boundary enforcement.
+Remaining: ordinary preferences browser-URL enforcement; platform/preferences raw-read
+bounds (no new physical cap or grammar selected here); global private-body admission;
+supported-case memory/latency; writer coverage and Stop/status responsiveness.
+Does not prove: complete all-boundary enforcement,
+working-memory maxima, actual write quiescence or real-machine behavior.
 
 ## Open questions
 
-The field inventory is completed by accepted [0022](0022-configuration-identity-path-and-host-bounds.md); its implementation remains planned. Persistence precision/schema policy in #224 is
-separate and unselected. Revisit resource ceilings for a demonstrated supported
+The field inventory is completed by accepted [0022](0022-configuration-identity-path-and-host-bounds.md); its implementation is partial. Persistence precision/schema policy in #224 is
+selected in [0023](0023-exact-schema-two-persistence.md) and implemented locally; store adoption remains separate. Revisit resource ceilings for a demonstrated supported
 workflow, measured supported-case memory failure, or a changed matching/listener
 model. A changed compatibility/capacity policy needs a new record. Later daemon
 peer admission and total shutdown validation remain adoption gates.

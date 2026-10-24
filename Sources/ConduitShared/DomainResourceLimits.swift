@@ -46,6 +46,9 @@ package enum DomainResourceLimits {
     /// derives the 36-byte and enumeration widths from the decoder's own types.
     package static let token = 64
     package static let noProxyList = ProxyBypassSyntax.maximumJSONBytes
+    /// The physical bytes of one runtime configuration file, read or refused (decision 0021). It is a file budget, not a
+    /// field ceiling, and it is separate from the private frame cap even though both are 8 MiB today.
+    package static let runtimeConfigurationFileBytes = 8_388_608
     /// The prefix a wildcard intercept pattern starts with, as UTF-8.
     package static let wildcardPrefix: [UInt8] = Array("*.".utf8)
 }
@@ -60,7 +63,7 @@ package enum DomainResourceField: CaseIterable, Sendable, Equatable {
     case auditLogPath
     case proxyHost, upstreamHost, tunnelRemoteHost, dnsDomain, dnsServer, interceptAddress
     case transparentProxyIP, allowedClient, forceProxyPattern, noProxyPattern, interceptPattern
-    case pacURL, checkURL, dohProvider
+    case pacURL, checkURL, dohProvider, browserTestURL
     case token
     case noProxyList
 
@@ -83,7 +86,7 @@ package enum DomainResourceField: CaseIterable, Sendable, Equatable {
         case .proxyHost, .upstreamHost, .tunnelRemoteHost, .dnsDomain, .dnsServer, .interceptAddress,
              .transparentProxyIP, .allowedClient, .forceProxyPattern, .noProxyPattern, .interceptPattern:
             DomainResourceLimits.hostText
-        case .pacURL, .checkURL, .dohProvider: DomainResourceLimits.urlText
+        case .pacURL, .checkURL, .dohProvider, .browserTestURL: DomainResourceLimits.urlText
         case .token: DomainResourceLimits.token
         case .noProxyList: DomainResourceLimits.noProxyList
         }
@@ -97,7 +100,7 @@ package enum DomainResourceField: CaseIterable, Sendable, Equatable {
         case .profileName, .upstreamName, .tunnelLabel, .authUsername, .authDomain, .authWorkstation,
              .auditLogPath, .proxyHost, .upstreamHost, .tunnelRemoteHost, .dnsDomain, .dnsServer,
              .interceptAddress, .transparentProxyIP, .allowedClient, .forceProxyPattern, .noProxyPattern,
-             .interceptPattern, .pacURL, .checkURL, .dohProvider, .token:
+             .interceptPattern, .pacURL, .checkURL, .dohProvider, .browserTestURL, .token:
             .utf8Bytes
         case .noProxyList:
             .encodedBytes

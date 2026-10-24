@@ -252,13 +252,14 @@ final class PrivateConfigCodecTests: XCTestCase {
         let text = String(decoding: body, as: UTF8.self)
 
         // Each mutation is a valid frame around an invalid body. A duplicate key, a key the schema
-        // does not name, a missing key, a bad enum, an out-of-range port, a fraction where an
-        // integer belongs, and null for a required integer are all refused.
+        // does not name, a missing key, a bad enum, a number past `Int`, a fraction where an
+        // integer belongs, and null for a required integer are all refused. An out-of-range port
+        // is not in this list: it is an `Int`, so it is accepted (see `testOutOfRangePortsAreRepresentableOnTheWire`).
         try assertBodyRefusal(text.replacingOccurrences(of: "\"strictMode\":true", with: "\"strictMode\":true,\"strictMode\":false"))
         try assertBodyRefusal(text.replacingOccurrences(of: "\"strictMode\":true", with: "\"strictMode\":true,\"extra\":1"))
         try assertBodyRefusal(text.replacingOccurrences(of: ",\"strictMode\":true", with: ""))
         try assertBodyRefusal(text.replacingOccurrences(of: "\"systemNegotiated\"", with: "\"kerberos\""))
-        try assertBodyRefusal(text.replacingOccurrences(of: "\"port\":3128", with: "\"port\":70000"))
+        try assertBodyRefusal(text.replacingOccurrences(of: "\"port\":3128", with: "\"port\":9223372036854775808"))
         try assertBodyRefusal(text.replacingOccurrences(of: "\"port\":3128", with: "\"port\":3128.5"))
         try assertBodyRefusal(text.replacingOccurrences(of: "\"maxConnections\":5000", with: "\"maxConnections\":null"))
         // A lone high or low surrogate in a URL is refused, never replaced with U+FFFD.
@@ -292,16 +293,40 @@ final class PrivateConfigCodecTests: XCTestCase {
         XCTAssertEqual(decoded.runtime.profileName, name)
     }
 
-    func testNonFiniteNumbersAndOutOfRangePortsAreRefusedByTheWriter() throws {
+    func testNonFiniteNumbersAreRefusedByTheWriter() throws {
         var request = try PrivateConfigSamples.request()
         request.runtime.health.checkIntervalSeconds = .infinity
         XCTAssertThrowsError(try PrivateConfigurationEncoder.encode(request)) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .invalidValue)
         }
-        request = try PrivateConfigSamples.request()
-        request.runtime.proxy.port = 70_000
-        XCTAssertThrowsError(try PrivateConfigurationEncoder.encode(request)) {
-            XCTAssertEqual($0 as? PrivateConfigurationWireError, .invalidValue)
+    }
+
+    /// A port is an `Int` on the wire, like every other integer. A draft port outside 0...65535 is
+    /// written and read back unchanged: the save stages it, and the runtime eligibility gate holds it.
+    /// Every port field is covered, including the upstream and tunnel rows the sample leaves empty.
+    func testOutOfRangePortsAreRepresentableOnTheWire() throws {
+        for port in [-1, 65_536, Int.max] {
+            var request = try PrivateConfigSamples.request()
+            request.runtime.proxy.port = port
+            request.runtime.proxy.socksPort = port
+            request.runtime.routing.localPACPort = port
+            request.runtime.dns.forwarderPort = port
+            request.runtime.dns.transparentProxyPort = port
+            request.runtime.upstreams = [
+                PrivateUpstreamSettings(
+                    id: ControlUpstreamID(rawValue: UUID()), name: "p", host: "proxy.example.test",
+                    port: port, enabled: true, priority: 1
+                ),
+            ]
+            request.runtime.tunnels.definitions = [
+                PrivateTunnelDefinitionSettings(
+                    id: ControlTunnelID(rawValue: UUID()), localPort: port, remoteHost: "db.example.test",
+                    remotePort: port, enabled: true, proxied: false, label: "", preset: nil
+                ),
+            ]
+            let frame = try PrivateConfigurationEncoder.encode(request)
+            let decoded = try PrivateConfigurationDecoder.decode(readFrame(frame.bytes(), chunkSize: 4_096))
+            XCTAssertEqual(decoded, request, "port \(port) reads back unchanged")
         }
     }
 

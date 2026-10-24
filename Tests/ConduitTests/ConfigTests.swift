@@ -225,9 +225,13 @@ final class ConfigTests: XCTestCase {
         var config = ProxyConfig.testFixture()
         config.pacURL = "https://user:secret@example.com/proxy.pac"
 
-        let messages = config.validate().compactMap(\.errorDescription)
+        let validation = config.validate()
+        let messages = validation.compactMap(\.errorDescription)
 
+        // The rejection and its check code are unchanged; the message names the field and reason only.
+        XCTAssertTrue(validation.map(\.check).contains("invalid_host field=routing.pacURL"))
         XCTAssertTrue(messages.contains { $0.contains("routing.pacURL") })
+        XCTAssertFalse(messages.contains { $0.contains("secret") || $0.contains("example.com") || $0.contains("user:") })
     }
 
     func testValidationRejectsNoProxyListsBeyondScopedSettingsLimits() {

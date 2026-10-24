@@ -714,6 +714,24 @@ final class AppStateHarnessTests: XCTestCase {
         )
     }
 
+    /// The import gate refuses a newer file before the editor is assigned: the editor keeps its config and the source keeps
+    /// its bytes. A current file then reaches the editor through the same `importConfiguration` path.
+    func testAnImportOfANewerFileLeavesTheEditorUnchanged() throws {
+        let appState = try launch()
+        appState.config.profileName = "kept"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("import-\(UUID().uuidString).json")
+        let newer = Data(#"{"schemaVersion":3,"profileName":"imported"}"#.utf8)
+        try newer.write(to: url)
+        XCTAssertThrowsError(try appState.importConfiguration(from: url))
+        XCTAssertEqual(appState.config.profileName, "kept", "a refused import never reaches the editor")
+        XCTAssertEqual(try Data(contentsOf: url), newer, "the refused source keeps its bytes")
+
+        try Data(#"{"schemaVersion":2,"profileName":"imported"}"#.utf8).write(to: url)
+        try appState.importConfiguration(from: url)
+        XCTAssertEqual(appState.config.profileName, "imported", "a current file is assigned through the same gate")
+        try FileManager.default.removeItem(at: url)
+    }
+
     /// `startDNS` flips `dnsForwarderEnabled` and saves. That flip is the
     /// lifecycle's own work, already live in the runtime; a pass that
     /// treated it as an edit would restart the forwarder it just started.
@@ -935,19 +953,51 @@ final class AppStateHarnessTests: XCTestCase {
     }
 
     /// A problem that does not block a start does not hold the save back:
-    /// otherwise one refused bypass entry would stop every later edit from
-    /// saving.
+    /// otherwise one refused intercept rule would stop every later edit from
+    /// saving. The intercept IP is invalid but representable, so the file
+    /// keeps it as typed, and the edit is an unrelated health field.
     func testAPauseOnANonBlockingProblemStillSaves() async throws {
-        let appState = try launch(platform: PlatformIntegrationConfig(), settingsSaveDebounce: .milliseconds(20))
+        let appState = try launch(platform: PlatformIntegrationConfig(), settingsSaveDebounce: .milliseconds(20),
+                                  configure: { $0.dns.interceptRules = [DNSInterceptRule(pattern: "*.intercept.test", interceptIP: "127.44.3")] })
         await harness.launchRecovery()
 
-        appState.config.noProxyHosts = Array(repeating: "short.example", count: ProxyBypassSyntax.maximumEntries + 1)
         XCTAssertFalse(appState.config.validate().isEmpty)
         XCTAssertFalse(appState.config.validate().contains(where: \.blocksProxyStart))
+        XCTAssertTrue(appState.config.startBlockingProblems.isEmpty)
+
+        appState.config.health.checkInterval = 45
         await appState.awaitPendingSave()
-        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.count,
-                       ProxyBypassSyntax.maximumEntries + 1)
+
+        let saved = try ProxyConfigPersistence.load(in: harness.environment)
+        XCTAssertEqual(saved.health.checkInterval, 45, "the unrelated edit saved")
+        XCTAssertEqual(saved.dns.interceptRules.first?.interceptIP, "127.44.3", "the representable IP is saved as typed")
+        XCTAssertEqual(count("config.autosave_held", in: appState), 0, "a non-blocking problem is not a held save")
         XCTAssertFalse(appState.hasUnsavedEdit)
+    }
+
+    /// A bypass list over the 256-entry cap is refused by the file writer: the
+    /// file keeps its last good contents, the edit stays unsaved, and the
+    /// refusal is an event. Bringing the draft back under the cap saves it.
+    func testAnOverlimitBypassCountIsRefusedAndKeepsTheFile() async throws {
+        let appState = try launch(platform: PlatformIntegrationConfig(), settingsSaveDebounce: .milliseconds(20))
+        await harness.launchRecovery()
+        let before = try Data(contentsOf: harness.environment.configFile)
+
+        appState.config.noProxyHosts = Array(repeating: "short.example", count: ProxyBypassSyntax.maximumEntries + 1)
+        await appState.awaitPendingSave()
+
+        XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), before, "the refused list was not written")
+        XCTAssertTrue(appState.hasUnsavedEdit)
+        XCTAssertEqual(count("config.save_rejected", in: appState), 1)
+        XCTAssertNotNil(appState.lastErrorMessage)
+
+        appState.config.noProxyHosts = Array(repeating: "short.example", count: ProxyBypassSyntax.maximumEntries)
+        await appState.awaitPendingSave()
+
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment).noProxyHosts.count,
+                       ProxyBypassSyntax.maximumEntries, "the corrected list saves")
+        XCTAssertFalse(appState.hasUnsavedEdit)
+        XCTAssertEqual(count("config.save_rejected", in: appState), 1, "the corrected save is not refused")
     }
 
     /// A pause on an edit that would block a start saves nothing: a
@@ -1451,19 +1501,22 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(appState.eventLog.events.contains { $0.event == "config.edit_committed" })
     }
 
-    /// A commit whose write failed still advanced the reconciler's
-    /// request, so quit must validate the draft itself rather than trust
-    /// that it matches the request.
+    /// A commit whose config write failed leaves the reconciler's request at
+    /// the prior config, so quit must validate the draft itself rather than
+    /// trust the request, and must not write the invalid draft.
     func testQuittingDiscardsAnInvalidEditWhoseCommitFailedToWrite() async throws {
         let appState = try launch()
         let configFile = harness.environment.configFile
+        let priorRequest = appState.reconciler.requestedConfig
         try FileManager.default.removeItem(at: configFile)
         try FileManager.default.createDirectory(at: configFile, withIntermediateDirectories: false)
 
         appState.config.localHost = "127.0."
         appState.commitPendingEdit(trigger: .submit)
         XCTAssertTrue(appState.hasUnsavedEdit, "the write failed")
-        XCTAssertEqual(appState.reconciler.requestedConfig, appState.config)
+        XCTAssertEqual(appState.reconciler.requestedConfig, priorRequest, "a failed config write does not advance the request")
+        XCTAssertEqual(appState.config.localHost, "127.0.", "the invalid draft stays in the editor")
+        XCTAssertNotNil(appState.lastErrorMessage)
         try FileManager.default.removeItem(at: configFile)
 
         appState.persistPendingEditForTermination()

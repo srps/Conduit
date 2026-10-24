@@ -3,7 +3,7 @@ import ConduitShared
 
 // The kernel's typed resource check (decision 0021). This file only maps `ProxyConfig` storage to the resource view in
 // `ConduitShared`. The order, the ceilings and the refusals live once, in `DomainResourceCheck.configuration(_:)`. The
-// bridge runs the check before `validate()` enumerates failures and before any value is mapped. The private request
+// bridge runs the check before any value is mapped; runtime eligibility stays with the runtime gate. The private request
 // reads the same traversal, and a parity test pins that the two agree. Raw stored bytes count, and so do disabled
 // entries and whitespace.
 

@@ -1,0 +1,7 @@
+Expected failing regression witness; actual command exit1. Checkout path normalized; assertion text/counts retained.
+<checkout>/Tests/ConduitTests/ExactMillisecondsRegressionWitnessTests.swift:18: error: -[ConduitTests.ExactMillisecondsRegressionWitnessTests testWholeMillisecondTimeoutSurvivesSaveAndLoad] : XCTAssertEqual failed: ("1.0") is not equal to ("1.001")
+<checkout>/Tests/ConduitTests/ExactMillisecondsRegressionWitnessTests.swift:19: error: -[ConduitTests.ExactMillisecondsRegressionWitnessTests testWholeMillisecondTimeoutSurvivesSaveAndLoad] : XCTAssertEqual failed: ("1000") is not equal to ("1001")
+<checkout>/Tests/ConduitTests/ExactMillisecondsRegressionWitnessTests.swift:21: error: -[ConduitTests.ExactMillisecondsRegressionWitnessTests testWholeMillisecondTimeoutSurvivesSaveAndLoad] : XCTAssertEqual failed: ("Optional(1000)") is not equal to ("Optional(1001)")
+	 Executed 1 test, with 3 failures (0 unexpected) in 1.449 (1.450) seconds
+	 Executed 1 test, with 3 failures (0 unexpected) in 1.449 (1.450) seconds
+	 Executed 1 test, with 3 failures (0 unexpected) in 1.449 (1.459) seconds

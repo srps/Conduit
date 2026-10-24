@@ -555,12 +555,14 @@ final class ConfigArchitectureTests: XCTestCase {
         let configURL = tempDir.appendingPathComponent("config.json")
         try json.write(to: configURL)
 
-        let platform = LegacyConfigMigration.extractPlatformConfig(from: configURL)
-        XCTAssertNotNil(platform)
-        XCTAssertTrue(platform!.manageSystemProxy)
-        XCTAssertEqual(platform!.systemProxyMode, .pac)
-        XCTAssertTrue(platform!.launchAtLogin)
-        XCTAssertFalse(platform!.manageSystemDNS)
+        // The legacy values come from the runtime file's own read, so the test loads through the persistence boundary.
+        let env = RuntimeEnvironment(configDirectory: tempDir)
+        try json.write(to: env.configFile)
+        let platform = try PlatformConfigPersistence.load(in: env)
+        XCTAssertTrue(platform.manageSystemProxy)
+        XCTAssertEqual(platform.systemProxyMode, .pac)
+        XCTAssertTrue(platform.launchAtLogin)
+        XCTAssertFalse(platform.manageSystemDNS)
     }
 
     func testLegacyPreferencesMigrationExtractsFields() throws {
@@ -575,17 +577,19 @@ final class ConfigArchitectureTests: XCTestCase {
         let configURL = tempDir.appendingPathComponent("config.json")
         try json.write(to: configURL)
 
-        let prefs = LegacyConfigMigration.extractAppPreferences(from: configURL)
-        XCTAssertNotNil(prefs)
-        XCTAssertFalse(prefs!.showMenuBarIcon)
-        XCTAssertFalse(prefs!.globalShortcutEnabled)
-        XCTAssertEqual(prefs!.preferredBrowserTestURL, "https://example.test/")
+        let env = RuntimeEnvironment(configDirectory: tempDir)
+        try json.write(to: env.configFile)
+        let prefs = try AppPreferencesPersistence.load(in: env)
+        XCTAssertFalse(prefs.showMenuBarIcon)
+        XCTAssertFalse(prefs.globalShortcutEnabled)
+        XCTAssertEqual(prefs.preferredBrowserTestURL, "https://example.test/")
     }
 
-    func testLegacyMigrationHandlesMissingFile() {
-        let bogus = URL(fileURLWithPath: "/tmp/nonexistent-\(UUID().uuidString).json")
-        XCTAssertNil(LegacyConfigMigration.extractPlatformConfig(from: bogus))
-        XCTAssertNil(LegacyConfigMigration.extractAppPreferences(from: bogus))
+    func testLegacyMigrationHandlesMissingFile() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let env = RuntimeEnvironment(configDirectory: tempDir)
+        XCTAssertEqual(try PlatformConfigPersistence.load(in: env), PlatformIntegrationConfig())
+        XCTAssertEqual(try AppPreferencesPersistence.load(in: env), AppPreferences())
     }
 
     // MARK: - Persistence Load Paths

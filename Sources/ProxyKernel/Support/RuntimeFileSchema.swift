@@ -1,0 +1,241 @@
+// SPDX-License-Identifier: Apache-2.0
+import ConduitShared
+import Foundation
+
+// The runtime file's known-key tables (decision 0024). Every table is built from the real `CodingKeys` of the decoder that
+// reads it, through an exhaustive switch: a key added to a `CodingKeys` enum does not compile until it has a shape here.
+// A shape says which JSON kind a key takes and which resource field charges its strings and lists. It never says what a
+// value means: `ProxyConfig.validate` and the typed decoders keep that.
+
+/// The decoder that owns a known key. Only the runtime file's own keys are always read. The legacy components are read
+/// only when their sidecar is absent, so their keys are not in the table otherwise.
+package enum RuntimeFileComponent: Sendable, Hashable {
+    case runtime
+    case platform
+    case preferences
+}
+
+/// Which required components a read must keep, derived from the sidecars that exist.
+package struct RuntimeFileRequirements: Sendable, Equatable {
+    package var platform: Bool
+    package var preferences: Bool
+
+    /// Only the runtime file: import, argv and headless loads with no legacy component to extract.
+    package static let runtimeOnly = RuntimeFileRequirements(platform: false, preferences: false)
+
+    /// The decoder key that carries these requirements to the envelope, so it builds only the components this read keeps.
+    static let userInfoKey = CodingUserInfoKey(rawValue: "conduit.runtimeFileRequirements")!
+
+    package init(platform: Bool, preferences: Bool) {
+        self.platform = platform
+        self.preferences = preferences
+    }
+}
+
+/// The JSON kind a known key accepts, and for a string the resource field that charges it. Null is accepted for every
+/// shape: each typed decoder reads null as absent (`decodeIfPresent`), and a required key that is null is left to
+/// Foundation to refuse.
+indirect enum RuntimeFileValueShape: Sendable {
+    /// A string under its resource ceiling.
+    case string(DomainResourceField)
+    /// A string whose value its typed decoder judges: an enum raw value or a UUID. It has no product ceiling of its own.
+    /// The physical file cap bounds it, and the decoder refuses a value it cannot read.
+    case decodedString
+    case number
+    case bool
+    /// An array of strings. Each item is charged to its ceiling and the list to its count and canonical width.
+    case stringArray(count: DomainResourceField, item: DomainResourceField)
+    /// An array of objects. The count is charged before each element, and each element is read against `members`.
+    case objectArray(count: DomainResourceField, members: RuntimeFileObjectSchema)
+
+    /// Whether a value that starts with `byte` has this shape's JSON kind. Null is handled by the caller.
+    func accepts(_ byte: UInt8) -> Bool {
+        switch self {
+        case .string, .decodedString:
+            byte == UInt8(ascii: "\"")
+        case .number:
+            byte == UInt8(ascii: "-") || (UInt8(ascii: "0")...UInt8(ascii: "9")).contains(byte)
+        case .bool:
+            byte == UInt8(ascii: "t") || byte == UInt8(ascii: "f")
+        case .stringArray, .objectArray:
+            byte == UInt8(ascii: "[")
+        }
+    }
+}
+
+/// One known key of an object: its file name, the component that reads it and its shape.
+package struct RuntimeFileMember: Sendable {
+    let name: String
+    let component: RuntimeFileComponent
+    let shape: RuntimeFileValueShape
+}
+
+/// The known members of one object. A member is matched by its name's UTF-8 bytes, so a key is found without building a
+/// `String`. The first member for a name wins, and a later member with the same name is never reached.
+package struct RuntimeFileObjectSchema: Sendable {
+    let members: [RuntimeFileMember]
+    /// The longest name, which bounds the buffer a key is matched into.
+    let longestName: Int
+    private let slots: [[UInt8]: Int]
+
+    init(_ declared: [RuntimeFileMember]) {
+        var members: [RuntimeFileMember] = []
+        var slots: [[UInt8]: Int] = [:]
+        for member in declared {
+            let name = Array(member.name.utf8)
+            guard slots[name] == nil else { continue }
+            slots[name] = members.count
+            members.append(member)
+        }
+        self.members = members
+        self.slots = slots
+        longestName = members.map { $0.name.utf8.count }.max() ?? 0
+    }
+
+    /// The member slot for a decoded key, or nil when the key is not known.
+    func slot(for name: [UInt8]) -> Int? {
+        slots[name]
+    }
+}
+
+/// The runtime file's schema: one object table per `CodingKeys` enum, and the nested tables of the arrays inside them.
+package enum RuntimeFileSchema {
+    /// The root table: the runtime keys, plus each legacy component whose sidecar is absent.
+    package static func root(_ requirements: RuntimeFileRequirements) -> RuntimeFileObjectSchema {
+        var members = runtimeMembers
+        if requirements.platform {
+            members += platformMembers
+        }
+        if requirements.preferences {
+            members += preferenceMembers
+        }
+        return RuntimeFileObjectSchema(members)
+    }
+
+    private static var runtimeMembers: [RuntimeFileMember] {
+        ProxyConfig.CodingKeys.allCases.map { key in
+            RuntimeFileMember(name: key.stringValue, component: .runtime, shape: runtimeShape(key))
+        }
+    }
+
+    private static var platformMembers: [RuntimeFileMember] {
+        PlatformIntegrationConfig.CodingKeys.allCases.map { key in
+            RuntimeFileMember(name: key.stringValue, component: .platform, shape: platformShape(key))
+        }
+    }
+
+    private static var preferenceMembers: [RuntimeFileMember] {
+        AppPreferences.CodingKeys.allCases.map { key in
+            RuntimeFileMember(name: key.stringValue, component: .preferences, shape: preferenceShape(key))
+        }
+    }
+
+    private static let upstreamTable = RuntimeFileObjectSchema(UpstreamProxy.CodingKeys.allCases.map { key in
+        RuntimeFileMember(name: key.stringValue, component: .runtime, shape: upstreamShape(key))
+    })
+
+    private static let dnsEntryTable = RuntimeFileObjectSchema(DomainDNSEntry.CodingKeys.allCases.map { key in
+        RuntimeFileMember(name: key.stringValue, component: .runtime, shape: dnsEntryShape(key))
+    })
+
+    private static let interceptRuleTable = RuntimeFileObjectSchema(DNSInterceptRule.CodingKeys.allCases.map { key in
+        RuntimeFileMember(name: key.stringValue, component: .runtime, shape: interceptRuleShape(key))
+    })
+
+    private static let tunnelTable = RuntimeFileObjectSchema(TunnelDefinition.CodingKeys.allCases.map { key in
+        RuntimeFileMember(name: key.stringValue, component: .runtime, shape: tunnelShape(key))
+    })
+
+    // MARK: - Runtime keys
+
+    private static func runtimeShape(_ key: ProxyConfig.CodingKeys) -> RuntimeFileValueShape {
+        switch key {
+        case .schemaVersion, .localPort, .socksPort, .pendingAuthHandshakeGlobalLimit, .pendingAuthHandshakesPerSource,
+             .localPACPort, .pacUsableRouteLimit, .healthCheckIntervalSeconds, .stalledConnectionTimeoutSeconds,
+             .maxConnections, .connectionCheckTimeoutMS, .upstreamResponseTimeoutSeconds, .upstreamConnectTimeoutSeconds,
+             .directConnectTTLMinutes, .circuitBreakerWindowSeconds, .circuitFailureThreshold,
+             .circuitBaseOpenIntervalSeconds, .circuitMaxOpenIntervalSeconds, .vpnFlapGraceSeconds,
+             .vpnFlapMinVisibleSeconds, .maxBufferedBodyBytes, .maxSpooledBodyBytes, .inboundConnectionWarnThreshold,
+             .inboundConnectionMaxLimit, .auditLogMaxBytes, .dnsForwarderPort, .maxTunnelSessions,
+             .maxSessionsPerTunnel, .transparentProxyPort:
+            .number
+        case .socksEnabled, .localPACEnabled, .pacRoutingEnabled, .strictMode, .verboseLogging, .auditLogEnabled,
+             .gatewayMode, .dnsForwarderEnabled, .transparentProxyEnabled:
+            .bool
+        case .authMode:
+            .decodedString
+        case .profileName: .string(.profileName)
+        case .localHost: .string(.proxyHost)
+        case .username: .string(.authUsername)
+        case .domain: .string(.authDomain)
+        case .workstation: .string(.authWorkstation)
+        case .pacURL: .string(.pacURL)
+        case .healthCheckURL: .string(.checkURL)
+        case .transparentProxyIP: .string(.transparentProxyIP)
+        case .auditLogPath: .string(.auditLogPath)
+        case .upstreams: .objectArray(count: .upstreams, members: upstreamTable)
+        case .dnsEntries: .objectArray(count: .dnsEntries, members: dnsEntryTable)
+        case .dnsInterceptRules: .objectArray(count: .interceptRules, members: interceptRuleTable)
+        case .tunnelDefinitions: .objectArray(count: .tunnelDefinitions, members: tunnelTable)
+        case .noProxyHosts: .stringArray(count: .noProxyHosts, item: .noProxyPattern)
+        case .forceProxyHosts: .stringArray(count: .forceProxyHosts, item: .forceProxyPattern)
+        case .allowedClients: .stringArray(count: .allowedClients, item: .allowedClient)
+        case .dohProviders: .stringArray(count: .dohProviders, item: .dohProvider)
+        }
+    }
+
+    private static func upstreamShape(_ key: UpstreamProxy.CodingKeys) -> RuntimeFileValueShape {
+        switch key {
+        case .id: .decodedString
+        case .name: .string(.upstreamName)
+        case .host: .string(.upstreamHost)
+        case .port, .priority: .number
+        case .enabled: .bool
+        }
+    }
+
+    private static func dnsEntryShape(_ key: DomainDNSEntry.CodingKeys) -> RuntimeFileValueShape {
+        switch key {
+        case .id: .decodedString
+        case .domain: .string(.dnsDomain)
+        case .servers: .stringArray(count: .dnsServers, item: .dnsServer)
+        case .enabled: .bool
+        }
+    }
+
+    private static func interceptRuleShape(_ key: DNSInterceptRule.CodingKeys) -> RuntimeFileValueShape {
+        switch key {
+        case .id: .decodedString
+        case .pattern: .string(.interceptPattern)
+        case .interceptIP: .string(.interceptAddress)
+        case .enabled: .bool
+        }
+    }
+
+    private static func tunnelShape(_ key: TunnelDefinition.CodingKeys) -> RuntimeFileValueShape {
+        switch key {
+        case .id, .preset: .decodedString
+        case .localPort, .remotePort: .number
+        case .remoteHost: .string(.tunnelRemoteHost)
+        case .enabled, .proxied: .bool
+        case .label: .string(.tunnelLabel)
+        }
+    }
+
+    // MARK: - Legacy components
+
+    private static func platformShape(_ key: PlatformIntegrationConfig.CodingKeys) -> RuntimeFileValueShape {
+        switch key {
+        case .systemProxyMode: .decodedString
+        case .manageSystemProxy, .manageEnvironmentVariables, .manageDNSResolvers, .manageSystemDNS, .launchAtLogin: .bool
+        }
+    }
+
+    private static func preferenceShape(_ key: AppPreferences.CodingKeys) -> RuntimeFileValueShape {
+        switch key {
+        case .preferredBrowserTestURL: .string(.browserTestURL)
+        case .showMenuBarIcon, .floatingWindowEnabled, .globalShortcutEnabled, .fileLoggingEnabled, .automaticUpdateChecks:
+            .bool
+        }
+    }
+}

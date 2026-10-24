@@ -44,7 +44,7 @@ final class PrivateConfigBridgeTests: XCTestCase {
         "tunnelDefinitions": "runtime.tunnels.definitions", "maxTunnelSessions": "runtime.tunnels.maxSessions",
         "maxSessionsPerTunnel": "runtime.tunnels.maxSessionsPerTunnel",
         "healthCheckURL": "runtime.health.checkURL", "healthCheckIntervalSeconds": "runtime.health.checkIntervalSeconds",
-        // The legacy millisecond and minute keys truncate. The DTO carries the canonical seconds.
+        // Legacy millisecond and minute keys require whole units. The DTO carries canonical seconds.
         "connectionCheckTimeoutMS": "runtime.health.connectionCheckTimeoutSeconds",
         "upstreamResponseTimeoutSeconds": "runtime.health.upstreamResponseTimeoutSeconds",
         "upstreamConnectTimeoutSeconds": "runtime.health.upstreamConnectTimeoutSeconds",
@@ -62,7 +62,12 @@ final class PrivateConfigBridgeTests: XCTestCase {
     // MARK: - Inventory
 
     func testInventoryMatchesTheKeysTheKernelEncodes() throws {
-        let encoded = try JSONEncoder().encode(richConfig())
+        // The file holds whole minutes, so this encodes a whole-minute TTL. `richConfig`
+        // keeps 90.5 seconds, a valid runtime value that the private frame must carry;
+        // the schema-two file refuses it (decision 0023), so it is not encoded here.
+        var config = richConfig()
+        config.health.directConnectTTL = 600
+        let encoded = try JSONEncoder().encode(config)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
         // `schemaVersion` is a file-format marker, so it is the one stored key the DTO omits.
         let expected = Set(Self.legacyKeyPaths.keys).union(["schemaVersion"])
@@ -235,37 +240,93 @@ final class PrivateConfigBridgeTests: XCTestCase {
 
     // MARK: - Boundary errors
 
-    func testValidationErrorsNameFieldsAndNeverEchoAToken() throws {
+    /// The bridge does not run semantic validation, so a draft with a URL token maps and round-trips
+    /// without an error. Its classification names the field, never the value, and the token stays out of
+    /// the request's reflection.
+    func testSemanticDraftWithAURLTokenMapsAndIsClassifiedByFieldOnly() throws {
         var config = richConfig()
         config.routing.pacURL = "https://user:TOKEN-XYZ-9@pac.example.test/p.pac"
-        do {
-            _ = try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))
-            XCTFail("a URL with userinfo must not pass validation")
-        } catch let error as PrivateConfigurationBridgeError {
-            guard case .invalidConfiguration(let firstCheck, let failureCount) = error else {
-                throw Failure(message: "expected invalidConfiguration")
-            }
-            XCTAssertGreaterThan(failureCount, 0)
-            XCTAssertFalse(firstCheck.contains("TOKEN-XYZ-9"))
-            XCTAssertFalse(String(describing: error).contains("TOKEN-XYZ-9"))
+        let request = try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))
+        let restored = try PrivateConfigurationBridge.makeValues(from: throughFrame(request), localLaunchAtLogin: false)
+        XCTAssertEqual(restored.config, config)
+
+        let checks = config.startBlockingProblems.map(\.check)
+        XCTAssertEqual(checks, ["invalid_host field=routing.pacURL"])
+        XCTAssertFalse(String(describing: checks).contains("TOKEN-XYZ-9"))
+        XCTAssertFalse(String(describing: request).contains("TOKEN-XYZ-9"))
+        XCTAssertFalse(String(reflecting: request.runtime.routing).contains("TOKEN-XYZ-9"))
+
+        // The validation message names the field and the reason, never the URL.
+        XCTAssertFalse(config.validate().compactMap(\.errorDescription).contains { $0.contains("TOKEN-XYZ-9") })
+    }
+
+    /// Start-blocking drafts map both ways and are held downstream by the eligibility classification,
+    /// not refused by the bridge.
+    func testBlockingDraftsMapBothWaysAndAreClassifiedNotRefused() throws {
+        var config = richConfig()
+        config.proxy.maxConnections = 0
+        config.routing.pacUsableRouteLimit = 0
+        let request = try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))
+        let restored = try PrivateConfigurationBridge.makeValues(from: throughFrame(request), localLaunchAtLogin: false)
+        XCTAssertEqual(restored.config, config)
+        XCTAssertEqual(Set(config.startBlockingProblems.map(\.check)), [
+            "invalid_limit field=proxy.maxConnections",
+            "invalid_limit field=routing.pacUsableRouteLimit",
+        ])
+    }
+
+    /// An out-of-range port is an `Int`, so it crosses the frame both ways. Stored and held: the schema-two
+    /// file stages it, and the blocking classification holds the runtime. The bridge does not refuse it.
+    func testOutOfRangePortMapsBothWaysAndIsHeldNotRefused() throws {
+        var config = richConfig()
+        // richConfig keeps a 90.5-second TTL on purpose, which the schema-two file refuses. This test
+        // stages the draft, so it uses a whole-minute TTL. The staging refusal itself is not weakened.
+        config.health.directConnectTTL = 120
+        config.proxy.port = 70_000
+        let request = try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))
+        let restored = try PrivateConfigurationBridge.makeValues(from: throughFrame(request), localLaunchAtLogin: false)
+        XCTAssertEqual(restored.config, config)
+        XCTAssertEqual(restored.config.startBlockingProblems.map(\.check), ["invalid_port field=proxy.port"])
+        XCTAssertNoThrow(try ProxyConfigPersistence.stagedFileData(for: restored.config))
+    }
+
+    /// A non-finite number is the codec's own refusal, and the bridge keeps it as a format check.
+    func testNonFiniteDurationStaysACodecRefusalAtTheBridge() throws {
+        var config = richConfig()
+        config.health.checkInterval = .infinity
+        XCTAssertThrowsError(try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))) {
+            XCTAssertEqual($0 as? PrivateConfigurationWireError, .invalidValue)
         }
     }
 
-    /// Many checks fail, but the error carries one field code and a count, not a copy of each check.
-    func testManyFailingChecksAreSummarisedAsOneCodeAndACount() throws {
+    /// Intercept-pattern, intercept-IP and transparent-proxy-IP problems are non-blocking, and this fixture stays
+    /// inside every resource cap. They map and round-trip, and they never hold a proxy start.
+    func testNonBlockingInterceptProblemsMapAndDoNotBlockApply() throws {
         var config = richConfig()
-        config.proxy.port = 70_000
-        config.proxy.socksPort = 70_000
-        config.dns.forwarderPort = 70_000
-        do {
-            _ = try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))
-            XCTFail("out-of-range ports must not pass validation")
-        } catch let error as PrivateConfigurationBridgeError {
-            guard case .invalidConfiguration(let firstCheck, let failureCount) = error else {
-                throw Failure(message: "expected invalidConfiguration")
-            }
-            XCTAssertEqual(firstCheck, "invalid_port field=proxy.port")
-            XCTAssertGreaterThanOrEqual(failureCount, 3)
+        config.dns.interceptRules = [
+            DNSInterceptRule(id: uuid(52), pattern: "not a domain!!", interceptIP: "not-an-ip", enabled: true),
+        ]
+        config.dns.transparentProxyEnabled = true
+        config.dns.transparentProxyIP = "not-an-ip"
+        let request = try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))
+        let restored = try PrivateConfigurationBridge.makeValues(from: throughFrame(request), localLaunchAtLogin: false)
+        XCTAssertEqual(restored.config, config)
+
+        let problems = config.validate()
+        XCTAssertFalse(problems.isEmpty)
+        XCTAssertTrue(problems.map(\.check).contains { $0.hasPrefix("invalid_intercept") })
+        XCTAssertTrue(problems.allSatisfy { !$0.blocksProxyStart })
+        XCTAssertTrue(config.startBlockingProblems.isEmpty)
+    }
+
+    /// A bypass list past its ceiling is refused by resource before mapping. Every bypass problem the validation
+    /// reports is a resource violation in this policy (count, entry bytes, or encoded bytes), so there is no
+    /// bypass-only non-blocking draft that passes the caps. This keeps that refusal covered.
+    func testBypassListBeyondItsCountCeilingIsRefusedByResourceBeforeMapping() throws {
+        var config = richConfig()
+        config.routing.noProxyHosts = Array(repeating: "short.example", count: 256) + ["another.example"]
+        XCTAssertThrowsError(try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))) {
+            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .resourceLimit(DomainResourceViolation(.noProxyHosts, 256)))
         }
     }
 
@@ -285,6 +346,11 @@ final class PrivateConfigBridgeTests: XCTestCase {
             expectedPlatformRevision: try XCTUnwrap(PrivatePlatformRevision(rawValue: 6)),
             expectedOwnerGeneration: try XCTUnwrap(PrivateConfigExpectedGeneration(rawValue: 5))
         )
+    }
+
+    /// The request as a transfer carries it: framed, read back through the real reader, and decoded.
+    private func throughFrame(_ request: PrivateConfigurationRequest) throws -> PrivateConfigurationRequest {
+        try PrivateConfigurationDecoder.decode(readFrameBody(PrivateConfigurationEncoder.encode(request).bytes()))
     }
 
     /// The body of one complete frame, read through the real reader.

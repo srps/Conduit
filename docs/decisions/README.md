@@ -38,7 +38,7 @@ Each record carries three statuses, because merged does not mean it works:
 | [0012](0012-commit-attribution.md) | Optional attribution trailers, no session URLs | accepted | implemented | none |
 | [0013](0013-runtime-module-isolation.md) | Shared runtime modules and control isolation | accepted | partial | none |
 | [0014](0014-runtime-client-stream.md) | Async runtime client and bounded observation contract | accepted | partial | none |
-| [0015](0015-save-before-apply.md) | Save durable intent before apply, with Stop and Quit exceptions | accepted | planned | none |
+| [0015](0015-save-before-apply.md) | Save durable intent before apply, with Stop and Quit exceptions | accepted | partial | none |
 | [0016](0016-isolated-development-bundle.md) | Isolated ad-hoc development app bundle | accepted | implemented | passed |
 | [0017](0017-exclusive-state-directory-writer.md) | Exclusive writer authority per state directory | accepted | partial | none |
 | [0018](0018-private-configuration-request.md) | Private configuration request with frozen explicit values | accepted | partial | none |
@@ -46,4 +46,6 @@ Each record carries three statuses, because merged does not mean it works:
 | [0020](0020-canonical-runtime-writer-root.md) | Keep runtime persistence within one canonical writer root | accepted | partial | none |
 | [0021](0021-bounded-configuration-at-all-boundaries.md) | Bound configuration resources at update and startup boundaries | accepted | partial | none |
 | [0022](0022-configuration-identity-path-and-host-bounds.md) | Complete identity, path and host configuration bounds | accepted | partial | none |
-| [0023](0023-exact-schema-two-persistence.md) | Keep schema two and refuse inexact committed durations | accepted | planned | none |
+| [0023](0023-exact-schema-two-persistence.md) | Keep schema two and refuse inexact committed durations | accepted | partial | none |
+| [0024](0024-strict-configuration-file-grammar.md) | Strict syntax and Unicode throughout configuration files | accepted | implemented | none |
+| [0025](0025-hold-mixed-configuration-apply.md) | Hold a mixed configuration apply until required inputs verify | accepted | planned | none |

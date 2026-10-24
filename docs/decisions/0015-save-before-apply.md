@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 implementation checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -82,7 +82,27 @@ applied state solely from a saved flag or label a pending stop as stopped.
 
 ## Implementation evidence
 
-None yet. Existing persistence paths are not claimed to enforce this policy.
+Partial, on branch `codex/exact-schema-two-persistence`, not merged. The app's
+commit path in [AppState.swift](../../Sources/Conduit/App/AppState.swift)
+(`saveConfig`) reconciles the runtime only after the save is written and the
+config blocks no proxy start. A refused save, or a commit that blocks a start,
+keeps the runtime on the config it last applied, and the reconcile still runs for
+platform changes at that config. The refusal and the held commit emit
+`config.save_rejected` and `config.apply_held`. Quit writes the platform file even
+when the runtime save is refused. The explicit health check and the tunnel start
+refuse a duration the runtime cannot hold, and name its field, before any connect. The
+direct-connect detector, built on system wake too, starts no probe without a usable budget.
+`AppState` keeps a temporary editor baseline (`editorBaseline`) to tell whether an unsaved
+edit is pending. It is not a receipt or a check of disk state; the store that replaces it
+owns that.
+Tests: [ConfigSaveGateTests.swift](../../Tests/ConduitTests/ConfigSaveGateTests.swift)
+on a real `AppState` over the harness, and
+[ConfigExactPersistenceTests.swift](../../Tests/ConduitTests/ConfigExactPersistenceTests.swift).
+
+Still open: the save is not a store transaction, so ordering through an actor, read-back
+of physical writes, expected revisions, and Stop/Quit fences beyond the quit path are
+unproven. The app's runtime host is still a twin of `RuntimeHost`, not one isolated
+host. The Settings UI is not exercised by the gate tests.
 
 Does not prove: atomic multi-file commits, cancellation of started writes,
 exclusive ownership across processes or machine cleanup after a deadline.

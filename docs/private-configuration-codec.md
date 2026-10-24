@@ -22,16 +22,19 @@ Shared target `ConduitShared`, all `package` access. Nothing is `public`.
 
 Target `ProxyControlBridge`, `package` access:
 
-- `PrivateConfigurationBridge.boundedLowerBound(_:) -> Int?`: a refusal test before
-  mapping. It returns nil once the bound passes the frame cap.
 - `PrivateConfigurationBridge.makeRequest(...) throws`: kernel config and platform to
-  the request. It refuses by bound first, then runs `ProxyConfig.validate()`.
+  the request. It checks shared resources before mapping, then exact frame size.
 - `PrivateConfigurationBridge.makeValues(from:localLaunchAtLogin:) throws`: request to
   kernel values. It takes the exact count first, so a request built in memory is
-  bounded too, then validates.
-- `PrivateConfigurationBridgeError`: `tooLarge`, or `invalidConfiguration(firstCheck:
-  failureCount:)`. `firstCheck` is one `ConfigValidationError.check` field code. The
-  error carries no collection and no value.
+  bounded too. Mapping does not authorize runtime apply.
+- `PrivateConfigurationBridgeError`: `tooLarge` or `resourceLimit`. Errors carry
+  fixed field/limit metadata, no collection and no configuration value.
+
+The local store-preparation correction removes the unadopted bridge's full semantic
+validation gate: exact schema-two staging owns storage representability, and the
+runtime owns start/subsystem eligibility. Representable invalid repair drafts stay
+saveable and held as today; non-blocking feature errors do not become proxy-start
+refusals. This correction is not an adopted store or apply engine.
 
 ## Frame and limits
 
@@ -78,23 +81,14 @@ and `PCV1 \n` is `unknownFrameKind`. A line feed ends the header only after the 
 and at least one digit. `ReferenceFrameParser` follows the same rule, and the fixed
 differential cases include both counterexamples and the other prefix positions.
 
-## Preflight bound (bridge)
+## Shared resource preflight
 
-`boundedLowerBound` charges a budget that starts at the frame cap:
-
-- each string: its raw UTF-8 bytes plus two quotes;
-- each object in an array: 2 braces plus a floor of 4 bytes per member (6, 4, 4 or 8
-  members, by type);
-- each array item, including each string in an array.
-
-It stops at the first charge past the cap, so an oversize input costs no more than the
-cap. Escapes and separators only add to the real size, so the bound never exceeds the
-encoded body. The bound covers stored values only. Top-level fixed structure is not
-charged, which keeps it a lower bound.
-
-Cost of the walk: `String.utf8.count` is constant time for native strings. A bridged
-NSString may be copied to count its bytes. The existing editor object's memory is not
-covered by this bound.
+`DomainResourceCheck.configuration` is the one typed traversal through
+representation-only kernel/private-request views. Adapters expose existing stored
+values; they keep no second limit/order policy or mapped arrays merely for sizing.
+The streaming scanner follows byte order and reuses neutral limits and scalar/list
+counters. The earlier lower-bound walk was removed rather than retained beside
+this check. Exact private encoding size still accounts for escaping and framing.
 
 ## Canonical bypass width and token guard
 
@@ -102,7 +96,7 @@ The bypass list (`noProxyHosts`) has a canonical JSON width of at most 8,192 byt
 
 - **Counted per scalar** (`CanonicalJSONWidth`): `"`, `\`, `/` and the short escapes take 2 bytes; other controls take 6 (`\u00XX`); other ASCII takes 1; everything else takes its UTF-8 length. The solidus is escaped by default. On the toolchain that ran the differential test, U+2028 and U+2029 are written raw, at 3 bytes.
 - **Decoded value, not wire spelling.** `a` and `a` both take 1 byte. The physical body is still bounded by the 8 MiB frame cap, so an escape-heavy list can exceed 8,192 wire bytes and still be accepted when its canonical width fits.
-- **No buffer.** The scanner keeps a running sum, and the typed checks use the same counter. The earlier typed check encoded the list with `JSONEncoder`. `ProxyBypassSyntax` still does, and the tests pin the two to the same boundary.
+- **No buffer.** The scanner keeps a running sum, and the typed checks use the same counter. The earlier typed check encoded the list with `JSONEncoder`. `ProxyBypassSyntax` now uses the same canonical counter, and tests pin it to the boundary.
 - **Known difference.** For a list past its count, the scanner refuses the first bad item it reads, and the typed check refuses the count first. Both are resource refusals, but they can name different fields. The scanner reads at most 256 items before the count refusal, so the cost stays bounded.
 
 **Token guard (64 bytes).** This is a lexical guard of the token grammar, not a product ceiling. A valid identifier is a canonical UUID of 36 bytes (`UUID(uuidString:)`), and every enumeration raw value the decoder accepts is 16 bytes or less. So no valid token is refused. A longer token is malformed and the scanner refuses it as `malformedBody`, not as `resourceLimitExceeded`. `ConfigurationResourceCanonicalWidthTests` derives those lengths from the decoder's own types.
