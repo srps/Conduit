@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
 # bundle-app.sh --dev (#23), run for real against a temporary copy of the
 # repository's packaging files. Build/sign tools are stand-ins; installation
 # and LaunchServices registration are confined to scratch before any case. swift,

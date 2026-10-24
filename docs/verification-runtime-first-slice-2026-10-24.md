@@ -26,8 +26,25 @@ Review then hardened the packaging fixture: checked substitutions redirect both
 INSTALL_DIR and the absolute LaunchServices registrar into scratch before any
 case runs. A copied guard is deliberately disabled, and the resulting install
 must stay in scratch and hit only the registration stub. The hardened fixture
-passed after review. Final full-gate evidence follows after committing this slice;
-the earlier checkpoint is not claimed to validate the later test-script bytes.
+passed after review. Claude then reran all 39 gates on committed checkpoint
+`a5123126e6951a0f604b2bbf1175f7ef804e38b0`: all passed, with 2,343 tests
+(two skips, zero failures), all 85 `pm-sim all` results passing, and the performance
+gate passing. Relevant-source SHA-256 remained
+`f5a0ff50107ee93c1599387e71f841575255a3bbc3d8a15b47972d795c07ba8c` from start
+to completion. Actual dev-bundle packaging/inspection also passed again.
+
+The fingerprint covers sorted nonignored tracked/untracked paths and bytes under
+Sources, Tests, scripts, .github and Resources, plus Package.swift,
+Package.resolved, bundle-app.sh and VERSION. Binaries came from SwiftPM's reported
+`--show-bin-path`, not an assumed old output directory. Full local logs and
+structured results are retained under
+`/private/tmp/conduit-architecture-20261024/dev-full-gates/`.
+
+After that full run, the only code-file edit was adding the SPDX comment to the
+new shell test; its syntax and behavioral packaging/containment test were rerun.
+Documentation/evidence updates passed the decision gates again. Swift/runtime
+source and compiled behavior stayed unchanged; the source hash above identifies
+the full-run checkpoint rather than silently claiming later bytes were tested.
 
 Actual packaging ran `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer zsh
 ./bundle-app.sh --dev`. Inspection confirmed the distinct display, app/helper/
@@ -44,7 +61,7 @@ Conduit Dev and its Popover preview showed Proxy, DNS and Tunnels stopped plus t
 FakeMachine/scratch-state notice. The scratch log confirmed that composition.
 Quit through that dev instance's Quit action and verified its process exited.
 The production Conduit executable path and PID were identical before and after.
-No notification permission was changed. The UI-inspection tool returned much
+No notification permission prompt was accepted. The UI-inspection tool returned much
 later than expected; that delay is not runtime performance evidence.
 
 ## Limits and next work
