@@ -308,6 +308,9 @@ public struct ControlRuntimeEvent: Codable, Sendable, Equatable {
     public var kind: String
     public var event: String
     public var detail: String?
+    /// The typed value behind `event` for a migrated family (decision 0013).
+    /// Additive: nil for a legacy event and for every record written before the field.
+    package var typed: ControlTypedRuntimeEvent?
 
     public init(
         timestamp: Date,
@@ -319,6 +322,72 @@ public struct ControlRuntimeEvent: Codable, Sendable, Equatable {
         self.kind = kind
         self.event = event
         self.detail = detail
+        self.typed = nil
+    }
+
+    package init(
+        timestamp: Date,
+        kind: String,
+        event: String,
+        detail: String?,
+        typed: ControlTypedRuntimeEvent?
+    ) {
+        self.timestamp = timestamp
+        self.kind = kind
+        self.event = event
+        self.detail = detail
+        self.typed = typed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case timestamp, kind, event, detail, typed
+    }
+
+    /// The v1 layout, unchanged. A `typed` value that is present, even as `null`,
+    /// must be valid and must agree with `kind`, `event` and `detail`: a disagreement
+    /// throws, so one event never reads one way as text and another as its typed value.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        kind = try container.decode(String.self, forKey: .kind)
+        event = try container.decode(String.self, forKey: .event)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        typed = nil
+        if container.contains(.typed) {
+            let value = try container.decode(ControlTypedRuntimeEvent.self, forKey: .typed)
+            guard !Self.disagrees(value, kind: kind, event: event, detail: detail) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .typed, in: container,
+                    debugDescription: "the typed payload disagrees with the event's kind, name or detail"
+                )
+            }
+            typed = value
+        }
+    }
+
+    /// Refuses to write a typed value that its own outer fields contradict.
+    public func encode(to encoder: any Encoder) throws {
+        if let typed, Self.disagrees(typed, kind: kind, event: event, detail: detail) {
+            throw EncodingError.invalidValue(self, .init(
+                codingPath: encoder.codingPath,
+                debugDescription: "the typed payload disagrees with the event's kind, name or detail"
+            ))
+        }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(timestamp, forKey: .timestamp)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(event, forKey: .event)
+        try container.encodeIfPresent(detail, forKey: .detail)
+        try container.encodeIfPresent(typed, forKey: .typed)
+    }
+
+    private static func disagrees(
+        _ typed: ControlTypedRuntimeEvent,
+        kind: String,
+        event: String,
+        detail: String?
+    ) -> Bool {
+        typed.kind != kind || typed.name != event || typed.detail != detail
     }
 
     public var humanDescription: String {

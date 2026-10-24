@@ -44,11 +44,41 @@ readable by `jq`, Splunk, Datadog, and `date -r`.
 | `kind` | string enum | yes | Coarse category — see below. |
 | `event` | string | yes | Dotted machine name, `<subsystem>.<what_happened>`. The primary dispatch key for consumers. |
 | `detail` | string | no | Diagnostic detail, often `key=value` tokens separated by spaces. **Always credential-sanitized** (`Authorization`/`Proxy-Authorization`/cookies/bearer/long-base64 masked, URL userinfo stripped) before it reaches any sink. |
+| `typed` | object | no | The typed value behind a migrated `lifecycle.*` name: `{"family": "lifecycle", "lifecycle": {…}}`. Absent on legacy records. Its name, kind and sanitized detail must match the record's; see [Typed lifecycle payloads](#typed-lifecycle-payloads). |
 
 ### `kind` values (v1)
 
 `lifecycle`, `routing`, `auth`, `connection`, `health`, `config`, `vpn`.
 New kinds may be added; ignore unknown ones.
+
+## Typed lifecycle payloads
+
+Four `lifecycle.*` names carry a typed value as well as the legacy `event`, `kind` and `detail`. The value is the record's optional `typed` field, written on the file and the control wire as `{"family": "lifecycle", "lifecycle": {"type": …}}`. The field is additive, so a v1 reader that ignores unknown fields is unaffected. Every other name stays legacy, including the rest of the `lifecycle` kind (`daemon.ready`, `init`, `platform.*`, `helper.*`, `update.*`). A record without `typed` decodes as a legacy record, and no typed value is derived from its `event` or `detail`.
+
+```json
+{"timestamp": 1781136000.123, "kind": "lifecycle", "event": "lifecycle.superseded", "detail": "operation=proxy_start generation=3 current=4 reason=superseded", "typed": {"family": "lifecycle", "lifecycle": {"type": "superseded", "operation": "proxy_start", "generation": 3, "current": 4, "reason": "superseded"}}}
+```
+
+| `type` | Event name | Keys | Rules |
+| --- | --- | --- | --- |
+| `superseded` | `lifecycle.superseded` | `operation`, `generation`, `current`, `reason` | `generation` ≥ 1. With `reason` `superseded`, `current` > `generation`; with `runtime_down`, `current` ≥ `generation`. |
+| `coalesced` | `lifecycle.coalesced` | `operation`, `joined` | `joined` ≥ 1. |
+| `termination_drain_expired` | `lifecycle.termination_drain_expired` | `deadline_ms` | Integer ≥ 0. |
+| `version_changed` | `lifecycle.version_changed` | `from`, `to` | Each is a version token; `from` must not read as a bearer credential (below). |
+
+All numeric typed-payload fields are JSON integers.
+
+- `operation` is one of six: `proxy_start`, `proxy_stop`, `dns_start`, `dns_stop`, `runtime_start`, `runtime_stop`.
+- `reason` is one of two: `superseded`, a later start or stop overtook the operation; `runtime_down`, a proxy start's listeners were down when it would have continued.
+- A version is 1 to 59 bytes of ASCII letters, digits, `.`, `-`, `+` and `_`. This is a boundary rule, not a semver parse: `0.5.8`, `0.5.8-rc.1+7` and `unbundled` are valid, and a `:`, `/`, `=`, space, quote or non-ASCII byte is not. The limit keeps the rendered `from=<version>` run at 64 bytes, under the 65-byte run the sanitizer masks. `from` may not end in the word `Bearer` (any case) at the start or after `.`, `-` or `+`, because its rendered `from=… to=…` line would be masked as a credential. The producer sanitizes both values, then checks the pair, then requires the rendered line to pass the sanitizer unchanged.
+- `detail` is derived from the fields, byte for byte: `operation=… generation=… current=… reason=…`, `operation=… joined=…`, `deadline_ms=…` or `from=… to=…`. The producer sanitizes that derived text; every valid typed payload renders a sanitizer fixed point, and the wire checks agreement.
+
+Producers and readers:
+
+- New `lifecycle.*` records must carry a typed value. The kernel's legacy initializer traps on any `lifecycle.` name, and `scripts/check-event-catalogue.py` fails a `lifecycle.` literal outside `Sources/RuntimeEvents` and the wire's own spelling.
+- A `typed` value that is present, even as `null`, must be valid and agree with the record's `event`, `kind` and sanitized `detail`. A disagreement, a bad number, an invalid version pair, or an unknown `type` under a known name fails the record. The control wire keeps a record as bounded display text only when neither its name nor its family and type are known.
+- The kernel's own file decoder does not classify unknown families, so it fails a line whose `typed` family it does not know. External consumers should skip such a line as an unknown record.
+- When the previous version cannot become a valid pair, no `lifecycle.version_changed` is emitted. `update.state_unreadable` with `reason=unrepresentable_version` is emitted instead, with no raw version. `update-state.json` still records the current version.
 
 ## Event catalogue (v1)
 
@@ -68,11 +98,11 @@ exactly these semantics; do not repurpose them.
 | `platform.launch_recovery_adopted` | The one-time resolver-file scan on the first launch of a release that records resolver files (`surface=resolverFile`, `adopted=`, `removed=` whether adopted files were removed because the switch is off, `foreign=` files with other contents left alone, `unjudged=` entry files left in place). |
 | `platform.launch_recovery_skipped` | A recovery step was not attempted (`surface=`, `reason=config_unavailable` when the config failed to load, which only the resolver scan needs; `reason=journal_unreadable`). The daemon emits these to `events.ndjson` even when it then exits on a bad config. |
 | `platform.launch_recovery_failed` | A restore threw, or part of it did not land and the records were kept for the next launch to retry (`surface=`, `reason=` the error, or `records_kept`). |
-| `lifecycle.superseded` | A start or stop stopped short, because a later start or stop had begun in the meantime (`reason=superseded`) or, for a proxy start, the listeners it started were down by then (`reason=runtime_down`). Checked after each suspension; inside its platform work the operation also stops before its next manager step. The later operation owns the surfaces; its work was queued behind this one's. `detail: operation=proxy_start\|proxy_stop\|dns_start\|dns_stop\|runtime_start\|runtime_stop generation=… current=… reason=…`. |
-| `lifecycle.coalesced` | A start or stop arrived while the same kind of operation was the latest and still running, and joined it instead of queueing a second copy of its platform work (`detail: operation=… joined=<generation>`). |
-| `lifecycle.termination_drain_expired` | The app's quit waited `deadline_ms` for the platform queue and went ahead with its clears; a step still running is serialised with them by its manager's lock (`detail: deadline_ms=…`). |
+| `lifecycle.superseded` | A start or stop stopped short, because a later start or stop had begun in the meantime (`reason=superseded`) or, for a proxy start, the listeners it started were down by then (`reason=runtime_down`). Checked after each suspension; inside its platform work the operation also stops before its next manager step. The later operation owns the surfaces; its work was queued behind this one's. `detail: operation=proxy_start\|proxy_stop\|dns_start\|dns_stop\|runtime_start\|runtime_stop generation=… current=… reason=…`. Typed: see [Typed lifecycle payloads](#typed-lifecycle-payloads). |
+| `lifecycle.coalesced` | A start or stop arrived while the same kind of operation was the latest and still running, and joined it instead of queueing a second copy of its platform work (`detail: operation=… joined=<generation>`). Typed: see [Typed lifecycle payloads](#typed-lifecycle-payloads). |
+| `lifecycle.termination_drain_expired` | The app's quit waited `deadline_ms` for the platform queue and went ahead with its clears; a step still running is serialised with them by its manager's lock (`detail: deadline_ms=…`). Typed: see [Typed lifecycle payloads](#typed-lifecycle-payloads). |
 | `lifecycle.crash_restart` *(planned)* | First startup after an unclean exit; detail references prior exit evidence and the matching crash-report name. |
-| `lifecycle.version_changed` | The app launched with a different version than the last launch recorded in `update-state.json` (`detail: from=… to=…`). After an in-app update this is the first event of the relaunched version; a manual install produces it too. Not emitted on a first launch. |
+| `lifecycle.version_changed` | The app launched with a different version than the last launch recorded in `update-state.json` (`detail: from=… to=…`). After an in-app update this is the first event of the relaunched version; a manual install produces it too. Not emitted on a first launch, nor when the previous version cannot be typed (see `update.state_unreadable`). Typed: see [Typed lifecycle payloads](#typed-lifecycle-payloads). |
 | `helper.installed` | **Install Helper** in Settings ran the app's bundled `install-helper.sh` (#121). `detail: caller_policy=enforced` (pinned to this build's certificate and the release certificate), `unenforced` (this build is signed ad-hoc, so the pin was removed and any program of the console user is admitted; logged as a warning) or `unchanged` (no app to derive a pin from). |
 | `helper.install_failed` | The install from Settings did not complete: the password prompt was dismissed, the app carries no installer, or the installer refused, for example a pin that would not accept this app (`detail: reason=…`). |
 | `helper.uninstalled` / `helper.uninstall_failed` | **Uninstall Helper** in Settings removed the helper and its pin, or did not (`detail: reason=…`). |
@@ -86,7 +116,7 @@ exactly these semantics; do not repurpose them.
 | `update.report_rejected` | A message on the updater's channel for this app was malformed or named no known report (`reason=`). Messages addressed to another copy of the app are ignored without an event. |
 | `update.preflight_started` / `update.preflight_passed` | An explicit install choice starts a bounded authenticated candidate check, or it passes before Sparkle is permitted to stage installation (`version=`). Checks cover archive/code signatures, expansion, bundle/version, architecture/minimum OS, destination permissions, and candidate helper admission/protocol. |
 | `update.preflight_failed` | Candidate verification or compatibility failed before the install choice reaches Sparkle (`version=`, fixed `reason=` category). The serving host remains running. Network errors and child output are not copied into the report. |
-| `update.state_unreadable` / `update.state_unwritable` | `update-state.json` could not be read or decoded at launch (the app carries on with no last check and no previous version), or could not be written (`reason=`). |
+| `update.state_unreadable` / `update.state_unwritable` | `update-state.json` could not be read or decoded at launch (the app carries on with no last check and no previous version), or could not be written (`reason=`). A previous version that cannot become a typed `lifecycle.version_changed` is reported here as `reason=unrepresentable_version`, with no raw value (see [Typed lifecycle payloads](#typed-lifecycle-payloads)). |
 
 ### routing
 | Event | Emitted when |

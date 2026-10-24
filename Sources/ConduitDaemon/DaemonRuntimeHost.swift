@@ -7,6 +7,7 @@ import ProxyControlBridge
 import ProxyKernel
 import ConduitShared
 import ProxyPAC
+import RuntimeEvents
 
 private struct DaemonVPNFlapWindowConfig: Sendable {
     var graceSeconds: TimeInterval
@@ -458,7 +459,7 @@ final class DaemonRuntimeHost {
     func startRuntime() async throws {
         await awaitLaunchRecovery()
         logNonBlockingConfigProblems()
-        guard let token = await admit(.start, "runtime_start") else { return }
+        guard let token = await admit(.start, .runtimeStart) else { return }
         defer { runtimeLane.end(token) }
         do {
             try await orchestrator.startProxy()
@@ -484,7 +485,7 @@ final class DaemonRuntimeHost {
         }
         // A stop issued while the listeners came up has already queued its
         // clears; applying now would put the surfaces back after them.
-        guard isCurrent(token, "runtime_start") else { return }
+        guard isCurrent(token, .runtimeStart) else { return }
 
         let config = self.config
         let platform = platformConfig
@@ -563,7 +564,7 @@ final class DaemonRuntimeHost {
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
         // rest of a start for a runtime that is down.
-        guard isCurrent(token, "runtime_start") else { return }
+        guard isCurrent(token, .runtimeStart) else { return }
         // A VPN transition handled while the apply was out reconciled the
         // entry files then, possibly before the apply wrote them from the
         // gate it was queued with. Twin of the check in `AppState.startProxy`.
@@ -579,7 +580,7 @@ final class DaemonRuntimeHost {
 
         if config.dnsForwarderEnabled {
             await orchestrator.startDNS()
-            guard isCurrent(token, "runtime_start") else { return }
+            guard isCurrent(token, .runtimeStart) else { return }
             let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
             let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
@@ -612,7 +613,7 @@ final class DaemonRuntimeHost {
                     }
                 }
             }
-            guard isCurrent(token, "runtime_start") else { return }
+            guard isCurrent(token, .runtimeStart) else { return }
             if platform.manageSystemDNS, forwarderRunning {
                 // Whether or not `apply` succeeded — see `AppState.startDNS`.
                 startDNSHealthTimer(forwarderPort: forwarderPort)
@@ -621,7 +622,7 @@ final class DaemonRuntimeHost {
 
         if config.tunnelDefinitions.contains(where: \.enabled) {
             await orchestrator.startTunnels()
-            guard isCurrent(token, "runtime_start") else { return }
+            guard isCurrent(token, .runtimeStart) else { return }
         }
 
         startLocationObserver()
@@ -652,7 +653,7 @@ final class DaemonRuntimeHost {
     /// it: it supersedes the one in flight, which then stops at its next step.
     func stopRuntime(exitAfterStop: Bool = false) async {
         await awaitLaunchRecovery()
-        guard let token = await admit(.stop, "runtime_stop", coalescing: !exitAfterStop) else { return }
+        guard let token = await admit(.stop, .runtimeStop, coalescing: !exitAfterStop) else { return }
         defer { runtimeLane.end(token) }
         let terminal = exitAfterStop
         runtimeStarted = false
@@ -679,11 +680,11 @@ final class DaemonRuntimeHost {
                 }
             }
         }
-        guard terminal || isCurrent(token, "runtime_stop") else { return }
+        guard terminal || isCurrent(token, .runtimeStop) else { return }
         await orchestrator.stopTunnels()
         await orchestrator.stopDNS()
         await orchestrator.stopProxy()
-        guard terminal || isCurrent(token, "runtime_stop") else { return }
+        guard terminal || isCurrent(token, .runtimeStop) else { return }
 
         // Each surface is cleared when its flag is on *or* when the journal
         // says the surface is ours, as in `AppState.stopProxy`. The flag alone
@@ -740,7 +741,7 @@ final class DaemonRuntimeHost {
             }
         }
         recordSplitDNS(entryFiles, source: .stop, startedAt: stopGeneration)
-        guard terminal || isCurrent(token, "runtime_stop") else { return }
+        guard terminal || isCurrent(token, .runtimeStop) else { return }
 
         logger.log(.notice, "Daemon runtime stopped.", category: .general)
         writeSnapshotFile(snapshot: orchestrator.snapshot)
@@ -813,7 +814,7 @@ final class DaemonRuntimeHost {
     /// returns `nil`. Twin of `AppState.admit`.
     private func admit(
         _ kind: LifecycleLane.Kind,
-        _ operation: String,
+        _ operation: LifecycleOperation,
         coalescing: Bool = true
     ) async -> LifecycleLane.Token? {
         switch runtimeLane.begin(kind, coalescing: coalescing) {
@@ -828,7 +829,7 @@ final class DaemonRuntimeHost {
 
     /// Whether the start or stop holding `token` may go on. When not, says
     /// so with a `lifecycle.superseded` event. Twin of `AppState.isCurrent`.
-    private func isCurrent(_ token: LifecycleLane.Token, _ operation: String) -> Bool {
+    private func isCurrent(_ token: LifecycleLane.Token, _ operation: LifecycleOperation) -> Bool {
         guard !token.isSuperseded else {
             recordLifecycle(runtimeLane.supersededEvent(operation: operation, token: token))
             return false

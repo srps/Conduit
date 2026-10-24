@@ -16,8 +16,13 @@ PM_SIM = 'Sources/pm-sim/VPNFlapScenarios.swift'
 LOCATION = 'Sources/PlatformMac/LocationSettingsRecovery.swift'
 MENU_BAR = 'Sources/Conduit/App/MenuBarPresentation.swift'
 APP = 'Sources/Conduit/App/AppState.swift'
+TYPED = 'Sources/RuntimeEvents/LifecycleEvents.swift'
+PAYLOAD = 'Sources/RuntimeEvents/RuntimeEventPayload.swift'
+WIRE = 'Sources/ConduitShared/ControlRuntimeEventTyped.swift'
+KERNEL = 'Sources/ProxyKernel/Models/RuntimeEvent.swift'
+UPDATES = 'Sources/PlatformMac/AppUpdates.swift'
 EVENTS = 'docs/events.md'
-MUTATED = (PRODUCT, PM_SIM, LOCATION, MENU_BAR, APP, EVENTS)  # restored after each case
+MUTATED = (PRODUCT, PM_SIM, LOCATION, MENU_BAR, APP, TYPED, PAYLOAD, WIRE, KERNEL, UPDATES, EVENTS)  # restored after each case
 
 
 def append(path, text):
@@ -136,6 +141,58 @@ rejected = [
      'pm-sim refers to `vpn.brand_new`'),
     ('NOT_EVENTS entry no longer used', replace(MENU_BAR, '"network.slash"', '"wifi.slash"'),
      '"network.slash" is listed'),
+    ('typed name emitted through the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle.superseded", detail: "x")'),
+     '`lifecycle.superseded` is a typed name'),
+    ('version_changed emitted through the legacy envelope by a producer',
+     append(UPDATES, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle.version_changed", detail: "from=1 to=2")'),
+     '`lifecycle.version_changed` is a typed name'),
+    ('planned crash_restart emitted through the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle.crash_restart", detail: "x")'),
+     '`lifecycle.crash_restart` is in the closed lifecycle namespace'),
+    ('typed name read as a literal by a consumer',
+     append(PM_SIM, 'let probe = events.filter { $0.event == "lifecycle.coalesced" }'),
+     '`lifecycle.coalesced` is a typed name'),
+    ('typed inventory widened without a typed case',
+     replace(TYPED, 'case terminationDrainExpired = "lifecycle.termination_drain_expired"',
+             'case terminationDrainExpired = "lifecycle.termination_drain_expired"\n    case brandNew = "lifecycle.brand_new"'),
+     'LifecycleEventName lists'),
+    ('legacy envelope stops refusing typed names',
+     replace(KERNEL, '!RuntimeEventPayload.requiresTypedPayload(event)', 'true'),
+     'no longer refuses the lifecycle namespace'),
+    ('unreviewed lifecycle name in the closed namespace',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle.future", detail: "x")'),
+     '`lifecycle.future` is in the closed lifecycle namespace'),
+    ('lifecycle namespace name built at run time',
+     append(PRODUCT, 'let probe = "lifecycle." + suffix'),
+     'built at run time'),
+    ('wire spells a typed name the inventory does not pin',
+     replace(WIRE, '"lifecycle.coalesced"', '"lifecycle.brand_new"'),
+     'the wire spells'),
+    ('untyped exception reintroduced for version_changed',
+     append(PAYLOAD, 'extension RuntimeEventPayload { static let legacyLifecycleNames: Set<String> = ["lifecycle.version_changed"] }'),
+     'legacyLifecycleNames reintroduces'),
+    ('untyped exception reintroduced for a future name',
+     append(PAYLOAD, 'extension RuntimeEventPayload { static let legacyLifecycleNames: Set<String> = ["lifecycle.future"] }'),
+     'legacyLifecycleNames reintroduces'),
+    ('namespace gate narrowed to the typed names',
+     replace(PAYLOAD, 'name.hasPrefix(namespacePrefix)', 'typedNames.contains(name)'),
+     'requiresTypedPayload no longer closes'),
+    ('version_changed case dropped from the typed inventory',
+     replace(TYPED, 'case versionChanged = "lifecycle.version_changed"\n', ''),
+     'LifecycleEventName lists'),
+    ('typed name split across literals in the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle" + "." + "superseded", detail: "x")'),
+     '`lifecycle.superseded` is a typed name'),
+    ('typed name split across raw literals in the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: #"lifecycle"# + "." + #"superseded"#, detail: "x")'),
+     '`lifecycle.superseded` is a typed name'),
+    ('typed name split with an escaped piece in the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle" + "\\u{2E}superseded", detail: "x")'),
+     '`lifecycle.superseded` is a typed name'),
+    ('closed lifecycle prefix split across literals, suffix from a variable',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle" + "." + suffix, detail: "x")'),
+     '`lifecycle.\\(…)` is in the closed lifecycle namespace'),
 ]
 
 accepted = [
@@ -155,6 +212,11 @@ accepted = [
         append(PRODUCT, 'let probe = RuntimeEvent(kind: .auth, event: "auth.brand_new")'),
         add_catalogue_row('| `auth.brand_new` | Documented. |'))),
     ('message text in an event family', append(PRODUCT, 'let probe = "pac.refreshed \\(count) times"')),
+    ('typed name in a comment', append(PRODUCT, '// lifecycle.superseded is emitted through its typed value')),
+    ('typed name in a comment of a producer', append(UPDATES, '// lifecycle.version_changed is emitted through its typed value')),
+    ('human text split across literals', append(PRODUCT, 'let note = "Proxy started. " + "Retry in 5s."')),
+    ('lifecycle kind rawValue', append(PRODUCT, 'enum Probe: String { case lifecycle = "lifecycle" }')),
+    ('lifecycle words split across literals as human text', append(PRODUCT, 'let note = "lifecycle " + "is idle"')),
 ]
 
 

@@ -19,8 +19,10 @@ source text:
    name at run time. It must be one of BUILT_NAMES, whose assembling
    expression must still read as recorded, and whose produced names are read
    from the calls that feed it and compared both ways with the names the
-   entry lists. NOT_EVENTS lists literals in event families that are not event
-   names (file names, hosts, config keys, symbols).
+   entry lists. A `+` chain of plain literals is folded first and read as the
+   name it spells, so `"lifecycle" + "." + "superseded"` is checked as a whole.
+   NOT_EVENTS lists literals in event families that are not event names (file
+   names, hosts, config keys, symbols).
 
 The catalogue is the first column of the tables under "## Event catalogue":
 every backticked token there is a full event name. A row containing
@@ -41,6 +43,10 @@ Blind spots. The check is a heuristic over literals, not over what runs:
   `[family, what].joined(separator: ".")`, or a prefix held in a constant and
   a rawValue `"started"`), and a name in a family the catalogue does not use
   yet that never sits at an `event:` label, are not seen;
+- a `+` chain is folded only across plain literals: past a variable, the
+  chain's concrete prefix is read but the variable's part is not, so
+  `"lifecycle" + "." + suffix` is caught as the closed `lifecycle.` prefix while
+  the name `suffix` supplies is not;
 - any literal in an event family counts as an emitter: an unrelated string
   such as a test host `"auth.example.test"` fails until it is listed in
   NOT_EVENTS, and an event name kept in product code only as a consumer
@@ -55,6 +61,23 @@ Blind spots. The check is a heuristic over literals, not over what runs:
 - names in Tests/ are not read, and the `kind` a name is emitted with is not
   compared with the catalogue section it sits in.
 All need a reviewer until #180 makes names a type.
+
+Authority. This is a static check over the recognised forms only: plain, raw and
+escaped literals, interpolations, and `+` chains of literals. It does not prove what
+a computed string is. The run-time precondition behind the legacy RuntimeEvent init
+(which calls RuntimeEventPayload.requiresTypedPayload) stays the authority; this gate
+stops the recognised forms from reaching it unreviewed.
+
+Typed families (decision 0013). The `lifecycle.*` names with a typed value are
+pinned in TYPED_NAMES below and must match `LifecycleEventName` in
+Sources/RuntimeEvents. The `lifecycle.` namespace is closed: a literal in it
+outside Sources/RuntimeEvents and the wire's spelling is a failure, with no
+exception list, so every emitter and consumer goes through the typed value. A
+built name in that namespace is caught by the run-time rule above. The kernel's
+legacy envelope must keep refusing the whole namespace (`requiresTypedPayload`,
+which must still test the `lifecycle.` prefix). This is a checked inventory, not
+a naming convention: the types are what stop an untyped producer, and this check
+stops a later edit from quietly removing that.
 
 Usage: check-event-catalogue.py [ROOT]
 """
@@ -112,6 +135,22 @@ BUILT_NAMES = [
           'event: "helper.\\(operation)_failed", detail:', 'changeHelper', 'helper.{}_failed',
           {'helper.install_failed', 'helper.uninstall_failed'}),
 ]
+# The typed migration inventory (decision 0013): every lifecycle name with a
+# typed value, which is the whole family. Changing it is a reviewed change to
+# LifecycleEventName as well.
+TYPED_NAMES = {
+    'lifecycle.superseded', 'lifecycle.coalesced', 'lifecycle.termination_drain_expired',
+    'lifecycle.version_changed',
+}
+TYPED_DIRECTORY = 'Sources/RuntimeEvents/'
+TYPED_INVENTORY = 'Sources/RuntimeEvents/LifecycleEvents.swift'
+LIFECYCLE_NAMESPACE = 'lifecycle.'
+# The kernel's legacy envelope gate. It must test the namespace prefix, with no exception list.
+PAYLOAD_INVENTORY = 'Sources/RuntimeEvents/RuntimeEventPayload.swift'
+# The wire's spelling of the typed names: a projection of the typed value, pinned to the
+# same inventory, so its literals are allowed outside the typed directory.
+WIRE_TYPED_FILE = 'Sources/ConduitShared/ControlRuntimeEventTyped.swift'
+KERNEL_EVENT = 'Sources/ProxyKernel/Models/RuntimeEvent.swift'
 # Names only pm-sim uses: synthetic events it builds to test sinks and
 # writers, and a report name the updater contract must reject. Never emitted
 # by a product binary.
@@ -321,6 +360,61 @@ def literals(tokens):
             after += 1
         plus = (before >= 0 and is_punct(tokens[before], '+')) or (after < len(tokens) and is_punct(tokens[after], '+'))
         found.append(Literal(token.text, token.interpolated or plus, index in labelled, token.line))
+    return found + concatenations(tokens, labelled)
+
+
+def at(tokens, index):
+    return tokens[index] if 0 <= index < len(tokens) else None
+
+
+def chain_continues(tokens, index):
+    """Whether the plain string at `index` follows a plain string through a `+`."""
+    before = index - 1
+    while is_punct(at(tokens, before), '('):
+        before -= 1
+    if not is_punct(at(tokens, before), '+'):
+        return False
+    before -= 1
+    while is_punct(at(tokens, before), ')'):
+        before -= 1
+    previous = at(tokens, before)
+    return previous is not None and previous.kind == 'str' and not previous.interpolated
+
+
+def chain_from(tokens, start):
+    """The text a `+` chain of plain strings from `start` spells, the index of its
+    last string, and whether the chain goes on into a piece that is not a plain string."""
+    text, last = tokens[start].text, start
+    while True:
+        plus = last + 1
+        while is_punct(at(tokens, plus), ')'):
+            plus += 1
+        if not is_punct(at(tokens, plus), '+'):
+            return text, last, False
+        piece = plus + 1
+        while is_punct(at(tokens, piece), '('):
+            piece += 1
+        token = at(tokens, piece)
+        if token is None or token.kind != 'str' or token.interpolated:
+            return text, last, True
+        text, last = text + token.text, piece
+
+
+def concatenations(tokens, labelled):
+    """Names split across `+` pieces, as the literal each spells. Plain pieces are folded,
+    so `"lifecycle" + "." + "superseded"` is `lifecycle.superseded` however it is written,
+    raw or escaped. A chain that goes on into a non-literal piece is folded as far as it
+    goes and marked built, like an interpolation, so its concrete prefix is still checked."""
+    found = []
+    for index, token in enumerate(tokens):
+        if token.kind != 'str' or token.interpolated or chain_continues(tokens, index):
+            continue
+        text, last, open_chain = chain_from(tokens, index)
+        if last == index:
+            continue  # one piece: literals() already judged it
+        if open_chain:
+            text += '\\(…)'
+        found.append(Literal(text, open_chain, index in labelled, token.line))
     return found
 
 
@@ -420,9 +514,14 @@ def check(root):
         tokens = tokenize(source)
         target = pm_sim if relative.startswith(PM_SIM) else product
         for literal in literals(tokens):
+            where = f'{relative}:{literal.line}'
+            if (literal.text.startswith(LIFECYCLE_NAMESPACE)
+                    and not relative.startswith(TYPED_DIRECTORY) and relative != WIRE_TYPED_FILE):
+                what = 'a typed name' if literal.text in TYPED_NAMES else 'in the closed lifecycle namespace'
+                problems.append(f'{where}: `{literal.text}` is {what}; emit it through RuntimeEvent(payload:) '
+                                'and match its typed value, not a literal (decision 0013)')
             if not is_event_literal(literal, families, seen_exceptions):
                 continue
-            where = f'{relative}:{literal.line}'
             if literal.built:
                 entry = templates.get((relative, literal.text))
                 if entry is not None:
@@ -459,7 +558,39 @@ def check(root):
             problems.append(f'{where}: pm-sim refers to `{name}`, which is not catalogued in docs/events.md')
     for text in sorted((NOT_EVENTS | PM_SIM_FIXTURES) - seen_exceptions):
         problems.append(f'"{text}" is listed in NOT_EVENTS or PM_SIM_FIXTURES but no source uses it; drop it')
+    problems += typed_inventory_problems(root)
     return problems, product
+
+
+def typed_inventory_problems(root):
+    """The typed inventory matches LifecycleEventName, the wire spells the same names, and
+    the kernel's legacy envelope still refuses the whole namespace."""
+    problems = []
+    inventory = root / TYPED_INVENTORY
+    text = inventory.read_text() if inventory.exists() else ''
+    block = re.search(r'enum LifecycleEventName\b[^{]*\{(.*?)\n\}', text, re.S)
+    listed = set(re.findall(r'"(lifecycle\.[a-z_]+)"', block.group(1))) if block else set()
+    if listed != TYPED_NAMES:
+        problems.append(f'{TYPED_INVENTORY}: LifecycleEventName lists {sorted(listed)}, but the typed inventory '
+                        f'pins {sorted(TYPED_NAMES)}; change both together')
+    payload = root / PAYLOAD_INVENTORY
+    payload_text = payload.read_text() if payload.exists() else ''
+    if 'legacyLifecycleNames' in payload_text:
+        problems.append(f'{PAYLOAD_INVENTORY}: legacyLifecycleNames reintroduces an untyped lifecycle exception; '
+                        'the namespace is closed, so a lifecycle name gets a typed case')
+    if 'name.hasPrefix(namespacePrefix)' not in payload_text:
+        problems.append(f'{PAYLOAD_INVENTORY}: requiresTypedPayload no longer closes the lifecycle namespace')
+    wire = root / WIRE_TYPED_FILE
+    wire_text = wire.read_text() if wire.exists() else ''
+    wire_names = set(re.findall(r'"(lifecycle\.[a-z_]+)"', wire_text))
+    if wire_names != TYPED_NAMES:
+        problems.append(f'{WIRE_TYPED_FILE}: the wire spells {sorted(wire_names)}, but the typed inventory '
+                        f'pins {sorted(TYPED_NAMES)}; change both together')
+    kernel = root / KERNEL_EVENT
+    if not kernel.exists() or '!RuntimeEventPayload.requiresTypedPayload(event)' not in kernel.read_text():
+        problems.append(f'{KERNEL_EVENT}: the legacy RuntimeEvent init no longer refuses the lifecycle namespace; '
+                        'a typed name must be emitted through RuntimeEvent(payload:)')
+    return problems
 
 
 if __name__ == '__main__':

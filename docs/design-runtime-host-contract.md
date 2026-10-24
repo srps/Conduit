@@ -1,6 +1,7 @@
 # Shared runtime contracts and host: owner review draft
 
 Date: 2026-10-24. Status: **selected architecture; staged implementation authorized**.
+Implementation status: the stage-1 foundation (typed lifecycle events, control value types and codec, the `RuntimeClient` protocol) is implemented on this branch. No `ConduitRuntime` target, in-memory client or production v2 socket exists yet. See the [stage-1 inventory](./runtime-client-stage1-inventory.md).
 
 Prepared by Codex with Claude Code architecture and persistence-policy review,
 using the owner's `claude.ai` Max subscription. The owner selected the module and
@@ -12,10 +13,11 @@ Claude implements and verifies bounded slices; Codex reviews each checkpoint.
 The accepted refinements are recorded in
 [0013](./decisions/0013-runtime-module-isolation.md),
 [0014](./decisions/0014-runtime-client-stream.md), and
-[0015](./decisions/0015-save-before-apply.md).
+[0015](./decisions/0015-save-before-apply.md), and
+[0017](./decisions/0017-exclusive-state-directory-writer.md).
 [0016](./decisions/0016-isolated-development-bundle.md) records the first dev-bundle
 slice. Existing accepted records retain their decisions. Illustrative type names,
-config field projection, writer lifetime, listener handoff and unmeasured resource
+config field projection, listener handoff and unmeasured resource
 limits remain design work, with explicit gates below. Authorization is not an
 implementation or real-machine validation claim. [ROADMAP](../ROADMAP.md) remains
 the queue.
@@ -130,7 +132,11 @@ and measured contention; it is not required up front or a cost-free later change
 ## Client, commands and outcomes
 
 Illustrative names below describe the intended shape; these snippets are not
-compilable implementation or a final exhaustive command list. Control message
+compilable implementation or a final exhaustive command list. The implemented
+protocol in [`RuntimeClient.swift`](../Sources/ConduitShared/RuntimeClient.swift)
+differs from the snippet: every call takes a `RuntimeDeadline`, the submit, lookup
+and outcome calls also take a request ID or operation with the expected incarnation,
+and the protocol adds `lookupAdmission` and `readSnapshot`. Control message
 values are `Codable`, `Sendable` values. Local stream handles are not encoded.
 
 ```swift
@@ -359,9 +365,14 @@ human detail derive from that case.
 package enum LifecycleEvent: Codable, Sendable, Equatable {
     case superseded(LifecycleSuperseded)
     case coalesced(LifecycleCoalesced)
-    case terminationDrainExpired(TerminationDrainExpired)
+    case terminationDrainExpired(LifecycleTerminationDrainExpired)
+    case versionChanged(LifecycleVersionChanged)
 }
 ```
+
+The implemented family is in [`LifecycleEvents.swift`](../Sources/RuntimeEvents/LifecycleEvents.swift),
+with its wire layout and bounds in [`events.md`](./events.md#typed-lifecycle-payloads). It types
+all four `lifecycle.*` names in the working tree. The other families stay legacy.
 
 Credentials, cookies, authorization headers and SecretBytes never enter Codable
 event values. Diagnostic text/targets use deliberately sanitized representations;
@@ -401,6 +412,16 @@ store must resolve the original immutable inputs or reject as superseded; an
 opaque revision followed by a read of newer files is insufficient. The value
 projection is the preferred shape; its complete field inventory remains an owner
 review and stage-1 design obligation, not a claim that raw ProxyConfig is wire-safe.
+
+Stage-1 source inventory and measurement obligations are recorded in
+[runtime-client-stage1-inventory.md](runtime-client-stage1-inventory.md). The owner
+favors the future daemon architecture and asks for a decision when a concrete
+trade-off is needed. A full pinned-config registry was considered but is not
+selected or implemented; save-before-apply does not require it. Keep the original
+explicit-value preference and private sensitive bindings while measuring. V1
+remains 16 KiB; the v2 bound is provisional. Bring back measured larger-frame
+versus chunked-transfer alternatives before implementing affected config apply,
+without introducing incidental config-count or query-string restrictions.
 
 For actions that persist DNS/tunnel/proxy intent, the AppState action adapter
 remains the persistence authority and passes the committed intent through the
@@ -532,7 +553,9 @@ instance. A one-writer object or a payload digest alone does not prevent this.
 Before allowing such overlap, prove the old writer has quiesced/exited or design
 bounded exclusive state-directory write ownership. A pending marker alone would
 not stop an old writer. No existing process lock or new durable marker is claimed
-here; the writer-lifetime/ownership choice remains for review. A crash's unsaved
+here. The owner selected exclusive OS-backed writer authority in decision 0017;
+its implementation remains planned. Legacy binaries still need old-process-exit
+handoff. A crash's unsaved
 stop warning is emitted in the old session; reliably repeating it next launch
 would require separately approved durable evidence, which this policy does not add.
 
@@ -670,6 +693,8 @@ slices after owner approval and the necessary decisions:
    substantial isolation work, without declaring its race cause established.
 2. Contract, codec, in-memory transport and conformance/model tests; lifecycle
    event family through producer, wire/file output, consumers and assertions.
+   Status: the contract, codec and lifecycle family are in the working tree. The
+   in-memory transport, conformance tests and consumers are not.
 3. Extract ConduitRuntime from the daemon with existing policy and fake-machine
    coverage. No production process switch or helper contract change.
 4. AppState DNS, tunnels, then proxy adoption, deleting copies and migrating each
@@ -697,13 +722,15 @@ for their affected slices, not blockers to independent work:
 | Choice | Recommendation or remaining owner choice | Consequence |
 | --- | --- | --- |
 | Config payload and commit granularity | AppState remains interim writer; prefer secret-free committed values with component receipts; exact-revision store if projection is unsuitable; identify coupled components | Selected save-before-apply policy needs field classification and explicit partial-write handling; later daemon writer handoff stays separate |
-| Writer lifetime at relaunch/update | Prove old-writer exit/quiescence before new writes, or design bounded exclusive state-directory write ownership; no new pending marker by default | A process-local queue or digest does not prevent overlapping instances from overwriting each other |
+| Writer lifetime at relaunch/update — selected | Exclusive OS-backed state-directory writer lease; busy hosts refuse runtime startup and reconciliation; keep authority until write quiescence or exit ([0017](./decisions/0017-exclusive-state-directory-writer.md)) | No snapshot registry or new generation schema selected; legacy releases still require old-process-exit handoff; implementation/upgrade validation remain due |
 | Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
 | Follow-up release scope | Keep full control-owner isolation in the 0.6 core; decide the bounded #194 applied-state slice, with full scheduler/leases separately scoped | Selected module/isolation shape does not silently expand the remaining release scope |
 | Resource and shutdown limits | Size frame/page/queue/retention bounds and a total shutdown budget including helper calls and manager locks | Provisional numbers above are review inputs, not validated shipping defaults |
 
 Concrete limit values and the full command/field inventory require stage-1 sizing
-and compatibility fixtures before those APIs are considered settled. Any owner
+and compatibility fixtures before those APIs are considered settled. The stage-1
+measurements so far are in the [inventory](./runtime-client-stage1-inventory.md);
+they select no limit. Any owner
 choice that refines an accepted decision receives a new ADR or the appropriate
 implementation/evidence update when that choice is approved; no accepted record is rewritten
 into a different decision.

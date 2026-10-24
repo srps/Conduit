@@ -39,29 +39,36 @@ let package = Package(
             path: "Sources/ConduitShared",
             exclude: ["AGENTS.md"]
         ),
+        // Foundation-only typed runtime events (decision 0013). Not a kernel
+        // type: the control wire projects these values without importing the
+        // kernel, and the kernel's `RuntimeEvent` carries them.
+        .target(
+            name: "RuntimeEvents",
+            path: "Sources/RuntimeEvents"
+        ),
         // `ProxyKernel` is the portable, Apple-framework-free core; per-pillar
         // code lives in `ProxyAuth` / `ProxyPAC` / `PlatformMac`, and
         // cross-target protocols in `Sources/ProxyKernel/Abstractions/`. The
         // dependency graph is documented in `docs/design-module-split.md`.
         //
-        // `ConduitShared` is the one first-party dependency, and it is
-        // there for `DomainNameSyntax` — the single domain-name grammar, which
-        // the config boundary and the helper's input validation both have to
-        // agree on. `ConduitShared` has no dependencies of its own, so
-        // this adds no cycle and no framework. The inverse would have dragged
-        // NIO into the root-privileged helper. Wire-contract *types* still stay
-        // out of the kernel — that is `ProxyControlBridge`'s job and it is
-        // unchanged.
+        // `ConduitShared` and `RuntimeEvents` are the first-party dependencies.
+        // `ConduitShared` is there for `DomainNameSyntax` — the single
+        // domain-name grammar, which the config boundary and the helper's input
+        // validation both have to agree on. `ConduitShared` has no dependencies
+        // of its own, so this adds no cycle and no framework. The inverse would
+        // have dragged NIO into the root-privileged helper. `RuntimeEvents` has
+        // no dependencies either. Wire-contract *types* still stay out of the
+        // kernel — that is `ProxyControlBridge`'s job and it is unchanged.
         .target(
             name: "ProxyKernel",
-            dependencies: nioProducts + ["ConduitShared"],
+            dependencies: nioProducts + ["ConduitShared", "RuntimeEvents"],
             path: "Sources/ProxyKernel",
             exclude: ["AGENTS.md"],
             resources: [.process("Resources")]
         ),
         .target(
             name: "ProxyControlBridge",
-            dependencies: ["ProxyKernel", "ConduitShared"],
+            dependencies: ["ProxyKernel", "ConduitShared", "RuntimeEvents"],
             path: "Sources/ProxyControlBridge"
         ),
         .target(
@@ -77,13 +84,13 @@ let package = Package(
         ),
         .target(
             name: "PlatformMac",
-            dependencies: ["ProxyKernel", "ConduitShared"],
+            dependencies: ["ProxyKernel", "ConduitShared", "RuntimeEvents"],
             path: "Sources/PlatformMac",
             exclude: ["AGENTS.md"]
         ),
         .executableTarget(
             name: "Conduit",
-            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared"],
+            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents"],
             path: "Sources/Conduit",
             exclude: ["AGENTS.md"]
         ),
@@ -108,13 +115,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "ConduitDaemon",
-            dependencies: ["ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", .product(name: "NIOConcurrencyHelpers", package: "swift-nio")],
+            dependencies: ["ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents", .product(name: "NIOConcurrencyHelpers", package: "swift-nio")],
             path: "Sources/ConduitDaemon",
             exclude: ["AGENTS.md"]
         ),
         .executableTarget(
             name: "pm-sim",
-            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "ConduitShared", "PlatformMac"] + nioProducts,
+            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "ConduitShared", "PlatformMac", "RuntimeEvents"] + nioProducts,
             path: "Sources/pm-sim"
         ),
         .executableTarget(
@@ -162,6 +169,7 @@ let package = Package(
                 "ProxyPAC",
                 "PlatformMac",
                 "ConduitShared",
+                "RuntimeEvents",
                 "ConduitDaemon",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),

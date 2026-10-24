@@ -26,6 +26,7 @@ The distinct ad-hoc-signed `Conduit Dev.app` selects the debug `FakeMachine` com
 Libraries (`Package.swift` is the authority; `docs/architecture.md` has the graph):
 
 - `ProxyKernel`: proxy, PAC routing engine, DNS forwarding, tunnels, runtime events, and the protocols the other targets implement.
+- `RuntimeEvents`: Foundation-only typed domain event values; no commands, transport or runtime ownership. The kernel carries their envelope and ProxyControlBridge maps separate wire values.
 - `ProxyAuth`: NTLM and Kerberos/Negotiate authenticators and the auth factory. `ProxyPAC`: CFNetwork-backed PAC evaluation.
 - `PlatformMac`: every machine side effect, the lifecycle policy both hosts share, and the fakes they run against.
 - `ConduitShared`: the helper IPC contract, the daemon control protocol and the domain-name grammar. `ProxyControlBridge` maps kernel snapshots to control-protocol types.

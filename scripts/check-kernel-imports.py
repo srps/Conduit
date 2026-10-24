@@ -12,8 +12,10 @@ The compiler does the parsing, so no Swift syntax can hide code from it:
 
 A file the compiler cannot parse fails. Needs `xcrun` (set DEVELOPER_DIR).
 Usage: check-kernel-imports.py [SOURCE_DIR] [--configuration debug|release]
-                               [--objects OBJECT...]
+                               [--runtime-events DIR] [--objects OBJECT...]
 Without --objects, checks the kernel object of that configuration's build.
+--runtime-events replaces Sources/RuntimeEvents as the Foundation-only directory;
+test-kernel-imports.py uses it for fixtures.
 """
 import re
 import subprocess
@@ -24,12 +26,17 @@ repository = Path(__file__).resolve().parent.parent
 arguments = sys.argv[1:]
 objects = None
 configuration = 'debug'
+runtime_events_root = repository / 'Sources' / 'RuntimeEvents'
 if '--objects' in arguments:
     split = arguments.index('--objects')
     arguments, objects = arguments[:split], [Path(o) for o in arguments[split + 1:]]
 if '--configuration' in arguments:
     split = arguments.index('--configuration')
     configuration = arguments[split + 1]
+    del arguments[split:split + 2]
+if '--runtime-events' in arguments:
+    split = arguments.index('--runtime-events')
+    runtime_events_root = Path(arguments[split + 1])
     del arguments[split:split + 2]
 root = Path(arguments[0]) if arguments else repository / 'Sources' / 'ProxyKernel'
 files = sorted(root.rglob('*.swift'))
@@ -38,8 +45,9 @@ if not files:
 
 # The NIO products ProxyKernel links in Package.swift, by name: a prefix
 # match would admit NIOTransportServices, which brings in Network.
+# `RuntimeEvents` is the Foundation-only typed event module (decision 0013).
 allowed = {
-    'Foundation', 'Dispatch', 'Darwin', 'Glibc', 'ConduitShared',
+    'Foundation', 'Dispatch', 'Darwin', 'Glibc', 'ConduitShared', 'RuntimeEvents',
     'NIOCore', 'NIOPosix', 'NIOHTTP1', 'NIOConcurrencyHelpers',
 }
 # The compilation conditions of SwiftPM's debug and release builds, in the
@@ -51,20 +59,29 @@ configurations = {
 if '.define(' in (repository / 'Package.swift').read_text():
     sys.exit('Package.swift defines compilation conditions; add them to the fence configurations')
 
+# `RuntimeEvents` is Foundation-only (decision 0013): it has no first-party or NIO
+# dependency, and an Apple framework such as Security would still compile, so the
+# compiler's import list is what keeps it that way.
+runtime_events = sorted(runtime_events_root.rglob('*.swift'))
+if not runtime_events:
+    sys.exit(f'No Swift sources found in {runtime_events_root}')
+fences = [('ProxyKernel', files, allowed), ('RuntimeEvents', runtime_events, {'Foundation'})]
+
 failed = False
-for file in files:
-    for name, defines in configurations.items():
-        command = ['xcrun', 'swiftc', '-frontend', '-emit-imported-modules', '-swift-version', '6',
-                   *defines, '-o', '-', str(file)]
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f'{file}: the compiler could not parse it ({name})\n{result.stderr}', file=sys.stderr)
-            failed = True
-            continue
-        for module in result.stdout.split():
-            if module not in allowed:
-                print(f'{file}: forbidden kernel import ({name}): {module}', file=sys.stderr)
+for label, group, permitted in fences:
+    for file in group:
+        for name, defines in configurations.items():
+            command = ['xcrun', 'swiftc', '-frontend', '-emit-imported-modules', '-swift-version', '6',
+                       *defines, '-o', '-', str(file)]
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f'{file}: the compiler could not parse it ({name})\n{result.stderr}', file=sys.stderr)
                 failed = True
+                continue
+            for module in result.stdout.split():
+                if module not in permitted:
+                    print(f'{file}: forbidden {label} import ({name}): {module}', file=sys.stderr)
+                    failed = True
 
 if objects is None:
     bin_path = subprocess.run(['xcrun', 'swift', 'build', '-c', configuration, '--show-bin-path'], cwd=repository,
@@ -81,4 +98,5 @@ for obj in objects:
 
 if failed:
     sys.exit(1)
-print(f'Kernel import/Process fence passed ({len(files)} Swift files, {len(objects)} object files)')
+print(f'Kernel import/Process fence passed ({len(files)} Swift files, {len(objects)} object files; '
+      f'{len(runtime_events)} RuntimeEvents files limited to Foundation)')

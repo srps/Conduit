@@ -3,6 +3,7 @@ import AppKit
 import ConduitShared
 import Foundation
 import ProxyKernel
+import RuntimeEvents
 
 // The host side of self-updating (#111). Sparkle itself runs in the nested
 // "Conduit Updater" process (see `UpdaterContract`); here is what the app
@@ -254,7 +255,7 @@ package final class UpdateCoordinator {
         state = loaded
         status.lastCheck = loaded.lastCheck
         if let previous = loaded.lastLaunchedVersion, previous != currentVersion {
-            record(RuntimeEvent(kind: .lifecycle, event: "lifecycle.version_changed", detail: "from=\(previous) to=\(currentVersion)"))
+            recordVersionChange(from: previous, to: currentVersion)
         }
         if loaded.lastLaunchedVersion != currentVersion {
             state.lastLaunchedVersion = currentVersion
@@ -264,6 +265,31 @@ package final class UpdateCoordinator {
             self?.receive(result)
         }
         setAutomaticChecks(automaticChecks)
+    }
+
+    /// Records a version change as its typed value. A change that is not plain tokens once sanitized,
+    /// or whose rendered line the sanitizer would rewrite, has no typed field to go in, so the
+    /// update-state failure reports it instead.
+    private func recordVersionChange(from previous: String, to current: String) {
+        guard let change = Self.versionChange(from: previous, to: current) else {
+            record(RuntimeEvent(kind: .lifecycle, event: "update.state_unreadable", detail: "reason=unrepresentable_version"))
+            return
+        }
+        record(RuntimeEvent(payload: .lifecycle(.versionChanged(change))))
+    }
+
+    /// The boundary for a version change headed into a typed field. The sanitizer runs first, so a
+    /// credential-looking value is redacted. The pair must then pass the typed pair rule, which checks the
+    /// grammar and refuses a `from` that reads as a bearer credential, before the domain value is built. The
+    /// line it renders must also come back from the sanitizer unchanged, a backstop for the same invariant.
+    /// Nil when any step leaves it unrepresentable.
+    private static func versionChange(from previous: String, to current: String) -> LifecycleVersionChanged? {
+        let from = SensitiveValueSanitizer.sanitize(previous)
+        let to = SensitiveValueSanitizer.sanitize(current)
+        guard LifecycleVersionChanged.isValid(from: from, to: to) else { return nil }
+        let change = LifecycleVersionChanged(from: from, to: to)
+        let line = LifecycleEvent.versionChanged(change).detail
+        return SensitiveValueSanitizer.sanitize(line) == line ? change : nil
     }
 
     package func stop() {

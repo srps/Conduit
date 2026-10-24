@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 implementation checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -78,7 +78,14 @@ contract exposes unknown/gap states; callers must render them honestly.
 
 ## Implementation evidence
 
-None yet. Contract and transport conformance work is the next runtime slice.
+Partial: the stage-1 foundation is implemented on this branch.
+
+- Protocol and values: [`RuntimeClient.swift`](../../Sources/ConduitShared/RuntimeClient.swift) (the async protocol, `RuntimeDeadline`, `RuntimeSubscription` and `RuntimeClientError`) and the `ControlRuntime*.swift` files beside it: commands with a request ID and expected incarnation, admission and lookup values, pages, snapshot stamps and the v2 envelope. The v2 envelope is version 2; v1 stays at 1.
+- Codec and bounds: [`ControlRuntimeCodec.swift`](../../Sources/ConduitShared/ControlRuntimeCodec.swift) (one JSON value per line; checks run in order: size, version, kind, body type, then the typed body) and [`ControlRuntimeSizing.swift`](../../Sources/ConduitShared/ControlRuntimeSizing.swift) (a summed byte budget refused before encoding).
+- Observation values: [`ControlRuntimeEventRecord.swift`](../../Sources/ConduitShared/ControlRuntimeEventRecord.swift) (a known record, or a bounded unknown display record) and [`RuntimeSnapshotControlProjection.swift`](../../Sources/ProxyControlBridge/RuntimeSnapshotControlProjection.swift).
+- Tests: `Tests/ConduitTests/RuntimeClientCodecTests.swift`, `RuntimeClientContractTests.swift`, `RuntimeConfigSizingTests.swift`, `RuntimeSnapshotProjectionTests.swift`, `ControlRuntimeEventProjectionTests.swift` and `RuntimeEventTypedTests.swift`. The focused counts are in the [stage-1 inventory](../runtime-client-stage1-inventory.md).
+
+Not implemented: an in-memory `RuntimeClient`. The only conformer in the tree is a test double that refuses commands. Also missing are the admission, lookup and subscription engine, a production v2 socket, the config commit/start DTO, and AppState adoption. Request lookup and admission exist as protocol shapes only, so their behavior is unverified. No shipping numeric limit is selected; v1 keeps its 16 KiB frame.
 
 Does not prove: a production control socket, cross-process authority or validated
 shipping resource limits.

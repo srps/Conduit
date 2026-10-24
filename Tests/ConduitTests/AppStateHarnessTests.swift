@@ -5,6 +5,7 @@ import ConduitShared
 @testable import Conduit
 @testable import PlatformMac
 @testable import ProxyKernel
+import RuntimeEvents
 
 // MARK: - Harness
 
@@ -823,8 +824,15 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(wifi.routesThroughAProxy, "the stop's clear landed after the start's apply")
         XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.systemProxy))
         XCTAssertEqual(harness.loginItems.registrations, [], "the overtaken start did nothing after its apply")
-        let superseded = appState.eventLog.events.filter { $0.event == "lifecycle.superseded" }
-        XCTAssertEqual(superseded.map(\.detail), ["operation=proxy_start generation=1 current=2 reason=superseded"])
+        XCTAssertEqual(
+            appState.eventLog.events.supersededValues,
+            [LifecycleSuperseded(operation: .proxyStart, generation: 1, current: 2, reason: .superseded)]
+        )
+        XCTAssertEqual(
+            appState.eventLog.events.filter { $0.event == "lifecycle.superseded" }.map(\.detail),
+            ["operation=proxy_start generation=1 current=2 reason=superseded"],
+            "golden: the human line operators read"
+        )
     }
 
     /// A VPN drop handled while the start's apply is out reconciles the
@@ -1880,7 +1888,7 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(harness.hold.reachedOnMainThread)
         let more = (0..<4).map { _ in Task { await appState.stopDNS() } }
         await harness.settle("the four later stops have arrived") {
-            appState.eventLog.events.filter { $0.event == "lifecycle.coalesced" }.count == 4
+            appState.eventLog.events.coalescedValues.count == 4
                 || appState.lifecycleGenerations.dns >= 6
         }
         harness.hold.release()
@@ -1889,7 +1897,15 @@ final class AppStateHarnessTests: XCTestCase {
 
         XCTAssertEqual(machine.privilege.commands(matching: .stopDNSRelay).count - relayStopsBefore, 1, "one teardown for five stops")
         XCTAssertEqual(appState.lifecycleGenerations.dns, 2, "the start and one stop")
-        XCTAssertEqual(appState.eventLog.events.filter { $0.event == "lifecycle.coalesced" }.map(\.detail), Array(repeating: "operation=dns_stop joined=2", count: 4))
+        XCTAssertEqual(
+            appState.eventLog.events.coalescedValues,
+            Array(repeating: LifecycleCoalesced(operation: .dnsStop, joined: 2), count: 4)
+        )
+        XCTAssertEqual(
+            appState.eventLog.events.filter { $0.event == "lifecycle.coalesced" }.map(\.detail),
+            Array(repeating: "operation=dns_stop joined=2", count: 4),
+            "golden: the human line operators read"
+        )
         XCTAssertFalse(machine.dnsRelayRunning)
         XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .stopped)
     }
@@ -1932,7 +1948,7 @@ final class AppStateHarnessTests: XCTestCase {
 
         XCTAssertEqual(clearedWhileHeld.value, 1, "quit cleared the system proxy while the start was still held")
         XCTAssertTrue(
-            appState.eventLog.events.contains { $0.event == "lifecycle.termination_drain_expired" && $0.detail == "deadline_ms=200" },
+            appState.eventLog.events.lifecycleValues.contains(.terminationDrainExpired(LifecycleTerminationDrainExpired(deadlineMilliseconds: 200))),
             "and said it stopped waiting"
         )
         XCTAssertFalse(wifi.routesThroughAProxy)
@@ -2023,8 +2039,15 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(appState.config.dnsForwarderEnabled, "the overtaken start did not persist DNS as on")
         XCTAssertFalse(appState.hasDNSHealthTimer, "nor start a health timer")
         XCTAssertEqual(appState.runtimeSnapshot.dnsRunState, .stopped)
-        let superseded = appState.eventLog.events.filter { $0.event == "lifecycle.superseded" }
-        XCTAssertEqual(superseded.map(\.detail), ["operation=dns_start generation=1 current=2 reason=superseded"])
+        XCTAssertEqual(
+            appState.eventLog.events.supersededValues,
+            [LifecycleSuperseded(operation: .dnsStart, generation: 1, current: 2, reason: .superseded)]
+        )
+        XCTAssertEqual(
+            appState.eventLog.events.filter { $0.event == "lifecycle.superseded" }.map(\.detail),
+            ["operation=dns_start generation=1 current=2 reason=superseded"],
+            "golden: the human line operators read"
+        )
     }
 
     /// The probe that asks for a restart ran a moment ago. A stop that
@@ -2748,8 +2771,8 @@ extension AppStateHarnessTests {
         harness.currentVersion = "0.5.0"
         let state = harness.launch()
         XCTAssertEqual(
-            state.eventLog.events.filter { $0.event == "lifecycle.version_changed" }.map(\.detail),
-            ["from=0.4.1 to=0.5.0"]
+            state.eventLog.events.compactMap(\.typed),
+            [.lifecycle(.versionChanged(LifecycleVersionChanged(from: "0.4.1", to: "0.5.0")))]
         )
     }
 
