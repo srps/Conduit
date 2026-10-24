@@ -1,7 +1,7 @@
 # Verification: runtime configuration verified replacement (2026-10-24)
 
 Scope: one physical building block for the future configuration store, on branch
-`codex/verified-runtime-file-replacement` from base `fd1491e`. It is unwired. Nothing
+`codex/verified-runtime-file-replacement`, rebased onto merged PR228 (`9c13d8a`). It is unwired. Nothing
 calls it at startup, in the host, in AppState or in a store. It adds no intent
 generation, no receipt, no expected-prior check, no sidecar or journal cap, no
 fallback and no external-edit policy. It is not the mixed-apply hold of
@@ -162,3 +162,33 @@ followed: the scratch root is now removed only after a confirmed lease release, 
 and the OS tests. A final change keeps the root when an acquisition was attempted and returned busy
 or failed, and bounds the scenario verdict at 32 assertions and 8 notes. The run recorded above is the
 one on that final source, and it exited 0.
+
+## Final complete workflow
+
+All 39 checks corresponding to `.github/workflows/swift.yml` passed on final source
+head `e5b8874612574266c709cf332a71893888c36cf8`. The source fingerprint before and
+after the run was identical:
+`6a258680505170a169ab3bb75088fe1ce150f124f17266a514f2e736046c7957`.
+Subsequent evidence edits are Markdown only.
+
+Full Swift suite: 2865 tests, two skips, zero failures. `pm-sim all`: 93 result
+records, all passed. The existing 100-connection performance gate passed at 10.24 s
+wall and 34,488,320 bytes maximum RSS. That is the existing synthetic proxy traffic
+workload, not a worst-case configuration memory bound. The complete run also
+passed the policy/mutation checks, signed updater stand-ins and HTTP/status/DNS
+regressions. Logs/results are retained locally under
+`/private/tmp/conduit-runtime-stage1-20261024/runtime-replacement-full-gates`.
+
+The earlier immutable ff7dc2a run also passed 39 checks before review refinements;
+it is archived separately. Independent Claude review checked classification,
+read bounds and cleanup, and prompted the corrected error taxonomy/comment.
+Its initial traversal concern was withdrawn after verifying internal initializer
+access and the sole canonical-layout production constructor. Codex checked the
+corrected mapping, synthetic witnesses and actual final workflow evidence.
+Implementation and both Claude reviews used the owner's claude.ai Max subscription;
+API credentials were disabled. No serving app/helper was stopped or installed,
+and no VPN access was needed. Hosted CI and release readiness are not inferred.
+
+Sidecar policy is now selected separately in 0026 on the parallel implementation
+branch; it is not added by this runtime-only primitive. The sole writer/store,
+client engine, AppState adoption and runtime isolation remain open.
