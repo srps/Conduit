@@ -51,5 +51,5 @@ None yet. Stage 1 comes first.
 
 ## Open questions
 
-- Whether `RuntimeHost` lives in PlatformMac or a new target depends on the dependency map from #85 ([0007](0007-kernel-file-split-first.md)).
+- Target placement was open in this record and is now settled by [0013](0013-runtime-module-isolation.md): ConduitRuntime owns the host; broad kernel target splitting is not a prerequisite. Client/stream refinements are in [0014](0014-runtime-client-stream.md), persistence policy in [0015](0015-save-before-apply.md).
 - Whether the in-memory `ControlProtocol` transport costs too much is settled in stage 1.

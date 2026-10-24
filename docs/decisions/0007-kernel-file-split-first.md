@@ -23,7 +23,7 @@ Decompose the large kernel files around state-owning seams first, starting with 
 ## Consequences
 
 - No compile-time claim is made; smaller files have to be measured before anyone says they build faster.
-- [0001](0001-one-runtime-host.md) waits on the dependency map to choose where `RuntimeHost` lives.
+- [0001](0001-one-runtime-host.md) originally left host placement to the dependency map. That question is now closed by [0013](0013-runtime-module-isolation.md); this record's optional broad Core/HTTP/DNS/Tunnel split remains separate from host convergence and the small event-only target.
 
 ## Invariants and verification
 

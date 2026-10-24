@@ -104,6 +104,21 @@ credential provider, observer seams and shutdown policy. It does not introduce a
 protocol per manager or a generic service locator. AppState cannot obtain a live
 manager/orchestrator through the client.
 
+The stage-1 composition inventory must name existing unseamed edges explicitly:
+`NetworkMonitor` and NSWorkspace wake delivery become injectable runtime inputs
+with fakes before their owning lifecycle moves; user notifications and
+`NSWorkspace.open` remain UI/administrative adapters, with test/dev suppression
+or seams where they would touch the machine. Current dev composition still uses
+real notification authorization, path monitoring and wake observation; bundle
+identity alone does not make these fakes. Avoid moving notification permission UI
+into RuntimeHost merely to share composition.
+
+`refreshPreflight` currently schedules helper status/evaluation off main and
+rejects older refresh IDs. Treat that as a bounded, freshness-stamped observation
+with incarnation/config applicability, not a helper call on each snapshot/status
+read. Preserve explicit unknown/busy/stale states and prevent an obsolete probe
+from authorizing repair after Stop.
+
 This establishes the intermediate AppState → client → in-memory transport →
 RuntimeHost shape and the later client → daemon transport → same host shape.
 Exclusive production ownership, user-session validation and recovery remain
@@ -321,6 +336,15 @@ through independent counters/health without recursive logging. Replay is an
 explanation, never a durable command log or authority for cleanup/recovery. This
 does not weaken authoritative platform-journal write-before-mutation requirements.
 No new durable telemetry spool/exporter is part of this program.
+
+Current-source inventory matters here: AppLogStore writes stderr on MainActor
+and creates a Task per off-main log; RotatingLogFile already performs append I/O
+on its serial queue, but that pending queue has no byte/item budget and flush/
+close synchronously drain it. Do not misdiagnose the file append as synchronous.
+As each sink crosses the new boundary, verify bounded pending work, slow-stderr/
+file behavior and a shutdown drain budget; surface rotation failures rather than
+silently discarding them. This is an affected-path obligation, not a new telemetry
+platform prerequisite for behavior-preserving extraction.
 
 ## Typed events, without an untyped producer escape hatch
 
@@ -692,6 +716,15 @@ The source review found reinforcing obligations, not a different target shape:
 - [ADR-0176](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0176-host-concurrency-single-writers-and-effects.md): separate state ownership, observation and physical effects; check generation/epoch authority at real effect boundaries. Applied as short owner turns and typed fenced completions, without adopting its distributed host-job machinery.
 - [ADR-0149](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0149-independent-observability.md): diagnostic custody/outages confer no control authority and must not stall lifecycle. Its legacy-format portions are superseded by overalls ADR-0159; the cited independence requirement is expressly carried forward. Conduit keeps bounded visible diagnostic gaps, not a new observability backend.
 - [ADR-0191](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0191-elixir-hegel-property-verification.md): bounded typed generators, deterministic replay, isolated fixtures and an explicit production/model/oracle boundary. Applied to #183 with redacted counterexamples and exact-checkpoint evidence; no Elixir property-test dependency is imported.
+
+The newer [native-client decision 0249](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0249-mila-rust-core-native-clients.md)
+also supports this staging: shared typed behavior and fixtures, thin native UI/OS
+adapters, and removal of the former path only after native parity evidence.
+Conduit already uses Swift throughout, so this supplies no reason for Rust/FFI or
+a rewrite. [Durability verification decision 0243](https://github.com/ghuntley/overalls/blob/trunk/docs/architecture/decisions/0243-native-guest-durability-verification.md)
+reinforces the existing receipt limit: successful read-back or process-kill
+recovery does not prove power-loss durability. Conduit's store contract must name
+its actual guarantee before a receipt claims more.
 
 These are source design lessons, not claims that overalls or Conduit's target
 architecture has passed deployment validation. Existing Conduit constraints on
