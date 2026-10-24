@@ -1,5 +1,11 @@
 # Conduit Architecture
 
+The staged shared-host proposal is in the
+[runtime contract review draft](./design-runtime-host-contract.md). It is pending
+owner review; the implementation overview below does not establish approval or
+completion of that proposal. `Package.swift` is the authority for the current
+target graph. See [ROADMAP](../ROADMAP.md) for execution order.
+
 > Describes the multi-target shape that landed in the module split, plus the subsequent security additions (the CFNetwork PAC evaluator and `SecretBytes`) and the orchestrator/UI performance cleanup. For the file-by-file migration history and the rationale behind every seam, read [`docs/design-module-split.md`](./design-module-split.md). For current implementation rationale and priorities, read [`planning.md`](./planning.md) and [`ROADMAP.md`](../ROADMAP.md).
 
 ## Overview
