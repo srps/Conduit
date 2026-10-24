@@ -55,3 +55,7 @@ Current DoH code starts2 formats across up to3 routes per provider. Eight provid
 Before adoption: exact-limit and one-over fixtures for every field, escaped-byte cases, unknown large keys/arrays rejected before DTO construction, actual bounded file reads under growth, client/host parity, and legal-maximum release-build sender/receiver memory measurements. Test busy peers without allocating N bodies and independently verify Stop/status responsiveness. Preserve the earlier575MB probe as evidence of the old unsupported shape, not a supported workload or acceptable budget.
 
 Revisit only for a demonstrated configuration needing more entries/bytes, a measured supported-case budget failure, or a new runtime matching/listener execution model. Record changed compatibility and capacity as a new decision. This review does not choose the separate store precision policy in#224.
+
+## Executed candidate-profile sizing
+
+Using the same unmodified codec, Codex executed two synthetic proposed-count-ceiling fixtures with long valid hostnames,16KiB URLs and1KiB display labels. Both validated and round-tripped equal while retaining all pipeline forms. Debug peaks were17,399,808B and19,349,504B; release peaks were15,581,184B and17,776,640B. Frames were639,291B and1,135,932B. These are single-process observations, not exhaustive maximum-memory proofs, an accepted threshold or an allocation-strategy improvement. Full sources, raw stage output and limits are in the [experiment note](experiments/private-configuration-codec/README.md#proposed-domain-bounds-probe).

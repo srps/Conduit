@@ -31,3 +31,12 @@ Both fixtures use the proposed count ceilings: 8 DoH providers, 8 DNS servers pe
 | Escaped display labels | 1,135,932 B | 19,349,504 B | 0.445 s |
 
 As in the earlier probe, every pipeline form is deliberately retained until the end. The debug-process baseline is about 7 MB. These observations support early domain bounds and do not prove a universal memory bound, release performance, receiver-only cost, busy-peer capacity or Stop/status latency. The earlier 575 MB result remains evidence of the uncapped input shape; no allocator optimization is claimed.
+
+The same two fixtures were also compiled with `-O` and linked against an Xcode-prefixed `swift build -c release --target ProxyControlBridge` (completed in53.87s). Fresh-process release measurements, still retaining all forms, were:
+
+| Fixture | Whole-process peak RSS | End-to-end time |
+| --- | ---: | ---: |
+| Long ordinary strings |15,581,184B |0.125s |
+| Escaped display labels |17,776,640B |0.222s |
+
+Baseline was6,864,896B. These are single runs, not medians, limits or latency guarantees. The fixtures reach proposed collection-count ceilings but do not exhaust every byte/uniqueness combination; they include repeated host/label strings and remain a sizing experiment. They do not exercise concurrent busy peers, runtime DoH fan-out, or Stop/status. Product caps and startup compatibility remain pending owner selection.
