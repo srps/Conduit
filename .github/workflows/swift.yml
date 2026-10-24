@@ -56,6 +56,8 @@ jobs:
         python3 scripts/test-kerberos-worker.py "$conduit_bin_dir/Conduit" "$conduit_bin_dir/ConduitDaemon"
     - name: Install script argument parsing
       run: bash ./scripts/test-install-helper-args.sh
+    - name: Dev bundle packaging (stand-in tools, nothing signed or installed)
+      run: bash ./scripts/test-dev-bundle.sh
     - name: Signing identity script keeps the key secret
       run: bash ./scripts/test-create-signing-identity.sh
     - name: Self-update end to end (stand-in host, local feed)

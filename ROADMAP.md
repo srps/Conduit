@@ -36,6 +36,10 @@ build of 0.5.8 on 2026-10-22; the installed build still needs a check.
    This now has a practical trigger: tandem testing selected a personal signing
    identity and generated repeated prompts, and duplicate bundle IDs made status
    inspection ambiguous. No private-key ACL change is needed.
+   Implemented locally with Claude and reviewed by Codex; actual ad-hoc bundle
+   launch selected FakeMachine without `--dev`, and the serving process remained
+   unchanged ([decision 0016](./docs/decisions/0016-isolated-development-bundle.md)).
+   Final gates are recorded in the [checkpoint evidence](./docs/verification-runtime-first-slice-2026-10-24.md).
 2. **Sanitizer continuation race ([#118](https://github.com/srps/Conduit/issues/118))
    [Rel, Sim]** — track A remains open; track B shipped in 0.5.5. No
    continuation race fix or new suppression is claimed. Investigate structured

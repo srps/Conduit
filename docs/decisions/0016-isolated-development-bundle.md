@@ -2,8 +2,8 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 implementation checkpoint and #23)
-- Implementation: planned
-- Validation: none
+- Implementation: implemented
+- Validation: passed
 - Supersedes: none
 - Superseded by: none
 
@@ -54,7 +54,21 @@ Run required repository checks and preserve the serving process throughout.
 
 ## Implementation evidence
 
-None yet. Claude is implementing this independently bounded first slice.
+[bundle-app.sh](../../bundle-app.sh) implements separate identity, ad-hoc signing
+and early flag refusal. [DevLaunch](../../Sources/Conduit/App/DevLaunch.swift) and
+[ConduitMain](../../Sources/Conduit/App/ConduitApp.swift) select fake composition
+and guard worker entry points. [Parser/composition tests](../../Tests/ConduitTests/DevLaunchOptionsTests.swift)
+cover identity, state aliases, worker guards and awaited teardown;
+[packaging regressions](../../scripts/test-dev-bundle.sh) confine even a deliberately
+broken install guard to scratch. [CI](../../.github/workflows/swift.yml) runs them.
+
+Validation: an actual ad-hoc dev bundle opened without `--dev`, using a fresh
+scratch-state override, on macOS 26.7.1 with VPN off. Its UI identified Conduit Dev,
+showed the FakeMachine notice and all three services stopped. Only that dev
+instance was quit; the serving production process stayed unchanged. Bundle
+metadata/signatures and worker refusal were inspected. Commands, automated
+checkpoint evidence and limits are in the
+[verification record](../verification-runtime-first-slice-2026-10-24.md).
 
 Does not prove: all remaining platform observation seams are fake, installed
 production validation or helper admission for ad-hoc code.

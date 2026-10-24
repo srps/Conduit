@@ -39,4 +39,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0013](0013-runtime-module-isolation.md) | Shared runtime modules and control isolation | accepted | planned | none |
 | [0014](0014-runtime-client-stream.md) | Async runtime client and bounded observation contract | accepted | planned | none |
 | [0015](0015-save-before-apply.md) | Save durable intent before apply, with Stop and Quit exceptions | accepted | planned | none |
-| [0016](0016-isolated-development-bundle.md) | Isolated ad-hoc development app bundle | accepted | planned | none |
+| [0016](0016-isolated-development-bundle.md) | Isolated ad-hoc development app bundle | accepted | implemented | passed |

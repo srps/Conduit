@@ -9,13 +9,17 @@ if [[ ! "$APP_VERSION" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
     exit 1
 fi
 BUNDLE_ID="io.github.srps.Conduit"
+# `--dev` (#23) builds Conduit Dev.app beside the installed app: its own
+# identifiers and name, ad-hoc signed, and the debug composition over a fake
+# machine (DevLaunch.swift). The executable keeps the name Conduit.
+DEV_BUNDLE_ID="io.github.srps.Conduit.dev"
+DEV_DISPLAY_NAME="Conduit Dev"
 APP_DIR="$SCRIPT_DIR/$APP_NAME.app"
 INSTALL_DIR="/Applications/$APP_NAME.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 HELPERS="$CONTENTS/Library/LaunchServices"
 UPDATER_NAME="Conduit Updater"
-UPDATER_ID="$BUNDLE_ID.Updater"
 # The update feed (#111): each published release attaches its own
 # appcast.xml, and "latest" resolves to the newest published one.
 FEED_URL="https://github.com/srps/Conduit/releases/latest/download/appcast.xml"
@@ -24,14 +28,24 @@ ARCH="$(uname -m)"
 BUILD_CONFIG="debug"
 INSTALL=false
 SHARE=false
+DEV=false
+RELEASE=false
 for arg in "$@"; do
     case "$arg" in
         --install) INSTALL=true ;;
-        --release) BUILD_CONFIG="release" ;;
+        --release) BUILD_CONFIG="release"; RELEASE=true ;;
         --share) SHARE=true ;;
+        --dev) DEV=true ;;
         *) echo "Unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
+
+# Refused before anything is built, signed or installed. A dev bundle is a
+# local test build; the other three make or install the app that ships.
+if $DEV && ($INSTALL || $SHARE || $RELEASE); then
+    echo "--dev builds $DEV_DISPLAY_NAME.app for local testing; it cannot be combined with --install, --share or --release." >&2
+    exit 1
+fi
 
 if $SHARE; then
     if $INSTALL; then
@@ -44,6 +58,18 @@ if $SHARE; then
     MACOS="$CONTENTS/MacOS"
     HELPERS="$CONTENTS/Library/LaunchServices"
 fi
+DISPLAY_NAME="$APP_NAME"
+if $DEV; then
+    BUNDLE_ID="$DEV_BUNDLE_ID"
+    DISPLAY_NAME="$DEV_DISPLAY_NAME"
+    APP_DIR="$SCRIPT_DIR/$DEV_DISPLAY_NAME.app"
+    CONTENTS="$APP_DIR/Contents"
+    MACOS="$CONTENTS/MacOS"
+    HELPERS="$CONTENTS/Library/LaunchServices"
+fi
+# After the mode: the updater's identifier follows the app's, so a dev bundle
+# has its own.
+UPDATER_ID="$BUNDLE_ID.Updater"
 UPDATER_APP="$CONTENTS/Helpers/$UPDATER_NAME.app"
 
 echo "Building ($BUILD_CONFIG, $ARCH)..."
@@ -114,14 +140,22 @@ cat > "$UPDATER_APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # Without the public update key (scripts/create-release-identity.sh) the app
-# reports updates as unavailable rather than trusting an unsigned feed.
+# reports updates as unavailable rather than trusting an unsigned feed. A dev
+# bundle never gets a feed: its updater refuses a host without one, so nothing
+# can hand off to the production feed from a dev instance (#23).
 SPARKLE_KEYS=""
-if [ -f "$SCRIPT_DIR/Resources/sparkle-public-ed-key" ]; then
+if [ -f "$SCRIPT_DIR/Resources/sparkle-public-ed-key" ] && ! $DEV; then
     SPARKLE_PUBLIC_KEY="$(tr -d '[:space:]' < "$SCRIPT_DIR/Resources/sparkle-public-ed-key")"
     SPARKLE_KEYS="    <key>SUFeedURL</key>
     <string>$FEED_URL</string>
     <key>SUPublicEDKey</key>
     <string>$SPARKLE_PUBLIC_KEY</string>"
+fi
+# Only the production app is a candidate for a helper preflight (UpdatePreflight.swift).
+PREFLIGHT_KEYS=""
+if ! $DEV; then
+    PREFLIGHT_KEYS="    <key>ConduitUpdatePreflightVersion</key>
+    <integer>1</integer>"
 fi
 cp "$SCRIPT_DIR/install-helper.sh" "$CONTENTS/Resources/install-helper.sh"
 chmod 755 "$CONTENTS/Resources/install-helper.sh"
@@ -161,11 +195,10 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key>
     <string>$BUNDLE_ID</string>
     <key>CFBundleName</key>
-    <string>$APP_NAME</string>
+    <string>$DISPLAY_NAME</string>
     <key>CFBundleDisplayName</key>
-    <string>Conduit</string>
-    <key>ConduitUpdatePreflightVersion</key>
-    <integer>1</integer>
+    <string>$DISPLAY_NAME</string>
+$PREFLIGHT_KEYS
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleVersion</key>
@@ -205,8 +238,13 @@ PLIST
 # Ad-hoc remains the fallback so a fresh checkout still builds; such an app
 # is refused by a helper that enforces the pin.
 SIGNING_NAME="Conduit Local Signing"
-SIGNING_HASH="$(security find-identity -p codesigning 2>/dev/null \
-    | awk -v name="\"$SIGNING_NAME\"" 'index($0, name) { print $2; exit }' || true)"
+SIGNING_HASH=""
+# A dev bundle is ad-hoc and never needs the Keychain, so the personal identity
+# is not even looked up: the lookup itself can prompt (#23).
+if ! $DEV; then
+    SIGNING_HASH="$(security find-identity -p codesigning 2>/dev/null \
+        | awk -v name="\"$SIGNING_NAME\"" 'index($0, name) { print $2; exit }' || true)"
+fi
 RELEASE_IDENTITY="${CONDUIT_RELEASE_SIGNING_IDENTITY:-}"
 
 # Inside out, never --deep: --deep would give every nested binary the app's
@@ -229,7 +267,10 @@ sign_bundle() { # <identity> <hardened runtime: yes|no>
     codesign --verify --strict --deep "$APP_DIR"
 }
 
-if $SHARE && [ -n "$RELEASE_IDENTITY" ]; then
+if $DEV; then
+    echo "Signing dev build ad-hoc, without the personal signing identity..."
+    sign_bundle - no
+elif $SHARE && [ -n "$RELEASE_IDENTITY" ]; then
     # Release CI (scripts/import-release-identity.sh): every published build
     # carries the one certificate helpers pin, with the hardened runtime the
     # helper requires.
@@ -316,6 +357,13 @@ if $INSTALL; then
     echo ""
     echo "First launch: if macOS shows \"cannot verify the developer\", right-click the"
     echo "app > Open, then click Open in the dialog. This is only needed once."
+elif $DEV; then
+    echo ""
+    echo "Dev instance, not installed. It runs over FakeMachine with scratch state (by default"
+    echo "under \$TMPDIR/conduit-dev). Helper, credentials, updater, login items, resolver and VPN"
+    echo "are fakes; notifications and network-path observation are real. Run it beside the installed app with:"
+    echo "  open -n \"$APP_DIR\""
+    echo "Dev flags follow --args, for example: --args --section dns --vpn utun4"
 else
     echo ""
     echo "Bundled binaries:"
