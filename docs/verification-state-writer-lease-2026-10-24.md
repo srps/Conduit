@@ -6,7 +6,7 @@ Date: 2026-10-24. Implements the unadopted OS lease and layout primitives under 
 
 Claude implemented and corrected this slice using the owner's claude.ai Max subscription. Codex reviewed the actual patch, wrote and ran independent regression witnesses, and executed the final focused wrapper after Claude's last correction could not invoke its allowed Bash command.
 
-`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` with `xcrun swift build` and `xcrun swift test --filter 'StateWriter|StateRoot|StateDirectoryLease|RuntimeEnvironment'`: **80 tests, zero failures**. Kernel import fence, event catalogue, decision checks with history, and `pm-sim state-writer-lease` passed (**17 assertions**). This is a focused checkpoint; full workflow-equivalent gates are still running and are recorded separately below when complete.
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` with `xcrun swift build` and `xcrun swift test --filter 'StateWriter|StateRoot|StateDirectoryLease|RuntimeEnvironment'`: **80 tests, zero failures**. Kernel import fence, event catalogue, decision checks with history, and `pm-sim state-writer-lease` passed (**17 assertions**). The full workflow-equivalent checkpoint is recorded below.
 
 Independent failures reproduced before correction:
 
@@ -37,3 +37,7 @@ No async store, writer coverage, startup/migration/recovery integration, session
 The Unicode fold is conservative and is not advertised as the filesystem's exact comparison table. Canonical-equivalent missing spellings are refused on every volume; this may refuse legitimate distinct names on a normalization-sensitive filesystem. Existing names use actual identities. Deployment storage, non-APFS/network filesystems, mount points, and arbitrary external directory/path replacement remain unverified. A reserved symlink is compared by its entry, not its target. Canonical parent containment can conservatively refuse alternate case spellings. These limits remain explicit before adoption; no new filesystem-wide ban is selected.
 
 Root/component/global registry alternatives and revisit triggers are recorded in0020. A future extension needs versioned/quiescent handoff and mixed-version tests; it is not a transparent mechanism swap.
+
+## Full workflow-equivalent checkpoint
+
+Codex ran all39 commands corresponding to swift.yml on unchanged relevant source: **2,587 tests, two skips, zero failures;86 simulator results; perf passed**. Perf recorded10.14s and35,110,912B maxRSS for its standard100-connection fixture, not the private configuration probe. Relevant-source SHA256 before and after: `322583970be44b887b79577dda2018e7a9a6942aba6a081c29279178f8c0ab7c`. The run began at8c43d2a with these additions uncommitted; commit845a435 contains that exact source, and this follow-up changes documentation only. No owner/deployment validation is implied. Hosted checks remain due at publication.
