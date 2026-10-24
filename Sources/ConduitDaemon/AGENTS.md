@@ -1,5 +1,7 @@
 # ConduitDaemon
 
-The daemon runtime host: `AppState`'s twin over the same managers and `RuntimeReconciler`.
+The daemon entry point: argument and config loading, signals, `--print-status` output and the resident wait. The runtime policy it runs is `RuntimeHost` in `Sources/ConduitRuntime/`, with the twin rule in that target's `AGENTS.md`.
 
-- A lifecycle rule added to one host lands in the other. Add the twin scenario to `Tests/ConduitTests/DaemonRuntimeHostTests.swift` over the same `FakeMachine`. Where the daemon cannot express it yet, add a strict `XCTExpectFailure` naming what the migration still has to bring over.
+- Keep policy out of this target. A lifecycle, reconcile or observer rule belongs in `ConduitRuntime`. This target only composes the host.
+- Inject process concerns here and nowhere else: pass `startedAt` and `terminalExit`, and pass production collaborators explicitly.
+- `exit` is called from this file only.

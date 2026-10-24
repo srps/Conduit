@@ -9,12 +9,12 @@ import ConduitShared
 import ProxyPAC
 import RuntimeEvents
 
-private struct DaemonVPNFlapWindowConfig: Sendable {
+private struct RuntimeVPNFlapWindowConfig: Sendable {
     var graceSeconds: TimeInterval
     var minVisibleSeconds: TimeInterval
 }
 
-private final class DaemonPrivilegeAuditEventSink: @unchecked Sendable {
+private final class RuntimePrivilegeAuditEventSink: @unchecked Sendable {
     private let lock = NSLock()
     private var sink: (@Sendable (RuntimeEvent) -> Void)?
 
@@ -30,15 +30,16 @@ private final class DaemonPrivilegeAuditEventSink: @unchecked Sendable {
     }
 }
 
-/// Daemon-owned runtime host.
+/// Shared runtime host, run by `ConduitDaemon` (decision 0013).
 ///
 /// This is the production-daemon counterpart to the runtime ownership that
-/// still lives in `AppState` as a temporary in-process fallback. Keeping the
-/// host in the `ConduitDaemon` target avoids dragging AppKit/SwiftUI into
-/// daemon code while still allowing it to link `PlatformMac` (Keychain,
-/// CFNetwork PAC, SCDynamicStore, helper XPC, networksetup wrappers).
+/// still lives in `AppState` as a temporary in-process twin. The host lives in
+/// `ConduitRuntime`, not the daemon executable, so the tests drive it over
+/// `FakeMachine`. It may link `PlatformMac` (Keychain, CFNetwork PAC,
+/// SCDynamicStore, helper XPC, networksetup wrappers) but imports no AppKit or
+/// SwiftUI.
 @MainActor
-final class DaemonRuntimeHost {
+package final class RuntimeHost {
     let environment: RuntimeEnvironment
     let logger: any LogSink
     let eventWriter: RuntimeEventFileWriter
@@ -59,7 +60,7 @@ final class DaemonRuntimeHost {
     /// touching the real system configuration.
     private let privilegeClient: any PrivilegeClient
     private let auditedPrivilegeClient: any PrivilegeClient
-    private let privilegeAuditSink = DaemonPrivilegeAuditEventSink()
+    private let privilegeAuditSink = RuntimePrivilegeAuditEventSink()
     /// The subprocess runner behind the `networksetup` and `launchctl`
     /// managers, and the directories they write. Injectable for the same
     /// reason as `privilegeClient`: a host test must not rewrite the machine
@@ -161,7 +162,9 @@ final class DaemonRuntimeHost {
     private var locationReconcileWanted = false
     private var proxySettingsReconcileInFlight = false
     private var proxySettingsReconcileWanted = false
-    private let networkMonitor: NetworkMonitor
+    /// The path source. Production is `NetworkMonitor`; a harness injects
+    /// `FakeNetworkPathObserver`, so no test reads the machine's network.
+    private let networkPathObserver: any NetworkPathObserving
     /// The hops from the observers and the orchestrator's callbacks onto the
     /// main actor. Internal so the tests can `drain()` them instead of
     /// sleeping. Same shape as `AppState`.
@@ -174,7 +177,7 @@ final class DaemonRuntimeHost {
     private var dnsReconcileInFlight = false
     private var dnsReconcileWanted = false
     private let vpnStatusMonitor: VPNStatusObserving
-    private let vpnFlapWindowBox: NIOLockedValueBox<DaemonVPNFlapWindowConfig>
+    private let vpnFlapWindowBox: NIOLockedValueBox<RuntimeVPNFlapWindowConfig>
     private var dnsHealthTimer: DispatchSourceTimer?
     /// Whether `startRuntime()` ran (and `stopRuntime()` hasn't). Platform
     /// side-effects (resolver files, system proxy, env vars) only exist in
@@ -224,6 +227,12 @@ final class DaemonRuntimeHost {
     /// `awaitLaunchRecovery()` — see `LaunchRecovery` for why it is neither
     /// inline nor unordered. Twin of `AppState.launchRecovery`.
     private var launchRecovery: LaunchRecovery?
+    /// The process start `status()` reports. The entry point passes it in, so
+    /// the host reads no clock of its own for status.
+    private let startedAt: Date
+    /// Ends the process after a terminal stop. The entry point passes
+    /// `exit(0)`; the host itself never exits, so a test can observe the call.
+    private let terminalExit: @MainActor () -> Void
 
     /// - Parameters:
     ///   - configFilePredatesLaunch: whether the config file existed before
@@ -232,15 +241,23 @@ final class DaemonRuntimeHost {
     ///     what tells an upgrade from a fresh install to the resolver-file
     ///     recovery (`DNSManager.recoverLegacyOwnership`). Same read as
     ///     `AppState.init`.
-    init(
+    ///   - startedAt: the process start that `status()` reports.
+    ///   - terminalExit: called once a terminal stop (`stopRuntime(exitAfterStop:
+    ///     true)`) has flushed its events. The entry point passes `exit(0)`.
+    ///   - networkPathObserver: the path source. `nil` makes the production
+    ///     `NetworkMonitor`; a harness passes `FakeNetworkPathObserver`.
+    package init(
         environment: RuntimeEnvironment,
         logger: any LogSink,
         loadedConfiguration: RuntimeConfigurationLoadResult,
         configFilePredatesLaunch: Bool,
+        startedAt: Date,
+        terminalExit: @escaping @MainActor () -> Void,
         networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) },
         networkLocationLimits: NetworkLocationLimits = .init(),
         vpnStatusMonitor: VPNStatusObserving? = nil,
+        networkPathObserver: (any NetworkPathObserving)? = nil,
         privilegeClient: (any PrivilegeClient)? = nil,
         credentialStore: (any SecretStore)? = nil,
         kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
@@ -254,10 +271,12 @@ final class DaemonRuntimeHost {
         homeDirectory: URL,
         resolverDirectory: String? = nil
     ) {
+        self.startedAt = startedAt
+        self.terminalExit = terminalExit
         self.dnsResponds = dnsResponds
         self.environmentDriftInterval = environmentDriftInterval
         self.reapplyRetrySchedule = reapplyRetrySchedule
-        self.networkMonitor = NetworkMonitor(debounceInterval: networkPathDebounce)
+        self.networkPathObserver = networkPathObserver ?? NetworkMonitor(debounceInterval: networkPathDebounce)
         self.networkLocationObserver = networkLocationObserver
         self.networkLocationStoreFactory = networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits
@@ -274,7 +293,7 @@ final class DaemonRuntimeHost {
             platformConfig: loadedConfiguration.platformConfig
         )
         let flapBox = NIOLockedValueBox(
-            DaemonVPNFlapWindowConfig(
+            RuntimeVPNFlapWindowConfig(
                 graceSeconds: loadedConfiguration.config.vpnFlapGraceSeconds,
                 minVisibleSeconds: loadedConfiguration.config.vpnFlapMinVisibleSeconds
             )
@@ -352,7 +371,7 @@ final class DaemonRuntimeHost {
                 self?.handle(orchestratorEvent: event)
             }
         }
-        networkMonitor.onChange = { [weak self, deliveries] change in
+        self.networkPathObserver.setOnChange { [weak self, deliveries] change in
             deliveries.deliver {
                 await self?.handleNetworkChange(change)
             }
@@ -429,7 +448,7 @@ final class DaemonRuntimeHost {
     /// a consumer that acts on `daemon.ready` must not find the machine still
     /// pointed at a crashed run's dead listeners. An await, so the main actor
     /// stays free while recovery runs.
-    func markReady(mode: String) async {
+    package func markReady(mode: String) async {
         await awaitLaunchRecovery()
         orchestrator.eventLog.append(RuntimeEvent(kind: .lifecycle, event: "daemon.ready", detail: "mode=\(mode)"))
         writeReadyFile()
@@ -437,12 +456,12 @@ final class DaemonRuntimeHost {
         flushEvents()
     }
 
-    func status() -> ControlDaemonStatus {
+    package func status() -> ControlDaemonStatus {
         var status = ControlDaemonStatus(snapshot: orchestrator.snapshot, config: config)
         status.daemon = ControlDaemonMetadata(
             processID: Int(ProcessInfo.processInfo.processIdentifier),
             executableName: "ConduitDaemon",
-            startedAt: ConduitDaemon.startedAt
+            startedAt: startedAt
         )
         status.configGeneration = configGeneration
         return status
@@ -456,7 +475,7 @@ final class DaemonRuntimeHost {
     /// reads on a machine with several services (#47). The `runtimeLane` token
     /// is checked after every suspension and, under each manager's lock,
     /// before every manager step; see `LifecycleLane`.
-    func startRuntime() async throws {
+    package func startRuntime() async throws {
         await awaitLaunchRecovery()
         logNonBlockingConfigProblems()
         guard let token = await admit(.start, .runtimeStart) else { return }
@@ -626,7 +645,7 @@ final class DaemonRuntimeHost {
         }
 
         startLocationObserver()
-        networkMonitor.start()
+        networkPathObserver.start()
         vpnStatusMonitor.start()
         runtimeStarted = true
         logger.log(.notice, "Daemon runtime started.", category: .general)
@@ -641,7 +660,7 @@ final class DaemonRuntimeHost {
     /// that leaves the main actor free, bounded by recovery's own probe and
     /// subprocesses, well inside launchd's exit timeout. Joining buys what the
     /// app has to argue is safe without: the stop's clears never overlap
-    /// recovery's, and `exit(0)` never cuts a restore off half way.
+    /// recovery's, and the terminal exit never cuts a restore off half way.
     ///
     /// The surface work runs on `platformWork` in two blocks, one on each side
     /// of the orchestrator stops, so each lands behind the apply of any start
@@ -651,7 +670,7 @@ final class DaemonRuntimeHost {
     /// A stop while a stop is out joins it rather than queueing another
     /// teardown, except, again, the one on the way to `exit`, which must reach
     /// it: it supersedes the one in flight, which then stops at its next step.
-    func stopRuntime(exitAfterStop: Bool = false) async {
+    package func stopRuntime(exitAfterStop: Bool = false) async {
         await awaitLaunchRecovery()
         guard let token = await admit(.stop, .runtimeStop, coalescing: !exitAfterStop) else { return }
         defer { runtimeLane.end(token) }
@@ -660,7 +679,7 @@ final class DaemonRuntimeHost {
         stopDNSHealthTimer()
         vpnStatusMonitor.stop()
         networkLocationObserver.stop()
-        networkMonitor.stop()
+        networkPathObserver.stop()
 
         let config = self.config
         let platform = platformConfig
@@ -747,7 +766,7 @@ final class DaemonRuntimeHost {
         writeSnapshotFile(snapshot: orchestrator.snapshot)
         flushEvents()
         if exitAfterStop {
-            exit(0)
+            terminalExit()
         }
     }
 
@@ -847,7 +866,7 @@ final class DaemonRuntimeHost {
         await orchestrator.testUpstream(named: name)
     }
 
-    func flushEvents() {
+    package func flushEvents() {
         let auditFlushed = orchestrator.auditSink.flush(timeout: 2)
         reportWriterLoss()
         if !eventWriter.flushReportingTimeout(auditFlushed: auditFlushed, eventLog: orchestrator.eventLog) {
@@ -1362,12 +1381,12 @@ final class DaemonRuntimeHost {
         }
     }
 
-    nonisolated static let prettyEncoder: JSONEncoder = CanonicalJSON.encoder(prettyPrinted: true)
+    package nonisolated static let prettyEncoder: JSONEncoder = CanonicalJSON.encoder(prettyPrinted: true)
 }
 
 // MARK: - Recovery without a configuration
 
-extension DaemonRuntimeHost {
+extension RuntimeHost {
     /// The journal restores for a launch whose config failed to load, run by
     /// `ConduitDaemon.main` before it exits. No host is built from a failed
     /// load, so without this a daemon killed with the system proxy or system
@@ -1381,7 +1400,7 @@ extension DaemonRuntimeHost {
     /// Events go to `events.ndjson` as a host's would, and are returned for
     /// the tests. The seams are `init`'s.
     @discardableResult
-    static func recoverWithoutConfiguration(
+    package static func recoverWithoutConfiguration(
         environment: RuntimeEnvironment,
         logger: any LogSink,
         privilegeClient: (any PrivilegeClient)? = nil,
@@ -1431,21 +1450,21 @@ extension DaemonRuntimeHost {
 
 // MARK: - RuntimeReconcilerHost
 
-/// The daemon's side of a reconcile pass. Each method is the twin of the one
+/// The host's side of a reconcile pass. Each method is the twin of the one
 /// in `AppState`, over this host's managers and logger; the rules about what
 /// a pass may read live in `RuntimeReconciler`, not here.
-extension DaemonRuntimeHost: RuntimeReconcilerHost {
-    func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
+extension RuntimeHost: RuntimeReconcilerHost {
+    package func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
         await orchestrator.applyConfigChange(new, from: old)
     }
 
     /// A reload's pass waits for any start or stop in flight, so it acts on
     /// the surfaces after the lifecycle's platform work rather than beside it.
-    func awaitLifecycleIdle() async {
+    package func awaitLifecycleIdle() async {
         await runtimeLane.waitUntilIdle()
     }
 
-    func runtimeState() -> RuntimeReconciler.RuntimeState {
+    package func runtimeState() -> RuntimeReconciler.RuntimeState {
         let snapshot = orchestrator.snapshot
         let proxyIsUp: Bool
         switch snapshot.runtimeStatus.state {
@@ -1462,7 +1481,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
     /// config (a removed split-DNS entry keeps its `/etc/resolver` file until
     /// the next full stop). Reads `pass.platform` and nothing live, as the
     /// reconciler's contract requires.
-    func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async {
+    package func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async {
         let old = pass.old
         let new = pass.new
         let platform = pass.platform
@@ -1566,7 +1585,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
         }
     }
 
-    func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action) {
+    package func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action) {
         orchestrator.eventLog.append(
             RuntimeEvent(kind: .config, event: "config.platform_integration", detail: String(describing: action))
         )
@@ -1576,7 +1595,7 @@ extension DaemonRuntimeHost: RuntimeReconcilerHost {
     /// paths use, with their warning-not-throw treatment. Returns whether the
     /// action landed, so the reconciler can leave the flag unreconciled for
     /// the next reload to retry.
-    func perform(
+    package func perform(
         _ action: PlatformIntegrationReconciler.Action,
         config: ProxyConfig,
         previousConfig: ProxyConfig,

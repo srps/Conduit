@@ -12,7 +12,9 @@ Implemented on this branch; not merged at this checkpoint:
 - The `ControlRuntime*` value types, the v2 envelope (version 2, separate from v1's version 1) and its frame codec, which writes `Date` values as epoch seconds on the scale of `ControlTimestamp`, plus pages and the snapshot projection.
 - The `RuntimeClient` protocol (`submit`, `lookupAdmission`, `outcome`, `subscribe`, `readPage`, `readSnapshot`) with its deadline, subscription and client-error types. Each v2 message carries a correlation ID, and the stamps and page requests name the incarnation they read.
 
-Not implemented: the in-memory client and its admission, lookup and subscription engine; the production v2 socket; a config commit or start DTO; a `ConduitRuntime` target; AppState adoption. Request lookup and admission exist only as protocol shapes, so their behavior is unverified. v1 control, helper IPC and the installed helper are unchanged, and no production peer uses v2.
+Not implemented: the in-memory client and its admission, lookup and subscription engine; the production v2 socket; a config commit or start DTO; AppState adoption. Request lookup and admission exist only as protocol shapes, so their behavior is unverified. v1 control, helper IPC and the installed helper are unchanged, and no production peer uses v2.
+
+The shared-host extraction subsequently added ConduitRuntime, with its own [verification checkpoint](verification-runtime-host-extraction-2026-10-24.md). AppState still runs its twin; this inventory does not claim client adoption.
 
 Not selected: shipping numeric limits for frames, pages, queues or retention. The v1 16 KiB frame (`ControlSocket.maxFrameBytes`) is retained. The design's 16 KiB v2 figure and 64-row pages remain review inputs.
 

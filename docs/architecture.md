@@ -25,7 +25,8 @@ Conduit/
 │   ├── PlatformMac/          macOS glue (Security, SC, SMAppService…)
 │   ├── ConduitShared/        helper IPC and control wire contracts (no dependencies)
 │   ├── Conduit/              SwiftUI GUI + wiring layer
-│   ├── ConduitDaemon/        user-session daemon host
+│   ├── ConduitRuntime/       shared RuntimeHost, currently composed by the daemon
+│   ├── ConduitDaemon/        user-session daemon entry point
 │   ├── ConduitUpdater/       nested Sparkle updater
 │   ├── ConduitHelper/        privileged LaunchDaemon
 │   ├── pm-proxy/             headless HTTP/SOCKS5/DNS/tunnel CLI
@@ -59,9 +60,10 @@ graph TD
     PAC["ProxyPAC<br/>(CFNetwork)"]
     Bridge["ProxyControlBridge<br/>(kernel to wire mapping)"]
     Platform["PlatformMac<br/>(Security, SC, SMAppService…)"]
+    Runtime["ConduitRuntime<br/>(shared RuntimeHost)"]
 
     App["Conduit<br/>(SwiftUI GUI)"]
-    Daemon["ConduitDaemon<br/>(user-session host)"]
+    Daemon["ConduitDaemon<br/>(entry point)"]
     Updater["ConduitUpdater<br/>(nested Sparkle updater)"]
     Helper["ConduitHelper<br/>(LaunchDaemon)"]
     PMProxy["pm-proxy<br/>(headless proxy)"]
@@ -96,6 +98,16 @@ graph TD
     App --> Shared
     App --> Events
 
+    Runtime --> Kernel
+    Runtime --> Auth
+    Runtime --> PAC
+    Runtime --> Platform
+    Runtime --> Bridge
+    Runtime --> Shared
+    Runtime --> Events
+    Runtime --> SwiftNIO
+
+    Daemon --> Runtime
     Daemon --> Bridge
     Daemon --> Kernel
     Daemon --> Auth
@@ -134,6 +146,7 @@ graph TD
     Helper --> Shared
 
     Tests --> App
+    Tests --> Runtime
     Tests --> Daemon
     Tests --> Bridge
     Tests --> Kernel
@@ -145,32 +158,33 @@ graph TD
     Tests --> SwiftNIO
 ```
 
-| Target                 | ProxyKernel | ProxyAuth | ProxyPAC | PlatformMac | ConduitShared | RuntimeEvents | ProxyControlBridge | NIO* |
-| ---------------------- | :---------: | :-------: | :------: | :---------: | :-----------: | :-----------: | :----------------: | :--: |
-| `ConduitShared`        | —           | —         | —        | —           | —             | —             | —                  | —    |
-| `RuntimeEvents`        | —           | —         | —        | —           | —             | —             | —                  | —    |
-| `ProxyKernel`          | —           | —         | —        | —           | ✓             | ✓             | —                  | ✓    |
-| `ProxyControlBridge`   | ✓           | —         | —        | —           | ✓             | ✓             | —                  | —    |
-| `ProxyAuth`            | ✓           | —         | —        | —           | —             | —             | —                  | —    |
-| `ProxyPAC`             | ✓           | —         | —        | —           | —             | —             | —                  | —    |
-| `PlatformMac`          | ✓           | —         | —        | —           | ✓             | ✓             | —                  | —    |
-| `ConduitUpdater`       | —           | —         | —        | ✓           | ✓             | —             | —                  | —    |
-| `pm-proxy`             | ✓           | ✓         | ✓        | —           | ✓             | —             | ✓                  | —    |
-| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | —                  | ✓    |
-| `pm-tunnel`            | ✓           | ✓         | —        | —           | —             | —             | —                  | —    |
-| `pm-dns`               | ✓           | —         | —        | —           | —             | —             | —                  | —    |
-| `pmctl`                | —           | —         | —        | —           | ✓             | —             | —                  | —    |
-| `pm-vpn-check`         | ✓           | —         | —        | ✓           | —             | —             | —                  | ✓    |
-| `pm-auth-check`        | ✓           | —         | —        | —           | —             | —             | —                  | —    |
-| `pm-tls-check`         | —           | —         | —        | ✓           | —             | —             | —                  | —    |
-| `ConduitHelper`        | ✓           | —         | —        | —           | ✓             | —             | —                  | —    |
-| `Conduit` (app)        | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | —                  | —    |
-| `ConduitDaemon`        | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓    |
-| `ConduitTests`         | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓    |
+| Target                 | ProxyKernel | ProxyAuth | ProxyPAC | PlatformMac | ConduitShared | RuntimeEvents | ProxyControlBridge | ConduitRuntime | NIO* |
+| ---------------------- | :---------: | :-------: | :------: | :---------: | :-----------: | :-----------: | :----------------: | :------------: | :--: |
+| `ConduitShared`        | —           | —         | —        | —           | —             | —             | —                  | — | —    |
+| `RuntimeEvents`        | —           | —         | —        | —           | —             | —             | —                  | — | —    |
+| `ProxyKernel`          | —           | —         | —        | —           | ✓             | ✓             | —                  | — | ✓    |
+| `ProxyControlBridge`   | ✓           | —         | —        | —           | ✓             | ✓             | —                  | — | —    |
+| `ProxyAuth`            | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
+| `ProxyPAC`             | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
+| `PlatformMac`          | ✓           | —         | —        | —           | ✓             | ✓             | —                  | — | —    |
+| `ConduitRuntime` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
+| `ConduitUpdater`       | —           | —         | —        | ✓           | ✓             | —             | —                  | — | —    |
+| `pm-proxy`             | ✓           | ✓         | ✓        | —           | ✓             | —             | ✓                  | — | —    |
+| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | —                  | — | ✓    |
+| `pm-tunnel`            | ✓           | ✓         | —        | —           | —             | —             | —                  | — | —    |
+| `pm-dns`               | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
+| `pmctl`                | —           | —         | —        | —           | ✓             | —             | —                  | — | —    |
+| `pm-vpn-check`         | ✓           | —         | —        | ✓           | —             | —             | —                  | — | ✓    |
+| `pm-auth-check`        | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
+| `pm-tls-check`         | —           | —         | —        | ✓           | —             | —             | —                  | — | —    |
+| `ConduitHelper`        | ✓           | —         | —        | —           | ✓             | —             | —                  | — | —    |
+| `Conduit` (app)        | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | —                  | — | —    |
+| `ConduitDaemon`        | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓ | ✓    |
+| `ConduitTests`         | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓ | ✓    |
 
 The matrix lists **direct** dependencies declared in `Package.swift`. `ConduitUpdater` is the only target that declares Sparkle. `Conduit` (app) and `ConduitDaemon` declare `ConduitShared` and `RuntimeEvents` themselves rather than reaching them through `PlatformMac`. Transitive reach is a separate question: `pm-proxy` declares no `PlatformMac`, and none of its declared targets (`ProxyKernel`, `ProxyAuth`, `ProxyPAC`, `ProxyControlBridge`, `ConduitShared`, `RuntimeEvents`) depends on it, so its closure contains no `PlatformMac`, Sparkle or `ConduitDaemon`. The kernel import fence in CI covers `ProxyKernel` and `RuntimeEvents`; the target graph is what keeps `PlatformMac` out of `pm-proxy`.
 
-`ConduitRuntime`, the target decision 0013 selects for the shared host, does not exist yet. `RuntimeClient` (in `ConduitShared`) is a protocol with no production or in-memory conformer. Neither is a running host.
+`ConduitRuntime` contains the extracted `RuntimeHost`, currently composed by the daemon. `RuntimeClient` (in `ConduitShared`) remains a protocol with no production or in-memory conformer. AppState adoption and RuntimeActor isolation remain pending.
 
 ### What each target owns
 
@@ -184,7 +198,8 @@ The matrix lists **direct** dependencies declared in `Package.swift`. `ConduitUp
 - **`Conduit`** (app target) — SwiftUI GUI + `AppState`, the wiring layer that owns every `PlatformMac` concrete and passes protocol-typed references into the orchestrator. It declares `ProxyKernel`, `ProxyAuth`, `ProxyPAC`, `PlatformMac`, `ConduitShared` and `RuntimeEvents` directly. Also hosts `AppLogStore` (the `@MainActor` ring-buffered log store) because it imports `Combine` and can't live in the kernel.
 - **`ConduitHelper`** — privileged LaunchDaemon at `/Library/PrivilegedHelperTools/io.github.srps.Conduit.Helper`. Communicates with the app over a Unix-domain socket at `/var/run/io.github.srps.Conduit.Helper.sock` using the `ConduitShared` contract. Depends on the kernel for `UDPRelay` / `TCPRelay` implementations.
 - **Executables: `pm-proxy`, `pm-dns`, `pm-tunnel`, `pm-sim`, `pm-vpn-check`, `pm-auth-check`** — each is a narrow tool. `pm-proxy` is the flagship: it runs the full HTTP/SOCKS5/DNS/tunnel stack off `ProxyKernel`, `ProxyAuth` and `ProxyPAC`, and declares `ProxyControlBridge` and `ConduitShared` for its control socket, with no system-side effects (no Keychain, no `networksetup`, no `/etc/resolver`). `pm-sim` is the fault-injection harness used by CI.
-- **`ConduitDaemon`** — the user-session daemon host (`DaemonRuntimeHost`) over `PlatformMac`, with the same platform-ownership rules as the app. It is not yet the production owner; the daemon milestones are in [ROADMAP](../ROADMAP.md).
+- **`ConduitRuntime`** — the shared `RuntimeHost`, extracted with lifecycle policy and MainActor isolation preserved. It owns runtime composition and uses explicit start-time, terminal-exit and network-path collaborators. The existing FakeMachine suite drives this library; the app has not adopted it yet.
+- **`ConduitDaemon`** — the user-session entry point over `RuntimeHost`, retaining arguments, configuration loading, signals and status output. It is not yet the production owner; the daemon milestones are in [ROADMAP](../ROADMAP.md).
 - **`ConduitUpdater`** — the nested Sparkle updater. It is the only target that links Sparkle; see the updater section below.
 - **`pmctl`** — command-line client for the control socket. It depends only on `ConduitShared`.
 - **`pm-tls-check`** — TLS-inspection diagnostic over `PlatformMac`.

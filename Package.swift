@@ -88,6 +88,15 @@ let package = Package(
             path: "Sources/PlatformMac",
             exclude: ["AGENTS.md"]
         ),
+        // The shared runtime host (decision 0013). Extracted from ConduitDaemon
+        // with its policy unchanged. Only ConduitDaemon and the tests depend on
+        // it: the updater must not, and AppState does not adopt it yet.
+        .target(
+            name: "ConduitRuntime",
+            dependencies: ["ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents", .product(name: "NIOConcurrencyHelpers", package: "swift-nio")],
+            path: "Sources/ConduitRuntime",
+            exclude: ["AGENTS.md"]
+        ),
         .executableTarget(
             name: "Conduit",
             dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents"],
@@ -115,7 +124,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "ConduitDaemon",
-            dependencies: ["ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents", .product(name: "NIOConcurrencyHelpers", package: "swift-nio")],
+            dependencies: ["ConduitRuntime", "ProxyKernel", "ProxyControlBridge", "ProxyAuth", "ProxyPAC", "PlatformMac", "ConduitShared", "RuntimeEvents", .product(name: "NIOConcurrencyHelpers", package: "swift-nio")],
             path: "Sources/ConduitDaemon",
             exclude: ["AGENTS.md"]
         ),
@@ -171,6 +180,7 @@ let package = Package(
                 "ConduitShared",
                 "RuntimeEvents",
                 "ConduitDaemon",
+                "ConduitRuntime",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
