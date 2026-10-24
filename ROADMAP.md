@@ -86,6 +86,11 @@ not a requirement to finish every event or property test before extraction:
    family through producer, codec, bridge, consumer and assertions. Define
    deadlines, unknown outcomes, subscription gaps and config ownership here.
    The existing synchronous `DaemonClient` is not the finished client.
+   The framed adapter now runs the v2 codec over an injected byte transport behind
+   one `RuntimeClient` factory; its concrete implementation is private. The final
+   combined local workflow passed all 39 checks (2,936 tests, two skips; 95 simulator
+   records and perf). See [adapter evidence](./docs/runtime-framed-client-2026-10-24.md).
+   This does not implement the service/ledger/stream engine or host adoption.
    The owner-selected persistence policy is save-before-apply for durable edits,
    with Stop/Quit admitted despite save failure. Define separate durable/session/
    applied outcomes and stop-fenced retries; Quit does not persist a disable.

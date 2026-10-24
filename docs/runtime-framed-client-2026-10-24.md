@@ -155,8 +155,7 @@ materializes no value, and a valid `1e400` is skipped without a Double conversio
 version, kind and body type, then classification, then the strict walk, then the typed decode. The
 unsupported-version, unknown-kind and oversize priority tests are unchanged and still pass.
 
-Not run here: the full `swift test`, `pm-sim all`, `scripts/perf-gate.sh`, and the other
-workflow-equivalent gates. Those belong to the broader gate, and they are not claimed for this slice.
+The focused wrappers above do not claim the full workflow. The final combined run is recorded below.
 
 ## Does not prove
 
@@ -164,3 +163,33 @@ Production host fences, admission order, retention, global body admission, worki
 the engine, the full client-engine behavior, or any machine effect. The tests and the simulator run
 over synthetic transports only. It also does not prove the host or store, a production socket transport,
 any model, or that a real transport enforces a deadline or the exact remaining time at send.
+
+
+## Final combined local workflow
+
+All 39 workflow-equivalent checks passed on immutable source commit
+`69b37a73b1dd5dceeeb8b96aacdb4016472b5f4e`, rebased onto merged PR #230.
+The source SHA-256 was
+`7660b5ab34b13ea3add9dbc11868e27d5e75fde39f08ae6e3f1c893c0d6ad7a7`
+before and after the run. Results and logs are under
+`/private/tmp/conduit-runtime-stage1-20261024/framed-client-full-gates/`.
+
+The full Swift suite passed 2,936 tests, with two skips and no failures.
+`pm-sim all` passed all 95 scenario records. All workflow script checks, signed
+and unsigned updater harnesses, security/redaction regressions, stream/shutdown
+checks and the performance gate passed. The existing performance workload took
+10.218 seconds, with 34,078,720 bytes maximum RSS and 102.40% CPU. These are that
+workload's process measurements, not private-transfer memory or host fairness proof.
+
+The earlier pre-correction source `b635ce2` also passed all 39 checks (2,878 tests,
+two skips; 93 simulator records), archived in `framed-client-full-gates-first-run`.
+An intervening run was aborted after sandbox restrictions denied Swift module-cache
+access; another was deliberately interrupted before the factory correction. Those
+are archived separately and supply no final workflow evidence. The final run used
+the authorized Xcode cache access and the final private implementation/factory.
+
+This completes local verification for the adapter slice. Hosted CI, actual service
+admission/subscription models, host/store adoption and release validation remain
+separate. Claude implemented and verified the focused changes through the owner's
+claude.ai Max subscription; no API authentication was used. No serving app/helper
+was replaced, and no owner or real-machine validation is claimed.
