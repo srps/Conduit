@@ -1,8 +1,9 @@
 # Writer authority: canonical state-root checkpoint
 
-Status: proposal, 2026-10-24. Decision 0017 selects an exclusive state-directory
-writer lease. This checkpoint resolves its coverage before persistence adoption;
-no lease or asynchronous store is implemented yet.
+Status: owner selected this shape on 2026-10-24;
+[0020](decisions/0020-canonical-runtime-writer-root.md) records the decision.
+It refines 0017 writer-lease coverage before persistence adoption; no lease or
+asynchronous store is implemented yet.
 
 ## Recommendation
 
@@ -91,3 +92,13 @@ semantics with owned subprocesses/fixtures. No blanket symlink, hardlink or
 network-filesystem ban is selected. Older binaries and external editors remain
 nonparticipants in the advisory protocol. This proposal does not establish
 power-loss durability or helper-owned recovery.
+
+## Revisit and future work
+
+Revisit when a demonstrated workflow needs authoritative writable components
+shared across roots and read-only input or deliberate import cannot meet it.
+Evaluate bounded component leases before a global registry. Preserve the client
+contract by keeping coordination behind the persistence boundary, but require
+versioned/quiescent handoff and mixed-version checks: old root-only hosts cannot
+recognize new component or registry authority. A later change needs a new record,
+bounded recovery/retention and deployment evidence; it is not a transparent swap.

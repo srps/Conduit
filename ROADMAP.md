@@ -102,7 +102,8 @@ not a requirement to finish every event or property test before extraction:
    The owner selected the eight-MiB private request cap in
    [0019](./docs/decisions/0019-private-configuration-frame-budget.md), with independent
    Stop/status work and explicit oversize refusal before saving. Open gates:
-   measured memory/capacity/latency, external-path writer coverage,
+   measured memory/capacity/latency and complete writer coverage under
+   the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
    listener handoff, and measured
    bounds and shutdown.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives

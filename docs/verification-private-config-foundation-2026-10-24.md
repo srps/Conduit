@@ -57,9 +57,9 @@ encoded-frame cap with independent Stop/status work. The cap is planned, not
 enforced by this move. Existing file validation, v1 control and helper IPC are
 unchanged. No new external dependency or public API was added.
 
-The [canonical state-root review](design-runtime-state-root-review.md) remains
-an owner-review proposal. Its narrower daemon split-path compatibility effect
-must not be silently implemented. The diagnostic overwrite reproduction is
+The owner subsequently selected the [canonical state-root shape](design-runtime-state-root-review.md),
+recorded in 0020. Its lease/store implementation remains planned and is not
+validated by this SecretBytes slice. The diagnostic overwrite reproduction is
 tracked separately in [#222](https://github.com/srps/Conduit/issues/222).
 
 Still due: typed private values and explicit codec, actual transfer/working-memory
