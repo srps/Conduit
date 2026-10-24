@@ -156,69 +156,60 @@ final class PrivateConfigBridgeTests: XCTestCase {
         )
     }
 
-    // MARK: - Preflight bound
+    // MARK: - Resource ceilings
 
-    func testOversizePreflightRefusesBeforeMapping() throws {
+    /// The display ceiling refuses a 9 MB name by its length, before validation or mapping.
+    func testOversizeProfileNameIsRefusedByItsCeilingBeforeMapping() throws {
         var config = richConfig()
         config.profileName = String(repeating: "a", count: 9_000_000)
         XCTAssertThrowsError(try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))) {
-            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .tooLarge)
+            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .resourceLimit(DomainResourceViolation(.profileName, 1_024)))
         }
     }
 
-    /// Each array item costs at least its quotes, so 4,194,305 empty strings (2 bytes each) pass the
-    /// cap. The walk refuses them by count, so no `PrivateURLValue` or `SecretBytes` is built.
+    /// A list is refused by its count, so 4,194,305 empty strings never reach a `PrivateURLValue` or `SecretBytes`.
     func testDenseEmptyStringsAreRefusedByCountBeforeMapping() throws {
         var config = richConfig()
         config.routing.noProxyHosts = Array(repeating: "", count: 4_194_305)
-        XCTAssertNil(PrivateConfigurationBridge.boundedLowerBound(config))
         XCTAssertThrowsError(try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))) {
-            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .tooLarge)
+            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .resourceLimit(DomainResourceViolation(.noProxyHosts, 256)))
         }
     }
 
-    /// Each interception rule costs its object floor (2 + 4 members x 4) and its two empty strings (2 each),
-    /// so 500,000 rules are over the cap and 300,000 are under it. The refusal comes from the count alone.
-    func testDenseObjectsAreChargedPerObjectBeforeMapping() throws {
+    /// The rule count is refused at 257 rules whatever they hold. The typed check alone accepts exactly 256.
+    func testInterceptRuleCountIsCeilingNotCost() throws {
         var config = richConfig()
         let rule = DNSInterceptRule(id: uuid(900), pattern: "", interceptIP: "", enabled: false)
-        config.dns.interceptRules = Array(repeating: rule, count: 500_000)
-        XCTAssertNil(PrivateConfigurationBridge.boundedLowerBound(config))
-
-        config.dns.interceptRules = Array(repeating: rule, count: 300_000)
-        let bound = try XCTUnwrap(PrivateConfigurationBridge.boundedLowerBound(config))
-        XCTAssertLessThanOrEqual(bound, PrivateConfigurationFrame.maxFrameBytes)
+        config.dns.interceptRules = Array(repeating: rule, count: 257)
+        XCTAssertEqual(
+            config.resourceViolation(),
+            DomainResourceViolation(.interceptRules, 256)
+        )
+        config.dns.interceptRules = Array(repeating: rule, count: 256)
+        XCTAssertNil(config.resourceViolation())
     }
 
-    /// Every item is counted, not only the first. Adding 1,000 empty strings adds exactly 2,000 bytes.
-    func testPreflightChargesEveryArrayItemExactly() throws {
-        let base = try XCTUnwrap(PrivateConfigurationBridge.boundedLowerBound(richConfig()))
+    /// Every item is checked, not only the first: a 254-byte bypass entry after 255 short ones is refused.
+    func testOverlongLastBypassEntryIsRefusedNotOnlyTheFirst() throws {
         var config = richConfig()
-        config.routing.noProxyHosts += Array(repeating: "", count: 1_000)
-        let grown = try XCTUnwrap(PrivateConfigurationBridge.boundedLowerBound(config))
-        XCTAssertEqual(grown - base, 2_000)
+        config.routing.noProxyHosts = Array(repeating: "a", count: 255) + [String(repeating: "b", count: 254)]
+        XCTAssertEqual(config.resourceViolation(), DomainResourceViolation(.noProxyPattern, 253))
     }
 
-    /// Quotes, escapes and multibyte text: the bound counts raw UTF-8 and quotes, and it stays at or below
-    /// the encoded body, which can only be larger.
-    func testLowerBoundStaysBelowEscapedAndMultibyteBodies() throws {
+    /// An approved value whose escapes make its frame several times its decoded size is accepted and reads back
+    /// unchanged. The 1,024-byte ceiling holds for the decoded bytes, and the frame is counted exactly.
+    func testEscapedApprovedValueIsAcceptedAndReadsBackUnchanged() throws {
         var config = richConfig()
-        config.profileName = String(repeating: "\"\\\u{01}", count: 500) + "🙂é"
+        config.profileName = String(repeating: "\"\\\u{01}", count: 256) + "🙂é"
+        XCTAssertLessThanOrEqual(config.profileName.utf8.count, 1_024)
         let request = try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))
-        let body = try bodyCount(of: PrivateConfigurationEncoder.encode(request).bytes())
-        let bound = try XCTUnwrap(PrivateConfigurationBridge.boundedLowerBound(config))
-        XCTAssertLessThanOrEqual(bound, body)
-        // The escaped body is strictly larger than the raw bytes, so the bound is not the real size.
-        XCTAssertLessThan(bound, body)
-    }
-
-    func testLowerBoundNeverExceedsTheEncodedBody() throws {
-        let config = richConfig()
-        let frame = try PrivateConfigurationEncoder.encode(
-            try makeRequest(config: config, platform: richPlatform(launchAtLogin: false))
-        ).bytes()
-        let bound = try XCTUnwrap(PrivateConfigurationBridge.boundedLowerBound(config))
-        XCTAssertLessThanOrEqual(bound, try bodyCount(of: frame))
+        let frame = try PrivateConfigurationEncoder.encode(request).bytes()
+        XCTAssertGreaterThan(try bodyCount(of: frame), config.profileName.utf8.count)
+        let restored = try PrivateConfigurationBridge.makeValues(
+            from: try PrivateConfigurationDecoder.decode(readFrameBody(frame)),
+            localLaunchAtLogin: false
+        )
+        XCTAssertEqual(restored.config.profileName, config.profileName)
     }
 
     /// The in-memory entry point takes a request that was never framed, so it counts the request exactly.
@@ -226,7 +217,10 @@ final class PrivateConfigBridgeTests: XCTestCase {
         var request = try PrivateConfigSamples.request()
         request.runtime.profileName = String(repeating: "a", count: PrivateConfigurationFrame.maxFrameBytes)
         XCTAssertThrowsError(try PrivateConfigurationBridge.makeValues(from: request, localLaunchAtLogin: false)) {
-            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .tooLarge)
+            XCTAssertEqual(
+                $0 as? PrivateConfigurationBridgeError,
+                .resourceLimit(DomainResourceViolation(.profileName, 1_024))
+            )
         }
     }
 
@@ -291,6 +285,15 @@ final class PrivateConfigBridgeTests: XCTestCase {
             expectedPlatformRevision: try XCTUnwrap(PrivatePlatformRevision(rawValue: 6)),
             expectedOwnerGeneration: try XCTUnwrap(PrivateConfigExpectedGeneration(rawValue: 5))
         )
+    }
+
+    /// The body of one complete frame, read through the real reader.
+    private func readFrameBody(_ frame: [UInt8]) throws -> PrivateConfigurationFrameBody {
+        let reader = PrivateConfigurationFrameReader()
+        guard case .frame(let body) = try reader.consume(frame).step else {
+            throw Failure(message: "the frame did not complete")
+        }
+        return body
     }
 
     /// The body length a frame's header declares.

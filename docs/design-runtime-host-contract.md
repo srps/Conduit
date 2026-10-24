@@ -195,9 +195,10 @@ Repeated checks at independent trust boundaries may be necessary; each should
 invoke the same policy rather than maintain another copy of its rules.
 
 Before integration, review each slice for duplicated field walks, implicit copies,
-and policy added to AppState. The current resource slice has two parallel typed
-walks; their consolidation is an open implementation task, not completed by the
-shared constants or parity tests. The exact-save correction needs an explicit
+and policy added to AppState. The local resource slice now uses one typed walk
+through `ConfigurationResourceSource` views; each adapter only exposes existing
+storage. Shared constants and parity tests alone did not satisfy this requirement.
+File/startup adoption remains pending. The exact-save correction needs an explicit
 migration into the sole shared workflow, without introducing another coordinator.
 Tests should exercise the real adapters against independent expected outcomes and
 models, including refusal before side effects; they should not merely compare two

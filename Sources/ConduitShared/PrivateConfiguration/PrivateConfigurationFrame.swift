@@ -66,6 +66,10 @@ package enum PrivateConfigurationWireError: Error, Sendable, Equatable, CustomSt
     case invalidValue
     /// The reader already delivered its frame, or it failed earlier. It accepts no more bytes.
     case invalidState
+    /// A value crosses an approved resource ceiling (decision 0021). The scanner or the typed check raises
+    /// it before Foundation decodes or the bridge maps anything. It names the field and the ceiling, never
+    /// the value, and it is distinct from `malformedBody`, so a caller can tell a bound from a grammar error.
+    case resourceLimitExceeded(DomainResourceViolation)
 
     package var description: String {
         switch self {
@@ -76,6 +80,7 @@ package enum PrivateConfigurationWireError: Error, Sendable, Equatable, CustomSt
         case .malformedBody: "private configuration body is malformed"
         case .invalidValue: "private configuration value is not representable"
         case .invalidState: "private configuration reader is not accepting input"
+        case .resourceLimitExceeded: "private configuration value exceeds a resource limit"
         }
     }
 }

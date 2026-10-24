@@ -397,10 +397,15 @@ package enum PrivateConfigurationEncoder {
     /// The most body bytes one frame can carry: the cap less the smallest header and terminator.
     private static let bodyLimit = PrivateConfigurationFrame.maxFrameBytes - minimumFrameOverhead
 
-    /// Returns the exact body length of `request`, without building a frame or any buffer. The same
-    /// writer runs with a counting sink, so the count is exact, and the pass stops at the first byte
-    /// past the body limit. It also refuses an unrepresentable value, exactly as `encode` does.
+    /// Returns the exact body length of `request`, without building a frame or any buffer. The approved
+    /// resource ceilings run first, so an overlimit value is refused before the writer walks it, and a
+    /// raw DTO that bypasses the bridge is covered too. The same writer then runs with a counting sink, so
+    /// the count is exact, and the pass stops at the first byte past the body limit. It also refuses an
+    /// unrepresentable value, exactly as `encode` does.
     package static func measureBody(_ request: PrivateConfigurationRequest) throws -> Int {
+        if let violation = request.resourceViolation() {
+            throw PrivateConfigurationWireError.resourceLimitExceeded(violation)
+        }
         let counting = PrivateJSONEmitter(sink: PrivateCountingSink(limit: bodyLimit))
         try counting.writeRequest(request)
         return counting.sink.count

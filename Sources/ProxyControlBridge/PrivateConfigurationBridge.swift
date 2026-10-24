@@ -16,118 +16,18 @@ import ConduitShared
 /// Failures of the mapping. Each case is fixed text or a bounded summary. None carries a value,
 /// a URL or a token, and none carries a collection, so the error stays small however many checks fail.
 package enum PrivateConfigurationBridgeError: Error, Sendable, Equatable {
-    /// The values are too large for one frame. Refused before any value is mapped.
+    /// The encoded frame is larger than the cap. Escapes can make approved values exceed it.
     case tooLarge
+    /// A value crosses an approved resource ceiling (decision 0021). It names the field and the ceiling,
+    /// never the value. This is refused before validation enumerates failures and before any value is mapped.
+    case resourceLimit(DomainResourceViolation)
     /// The kernel's validation refused the values. `firstCheck` is the field code of the first
     /// failing check, as `ConfigValidationError.check` names it. `failureCount` is how many checks
     /// failed. Validation still runs in full; only the summary is carried out of it.
     case invalidConfiguration(firstCheck: String, failureCount: Int)
 }
 
-/// Charges the preflight's lower bound against the frame cap. Every charge is checked before it is
-/// subtracted, so no sum can overflow, and the first charge past the cap throws.
-private struct PreflightBudget {
-    /// The bytes the body may still take. It starts at the frame cap, which is the whole frame's
-    /// bound, so a body that passes this walk cannot be larger than the cap.
-    private(set) var remaining = PrivateConfigurationFrame.maxFrameBytes
-
-    /// Smallest encoded member: `"k":` with a one-byte value. Real keys are longer, so this is a floor.
-    static let memberFloor = 4
-
-    mutating func spend(_ bytes: Int) throws {
-        guard bytes <= remaining else {
-            throw PrivateConfigurationBridgeError.tooLarge
-        }
-        remaining -= bytes
-    }
-
-    /// A JSON string: its raw UTF-8 bytes and its two quotes. Escapes can only add to this.
-    mutating func spend(string text: String) throws {
-        // `remaining` is never negative, so `remaining - 2` cannot overflow. A failed guard is a refusal.
-        guard text.utf8.count <= remaining - 2 else {
-            throw PrivateConfigurationBridgeError.tooLarge
-        }
-        remaining -= text.utf8.count + 2
-    }
-
-    /// A JSON object with `members` members: its two braces and a floor for each member. The member
-    /// count is a constant at every call site, so the multiplication stays small.
-    mutating func spend(object members: Int) throws {
-        try spend(2 + members * Self.memberFloor)
-    }
-}
-
 package enum PrivateConfigurationBridge {
-    /// A lower bound on the encoded body, or nil once the bound passes the frame cap.
-    ///
-    /// The walk reads each stored string once, for its UTF-8 count, and charges every array item
-    /// and object at its minimum structure. Quotes, braces and member keys are counted, not only raw
-    /// text, so a long run of empty strings or objects is charged. The walk stops at the first charge
-    /// past the cap, so an oversize input costs no more than the cap. Escapes and separators only add
-    /// to the real size, so the bound never exceeds the encoded body. It refuses by count, and the
-    /// codec's exact count is still the final check.
-    ///
-    /// Cost of the walk itself: `String.utf8.count` is constant time for native strings. A bridged
-    /// NSString may be copied to count its UTF-8. The stored values this walk does not copy are the
-    /// caller's existing editor objects, whose memory this bound does not cover.
-    package static func boundedLowerBound(_ config: ProxyConfig) -> Int? {
-        var budget = PreflightBudget()
-        do {
-            try walkLowerBound(config, &budget)
-        } catch {
-            return nil
-        }
-        return PrivateConfigurationFrame.maxFrameBytes - budget.remaining
-    }
-
-    private static func walkLowerBound(_ config: ProxyConfig, _ budget: inout PreflightBudget) throws {
-        try budget.spend(string: config.profileName)
-        try budget.spend(string: config.localHost)
-        try budget.spend(string: config.auth.username)
-        try budget.spend(string: config.auth.domain)
-        try budget.spend(string: config.auth.workstation)
-        for client in config.proxy.allowedClients {
-            try budget.spend(string: client)
-        }
-        for upstream in config.upstreams {
-            try budget.spend(object: 6)
-            try budget.spend(string: upstream.name)
-            try budget.spend(string: upstream.host)
-        }
-        try budget.spend(string: config.routing.pacURL)
-        for host in config.routing.noProxyHosts {
-            try budget.spend(string: host)
-        }
-        for host in config.routing.forceProxyHosts {
-            try budget.spend(string: host)
-        }
-        for provider in config.dns.dohProviders {
-            try budget.spend(string: provider)
-        }
-        for entry in config.dns.entries {
-            try budget.spend(object: 4)
-            try budget.spend(string: entry.domain)
-            for server in entry.servers {
-                try budget.spend(string: server)
-            }
-        }
-        for rule in config.dns.interceptRules {
-            try budget.spend(object: 4)
-            try budget.spend(string: rule.pattern)
-            try budget.spend(string: rule.interceptIP)
-        }
-        try budget.spend(string: config.dns.transparentProxyIP)
-        for definition in config.tunnels.definitions {
-            try budget.spend(object: 8)
-            try budget.spend(string: definition.remoteHost)
-            try budget.spend(string: definition.label)
-        }
-        try budget.spend(string: config.health.checkURL)
-        if let path = config.logging.auditLogPath {
-            try budget.spend(string: path)
-        }
-    }
-
     /// Builds the request for one update. Its `launchAtLogin` is not carried; the local login item
     /// is app-owned.
     package static func makeRequest(
@@ -140,12 +40,12 @@ package enum PrivateConfigurationBridge {
         expectedPlatformRevision: PrivatePlatformRevision,
         expectedOwnerGeneration: PrivateConfigExpectedGeneration
     ) throws -> PrivateConfigurationRequest {
-        // The preflight runs before the mapping, so an oversize value is refused without mapping it.
-        guard boundedLowerBound(config) != nil else {
-            throw PrivateConfigurationBridgeError.tooLarge
+        // The approved ceilings run before validation enumerates failures and before any value is mapped.
+        if let violation = config.resourceViolation() {
+            throw PrivateConfigurationBridgeError.resourceLimit(violation)
         }
         try requireValid(config)
-        return PrivateConfigurationRequest(
+        let request = PrivateConfigurationRequest(
             requestID: requestID,
             incarnation: incarnation,
             budget: budget,
@@ -155,6 +55,10 @@ package enum PrivateConfigurationBridge {
             runtime: runtimeValues(config),
             platform: platformValues(platform)
         )
+        // Escapes can make an approved value larger in the frame than its decoded size, so the exact count
+        // runs on the mapped request before anything is encoded.
+        try requireFrame(request)
+        return request
     }
 
     /// Rebuilds the config and platform values from a decoded request. `localLaunchAtLogin` is this
@@ -165,16 +69,24 @@ package enum PrivateConfigurationBridge {
         localLaunchAtLogin: Bool
     ) throws -> (config: ProxyConfig, platform: PlatformIntegrationConfig) {
         // A decoded request was framed, so it is within the cap already. A request built in memory
-        // was not, so its exact body count is taken first. The count writes nothing and copies nothing,
-        // and it refuses an unrepresentable value the same way the encoder does.
+        // was not, so its resource ceilings and exact body count are taken first. The count writes nothing
+        // and copies nothing, and it refuses an unrepresentable value the same way the encoder does.
+        try requireFrame(request)
+        let config = proxyConfig(request.runtime)
+        try requireValid(config)
+        return (config, platformConfig(request.platform, launchAtLogin: localLaunchAtLogin))
+    }
+
+    /// The codec's exact count of a mapped request. It also runs the approved ceilings on the request, so a
+    /// request that bypassed the kernel check is refused here too. A frame past the cap is `tooLarge`.
+    private static func requireFrame(_ request: PrivateConfigurationRequest) throws {
         do {
             _ = try PrivateConfigurationEncoder.measureBody(request)
         } catch PrivateConfigurationWireError.frameTooLarge {
             throw PrivateConfigurationBridgeError.tooLarge
+        } catch PrivateConfigurationWireError.resourceLimitExceeded(let violation) {
+            throw PrivateConfigurationBridgeError.resourceLimit(violation)
         }
-        let config = proxyConfig(request.runtime)
-        try requireValid(config)
-        return (config, platformConfig(request.platform, launchAtLogin: localLaunchAtLogin))
     }
 
     /// Runs the kernel's validation in full. Only the first failing check's field code and the

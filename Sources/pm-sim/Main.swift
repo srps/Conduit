@@ -90,6 +90,7 @@ enum PMSim {
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
+              config-resource-bounds  Approved configuration ceilings: exact and one-over, scanner order, encoder refusal
               security-boundaries     Auth destinations, config rejection, and loopback listeners
               kerberos-service-ticket A TGT without a service ticket is unreachable, not a missing credential
               kerberos-fallback-flood A fallback on every handshake is one event a minute, with the GSS codes
@@ -264,6 +265,7 @@ enum PMSim {
         "dns-ephemeral-pair-rebind",
         "observable-target-redaction",
         "private-config-boundary",
+        "config-resource-bounds",
         "security-boundaries",
         "kerberos-service-ticket",
         "kerberos-fallback-flood",
@@ -431,6 +433,8 @@ enum PMSim {
             return [try await ObservableTargetScenarios.redaction()]
         case "private-config-boundary":
             return [try PrivateConfigBoundaryScenario.run()]
+        case "config-resource-bounds":
+            return [try ConfigResourceBoundsScenario.run()]
         case "security-boundaries":
             return [try await SecurityScenarios.boundaries(verbose: verbose)]
         case "kerberos-service-ticket":

@@ -54,35 +54,50 @@ final class PrivateConfigCodecTests: XCTestCase {
 
     /// A body longer than the reader's first buffer capacity grows across several doublings. The
     /// result must match the bytes that went in, and the reader must not stop at a capacity edge.
+    /// The length comes from trailing whitespace, not from a value: an approved name cannot reach it.
     func testBodyLargerThanTheInitialCapacityGrowsIntact() throws {
-        let name = String(repeating: "é🙂", count: 30_000)
-        let request = try PrivateConfigSamples.request(profileName: name)
-        let bytes = try PrivateConfigurationEncoder.encode(request).bytes()
+        let request = try PrivateConfigSamples.request(profileName: "é🙂")
+        let body = try Self.paddedBody(of: request, count: PrivateConfigurationFrame.maxInputBytesPerConsume * 8)
+        let bytes = Array("PCV1 Q \(body.count)\n".utf8) + body + [0x0A]
         XCTAssertGreaterThan(bytes.count, PrivateConfigurationFrame.maxInputBytesPerConsume * 8)
         let decoded = try PrivateConfigurationDecoder.decode(readFrame(bytes, chunkSize: 16_384))
-        XCTAssertEqual(decoded.runtime.profileName, name)
+        XCTAssertEqual(decoded, request)
     }
 
     // MARK: - Cap
 
+    /// The cap is tested with raw bodies, not with a product-sized value. Trailing whitespace is valid
+    /// JSON, so a body of any length up to the cap can carry one request. A seven-digit body length of
+    /// `cap - 16` makes the frame exactly `cap`: the header `PCV1 Q ` plus seven digits and a line feed
+    /// (15 bytes), the body, and the terminator. One more body byte is one more frame byte.
     func testExactCapAcceptedAndCapPlusOneRefused() throws {
         let cap = PrivateConfigurationFrame.maxFrameBytes
-        // A seven-digit body length of `cap - 16` makes the whole frame exactly `cap`: the
-        // header is `PCV1 Q ` plus seven digits plus a line feed (15 bytes), and the terminator
-        // is one more. Each profile-name byte adds exactly one body byte, since 'a' needs no escape.
-        let empty = try PrivateConfigurationEncoder.encode(PrivateConfigSamples.request(profileName: "")).bytes()
-        let emptyBody = try Self.declaredBodyLength(empty)
-        let name = String(repeating: "a", count: cap - 16 - emptyBody)
-
-        let exact = try PrivateConfigurationEncoder.encode(PrivateConfigSamples.request(profileName: name))
+        let request = try PrivateConfigSamples.request()
+        let body = try Self.paddedBody(of: request, count: cap - 16)
+        let exact = Array("PCV1 Q \(body.count)\n".utf8) + body + [0x0A]
         XCTAssertEqual(exact.count, cap)
-        let decoded = try PrivateConfigurationDecoder.decode(readFrame(exact.bytes(), chunkSize: 16_384))
-        XCTAssertEqual(decoded.runtime.profileName.utf8.count, name.utf8.count)
+        let decoded = try PrivateConfigurationDecoder.decode(readFrame(exact, chunkSize: 16_384))
+        XCTAssertEqual(decoded, request)
 
-        let overflow = name + "a"
-        XCTAssertThrowsError(try PrivateConfigurationEncoder.encode(PrivateConfigSamples.request(profileName: overflow))) {
+        let overflowBody = body + [UInt8(ascii: " ")]
+        let overflow = Array("PCV1 Q \(overflowBody.count)\n".utf8) + overflowBody + [0x0A]
+        XCTAssertThrowsError(try PrivateConfigurationFrameReader().consume(overflow)) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .frameTooLarge)
         }
+        XCTAssertThrowsError(try PrivateConfigurationDecoder.decode(
+            PrivateConfigurationFrameBody(bytes: SecretBytes(overflowBody)))) {
+            XCTAssertEqual($0 as? PrivateConfigurationWireError, .frameTooLarge)
+        }
+    }
+
+    /// The request's JSON body, padded with trailing spaces to `count` bytes. Used only for frame-level tests.
+    private static func paddedBody(of request: PrivateConfigurationRequest, count: Int) throws -> [UInt8] {
+        let frame = try PrivateConfigurationEncoder.encode(request).bytes()
+        let start = try XCTUnwrap(frame.firstIndex(of: 0x0A)) + 1
+        var body = Array(frame[start..<(frame.count - 1)])
+        XCTAssertLessThanOrEqual(body.count, count)
+        body.append(contentsOf: repeatElement(UInt8(ascii: " "), count: count - body.count))
+        return body
     }
 
     func testReaderRefusesOversizeLengthBeforeAnyBodyByte() throws {
@@ -605,10 +620,31 @@ enum PrivateConfigSamples {
             ),
             dns: PrivateDNSSettings(
                 forwarderEnabled: false, forwarderPort: 5_053,
-                dohProviders: [PrivateURLValue("https://1.1.1.1/dns-query")], entries: [], interceptRules: [],
+                dohProviders: [PrivateURLValue("https://1.1.1.1/dns-query")],
+                // One disabled item in each nested table, so every object shape is exercised by the sample.
+                entries: [
+                    PrivateDNSEntrySettings(
+                        id: PrivateDNSEntryID(rawValue: uuid(30)), domain: "example.test",
+                        servers: ["127.0.0.1"], enabled: false
+                    ),
+                ],
+                interceptRules: [
+                    PrivateInterceptRuleSettings(
+                        id: PrivateInterceptRuleID(rawValue: uuid(40)), pattern: "*.example.test",
+                        interceptIP: "127.0.0.2", enabled: false
+                    ),
+                ],
                 transparentProxyEnabled: false, transparentProxyIP: "127.44.3.0", transparentProxyPort: 10_443
             ),
-            tunnels: PrivateTunnelSettings(definitions: [], maxSessions: 128, maxSessionsPerTunnel: 32),
+            tunnels: PrivateTunnelSettings(
+                definitions: [
+                    PrivateTunnelDefinitionSettings(
+                        id: ControlTunnelID(rawValue: uuid(50)), localPort: 1_521, remoteHost: "db.example.test",
+                        remotePort: 1_521, enabled: false, proxied: false, label: "db", preset: nil
+                    ),
+                ],
+                maxSessions: 128, maxSessionsPerTunnel: 32
+            ),
             health: PrivateHealthSettings(
                 checkURL: PrivateURLValue("http://detectportal.firefox.com/success.txt"),
                 checkIntervalSeconds: 30, connectionCheckTimeoutSeconds: 2, upstreamResponseTimeoutSeconds: 45,

@@ -16,10 +16,13 @@ import Foundation
 
 // MARK: - Scanner
 
-/// A bounded structural check over the body. It keeps no copy of the text, and it captures only
-/// the unescaped bytes of object keys, for the duplicate check. Those captured keys, and the
-/// `String` built for each escape inside them, are ordinary Swift copies. They are not zeroed when
-/// released, and a malformed key can hold token-like text (0018 §2–3).
+/// A bounded, schema-directed check over the body (decisions 0018 and 0021). It walks the body against
+/// `PrivateConfigurationSchema`, so every key must be named there, each duplicate is refused (even one
+/// spelled with escapes), each approved array is refused at its count before its elements are read, and
+/// each string is refused at the first byte past its ceiling. A bypass list is also refused once its
+/// canonical JSON width passes 8,192 bytes, which is charged as each item closes, so no later byte is read.
+/// It keeps no copy of the text and allocates nothing per key: names are matched from the fixed tables as
+/// their bytes arrive. Nothing it reads is zeroed, because nothing it reads is copied.
 private struct PrivateJSONScanner {
     /// The schema nests six levels deep at most: root, runtime, dns, entries, entry and servers.
     /// Eight is a stack bound, not a size limit.
@@ -35,7 +38,7 @@ private struct PrivateJSONScanner {
     static func validate(_ bytes: UnsafeBufferPointer<UInt8>) throws {
         var scanner = PrivateJSONScanner(bytes: bytes)
         scanner.skipWhitespace()
-        try scanner.scanValue(depth: 0)
+        try scanner.scanValue(.object(PrivateConfigurationSchema.request), depth: 0)
         scanner.skipWhitespace()
         guard scanner.index == bytes.count else {
             throw PrivateConfigurationWireError.malformedBody
@@ -59,31 +62,33 @@ private struct PrivateJSONScanner {
         index += 1
     }
 
-    private mutating func scanValue(depth: Int) throws {
+    /// Scans one value of the given shape. A token that the shape does not allow is refused here, which
+    /// is the same refusal Foundation would give for that type, reached before any value is decoded.
+    private mutating func scanValue(_ shape: PrivateValueShape, depth: Int) throws {
         guard let byte = current else {
             throw PrivateConfigurationWireError.malformedBody
         }
-        switch byte {
-        case UInt8(ascii: "{"):
-            try scanObject(depth: depth)
-        case UInt8(ascii: "["):
-            try scanArray(depth: depth)
-        case UInt8(ascii: "\""):
-            _ = try scanString(captured: false)
-        case UInt8(ascii: "t"):
-            try scanLiteral("true")
-        case UInt8(ascii: "f"):
-            try scanLiteral("false")
-        case UInt8(ascii: "n"):
+        switch (shape, byte) {
+        case (.object(let object), UInt8(ascii: "{")):
+            try scanObject(object, depth: depth)
+        case (.array(let field, let element), UInt8(ascii: "[")):
+            try scanArray(field, element, depth: depth)
+        case (.string(let field), UInt8(ascii: "\"")), (.nullableString(let field), UInt8(ascii: "\"")):
+            try scanString(field)
+        case (.nullableString, UInt8(ascii: "n")):
             try scanLiteral("null")
-        case UInt8(ascii: "-"), UInt8(ascii: "0")...UInt8(ascii: "9"):
+        case (.bool, UInt8(ascii: "t")):
+            try scanLiteral("true")
+        case (.bool, UInt8(ascii: "f")):
+            try scanLiteral("false")
+        case (.number, UInt8(ascii: "-")), (.number, UInt8(ascii: "0")...UInt8(ascii: "9")):
             try scanNumber()
         default:
             throw PrivateConfigurationWireError.malformedBody
         }
     }
 
-    private mutating func scanObject(depth: Int) throws {
+    private mutating func scanObject(_ object: PrivateObjectShape, depth: Int) throws {
         guard depth < Self.maxDepth else {
             throw PrivateConfigurationWireError.malformedBody
         }
@@ -93,23 +98,24 @@ private struct PrivateJSONScanner {
             index += 1
             return
         }
-        // Each key is copied into an unscrubbed array, because the duplicate check needs its bytes.
-        // The copies are not `PrivateFrameBuffer` allocations, so they are not zeroed (0018 §2–3).
-        var keys = Set<[UInt8]>()
+        // One bit per member position. A repeated key, even one spelled with escapes, makes the object
+        // ambiguous, so its bit is already set and the repeat is refused.
+        var seen: UInt64 = 0
         while true {
             skipWhitespace()
             guard current == UInt8(ascii: "\"") else {
                 throw PrivateConfigurationWireError.malformedBody
             }
-            let key = try scanString(captured: true)
-            // A repeated key, even one spelled with escapes, makes the object ambiguous. Refuse it.
-            guard keys.insert(key).inserted else {
+            let position = try scanKey(of: object)
+            let bit: UInt64 = 1 << UInt64(position)
+            guard seen & bit == 0 else {
                 throw PrivateConfigurationWireError.malformedBody
             }
+            seen |= bit
             skipWhitespace()
             try expect(UInt8(ascii: ":"))
             skipWhitespace()
-            try scanValue(depth: depth + 1)
+            try scanValue(object.members[position].shape, depth: depth + 1)
             skipWhitespace()
             guard let next = current else {
                 throw PrivateConfigurationWireError.malformedBody
@@ -125,7 +131,51 @@ private struct PrivateJSONScanner {
         }
     }
 
-    private mutating func scanArray(depth: Int) throws {
+    /// Reads one member name and returns its position in `object`. The name's decoded bytes are matched
+    /// against the member names as they arrive, so no key is copied. A byte that no name can match
+    /// refuses the key at once, which is before its value and before any later key. Every member name is
+    /// ASCII, so a non-ASCII byte or escape refuses the key.
+    private mutating func scanKey(of object: PrivateObjectShape) throws -> Int {
+        try expect(UInt8(ascii: "\""))
+        var candidates = object.allMembers
+        var length = 0
+        while true {
+            guard let byte = current else {
+                throw PrivateConfigurationWireError.malformedBody
+            }
+            if byte == UInt8(ascii: "\"") {
+                index += 1
+                break
+            }
+            let decoded: UInt8
+            if byte == UInt8(ascii: "\\") {
+                index += 1
+                let scalar = try scanEscape()
+                guard scalar.value < 0x80 else {
+                    throw PrivateConfigurationWireError.malformedBody
+                }
+                decoded = UInt8(scalar.value)
+            } else if byte < 0x20 || byte >= 0x80 {
+                throw PrivateConfigurationWireError.malformedBody
+            } else {
+                index += 1
+                decoded = byte
+            }
+            candidates = object.narrow(candidates, at: length, to: decoded)
+            guard candidates != 0 else {
+                throw PrivateConfigurationWireError.malformedBody
+            }
+            length += 1
+        }
+        guard let position = object.member(among: candidates, length: length) else {
+            throw PrivateConfigurationWireError.malformedBody
+        }
+        return position
+    }
+
+    /// Scans one array of at most the field's approved count. The count is checked before an element is
+    /// read, so the element past the ceiling is never scanned, even when it is empty or malformed.
+    private mutating func scanArray(_ field: DomainResourceField, _ element: PrivateValueShape, depth: Int) throws {
         guard depth < Self.maxDepth else {
             throw PrivateConfigurationWireError.malformedBody
         }
@@ -135,9 +185,24 @@ private struct PrivateJSONScanner {
             index += 1
             return
         }
+        var count = 0
+        // A list with a canonical-width ceiling is charged as each item closes. That is the same order the typed
+        // check uses, so the first ceiling crossed in item order is the one refused.
+        var encoded = CanonicalJSONStringList()
         while true {
             skipWhitespace()
-            try scanValue(depth: depth + 1)
+            count += 1
+            if let violation = DomainResourceCheck.entries(count, field) {
+                throw PrivateConfigurationWireError.resourceLimitExceeded(violation)
+            }
+            if let encodedField = field.encodedListField, case .string(let item) = element {
+                encoded.append(quotedWidth: try scanString(item).canonicalBytes)
+                if let violation = DomainResourceCheck.encodedBytes(encoded.bytes, encodedField) {
+                    throw PrivateConfigurationWireError.resourceLimitExceeded(violation)
+                }
+            } else {
+                try scanValue(element, depth: depth + 1)
+            }
             skipWhitespace()
             guard let next = current else {
                 throw PrivateConfigurationWireError.malformedBody
@@ -153,18 +218,64 @@ private struct PrivateJSONScanner {
         }
     }
 
-    /// Scans one string. With `captured`, returns its unescaped UTF-8 bytes. Without it, returns
-    /// nothing, so a value string leaves no copy behind.
-    private mutating func scanString(captured: Bool) throws -> [UInt8] {
+    /// The decoded UTF-8 length of one string as it is read, whether its first two bytes are the `*.`
+    /// wildcard prefix, and its canonical JSON width with quotes (`CanonicalJSONWidth`). An escape counts as
+    /// the bytes it decodes to, so `é` is two bytes. A raw byte and its escape have the same canonical width.
+    private struct DecodedText {
+        private(set) var byteCount = 0
+        private(set) var canonicalBytes = 2
+        /// True while every byte so far has matched the wildcard prefix.
+        private var wildcardCandidate = true
+
+        /// One ASCII scalar, raw or decoded from an escape.
+        mutating func append(_ byte: UInt8) {
+            switch byteCount {
+            case 0: wildcardCandidate = byte == UInt8(ascii: "*")
+            case 1: wildcardCandidate = wildcardCandidate && byte == UInt8(ascii: ".")
+            default: break
+            }
+            byteCount += 1
+            canonicalBytes += CanonicalJSONWidth.scalarWidth(UInt32(byte))
+        }
+
+        /// A multibyte scalar is never part of the ASCII prefix, so it rules the prefix out.
+        mutating func appendMultibyte(_ width: Int, scalar: UInt32) {
+            if byteCount < 2 {
+                wildcardCandidate = false
+            }
+            byteCount += width
+            canonicalBytes += CanonicalJSONWidth.scalarWidth(scalar)
+        }
+
+        var hasWildcardPrefix: Bool {
+            byteCount >= 2 && wildcardCandidate
+        }
+
+        static func width(of scalar: Unicode.Scalar) -> Int {
+            switch scalar.value {
+            case 0..<0x80: 1
+            case 0x80..<0x800: 2
+            case 0x800..<0x10000: 3
+            default: 4
+            }
+        }
+    }
+
+    /// Scans one value string under its field's ceiling. Its decoded UTF-8 length is counted as it is read,
+    /// and the first byte past the ceiling is refused, so the rest of the string is never scanned. Nothing
+    /// is copied: the value is decoded later, and only from bytes this pass has accepted. The returned text
+    /// carries the string's canonical width, which a list charges once the string closes.
+    @discardableResult
+    private mutating func scanString(_ field: DomainResourceField) throws -> DecodedText {
         try expect(UInt8(ascii: "\""))
-        var out: [UInt8] = []
+        var text = DecodedText()
         while true {
             guard let byte = current else {
                 throw PrivateConfigurationWireError.malformedBody
             }
             if byte == UInt8(ascii: "\"") {
                 index += 1
-                return out
+                return text
             }
             if byte < 0x20 {
                 throw PrivateConfigurationWireError.malformedBody
@@ -172,24 +283,45 @@ private struct PrivateJSONScanner {
             if byte == UInt8(ascii: "\\") {
                 index += 1
                 let scalar = try scanEscape()
-                if captured {
-                    out.append(contentsOf: String(Character(scalar)).utf8)
+                if scalar.value < 0x80 {
+                    text.append(UInt8(scalar.value))
+                } else {
+                    text.appendMultibyte(DecodedText.width(of: scalar), scalar: scalar.value)
                 }
-                continue
-            }
-            if byte < 0x80 {
-                if captured {
-                    out.append(byte)
-                }
+            } else if byte < 0x80 {
+                text.append(byte)
                 index += 1
-                continue
+            } else {
+                let length = try utf8SequenceLength()
+                text.appendMultibyte(length, scalar: scalarValue(at: index, length: length))
+                index += length
             }
-            let length = try utf8SequenceLength()
-            if captured {
-                out.append(contentsOf: UnsafeBufferPointer(rebasing: bytes[index..<(index + length)]))
-            }
-            index += length
+            try enforce(field, text)
         }
+    }
+
+    /// Refuses the string once its decoded length passes the field's ceiling for its prefix. A token past its
+    /// lexical guard is not a token under the grammar, so it is malformed and not a resource refusal.
+    private func enforce(_ field: DomainResourceField, _ text: DecodedText) throws {
+        guard let violation = DomainResourceCheck.utf8(
+            text.byteCount, wildcardPrefix: text.hasWildcardPrefix, field
+        ) else {
+            return
+        }
+        if field == .token {
+            throw PrivateConfigurationWireError.malformedBody
+        }
+        throw PrivateConfigurationWireError.resourceLimitExceeded(violation)
+    }
+
+    /// The scalar value of the validated multibyte sequence at `start`, read from its bytes without a copy.
+    private func scalarValue(at start: Int, length: Int) -> UInt32 {
+        let leadMask: UInt8 = length == 2 ? 0x1F : (length == 3 ? 0x0F : 0x07)
+        var value = UInt32(bytes[start] & leadMask)
+        for offset in 1..<length {
+            value = (value << 6) | UInt32(bytes[start + offset] & 0x3F)
+        }
+        return value
     }
 
     private mutating func scanEscape() throws -> Unicode.Scalar {

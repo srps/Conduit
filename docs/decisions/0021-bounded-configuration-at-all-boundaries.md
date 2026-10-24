@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 configuration resource profile checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: 0019
 - Superseded by: none
@@ -114,8 +114,19 @@ of global admission, physical write quiescence or running-app memory.
 
 ## Implementation evidence
 
-None yet for this refined policy. The existing local codec/probes motivated the
-choice but do not enforce these domain/startup limits or global admission.
+Partial, for the private request boundary and the kernel's typed check only:
+
+- Scanner count, item, and aggregate bypass-width checks, and the token guard: [PrivateConfigurationDecoder.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift). The shared ceilings and the canonical width counter are in [DomainResourceLimits.swift](../../Sources/ConduitShared/DomainResourceLimits.swift).
+- Typed checks over the private request and over `ProxyConfig`: [PrivateConfigurationResourceCheck.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationResourceCheck.swift) and [ConfigResourceLimits.swift](../../Sources/ProxyKernel/Models/ConfigResourceLimits.swift).
+- Tests: [ConfigurationResourceCanonicalWidthTests.swift](../../Tests/ConduitTests/ConfigurationResourceCanonicalWidthTests.swift), [ConfigurationResourceLimitsTests.swift](../../Tests/ConduitTests/ConfigurationResourceLimitsTests.swift), [PrivateConfigResourceReviewTests.swift](../../Tests/ConduitTests/PrivateConfigResourceReviewTests.swift), and [PrivateConfigGrammarDifferentialTests.swift](../../Tests/ConduitTests/PrivateConfigGrammarDifferentialTests.swift).
+- Headless scenario: [ScenarioConfigResourceBounds.swift](../../Sources/pm-sim/ScenarioConfigResourceBounds.swift).
+- Codec notes: [private-configuration-codec.md](../private-configuration-codec.md), "Canonical bypass width and token guard".
+
+"Encoded bytes" means the default output of `JSONEncoder`, counted without a buffer. The app's `ProxyBypassSyntax` still encodes with `JSONEncoder`, and tests pin it to the same boundary.
+
+Does not prove: startup, file load or import refusal with preserved bytes; runtime admission; global memory; writer coverage; control responsiveness; or complete startup/import boundary enforcement. No owner or real-machine validation is claimed.
+
+Earlier notes, before this slice: the local codec and probes motivated the choice but did not enforce these limits.
 
 Does not prove: exhaustive working-memory maxima, real-machine behavior, writer
 coverage, control responsiveness or complete startup/import boundary enforcement.

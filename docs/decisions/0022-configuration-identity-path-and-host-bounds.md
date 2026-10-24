@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 resource-profile completion checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -88,8 +88,14 @@ across startup/import/in-memory/private boundaries. Fixed errors do not echo val
 
 ## Implementation evidence
 
-None yet. The first private-boundary slice is under implementation; legacy file
-filtering/load/import and runtime admission remain separate reviewable slices.
+Partial: the private request boundary and the kernel's typed check enforce the identity, host, path, and allowed-client ceilings on their own values, under the same ceilings as [0021](0021-bounded-configuration-at-all-boundaries.md).
+
+- Ceilings and width counter: [DomainResourceLimits.swift](../../Sources/ConduitShared/DomainResourceLimits.swift). Scanner: [PrivateConfigurationDecoder.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift).
+- Typed checks: [PrivateConfigurationResourceCheck.swift](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationResourceCheck.swift) and [ConfigResourceLimits.swift](../../Sources/ProxyKernel/Models/ConfigResourceLimits.swift).
+- Tests: [ConfigurationResourceLimitsTests.swift](../../Tests/ConduitTests/ConfigurationResourceLimitsTests.swift), [ConfigurationResourceCanonicalWidthTests.swift](../../Tests/ConduitTests/ConfigurationResourceCanonicalWidthTests.swift), [PrivateConfigResourceReviewTests.swift](../../Tests/ConduitTests/PrivateConfigResourceReviewTests.swift), and [PrivateConfigGrammarDifferentialTests.swift](../../Tests/ConduitTests/PrivateConfigGrammarDifferentialTests.swift).
+- Codec notes: [private-configuration-codec.md](../private-configuration-codec.md), "Canonical bypass width and token guard".
+
+Does not prove: legacy file filtering, load, or import; startup refusal with preserved bytes; runtime admission; steady or runtime memory; Stop/status fairness; actual write quiescence; or real-machine behavior. No owner or real-machine validation is claimed.
 
 Does not prove: complete boundary coverage, steady/runtime memory, Stop/status
 fairness, actual write quiescence or real-machine behavior.
