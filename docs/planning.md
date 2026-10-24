@@ -35,6 +35,88 @@ The April ecosystem and competitive research is retained in an
 [archive](./archive/planning-research-2026-04.md). It supplies historical context,
 not current dependency versions, market claims, or a second implementation plan.
 
+## Shared runtime program: implementation checkpoint, 2026-10-24
+
+The owner requested a staged plan that reduces development defects while daily
+use is stable: typed contracts and model-based tests accompany the shared
+`RuntimeHost` work (#186), rather than waiting in separate later projects.
+The [runtime design](./design-runtime-host-contract.md) records the selected
+architecture and remaining slice-specific gates. On 2026-10-24 the owner agreed
+with the recommendations and authorized staged implementation with Claude after
+a final overalls cross-check. Decisions 0013–0016 record accepted refinements;
+existing accepted records retain their decisions. Claude implements and verifies
+bounded slices on the owner's subscription, and Codex reviews each checkpoint.
+Implementation and real-machine validation remain separate evidence.
+
+Module/isolation shape selected by the owner on 2026-10-24: a new ConduitRuntime
+hosts the shared runtime; Foundation-only RuntimeEvents holds producer events;
+ConduitShared holds control values/client/codec and ProxyControlBridge maps them.
+A shared RuntimeActor, declared in a low-level ProxyKernel abstraction, isolates
+the runtime control-owner cluster after behavior-preserving extraction and
+lifecycle adoption. MainActor remains for UI; NIO loops and PlatformWork retain
+their responsibilities. Per-runtime resource ownership remains explicit. Broad
+kernel splitting and subsystem actors follow evidence, not a prerequisite.
+The client/stream semantics are also selected (decision 0014); exact payload
+classification, ownership/handoff refinements and sized bounds remain gates for
+the affected slices.
+
+The 0.6 core is the async client boundary, behavior-preserving shared-host
+extraction, AppState adoption by lifecycle (DNS, tunnels, proxy), then runtime
+isolation off the main actor. Test-suite consolidation follows demonstrated
+parity. #180 migrates complete typed-event families through this boundary as the
+corresponding code moves; #183 brings independent models, bounded exhaustive
+exploration and replayable seeded sequences to each state owner being changed.
+Neither requires a repository-wide conversion before host extraction begins.
+
+The boundary carries typed commands, outcomes, presentation-complete snapshots
+and bounded cancellable subscriptions using the same versioned contract in
+memory and later over a socket. It must define command completion, cancellation
+after acceptance, deadline/unknown-outcome handling, initial-snapshot ordering,
+replay gaps and slow-subscriber behavior. The existing synchronous `DaemonClient`
+and thin `ControlDaemonStatus` do not yet meet that boundary. Proposed types must
+eliminate contradictory outcomes and duplicate derived state, keep credentials
+out of Codable messages, and preserve existing wire compatibility deliberately.
+
+Desired configuration, successfully persisted configuration and applied machine
+state are distinct. AppState keeps drafts and UI policy; the current persistence
+authority must remain explicit through extraction, and a daemon-side authority
+must be settled before production client adoption. #194's per-surface applied
+state and #181's scheduler are separately scoped shared-implementation follow-ups,
+with models for supersession, partial failures and stop/restart ordering. A
+bounded applied-state slice may join 0.6; their full scopes do not gate extraction.
+
+The owner selected save-before-apply for durable settings, with Stop/Quit
+exceptions (2026-10-24): verify persistence before admitting an ordinary edit or
+enable, then retain saved intent and bounded repair when applying fails. Admit a
+session stop/shutdown fence without waiting for persistence; an unsaved disabled
+preference cannot let background reconciliation restart the stopped module.
+Report actual stop/cleanup success separately from persistence failure. Quit
+does not itself persist a disable, and later daemon-mode UI Quit only disconnects.
+Partial config-file writes are not a transaction; gate coupled inputs on verified
+components and validation. The review draft specifies failure cases and the #183
+model obligations. Decision 0015 records the selected policy; current behavior
+is not claimed to enforce it before its tested migration slice.
+
+The final overalls review adds explicit status/Stop responsiveness under slow
+effects and sustained observer load, bounded work per owner turn, diagnostic-sink
+failure independent of control, and typed dispatch/completion fencing. Attach
+verification to the actual source/build checkpoint, using independent production
+adapters and reference models; do not count an earlier build as later evidence.
+
+Moving `RuntimeHost` alone does not remove main-actor runtime work:
+`ProxyOrchestrator`, `LifecycleLane` and `RuntimeReconciler` are isolated there
+today. Stage 4 must account for them, the serialized `PlatformWork` operations,
+observer delivery and bounded total termination. Investigate #118's structured
+teardown/reproducer work before substantial concurrency changes; do not declare
+its sanitizer report a proven production race or false positive.
+
+One shared implementation is separate from exclusive production process
+ownership. #48 (with helper-core extraction #32/#76), durable owner-death recovery,
+LaunchAgent/control-socket lifecycle and real user-session validation remain a
+later production-daemon milestone. Preserve the single-writer journal/lease
+contract and later external edits. Broad kernel splitting, profiles and managed
+configuration do not become prerequisites. `ROADMAP.md` remains the only queue.
+
 ## Network locations and recovery
 
 The location-recovery work is tracked in [#110](https://github.com/srps/Conduit/issues/110).
@@ -144,7 +226,9 @@ session; a user-space process is not sufficient evidence of every session behavi
 Follow [`design-daemon-first-control-plane.md`](./design-daemon-first-control-plane.md)
 with these delivery boundaries. Before step 3, both hosts converge on one
 host-neutral `RuntimeHost` ([decision 0001](./decisions/0001-one-runtime-host.md),
-#186), so step 3 swaps the in-process host for `DaemonClient`:
+#186), with typed contracts and model-based verification alongside the staged
+work described above. This makes step 3 a client transport change after its
+ownership and user-session acceptance gates, rather than another runtime rewrite:
 
 1. Wire a bounded production server to the existing protocol/client/bridge. Implement
    status/start/stop/reload and event access, then upstream tests. Validate versions

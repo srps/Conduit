@@ -37,9 +37,9 @@ final class ConduitAppDelegate: NSObject, NSApplicationDelegate {
         // A dev instance stays a regular app: the Dock icon is one more
         // thing telling it apart from the installed one, and it is what
         // lets the popover preview and the app window present at launch.
-        // Read from the arguments because the app state, which owns the
-        // parsed flags, may not exist yet.
-        if !CommandLine.arguments.contains(DevLaunchOptions.flag) {
+        // Read from the arguments and the bundle because the app state, which
+        // owns the parsed flags, may not exist yet.
+        if !DevLaunchOptions.requested() {
             NSApp.setActivationPolicy(.accessory)
         }
     }

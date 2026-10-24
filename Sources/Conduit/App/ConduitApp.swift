@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Darwin
+import Foundation
 import SwiftUI
 import ProxyAuth
 import PlatformMac
@@ -8,10 +9,20 @@ import PlatformMac
 enum ConduitMain {
     @MainActor
     static func main() {
-        if let status = UpdateHelperPreflightWorker.run(arguments: Array(CommandLine.arguments.dropFirst())) {
+        // Checked before the workers: they run ahead of app composition and
+        // reach the real helper or the Kerberos cache. A dev request, by flag
+        // or by bundle, never does, in a release build either.
+        if let refusal = DevLaunch.workerRefusal(
+            arguments: CommandLine.arguments,
+            bundleIdentifier: Bundle.main.bundleIdentifier
+        ) {
+            DevLaunch.fail(refusal)
+        }
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if let status = UpdateHelperPreflightWorker.run(arguments: arguments) {
             exit(status)
         }
-        if let status = KerberosTicketRecoveryWorker.run(arguments: Array(CommandLine.arguments.dropFirst())) {
+        if let status = KerberosTicketRecoveryWorker.run(arguments: arguments) {
             exit(status)
         }
         ConduitApp.main()

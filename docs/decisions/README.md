@@ -36,3 +36,7 @@ Each record carries three statuses, because merged does not mean it works:
 | [0010](0010-self-update.md) | Self-update with a nested Sparkle updater | accepted | implemented | pending |
 | [0011](0011-vpn-path-based-socket-sweeps.md) | Path-based socket sweeps for VPN transitions | accepted | implemented | pending |
 | [0012](0012-commit-attribution.md) | Optional attribution trailers, no session URLs | accepted | implemented | none |
+| [0013](0013-runtime-module-isolation.md) | Shared runtime modules and control isolation | accepted | planned | none |
+| [0014](0014-runtime-client-stream.md) | Async runtime client and bounded observation contract | accepted | planned | none |
+| [0015](0015-save-before-apply.md) | Save durable intent before apply, with Stop and Quit exceptions | accepted | planned | none |
+| [0016](0016-isolated-development-bundle.md) | Isolated ad-hoc development app bundle | accepted | implemented | passed |

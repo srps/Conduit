@@ -1,7 +1,7 @@
 # Conduit Roadmap
 
 The execution queue and sole tracker of product-work status. Reviewed against the
-checkout and open issues on 2026-10-22. Conduit remains a macOS-native Swift corporate proxy manager;
+checkout and open issues on 2026-10-24. Conduit remains a macOS-native Swift corporate proxy manager;
 no rewrite or cross-platform port is planned.
 
 Implementation rationale, dependencies, and acceptance criteria live in
@@ -20,9 +20,9 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
-## Immediate cleanup priorities (2026-10-22)
+## Immediate priorities (2026-10-24)
 
-In 0.5.8, awaiting release: the Settings fixes in #216. An edit that brings up
+0.5.8 shipped on 2026-10-23 with the Settings fixes in #216. An edit that brings up
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
 warning, and the Overview "active" counter no longer repeats the word.
 
@@ -36,9 +36,27 @@ build of 0.5.8 on 2026-10-22; the installed build still needs a check.
    This now has a practical trigger: tandem testing selected a personal signing
    identity and generated repeated prompts, and duplicate bundle IDs made status
    inspection ambiguous. No private-key ACL change is needed.
+   Implemented locally with Claude and reviewed by Codex; actual ad-hoc bundle
+   launch selected FakeMachine without `--dev`, and the serving process remained
+   unchanged ([decision 0016](./docs/decisions/0016-isolated-development-bundle.md)).
+   Final gates are recorded in the [checkpoint evidence](./docs/verification-runtime-first-slice-2026-10-24.md).
 2. **Sanitizer continuation race ([#118](https://github.com/srps/Conduit/issues/118))
    [Rel, Sim]** — track A remains open; track B shipped in 0.5.5. No
-   continuation race fix or new suppression is claimed.
+   continuation race fix or new suppression is claimed. Investigate structured
+   teardown and the reduced reproducer before substantial actor-isolation work;
+   this is a test-confidence workstream, not proof of a production race.
+
+The owner reports stable daily use. The next development effort reduces bugs
+found while changing the runtime: typed contracts and model-based verification
+accompany host convergence instead of becoming separate projects to finish first.
+The owner authorized staged implementation on 2026-10-24 after the final overalls
+cross-check. Selected shapes and remaining slice-specific gates are in the
+[runtime design](./docs/design-runtime-host-contract.md), with accepted refinements
+in decisions [0013](./docs/decisions/0013-runtime-module-isolation.md),
+[0014](./docs/decisions/0014-runtime-client-stream.md) and
+[0015](./docs/decisions/0015-save-before-apply.md). Claude implements and verifies
+each slice on the owner's subscription; Codex reviews the checkpoint. Existing
+accepted decisions retain their status.
 
 The path-based VPN migration shipped in 0.5.6 was validated on the owner's
 full-tunnel VPN with a pre-release build; split-tunnel and the released build
@@ -52,31 +70,68 @@ to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
 
 ## Proposed release scope
 
-**0.5.8 — Settings fixes for 0.5.7.** Listed above and in
-[`CHANGELOG.md`](./CHANGELOG.md). An app update only; the helper is unchanged.
-
-**0.6 — one runtime host and applied-state tracking.** Roughly in this order;
-each change brings its own tests and pm-sim scenario:
+**0.6 core — typed runtime contracts and one runtime host.** Stages 1–4 below
+are the core scope. Each stage has its own behavioral and compatibility checks;
+new runtime behavior adds unit tests and a pm-sim scenario. This is one program,
+not a requirement to finish every event or property test before extraction:
 
 1. **One runtime host ([#186](https://github.com/srps/Conduit/issues/186)),
    accepted** ([decision 0001](./docs/decisions/0001-one-runtime-host.md)).
-   Stages 1–5: the wire-shaped runtime interface, `RuntimeHost` extracted from
-   `DaemonRuntimeHost`, AppState's lifecycles moved onto it one at a time, then
-   off the main actor, which closes what is left of #47 and meets #79's
-   acceptance list. Fixes stop landing twice.
-2. **Applied state per surface ([#194](https://github.com/srps/Conduit/issues/194)
-   remainder) with one mutation authority
-   ([#48](https://github.com/srps/Conduit/issues/48)).** Track what is on the
-   machine, not what the last save asked for; keep superseded lifecycle work
-   visible; reconcile the login item at launch. Then exclusive mutation
-   authority and owner-death recovery, which also retires the AppleScript
-   fallback as a second writer (audit F2).
+   **Stage 1:** define AppState's async runtime client, typed commands/outcomes,
+   full presentation snapshots, and bounded cancellable subscriptions over the
+   same versioned contract in memory and later on a socket. Start
+   [#180](https://github.com/srps/Conduit/issues/180) with one complete typed-event
+   family through producer, codec, bridge, consumer and assertions. Define
+   deadlines, unknown outcomes, subscription gaps and config ownership here.
+   The existing synchronous `DaemonClient` is not the finished client.
+   The owner-selected persistence policy is save-before-apply for durable edits,
+   with Stop/Quit admitted despite save failure. Define separate durable/session/
+   applied outcomes and stop-fenced retries; Quit does not persist a disable.
+2. **Stage 2 — extract the shared host.** Extract `RuntimeHost` from
+   `DaemonRuntimeHost` with no policy change. Retain the daemon fake-machine
+   suite and explicit composition dependencies. The owner selected ConduitRuntime
+   for the host and an event-only RuntimeEvents target; control values/client/
+   codec stay in ConduitShared with ProxyControlBridge mapping. Broad kernel/file
+   splitting is not a prerequisite. Client/stream semantics are selected in decision 0014.
+3. **Stage 3 — AppState adopts the client, one lifecycle at a time.** Move DNS,
+   tunnels and proxy onto the shared host, deleting each old implementation.
+   AppState retains editor drafts and UI responsibilities. Migrate the event
+   families touched by each slice. Bring
+   [#183](https://github.com/srps/Conduit/issues/183)'s independent models,
+   bounded exhaustive exploration and seeded tests alongside lifecycle,
+   subscription and supersession work. Merge twin tests only after parity is
+   demonstrated, retaining thin composition/client suites.
+4. **Stage 4 — runtime isolation.** Move runtime-owned control work off the main
+   actor, meeting [#47](https://github.com/srps/Conduit/issues/47) and
+   [#79](https://github.com/srps/Conduit/issues/79)'s remaining acceptance lists.
+   `ProxyOrchestrator`, `LifecycleLane` and `RuntimeReconciler` are currently
+   main-actor isolated too: moving the host alone does not complete this stage.
+   The owner selected one shared RuntimeActor declared in ProxyKernel for the
+   full runtime control-owner cluster. UI remains MainActor, NIO stays on its
+   loops, and blocking effects stay on PlatformWork. Preserve serialized platform
+   operations and bounded total termination. Bound work per turn and prove status/Stop
+   responsiveness under observer load; diagnostics cannot gate control progress.
+
+**Stage 5 — strengthen the shared implementation (separately scoped follow-ups).**
+A bounded applied-state slice may join 0.6 once defined and validated; the full
+list below does not gate the core release:
+
+1. **Applied state per surface ([#194](https://github.com/srps/Conduit/issues/194)
+   remainder).** Track desired, durable and actually applied state separately;
+   retain pending/failed/superseded work and reconcile the login item at launch.
+   Use typed surface outcomes and model-based ordering tests. 0.5.7's retries
+   are mitigation, not completion. Full process ownership and durable helper
+   leases remain the later production-daemon gate (#48).
+   Include save-before-apply, partial durable writes and Stop/Quit exceptions
+   from the review draft as explicit behavior changes, not extraction claims.
+2. **Scheduling primitive ([#181](https://github.com/srps/Conduit/issues/181)).**
+   `HealthChecker` is the first consumer. #207 fences stale completions but does
+   not finish non-overlap or fence every pool side effect. Define the primitive
+   and its bounded model together; migrate other timers only when touched.
 3. **Journal envelope ([#182](https://github.com/srps/Conduit/issues/182)).**
    0.5.7 reads it; 0.6 writes it. The ISO-8601 reader and the 0.1.x DNS
    importer go one release later.
-4. **Scheduling primitive ([#181](https://github.com/srps/Conduit/issues/181))**
-   with `HealthChecker` as its first consumer, and the rest of
-   [#197](https://github.com/srps/Conduit/issues/197): response timeouts and
+4. **Remaining timeout semantics ([#197](https://github.com/srps/Conduit/issues/197)):** response timeouts and
    the breaker (with the [#184](https://github.com/srps/Conduit/issues/184)
    spike), a health check's first timeout, the prober's slow `CONNECT`, the DNS
    health tick and the launchd residue read.
@@ -110,7 +165,15 @@ rather than being hidden in an internal refactor.
 no production version bump. Ad-hoc signing, a distinct identity, automatic fake
 mode and rejection of installation are its acceptance gates.
 
-**After 0.6.** The production daemon/client transition (Next 1–3), named
+**Stage 6 — production daemon/client transition (after the shared host).** Next
+1–3 remain a separate milestone: exclusive process ownership/readiness, durable
+owner-death recovery (#48, with #32/#76), production socket and LaunchAgent
+lifecycle, and real user-session Keychain/Kerberos/CFNetwork validation. Sharing
+one implementation does not establish one production owner. Preserve later
+external settings; retire the AppleScript second-writer path as part of that
+authority contract. API approval and the necessary ADRs precede implementation.
+
+**Later product work.** Named
 profiles and location switching (#114/#115) and broad kernel splitting (#85,
 [decision 0007](./docs/decisions/0007-kernel-file-split-first.md)) follow the
 ownership work. Refactor size alone does not require a minor version.
@@ -119,8 +182,10 @@ ownership work. Refactor size alone does not require a minor version.
 
 1. [x] **Network-location-safe recovery ([#110](https://github.com/srps/Conduit/issues/110))** — active-location observation independent of path/VPN signals, stable location/service journal identity, compare-and-write helper v5, inactive-location cleanup, conservative legacy migration, and shared app/daemon reconciliation are implemented with unit and simulator coverage. External edits, renames/deletion, failed reapply, loginwindow cleanup, and stale active-location writes are covered. Shipped in 0.4.0 and validated with helper v5 and the corporate VPN client on macOS 26; macOS 27 was waived for that release and remains untested. Same-location drift repair is bounded against programs that keep rewriting proxy settings ([#116](https://github.com/srps/Conduit/issues/116)). Profile associations ([#114](https://github.com/srps/Conduit/issues/114)) and opt-in switching ([#115](https://github.com/srps/Conduit/issues/115)) follow later. See [`docs/design-network-location-recovery.md`](./docs/design-network-location-recovery.md). [Rel, Obs, UI, Sim]
 2. [~] **Secure GitHub Releases updating ([#111](https://github.com/srps/Conduit/issues/111))** — implemented for 0.5: Sparkle 2 in a nested updater process, an EdDSA-signed appcast per release, a project-held release certificate the helper pin admits ([`docs/release-signing.md`](./docs/release-signing.md)), events and simulator coverage. Candidate helper/installation preflight and fixed staging bounds shipped in 0.5.3; owner-installed 0.5.3→0.5.4 logged a successful authenticated preflight and replacement. Owner-installed 0.5.0→0.5.1→0.5.2 updates have logged proxy restoration, relaunch, readiness-before-reapply and resumed authentication on the current macOS 26 Apple Silicon machine (`docs/validation-0.5.3.md`). Remaining: new-preflight/negative-path/platform validation and key-backup evidence. Original scope: manual and opt-in automatic checks, release notes, and explicit Install Update and Restart. Prefer Sparkle 2 with Ed25519-authenticated archives and an embedded verification key. Preserve config/state, preflight helper identity compatibility, restore proxy/DNS before shutdown, and reapply only after readiness. Keep downloads/staging/retries bounded and recover from verification/replacement/launch failures. A brief interruption is acceptable; Developer ID/notarization and zero-downtime handoff do not gate this feature. See [decision 0010](./docs/decisions/0010-self-update.md). [OSS, Rel, Sec, UI, Obs, Sim]
-3. [~] **Owner-death recovery and one mutation authority ([#48](https://github.com/srps/Conduit/issues/48))** — app and daemon launch recovery exist. Queued for 0.6 with the #194 remainder. Remaining: exclusive ownership of platform mutations and durable recovery when no replacement runtime starts. Coordinate journal authority, authenticated helper sessions, and any helper-owned leases; preserve later external changes. This is a production daemon-migration gate. [Rel, Sec, Dmn, Sim]
+3. [~] **Owner-death recovery and one mutation authority ([#48](https://github.com/srps/Conduit/issues/48))** — app and daemon launch recovery exist. A separate production-daemon milestone after shared-host convergence, not a gate for the 0.6 core extraction. Remaining: exclusive ownership of platform mutations and durable recovery when no replacement runtime starts. Coordinate journal authority, authenticated helper sessions, and any helper-owned leases; preserve later external changes. This is a production daemon-migration gate. [Rel, Sec, Dmn, Sim]
 4. [~] **Request-body replay bounds and isolation ([#81](https://github.com/srps/Conduit/issues/81))** — per-body bounded spooling exists. Remaining: runtime-owned private spool storage, aggregate disk/queued-write budgets, replay backpressure tied to downstream completion/writability, off-event-loop cleanup, and structured failure reporting. Cover slow origins, disk failures, cancellation, and concurrent runtimes. [Rel, Sec, Eff, Sim]
+5. [ ] **Typed event contracts ([#180](https://github.com/srps/Conduit/issues/180))** — begin with #186's client boundary and migrate complete families alongside each host slice. Closed typed payloads derive stable names, categories, fields and human detail; compatibility and redaction cross the same codec/control bridge. Completion of every family is not a prerequisite for host extraction. [Obs, Rel, Sim]
+6. [ ] **Model-based verification ([#183](https://github.com/srps/Conduit/issues/183))** — independent reference models, bounded exhaustive exploration for small finite state spaces, and seeded/shrunk sequences for larger inputs. Begin with lifecycle/subscription ordering; add applied-state and scheduler models when those owners change. Fail on exhausted exploration budgets and show sensitivity to injected bugs. [Rel, Sim]
 
 ## Next
 
@@ -169,8 +234,6 @@ demo UI, and advanced metrics do not block the first usable daemon/client slice.
 
 - [~] **Allocation and performance analysis** — add Instruments allocation stacks and drift baselines to existing gates. Parser/header-interning changes follow measured bottlenecks. [Eff]
 - [~] **Scenario coverage completion** — audit behavioral coverage before adding named scenarios: auth expiry, PAC fallback, DNS poison rejection, tunnel rotation, mixed HTTP/SOCKS, gateway admission, and tunnel health. Network transitions, connection flood, auth storm, and upstream flap already have scenarios. [Rel, Sec, Sim]
-- [ ] **Model-based property tests ([#183](https://github.com/srps/Conduit/issues/183))** — seeded tests that drive the pure state machines against a model. [Rel, Sim]
-- [ ] **Typed event fields ([#180](https://github.com/srps/Conduit/issues/180))** — `RuntimeEvent` fields as typed values instead of `key=value` detail strings, within the additive schema rules. [Obs]
 - [ ] **Chaos demo and recording** — dev-only SwiftUI state/events/fault UI over fake credentials and isolated resources; a short recovery demonstration after the daemon/client path works. [Sim, UI, Obs, OSS]
 
 ### Distribution and demand-gated integrations

@@ -2,6 +2,15 @@
 
 Status: design prepared for the daemon-first control-plane implementation.
 
+Planning checkpoint (2026-10-24): the daemon target, protocol/client and runtime
+host described as new below now exist in part. The current execution sequence is
+in [ROADMAP](../ROADMAP.md): converge on a shared in-process host first, with
+typed contracts and model-based tests alongside it, then satisfy production
+ownership/recovery and LaunchAgent gates before adopting the daemon. Concrete
+refinements are in the [runtime contract review draft](./design-runtime-host-contract.md),
+with selected refinements in decisions 0013–0015 and staged implementation authorized. This historical design
+does not establish that the installed daemon/client transition has shipped.
+
 ## Problem
 
 Conduit currently embeds the real proxy runtime in the SwiftUI app process. The installed `ConduitHelper` survives UI exit, but it is only a privileged side-effect helper: `networksetup`, DNS resolver writes, and low-port TCP/UDP relays. It does not host `ProxyOrchestrator`, `LocalProxyServer`, local PAC, DNS forwarding, SOCKS5, transparent proxy, or tunnels.

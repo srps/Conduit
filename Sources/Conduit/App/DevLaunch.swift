@@ -7,26 +7,29 @@ import ProxyKernel
 import SwiftUI
 
 extension AppState {
-    /// The production app, or with `--dev` the harness's composition over a
-    /// fake machine, so a second Conduit runs beside the installed one for
-    /// visual and VoiceOver checks without touching the system. Dev mode is
-    /// compiled into debug builds only; a release build refuses the flag
-    /// rather than ignoring it.
+    /// The production app, or the harness's composition over a fake machine,
+    /// so a second Conduit runs beside the installed one for visual and
+    /// VoiceOver checks without touching the system. The composition is asked
+    /// for by `--dev` or by the dev bundle identity (`Conduit Dev.app`). Dev
+    /// mode is compiled into debug builds only; a release build refuses both
+    /// rather than ignoring them.
     @MainActor
-    static func forLaunch(arguments: [String] = CommandLine.arguments) -> AppState {
-        #if DEBUG
+    static func forLaunch(
+        arguments: [String] = CommandLine.arguments,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) -> AppState {
         do {
-            if let options = try DevLaunchOptions.parse(arguments) {
+            if let options = try DevLaunchOptions.parse(arguments, bundleIdentifier: bundleIdentifier) {
+                #if DEBUG
                 return DevLaunch.makeAppState(options)
+                #else
+                // `parse` throws for every dev request in a release build, so this is not reached.
+                DevLaunch.fail("dev mode is available in debug builds only")
+                #endif
             }
         } catch {
             DevLaunch.fail(error.localizedDescription)
         }
-        #else
-        if arguments.contains(DevLaunchOptions.flag) {
-            DevLaunch.fail("\(DevLaunchOptions.flag) is available in debug builds only")
-        }
-        #endif
         return AppState(
             commandRunner: CommandRunner.host,
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
@@ -69,20 +72,65 @@ struct DevLaunchOptions: Equatable {
             .appendingPathComponent("conduit-dev", isDirectory: true)
     }
 
-    /// `nil` when `--dev` is absent. The production flags (`--port`,
-    /// `--no-system-proxy`, `--no-env`) are `AppState`'s and pass through;
-    /// a dev flag without `--dev` is refused rather than ignored.
+    /// The bundle identifier `bundle-app.sh --dev` gives `Conduit Dev.app`.
+    /// Exact match only: the dev helper's and updater's identifiers are
+    /// suffixed and do not select the composition.
+    static let devBundleIdentifier = "io.github.srps.Conduit.dev"
+
+    static func isDevBundle(_ identifier: String?) -> Bool {
+        identifier == devBundleIdentifier
+    }
+
+    /// Whether this launch asks for the dev composition, by flag or by bundle.
+    /// The app delegate reads it before any app state exists.
+    static func requested(
+        by arguments: [String] = CommandLine.arguments,
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier
+    ) -> Bool {
+        arguments.dropFirst().contains(flag) || isDevBundle(bundleIdentifier)
+    }
+
+    /// The installed app's config and log directories: what a dev instance
+    /// must never read or write (#23).
+    static var productionStateDirectories: [URL] {
+        let production = RuntimeEnvironment.userDefault()
+        return [production.configDirectory, production.logFile.deletingLastPathComponent()]
+    }
+
+    static var compiledAsDebugBuild: Bool {
+        #if DEBUG
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    /// `nil` when neither `--dev` nor the dev bundle asks for the composition.
+    /// The production flags (`--port`, `--no-system-proxy`, `--no-env`) are
+    /// `AppState`'s and pass through; a dev flag without `--dev` is refused
+    /// rather than ignored. A release build refuses a request outright, and a
+    /// state directory that overlaps the installed app's is refused whatever
+    /// its spelling.
     static func parse(
         _ arguments: [String],
-        defaultStateDirectory: URL = defaultStateDirectory
+        bundleIdentifier: String? = nil,
+        isDebugBuild: Bool = compiledAsDebugBuild,
+        defaultStateDirectory: URL = defaultStateDirectory,
+        protectedDirectories: [URL] = productionStateDirectories
     ) throws -> DevLaunchOptions? {
         let args = Array(arguments.dropFirst())
         let devFlags: Set<String> = ["--dev-state-dir", "--section", "--vpn", "--upstream"]
-        guard args.contains(flag) else {
+        let flagged = args.contains(flag)
+        guard flagged || isDevBundle(bundleIdentifier) else {
             if let stray = args.first(where: { devFlags.contains($0) }) {
                 throw ParseError("\(stray) needs \(flag)")
             }
             return nil
+        }
+        guard isDebugBuild else {
+            throw ParseError(flagged
+                ? "\(flag) is available in debug builds only"
+                : "\(devBundleIdentifier) is available in debug builds only")
         }
         var options = DevLaunchOptions(stateDirectory: defaultStateDirectory)
         var index = 0
@@ -123,7 +171,88 @@ struct DevLaunchOptions: Equatable {
             }
             index += 1
         }
+        try refuseProductionState(options.stateDirectory, protectedDirectories: protectedDirectories)
         return options
+    }
+
+    /// Refuses a state directory that is, sits inside, or contains a protected
+    /// directory, compared after symlinks resolve. A link or a parent path
+    /// reaches the installed app's files no more than the path itself would.
+    /// Then refuses any known runtime file or fake root beneath it that
+    /// resolves outside it, since the state directory alone says nothing about
+    /// what its children link to.
+    static func refuseProductionState(_ directory: URL, protectedDirectories: [URL]) throws {
+        let devPath = try canonicalPath(directory)
+        let devParts = devPath.split(separator: "/")
+        for protected in protectedDirectories {
+            let productionPath = try canonicalPath(protected)
+            let productionParts = productionPath.split(separator: "/")
+            let shared = min(devParts.count, productionParts.count)
+            if devParts.prefix(shared).elementsEqual(productionParts.prefix(shared)) {
+                throw ParseError("--dev-state-dir \(directory.path) overlaps the installed Conduit's \(productionPath); choose another directory")
+            }
+        }
+        for component in ownedComponents(in: directory) {
+            let resolved = try canonicalPath(component)
+            guard resolved == devPath || resolved.hasPrefix(devPath + "/") else {
+                throw ParseError("--dev-state-dir \(directory.path): \(component.lastPathComponent) resolves to \(resolved), outside the state directory; choose another directory")
+            }
+        }
+    }
+
+    /// The runtime files and fake roots a dev run reads or writes beneath its
+    /// state directory, named by the same `RuntimeEnvironment` the app uses.
+    /// The export default is left out: it sits in the real home by design and
+    /// is written only by an explicit export. Only these are checked, so a
+    /// directory the app creates beneath them is not scanned.
+    static func ownedComponents(in stateDirectory: URL) -> [URL] {
+        let environment = RuntimeEnvironment.isolated(stateDirectory: stateDirectory)
+        return [
+            environment.configFile, environment.platformStateFile, environment.platformConfigFile,
+            environment.preferencesFile, environment.snapshotFile, environment.eventsFile,
+            environment.logFile, environment.updateStateFile, environment.legacySavedDNSFile,
+            fakeHome(in: stateDirectory), fakeResolver(in: stateDirectory),
+        ]
+    }
+
+    static func fakeHome(in stateDirectory: URL) -> URL {
+        stateDirectory.appendingPathComponent("home", isDirectory: true)
+    }
+
+    static func fakeResolver(in stateDirectory: URL) -> URL {
+        stateDirectory.appendingPathComponent("resolver", isDirectory: true)
+    }
+
+    /// The path with every symlink in its existing part resolved. The missing
+    /// tail is kept as written, since a directory that does not exist yet
+    /// cannot hold a link. A dangling link cannot be resolved, so it is
+    /// refused rather than guessed at. A missing `.` or `..` is refused too:
+    /// it cannot be placed without resolving a parent that does not exist.
+    /// The tail is joined as plain strings, not through `URL`: standardizing
+    /// drops `/private` only from paths that exist, so a missing directory
+    /// and its existing parent would disagree about the same location.
+    static func canonicalPath(_ url: URL) throws -> String {
+        var existing = url.path
+        var missing: [String] = []
+        var info = stat()
+        while lstat(existing, &info) != 0 {
+            let code = errno
+            let name = (existing as NSString).lastPathComponent
+            guard code == ENOENT, existing != "/", name != ".", name != ".." else {
+                throw ParseError("--dev-state-dir: cannot inspect \(url.path)")
+            }
+            missing.insert(name, at: 0)
+            existing = (existing as NSString).deletingLastPathComponent
+        }
+        guard let resolved = realpath(existing, nil) else {
+            throw ParseError("--dev-state-dir: cannot resolve \(url.path); a link may be dangling")
+        }
+        defer { free(resolved) }
+        var canonical = String(cString: resolved)
+        for name in missing {
+            canonical = (canonical as NSString).appendingPathComponent(name)
+        }
+        return canonical
     }
 
     private static func endpoint(from raw: String) throws -> Endpoint {
@@ -264,13 +393,47 @@ enum DevLaunch {
         exit(EX_USAGE)
     }
 
+    /// The argument-triggered worker modes. They reach the installed helper or
+    /// the Kerberos cache before any app state exists, so a dev request refuses
+    /// them rather than running them (#23).
+    static func isWorkerArgument(_ argument: String) -> Bool {
+        argument == UpdateHelperPreflightWorker.argument || argument == KerberosTicketRecoveryReply.argument
+    }
+
+    /// The refusal for a worker mode asked for alongside a dev request, by
+    /// `--dev` or by the dev bundle, or `nil` when the launch may run its
+    /// worker. It takes no build flag: a release binary given `--dev` and a
+    /// worker argument refuses here, before any worker has contacted the
+    /// installed helper or the Kerberos cache. A production launch is `nil`.
+    static func workerRefusal(arguments: [String], bundleIdentifier: String?) -> String? {
+        guard DevLaunchOptions.requested(by: arguments, bundleIdentifier: bundleIdentifier),
+              arguments.dropFirst().contains(where: isWorkerArgument) else { return nil }
+        return "worker modes are not available in the dev instance"
+    }
+
     #if DEBUG
     /// The harness's `launch()`, with a state directory that survives
     /// relaunches so edits made in the dev instance's Settings persist.
     @MainActor
     static func makeAppState(_ options: DevLaunchOptions) -> AppState {
-        let home = options.stateDirectory.appendingPathComponent("home", isDirectory: true)
-        let resolverDirectory = options.stateDirectory.appendingPathComponent("resolver", isDirectory: true)
+        do {
+            return try composeAppState(options)
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    /// `makeAppState` after the state directory and its runtime files have been
+    /// checked. The check comes first, so a refused launch creates nothing and
+    /// reads no config from beneath the directory.
+    @MainActor
+    static func composeAppState(
+        _ options: DevLaunchOptions,
+        protectedDirectories: [URL] = DevLaunchOptions.productionStateDirectories
+    ) throws -> AppState {
+        try DevLaunchOptions.refuseProductionState(options.stateDirectory, protectedDirectories: protectedDirectories)
+        let home = DevLaunchOptions.fakeHome(in: options.stateDirectory)
+        let resolverDirectory = DevLaunchOptions.fakeResolver(in: options.stateDirectory)
         do {
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         } catch {
@@ -326,15 +489,24 @@ enum DevLaunch {
             vpn.connectedInterfaceName = options.vpnInterfaceName
             vpn.emit(vpnState)
         }
+        // Not the path: the log sanitizer redacts a long hex run, and a
+        // temporary directory has one. The log file sits in the directory.
+        // Names what is still real: notifications and network-path observation
+        // have no seams yet (see AGENTS.md).
         state.logStore.log(
             .notice,
-            // Not the path: the log sanitizer redacts a long hex run, and a
-            // temporary directory has one. The log file sits in the directory.
-            "Dev mode: fake machine and scratch state. Nothing here reaches the system.",
+            "Dev mode: FakeMachine and scratch state. Helper, credentials, updater, login items, resolver and VPN are fakes. Notifications and network-path observation are real.",
             category: .system
         )
         session = Session(options: options, machine: machine, vpn: vpn, loginItems: loginItems, helper: helper, secrets: secrets)
         return state
+    }
+
+    /// Drops the session once its app state has been shut down, so the static
+    /// does not outlive the composition it describes.
+    @MainActor
+    static func endSession() {
+        session = nil
     }
 
     /// First launch writes a config with every port ephemeral and the four
