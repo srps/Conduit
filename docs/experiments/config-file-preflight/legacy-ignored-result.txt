@@ -1,0 +1,9 @@
+Checkout: d86aae2518306e3d27fafea3f62fb0429a46b0e6
+Command: Xcode swift test --filter ConfigLegacyIgnoredGrammarWitnessTests
+One test passed; temporary test source removed after execution.
+LEGACY_IGNORED_WITNESS case=lone_high actual_persistence_accepted=true
+LEGACY_IGNORED_WITNESS case=bad_hex actual_persistence_accepted=true
+LEGACY_IGNORED_WITNESS case=bad_escape actual_persistence_accepted=true
+LEGACY_IGNORED_WITNESS case=huge_number actual_persistence_accepted=true
+LEGACY_IGNORED_WITNESS case=bad_utf8 actual_persistence_accepted=true
+LEGACY_IGNORED_WITNESS case=raw_control actual_persistence_accepted=true

@@ -191,6 +191,9 @@ boundary; splitting files alone does not establish one.
 Distinct file and wire grammars are necessary: legacy files retain ignored unknown
 fields and first-duplicate-wins compatibility, whereas private requests are strict.
 That difference must not create independent resource-limit or duration policies.
+[Decision0024](decisions/0024-strict-configuration-file-grammar.md) selects strict
+syntax and Unicode for all file values, including discarded ones; preserving
+unknown keys does not preserve Foundation's malformed-content tolerances.
 Repeated checks at independent trust boundaries may be necessary; each should
 invoke the same policy rather than maintain another copy of its rules.
 

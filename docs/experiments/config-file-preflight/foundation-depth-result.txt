@@ -1,0 +1,4 @@
+Current Xcode Foundation JSONDecoder; minimal Decodable root with ignored array.
+Depth 64,128,256,510,511: accepted.
+Depth 512,513,1024,4096: refused.
+Depth counts nested arrays inside the root object. This is not an actual ProxyConfig-boundary depth proof.

@@ -123,6 +123,9 @@ not a requirement to finish every event or property test before extraction:
    consolidate parallel kernel/private resource walks, reuse policy across file/wire
    boundaries, and keep exact representation and commit coordination out of host
    adapters. Shared constants and parity tests do not complete that requirement.
+   File grammar is selected in [0024](./docs/decisions/0024-strict-configuration-file-grammar.md):
+   strict syntax, UTF-8 and Unicode even in discarded values; valid unknown fields
+   and first-key-wins remain. Rejected original files are preserved.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move keeps MainActor and current policy. Extract `RuntimeHost` from
