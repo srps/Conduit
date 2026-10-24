@@ -381,6 +381,12 @@ package struct PlatformIntegrationConfig: Codable, Equatable, Sendable {
     package var systemProxyMode: SystemProxyMode
     package var launchAtLogin: Bool
 
+    /// The legacy file keys this type reads from the runtime file (`RuntimeFileSchema`). Retired keys are not listed,
+    /// so they are ignored as they always were.
+    package enum CodingKeys: String, CodingKey, CaseIterable {
+        case manageSystemProxy, manageEnvironmentVariables, manageDNSResolvers, manageSystemDNS, systemProxyMode, launchAtLogin
+    }
+
     package init(
         manageSystemProxy: Bool = false,
         manageEnvironmentVariables: Bool = false,
@@ -441,6 +447,12 @@ package struct AppPreferences: Codable, Equatable, Sendable {
     /// release feed through the nested updater. Checking by hand works
     /// either way; nothing installs without the user choosing to.
     package var automaticUpdateChecks: Bool
+
+    /// The legacy file keys this type reads from the runtime file (`RuntimeFileSchema`).
+    package enum CodingKeys: String, CodingKey, CaseIterable {
+        case showMenuBarIcon, floatingWindowEnabled, globalShortcutEnabled, preferredBrowserTestURL
+        case fileLoggingEnabled, automaticUpdateChecks
+    }
 
     package init(
         showMenuBarIcon: Bool = true,

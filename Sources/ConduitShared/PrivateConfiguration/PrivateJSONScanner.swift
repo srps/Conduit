@@ -9,10 +9,11 @@
 /// which is charged as each item closes, so no later byte is read.
 ///
 /// The lexical rules (whitespace, literals, numbers, strings, escapes, UTF-8 and control characters) belong to
-/// `JSONByteCursor`, which the runtime file reader shares. This walk adds only what the wire needs: the schema, the
-/// duplicate mask, the approved counts and widths, and the token rule. A lexical `Fault` becomes the one wire refusal
-/// here. The scanner keeps no copy of the text and allocates nothing per key: names are matched from the fixed tables
-/// as their bytes arrive.
+/// `JSONByteCursor`. The scalar and list charges belong to `DomainResourceStringBudget` and
+/// `DomainResourceListBudget`, which the runtime file filter shares. This walk adds only what the wire needs: the
+/// schema, the duplicate mask and the token rule. A lexical `Fault` becomes the one wire refusal here. The scanner
+/// keeps no copy of the text and allocates nothing per key: names are matched from the fixed tables as their bytes
+/// arrive.
 struct PrivateJSONScanner {
     /// The schema nests six levels deep at most: root, runtime, dns, entries, entry and servers.
     /// Eight is a stack bound, not a size limit.
@@ -134,19 +135,15 @@ struct PrivateJSONScanner {
         if cursor.consumeIf(UInt8(ascii: "]")) {
             return
         }
-        var count = 0
-        // A list with a canonical-width ceiling is charged as each item closes. That is the same order the typed
-        // check uses, so the first ceiling crossed in item order is the one refused.
-        var encoded = CanonicalJSONStringList()
+        var list = DomainResourceListBudget()
         while true {
             cursor.skipWhitespace()
-            count += 1
-            if let violation = DomainResourceCheck.entries(count, field) {
+            if let violation = list.admitElement(field) {
                 throw PrivateConfigurationWireError.resourceLimitExceeded(violation)
             }
             if let encodedField = field.encodedListField, case .string(let item) = element {
-                encoded.append(quotedWidth: try scanString(item).canonicalBytes)
-                if let violation = DomainResourceCheck.encodedBytes(encoded.bytes, encodedField) {
+                let text = try scanString(item)
+                if let violation = list.closeStringItem(canonicalWidth: text.canonicalBytes, list: encodedField) {
                     throw PrivateConfigurationWireError.resourceLimitExceeded(violation)
                 }
             } else {
@@ -163,56 +160,13 @@ struct PrivateJSONScanner {
         }
     }
 
-    /// The decoded UTF-8 length of one string as it is read, whether its first two bytes are the `*.`
-    /// wildcard prefix, and its canonical JSON width with quotes (`CanonicalJSONWidth`). An escape counts as
-    /// the bytes it decodes to, so `é` is two bytes. A raw byte and its escape have the same canonical width.
-    private struct DecodedText {
-        private(set) var byteCount = 0
-        private(set) var canonicalBytes = 2
-        /// True while every byte so far has matched the wildcard prefix.
-        private var wildcardCandidate = true
-
-        /// One decoded scalar, raw or escaped. An ASCII scalar counts one byte and may extend the wildcard prefix. A
-        /// multibyte scalar is never part of that prefix, so it rules the prefix out.
-        mutating func append(_ scalar: Unicode.Scalar) {
-            if scalar.value < 0x80 {
-                let byte = UInt8(scalar.value)
-                switch byteCount {
-                case 0: wildcardCandidate = byte == UInt8(ascii: "*")
-                case 1: wildcardCandidate = wildcardCandidate && byte == UInt8(ascii: ".")
-                default: break
-                }
-                byteCount += 1
-            } else {
-                if byteCount < 2 {
-                    wildcardCandidate = false
-                }
-                byteCount += Self.width(of: scalar)
-            }
-            canonicalBytes += CanonicalJSONWidth.scalarWidth(scalar.value)
-        }
-
-        var hasWildcardPrefix: Bool {
-            byteCount >= 2 && wildcardCandidate
-        }
-
-        static func width(of scalar: Unicode.Scalar) -> Int {
-            switch scalar.value {
-            case 0..<0x80: 1
-            case 0x80..<0x800: 2
-            case 0x800..<0x10000: 3
-            default: 4
-            }
-        }
-    }
-
     /// Scans one value string under its field's ceiling. Its decoded UTF-8 length is counted as it is read,
     /// and the first byte past the ceiling is refused, so the rest of the string is never scanned. Nothing
-    /// is copied: the value is decoded later, and only from bytes this pass has accepted. The returned text
+    /// is copied: the value is decoded later, and only from bytes this pass has accepted. The returned budget
     /// carries the string's canonical width, which a list charges once the string closes.
     @discardableResult
-    private mutating func scanString(_ field: DomainResourceField) throws -> DecodedText {
-        var text = DecodedText()
+    private mutating func scanString(_ field: DomainResourceField) throws -> DomainResourceStringBudget {
+        var text = DomainResourceStringBudget()
         try cursor.scanString { scalar in
             text.append(scalar)
             try Self.enforce(field, text)
@@ -222,10 +176,8 @@ struct PrivateJSONScanner {
 
     /// Refuses the string once its decoded length passes the field's ceiling for its prefix. A token past its
     /// lexical guard is not a token under the grammar, so it is malformed and not a resource refusal.
-    private static func enforce(_ field: DomainResourceField, _ text: DecodedText) throws {
-        guard let violation = DomainResourceCheck.utf8(
-            text.byteCount, wildcardPrefix: text.hasWildcardPrefix, field
-        ) else {
+    private static func enforce(_ field: DomainResourceField, _ text: DomainResourceStringBudget) throws {
+        guard let violation = text.violation(field) else {
             return
         }
         if field == .token {

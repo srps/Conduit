@@ -45,7 +45,7 @@ final class ConfigurationResourceLimitsTests: XCTestCase {
         .proxyHost: 253, .upstreamHost: 253, .tunnelRemoteHost: 253, .dnsDomain: 253, .dnsServer: 253,
         .interceptAddress: 253, .transparentProxyIP: 253, .allowedClient: 253, .forceProxyPattern: 253,
         .noProxyPattern: 253, .interceptPattern: 253,
-        .pacURL: 16_384, .checkURL: 16_384, .dohProvider: 16_384,
+        .pacURL: 16_384, .checkURL: 16_384, .dohProvider: 16_384, .browserTestURL: 16_384,
         .token: 64, .noProxyList: 8_192,
     ]
 

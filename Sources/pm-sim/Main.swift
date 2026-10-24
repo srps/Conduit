@@ -91,6 +91,7 @@ enum PMSim {
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               config-resource-bounds  Approved configuration ceilings: exact and one-over, scanner order, encoder refusal
+              config-file-boundary  Runtime configuration file: cap, first-key, strict filter, legacy fallback, import and writer gates
               config-exact-persistence  Schema-two saves: whole-unit round trips; inexact durations refused before any write
               auth-identity-length    NTLM identity fields: 16-bit boundary accepted; uppercase expansion and oversized fields refused, not credential-unavailable
               security-boundaries     Auth destinations, config rejection, and loopback listeners
@@ -268,6 +269,7 @@ enum PMSim {
         "observable-target-redaction",
         "private-config-boundary",
         "config-resource-bounds",
+        "config-file-boundary",
         "config-exact-persistence",
         "auth-identity-length",
         "security-boundaries",
@@ -439,6 +441,8 @@ enum PMSim {
             return [try PrivateConfigBoundaryScenario.run()]
         case "config-resource-bounds":
             return [try ConfigResourceBoundsScenario.run()]
+        case "config-file-boundary":
+            return [try ConfigFileBoundaryScenario.run()]
         case "config-exact-persistence":
             return [try ConfigExactPersistenceScenario.run()]
         case "auth-identity-length":

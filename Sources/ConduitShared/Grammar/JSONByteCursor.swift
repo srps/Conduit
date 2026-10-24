@@ -141,11 +141,28 @@ package struct JSONByteCursor {
         }
     }
 
-    /// Consumes one value of any shape without materializing it. The walk uses an explicit stack, so depth costs heap
-    /// bits rather than call frames. `maxDepth` bounds the open containers and is the caller's choice. The stack holds
-    /// one bit per open container and grows only as far as the input actually nests.
+    /// The raw bytes from `start` up to the cursor, which a caller copies as an accepted span. Nothing is decoded.
+    package func span(from start: Int) -> UnsafeBufferPointer<UInt8> {
+        UnsafeBufferPointer(rebasing: bytes[start..<index])
+    }
+
+    /// The offset of the cursor from the start of the text.
+    package var position: Int {
+        index
+    }
+
+    /// `skipValue(maxDepth:containers:)` with a stack of its own, for a caller that skips once.
     package mutating func skipValue(maxDepth: Int) throws {
-        var containers = ContainerStack()
+        var containers = JSONContainerStack()
+        try skipValue(maxDepth: maxDepth, containers: &containers)
+    }
+
+    /// Consumes one value of any shape without materializing it. The walk uses an explicit stack, so depth costs heap
+    /// bits rather than call frames. `maxDepth` bounds the open containers and is the caller's choice. The caller's
+    /// stack is emptied first and keeps its storage, so one stack can serve a whole text without a new allocation per
+    /// skipped value.
+    package mutating func skipValue(maxDepth: Int, containers: inout JSONContainerStack) throws {
+        containers.reset()
         valueStart: while true {
             skipWhitespace()
             guard let byte = current else {
@@ -363,10 +380,17 @@ package struct JSONByteCursor {
 }
 
 /// The open containers of one skip, one bit each, true for an object. A 64-level word is added only when the nesting
-/// reaches it, so the stack costs what the input's real depth costs and nothing for shallow input.
-private struct ContainerStack {
+/// reaches it, so the stack costs what the input's real depth costs and nothing for shallow input. A caller reuses one
+/// stack across skips: `reset` empties it and keeps its words.
+package struct JSONContainerStack {
     private var words: [UInt64] = []
     private(set) var count = 0
+
+    package init() {}
+
+    package mutating func reset() {
+        count = 0
+    }
 
     /// Whether the innermost open container is an object, or nil when none is open.
     var innermostIsObject: Bool? {

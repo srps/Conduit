@@ -714,6 +714,24 @@ final class AppStateHarnessTests: XCTestCase {
         )
     }
 
+    /// The import gate refuses a newer file before the editor is assigned: the editor keeps its config and the source keeps
+    /// its bytes. A current file then reaches the editor through the same `importConfiguration` path.
+    func testAnImportOfANewerFileLeavesTheEditorUnchanged() throws {
+        let appState = try launch()
+        appState.config.profileName = "kept"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("import-\(UUID().uuidString).json")
+        let newer = Data(#"{"schemaVersion":3,"profileName":"imported"}"#.utf8)
+        try newer.write(to: url)
+        XCTAssertThrowsError(try appState.importConfiguration(from: url))
+        XCTAssertEqual(appState.config.profileName, "kept", "a refused import never reaches the editor")
+        XCTAssertEqual(try Data(contentsOf: url), newer, "the refused source keeps its bytes")
+
+        try Data(#"{"schemaVersion":2,"profileName":"imported"}"#.utf8).write(to: url)
+        try appState.importConfiguration(from: url)
+        XCTAssertEqual(appState.config.profileName, "imported", "a current file is assigned through the same gate")
+        try FileManager.default.removeItem(at: url)
+    }
+
     /// `startDNS` flips `dnsForwarderEnabled` and saves. That flip is the
     /// lifecycle's own work, already live in the runtime; a pass that
     /// treated it as an edit would restart the forwarder it just started.

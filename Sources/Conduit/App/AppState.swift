@@ -1079,10 +1079,15 @@ final class AppState: ObservableObject {
     /// the value.
     private func reportSaveFailure(_ error: Error) {
         lastErrorMessage = error.localizedDescription
-        logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
+        // The structured event is emitted first, and the log line is written after it.
         if let refusal = error as? ConfigFileRepresentabilityError {
             recordLifecycle(refusal.event, level: .warning)
+        } else if let refusal = error as? ConfigurationResourceRefusal {
+            recordLifecycle(refusal.event, level: .warning)
+        } else if let refusal = error as? ConfigurationFileSizeRefusal {
+            recordLifecycle(refusal.event, level: .warning)
         }
+        logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
     }
 
     func saveConfig() {
@@ -1464,8 +1469,10 @@ final class AppState: ObservableObject {
     }
 
     func importConfiguration(from url: URL) throws {
-        let data = try Data(contentsOf: url)
-        config = try JSONDecoder().decode(ProxyConfig.self, from: data)
+        // The import passes the same gate as a startup load: the bounded read, the strict filter, the newer-schema refusal
+        // and the in-memory migration. The editor is assigned only after all of them pass.
+        let imported = try ProxyConfigPersistence.loadImport(from: url)
+        config = imported
         saveConfig()
     }
 

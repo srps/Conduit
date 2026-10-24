@@ -34,6 +34,49 @@ package enum RuntimeConfigurationFileError: Error, Sendable, Equatable {
     case closeFailed(Int32)
 }
 
+/// A fixed errno description: the code and the system's text for it. It never carries a path, a byte or a value.
+private func errnoSummary(_ code: Int32) -> String {
+    "errno \(code) (\(String(cString: strerror(code))))"
+}
+
+extension RuntimeConfigurationFileReadStep {
+    /// The step that refused or failed the read, in fixed words and the errno. Both failures of one read are reported by
+    /// `RuntimeConfigurationFileError.summary`, so neither is dropped.
+    package var summary: String {
+        switch self {
+        case .statusFailed(let code):
+            "status check failed, \(errnoSummary(code))"
+        case .notRegularFile:
+            "not a regular file"
+        case .readFailed(let code):
+            "read failed, \(errnoSummary(code))"
+        case .tooLarge(let limit):
+            "exceeds the runtime file size limit of \(limit) bytes"
+        }
+    }
+}
+
+extension RuntimeConfigurationFileError {
+    /// The read's failures in fixed words: the refused or failed step, then a close that failed after it, when one did. A
+    /// close failure after a good read is reported alone. The text names no path, input byte or value.
+    package var summary: String {
+        switch self {
+        case .missing:
+            "the file does not exist"
+        case .openFailed(let code):
+            "open failed, \(errnoSummary(code))"
+        case .closeFailed(let code):
+            "close failed, \(errnoSummary(code))"
+        case .unreadable(let step, let closeErrno):
+            if let closeErrno {
+                "\(step.summary), and close also failed, \(errnoSummary(closeErrno))"
+            } else {
+                step.summary
+            }
+        }
+    }
+}
+
 /// The read loop, separated from the descriptor so a test can drive it with fixed chunks and with growth. The scratch
 /// buffer is one fixed chunk for every read. Only the allowed bytes are appended, so a refused file never grows the
 /// returned data.

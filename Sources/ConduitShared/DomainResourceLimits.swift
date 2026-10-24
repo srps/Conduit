@@ -63,7 +63,7 @@ package enum DomainResourceField: CaseIterable, Sendable, Equatable {
     case auditLogPath
     case proxyHost, upstreamHost, tunnelRemoteHost, dnsDomain, dnsServer, interceptAddress
     case transparentProxyIP, allowedClient, forceProxyPattern, noProxyPattern, interceptPattern
-    case pacURL, checkURL, dohProvider
+    case pacURL, checkURL, dohProvider, browserTestURL
     case token
     case noProxyList
 
@@ -86,7 +86,7 @@ package enum DomainResourceField: CaseIterable, Sendable, Equatable {
         case .proxyHost, .upstreamHost, .tunnelRemoteHost, .dnsDomain, .dnsServer, .interceptAddress,
              .transparentProxyIP, .allowedClient, .forceProxyPattern, .noProxyPattern, .interceptPattern:
             DomainResourceLimits.hostText
-        case .pacURL, .checkURL, .dohProvider: DomainResourceLimits.urlText
+        case .pacURL, .checkURL, .dohProvider, .browserTestURL: DomainResourceLimits.urlText
         case .token: DomainResourceLimits.token
         case .noProxyList: DomainResourceLimits.noProxyList
         }
@@ -100,7 +100,7 @@ package enum DomainResourceField: CaseIterable, Sendable, Equatable {
         case .profileName, .upstreamName, .tunnelLabel, .authUsername, .authDomain, .authWorkstation,
              .auditLogPath, .proxyHost, .upstreamHost, .tunnelRemoteHost, .dnsDomain, .dnsServer,
              .interceptAddress, .transparentProxyIP, .allowedClient, .forceProxyPattern, .noProxyPattern,
-             .interceptPattern, .pacURL, .checkURL, .dohProvider, .token:
+             .interceptPattern, .pacURL, .checkURL, .dohProvider, .browserTestURL, .token:
             .utf8Bytes
         case .noProxyList:
             .encodedBytes

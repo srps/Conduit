@@ -43,21 +43,5 @@ package struct GenericDefaults: ConfigDefaultsProvider, Sendable {
     package let logging = LoggingSection()
 }
 
-// MARK: - Legacy Config Migration
-
-/// Reads platform and preferences fields from a legacy config.json that bundled them
-/// with the runtime config. Used for one-time migration on upgrade.
-///
-/// Both target types use tolerant `init(from decoder:)` with `decodeIfPresent`,
-/// so they safely ignore unrelated keys in the flat legacy JSON.
-package enum LegacyConfigMigration {
-    package static func extractPlatformConfig(from url: URL) -> PlatformIntegrationConfig? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(PlatformIntegrationConfig.self, from: data)
-    }
-
-    package static func extractAppPreferences(from url: URL) -> AppPreferences? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(AppPreferences.self, from: data)
-    }
-}
+// The legacy platform and preferences values of a runtime file are read by `RuntimeFileSchema` and `RuntimeFileDocument`,
+// from the same frozen read as the runtime config (decision 0024). No other path reads the file for them.
