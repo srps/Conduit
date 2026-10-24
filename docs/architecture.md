@@ -47,6 +47,8 @@ Line and test counts are not kept here. `swift test` and `find Sources -name '*.
 
 ## Target Dependency Graph
 
+pm-sim uses the existing ProxyControlBridge target to exercise production protected-diagnostic-resource composition rather than duplicating its mapping. This adds no external dependency or kernel-to-control edge.
+
 The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. CI enforces the kernel import and `Process` fence, using the Swift compiler's own parse and the built object, with [`scripts/check-kernel-imports.py`](../scripts/check-kernel-imports.py). Linking alone cannot catch a stray Apple-framework import; Linux portability is not a current goal.
 
 ```mermaid

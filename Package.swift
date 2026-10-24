@@ -130,7 +130,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "pm-sim",
-            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "ConduitShared", "PlatformMac", "RuntimeEvents"] + nioProducts,
+            dependencies: ["ProxyKernel", "ProxyAuth", "ProxyPAC", "ProxyControlBridge", "ConduitShared", "PlatformMac", "RuntimeEvents"] + nioProducts,
             path: "Sources/pm-sim"
         ),
         .executableTarget(
