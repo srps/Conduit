@@ -1,13 +1,17 @@
 # 0019: One private configuration frame capped at eight MiB
 
 - Date: 2026-10-24
-- Decision: accepted (owner, 2026-10-24, #186 private transfer budget checkpoint)
+- Decision: superseded (owner, 2026-10-24, #186 configuration resource profile checkpoint)
 - Implementation: partial
 - Validation: none
 - Supersedes: none
-- Superseded by: none
+- Superseded by: 0021
 
 ## Context
+
+Decision [0021](0021-bounded-configuration-at-all-boundaries.md) retains the frame
+choice and replaces the no-count-limit/startup-unchanged policy. This record
+preserves the original accepted reasoning.
 
 [0018](0018-private-configuration-request.md) selects one private request with full
 frozen configuration values. Current validation accepts strings and collection
@@ -89,8 +93,8 @@ values. The densest fixture, a valid frame of 8,102,178 bytes, reached a peak of
 memory budget.
 
 Does not prove: codec allocation bounds, release-build memory, control responsiveness, writer
-coverage or real-machine behavior. The corrected source has not been rerun, so no validation
-is recorded.
+coverage or real-machine behavior. The corrected local source passed all workflow-equivalent gates; those are
+unit/simulator checks, not owner or real-machine validation.
 
 ## Open questions
 

@@ -101,8 +101,14 @@ not a requirement to finish every event or property test before extraction:
    encoded request containing full frozen values, with neutral SecretBytes in
    ConduitShared. Save, runtime admission and apply outcomes remain distinct.
    The owner selected the eight-MiB private request cap in
-   [0019](./docs/decisions/0019-private-configuration-frame-budget.md), with independent
-   Stop/status work and explicit oversize refusal before saving. Open gates:
+   [0019](./docs/decisions/0019-private-configuration-frame-budget.md), refined by
+   [0021](./docs/decisions/0021-bounded-configuration-at-all-boundaries.md): retain the
+   complete eight-MiB frame, add selected domain counts/byte limits and apply them
+   at startup/import too, with bounded actual reads and rejected files preserved.
+   Tunnels mean native-protocol local forwards: primary performance case64,
+   hard ceiling128. Early schema-aware refusal precedes decoded object expansion;
+   one active private body/decode and independent Stop/status capacity remain
+   adoption obligations. The limits are selected but not yet implemented. Open gates:
    measured memory/capacity/latency and complete writer coverage under
    the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
    listener handoff, and measured bounds and shutdown. Before implementing the
