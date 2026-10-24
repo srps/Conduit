@@ -13,6 +13,8 @@ package enum NTLMAuthError: Error, LocalizedError, CredentialFailureClassifying 
     case invalidChallenge
     case invalidMessage
     case cryptoFailure
+    /// A name, response or target field longer than its 16-bit length field.
+    case messageFieldTooLong
 
     package var errorDescription: String? {
         switch self {
@@ -22,6 +24,8 @@ package enum NTLMAuthError: Error, LocalizedError, CredentialFailureClassifying 
             return "The NTLM message could not be encoded."
         case .cryptoFailure:
             return "A required NTLM cryptographic operation failed."
+        case .messageFieldTooLong:
+            return "An NTLM message field is longer than the protocol allows."
         }
     }
 }
@@ -66,6 +70,14 @@ package enum NTLMAuth {
 
     /// Type 1 (Negotiate) message per MS-NLMP with CNTLM-compatible layout:
     ///   Signature(8) + Type(4) + Flags(4) + DomainBuffer(8) + WorkstationBuffer(8) + Version(8) + Payload
+    /// The 16-bit length of one security buffer. The identity comes from the
+    /// user's configuration and the target info from the server, so either can be
+    /// longer than the field; `UInt16(_:)` would trap, and this refuses instead.
+    private static func bufferLength(_ count: Int) throws -> UInt16 {
+        guard let length = UInt16(exactly: count) else { throw NTLMAuthError.messageFieldTooLong }
+        return length
+    }
+
     package static func negotiateMessage(credentials: ProxyCredentials) throws -> String {
         let domainData = Data(credentials.domain.uppercased().utf8)
         let workstationData = Data(credentials.workstation.uppercased().utf8)
@@ -75,9 +87,9 @@ package enum NTLMAuth {
         message.append(signature)                                                                           // 0:  Signature
         message.append(littleEndian: UInt32(1))                                                             // 8:  MessageType
         message.append(littleEndian: negotiateFlags)                                                        // 12: NegotiateFlags
-        message.append(securityBuffer(length: UInt16(domainData.count),                                     // 16: DomainNameFields
+        message.append(securityBuffer(length: try bufferLength(domainData.count),                           // 16: DomainNameFields
                                       offset: UInt32(headerSize + workstationData.count)))
-        message.append(securityBuffer(length: UInt16(workstationData.count),                                // 24: WorkstationFields
+        message.append(securityBuffer(length: try bufferLength(workstationData.count),                      // 24: WorkstationFields
                                       offset: UInt32(headerSize)))
         message.append(contentsOf: ntlmsspVersion)                                                          // 32: Version
         message.append(workstationData)                                                                     // 40: Payload
@@ -95,6 +107,14 @@ package enum NTLMAuth {
         let domainData = Data(credentials.domain.utf16LE)
         let userData = Data(credentials.username.utf16LE)
         let workstationData = Data(credentials.workstation.utf16LE)
+        // Each 16-bit length is checked here, before any digest or offset is computed, and
+        // the buffers below reuse these values. The LM response is 24 bytes; the NT response
+        // is 48 bytes plus the target info the server sent.
+        let lmLength = try bufferLength(24)
+        let ntLength = try bufferLength(48 + challenge.targetInfo.count)
+        let domainLength = try bufferLength(domainData.count)
+        let userLength = try bufferLength(userData.count)
+        let workstationLength = try bufferLength(workstationData.count)
 
         // `credentials.ntHash` is SecretBytes; bridge into hmacMD5 via
         // the withUnsafeBytes closure that keeps the key on the stack
@@ -131,11 +151,15 @@ package enum NTLMAuth {
         var message = Data()
         message.append(signature)                                                                           // 0:  Signature
         message.append(littleEndian: UInt32(3))                                                             // 8:  MessageType
-        message.append(securityBuffer(length: UInt16(lmResponse.count), offset: offsets[0]))                // 12: LmChallengeResponse
-        message.append(securityBuffer(length: UInt16(ntResponse.count), offset: offsets[1]))                // 20: NtChallengeResponse
-        message.append(securityBuffer(length: UInt16(domainData.count), offset: offsets[2]))                // 28: DomainName
-        message.append(securityBuffer(length: UInt16(userData.count), offset: offsets[3]))                  // 36: UserName
-        message.append(securityBuffer(length: UInt16(workstationData.count), offset: offsets[4]))           // 44: Workstation
+        precondition(
+            lmResponse.count == Int(lmLength) && ntResponse.count == Int(ntLength),
+            "NTLM response sizes must match the lengths checked before the digests"
+        )
+        message.append(securityBuffer(length: lmLength, offset: offsets[0]))                                // 12: LmChallengeResponse
+        message.append(securityBuffer(length: ntLength, offset: offsets[1]))                                // 20: NtChallengeResponse
+        message.append(securityBuffer(length: domainLength, offset: offsets[2]))                            // 28: DomainName
+        message.append(securityBuffer(length: userLength, offset: offsets[3]))                              // 36: UserName
+        message.append(securityBuffer(length: workstationLength, offset: offsets[4]))                       // 44: Workstation
         message.append(securityBuffer(length: 0, offset: UInt32(payloadOffset +                             // 52: EncryptedRandomSessionKey
             payloadSegments.reduce(0) { $0 + $1.count })))
         message.append(littleEndian: responseFlags)                                                         // 60: NegotiateFlags

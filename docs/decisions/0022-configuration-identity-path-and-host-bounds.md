@@ -97,11 +97,22 @@ Partial: the private request boundary and the kernel's typed check enforce the i
 
 Does not prove: legacy file filtering, load, or import; startup refusal with preserved bytes; runtime admission; steady or runtime memory; Stop/status fairness; actual write quiescence; or real-machine behavior. No owner or real-machine validation is claimed.
 
+Partial protocol-boundary safety: [NTLMAuth.swift](../../Sources/ProxyAuth/NTLMAuth.swift)
+checks transformed Type1 and Type3 field lengths before narrowing to UInt16 and
+before crypto or offset construction. The fixed error does not echo identities.
+[NTLMIdentityLengthTests.swift](../../Tests/ConduitTests/NTLMIdentityLengthTests.swift),
+[NTLMProtocolLengthReviewTests.swift](../../Tests/ConduitTests/NTLMProtocolLengthReviewTests.swift)
+and [ScenarioAuthIdentityLength.swift](../../Sources/pm-sim/ScenarioAuthIdentityLength.swift)
+exercise exact boundaries, uppercase/UTF16 expansion and refusal classification
+against the real authenticator with synthetic credentials. The scenario passed8
+assertions. These protocol guards complement the configured resource profile;
+legacy file/startup/import enforcement remains a separate planned slice.
+
 Does not prove: complete boundary coverage, steady/runtime memory, Stop/status
 fairness, actual write quiescence or real-machine behavior.
 
 ## Open questions
 
-Persistence precision/schema in #224 remains unselected before the verified store.
+Persistence precision/schema is selected in [0023](0023-exact-schema-two-persistence.md); the asynchronous store remains planned.
 Revisit these ceilings for a demonstrated legitimate value or a changed underlying
 protocol/platform limit, with compatibility and measured cost recorded separately.
