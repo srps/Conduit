@@ -89,7 +89,7 @@ Use scratch files/fakes; no installed app/helper or user configuration changes.
 
 ## Implementation evidence
 
-Partial, on branch `codex/exact-schema-two-persistence`, not merged. Implemented:
+Partial, integrated on branch `codex/bounded-configuration-files`. Implemented:
 checked whole-millisecond and whole-minute conversion in
 [DurationUnits.swift](../../Sources/ProxyKernel/Models/DurationUnits.swift); the
 staged save that refuses before any write and compares the decoded sections in
@@ -127,22 +127,19 @@ single old-code test failed with exactly three assertions against the unchanged
 pre-fix source at d86aae2 (domain 1.0 for 1.001, getter 1000 for 1001, file 1000 for
 1001). It proves that one case, not the whole current suite.
 
-Verification, not owner or real-machine validation: the precision wrapper passed on
-this tree. Its filtered `swift test` run executed 440 tests with 0 failures, including
-`ConfigSaveGateTests`, `ConfigRuntimeRangeRefusalTests`, `ConfigExactPersistenceTests`,
-`DurationUnitsTests`, `NTLMIdentityLengthTests` and the Codex-owned
-`NTLMProtocolLengthReviewTests`. `pm-sim config-exact-persistence` passed 8 of 8
-assertions, and `pm-sim auth-identity-length` passed 8 of 8. The kernel import fence,
-the event catalogue (207 names) and the decision check passed. Not run: the full
-`swift.yml` steps, `pm-sim all`, `scripts/perf-gate.sh` and the other `scripts/check-*`
-and `scripts/test-*` checks.
+The initial precision wrapper passed 440 tests. Integrated with runtime-file bounds
+and editable private transport, the focused suite passed 697 tests and the final
+full Swift run passed 2846 tests with two skips and no failures. The exact-persistence
+and authentication-length scenarios each passed eight assertions. See the
+[combined verification record](../verification-configuration-boundary-2026-10-24.md)
+for the complete workflow evidence and limits. These are automated checks, not
+owner or real-machine validation.
 
 Does not prove: asynchronous store ordering, read-back ambiguity, expected
 revisions, partial component results, physical write quiescence, Stop/Quit fences
 beyond the quit path, or shutdown latency. The gate tests drive `AppState` through the
 harness, not the Settings UI. The NTLM scenario calls the real authenticator with
-synthetic credentials, not a network handshake. Real-machine behavior and the neutral
-resource caps for the separate bounds branch are not covered.
+synthetic credentials, not a network handshake. Real-machine behavior is not covered.
 
 Evidence, limited to the assertions that exist:
 

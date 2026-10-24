@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 strict file-preflight checkpoint)
-- Implementation: partial
+- Implementation: implemented
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -83,22 +83,33 @@ the actual decoder; the private schema's depth-eight bound is not a file limit.
 
 ## Implementation evidence
 
-Partial lexical/reader foundation: [JSONByteCursor.swift](../../Sources/ConduitShared/Grammar/JSONByteCursor.swift)
-provides strict syntax, UTF-8/Unicode and bounded iterative skipping, shared by the
-[private scanner](../../Sources/ConduitShared/PrivateConfiguration/PrivateJSONScanner.swift).
-[RuntimeConfigurationFileReader.swift](../../Sources/ProxyKernel/Support/RuntimeConfigurationFileReader.swift)
-enforces the fixed 8 MiB physical read cap, checks the opened descriptor and preserves
-simultaneous read/close failures. It is not yet adopted by runtime file loading.
-[BoundedJSONByteCursorTests.swift](../../Tests/ConduitTests/BoundedJSONByteCursorTests.swift)
-and [ConfigurationFileReaderTests.swift](../../Tests/ConduitTests/ConfigurationFileReaderTests.swift)
-passed 12 and 19 tests respectively. The combined focused wrapper passed 537 tests,
-plus the existing private-boundary and resource-bound scenarios and the import,
-event and decision checks. This is not the full workflow or owner validation.
-The preserved witness establishes old acceptance only. File filtering and
-startup/reload/import adoption remain planned.
+[JSONByteCursor.swift](../../Sources/ConduitShared/Grammar/JSONByteCursor.swift)
+provides one strict lexical contract, shared by the private scanner and the
+[RuntimeFileFilter.swift](../../Sources/ProxyKernel/Support/RuntimeFileFilter.swift)
+file adapter. The filter discards unknown and later duplicate values before typed
+expansion, validates their complete grammar, and maps known fields through
+[RuntimeFileSchema.swift](../../Sources/ProxyKernel/Support/RuntimeFileSchema.swift)
+to the shared resource policy. Its retained bytes enter one typed document decode.
 
-Does not prove: final-parser parity, bounded typed expansion, writer admission,
-real-machine startup or release readiness.
+[RuntimeConfigurationFileReader.swift](../../Sources/ProxyKernel/Support/RuntimeConfigurationFileReader.swift)
+bounds actual reads at 8 MiB. [ProxyConfigPersistence.swift](../../Sources/ProxyKernel/Support/ProxyConfigPersistence.swift)
+adopts the gate for load, migration and import; legacy components use the same
+frozen document. AppState import checks the schema before editor assignment, and
+pm-proxy argv input uses the same format gate. Candidates are staged before
+migration writes. Rejected source bytes are preserved.
+
+[ConfigurationFileBoundaryTests.swift](../../Tests/ConduitTests/ConfigurationFileBoundaryTests.swift),
+[ConfigurationFileGateTests.swift](../../Tests/ConduitTests/ConfigurationFileGateTests.swift),
+[ConfigurationFileReaderTests.swift](../../Tests/ConduitTests/ConfigurationFileReaderTests.swift),
+[BoundedJSONByteCursorTests.swift](../../Tests/ConduitTests/BoundedJSONByteCursorTests.swift),
+the AppState harness and `pm-sim config-file-boundary` exercise these adapters.
+They pin escaped duplicate keys, malformed ignored values, valid ignored huge
+exponents, resource parity, the actual decoder's depth boundary and unchanged
+rejected originals. See the [combined verification record](../verification-configuration-boundary-2026-10-24.md).
+
+This implements runtime-file grammar, not a new sidecar/journal grammar or cap.
+Does not prove: owner/real-machine startup validation, global working-memory bounds,
+writer admission or release readiness.
 
 ## Open questions
 

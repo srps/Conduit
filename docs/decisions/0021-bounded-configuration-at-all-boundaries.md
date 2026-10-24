@@ -114,12 +114,17 @@ of global admission, physical write quiescence or running-app memory.
 
 ## Implementation evidence
 
-Reader foundation, not adoption: [RuntimeConfigurationFileReader.swift](../../Sources/ProxyKernel/Support/RuntimeConfigurationFileReader.swift)
-bounds actual reads at the selected 8 MiB, rejects nonregular opened descriptors,
-keeps the probe byte out of the returned buffer, and reports simultaneous read
-and close failures. [ConfigurationFileReaderTests.swift](../../Tests/ConduitTests/ConfigurationFileReaderTests.swift)
-passed 19 tests. Startup/reload/import still await the filter and caller adoption;
-this does not close all-boundary enforcement or memory/Stop-status acceptance.
+Runtime file adoption is implemented in
+[ProxyConfigPersistence.swift](../../Sources/ProxyKernel/Support/ProxyConfigPersistence.swift):
+load/reload, migration, import and pm-proxy argv input share a bounded regular-file
+reader and schema-aware filter. Known field checks precede typed expansion; unknown
+and later duplicate values retain strict grammar through the shared lexical cursor.
+Legacy extraction reuses one frozen document and stages candidates before writes.
+[ConfigurationFileBoundaryTests.swift](../../Tests/ConduitTests/ConfigurationFileBoundaryTests.swift),
+[ConfigurationFileGateTests.swift](../../Tests/ConduitTests/ConfigurationFileGateTests.swift)
+and [ScenarioConfigFileBoundary.swift](../../Sources/pm-sim/ScenarioConfigFileBoundary.swift)
+cover refusal and original-byte preservation. See the
+[combined verification record](../verification-configuration-boundary-2026-10-24.md).
 
 Partial, for the private request boundary and the kernel's typed check only:
 
@@ -131,12 +136,11 @@ Partial, for the private request boundary and the kernel's typed check only:
 
 "Encoded bytes" means the default output of `JSONEncoder`, counted without a buffer. The app's `ProxyBypassSyntax` uses the shared canonical byte counter, and tests pin it to the same boundary.
 
-Does not prove: startup, file load or import refusal with preserved bytes; runtime admission; global memory; writer coverage; control responsiveness; or complete startup/import boundary enforcement. No owner or real-machine validation is claimed.
-
-Earlier notes, before this slice: the local codec and probes motivated the choice but did not enforce these limits.
-
-Does not prove: exhaustive working-memory maxima, real-machine behavior, writer
-coverage, control responsiveness or complete startup/import boundary enforcement.
+Remaining: ordinary preferences browser-URL enforcement; platform/preferences raw-read
+bounds (no new physical cap or grammar selected here); global private-body admission;
+supported-case memory/latency; writer coverage and Stop/status responsiveness.
+Does not prove: complete all-boundary enforcement,
+working-memory maxima, actual write quiescence or real-machine behavior.
 
 ## Open questions
 

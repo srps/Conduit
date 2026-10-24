@@ -113,7 +113,8 @@ not a requirement to finish every event or property test before extraction:
    PR #227 merged the private scanner and one shared typed resource traversal
    at `f427255`, with hosted Swift and CodeQL passing. Automated Codex reviews
    failed to run and supply no review evidence; Claude and Codex source review
-   accompanied the local workflow checks. Startup/import adoption remains in progress. Open gates:
+   accompanied the local workflow checks. Runtime-file startup/import adoption is
+   implemented locally through the shared lexical/resource policy. Open gates:
    measured memory/capacity/latency and complete writer coverage under
    the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
    listener handoff, and measured bounds and shutdown. Before adopting the
@@ -128,17 +129,18 @@ not a requirement to finish every event or property test before extraction:
    adapters. Shared constants and parity tests do not complete that requirement.
    File grammar is selected in [0024](./docs/decisions/0024-strict-configuration-file-grammar.md):
    strict syntax, UTF-8 and Unicode even in discarded values; valid unknown fields
-   and first-key-wins remain. The shared strict cursor and fixed-cap regular-file
-   reader are committed locally, with 537 focused tests passing before caller
-   adoption. The file filter and startup/import integration are in progress;
-   preservation of rejected originals remains an adoption gate. The next store/client
+   and first-key-wins remain. The shared strict cursor, fixed-cap regular-file
+   reader and filter are adopted by runtime load/migration/import/argv input,
+   preserving rejected originals. The integrated focused suite passed 697 tests;
+   the full Swift suite passed 2846 tests with two skips. See the
+   [verification record](./docs/verification-configuration-boundary-2026-10-24.md).
+   Normal preferences browser-URL enforcement and sidecar raw-read bounds remain open. The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding
    a mixed runtime/platform apply until required inputs verify in
    [0025](./docs/decisions/0025-hold-mixed-configuration-apply.md); the gate remains
    planned, with independent effect groups deferred. Exact schema-two
-   staging and safe duration conversions are also committed locally, with 440
-   focused tests before integration. These counts do not establish a verified
+   staging and safe duration conversions are also committed locally. These counts do not establish a verified
    asynchronous store, read-back receipts, writer coverage or release readiness.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.

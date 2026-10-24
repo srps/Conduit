@@ -47,5 +47,5 @@ Each record carries three statuses, because merged does not mean it works:
 | [0021](0021-bounded-configuration-at-all-boundaries.md) | Bound configuration resources at update and startup boundaries | accepted | partial | none |
 | [0022](0022-configuration-identity-path-and-host-bounds.md) | Complete identity, path and host configuration bounds | accepted | partial | none |
 | [0023](0023-exact-schema-two-persistence.md) | Keep schema two and refuse inexact committed durations | accepted | partial | none |
-| [0024](0024-strict-configuration-file-grammar.md) | Strict syntax and Unicode throughout configuration files | accepted | partial | none |
+| [0024](0024-strict-configuration-file-grammar.md) | Strict syntax and Unicode throughout configuration files | accepted | implemented | none |
 | [0025](0025-hold-mixed-configuration-apply.md) | Hold a mixed configuration apply until required inputs verify | accepted | planned | none |

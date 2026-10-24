@@ -2,8 +2,8 @@
 
 Status: architecture reviewed with Claude Code using the owner's claude.ai Max
 subscription. Strict grammar is accepted in [0024](decisions/0024-strict-configuration-file-grammar.md).
-Cursor/reader foundations are implemented locally (537 focused tests passed);
-file filtering and adoption remain planned. This is an implementation design, not another execution queue.
+Cursor, reader, filter and runtime-load/import/argv adoption are implemented locally.
+The combined focused suite passed 697 tests; see the [verification record](verification-configuration-boundary-2026-10-24.md). This is an implementation design, not another execution queue.
 
 ## Ownership and operations
 
@@ -49,8 +49,8 @@ migration write, retaining the existing write order.
 
 ## Adoption and evidence
 
-Replace the runtime `Data(contentsOf:)` read, legacy extraction path rereads,
-AppState's raw import decoder and argv's separate migration behavior. Keep import
+The gate replaces the runtime `Data(contentsOf:)` read, legacy extraction path rereads,
+AppState's raw import decoder and argv's separate migration behavior. Import remains
 runtime-only. Newer schemas fail through the same file-format gate before editor
 assignment. Ordinary saves check resources before encoding and use the selected
 exact schema-two staging; save/apply coordination stays with the forthcoming sole
@@ -65,5 +65,7 @@ that does not justify duplicating policy or delaying early refusal.
 
 The [pre-change witnesses](experiments/config-file-preflight/README.md) establish
 ignored-value tolerance and a limited Foundation depth observation. Pin depth
-against the actual file decoder. Neither those probes nor the planned APIs prove
-memory/RSS bounds, complete adoption or release readiness.
+against the actual file decoder. Those probes do not prove
+memory/RSS bounds or release readiness. Ordinary platform/preferences sidecar reads
+remain unbounded; no new sidecar/journal grammar or physical cap is selected here.
+The normal preferences browser-URL boundary also remains to be completed.
