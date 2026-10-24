@@ -18,7 +18,10 @@ import Foundation
 ///
 /// A mutation is sent once. A submit whose send may have happened and whose answer is lost is
 /// `admissionUnknown`, and the client never resends it.
-package struct FramedRuntimeClient: RuntimeClient {
+///
+/// Callers never name this type. `makeFramedRuntimeClient` is the one package seam and returns
+/// `any RuntimeClient`, so this concrete adapter stays file-private and no other target depends on it.
+private struct FramedRuntimeClient: RuntimeClient {
     private let transport: any ControlRuntimeTransport
     private let limits: ControlFrameLimits
     private let wireBudgetCap: Duration
@@ -26,12 +29,12 @@ package struct FramedRuntimeClient: RuntimeClient {
     private let makeCorrelation: @Sendable () -> ControlRequestID
 
     /// Refuses a budget cap that is not positive. `limits` is validated when it is built.
-    package init(
+    init(
         transport: any ControlRuntimeTransport,
         limits: ControlFrameLimits,
         wireBudgetCap: Duration,
-        now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
-        makeCorrelation: @escaping @Sendable () -> ControlRequestID = { ControlRequestID(rawValue: UUID()) }
+        now: @escaping @Sendable () -> ContinuousClock.Instant,
+        makeCorrelation: @escaping @Sendable () -> ControlRequestID
     ) throws {
         guard wireBudgetCap > .zero else { throw ControlRuntimeWireError.invalidValue }
         self.transport = transport
@@ -45,7 +48,7 @@ package struct FramedRuntimeClient: RuntimeClient {
 
     /// A submit's correlation is its request ID, so a reply names the request it answers. It is never
     /// resent. A send that may have happened and whose answer is lost is `admissionUnknown`.
-    package func submit(
+    func submit(
         _ command: ControlRuntimeCommand,
         requestID: ControlRequestID,
         expectedIncarnation: ControlHostIncarnation,
@@ -67,7 +70,7 @@ package struct FramedRuntimeClient: RuntimeClient {
         }
     }
 
-    package func lookupAdmission(
+    func lookupAdmission(
         of requestID: ControlRequestID,
         expectedIncarnation: ControlHostIncarnation,
         deadline: RuntimeDeadline
@@ -87,7 +90,7 @@ package struct FramedRuntimeClient: RuntimeClient {
         }
     }
 
-    package func outcome(
+    func outcome(
         of operation: ControlOperationID,
         expectedIncarnation: ControlHostIncarnation,
         deadline: RuntimeDeadline
@@ -109,7 +112,7 @@ package struct FramedRuntimeClient: RuntimeClient {
 
     // MARK: - Reads and subscriptions
 
-    package func readPage(_ request: ControlPageRequest, deadline: RuntimeDeadline) async throws -> ControlPageReply {
+    func readPage(_ request: ControlPageRequest, deadline: RuntimeDeadline) async throws -> ControlPageReply {
         do {
             let response = try await exchange(.readPage(request), correlation: makeCorrelation(), expecting: .page, deadline: deadline)
             guard case .page(let reply) = response else { throw ExchangeFailure.invalidReply }
@@ -119,7 +122,7 @@ package struct FramedRuntimeClient: RuntimeClient {
         }
     }
 
-    package func readSnapshot(deadline: RuntimeDeadline) async throws -> ControlRuntimeSnapshot {
+    func readSnapshot(deadline: RuntimeDeadline) async throws -> ControlRuntimeSnapshot {
         do {
             let response = try await exchange(.readSnapshot, correlation: makeCorrelation(), expecting: .snapshot, deadline: deadline)
             guard case .snapshot(let snapshot) = response else { throw ExchangeFailure.invalidReply }
@@ -130,7 +133,7 @@ package struct FramedRuntimeClient: RuntimeClient {
     }
 
     /// Opens one stream. The subscription mints its own correlation, and every frame must answer it.
-    package func subscribe(_ request: ControlSubscriptionRequest, deadline: RuntimeDeadline) async throws -> RuntimeSubscription {
+    func subscribe(_ request: ControlSubscriptionRequest, deadline: RuntimeDeadline) async throws -> RuntimeSubscription {
         let correlation = makeCorrelation()
         let frame = try encodeRequest(.subscribe(request), correlation: correlation)
         if let end = notLiveEnd(deadline) {
@@ -223,6 +226,26 @@ package struct FramedRuntimeClient: RuntimeClient {
     private func wireCode(_ error: any Error) -> ControlRuntimeErrorCode {
         (error as? ControlRuntimeWireError)?.code ?? .invalidValue
     }
+}
+
+/// The one package seam for the framed client. It constructs the private adapter and returns it as the
+/// protocol. It is the only place construction policy is defined. `now` defaults to the monotonic clock,
+/// and `makeCorrelation` defaults to a fresh UUID. The adapter refuses a `wireBudgetCap` that is not
+/// positive, and that refusal is thrown from here.
+package func makeFramedRuntimeClient(
+    transport: any ControlRuntimeTransport,
+    limits: ControlFrameLimits,
+    wireBudgetCap: Duration,
+    now: @escaping @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+    makeCorrelation: @escaping @Sendable () -> ControlRequestID = { ControlRequestID(rawValue: UUID()) }
+) throws -> any RuntimeClient {
+    try FramedRuntimeClient(
+        transport: transport,
+        limits: limits,
+        wireBudgetCap: wireBudgetCap,
+        now: now,
+        makeCorrelation: makeCorrelation
+    )
 }
 
 // MARK: - Failure mapping

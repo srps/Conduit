@@ -80,9 +80,9 @@ final class FramedRuntimeClientTests: XCTestCase {
         wireBudgetCap: Duration = .seconds(60),
         epoch: ContinuousClock.Instant,
         now: (@Sendable () -> ContinuousClock.Instant)? = nil
-    ) throws -> FramedRuntimeClient {
+    ) throws -> any RuntimeClient {
         let minted = self.minted
-        return try FramedRuntimeClient(
+        return try makeFramedRuntimeClient(
             transport: transport,
             limits: limits ?? self.limits,
             wireBudgetCap: wireBudgetCap,
@@ -834,8 +834,8 @@ final class FramedRuntimeClientTests: XCTestCase {
     }
 
     func testConstructionRefusesABudgetCapThatIsNotPositive() throws {
-        XCTAssertThrowsError(try FramedRuntimeClient(transport: ScriptedTransport(), limits: limits, wireBudgetCap: .zero))
-        XCTAssertThrowsError(try FramedRuntimeClient(transport: ScriptedTransport(), limits: limits, wireBudgetCap: .seconds(-1)))
+        XCTAssertThrowsError(try makeFramedRuntimeClient(transport: ScriptedTransport(), limits: limits, wireBudgetCap: .zero))
+        XCTAssertThrowsError(try makeFramedRuntimeClient(transport: ScriptedTransport(), limits: limits, wireBudgetCap: .seconds(-1)))
         XCTAssertThrowsError(try ControlFrameLimits(maxFrameBytes: 1))
     }
 }

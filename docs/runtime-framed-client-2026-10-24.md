@@ -10,7 +10,8 @@ private configuration, AppState adoption or production socket.
   request frame, the explicit `ControlFrameLimits` for the reply, and the caller's `RuntimeDeadline`.
   `ControlRuntimeStream.next` returns one complete frame, with its line feed. `cancel` is idempotent
   and never stops the host. `ControlRuntimeTransportFailure` is `notSent` or `sent`.
-- `FramedRuntimeClient` (`FramedRuntimeClient.swift`): the same v2 codec for every message.
+- `makeFramedRuntimeClient` (`FramedRuntimeClient.swift`): the one package seam. It returns `any RuntimeClient`
+  and constructs the file-private `FramedRuntimeClient` adapter, which runs the same v2 codec for every message.
   `ControlRuntimeCodec.decodeFullFrame` is the one full-frame check. It enforces size before parsing,
   one trailing line feed, and no second frame.
 - Timers: the transport owns every wait and timer. The client checks the deadline once before a send,
@@ -71,9 +72,11 @@ Three narrow corrections. They touch only `FramedRuntimeClient`, the `wireBudget
   before the transport is called. A cancelled task is `notSent(.cancelled)`, checked first. The budget reads the clock
   once per call, and the live check after encoding reads it again, so an expiry in between sends nothing.
   `readPage`, `readSnapshot` and `subscribe` carry no budget and keep the absolute-deadline check.
-- `decodeFullFrame` scans the payload once. It keeps the size check and the required single trailing line feed. Then
-  `decodeFrame` refuses any line feed left in the payload, as it did before. Priority is unchanged: size, trailing
-  feed, payload line feed, then version, kind and body.
+- `decodeFullFrame` keeps the size check and the required single trailing line feed. Then `decodeFrame` makes one
+  interior line-feed scan of the payload and refuses any line feed it finds, as it did before. Priority is unchanged:
+  size, trailing feed, payload line feed, then version, kind and body. The strict JSON walk and Foundation's
+  `JSONDecoder` still traverse the JSON bytes after that scan, so this is one scan for line feeds, not a single pass
+  over the whole decode.
 
 Limits of these claims:
 
@@ -84,6 +87,16 @@ Limits of these claims:
   deadline and owns the wait.
 - No host zero-budget policy is defined, and the wire schema is unchanged. Zero is still a valid wire value. This
   client just never sends it.
+
+## Package seam (module-boundary correction)
+
+The concrete adapter is no longer a `package` type. `FramedRuntimeClient` is file-private, and its initializer and
+protocol methods are internal to that file, not `package`. The only package declaration in the file is
+`makeFramedRuntimeClient(transport:limits:wireBudgetCap:now:makeCorrelation:) throws -> any RuntimeClient`. It owns the
+defaults for `now` and `makeCorrelation`, and it refuses a non-positive `wireBudgetCap`. The adapter's initializer has no
+defaults. The framed-client tests and `pm-sim
+framed-runtime-client` construct through it, and their helper returns `any RuntimeClient`. No other target names
+the adapter. No behavior, wire, host, store or policy changed, and no test was added to mirror the implementation.
 
 ## Verification
 
@@ -109,6 +122,17 @@ clock fixture. It used the same wrapper and overwrote the logs in `framed-client
 - `swift build`: complete, with no compiler warnings in the changed files.
 - Focused `swift test`: 163 tests, 0 failures (0 unexpected). `FramedRuntimeClientTests` ran 33 of 33, which is the
   26 from the freeze run plus 7 new methods. `ControlRuntimeStrictJSONTests` ran 6 of 6.
+- `check-kernel-imports.py`: passed (103 Swift files).
+- `check-event-catalogue.py`: passed (207 event names).
+- `check-decisions.py --require-history`: passed.
+- `pm-sim framed-runtime-client`: PASS, 10 of 10 assertions.
+
+Module-boundary correction run, 2026-10-24, on the final source after the package seam, with defaults only on
+`makeFramedRuntimeClient`. It used the same wrapper and overwrote the logs. The script printed PASS.
+
+- `swift build`: complete, with no warnings in `build.log`.
+- Focused `swift test`: 163 tests, 0 failures (0 unexpected). `FramedRuntimeClientTests` ran 33 of 33 and
+  `ControlRuntimeStrictJSONTests` ran 6 of 6.
 - `check-kernel-imports.py`: passed (103 Swift files).
 - `check-event-catalogue.py`: passed (207 event names).
 - `check-decisions.py --require-history`: passed.

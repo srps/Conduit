@@ -21,7 +21,7 @@ enum FramedRuntimeClientScenario {
         let host = FramedSimHost(incarnation: incarnation)
         let epoch = ContinuousClock.now
         let deadline = RuntimeDeadline.after(.seconds(5), from: epoch)
-        let client = try FramedRuntimeClient(
+        let client = try makeFramedRuntimeClient(
             transport: host,
             limits: try ControlFrameLimits(maxFrameBytes: 64 * 1024),
             wireBudgetCap: .seconds(60),
@@ -55,7 +55,7 @@ enum FramedRuntimeClientScenario {
         host.refuse(with: nil)
 
         // An oversize request is refused locally, so the host sees no new request.
-        let small = try FramedRuntimeClient(
+        let small = try makeFramedRuntimeClient(
             transport: host,
             limits: try ControlFrameLimits(maxFrameBytes: 64),
             wireBudgetCap: .seconds(60),
