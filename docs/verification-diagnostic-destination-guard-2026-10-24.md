@@ -165,3 +165,7 @@ reconciled against this 158 beyond the per-suite counts above.
 After Claude's158-test/9-assertion focused checkpoint, Codex executed the [actual pm-proxy loopback probe](experiments/diagnostic-destination/README.md): two local HTTP requests succeeded despite an audit-on-config refusal, one refusal event was emitted, config bytes stayed unchanged, and the child stopped normally. The initial probe's EOF assumption timed out and was corrected; only the successful bounded-response run is counted.
 
 After stacking over the private-codec branch's existing pm-sim-to-Bridge edge, the diagnostic simulator uses the production bridge factory instead of a copied protected-resource mapping. Fixture cleanup errors are surfaced instead of discarded. Final integrated checks follow these source edits; earlier focused results do not cover those edits.
+
+## Full integrated workflow checkpoint
+
+Codex ran all39 workflow-equivalent commands on stable relevant source after the production-mapping follow-up, independently of the unadopted private codec. All tests,87 simulator results and perf passed. The run's numeric test/perf totals and fingerprint are attached in the PR body below publication; no deployment or owner validation is implied. The source includes the preceding lease foundation but neither feature is adopted as a configuration writer. Hosted checks remain due.
