@@ -19,8 +19,10 @@ source text:
    name at run time. It must be one of BUILT_NAMES, whose assembling
    expression must still read as recorded, and whose produced names are read
    from the calls that feed it and compared both ways with the names the
-   entry lists. NOT_EVENTS lists literals in event families that are not event
-   names (file names, hosts, config keys, symbols).
+   entry lists. A `+` chain of plain literals is folded first and read as the
+   name it spells, so `"lifecycle" + "." + "superseded"` is checked as a whole.
+   NOT_EVENTS lists literals in event families that are not event names (file
+   names, hosts, config keys, symbols).
 
 The catalogue is the first column of the tables under "## Event catalogue":
 every backticked token there is a full event name. A row containing
@@ -41,6 +43,10 @@ Blind spots. The check is a heuristic over literals, not over what runs:
   `[family, what].joined(separator: ".")`, or a prefix held in a constant and
   a rawValue `"started"`), and a name in a family the catalogue does not use
   yet that never sits at an `event:` label, are not seen;
+- a `+` chain is folded only across plain literals: past a variable, the
+  chain's concrete prefix is read but the variable's part is not, so
+  `"lifecycle" + "." + suffix` is caught as the closed `lifecycle.` prefix while
+  the name `suffix` supplies is not;
 - any literal in an event family counts as an emitter: an unrelated string
   such as a test host `"auth.example.test"` fails until it is listed in
   NOT_EVENTS, and an event name kept in product code only as a consumer
@@ -55,6 +61,12 @@ Blind spots. The check is a heuristic over literals, not over what runs:
 - names in Tests/ are not read, and the `kind` a name is emitted with is not
   compared with the catalogue section it sits in.
 All need a reviewer until #180 makes names a type.
+
+Authority. This is a static check over the recognised forms only: plain, raw and
+escaped literals, interpolations, and `+` chains of literals. It does not prove what
+a computed string is. The run-time precondition behind the legacy RuntimeEvent init
+(which calls RuntimeEventPayload.requiresTypedPayload) stays the authority; this gate
+stops the recognised forms from reaching it unreviewed.
 
 Typed families (decision 0013). The `lifecycle.*` names with a typed value are
 pinned in TYPED_NAMES below and must match `LifecycleEventName` in
@@ -348,6 +360,61 @@ def literals(tokens):
             after += 1
         plus = (before >= 0 and is_punct(tokens[before], '+')) or (after < len(tokens) and is_punct(tokens[after], '+'))
         found.append(Literal(token.text, token.interpolated or plus, index in labelled, token.line))
+    return found + concatenations(tokens, labelled)
+
+
+def at(tokens, index):
+    return tokens[index] if 0 <= index < len(tokens) else None
+
+
+def chain_continues(tokens, index):
+    """Whether the plain string at `index` follows a plain string through a `+`."""
+    before = index - 1
+    while is_punct(at(tokens, before), '('):
+        before -= 1
+    if not is_punct(at(tokens, before), '+'):
+        return False
+    before -= 1
+    while is_punct(at(tokens, before), ')'):
+        before -= 1
+    previous = at(tokens, before)
+    return previous is not None and previous.kind == 'str' and not previous.interpolated
+
+
+def chain_from(tokens, start):
+    """The text a `+` chain of plain strings from `start` spells, the index of its
+    last string, and whether the chain goes on into a piece that is not a plain string."""
+    text, last = tokens[start].text, start
+    while True:
+        plus = last + 1
+        while is_punct(at(tokens, plus), ')'):
+            plus += 1
+        if not is_punct(at(tokens, plus), '+'):
+            return text, last, False
+        piece = plus + 1
+        while is_punct(at(tokens, piece), '('):
+            piece += 1
+        token = at(tokens, piece)
+        if token is None or token.kind != 'str' or token.interpolated:
+            return text, last, True
+        text, last = text + token.text, piece
+
+
+def concatenations(tokens, labelled):
+    """Names split across `+` pieces, as the literal each spells. Plain pieces are folded,
+    so `"lifecycle" + "." + "superseded"` is `lifecycle.superseded` however it is written,
+    raw or escaped. A chain that goes on into a non-literal piece is folded as far as it
+    goes and marked built, like an interpolation, so its concrete prefix is still checked."""
+    found = []
+    for index, token in enumerate(tokens):
+        if token.kind != 'str' or token.interpolated or chain_continues(tokens, index):
+            continue
+        text, last, open_chain = chain_from(tokens, index)
+        if last == index:
+            continue  # one piece: literals() already judged it
+        if open_chain:
+            text += '\\(…)'
+        found.append(Literal(text, open_chain, index in labelled, token.line))
     return found
 
 

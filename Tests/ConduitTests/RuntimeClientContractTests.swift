@@ -235,33 +235,46 @@ final class RuntimeClientContractTests: XCTestCase {
 
     // MARK: - Client protocol and subscription handle
 
-    func testAClientThatCannotRunACommandRejectsItRatherThanPretendingSuccess() async throws {
-        let client: any RuntimeClient = RefusingRuntimeClient()
+    func testANoTransportClientRefusesEveryCallAsNotSent() async {
+        // Compile conformance only: this stand-in shows the protocol can be met without a
+        // transport. It is not production behaviour. It sends nothing, so every call is
+        // refused as not sent and none carries a host's answer. A refused lookup says nothing
+        // about whether an earlier submit ran; only a live host can answer that.
+        let client: any RuntimeClient = NoTransportRuntimeClient()
         let deadline = RuntimeDeadline.after(.seconds(1), from: ContinuousClock.now)
-        let admission = try await client.submit(
-            .stop(.dns),
-            requestID: ControlRequestID(rawValue: uuid(9)),
-            expectedIncarnation: incarnation(1),
-            deadline: deadline
-        )
-        XCTAssertEqual(admission, .rejected(.notImplemented))
+        let requestID = ControlRequestID(rawValue: uuid(9))
+        let operationID = ControlOperationID(rawValue: uuid(9))
 
-        let recovered = try await client.lookupAdmission(
-            of: ControlRequestID(rawValue: uuid(9)), expectedIncarnation: incarnation(1), deadline: deadline
-        )
-        XCTAssertEqual(recovered, .unknown(.notRecorded))
-
-        let lookup = try await client.outcome(
-            of: ControlOperationID(rawValue: uuid(9)), expectedIncarnation: incarnation(1), deadline: deadline
-        )
-        XCTAssertEqual(lookup, .unknown(.notRecorded))
-
-        // With no transport, a snapshot read is refused as not sent, never as a reply.
-        do {
+        await assertNotSent {
+            _ = try await client.submit(.stop(.dns), requestID: requestID, expectedIncarnation: incarnation(1), deadline: deadline)
+        }
+        await assertNotSent {
+            _ = try await client.lookupAdmission(of: requestID, expectedIncarnation: incarnation(1), deadline: deadline)
+        }
+        await assertNotSent {
+            _ = try await client.outcome(of: operationID, expectedIncarnation: incarnation(1), deadline: deadline)
+        }
+        await assertNotSent {
+            _ = try await client.subscribe(.live, deadline: deadline)
+        }
+        await assertNotSent {
+            _ = try await client.readPage(ControlPageRequest(expectedIncarnation: incarnation(1), collection: .upstreamHealth), deadline: deadline)
+        }
+        await assertNotSent {
             _ = try await client.readSnapshot(deadline: deadline)
-            XCTFail("a client with no transport must not return a snapshot")
+        }
+    }
+
+    private func assertNotSent<T>(
+        _ call: () async throws -> T,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await call()
+            XCTFail("a client with no transport must not return an answer", file: file, line: line)
         } catch {
-            XCTAssertEqual(error as? RuntimeClientError, .notSent(.disconnected))
+            XCTAssertEqual(error as? RuntimeClientError, .notSent(.disconnected), file: file, line: line)
         }
     }
 
@@ -401,15 +414,16 @@ final class RuntimeClientContractTests: XCTestCase {
     }
 }
 
-/// A client that admits nothing. It exercises the protocol without any transport.
-private struct RefusingRuntimeClient: RuntimeClient {
+/// A client with no transport. Every call is refused as not sent, so it answers nothing. It
+/// shows the protocol can be met without a transport; it is not production behaviour.
+private struct NoTransportRuntimeClient: RuntimeClient {
     func submit(
         _ command: ControlRuntimeCommand,
         requestID: ControlRequestID,
         expectedIncarnation: ControlHostIncarnation,
         deadline: RuntimeDeadline
     ) async throws -> ControlAdmission {
-        .rejected(.notImplemented)
+        throw RuntimeClientError.notSent(.disconnected)
     }
 
     func lookupAdmission(
@@ -417,7 +431,7 @@ private struct RefusingRuntimeClient: RuntimeClient {
         expectedIncarnation: ControlHostIncarnation,
         deadline: RuntimeDeadline
     ) async throws -> ControlRequestLookup {
-        .unknown(.notRecorded)
+        throw RuntimeClientError.notSent(.disconnected)
     }
 
     func outcome(
@@ -425,15 +439,15 @@ private struct RefusingRuntimeClient: RuntimeClient {
         expectedIncarnation: ControlHostIncarnation,
         deadline: RuntimeDeadline
     ) async throws -> ControlOperationLookup {
-        .unknown(.notRecorded)
+        throw RuntimeClientError.notSent(.disconnected)
     }
 
     func subscribe(_ request: ControlSubscriptionRequest, deadline: RuntimeDeadline) async throws -> RuntimeSubscription {
-        throw RuntimeClientError.wire(.unsupportedVersion)
+        throw RuntimeClientError.notSent(.disconnected)
     }
 
     func readPage(_ request: ControlPageRequest, deadline: RuntimeDeadline) async throws -> ControlPageReply {
-        throw RuntimeClientError.unexpectedReply
+        throw RuntimeClientError.notSent(.disconnected)
     }
 
     func readSnapshot(deadline: RuntimeDeadline) async throws -> ControlRuntimeSnapshot {

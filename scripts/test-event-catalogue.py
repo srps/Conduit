@@ -181,6 +181,18 @@ rejected = [
     ('version_changed case dropped from the typed inventory',
      replace(TYPED, 'case versionChanged = "lifecycle.version_changed"\n', ''),
      'LifecycleEventName lists'),
+    ('typed name split across literals in the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle" + "." + "superseded", detail: "x")'),
+     '`lifecycle.superseded` is a typed name'),
+    ('typed name split across raw literals in the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: #"lifecycle"# + "." + #"superseded"#, detail: "x")'),
+     '`lifecycle.superseded` is a typed name'),
+    ('typed name split with an escaped piece in the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle" + "\\u{2E}superseded", detail: "x")'),
+     '`lifecycle.superseded` is a typed name'),
+    ('closed lifecycle prefix split across literals, suffix from a variable',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .lifecycle, event: "lifecycle" + "." + suffix, detail: "x")'),
+     '`lifecycle.\\(…)` is in the closed lifecycle namespace'),
 ]
 
 accepted = [
@@ -202,6 +214,9 @@ accepted = [
     ('message text in an event family', append(PRODUCT, 'let probe = "pac.refreshed \\(count) times"')),
     ('typed name in a comment', append(PRODUCT, '// lifecycle.superseded is emitted through its typed value')),
     ('typed name in a comment of a producer', append(UPDATES, '// lifecycle.version_changed is emitted through its typed value')),
+    ('human text split across literals', append(PRODUCT, 'let note = "Proxy started. " + "Retry in 5s."')),
+    ('lifecycle kind rawValue', append(PRODUCT, 'enum Probe: String { case lifecycle = "lifecycle" }')),
+    ('lifecycle words split across literals as human text', append(PRODUCT, 'let note = "lifecycle " + "is idle"')),
 ]
 
 
