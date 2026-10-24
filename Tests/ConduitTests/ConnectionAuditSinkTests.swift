@@ -133,7 +133,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
 
     func testRecordsAreAppendedAsNDJSON() throws {
         let url = tempDirectory.appendingPathComponent("audit.ndjson")
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 1_000_000, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 1_000_000, logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
 
         let r1 = sampleRecord(target: "a.example:443")
         let r2 = sampleRecord(target: "b.example:443")
@@ -158,7 +159,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
         // characters by default; this test pins the assumption so a future
         // encoder swap that drops escaping is caught.
         let url = tempDirectory.appendingPathComponent("audit.ndjson")
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 1_000_000, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 1_000_000, logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
 
         let weird = sampleRecord(target: "host\nwith\nnewlines:443")
         sink.record(weird)
@@ -176,7 +178,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
         // Each sample record serializes to ~280 bytes after newline.
         // Cap at 600 — file should never exceed that even after many
         // writes.
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 600, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 600, logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         for i in 0..<20 {
             sink.record(sampleRecord(target: "host-\(i):443"))
         }
@@ -191,7 +194,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
         // the first-ever record from process boot, so this is the right
         // direction.
         let url = tempDirectory.appendingPathComponent("audit.ndjson")
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 600, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 600, logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         for i in 0..<20 {
             sink.record(sampleRecord(target: "host-\(i):443"))
         }
@@ -208,7 +212,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
         // partial leading line. Decoding all lines proves no JSON parse
         // errors from a half-truncated record.
         let url = tempDirectory.appendingPathComponent("audit.ndjson")
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 800, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 800, logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         for i in 0..<20 {
             sink.record(sampleRecord(target: "host-\(i):443"))
         }
@@ -229,7 +234,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
 
     func testRecordsAreFlushedSynchronouslyOnFlush() throws {
         let url = tempDirectory.appendingPathComponent("audit.ndjson")
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 1_000_000, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 1_000_000, logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         sink.record(sampleRecord(target: "sync.example:443"))
         sink.flush()
         let contents = try String(contentsOf: url, encoding: .utf8)
@@ -244,7 +250,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
         // same time. The sink must serialize internally so each line of
         // NDJSON is intact (no interleaved bytes mid-record).
         let url = tempDirectory.appendingPathComponent("audit.ndjson")
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 5_000_000, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 5_000_000, logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
 
         let writeCount = 100
         let group = DispatchGroup()
@@ -283,7 +290,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
             .appendingPathComponent("nested")
             .appendingPathComponent("subdir")
             .appendingPathComponent("audit.ndjson")
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 1_000_000, logger: DiscardingLogSink())
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 1_000_000, logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         sink.record(sampleRecord(target: "lazy.example:443"))
         sink.flush()
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path),
@@ -296,7 +304,8 @@ final class FileConnectionAuditSinkTests: XCTestCase {
         // a single record.
         let url = tempDirectory.appendingPathComponent("audit.ndjson")
         let logger = RecordingLogSink(minLevel: .debug)
-        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 100, logger: logger)
+        let sink = FileConnectionAuditSink(fileURL: url, maxBytes: 100, logger: logger,
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         sink.record(sampleRecord(target: "this.target.is.long.enough.to.exceed.the.tiny.cap:443"))
         sink.flush()
         let warnings = logger.entries().filter { $0.level == .warning }

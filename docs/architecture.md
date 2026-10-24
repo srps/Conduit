@@ -47,6 +47,8 @@ Line and test counts are not kept here. `swift test` and `find Sources -name '*.
 
 ## Target Dependency Graph
 
+pm-sim uses the existing ProxyControlBridge target to exercise production protected-diagnostic-resource composition rather than duplicating its mapping. This adds no external dependency or kernel-to-control edge.
+
 The load-bearing invariant: `pm-proxy` does **not** depend on `PlatformMac`. CI enforces the kernel import and `Process` fence, using the Swift compiler's own parse and the built object, with [`scripts/check-kernel-imports.py`](../scripts/check-kernel-imports.py). Linking alone cannot catch a stray Apple-framework import; Linux portability is not a current goal.
 
 ```mermaid
@@ -97,6 +99,7 @@ graph TD
     App --> Platform
     App --> Shared
     App --> Events
+    App --> Bridge
 
     Runtime --> Kernel
     Runtime --> Auth
@@ -126,6 +129,7 @@ graph TD
     PMSim --> Kernel
     PMSim --> Auth
     PMSim --> PAC
+    PMSim --> Bridge
     PMSim --> Platform
     PMSim --> Shared
     PMSim --> Events
@@ -170,7 +174,7 @@ graph TD
 | `ConduitRuntime` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
 | `ConduitUpdater`       | —           | —         | —        | ✓           | ✓             | —             | —                  | — | —    |
 | `pm-proxy`             | ✓           | ✓         | ✓        | —           | ✓             | —             | ✓                  | — | —    |
-| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | —                  | — | ✓    |
+| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | — | ✓    |
 | `pm-tunnel`            | ✓           | ✓         | —        | —           | —             | —             | —                  | — | —    |
 | `pm-dns`               | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
 | `pmctl`                | —           | —         | —        | —           | ✓             | —             | —                  | — | —    |
@@ -191,7 +195,7 @@ The matrix lists **direct** dependencies declared in `Package.swift`. `ConduitUp
 - **`ConduitShared`** — zero-dependency wire contracts. The helper IPC (`HelperCommand`, `HelperRequest`, `HelperResponse`, input validation) is imported by the app and the helper so they can't drift. The control protocol carries the v1 socket types and the v2 runtime values (`ControlRuntime*.swift`), frame codec and `RuntimeClient` protocol (`RuntimeClient.swift`). The v2 files are stage-1 foundation only (decision 0014): there is no in-memory client, admission or subscription engine, and no production v2 socket. Helper IPC and v1 control keep their own versions.
 - **`ProxyKernel`** — portable library: proxy server, connection pool, PAC routing engine, DNS forwarder, transparent TCP proxy, tunnel forwarder, auto-recovery ladder, health checks, VPN state fusion, upstream probing, routing decisions, metadata blocklist, kernel-side abstractions. Imports only Foundation, Dispatch, NIO modules, Darwin/Glibc, `ConduitShared` (domain-name grammar) and `RuntimeEvents` (typed event values). CI runs `scripts/check-kernel-imports.py` to enforce this allowlist; `Process` is unavailable inside the kernel, and the script rejects a qualified `Foundation.Process` in the built object.
 - **`RuntimeEvents`** — Foundation-only typed event values (decision 0013), with no dependencies. `LifecycleEvent` types the four `lifecycle.*` names with closed operation and reason enums and numeric fields; `RuntimeEventPayload` is the envelope's `typed` value. `ProxyKernel` carries it on `RuntimeEvent`. The shapes and bounds are in [`events.md`](./events.md#typed-lifecycle-payloads). `scripts/check-kernel-imports.py` limits this target to Foundation.
-- **`ProxyControlBridge`** — maps kernel and `RuntimeEvents` values onto `ConduitShared` wire values, with exhaustive switches and no default cases. `ControlStatusMapping.swift` covers v1 status; `RuntimeEventControlProjection.swift` and `RuntimeSnapshotControlProjection.swift` cover the v2 values. Depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`.
+- **`ProxyControlBridge`** — maps kernel and `RuntimeEvents` values onto `ConduitShared` wire values, with exhaustive switches and no default cases. `ControlStatusMapping.swift` covers v1 status; `RuntimeEventControlProjection.swift` and `RuntimeSnapshotControlProjection.swift` cover the v2 values. `ProxyControlBridgeProtectedDiagnosticResources.swift` maps the runtime environment to the files a diagnostic writer must never write, including the control socket and daemon-ready names. Depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`.
 - **`ProxyAuth`** — opt-in capability layer. NTLM message generation (`NTLMAuth.swift`, CommonCrypto for MD4/HMAC-MD5), Kerberos/Negotiate (`KerberosAuth.swift`, GSS.framework), and `AuthenticatorFactory.swift` which assembles a `ProxyAuthenticator` from the active config + a `CredentialProvider`.
 - **`ProxyPAC`** — opt-in capability layer with the CFNetwork-backed `CFPACEvaluator` (`CFNetworkExecuteProxyAutoConfigurationScript` on a private CFRunLoop, paired with `CFPacScriptEvaluator`). This is the sole production `PacEvaluator` implementation after the CFNetwork evaluator graduated; the JavaScriptCore-backed resolver was removed.
 - **`PlatformMac`** — macOS-only glue. Keychain, `networksetup` wrappers, `SMAppService`, `SCDynamicStore`-based VPN monitor, `NWPathMonitor`, `/etc/resolver/*` writer, helper XPC client, shell runner, first-run example-corp preset injection. It depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`, and is linked by the GUI app, `ConduitDaemon`, `ConduitUpdater`, `pm-sim`, `pm-vpn-check` and `pm-tls-check`. `pm-proxy` does not link it.

@@ -118,20 +118,25 @@ package final class BoundedRecordWriter: @unchecked Sendable {
 
 /// Keeps a single current generation. Rotation truncates at a record boundary;
 /// it never loads the existing file into memory. The file never exceeds maxBytes.
+/// The destination guard admits the path before anything is created and the opened
+/// descriptor before any truncate or write (#222).
 package final class RotatingRecordFile: @unchecked Sendable {
     private let fileURL: URL
     private let maxBytes: Int
+    private let destinationGuard: any RecordFileDestinationGuarding
     private let counters = NIOLockedValueBox((bytes: UInt64(0), rotations: UInt64(0)))
     package var bytesWritten: UInt64 { counters.withLockedValue { $0.bytes } }
     package var rotationCount: UInt64 { counters.withLockedValue { $0.rotations } }
-    package init(fileURL: URL, maxBytes: Int) {
+    package init(fileURL: URL, maxBytes: Int, destinationGuard: any RecordFileDestinationGuarding) {
         precondition(maxBytes > 0)
         self.fileURL = fileURL
         self.maxBytes = maxBytes
+        self.destinationGuard = destinationGuard
     }
 
     // Called only by the owning writer's serial drain.
     package func append(_ records: [Data]) throws {
+        try destinationGuard.admit(destination: fileURL)
         try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: fileURL.path) {
@@ -141,6 +146,7 @@ package final class RotatingRecordFile: @unchecked Sendable {
         }
         let handle = try FileHandle(forUpdating: fileURL)
         do {
+            try destinationGuard.admit(openedDescriptor: handle.fileDescriptor, destination: fileURL)
             var offset = try handle.seekToEnd()
             if offset > 0 {
                 try handle.seek(toOffset: offset - 1)
