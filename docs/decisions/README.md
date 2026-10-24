@@ -46,3 +46,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0020](0020-canonical-runtime-writer-root.md) | Keep runtime persistence within one canonical writer root | accepted | partial | none |
 | [0021](0021-bounded-configuration-at-all-boundaries.md) | Bound configuration resources at update and startup boundaries | accepted | planned | none |
 | [0022](0022-configuration-identity-path-and-host-bounds.md) | Complete identity, path and host configuration bounds | accepted | planned | none |
+| [0023](0023-exact-schema-two-persistence.md) | Keep schema two and refuse inexact committed durations | accepted | planned | none |
