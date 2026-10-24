@@ -1,6 +1,12 @@
 # Verified store precision checkpoint
 
-Date: 2026-10-24. **Owner selected schema2 with explicit refusal of inexact saves; implementation is partial on branch `codex/exact-schema-two-persistence` and not merged.** See [decision0023](decisions/0023-exact-schema-two-persistence.md). Prepared by Codex with an independent read-only Claude Code review using the owner's claude.ai Max subscription. Tracks [#224](https://github.com/srps/Conduit/issues/224) and the store phase of [#186](https://github.com/srps/Conduit/issues/186).
+Date: 2026-10-24. **Owner selected schema2 with explicit refusal of inexact saves; implementation is partial on branch `codex/bounded-configuration-files` and not merged.** See [decision0023](decisions/0023-exact-schema-two-persistence.md). Prepared by Codex with an independent read-only Claude Code review using the owner's claude.ai Max subscription. Tracks [#224](https://github.com/srps/Conduit/issues/224) and the store phase of [#186](https://github.com/srps/Conduit/issues/186).
+
+Current implementation checkpoint: exact file staging, whole-millisecond correction,
+finite/range checks and the thin app save gate passed 440 focused tests plus the
+exact-persistence and authentication-length scenarios before integration. This
+is not the asynchronous verified store: physical read-back, component revisions,
+lease adoption and complete Stop/Quit fencing remain pending.
 
 ## Why this choice is needed
 

@@ -496,9 +496,14 @@ selected or implemented; save-before-apply does not require it. The single priva
 request removes public/private pairing and reference expiry. V1 remains 16 KiB;
 the v2 bound is provisional. The owner selected one private frame capped at eight MiB in
 [0019](decisions/0019-private-configuration-frame-budget.md), with independent
-Stop/status work. Refuse oversize updates before save while preserving existing-file
-startup validation. Verify actual memory/capacity/latency before adoption, without
-introducing incidental config-count or query-string restrictions.
+Stop/status work. Refuse oversize updates before save. Decisions
+[0021](decisions/0021-bounded-configuration-at-all-boundaries.md) and
+[0022](decisions/0022-configuration-identity-path-and-host-bounds.md) subsequently
+selected domain counts and string-byte ceilings at startup/import too;
+[0024](decisions/0024-strict-configuration-file-grammar.md) selects strict grammar
+throughout discarded values. Verify actual memory/capacity/latency before adoption.
+The private scanner and shared typed traversal are merged; the bounded file
+reader and shared lexical cursor are local foundations awaiting caller adoption.
 
 For actions that persist DNS/tunnel/proxy intent, the AppState action adapter
 remains the persistence authority and passes the committed intent through the

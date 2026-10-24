@@ -105,12 +105,15 @@ not a requirement to finish every event or property test before extraction:
    [0021](./docs/decisions/0021-bounded-configuration-at-all-boundaries.md): retain the
    complete eight-MiB frame, add selected domain counts/byte limits and apply them
    at startup/import too, with bounded actual reads and rejected files preserved.
-   Tunnels mean native-protocol local forwards: primary performance case64,
-   hard ceiling128. Early schema-aware refusal precedes decoded object expansion;
+   Tunnels mean native-protocol local forwards: primary performance case 64,
+   hard ceiling 128. Early schema-aware refusal precedes decoded object expansion;
    one active private body/decode and independent Stop/status capacity remain
    adoption obligations. String categories and legacy compatibility are completed in
    [0022](./docs/decisions/0022-configuration-identity-path-and-host-bounds.md).
-   The limits are selected and under implementation; adoption remains pending. Open gates:
+   PR #227 merged the private scanner and one shared typed resource traversal
+   at `f427255`, with hosted Swift and CodeQL passing. Automated Codex reviews
+   failed to run and supply no review evidence; Claude and Codex source review
+   accompanied the local workflow checks. Startup/import adoption remains in progress. Open gates:
    measured memory/capacity/latency and complete writer coverage under
    the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
    listener handoff, and measured bounds and shutdown. Before adopting the
@@ -120,12 +123,18 @@ not a requirement to finish every event or property test before extraction:
    [0023](./docs/decisions/0023-exact-schema-two-persistence.md); fix whole-millisecond
    round trips and safe conversion before adoption. No schema3 migration is selected.
    Integration also requires [cohesive ownership](./docs/design-runtime-host-contract.md#cohesion-and-implementation-ownership):
-   consolidate parallel kernel/private resource walks, reuse policy across file/wire
+   retain the single kernel/private typed resource walk, reuse policy across file/wire
    boundaries, and keep exact representation and commit coordination out of host
    adapters. Shared constants and parity tests do not complete that requirement.
    File grammar is selected in [0024](./docs/decisions/0024-strict-configuration-file-grammar.md):
    strict syntax, UTF-8 and Unicode even in discarded values; valid unknown fields
-   and first-key-wins remain. Rejected original files are preserved.
+   and first-key-wins remain. The shared strict cursor and fixed-cap regular-file
+   reader are committed locally, with 537 focused tests passing before caller
+   adoption. The file filter and startup/import integration are in progress;
+   preservation of rejected originals remains an adoption gate. Exact schema-two
+   staging and safe duration conversions are also committed locally, with 440
+   focused tests before integration. These counts do not establish a verified
+   asynchronous store, read-back receipts, writer coverage or release readiness.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move keeps MainActor and current policy. Extract `RuntimeHost` from
