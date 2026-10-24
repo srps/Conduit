@@ -166,7 +166,7 @@ it must be a deliberate tested refinement, not inferred from individual saved fl
 
 The runtime boundary, exact schema-two staging and bridge correction merged in
 PR #228; the runtime physical replacement seam/model merged in PR #229. The
-shared sidecar boundary is in PR #230. These are building blocks, not the async
+shared sidecar boundary merged in PR #230. These are building blocks, not the async
 store. Settle the external-edit policy before its affected expected-prior check.
 Add the sole leased writer,
 intent/revision fencing and bounded metadata, followed by the client workflow and

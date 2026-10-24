@@ -2,7 +2,7 @@
 
 Checkpoint: 2026-10-24, before AppState adopts the client. This is an inventory and
 measurement plan, not an additional accepted decision or a claim of release
-completion. Decisions 0013–0019 record the selected shapes and separate implementation status.
+completion. Decisions 0013–0026 record the selected shapes and separate implementation status.
 
 ## Implementation status
 
@@ -12,16 +12,35 @@ Foundation merged in PR #220 (`fd630d1`), with hosted Swift/CodeQL checks passed
 - The `ControlRuntime*` value types, the v2 envelope (version 2, separate from v1's version 1) and its frame codec, which writes `Date` values as epoch seconds on the scale of `ControlTimestamp`, plus pages and the snapshot projection.
 - The `RuntimeClient` protocol (`submit`, `lookupAdmission`, `outcome`, `subscribe`, `readPage`, `readSnapshot`) with its deadline, subscription and client-error types. Each v2 message carries a correlation ID, and the stamps and page requests name the incarnation they read.
 
-Not implemented: the in-memory client and its admission, lookup and subscription engine; the production v2 socket; a config commit or start DTO; AppState adoption. Request lookup and admission exist only as protocol shapes, so their behavior is unverified. v1 control, helper IPC and the installed helper are unchanged, and no production peer uses v2.
+The framed adapter is implemented on `codex/framed-runtime-client`: the v2 codec
+runs over an injected byte transport, with explicit limits/deadlines, one-send
+mutation error mapping and single-pull stream handles. Its package factory returns
+the existing `RuntimeClient` protocol; the concrete adapter remains private.
+See [the adapter checkpoint](runtime-framed-client-2026-10-24.md) for source and
+verification evidence. It is not an in-memory service or production transport.
+
+Not implemented: the admission/lookup/subscription engine, the production v2
+socket, the combined configuration commit/start workflow and AppState adoption.
+Request lookup and admission are exercised through scripted/simulated transports;
+actual host behavior remains unverified. V1 control and helper IPC are unchanged,
+and no production peer uses v2.
 
 The shared-host extraction merged in PR #221 (`3d566d8`) and added ConduitRuntime, with its own [verification checkpoint](verification-runtime-host-extraction-2026-10-24.md). AppState still runs its twin; this inventory does not claim client adoption.
 
 Selected for private configuration: one full frozen request (0018), capped at eight
-MiB with independent Stop/status work (0019); its production codec is not implemented.
+MiB and refined by domain/startup bounds (0021–0022). Its explicit codec and
+[domain bridge](../Sources/ProxyControlBridge/PrivateConfigurationBridge.swift) are
+implemented through PR #227/#228; global single-body admission and independent
+Stop/status capacity remain adoption obligations.
 Not selected: ordinary v2 frame/page/queue/retention limits. The v1 16 KiB frame (`ControlSocket.maxFrameBytes`) is retained. The design's 16 KiB v2 figure and 64-row pages remain review inputs.
 
-Open gates: exact required-component handling, external-path writer coverage, listener
-handoff, measured memory/capacity/latency and total shutdown. No registry is selected.
+Open gates: verified component receipts and the selected mixed-apply gate (0025),
+complete writer adoption under the selected canonical root (0020), listener
+handoff, measured admission/capacity/latency and total shutdown. External-file
+edit conflicts remain an owner decision before expected-prior store checks. No
+registry is selected. Runtime and sidecar input/staging boundaries merged in
+PR #228/#230; the runtime replacement/read-back primitive/model merged in PR #229.
+These foundations are not the asynchronous store.
 
 ## Focused evidence
 
@@ -38,11 +57,11 @@ Focused runs reported on the uncommitted tree: 127 codec tests and 287 event tes
 
 This does not cover every Task or NIO schedule, and it does not resolve sanitizer issue [#118](https://github.com/srps/Conduit/issues/118).
 
-## Measured raw persisted configuration
+## Historical raw persisted-configuration probes
 
-`Tests/ConduitTests/RuntimeConfigSizingTests.swift` measures the raw persisted `ProxyConfig` encoding. It is input evidence only. It is not the size of a v2 value, of a secret-free commit envelope, or of a full command payload, and none of those is defined yet.
+`Tests/ConduitTests/RuntimeConfigSizingTests.swift` measures the raw persisted `ProxyConfig` encoding. It is input evidence only. It is not the size of the subsequently selected private request or of a full framed command. These are foundation-era observations before decisions 0018–0022, not current largest-valid measurements.
 
-| Fixture | Raw bytes | Validation |
+| Fixture | Raw bytes | Validation at the foundation checkpoint |
 | --- | ---: | --- |
 | `default` | 1,849 | boundary-valid |
 | `large_valid` | 11,482 | boundary-valid |
@@ -51,7 +70,7 @@ This does not cover every Task or NIO schedule, and it does not resolve sanitize
 | `high_count` | 21,212 | boundary-valid |
 
 - These are five measured points, not a largest-valid claim. Item counts alone do not prove a byte bound.
-- Two raw fixtures (`long_strings`, `high_count`) exceed the v1 16 KiB frame, so a full-config command cannot use that frame unchanged. Whether it takes a larger v2 frame or chunked transfer is an owner choice.
+- Two raw fixtures (`long_strings`, `high_count`) exceed the v1 16 KiB frame, so a full-config command cannot use that frame unchanged. Decisions 0018–0022 subsequently selected one private frame capped at eight MiB with domain limits; chunking is not the selected shape.
 - The raw encoding carries URL fields that can hold tokens. The fixtures use artificial tokens. The encoding is private data and does not cross the control wire as it is.
 
 ## Presentation coverage
@@ -89,26 +108,21 @@ make all of its values suitable for ordinary Codable control messages.
   userinfo, which does not establish that other URL fields or query strings are
   safe. Keep sensitive inputs private; do not reject existing query-bearing
   configurations as an incidental transport refactor.
-- Profile labels, upstream names/hosts, DNS entries, tunnel labels/remote hosts
-  and several collection counts have no complete current validation ceiling.
-  `maxConnections` also has no upper ceiling. New count/string restrictions are
-  not approved by this inventory.
+- Decisions 0021–0022 now bound the inventoried configuration collections and
+  identity/display/host/path/URL strings through one resource policy. Runtime
+  semantics and stricter existing grammars remain at their owning gates. This
+  inventory introduces no additional count or scalar ceiling.
 - Config, platform integration and UI preferences persist separately. Config
   plus platform settings can jointly determine a machine effect; preferences
   remain separate. Receipts describe exact verified component values, not a
   transaction across files, Keychain and machine surfaces.
 
-The original preferred shape remains explicit committed safe values with
-component receipts/revision checks and private sensitive bindings. A full pinned
-config registry was considered and is not selected or implemented. It would add
-retention/expiry failures and would still need an exact-value transfer design at
-the later daemon boundary. No durable snapshot history is introduced.
-
-The owner favors the future daemon architecture and asks to be told when a
-concrete decision is needed. Complete the inventory and measurement work before
-bringing back a larger v2 frame versus chunked-transfer choice. Save-before-apply
-requires exact immutable input; it does not require a registry. Stop/Quit policy
-is independent of this choice.
+The selected shape is one private, explicitly encoded request containing the full
+frozen configuration (0018), rather than separate public/private halves. Values
+stay out of ordinary events/status. Save-before-apply requires exact immutable
+input; it does not require a snapshot registry. The registry alternative was
+rejected because it adds retention/expiry and exact-value transfer obligations.
+Stop/Quit policy remains independent.
 
 ## Bounds and measurement
 
@@ -117,26 +131,29 @@ values are review inputs, not selected shipping defaults. Item counts alone do
 not prove a byte bound. Pages must obey encoded bytes and guarantee either
 progress or an explicit oversized-row result; totals cannot become sample sizes.
 
-Claude's initial inventory used hand arithmetic. Those estimates do not prove
-that a baseline, page or config fits and do not authorize new config limits.
+Claude's initial inventory used hand arithmetic. Those historical estimates do not
+prove that a baseline or page fits. The accepted configuration limits are recorded
+separately in 0021–0022, with startup grammar and sidecar caps in 0024/0026.
 Executable fixtures must identify the exact source schema, encoder/envelope,
 input configuration, validation result and encoded byte count. Measure defaults,
 representative larger configurations, long strings/counts and JSON escaping.
-Raw persisted-config sizes are useful input but are not measurements of a future
-secret-free commit envelope that has not been defined yet.
+Raw persisted-config sizes remain historical input, not measurements of the actual
+private-frame pipeline, active host workload or maximum process memory.
 
 Frame/parser/queue/retention limits are explicit configuration in the contract
 foundation. Their shipping values need measured fixtures and owner review.
 Unknown/expired/capacity outcomes remain explicit; boundedness is not a claim
-that all currently valid unbounded configurations fit a single finite frame.
+that every field at its individual maximum fits a single finite frame. The actual
+encoded-byte cap is enforced separately.
 
 ## Event migration inventory
 
 Live `lifecycle.*` producers include superseded, coalesced,
 termination_drain_expired **and version_changed** (AppUpdates). The fourth producer
-was missed by the initial three-name inventory. The working tree now types it too,
-so all four names emit typed values. The family is not called complete yet: the
-catalogue is still hand-maintained, and only the four lifecycle names are typed. `lifecycle.crash_restart` is catalogued as planned,
+was missed by the initial three-name inventory and is included in the merged
+foundation. All four emitted names now use typed values across producer, codecs,
+bridge and assertions. Other families remain legacy and the global catalogue is
+still hand-maintained. `lifecycle.crash_restart` is catalogued as planned,
 not an emitted event. Migrated names derive metadata from typed fields; the
 legacy producer must refuse the closed namespace, including dynamically formed
 names. Historical records can remain readable without inventing typed evidence.

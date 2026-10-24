@@ -135,9 +135,10 @@ not a requirement to finish every event or property test before extraction:
    the full Swift suite passed 2846 tests with two skips. See the
    [verification record](./docs/verification-configuration-boundary-2026-10-24.md).
    PR #229 merged the bounded runtime replacement/read-back primitive and its
-   independent 432-case classifier model. PR #230 implements the shared 128 KiB
+   independent 432-case classifier model. PR #230 merged the shared 128 KiB
    sidecar boundary and raw browser-URL check; its complete local workflow passed
-   2,897 tests (two skips) and all 94 simulator records, with hosted CI pending.
+   2,897 tests (two skips) and all 94 simulator records. It merged at `2e75d94`
+   after hosted Swift and CodeQL passed.
    The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding
