@@ -217,6 +217,8 @@ The import fence in `AGENTS.md` is untouched: `ConduitShared` is Foundation + Da
 
 `pm-sim` keeps its existing `ProxyAuth` dependency for `MockAuthenticator`'s conformance to `ProxyAuthenticator` (which moves with `ProxyAuth`'s caller surface staying in `ProxyKernel/Abstractions/`); it **does not** depend on `ProxyPAC` because no scenario currently exercises real PAC evaluation.
 
+`pm-sim` also depends on `ProxyControlBridge`, a first-party target, so the `private-config-boundary` scenario can drive the real `PrivateConfigurationBridge` mapping rather than a copy of it. This is the rule above applied: a sim-side scenario needs a post-move kernel-to-wire mapping. The edge adds no external package, and no cycle, because `ProxyControlBridge` depends only on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`. It widens no public surface.
+
 `pm-tunnel` depends on `ProxyAuth` after the ProxyAuth-move step (constructs `NTLMAuthenticator` / `NegotiateAuthenticator` inline); see that step's shipped notes.
 
 `pm-vpn-check` constructs `VPNStatusMonitor` directly as a diagnostic CLI — by design it exercises the SCDynamicStore production code path, so it links `PlatformMac` rather than mocking through a protocol. `pm-auth-check` uses `import GSS` at the executable level without referencing any concrete type from `ProxyAuth` or `PlatformMac`; it stays `ConduitCore`-only.

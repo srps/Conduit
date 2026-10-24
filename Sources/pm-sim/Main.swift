@@ -89,6 +89,7 @@ enum PMSim {
               dns-upstream-spoof      DNS: wrong-ID and QR-clear replies are dropped, never answered or cached
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
               observable-target-redaction  Query/fragment privacy across observations
+              private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               security-boundaries     Auth destinations, config rejection, and loopback listeners
               kerberos-service-ticket A TGT without a service ticket is unreachable, not a missing credential
               kerberos-fallback-flood A fallback on every handshake is one event a minute, with the GSS codes
@@ -262,6 +263,7 @@ enum PMSim {
         "dns-upstream-spoof",
         "dns-ephemeral-pair-rebind",
         "observable-target-redaction",
+        "private-config-boundary",
         "security-boundaries",
         "kerberos-service-ticket",
         "kerberos-fallback-flood",
@@ -427,6 +429,8 @@ enum PMSim {
             return [try await DNSResolverScenarios.ephemeralPairRebind(verbose: verbose)]
         case "observable-target-redaction":
             return [try await ObservableTargetScenarios.redaction()]
+        case "private-config-boundary":
+            return [try PrivateConfigBoundaryScenario.run()]
         case "security-boundaries":
             return [try await SecurityScenarios.boundaries(verbose: verbose)]
         case "kerberos-service-ticket":

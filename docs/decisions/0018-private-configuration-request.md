@@ -138,7 +138,7 @@ Its numbers are sizing evidence only, not a configuration limit.
 
 ## Implementation evidence
 
-Partial: only the `SecretBytes` placement in decision 8 is implemented. The neutral,
+Partial: the `SecretBytes` placement in decision 8 is implemented, and so is a headless explicit codec for decision 2. The neutral,
 non-`Codable` type is in [`SecretBytes.swift`](../../Sources/ConduitShared/SecretBytes.swift),
 with its redaction, zero-on-release and constant-time equality unchanged.
 [`ProxyKernel`'s `SecretBytes.swift`](../../Sources/ProxyKernel/Security/SecretBytes.swift) is
@@ -151,10 +151,20 @@ and `pm-sim security-boundaries` passed. Codex then ran all 39 workflow-equivale
 gates on unchanged source: 2,510 tests (two skips), all 85 simulator results and
 perf passed; see the [verification checkpoint](../verification-private-config-foundation-2026-10-24.md).
 
-Does not prove: the private configuration value, its explicit codec, the frozen request,
-the configuration store and workflow, or any frame or total budget ([0019](0019-private-configuration-frame-budget.md)).
-These remain unimplemented. Their executed sizing output is in the experiment README; that
-candidate is sizing evidence only and is not production code.
+Codec (headless, 2026-10-24, review correction pass): the private value types, the explicit
+encoder, frame reader and decoder, and the bridge mapping to `ProxyConfig` are in
+[`Sources/ConduitShared/PrivateConfiguration/`](../../Sources/ConduitShared/PrivateConfiguration/)
+and [`PrivateConfigurationBridge.swift`](../../Sources/ProxyControlBridge/PrivateConfigurationBridge.swift).
+The values have no general `Codable` conformance, and a test checks that no generic path
+accepts them. The notes, limits, error mapping and copy inventory are in
+[the codec notes](../private-configuration-codec.md). The corrected source has not been
+rerun, so no validation is recorded for it.
+
+Does not prove: the configuration store or workflow, any runtime admission or apply path,
+any socket or transfer engine, the codec's allocation or Stop-latency bounds, or adoption
+readiness. The frame cap is recorded under [0019](0019-private-configuration-frame-budget.md).
+Their executed sizing output is in the experiment README; that candidate is sizing evidence
+only and is not production code.
 
 ## Open questions
 
