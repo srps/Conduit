@@ -20,7 +20,7 @@ Open owner gates: config projection and coupling, listener handoff, and measured
 
 ## Focused evidence
 
-Focused runs reported on the uncommitted tree: 127 codec tests and 287 event tests. The simulator scenarios carry 7 lifecycle and 15 update assertions. These are focused counts, not a full gate run. The full `swift.yml` gates have not been run on the combined foundation. Codex will record them later against the exact source identity.
+Focused runs reported on the uncommitted tree: 127 codec tests and 287 event tests. The simulator scenarios carry 7 lifecycle and 15 update assertions. These are focused counts, not a full gate run. The corrected combined foundation subsequently passed all 39 workflow-equivalent gates, including 2,506 tests (two skips), 85 simulator results and perf; exact identity, review repairs and limits are in the [verification checkpoint](verification-runtime-client-foundation-2026-10-24.md).
 
 ## Lifecycle model evidence
 
