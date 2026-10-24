@@ -36,7 +36,7 @@ to completion. Actual dev-bundle packaging/inspection also passed again.
 The fingerprint covers sorted nonignored tracked/untracked paths and bytes under
 Sources, Tests, scripts, .github and Resources, plus Package.swift,
 Package.resolved, bundle-app.sh and VERSION. Binaries came from SwiftPM's reported
-`--show-bin-path`, not an assumed old output directory. Full local logs and
+`--show-bin-path`, not an assumed old output directory. The latest full local logs and
 structured results are retained under
 `/private/tmp/conduit-architecture-20261024/dev-full-gates/`.
 
@@ -78,3 +78,35 @@ presentation fields and composition seams, then delivers typed client/codec/
 subscription and lifecycle-event/model slices under decisions 0013–0015. Config
 field classification/coupling, overlapping-writer ownership, listener handoff and
 measured resource/shutdown limits remain explicit affected-slice gates.
+
+## Review follow-up: aliases below the scratch root
+
+Independent review found that checking the chosen state directory alone did not
+protect against an existing child symlink. For example, a scratch `config.json`
+could link outside the scratch directory even though its parent passed the
+production-overlap check. Claude added refusal for each known runtime file and
+the fake home/resolver roots, and repeated that check before composition creates
+directories or seeds configuration. Aliases that resolve within the scratch root
+remain supported. This is a point-in-time check of known components, not a tree
+scan or protection against a concurrent symlink replacement.
+
+The regression tests first failed for all 11 aliased components and a dangling
+child. After the fix, all 19 DevLaunchOptions tests and the packaging fixture
+passed. Codex then reran every executable workflow gate: all 39 passed, including
+2,348 Swift tests (two skips, zero failures), all 85 simulator results and the
+performance gate. The relevant-source SHA-256 was
+`73f7caa622cd0387631df2533ed58204d4f6bf5907289991406ebbf26ba8979f` throughout.
+HEAD was `7d1d2985b495413605559e50ee57d1dd7e5135fe` with the two implementation/test
+files uncommitted; this fingerprint identifies the tested source. The logs at
+the path above now describe this follow-up run.
+
+A separate suspected case-variant bypass did not reproduce for existing paths:
+Darwin `realpath` returned the stored spelling on this machine. No unconditional
+lowercasing was added. A filesystem-sensitive regression permits distinct paths
+on a case-sensitive volume and rejects an alias when the volume resolves it to
+the protected directory. Nonexistent protected paths with different case, and
+nested aliases below the fake roots, are outside this check's evidence.
+
+The earlier native launch evidence predates this follow-up. The added refusal is
+covered by parser and direct-composition tests; no new production or VPN behavior
+is claimed, and no serving process was quit or replaced.

@@ -19,7 +19,7 @@ The default `swift` may be Command Line Tools, which fails with `no such module 
 | Install app | `./bundle-app.sh --release --install` (quits and replaces the running Conduit) |
 | Install helper | `sudo ./install-helper.sh`, required after any change to `Sources/ConduitHelper/` |
 
-The distinct ad-hoc-signed `Conduit Dev.app` selects the debug `FakeMachine` composition by bundle identity; explicit `--dev` remains supported. It uses scratch state under `$TMPDIR/conduit-dev` and ephemeral ports. Build-time `--dev` refuses `--install`, `--release` and `--share`; never substitute a production install for this dev build. Notification authorization, network-path and wake observation still use real OS adapters; their test seams are separate work. Use `open -n`: a direct executable launch from an agent session has no window server access. Its `proxy.log` confirms the windows came up.
+The distinct ad-hoc-signed `Conduit Dev.app` selects the debug `FakeMachine` composition by bundle identity; explicit `--dev` remains supported. It uses scratch state under `$TMPDIR/conduit-dev` and ephemeral ports by default. Build-time `--dev` refuses `--install`, `--release` and `--share`; never substitute a production install for this dev build. Notification authorization, network-path and wake observation still use real OS adapters; their test seams are separate work. Use `open -n`: a direct executable launch from an agent session has no window server access. Its `proxy.log` confirms the windows came up.
 
 ## Layout
 

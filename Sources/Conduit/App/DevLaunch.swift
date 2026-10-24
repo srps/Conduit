@@ -178,6 +178,9 @@ struct DevLaunchOptions: Equatable {
     /// Refuses a state directory that is, sits inside, or contains a protected
     /// directory, compared after symlinks resolve. A link or a parent path
     /// reaches the installed app's files no more than the path itself would.
+    /// Then refuses any known runtime file or fake root beneath it that
+    /// resolves outside it, since the state directory alone says nothing about
+    /// what its children link to.
     static func refuseProductionState(_ directory: URL, protectedDirectories: [URL]) throws {
         let devPath = try canonicalPath(directory)
         let devParts = devPath.split(separator: "/")
@@ -189,6 +192,35 @@ struct DevLaunchOptions: Equatable {
                 throw ParseError("--dev-state-dir \(directory.path) overlaps the installed Conduit's \(productionPath); choose another directory")
             }
         }
+        for component in ownedComponents(in: directory) {
+            let resolved = try canonicalPath(component)
+            guard resolved == devPath || resolved.hasPrefix(devPath + "/") else {
+                throw ParseError("--dev-state-dir \(directory.path): \(component.lastPathComponent) resolves to \(resolved), outside the state directory; choose another directory")
+            }
+        }
+    }
+
+    /// The runtime files and fake roots a dev run reads or writes beneath its
+    /// state directory, named by the same `RuntimeEnvironment` the app uses.
+    /// The export default is left out: it sits in the real home by design and
+    /// is written only by an explicit export. Only these are checked, so a
+    /// directory the app creates beneath them is not scanned.
+    static func ownedComponents(in stateDirectory: URL) -> [URL] {
+        let environment = RuntimeEnvironment.isolated(stateDirectory: stateDirectory)
+        return [
+            environment.configFile, environment.platformStateFile, environment.platformConfigFile,
+            environment.preferencesFile, environment.snapshotFile, environment.eventsFile,
+            environment.logFile, environment.updateStateFile, environment.legacySavedDNSFile,
+            fakeHome(in: stateDirectory), fakeResolver(in: stateDirectory),
+        ]
+    }
+
+    static func fakeHome(in stateDirectory: URL) -> URL {
+        stateDirectory.appendingPathComponent("home", isDirectory: true)
+    }
+
+    static func fakeResolver(in stateDirectory: URL) -> URL {
+        stateDirectory.appendingPathComponent("resolver", isDirectory: true)
     }
 
     /// The path with every symlink in its existing part resolved. The missing
@@ -384,8 +416,24 @@ enum DevLaunch {
     /// relaunches so edits made in the dev instance's Settings persist.
     @MainActor
     static func makeAppState(_ options: DevLaunchOptions) -> AppState {
-        let home = options.stateDirectory.appendingPathComponent("home", isDirectory: true)
-        let resolverDirectory = options.stateDirectory.appendingPathComponent("resolver", isDirectory: true)
+        do {
+            return try composeAppState(options)
+        } catch {
+            fail(error.localizedDescription)
+        }
+    }
+
+    /// `makeAppState` after the state directory and its runtime files have been
+    /// checked. The check comes first, so a refused launch creates nothing and
+    /// reads no config from beneath the directory.
+    @MainActor
+    static func composeAppState(
+        _ options: DevLaunchOptions,
+        protectedDirectories: [URL] = DevLaunchOptions.productionStateDirectories
+    ) throws -> AppState {
+        try DevLaunchOptions.refuseProductionState(options.stateDirectory, protectedDirectories: protectedDirectories)
+        let home = DevLaunchOptions.fakeHome(in: options.stateDirectory)
+        let resolverDirectory = DevLaunchOptions.fakeResolver(in: options.stateDirectory)
         do {
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         } catch {

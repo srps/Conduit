@@ -58,7 +58,8 @@ Run required repository checks and preserve the serving process throughout.
 and early flag refusal. [DevLaunch](../../Sources/Conduit/App/DevLaunch.swift) and
 [ConduitMain](../../Sources/Conduit/App/ConduitApp.swift) select fake composition
 and guard worker entry points. [Parser/composition tests](../../Tests/ConduitTests/DevLaunchOptionsTests.swift)
-cover identity, state aliases, worker guards and awaited teardown;
+cover identity, state aliases (including known child files/fake roots), worker
+guards and awaited teardown;
 [packaging regressions](../../scripts/test-dev-bundle.sh) confine even a deliberately
 broken install guard to scratch. [CI](../../.github/workflows/swift.yml) runs them.
 
