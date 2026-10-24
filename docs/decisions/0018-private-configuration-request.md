@@ -147,7 +147,9 @@ keeps the behaviour tests and adds one check that both spellings name the same t
 Run on 2026-10-24 with the secret-move verification script in isolated headless mode: the
 debug build passed, 86 focused credential, auth and Keychain tests passed with 0 failures
 (20 of them `SecretBytesTests`), the kernel import fence passed, the decision checks passed
-and `pm-sim security-boundaries` passed.
+and `pm-sim security-boundaries` passed. Codex then ran all 39 workflow-equivalent
+gates on unchanged source: 2,510 tests (two skips), all 85 simulator results and
+perf passed; see the [verification checkpoint](../verification-private-config-foundation-2026-10-24.md).
 
 Does not prove: the private configuration value, its explicit codec, the frozen request,
 the configuration store and workflow, or any frame or total budget ([0019](0019-private-configuration-frame-budget.md)).
