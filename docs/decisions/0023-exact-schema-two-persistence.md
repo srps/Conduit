@@ -117,9 +117,10 @@ through the one duration inventory `RuntimeDurationField` in `ConfigValidation.s
 the explicit health check, tunnel start and `pm-tunnel`. The direct-connect detector
 takes a checked millisecond budget (`DurationUnits.checkedMilliseconds`) and starts no
 probe without one, reported as `budget_refused`. Proxy start is validated already. A
-commit the runtime cannot hold is saved but not reconciled into the runtime
-(`AppState.saveConfig`, [0015](0015-save-before-apply.md)); the same commit still
-reconciles platform changes at the config the runtime applies. Events:
+representable repair draft with start-blocking problems is saved but not reconciled
+into the runtime (`AppState.saveConfig`, [0015](0015-save-before-apply.md)); the
+current thin gate still reconciles platform changes at the prior runtime config.
+This does not implement the mixed-component verification gate selected in0025. Events:
 `config.save_rejected` (emitted by the save path) and `config.apply_held`.
 The 1001 ms witness is preserved at
 [docs/experiments/config-precision](../experiments/config-precision/README.md). Its
