@@ -33,8 +33,8 @@ package enum PrivateConfigurationDecoder {
             do {
                 return try JSONDecoder().decode(WireRequest.self, from: data).request
             } catch {
-                // Deliberate: every decode failure, including a `WireValue` refusal such as an out-of-range
-                // port, is reported as one fixed `malformedBody`. The error names no field, so a caller learns
+                // Deliberate: every decode failure, including a `WireValue` refusal such as a non-finite
+                // or non-UUID value, or a number that is not an `Int`, is reported as one fixed `malformedBody`. The error names no field, so a caller learns
                 // only that the body was refused. The tests pin this, and no finer taxonomy is claimed.
                 throw PrivateConfigurationWireError.malformedBody
             }
@@ -75,13 +75,6 @@ private extension Decoder {
 private enum WireValue {
     static func uuid(_ text: String) throws -> UUID {
         guard let value = UUID(uuidString: text) else {
-            throw PrivateConfigurationWireError.invalidValue
-        }
-        return value
-    }
-
-    static func port(_ value: Int) throws -> Int {
-        guard (0...65_535).contains(value) else {
             throw PrivateConfigurationWireError.invalidValue
         }
         return value
@@ -178,9 +171,9 @@ private struct WireProxy: Decodable {
         let c = try decoder.strictContainer(Keys.self)
         value = PrivateProxySettings(
             host: try c.decode(String.self, forKey: .host),
-            port: try WireValue.port(c.decode(Int.self, forKey: .port)),
+            port: try c.decode(Int.self, forKey: .port),
             socksEnabled: try c.decode(Bool.self, forKey: .socksEnabled),
-            socksPort: try WireValue.port(c.decode(Int.self, forKey: .socksPort)),
+            socksPort: try c.decode(Int.self, forKey: .socksPort),
             gatewayMode: try c.decode(Bool.self, forKey: .gatewayMode),
             allowedClients: try c.decode([String].self, forKey: .allowedClients),
             maxConnections: try c.decode(Int.self, forKey: .maxConnections),
@@ -227,7 +220,7 @@ private struct WireUpstream: Decodable {
             id: ControlUpstreamID(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .id))),
             name: try c.decode(String.self, forKey: .name),
             host: try c.decode(String.self, forKey: .host),
-            port: try WireValue.port(c.decode(Int.self, forKey: .port)),
+            port: try c.decode(Int.self, forKey: .port),
             enabled: try c.decode(Bool.self, forKey: .enabled),
             priority: try c.decode(Int.self, forKey: .priority)
         )
@@ -247,7 +240,7 @@ private struct WireRouting: Decodable {
         value = PrivateRoutingSettings(
             pacURL: try PrivateURLValue(c.decode(String.self, forKey: .pacURL)),
             localPACEnabled: try c.decode(Bool.self, forKey: .localPACEnabled),
-            localPACPort: try WireValue.port(c.decode(Int.self, forKey: .localPACPort)),
+            localPACPort: try c.decode(Int.self, forKey: .localPACPort),
             pacRoutingEnabled: try c.decode(Bool.self, forKey: .pacRoutingEnabled),
             pacUsableRouteLimit: try c.decode(Int.self, forKey: .pacUsableRouteLimit),
             noProxyHosts: try c.decode([String].self, forKey: .noProxyHosts),
@@ -268,13 +261,13 @@ private struct WireDNS: Decodable {
         let c = try decoder.strictContainer(Keys.self)
         value = PrivateDNSSettings(
             forwarderEnabled: try c.decode(Bool.self, forKey: .forwarderEnabled),
-            forwarderPort: try WireValue.port(c.decode(Int.self, forKey: .forwarderPort)),
+            forwarderPort: try c.decode(Int.self, forKey: .forwarderPort),
             dohProviders: try c.decode([String].self, forKey: .dohProviders).map { PrivateURLValue($0) },
             entries: try c.decode([WireDNSEntry].self, forKey: .entries).map(\.value),
             interceptRules: try c.decode([WireInterceptRule].self, forKey: .interceptRules).map(\.value),
             transparentProxyEnabled: try c.decode(Bool.self, forKey: .transparentProxyEnabled),
             transparentProxyIP: try c.decode(String.self, forKey: .transparentProxyIP),
-            transparentProxyPort: try WireValue.port(c.decode(Int.self, forKey: .transparentProxyPort))
+            transparentProxyPort: try c.decode(Int.self, forKey: .transparentProxyPort)
         )
     }
 }
@@ -345,9 +338,9 @@ private struct WireTunnelDefinition: Decodable {
         let presetRaw = try c.decode(String?.self, forKey: .preset)
         value = PrivateTunnelDefinitionSettings(
             id: ControlTunnelID(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .id))),
-            localPort: try WireValue.port(c.decode(Int.self, forKey: .localPort)),
+            localPort: try c.decode(Int.self, forKey: .localPort),
             remoteHost: try c.decode(String.self, forKey: .remoteHost),
-            remotePort: try WireValue.port(c.decode(Int.self, forKey: .remotePort)),
+            remotePort: try c.decode(Int.self, forKey: .remotePort),
             enabled: try c.decode(Bool.self, forKey: .enabled),
             proxied: try c.decode(Bool.self, forKey: .proxied),
             label: try c.decode(String.self, forKey: .label),

@@ -9,22 +9,21 @@ import ConduitShared
 // (`connectionCheckTimeoutMS`, `directConnectTTLMinutes`). Every duration here is the
 // canonical seconds stored in `health`.
 //
-// Validation runs in this boundary, through `ProxyConfig.validate()`. The codec checks only
-// that a value can be represented. The errors are fixed and safe: they carry the first failing
-// check's field code and a count, never a value or a URL.
+// This boundary checks format, not eligibility. It refuses only what the wire cannot carry or an
+// approved ceiling forbids: a resource ceiling, a frame past the cap, and the codec's own checks
+// (a non-finite number, a value that is not its wire type). It does not run `ProxyConfig.validate()`, so a
+// semantically invalid draft maps and round-trips. Schema-two staging decides what may be stored
+// (`ProxyConfigPersistence.stagedFileData`), and `startBlockingProblems` decides what may run
+// (`docs/design-runtime-store-workflow.md`). A mapped value is a draft, not authority to run.
 
 /// Failures of the mapping. Each case is fixed text or a bounded summary. None carries a value,
-/// a URL or a token, and none carries a collection, so the error stays small however many checks fail.
+/// a URL or a token.
 package enum PrivateConfigurationBridgeError: Error, Sendable, Equatable {
     /// The encoded frame is larger than the cap. Escapes can make approved values exceed it.
     case tooLarge
     /// A value crosses an approved resource ceiling (decision 0021). It names the field and the ceiling,
-    /// never the value. This is refused before validation enumerates failures and before any value is mapped.
+    /// never the value. This is refused before any value is mapped.
     case resourceLimit(DomainResourceViolation)
-    /// The kernel's validation refused the values. `firstCheck` is the field code of the first
-    /// failing check, as `ConfigValidationError.check` names it. `failureCount` is how many checks
-    /// failed. Validation still runs in full; only the summary is carried out of it.
-    case invalidConfiguration(firstCheck: String, failureCount: Int)
 }
 
 package enum PrivateConfigurationBridge {
@@ -40,11 +39,10 @@ package enum PrivateConfigurationBridge {
         expectedPlatformRevision: PrivatePlatformRevision,
         expectedOwnerGeneration: PrivateConfigExpectedGeneration
     ) throws -> PrivateConfigurationRequest {
-        // The approved ceilings run before validation enumerates failures and before any value is mapped.
+        // The approved ceilings run before any value is mapped.
         if let violation = config.resourceViolation() {
             throw PrivateConfigurationBridgeError.resourceLimit(violation)
         }
-        try requireValid(config)
         let request = PrivateConfigurationRequest(
             requestID: requestID,
             incarnation: incarnation,
@@ -63,7 +61,8 @@ package enum PrivateConfigurationBridge {
 
     /// Rebuilds the config and platform values from a decoded request. `localLaunchAtLogin` is this
     /// machine's own login-item state. It is an explicit input, so applying a transfer never resets it
-    /// to a default. The result is validated before it is returned.
+    /// to a default. The result is a draft: it is not validated here, so a semantically invalid value
+    /// comes back as it was sent. Whether it may be stored or run is decided downstream (see the header).
     package static func makeValues(
         from request: PrivateConfigurationRequest,
         localLaunchAtLogin: Bool
@@ -72,9 +71,7 @@ package enum PrivateConfigurationBridge {
         // was not, so its resource ceilings and exact body count are taken first. The count writes nothing
         // and copies nothing, and it refuses an unrepresentable value the same way the encoder does.
         try requireFrame(request)
-        let config = proxyConfig(request.runtime)
-        try requireValid(config)
-        return (config, platformConfig(request.platform, launchAtLogin: localLaunchAtLogin))
+        return (proxyConfig(request.runtime), platformConfig(request.platform, launchAtLogin: localLaunchAtLogin))
     }
 
     /// The codec's exact count of a mapped request. It also runs the approved ceilings on the request, so a
@@ -87,19 +84,6 @@ package enum PrivateConfigurationBridge {
         } catch PrivateConfigurationWireError.resourceLimitExceeded(let violation) {
             throw PrivateConfigurationBridgeError.resourceLimit(violation)
         }
-    }
-
-    /// Runs the kernel's validation in full. Only the first failing check's field code and the
-    /// count leave this function, so no collection of checks is copied into the error.
-    private static func requireValid(_ config: ProxyConfig) throws {
-        let failures = config.validate()
-        guard let first = failures.first else {
-            return
-        }
-        throw PrivateConfigurationBridgeError.invalidConfiguration(
-            firstCheck: first.check,
-            failureCount: failures.count
-        )
     }
 
     // MARK: - Kernel to values

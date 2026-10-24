@@ -101,6 +101,12 @@ package enum ConfigValidationError: Error, LocalizedError, Sendable {
         case .unrepresentableDuration(let field):
             return "\(field) must be a finite duration that the runtime can hold"
         case .invalidHost(let field, let value):
+            // A PAC URL with userinfo carries a credential, so its message names the field and the reason
+            // and never the value. The save banner and the validation log both show this text; events carry
+            // only the `check` code. The Settings field already shows what was typed.
+            if field == "routing.pacURL" {
+                return "routing.pacURL: the URL carries a username or password. Remove them; the value is not shown here."
+            }
             return "\(field): '\(value)' is not a valid host"
         case .invalidInterceptPattern(let index, let pattern, let reason):
             return "dns.interceptRules[\(index)]: '\(pattern)' does not name a usable "

@@ -2,6 +2,8 @@
 import Foundation
 import XCTest
 @testable import Conduit
+@testable import ConduitShared
+@testable import ProxyControlBridge
 @testable import ProxyKernel
 
 /// The save gate in `AppState.saveConfig` (decision 0023). A save the file
@@ -176,6 +178,93 @@ final class ConfigSaveGateTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: file), before)
         // The discarded config is not saved, so the edit stays unsaved even though the platform write succeeded.
         XCTAssertTrue(state.hasUnsavedEdit)
+    }
+
+    /// An out-of-range port that crossed the private transfer is saved to the file and held from the runtime.
+    /// This is the Settings repair baseline through the real save gate: the draft is persisted, the apply is
+    /// held, and no save is rejected.
+    func testMappedOutOfRangePortIsSavedAndHeldOutOfTheRuntime() throws {
+        harness = try AppStateHarness(config: ProxyConfig.testFixture(), platformConfig: PlatformIntegrationConfig())
+        let state = harness.launch()
+        let applied = state.reconciler.requestedConfig
+        var draft = state.config
+        draft.proxy.port = 70_000
+        state.config = try mappedDraft(draft)
+
+        state.saveConfig()
+
+        XCTAssertEqual(try ProxyConfigPersistence.load(from: harness.environment.configFile).proxy.port, 70_000)
+        XCTAssertEqual(state.reconciler.requestedConfig, applied)
+        let held = state.eventLog.events.filter { $0.event == "config.apply_held" }
+        XCTAssertEqual(held.count, 1)
+        XCTAssertTrue(held.first?.detail?.contains("invalid_port field=proxy.port") ?? false)
+        XCTAssertFalse(state.eventLog.events.contains { $0.event == "config.save_rejected" })
+    }
+
+    /// A non-blocking intercept problem does not hold the apply. The draft saves and reconciles together with an
+    /// unrelated runtime edit from the same save. It stays inside every resource cap; a bypass problem cannot,
+    /// since each one is a resource refusal (see the bridge test).
+    func testMappedNonBlockingDraftSavesAndReconcilesUnrelatedProgress() throws {
+        harness = try AppStateHarness(config: ProxyConfig.testFixture(), platformConfig: PlatformIntegrationConfig())
+        let state = harness.launch()
+        var draft = state.config
+        draft.dns.interceptRules = [
+            DNSInterceptRule(id: UUID(), pattern: "not a domain!!", interceptIP: "not-an-ip", enabled: true),
+        ]
+        draft.health.checkInterval = 47
+        state.config = try mappedDraft(draft)
+
+        state.saveConfig()
+
+        XCTAssertEqual(try ProxyConfigPersistence.load(from: harness.environment.configFile).health.checkInterval, 47)
+        XCTAssertEqual(state.reconciler.requestedConfig, state.config)
+        XCTAssertTrue(state.eventLog.events.allSatisfy { $0.event != "config.apply_held" && $0.event != "config.save_rejected" })
+    }
+
+    /// A draft with a URL credential is held, and the credential appears in no surface the save writes:
+    /// the banner, the validation log, or the events. The banner and the log must be populated, so the
+    /// absence is not vacuous.
+    func testMappedUserInfoDraftIsHeldAndItsCredentialIsAbsentFromEveryPresentation() throws {
+        harness = try AppStateHarness(config: ProxyConfig.testFixture(), platformConfig: PlatformIntegrationConfig())
+        let state = harness.launch()
+        let applied = state.reconciler.requestedConfig
+        var draft = state.config
+        draft.routing.pacURL = "https://user:TOKEN-GATE-3@pac.example.test/p.pac"
+        state.config = try mappedDraft(draft)
+
+        state.saveConfig()
+
+        XCTAssertEqual(state.reconciler.requestedConfig, applied)
+        XCTAssertEqual(state.eventLog.events.filter { $0.event == "config.apply_held" }.count, 1)
+        let banner = try XCTUnwrap(state.lastErrorMessage, "the save shows the problem")
+        XCTAssertTrue(banner.contains("routing.pacURL"))
+        XCTAssertFalse(banner.contains("TOKEN-GATE-3"))
+        let log = state.logStore.exportDiagnosticLog()
+        XCTAssertTrue(log.contains("Config validation: routing.pacURL"), "the validation line reached the log")
+        XCTAssertFalse(log.contains("TOKEN-GATE-3"))
+        XCTAssertFalse(state.eventLog.events.contains { ($0.detail ?? "").contains("TOKEN-GATE-3") })
+    }
+
+    /// The draft as the private bridge carries it: its request framed, read back through the real reader,
+    /// decoded and mapped to values. The gate sees what a transfer would deliver.
+    private func mappedDraft(_ draft: ProxyConfig) throws -> ProxyConfig {
+        let request = try PrivateConfigurationBridge.makeRequest(
+            config: draft,
+            platform: PlatformIntegrationConfig(),
+            requestID: ControlRequestID(rawValue: UUID()),
+            incarnation: ControlHostIncarnation(rawValue: UUID()),
+            budget: try ControlWireBudget(5_000),
+            expectedConfigRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 7)),
+            expectedPlatformRevision: try XCTUnwrap(PrivatePlatformRevision(rawValue: 6)),
+            expectedOwnerGeneration: try XCTUnwrap(PrivateConfigExpectedGeneration(rawValue: 5))
+        )
+        let frame = try PrivateConfigurationEncoder.encode(request).bytes()
+        let reader = PrivateConfigurationFrameReader()
+        guard case .frame(let body) = try reader.consume(frame).step else {
+            throw PrivateConfigurationWireError.malformedBody
+        }
+        let decoded = try PrivateConfigurationDecoder.decode(body)
+        return try PrivateConfigurationBridge.makeValues(from: decoded, localLaunchAtLogin: false).config
     }
 
     /// Makes a destination unwritable: a directory sits where the file goes. It is called after

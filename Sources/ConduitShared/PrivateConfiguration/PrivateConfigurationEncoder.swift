@@ -12,7 +12,9 @@ import Foundation
 // Both passes call the same code, so the count is exact by construction. The escapes
 // (quotes, backslashes, control bytes) and the number formatting are counted the way
 // they are written, not estimated. The writer refuses a value it cannot represent
-// (a non-finite number, or a port outside 0...65535); it never truncates.
+// (a non-finite number); it never truncates. A port is an `Int` like every other integer
+// here: the wire does not range-check it, because an out-of-range port is an editable
+// draft that the save stages and the runtime eligibility gate holds, not a format error.
 
 /// Bytes of the smallest possible frame around a body: `PCV1 Q 1\n`, the body, and `\n`.
 private let minimumFrameOverhead = 10
@@ -162,14 +164,6 @@ private final class PrivateJSONEmitter<Sink: PrivateFrameSink> {
         try ascii(String(value))
     }
 
-    /// A port the wire can carry: 0 through 65535, and 0 is a configured value.
-    func writePort(_ value: Int) throws {
-        guard (0...65_535).contains(value) else {
-            throw PrivateConfigurationWireError.invalidValue
-        }
-        try writeInt(value)
-    }
-
     func writeBool(_ value: Bool) throws {
         try keyword(value ? "true" : "false")
     }
@@ -252,9 +246,9 @@ extension PrivateJSONEmitter {
     private func writeProxy(_ value: PrivateProxySettings) throws {
         try object {
             try member("host") { try writeString(value.host) }
-            try member("port") { try writePort(value.port) }
+            try member("port") { try writeInt(value.port) }
             try member("socksEnabled") { try writeBool(value.socksEnabled) }
-            try member("socksPort") { try writePort(value.socksPort) }
+            try member("socksPort") { try writeInt(value.socksPort) }
             try member("gatewayMode") { try writeBool(value.gatewayMode) }
             try member("allowedClients") { try array(value.allowedClients) { try writeString($0) } }
             try member("maxConnections") { try writeInt(value.maxConnections) }
@@ -283,7 +277,7 @@ extension PrivateJSONEmitter {
             try member("id") { try writeUUID(value.id.rawValue) }
             try member("name") { try writeString(value.name) }
             try member("host") { try writeString(value.host) }
-            try member("port") { try writePort(value.port) }
+            try member("port") { try writeInt(value.port) }
             try member("enabled") { try writeBool(value.enabled) }
             try member("priority") { try writeInt(value.priority) }
         }
@@ -293,7 +287,7 @@ extension PrivateJSONEmitter {
         try object {
             try member("pacURL") { try writeURL(value.pacURL) }
             try member("localPACEnabled") { try writeBool(value.localPACEnabled) }
-            try member("localPACPort") { try writePort(value.localPACPort) }
+            try member("localPACPort") { try writeInt(value.localPACPort) }
             try member("pacRoutingEnabled") { try writeBool(value.pacRoutingEnabled) }
             try member("pacUsableRouteLimit") { try writeInt(value.pacUsableRouteLimit) }
             try member("noProxyHosts") { try array(value.noProxyHosts) { try writeString($0) } }
@@ -304,13 +298,13 @@ extension PrivateJSONEmitter {
     private func writeDNS(_ value: PrivateDNSSettings) throws {
         try object {
             try member("forwarderEnabled") { try writeBool(value.forwarderEnabled) }
-            try member("forwarderPort") { try writePort(value.forwarderPort) }
+            try member("forwarderPort") { try writeInt(value.forwarderPort) }
             try member("dohProviders") { try array(value.dohProviders) { try writeURL($0) } }
             try member("entries") { try array(value.entries) { try writeDNSEntry($0) } }
             try member("interceptRules") { try array(value.interceptRules) { try writeInterceptRule($0) } }
             try member("transparentProxyEnabled") { try writeBool(value.transparentProxyEnabled) }
             try member("transparentProxyIP") { try writeString(value.transparentProxyIP) }
-            try member("transparentProxyPort") { try writePort(value.transparentProxyPort) }
+            try member("transparentProxyPort") { try writeInt(value.transparentProxyPort) }
         }
     }
 
@@ -343,9 +337,9 @@ extension PrivateJSONEmitter {
     private func writeTunnelDefinition(_ value: PrivateTunnelDefinitionSettings) throws {
         try object {
             try member("id") { try writeUUID(value.id.rawValue) }
-            try member("localPort") { try writePort(value.localPort) }
+            try member("localPort") { try writeInt(value.localPort) }
             try member("remoteHost") { try writeString(value.remoteHost) }
-            try member("remotePort") { try writePort(value.remotePort) }
+            try member("remotePort") { try writeInt(value.remotePort) }
             try member("enabled") { try writeBool(value.enabled) }
             try member("proxied") { try writeBool(value.proxied) }
             try member("label") { try writeString(value.label) }

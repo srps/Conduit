@@ -80,16 +80,44 @@ enum PrivateConfigBoundaryScenario {
         let bridgeRefusesOversize = bridgeRefusal(of: { try makeBridgeRequest(config: oversizeConfig, platform: platform) })
             == .resourceLimit(DomainResourceViolation(.profileName, 1_024))
 
-        // The bridge refuses an invalid config with one field code and a count, never the URL token.
+        // The bridge does not refuse a semantic draft: it maps and round-trips, and the eligibility classification
+        // names the field and never the URL token. This is pure mapping and classification, not a physical apply proof.
         let bridgeToken = "BRIDGE-TOKEN-5"
-        var invalidConfig = config
-        invalidConfig.routing.pacURL = "https://user:\(bridgeToken)@pac.example.test/p.pac"
-        let invalid = bridgeRefusal(of: { try makeBridgeRequest(config: invalidConfig, platform: platform) })
-        var invalidRefused = false
-        if case .invalidConfiguration(let firstCheck, let failureCount)? = invalid {
-            invalidRefused = failureCount > 0 && !firstCheck.contains(bridgeToken)
-                && !String(describing: invalid).contains(bridgeToken)
-        }
+        var tokenDraft = config
+        tokenDraft.routing.pacURL = "https://user:\(bridgeToken)@pac.example.test/p.pac"
+        let tokenRequest = try makeBridgeRequest(config: tokenDraft, platform: platform)
+        let tokenMapped = try throughFrame(tokenDraft, platform: platform)
+        let tokenChecks = tokenMapped.startBlockingProblems.map(\.check)
+        let semanticDraftMapped = tokenMapped == tokenDraft && tokenChecks == ["invalid_host field=routing.pacURL"]
+        let tokenAbsent = !String(describing: tokenChecks).contains(bridgeToken)
+            && !String(describing: tokenRequest).contains(bridgeToken)
+
+        // An out-of-range port is an Int, so it crosses the frame and is held by classification, not refused.
+        var portDraft = config
+        portDraft.proxy.port = 70_000
+        let portMapped = try throughFrame(portDraft, platform: platform)
+        let portHeld = portMapped == portDraft && portMapped.startBlockingProblems.map(\.check) == ["invalid_port field=proxy.port"]
+
+        // Intercept problems are non-blocking and stay inside every cap: they map, and classification never holds a start.
+        var nonBlocking = config
+        nonBlocking.dns.interceptRules = [
+            DNSInterceptRule(id: uuid(52), pattern: "not a domain!!", interceptIP: "not-an-ip", enabled: true),
+        ]
+        let nonBlockingMapped = try throughFrame(nonBlocking, platform: platform)
+        let nonBlockingHeld = nonBlockingMapped == nonBlocking
+            && nonBlockingMapped.startBlockingProblems.isEmpty
+            && !nonBlocking.validate().isEmpty
+
+        // A bypass list past its count ceiling is a resource refusal before mapping, as bypass problems always are here.
+        var longBypass = config
+        longBypass.routing.noProxyHosts = Array(repeating: "short.example", count: 256) + ["another.example"]
+        let bypassRefused = bridgeRefusal(of: { try makeBridgeRequest(config: longBypass, platform: platform) })
+            == .resourceLimit(DomainResourceViolation(.noProxyHosts, 256))
+
+        // A non-finite number is still the codec's refusal at the bridge.
+        var nonFinite = config
+        nonFinite.health.checkInterval = .infinity
+        let nonFiniteRefused = refusal(of: { try makeBridgeRequest(config: nonFinite, platform: platform) }) == .invalidValue
 
         let checks: [ScenarioAssertion] = [
             .init("every read schedule decodes to the same request", segmentationsMatch),
@@ -103,7 +131,11 @@ enum PrivateConfigBoundaryScenario {
             .init("a duplicate key is refused by the decoder", duplicateRefused),
             .init("the bridge maps the fixture config and platform through the frame and back unchanged", bridgeRoundTrip),
             .init("the bridge refuses an oversize name by its ceiling before mapping", bridgeRefusesOversize),
-            .init("the bridge refuses an invalid config by field code and count, never by its token", invalidRefused),
+            .init("a semantic draft with a URL token maps through the frame and is classified by field code, never by its token", semanticDraftMapped && tokenAbsent),
+            .init("an out-of-range port maps through the frame and is held by classification, not refused", portHeld),
+            .init("a non-blocking intercept draft maps through the frame and does not hold a start", nonBlockingHeld),
+            .init("a bypass list past its count ceiling is refused by resource before mapping", bypassRefused),
+            .init("a non-finite duration stays a codec refusal at the bridge", nonFiniteRefused),
         ]
         let passed = checks.allSatisfy(\.passed)
         guard passed else {
@@ -114,7 +146,7 @@ enum PrivateConfigBoundaryScenario {
             clientsClosedEarly: 0, totalBytes: frame.count, durationSeconds: Date().timeIntervalSince(started),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: checks,
-            notes: ["PASS: private request frame round-trips at every read schedule, the bridge maps the fixture config through the frame, keeps URL tokens out of reflection, and refuses oversize, unsupported, duplicate-key and invalid input"]
+            notes: ["PASS: private request frame round-trips at every read schedule, the bridge maps the fixture config through the frame, keeps URL tokens out of reflection, refuses oversize, unsupported and duplicate-key input, and maps semantic drafts with their eligibility classification (pure mapping, not a physical apply proof)"]
         )
     }
 
@@ -134,6 +166,13 @@ enum PrivateConfigBoundaryScenario {
             }
         }
         throw Failure(message: "the input ended inside the frame")
+    }
+
+    /// The bridge's request for `config`, carried through the frame and decoded, then mapped back to values.
+    private static func throughFrame(_ config: ProxyConfig, platform: PlatformIntegrationConfig) throws -> ProxyConfig {
+        let frame = try PrivateConfigurationEncoder.encode(try makeBridgeRequest(config: config, platform: platform))
+        let decoded = try decodeFrame(frame.withUnsafeBytes { Array($0) }, chunk: 613)
+        return try PrivateConfigurationBridge.makeValues(from: decoded, localLaunchAtLogin: true).config
     }
 
     /// The wire error a throwing step produced, or nil when it succeeded.
