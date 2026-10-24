@@ -259,7 +259,14 @@ package enum ProxyConfigPersistence {
 
     /// Saves `config` only after its bytes are staged and checked. A refusal throws before any directory or file is created or replaced.
     package static func save(_ config: ProxyConfig, to url: URL) throws {
-        try writeData(stagedFileData(for: config), to: url)
+        try writeStagedRuntimeFile(stagedFileData(for: config), to: url)
+    }
+
+    /// Replaces the runtime file with bytes a caller already staged and checked, through the same atomic write a save uses.
+    /// The verified replacement in PlatformMac calls this, so there is one physical write path. It does not check the bytes:
+    /// the caller owns that, and the caller must hold the root's writer lease (decision 0017).
+    package static func writeStagedRuntimeFile(_ data: Data, to url: URL) throws {
+        try writeData(data, to: url)
     }
 
     /// The exact bytes a save writes, checked in memory (decision 0023). The

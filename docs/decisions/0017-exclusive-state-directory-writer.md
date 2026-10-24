@@ -90,6 +90,8 @@ Does not prove: legacy upgrade ordering, cross-process exclusion on the owner's
 storage, complete writer coverage, asynchronous write quiescence, Stop/Quit or deadline
 behavior, or real-machine cleanup after a deadline.
 
+The verified runtime-file replacement takes a held `StateWriterLease` and refuses a file outside that lease's root before any I/O ([`VerifiedRuntimeFileReplacement.swift`](../../Sources/PlatformMac/VerifiedRuntimeFileReplacement.swift)). No writer calls it yet, and the lease still excludes only cooperating writers. The lease has no held-state query, so the caller proves that it still holds the root. See [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
+
 ## Open questions
 
 Concrete lease/store APIs, acquisition failures and writer inventory are

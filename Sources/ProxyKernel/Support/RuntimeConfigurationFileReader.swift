@@ -123,6 +123,12 @@ package enum RuntimeConfigurationFileReader {
         try read(at: url, limit: maximumBytes, closeDescriptor: { Darwin.close($0) })
     }
 
+    /// Reads the file at `url` under `limit`, which may only lower the approved budget. A caller that has already bounded its
+    /// own read (the verified replacement's read-back) uses this instead of a second read loop.
+    package static func read(at url: URL, limit: Int) throws(RuntimeConfigurationFileError) -> Data {
+        try read(at: url, limit: limit, closeDescriptor: { Darwin.close($0) })
+    }
+
     /// The read with a limit and a close that the tests choose. The limit can only be lowered from the approved budget,
     /// so this path cannot widen it. `closeDescriptor` is the descriptor's close. A test uses it to observe every release
     /// and to force a failed close.

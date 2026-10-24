@@ -990,3 +990,161 @@ package final class FakeStateWriterLeasing: StateWriterLeasing, @unchecked Senda
         }
     }
 }
+
+// MARK: - Runtime file access
+
+/// Stands in for `StateFileAccessing`: one in-memory file per resolved path. It models low-level effects only. A read can
+/// report a missing file, a failure, or a file past its budget. A write can fail before it lands or after it lands. Someone
+/// else can edit the file before a write or between a write and the next read. It never reports a final outcome: that is
+/// the verified replacement's job.
+///
+/// Scripts are consumed in call order. A read or write with no script behaves as the stored file does. Scripts and the
+/// observation log have a fixed capacity, and exceeding it traps, because a test that overruns it has a bug.
+package final class FakeStateFileAccess: StateFileAccessing, @unchecked Sendable {
+    package static let scriptCapacity = 8
+    package static let observationCapacity = 16
+    /// How many distinct paths the fake stores. Bytes per file are not capped, so a fixture can hold oversize bytes to exercise a refusal.
+    package static let fileCapacity = 8
+
+    /// What one read reports, in place of the stored file.
+    package enum ReadScript: Equatable, Sendable {
+        /// The stored file, read as a bounded read reports it.
+        case actual
+        /// A missing file, even when one is stored.
+        case missing
+        /// This failure.
+        case failed(RuntimeConfigurationFileError)
+    }
+
+    /// How one write lands on the stored file.
+    package enum Landing: Equatable, Sendable {
+        /// The file is replaced, and the call succeeds.
+        case lands
+        /// The call fails and the stored file is unchanged.
+        case failsBeforeLanding(errno: Int32)
+        /// The file is replaced, and then the call fails.
+        case landsThenFails(errno: Int32)
+    }
+
+    /// A change by another party to the stored file.
+    package enum ExternalEdit: Equatable, Sendable {
+        case replace(Data)
+        case remove
+    }
+
+    package struct WriteScript: Equatable, Sendable {
+        package let landing: Landing
+        /// Applied before the write lands.
+        package let editBeforeWrite: ExternalEdit?
+        /// Applied after the write, so the next read sees it.
+        package let editAfterWrite: ExternalEdit?
+
+        package init(landing: Landing, editBeforeWrite: ExternalEdit? = nil, editAfterWrite: ExternalEdit? = nil) {
+            self.landing = landing
+            self.editBeforeWrite = editBeforeWrite
+            self.editAfterWrite = editAfterWrite
+        }
+    }
+
+    /// One call the code under test made, in order. A read records its budget and a write its byte count.
+    package enum Observation: Equatable, Sendable {
+        case read(path: String, limit: Int)
+        case write(path: String, count: Int)
+    }
+
+    private let lock = NSLock()
+    private var files: [String: Data] = [:]
+    private var readScripts: [ReadScript] = []
+    private var writeScripts: [WriteScript] = []
+    private var log: [Observation] = []
+
+    package init(files: [String: Data] = [:]) {
+        for (path, bytes) in files { store(bytes, at: path) }
+    }
+
+    /// The stored bytes at `path`, or nil when no file is stored there.
+    package func storedBytes(at path: String) -> Data? {
+        lock.withLock { files[path] }
+    }
+
+    /// Every call so far, in order.
+    package var observations: [Observation] {
+        lock.withLock { log }
+    }
+
+    /// Replaces the unconsumed read scripts. A scenario with more reads than `scriptCapacity` is a test bug.
+    package func scheduleReads(_ scripts: [ReadScript]) {
+        precondition(scripts.count <= Self.scriptCapacity, "a fake read script is bounded")
+        lock.withLock { readScripts = scripts }
+    }
+
+    /// Replaces the unconsumed write scripts. A scenario with more writes than `scriptCapacity` is a test bug.
+    package func scheduleWrites(_ scripts: [WriteScript]) {
+        precondition(scripts.count <= Self.scriptCapacity, "a fake write script is bounded")
+        lock.withLock { writeScripts = scripts }
+    }
+
+    /// Caller holds `lock`.
+    private func record(_ observation: Observation) {
+        precondition(log.count < Self.observationCapacity, "a fake observation log is bounded")
+        log.append(observation)
+    }
+
+    /// Caller holds `lock`, or is `init`. Every change to the file store goes through here, so the path count has one bound.
+    private func store(_ bytes: Data?, at path: String) {
+        guard let bytes else {
+            files.removeValue(forKey: path)
+            return
+        }
+        if files[path] == nil {
+            precondition(files.count < Self.fileCapacity, "a fake file store is bounded")
+        }
+        files[path] = bytes
+    }
+
+    /// Caller holds `lock`.
+    private func apply(_ edit: ExternalEdit, at path: String) {
+        switch edit {
+        case .replace(let bytes): store(bytes, at: path)
+        case .remove: store(nil, at: path)
+        }
+    }
+
+    package func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, RuntimeConfigurationFileError> {
+        lock.withLock { () -> Result<Data, RuntimeConfigurationFileError> in
+            record(.read(path: file.path, limit: limit))
+            let script = readScripts.isEmpty ? ReadScript.actual : readScripts.removeFirst()
+            switch script {
+            case .missing:
+                return .failure(.missing)
+            case .failed(let error):
+                return .failure(error)
+            case .actual:
+                guard let bytes = files[file.path] else { return .failure(.missing) }
+                guard bytes.count <= limit else { return .failure(.unreadable(.tooLarge(limit: limit), closeErrno: nil)) }
+                return .success(bytes)
+            }
+        }
+    }
+
+    package func replaceRuntimeFile(_ file: StateRootFile, bytes: Data) -> Result<Void, RuntimeFileWriteError> {
+        lock.withLock { () -> Result<Void, RuntimeFileWriteError> in
+            record(.write(path: file.path, count: bytes.count))
+            let script = writeScripts.isEmpty ? WriteScript(landing: .lands) : writeScripts.removeFirst()
+            if let edit = script.editBeforeWrite { apply(edit, at: file.path) }
+            let result: Result<Void, RuntimeFileWriteError>
+            switch script.landing {
+            case .lands:
+                store(bytes, at: file.path)
+                result = .success(())
+            case .failsBeforeLanding(let errno):
+                result = .failure(.writeFailed(errno: errno))
+            case .landsThenFails(let errno):
+                store(bytes, at: file.path)
+                result = .failure(.writeFailed(errno: errno))
+            }
+            if let edit = script.editAfterWrite { apply(edit, at: file.path) }
+            return result
+        }
+    }
+}

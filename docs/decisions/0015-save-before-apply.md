@@ -107,6 +107,9 @@ host. The Settings UI is not exercised by the gate tests.
 Does not prove: atomic multi-file commits, cancellation of started writes,
 exclusive ownership across processes or machine cleanup after a deadline.
 
+Physical verification primitive, unwired (2026-10-24): [`VerifiedRuntimeFileReplacement.swift`](../../Sources/PlatformMac/VerifiedRuntimeFileReplacement.swift)
+classifies one runtime-file replacement as verified persisted, verified not persisted, unknown or not started, from a pre-read, the write's own result and a bounded read-back. The outcome carries no bytes. It is not a store: it takes no intent generation, mints no receipt and does not check the expected prior. Evidence and limits are in [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
+
 ## Open questions
 
 Classify secret-free committed fields and coupled components before their client
