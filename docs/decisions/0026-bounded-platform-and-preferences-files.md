@@ -1,0 +1,94 @@
+# 0026: Bound platform and preferences files through the shared file contract
+
+- Date: 2026-10-24
+- Decision: accepted (owner, 2026-10-24, #186 sidecar file-boundary checkpoint)
+- Implementation: planned
+- Validation: none
+- Supersedes: none
+- Superseded by: none
+
+## Context
+
+The runtime file already has a bounded reader/filter under 0021–0024. Platform and
+preferences sidecars still use unbounded reads and lack the ordinary preferences
+browser-URL check. Each contains six settings. The prior records explicitly left
+sidecar physical caps and discarded-value grammar open; the recovery journal is
+a separate runtime-state format.
+
+Codex and Claude reviewed the actual persistence/field inventory through Claude
+Code on the owner's claude.ai Max subscription. The owner selected **"128 KiB per
+sidecar (Recommended)"** in the question that also proposed shared strict filtering,
+valid unknown fields, first-key behavior and preserved rejected bytes. See the
+[review checkpoint](../design-configuration-sidecar-boundary.md).
+
+## Decision
+
+Cap each platform/preferences input file at 131,072 actual bytes. Bound the actual
+read with a single probe byte; metadata is not the bound. Apply the same ceiling
+to staged canonical output before physical writes. Enforce the existing 16,384 raw
+UTF-8 byte browser-test-URL limit before blank-value fallback or typed expansion.
+No new URL grammar, normalization or other domain-field ceiling is selected.
+
+Use the same bounded reader, strict lexical cursor, resource policy and file
+filter as the runtime file, with component-specific schema roots derived from the
+actual CodingKeys. Require valid syntax, UTF-8 and Unicode escapes throughout,
+including discarded unknown and later duplicate values. Valid unknown fields
+remain ignored; the first known key wins, including escaped spellings. Ignored
+valid huge exponents do not need Double conversion. Later discarded values do
+not consume domain-field budgets; all physical bytes count toward the file cap.
+
+Refuse wrong-kind sidecars explicitly, rather than applying the legacy runtime
+component's warning/default fallback. Stage candidates before migration writes.
+Refuse oversized/malformed inputs at startup or reload, report a bounded safe
+reason and preserve their original bytes. Never truncate or silently discard
+configured values. Ordinary preference-save refusal reaches the existing user
+error presentation. Independent preference effects and save-before-apply remain
+as selected; these checks do not implement the sole store or mixed-apply gate.
+
+This selects no new recovery-journal cap/grammar, registry, schema migration,
+writer-lease mechanism, runtime eligibility policy or listener handoff.
+
+## Alternatives
+
+- **Reuse 8 MiB per sidecar:** more tolerance for large unknown content/padding,
+  but up to 64 times the input/work for six settings. Not selected.
+- **Post-decode URL checks only:** fails the selected pre-expansion requirement
+  and leaves raw input allocation unbounded without another physical gate.
+- **Preserve malformed ignored values:** requires a permissive lexical mode and
+  competing ordinary file contracts. Not selected. Exact old sidecar tolerance
+  was not separately probed; the recorded runtime decoder witness is motivation,
+  not proof of a sidecar memory measurement.
+- **Reject all unknown/duplicate keys:** discards the selected valid-file
+  compatibility and is unnecessary for bounded filtering.
+
+## Consequences
+
+A 16 KiB raw URL needs at most 98,304 encoded bytes at six bytes per decoded byte,
+plus fixed keys/booleans/pretty printing, below 128 KiB. Verify this against the
+actual canonical encoder before adoption. This is an input/output cap, not RSS.
+Valid hand-edited files exceeding the cap through extra content/padding will now
+be refused but preserved. Files produced from approved typed values fit.
+
+Keep caps/schema mechanics inside persistence so later daemon/client APIs remain
+stable. Revisit for a concrete new supported field that cannot fit, with
+compatibility fixtures and measured input/working-memory costs. A larger cap
+requires no registry or new ownership model.
+
+## Invariants and verification
+
+Test exact/one-over physical and raw URL bounds, worst-case escaping, whitespace
+before fallback, valid unknown fields and escaped duplicates, strict discarded
+values, wrong-kind refusal, standalone/combined loads, migration staging,
+unchanged rejected originals and actual Settings refusal presentation. Verify
+one reader/filter/resource policy path. Test with scratch files/fakes; preserve
+the serving app/helper. No global memory or real-machine validation is inferred.
+
+## Implementation evidence
+
+None yet. Shared sidecar filtering and preference-save enforcement are planned.
+
+## Open questions
+
+None for these two configuration documents. Journal policy, full writer adoption,
+intent/revision ordering, Stop/Quit fences and total shutdown remain separate
+implementation/validation gates.
