@@ -43,5 +43,5 @@ package struct GenericDefaults: ConfigDefaultsProvider, Sendable {
     package let logging = LoggingSection()
 }
 
-// The legacy platform and preferences values of a runtime file are read by `RuntimeFileSchema` and `RuntimeFileDocument`,
+// The legacy platform and preferences values of a runtime file are read by `ConfigurationFileSchema` and `RuntimeFileDocument`,
 // from the same frozen read as the runtime config (decision 0024). No other path reads the file for them.

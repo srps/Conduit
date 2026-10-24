@@ -92,6 +92,7 @@ enum PMSim {
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
               config-resource-bounds  Approved configuration ceilings: exact and one-over, scanner order, encoder refusal
               config-file-boundary  Runtime configuration file: cap, first-key, strict filter, legacy fallback, import and writer gates
+              config-sidecar-boundary  Platform and preferences files: 128 KiB cap, raw URL limit, strict grammar, wrong-kind refusal, staged migration (0026)
               config-exact-persistence  Schema-two saves: whole-unit round trips; inexact durations refused before any write
               auth-identity-length    NTLM identity fields: 16-bit boundary accepted; uppercase expansion and oversized fields refused, not credential-unavailable
               security-boundaries     Auth destinations, config rejection, and loopback listeners
@@ -271,6 +272,7 @@ enum PMSim {
         "private-config-boundary",
         "config-resource-bounds",
         "config-file-boundary",
+        "config-sidecar-boundary",
         "config-exact-persistence",
         "auth-identity-length",
         "security-boundaries",
@@ -445,6 +447,8 @@ enum PMSim {
             return [try ConfigResourceBoundsScenario.run()]
         case "config-file-boundary":
             return [try ConfigFileBoundaryScenario.run()]
+        case "config-sidecar-boundary":
+            return [try ConfigSidecarBoundaryScenario.run()]
         case "config-exact-persistence":
             return [try ConfigExactPersistenceScenario.run()]
         case "auth-identity-length":

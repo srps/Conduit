@@ -1088,6 +1088,8 @@ final class AppState: ObservableObject {
             recordLifecycle(refusal.event, level: .warning)
         } else if let refusal = error as? ConfigurationFileSizeRefusal {
             recordLifecycle(refusal.event, level: .warning)
+        } else if let refusal = error as? ConfigurationSidecarSaveRefusal {
+            recordLifecycle(refusal.event, level: .warning)
         }
         logStore.log(.warning, "Failed to save configuration: \(error.localizedDescription)")
     }

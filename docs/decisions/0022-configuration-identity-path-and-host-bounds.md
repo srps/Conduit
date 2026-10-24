@@ -96,12 +96,14 @@ Partial: the private request boundary and the kernel's typed check enforce the i
 - Codec notes: [private-configuration-codec.md](../private-configuration-codec.md), "Canonical bypass width and token guard".
 
 Runtime-file filtering and load/import adoption now enforce the same profile through
-[RuntimeFileSchema.swift](../../Sources/ProxyKernel/Support/RuntimeFileSchema.swift) and
-[RuntimeFileFilter.swift](../../Sources/ProxyKernel/Support/RuntimeFileFilter.swift).
+[ConfigurationFileSchema.swift](../../Sources/ProxyKernel/Support/ConfigurationFileSchema.swift) and
+[ConfigurationFileFilter.swift](../../Sources/ProxyKernel/Support/ConfigurationFileFilter.swift).
 [ConfigurationFileGateTests.swift](../../Tests/ConduitTests/ConfigurationFileGateTests.swift)
 exercise parity and preserved rejected bytes; see the
 [combined verification record](../verification-configuration-boundary-2026-10-24.md).
-The normal preferences browser-URL boundary and sidecar raw-read budgets remain open.
+The normal preferences browser-URL boundary and sidecar reads are implemented under
+[0026](0026-bounded-platform-and-preferences-files.md), through the same file gate and
+resource policy. See the [sidecar verification record](../verification-config-sidecar-boundary-2026-10-24.md).
 No owner or real-machine validation is claimed.
 
 Partial protocol-boundary safety: [NTLMAuth.swift](../../Sources/ProxyAuth/NTLMAuth.swift)

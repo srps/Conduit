@@ -12,7 +12,7 @@ fallback and no external-edit policy. It is not the mixed-apply hold of
 - `ProxyKernel/Support/ProxyConfigPersistence.swift`: package `writeStagedRuntimeFile(_:to:)`
   wraps the existing private `writeData`. `save(_:to:)` calls it, so the legacy save and the
   adapter share one physical write path.
-- `ProxyKernel/Support/RuntimeConfigurationFileReader.swift`: package `read(at:limit:)`
+- `ProxyKernel/Support/ConfigurationFileReader.swift`: package `read(at:limit:)`
   delegates to the three-argument reader with `Darwin.close`. The approved 8 MiB precondition
   and the existing entry points are unchanged.
 - `PlatformMac/StateFileAccess.swift`: `RuntimeFileWriteError`, the `StateFileAccessing` protocol

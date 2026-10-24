@@ -142,6 +142,12 @@ not a requirement to finish every event or property test before extraction:
    planned, with independent effect groups deferred. Exact schema-two
    staging and safe duration conversions are also committed locally. These counts do not establish a verified
    asynchronous store, read-back receipts, writer coverage or release readiness.
+   The owner selected a 128 KiB cap for each platform/preferences sidecar with the
+   same strict reader/filter contract, valid unknown fields and first-key behavior
+   in [0026](./docs/decisions/0026-bounded-platform-and-preferences-files.md).
+   Implement the existing 16 KiB browser-URL bound before sidecar decode/save;
+   preserve rejected inputs. The journal is separate. No second parser or host
+   persistence path is selected. Sidecar implementation remains planned.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
    The move keeps MainActor and current policy. Extract `RuntimeHost` from

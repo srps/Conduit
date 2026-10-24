@@ -85,13 +85,13 @@ the actual decoder; the private schema's depth-eight bound is not a file limit.
 
 [JSONByteCursor.swift](../../Sources/ConduitShared/Grammar/JSONByteCursor.swift)
 provides one strict lexical contract, shared by the private scanner and the
-[RuntimeFileFilter.swift](../../Sources/ProxyKernel/Support/RuntimeFileFilter.swift)
+[ConfigurationFileFilter.swift](../../Sources/ProxyKernel/Support/ConfigurationFileFilter.swift)
 file adapter. The filter discards unknown and later duplicate values before typed
 expansion, validates their complete grammar, and maps known fields through
-[RuntimeFileSchema.swift](../../Sources/ProxyKernel/Support/RuntimeFileSchema.swift)
+[ConfigurationFileSchema.swift](../../Sources/ProxyKernel/Support/ConfigurationFileSchema.swift)
 to the shared resource policy. Its retained bytes enter one typed document decode.
 
-[RuntimeConfigurationFileReader.swift](../../Sources/ProxyKernel/Support/RuntimeConfigurationFileReader.swift)
+[ConfigurationFileReader.swift](../../Sources/ProxyKernel/Support/ConfigurationFileReader.swift)
 bounds actual reads at 8 MiB. [ProxyConfigPersistence.swift](../../Sources/ProxyKernel/Support/ProxyConfigPersistence.swift)
 adopts the gate for load, migration and import; legacy components use the same
 frozen document. AppState import checks the schema before editor assignment, and
@@ -107,7 +107,9 @@ They pin escaped duplicate keys, malformed ignored values, valid ignored huge
 exponents, resource parity, the actual decoder's depth boundary and unchanged
 rejected originals. See the [combined verification record](../verification-configuration-boundary-2026-10-24.md).
 
-This implements runtime-file grammar, not a new sidecar/journal grammar or cap.
+This implements runtime-file grammar. [0026](0026-bounded-platform-and-preferences-files.md)
+extends the shared strict gate to platform/preferences sidecars with its separately
+selected cap. The journal remains separate.
 Does not prove: owner/real-machine startup validation, global working-memory bounds,
 writer admission or release readiness.
 

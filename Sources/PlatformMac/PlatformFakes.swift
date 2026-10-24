@@ -1013,7 +1013,7 @@ package final class FakeStateFileAccess: StateFileAccessing, @unchecked Sendable
         /// A missing file, even when one is stored.
         case missing
         /// This failure.
-        case failed(RuntimeConfigurationFileError)
+        case failed(ConfigurationFileError)
     }
 
     /// How one write lands on the stored file.
@@ -1110,8 +1110,8 @@ package final class FakeStateFileAccess: StateFileAccessing, @unchecked Sendable
         }
     }
 
-    package func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, RuntimeConfigurationFileError> {
-        lock.withLock { () -> Result<Data, RuntimeConfigurationFileError> in
+    package func readRuntimeFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
+        lock.withLock { () -> Result<Data, ConfigurationFileError> in
             record(.read(path: file.path, limit: limit))
             let script = readScripts.isEmpty ? ReadScript.actual : readScripts.removeFirst()
             switch script {

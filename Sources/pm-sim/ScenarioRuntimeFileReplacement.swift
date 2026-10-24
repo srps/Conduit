@@ -76,7 +76,7 @@ enum RuntimeFileReplacementScenario {
         leases.lease = held
 
         let staged = Data("staged-config".utf8)
-        let budget = RuntimeConfigurationFileReader.maximumBytes
+        let budget = ConfigurationFileReader.maximumBytes
         // Every file the scenario replaces comes from the layout, so each path is the one a writer would resolve.
         let config = plan.config
         let fakeFile = plan.config
