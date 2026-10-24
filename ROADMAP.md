@@ -76,6 +76,9 @@ not a requirement to finish every event or property test before extraction:
    family through producer, codec, bridge, consumer and assertions. Define
    deadlines, unknown outcomes, subscription gaps and config ownership here.
    The existing synchronous `DaemonClient` is not the finished client.
+   The owner-selected persistence policy is save-before-apply for durable edits,
+   with Stop/Quit admitted despite save failure. Define separate durable/session/
+   applied outcomes and stop-fenced retries; Quit does not persist a disable.
 2. **Stage 2 — extract the shared host.** Extract `RuntimeHost` from
    `DaemonRuntimeHost` with no policy change. Retain the daemon fake-machine
    suite and explicit composition dependencies. Target placement is proposed
@@ -105,6 +108,8 @@ list below does not gate the core release:
    Use typed surface outcomes and model-based ordering tests. 0.5.7's retries
    are mitigation, not completion. Full process ownership and durable helper
    leases remain the later production-daemon gate (#48).
+   Include save-before-apply, partial durable writes and Stop/Quit exceptions
+   from the review draft as explicit behavior changes, not extraction claims.
 2. **Scheduling primitive ([#181](https://github.com/srps/Conduit/issues/181)).**
    `HealthChecker` is the first consumer. #207 fences stale completions but does
    not finish non-overlap or fence every pool side effect. Define the primitive

@@ -71,6 +71,18 @@ state and #181's scheduler are separately scoped shared-implementation follow-up
 with models for supersession, partial failures and stop/restart ordering. A
 bounded applied-state slice may join 0.6; their full scopes do not gate extraction.
 
+The owner selected save-before-apply for durable settings, with Stop/Quit
+exceptions (2026-10-24): verify persistence before admitting an ordinary edit or
+enable, then retain saved intent and bounded repair when applying fails. Admit a
+session stop/shutdown fence without waiting for persistence; an unsaved disabled
+preference cannot let background reconciliation restart the stopped module.
+Report actual stop/cleanup success separately from persistence failure. Quit
+does not itself persist a disable, and later daemon-mode UI Quit only disconnects.
+Partial config-file writes are not a transaction; gate coupled inputs on verified
+components and validation. The review draft specifies failure cases and the #183
+model obligations. This is a selected planning policy, not an implemented change
+or approval to write ADRs yet.
+
 Moving `RuntimeHost` alone does not remove main-actor runtime work:
 `ProxyOrchestrator`, `LifecycleLane` and `RuntimeReconciler` are isolated there
 today. Stage 4 must account for them, the serialized `PlatformWork` operations,

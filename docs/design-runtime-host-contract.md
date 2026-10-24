@@ -11,6 +11,16 @@ below remain recommendations until the owner decides. Existing accepted
 [decision 0002](./decisions/0002-daemon-first-ownership.md) retain their status.
 No new ADR is written by this document. [ROADMAP](../ROADMAP.md) remains the queue.
 
+Policy checkpoint (2026-10-24): the owner selected **save-before-apply for durable
+settings, with Stop/Quit exceptions**, and requested a Claude review before ADRs
+or implementation. The policy below records that planning choice; the remaining
+architecture/API decisions at the end are still open.
+
+Claude's two focused policy-review passes accept this basis and withdraw its earlier
+act-first preference for ordinary durable edits/enables. Its requested safeguards
+are included below: three-valued save outcomes, generation-ordered writes,
+explicit in-flight-write handling, and one total monotonic shutdown deadline.
+
 ## Purpose and current constraints
 
 Daily use is stable. Reduce defects discovered during development by combining
@@ -113,7 +123,8 @@ package protocol RuntimeClient: Sendable {
 }
 
 package enum ControlRuntimeCommand: Codable, Sendable {
-    case setModuleState(ControlModule, ControlRequestedState)
+    case start(ControlModule, using: ControlCommittedInputReference)
+    case stop(ControlModule)
     case restart(ControlModule, ifRevision: ControlLifecycleRevision)
     case applyCommittedConfiguration(ControlConfigurationCommit)
     case testUpstream(ControlUpstreamReference)
@@ -142,7 +153,10 @@ package enum ControlOperationOutcome: Codable, Sendable {
 }
 ```
 
-Use explicit requested state, not a UI-derived `toggle`. The runtime admits or
+Use explicit start/stop intent, not a UI-derived `toggle`. A start/enable names
+verified committed input already known to the host, or supplies the corresponding
+commit payload first; it cannot apply an editor draft or bypass save verification.
+An ordinary config apply does not clear a session stop fence. The runtime admits or
 joins a lifecycle operation based on authoritative state; a lagging presentation
 snapshot never authorizes a machine mutation. A stop reply means admission until
 its operation outcome says it settled. Host exit is an entry-point policy, not
@@ -159,6 +173,12 @@ writable booleans must not contradict that cause.
 
 ### Completion, cancellation and retry
 
+- A `budget: Duration` in the client sketch is derived from one local absolute
+  monotonic deadline, created once for the caller's workflow. Status waits and
+  nested calls use its remaining time, not fresh full budgets. Across a process
+  boundary, carry a capped remaining budget and establish the server's local
+  deadline; do not serialize a process-local clock instant. The concrete deadline
+  wrapper and enforcement APIs remain for contract review.
 - A caller budget bounds waiting; a local timeout after a possible send does not
   prove that the command was rejected. Report an unknown outcome when admission
   cannot be established, retain correlation identifiers and query state/outcome.
@@ -327,17 +347,166 @@ opaque revision followed by a read of newer files is insufficient. The value
 projection is the preferred shape; its complete field inventory remains an owner
 review and stage-1 design obligation, not a claim that raw ProxyConfig is wire-safe.
 
-For actions that currently persist DNS/tunnel/proxy intent, the AppState action
-adapter remains the persistence authority and passes the committed intent through
-the client. RuntimeHost never calls back into a live AppState to save a flag.
-**An owner choice remains about action ordering:** Codex recommends persist intent
-before admitting its runtime change; Claude prefers persisting intent after the
-runtime outcome. Persist-first can leave a durable requested setting whose apply
-fails; act-first can leave runtime state whose persistence fails. Both require
-explicit durable/desired/applied reporting, failure policy and reconciliation.
-Preserve current behavior during extraction; select and test any policy change
-against start/stop/quit semantics and #194 before migrating that action. Ephemeral
-start/stop and durable configuration intent must be explicit in the command map.
+For actions that persist DNS/tunnel/proxy intent, the AppState action adapter
+remains the persistence authority and passes the committed intent through the
+client. RuntimeHost never calls back into a live AppState to save a flag.
+
+### Selected policy: save before apply; Stop and Quit remain available
+
+The saved configuration describes the requested destination, not the last fully
+successful operation. Keep four concepts separate: editor draft, verified durable
+intent, the current session's explicit lifecycle intent, and observed/applied
+state per surface. A session stop can override an older saved enabled setting
+without pretending the disabled setting was saved.
+
+For ordinary persistent edits and enable operations:
+
+1. Validate the committed edit, preserving the existing held-listener-edit rules.
+2. Persist the required runtime components through the sole write authority and
+   obtain receipts for the exact values that actually landed.
+3. Admit the runtime operation only for that verified committed input, with the
+   relevant lifecycle/configuration preconditions. A failed or unconfirmed save
+   does not authorize applying the proposed new value.
+4. Publish saving/applying/applied/needs-attention outcomes separately. If applying
+   fails or lands partly, retain the saved intent and bounded corrective work;
+   do not silently rewrite the user's setting back to its old value. Superseding
+   intent and session-stop fences remain authoritative over every retry.
+
+Save outcomes are **verified persisted**, **verified not persisted**, or
+**unknown**. A write error alone does not prove that the old file remains: an
+atomic replacement may have become visible before an error was reported. Use a
+bounded read-back/identity check to resolve ambiguity before claiming a definite
+result. Publish unknown promptly while resolution is pending; do not block all
+observation on read-back. Here "verified persisted" means an authoritative store
+read-back identity match under the specified commit/durability contract; matching
+a receipt to an in-memory payload is only an identity check. Neither implies
+power-loss durability unless the store's contract explicitly guarantees it.
+If ambiguity cannot be resolved, keep unknown/needs-attention, admit no ordinary
+apply in this process, and explain that the value may take effect next launch.
+Unknown-save observation/read-back must itself respect shutdown's remaining budget.
+A nonmatching read-back after a newer write is evidence of supersession or
+uncertainty, not proof that the older attempt never committed.
+
+Each write carries a writer-incarnation/monotonic intent generation and expected
+prior component revision. The sole writer serializes component commits, rejects
+superseded queued writes before they start, and returns generation-tagged results.
+Capture the intent generation before suspending for save/admission; a late
+callback cannot allocate a newer generation and turn an older action into the
+latest intent. This also fences a delayed Stop receipt/save after a newer Start.
+A successful save completion alone does not authorize apply: the runtime also
+checks current intent generation and the session stop/shutdown fence. Later
+whole-config saves must merge the current explicit lifecycle intent rather than
+reintroduce an enabled flag from an older editor snapshot. An explicit newer
+Start/Enable remains distinct from such an autosave.
+
+An old write already in flight may land before a later disabled save; the session
+fence still prevents re-enable. The disabled preference becomes verified only
+after its own serialized commit. Once it is verified, no older queued write may
+overwrite it. Failure to save the stop means an older durable enabled value can
+survive a crash; do not claim the in-memory fence changed disk.
+
+The proposed receipt identifies the canonical encoding of the exact component
+values and their writer/generation/revision, so the host can check identity with
+the payload. Digest algorithm and encoding remain a contract choice. A matching
+digest proves neither disk durability nor caller authority: receipts originate
+from the one persistence authority, and the host's normal admission and freshness
+checks still apply.
+
+This is not an atomic transaction across config files or machine surfaces.
+Runtime config and platform settings can have different commit receipts; UI-only
+preference failure does not invalidate an independently committed runtime edit.
+A coupled operation is withheld unless all components it requires are verified
+and the combined input validates. Independent components can settle separately
+only when the command map explicitly establishes that independence. Partial
+durable writes remain visible and repairable; already-written files are not
+called rolled back. Crash recovery revalidates the actual durable set before
+starting/applying. The existing multi-file crash window is not solved by #182.
+
+**Explicit Stop is a session control operation, not contingent on saving.** Admit
+its session stop/supersession fence before attempting optional persistence of a
+disabled preference. Give stop/shutdown a bounded control path that cannot be
+starved by the ordinary command queue or a slow save. The ordinary persistence
+writer remains single; a late save does not obtain a second runtime authority.
+Already-running physical effects may complete, but stale completions cannot
+publish a new running state or erase the corrective stop/cleanup work.
+
+The AppState action adapter first submits `stop(module)` without waiting for
+persistence. RuntimeHost records the session fence in the same isolation turn as
+admission, before returning accepted/joined, and begins stop work. On that receipt,
+the adapter queues any applicable disabled-intent save through the sole writer;
+it need not wait for stop completion to save, and neither stop completion nor
+admission waits on saving. If admission is unknown/unavailable, the adapter may
+still save the user's disabled intent for next launch, but reports control
+uncertainty separately and cannot claim the runtime fence or stop occurred.
+
+If the disabled preference cannot be saved, still attempt the stop and expose
+the durable/session mismatch: for example, "Stopped for this session. Could not
+save the setting; it may start again next launch." Report that wording only when
+the listener actually stopped. Listener-stop or platform-cleanup failure has its
+own typed pending/partial/failed outcome; retaining the request does not prove
+that cleanup finished. Preserve journal records for unresolved owned settings.
+
+Automatic reconcile, helper repair, VPN/path observations, autosave completions
+and retries cannot clear the session stop fence. A newer explicit start/enable
+for that module can supersede it. A new host incarnation does not inherit an
+unpersisted session override: it revalidates the saved configuration and may start
+again, which the persistence warning in the stopping session must explain; no
+next-launch warning is promised without durable evidence. Best-effort bounded
+retries may save the newer disabled intent, but never reapply an older enabled intent.
+
+**Quit is not a durable disable operation.** In-process Quit begins the runtime's
+shutdown fence immediately and attempts bounded cleanup even if saving pending
+edits fails. Preserve the existing rule that quit does not apply unsaved edits;
+an invalid pending edit does not prevent quitting. Do not save "disabled" merely
+because the app is exiting or silently change launch behavior. An edit's save
+failure and a shutdown's cleanup/drain failure remain separate outcomes. Stop
+waiting at the documented total shutdown budget, retain recoverable ownership
+state and report incomplete cleanup rather than claiming success.
+
+Close ordinary write admission on shutdown; coalesce or discard superseded queued
+saves. A bounded shutdown-drain exception preserves the existing attempt to save
+the latest valid pending edit without applying it if the remaining budget permits.
+Account for every write already started. If its result cannot be established by
+the deadline, report it
+as unknown instead of calling it cancelled or safely rolled back. Cancellation
+of an awaiting task does not cancel an underlying write.
+
+An old process that has actually exited cannot later execute another write, but
+an old writer still alive during relaunch/update overlap could overwrite a new
+instance. A one-writer object or a payload digest alone does not prevent this.
+Before allowing such overlap, prove the old writer has quiesced/exited or design
+bounded exclusive state-directory write ownership. A pending marker alone would
+not stop an old writer. No existing process lock or new durable marker is claimed
+here; the writer-lifetime/ownership choice remains for review. A crash's unsaved
+stop warning is emitted in the old session; reliably repeating it next launch
+would require separately approved durable evidence, which this policy does not add.
+
+Use one monotonic absolute shutdown deadline. Pass its remaining budget through
+persistence resolution, queue drain, helper calls and manager-lock waits; do not
+sum fresh per-step timeouts. Deadline expiry means incomplete/unknown work, not a
+physical cancellation guarantee. Exact budgets and the mechanisms needed to
+enforce that end-to-end bound remain part of #47's reviewed API design.
+
+Later daemon-mode UI Quit only disconnects. Explicit runtime stop, runtime owner
+shutdown, logout and update paths retain their separate policies. This exception
+does not authorize app-side platform writes or a second writer after migration.
+
+Failure examples and required observations:
+
+| Scenario | Required result |
+| --- | --- |
+| Port 3128 to 3129 cannot be saved | Keep the committed configuration serving; proposed 3129 is not admitted as a durable edit |
+| Save 3129, then die before apply | Next launch revalidates saved intent and reconciles; no claim of uninterrupted service or owner-death cleanup |
+| Listener moves, macOS proxy write fails | Saved 3129 stays desired; report exact listener/platform mismatch and retain repair. Prefer bind-new, verify-ready, repoint, then retire-old; whether the old listener stays serving on repoint failure is an explicit handoff decision below |
+| Save outcome is unknown | Try bounded read-back; without verification, apply nothing new and report that the value may take effect next launch |
+| DNS files apply only partly | Show the unapplied entries; retain bounded repair against saved intent, not an all-or-nothing success flag |
+| Stop cannot save disabled intent | Session stop still supersedes starts; report actual stop result plus unsaved launch-setting warning; background repair cannot restart it |
+| Quit save fails or helper is slow | Shutdown remains admissible and bounded; retain unresolved journal state and report its actual outcome; do not persist a disable as a side effect of Quit |
+
+Stage-2 extraction still preserves current behavior. This selected policy is an
+explicit behavior change for the corresponding migrated action, with #194/#47
+acceptance and #183 model/harness evidence before that slice ships. It is not
+retroactive evidence that today's code implements it.
 
 Before production daemon adoption, transfer runtime-config write authority to the
 daemon-side store through a separately reviewed commit/configure operation.
@@ -403,7 +572,7 @@ so stop/start/config interleavings become controllable.
 | --- | --- | --- |
 | Subscription/admission | Client boundary | Baseline first, ordered replay/live handoff, bounded queues, explicit gaps, cancellation and unknown admission |
 | LifecycleLane | Before lifecycle migration/isolation | Live tokens/accounting, joins, supersession, quiescence and delayed completions |
-| Config/applied surfaces | Proxy migration and #194 | Durable vs desired/applied, partial failure, inverse edits, retained corrective work |
+| Config/applied surfaces | Each intent-changing migration and #194 | Save failure admits no ordinary edit; durable vs session/applied intent, partial writes, inverse edits, retained correction and stop-fenced retries |
 | Health scheduling | #181 | One physical run across restart, dropped ticks, one explicit follow-up, stale result/pool-effect fencing |
 | Breaker, VPNStateFuser, ConfigDiff | Their state owners are touched | Preserve #183's original model scope; bounded exhaustive or seeded mode as appropriate |
 
@@ -414,6 +583,22 @@ inputs use replayable seeds and minimized histories. Demonstrate injected-bug
 sensitivity against the production adapter and print the shortest counterexample
 or seed/history. State precisely which bound was checked; do not claim all real
 Task/NIO schedules are proved. Harness and pm-sim cases still cover actual effects.
+
+For the selected persistence policy, include save success/failure/unknown, apply
+and cleanup completions, stop, quit and fresh-launch observations in the command
+alphabet. Check save-before-admission for ordinary edits; Stop/Quit admission
+despite save failure; no automatic re-enable after a session stop; late save/apply
+completions cannot overtake shutdown; partial durable writes do not imply a
+transaction; and a new incarnation can follow older saved enabled intent only
+with the prior unsaved-stop warning represented. Inject a bug that removes each
+critical fence/order check and show a minimized counterexample against the
+production adapter, not only the reference model.
+In particular include stop during an enable write, disabled-save queued behind
+enable, superseded whole-config autosaves, out-of-order completion delivery,
+deadline during a started write, and fresh-launch/overlap observations. Inject
+removal of the generation check, stop check on save completion, and ambiguous-save
+read-back. Model process overlap only against an explicit writer-ownership design;
+do not assume a process-local queue solves it.
 
 ## Delivery slices and owner choices
 
@@ -442,15 +627,20 @@ Every implementation slice runs the repository-required checks, full host parity
 where still applicable, pm-sim and performance gates. This planning-only change
 runs documentation/decision checks; it makes no runtime-validation claim.
 
-The owner should decide the following before ADRs and implementation:
+The persistence ordering choice is selected: save-before-apply with the Stop/Quit
+exceptions above. The owner should decide the following remaining shapes before
+ADRs and implementation:
 
 | Choice | Recommendation or remaining owner choice | Consequence |
 | --- | --- | --- |
 | Module shape | ConduitRuntime plus a small event-only RuntimeEvents; control DTOs/client stay ConduitShared | Avoids updater dependency growth and a kernel-to-control dependency |
 | Contract and compatibility | Encoded in-memory transport, explicit v2 command/stream contract, lifecycle first | Exercises future daemon semantics now; keeps v1 compatibility deliberate |
 | Admission and stream semantics | Admission separate from settlement, no blind mutation retry; baseline/replay/live ordering and explicit overflow termination | Honest unknown outcomes and bounded memory; no exactly-once claim |
-| Config authority | AppState remains interim writer; validated committed values with exact component receipts; select persist-first vs act-first policy | Avoids a new writer; field classification, action ordering and later daemon handoff need specific tests |
+| Config payload and commit granularity | AppState remains interim writer; prefer secret-free committed values with component receipts; exact-revision store if projection is unsuitable; identify coupled components | Selected save-before-apply policy needs field classification and explicit partial-write handling; later daemon writer handoff stays separate |
+| Writer lifetime at relaunch/update | Prove old-writer exit/quiescence before new writes, or design bounded exclusive state-directory write ownership; no new pending marker by default | A process-local queue or digest does not prevent overlapping instances from overwriting each other |
+| Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
 | Isolation and scope | RuntimeActor for the full control-owner cluster in 0.6 core; applied state/scheduler separately scoped; leases later | Moving only the host cannot be called completion |
+| Resource and shutdown limits | Size frame/page/queue/retention bounds and a total shutdown budget including helper calls and manager locks | Provisional numbers above are review inputs, not validated shipping defaults |
 
 Concrete limit values and the full command/field inventory require stage-1 sizing
 and compatibility fixtures before those APIs are considered settled. Any owner
