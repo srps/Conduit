@@ -999,8 +999,10 @@ final class AppState: ObservableObject {
         cancelPendingSave()
         guard configurationLoadError == nil else { return }
         if hasUnsavedEdit {
-            // Every unsaved config, even one equal to the last request: a
-            // save whose write failed advanced the request all the same.
+            // Every unsaved config, even one equal to the last request: a save
+            // that wrote the config and then failed on a platform file advanced
+            // the request and left the edit unsaved. A failed config write leaves
+            // the request at its prior config.
             let blocking = config.startBlockingProblems
             if let first = blocking.first {
                 recordLifecycle(RuntimeEvent(kind: .config, event: "config.edit_discarded",
