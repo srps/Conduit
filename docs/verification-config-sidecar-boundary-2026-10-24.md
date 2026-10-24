@@ -55,3 +55,25 @@ Earlier runs on an earlier source state found one warning from the reader catch.
   `ConfigurationFileFilter.swift` and `ConfigurationFileSchema.swift`. The types inside are `ConfigurationFileReader`, `ConfigurationFileGate`,
   `ConfigurationFileFilter` and `ConfigurationFileSchema`. Renaming the files is a mechanical follow-up.
 - The 16 KiB URL check and the 128 KiB sidecar budget do not establish memory or RSS bounds. No global memory claim is made.
+
+## Independent review corrections
+
+The first complete 39-check workflow passed on `9591dfe` after the mechanical file
+renames and rebase onto PR #229. Static independent Claude review found no blocking
+production defect, but found six lost escape fixtures: ASCII input had replaced
+escaped JSON strings/keys. The corrected fixtures build their escape bytes
+explicitly and assert encoded widths. New witnesses cover a multibyte browser URL
+at the exact decoded UTF-8 limit and one over for both read and save, and a later
+over-limit duplicate ignored without charging its field budget.
+
+The simulator now checks FIFO creation, preserves its errno on failure, and cleans
+its scratch root on throws while reporting cleanup failures. Unexpected witness
+errors are reported. Standalone migration warnings reuse the existing formatter.
+Whitespace-only URL defaulting is existing behavior preserved by 0026, not a new
+normalization or exact-preferences round-trip policy.
+
+The corrected focused wrapper passed 299 tests (30 sidecar boundary tests and two
+AppState harness refusal tests), the import/event/decision checks, and all three
+focused simulator scenarios (13/17/29 assertions). The complete workflow must still
+run on this corrected source; the first run is archived separately. These checks
+are not owner/real-machine validation or release readiness.

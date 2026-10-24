@@ -262,7 +262,7 @@ package enum ProxyConfigPersistence {
             return ProxyConfigMigrationResult(
                 config: result.config,
                 migrated: true,
-                warnings: ["Config schema migrated in memory but could not be written to \(url.path): \(error.localizedDescription)"]
+                warnings: [migrationWarning("Config schema", url, error)]
             )
         }
     }
@@ -599,7 +599,7 @@ package enum PlatformConfigPersistence {
             return PlatformConfigMigrationResult(
                 config: candidate.config,
                 migrated: true,
-                warnings: ["Platform config migrated in memory but could not be written to \(environment.platformConfigFile.path): \(error.localizedDescription)"]
+                warnings: [migrationWarning("Platform config", environment.platformConfigFile, error)]
             )
         }
     }
@@ -675,7 +675,7 @@ package enum AppPreferencesPersistence {
             return AppPreferencesMigrationResult(
                 preferences: candidate.preferences,
                 migrated: true,
-                warnings: ["App preferences migrated in memory but could not be written to \(environment.preferencesFile.path): \(error.localizedDescription)"]
+                warnings: [migrationWarning("App preferences", environment.preferencesFile, error)]
             )
         }
     }

@@ -13,6 +13,13 @@ enum ConfigSidecarBoundaryScenario {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("pm-config-sidecar-boundary-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        var cleaned = false
+        defer {
+            if !cleaned {
+                do { try FileManager.default.removeItem(at: root) }
+                catch { fputs("config-sidecar-boundary cleanup failed: " + error.localizedDescription + "\n", stderr) }
+            }
+        }
         var checks: [ScenarioAssertion] = []
         var caseCount = 0
         func fresh() throws -> RuntimeEnvironment {
@@ -66,14 +73,15 @@ enum ConfigSidecarBoundaryScenario {
         checks.append(.init("16385 bytes of whitespace are refused before the blank fallback can apply",
                             isRefused { _ = try AppPreferencesPersistence.load(in: blankOverEnv) }))
 
+        let escapedUnit = String(decoding: [UInt8(92), 117, 48, 48, 54, 49], as: UTF8.self)
         let escapedEnv = try fresh()
-        try (Data(#"{"preferredBrowserTestURL":""#.utf8) + Data(String(repeating: #"a"#, count: 16_384).utf8) + suffix)
+        try (Data(#"{"preferredBrowserTestURL":""#.utf8) + Data(String(repeating: escapedUnit, count: 16_384).utf8) + suffix)
             .write(to: escapedEnv.preferencesFile)
         checks.append(.init("16384 escaped characters count by their decoded bytes and load",
-                            (try? AppPreferencesPersistence.load(in: escapedEnv))?.preferredBrowserTestURL == String(repeating: "a", count: 16_384)))
+                            escapedUnit.utf8.count == 6 && (try? AppPreferencesPersistence.load(in: escapedEnv))?.preferredBrowserTestURL == String(repeating: "a", count: 16_384)))
 
         let escapedOverEnv = try fresh()
-        try (Data(#"{"preferredBrowserTestURL":""#.utf8) + Data(String(repeating: #"a"#, count: 16_385).utf8) + suffix)
+        try (Data(#"{"preferredBrowserTestURL":""#.utf8) + Data(String(repeating: escapedUnit, count: 16_385).utf8) + suffix)
             .write(to: escapedOverEnv.preferencesFile)
         checks.append(.init("16385 escaped characters are refused by their decoded count",
                             isRefused { _ = try AppPreferencesPersistence.load(in: escapedOverEnv) }))
@@ -103,7 +111,7 @@ enum ConfigSidecarBoundaryScenario {
         let laterBadEscape = Data(#"{"manageSystemProxy":true,"manageSystemProxy":"\x"}"#.utf8)
         checks.append(.init("a later duplicate with an invalid escape refuses the platform sidecar",
                             try loadPlatform(laterBadEscape, in: fresh()) == nil))
-        let escapedFirst = Data(#"{"manageSystemProxy":true,"manageSystemProxy":false}"#.utf8)
+        let escapedFirst = Data([UInt8(123), 34, 92, 117, 48, 48, 54, 100]) + Data(#"anageSystemProxy":true,"manageSystemProxy":false}"#.utf8)
         checks.append(.init("an escaped spelling of the first known key wins over a later one",
                             try loadPlatform(escapedFirst, in: fresh())?.manageSystemProxy == true))
         let ignoredExponent = Data(#"{"manageSystemProxy":true,"unknownExponent":1e400}"#.utf8)
@@ -194,11 +202,14 @@ enum ConfigSidecarBoundaryScenario {
 
         // A named pipe is refused without blocking.
         let pipeEnv = try fresh()
-        _ = mkfifo(pipeEnv.platformConfigFile.path, 0o600)
+        guard mkfifo(pipeEnv.platformConfigFile.path, 0o600) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
         checks.append(.init("a named pipe sidecar is refused without blocking",
                             isRefused { _ = try PlatformConfigPersistence.load(in: pipeEnv) }))
 
         try FileManager.default.removeItem(at: root)
+        cleaned = true
         return ScenarioResult(
             name: "config-sidecar-boundary", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(started),
@@ -244,6 +255,7 @@ enum ConfigSidecarBoundaryScenario {
         } catch is ConfigurationLoadError {
             return true
         } catch {
+            fputs("config-sidecar-boundary unexpected load error: " + error.localizedDescription + "\n", stderr)
             return false
         }
     }
@@ -256,6 +268,7 @@ enum ConfigSidecarBoundaryScenario {
         } catch let refusal as ConfigurationSidecarSaveRefusal {
             return refusal
         } catch {
+            fputs("config-sidecar-boundary unexpected save error: " + error.localizedDescription + "\n", stderr)
             return nil
         }
     }
@@ -269,6 +282,10 @@ enum ConfigSidecarBoundaryScenario {
 
     /// Whether the file at `url` holds exactly `expected`.
     private static func kept(_ url: URL, _ expected: Data) -> Bool {
-        (try? Data(contentsOf: url)) == expected
+        do { return try Data(contentsOf: url) == expected }
+        catch {
+            fputs("config-sidecar-boundary verification read failed: " + error.localizedDescription + "\n", stderr)
+            return false
+        }
     }
 }

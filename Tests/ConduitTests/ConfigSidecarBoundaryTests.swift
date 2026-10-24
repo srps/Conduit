@@ -128,12 +128,29 @@ final class ConfigSidecarBoundaryTests: XCTestCase {
 
     func testEscapedURLCharactersCountByTheirDecodedBytes() throws {
         let limit = DomainResourceLimits.urlText
-        let escaped = Data(String(repeating: #"a"#, count: limit).utf8)
-        let accepted = Data(#"{"preferredBrowserTestURL":""#.utf8) + escaped + suffix
+        let unit = String(decoding: [UInt8(92), 117, 48, 48, 54, 49], as: UTF8.self)
+        let escaped = Data(String(repeating: unit, count: limit).utf8)
+        XCTAssertEqual(escaped.count, 6 * limit, "the fixture contains JSON escapes, not decoded ASCII")
+        let prefix = Data(#"{"preferredBrowserTestURL":""#.utf8)
+        let accepted = prefix + escaped + suffix
         XCTAssertEqual(try preferences(accepted, "escaped-exact")?.preferredBrowserTestURL, String(repeating: "a", count: limit))
-
-        let refused = Data(#"{"preferredBrowserTestURL":""#.utf8) + Data(String(repeating: #"a"#, count: limit + 1).utf8) + suffix
+        let refused = prefix + Data(String(repeating: unit, count: limit + 1).utf8) + suffix
+        XCTAssertLessThan(refused.count, DomainResourceLimits.sidecarFileBytes)
         XCTAssertNil(try preferences(refused, "escaped-over"))
+    }
+
+    func testMultibyteURLsAreBoundedByUTF8BytesForReadAndSave() throws {
+        let limit = DomainResourceLimits.urlText
+        let unit = String(decoding: [UInt8(92), 117, 48, 48, 101, 57], as: UTF8.self)
+        let expected = String(repeating: "é", count: limit / 2)
+        XCTAssertEqual(expected.utf8.count, limit)
+        let prefix = Data(#"{"preferredBrowserTestURL":""#.utf8)
+        let escaped = Data(String(repeating: unit, count: limit / 2).utf8)
+        XCTAssertEqual(escaped.count, 6 * (limit / 2))
+        XCTAssertEqual(try preferences(prefix + escaped + suffix, "multibyte-exact")?.preferredBrowserTestURL, expected)
+        XCTAssertNil(try preferences(prefix + escaped + Data("a".utf8) + suffix, "multibyte-over"))
+        XCTAssertNoThrow(try AppPreferencesPersistence.stagedData(for: AppPreferences(preferredBrowserTestURL: expected)))
+        XCTAssertThrowsError(try AppPreferencesPersistence.stagedData(for: AppPreferences(preferredBrowserTestURL: expected + "a")))
     }
 
     func testTheWorstApprovedURLStagesUnderTheBudgetAndReadsBackUnchanged() throws {
@@ -214,8 +231,19 @@ final class ConfigSidecarBoundaryTests: XCTestCase {
     }
 
     func testAnEscapedSpellingOfTheFirstKnownKeyWins() throws {
-        let data = Data(#"{"manageSystemProxy":true,"manageSystemProxy":false}"#.utf8)
+        let prefix = Data([UInt8(123), 34, 92, 117, 48, 48, 54, 100])
+        let data = prefix + Data(#"anageSystemProxy":true,"manageSystemProxy":false}"#.utf8)
+        XCTAssertEqual(data.count, Data(#"{"manageSystemProxy":true,"manageSystemProxy":false}"#.utf8).count + 5)
         XCTAssertEqual(try platform(data, "escaped-first")?.manageSystemProxy, true)
+    }
+
+    func testALaterOverLimitURLIsDiscardedWithoutChargingItsBudget() throws {
+        let first = "https://first.example.test/"
+        let bytes = Data(#"{"preferredBrowserTestURL":""#.utf8) + Data(first.utf8)
+            + Data(#"","preferredBrowserTestURL":""#.utf8)
+            + Data(String(repeating: "b", count: DomainResourceLimits.urlText + 1).utf8) + suffix
+        XCTAssertLessThan(bytes.count, DomainResourceLimits.sidecarFileBytes)
+        XCTAssertEqual(try preferences(bytes, "later-overlimit")?.preferredBrowserTestURL, first)
     }
 
     func testAnIgnoredExponentBeyondDoubleRangeIsAcceptedWithoutConversion() throws {
