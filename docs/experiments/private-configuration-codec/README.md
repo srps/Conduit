@@ -62,3 +62,49 @@ The source differs from the earlier64-case probe only in tunnel count. Two
 initial compilation attempts lacked dependency header module maps and did not
 run; adding the existing _AtomicsShims/CNIOWindows maps allowed compilation.
 No product source or dependency was changed for this experiment.
+
+
+## Staged representation lifetimes (128 tunnels)
+
+`ConfigurationLifetimeProbe.swift` uses the same synthetic128-definition fixtures
+and the same existing release library objects, before domain-limit implementation.
+It returns only the frame from the sender, releases that after framing, releases
+the body after decoding, and releases the decoded request after reconstruction.
+The final configuration survives until a separate function returns. Function
+boundaries and `withExtendedLifetime` make the intended retention stages explicit.
+The probe verifies shape; exact equality was already checked by the all-forms
+headroom probe. No product source was optimized for this experiment.
+
+It samples three distinct measures: `getrusage` peak RSS, `task_info(TASK_VM_INFO)`
+current resident bytes/physical footprint, and `malloc_zone_statistics(nil, ...)`
+bytes currently in use across malloc zones. SDK header declarations were checked
+before use. Allocator bytes exclude memory outside those allocations; they are
+not the configuration's entire physical footprint. Raw output is preserved in
+`lifetime-release-results.json`.
+
+| Stage/metric | Ordinary labels | Escaped labels |
+| --- | ---: | ---: |
+| Baseline allocator bytes in use |89,248B |89,312B |
+| Final runtime values only: allocator bytes in use |1,165,568B |1,220,736B |
+| After releasing final values: allocator bytes in use |188,000B |201,952B |
+| Final values only: current resident bytes |15,646,720B |20,430,848B |
+| Final values only: physical footprint |8,307,192B |13,091,320B |
+| Baseline resident bytes |6,176,768B |6,144,000B |
+| Baseline physical footprint |1,622,376B |1,589,608B |
+
+The live-allocation increase with only final values is roughly1.1MB, and most of
+that disappears from malloc in-use after releasing the values. Resident bytes
+and physical footprint did **not** immediately fall after release. Freed
+allocation pages can remain reserved for reuse, and library mappings/caches also
+contribute; these counters do not attribute all retained pages. Thus live heap,
+RSS, physical footprint and high-water marks must not be substituted for each
+other, and releasing a representation does not promise an immediate RSS drop.
+
+This single-update scratch process has no old active configuration, listeners,
+traffic, UI, concurrency or repeated-update growth test. It is neither an idle
+running-Conduit measurement nor an exhaustive byte/uniqueness maximum. A real
+update can retain the previous live configuration until replacement. Measure that
+lifetime and repeated updates during adoption; do not derive an app footprint
+by adding these numbers to a one-off app RSS sample. Fixed resource caps and
+shorter lifetimes are the current recommendation; no claimed allocation/storage
+optimization or new RSS acceptance threshold is introduced.
