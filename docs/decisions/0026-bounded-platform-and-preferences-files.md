@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 sidecar file-boundary checkpoint)
-- Implementation: partial
+- Implementation: implemented
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -64,8 +64,8 @@ writer-lease mechanism, runtime eligibility policy or listener handoff.
 ## Consequences
 
 A 16 KiB raw URL needs at most 98,304 encoded bytes at six bytes per decoded byte,
-plus fixed keys/booleans/pretty printing, below 128 KiB. Verify this against the
-actual canonical encoder before adoption. This is an input/output cap, not RSS.
+plus fixed keys/booleans/pretty printing, below 128 KiB. The canonical-encoder
+witness verifies that encoded expansion. This is an input/output cap, not RSS.
 Valid hand-edited files exceeding the cap through extra content/padding will now
 be refused but preserved. Files produced from approved typed values fit.
 
@@ -85,10 +85,10 @@ the serving app/helper. No global memory or real-machine validation is inferred.
 
 ## Implementation evidence
 
-Partial, on branch `codex/bounded-configuration-sidecars`, not merged:
+Implemented on branch `codex/bounded-configuration-sidecars`; PR integration is tracked separately:
 
 - Shared reader, gate and schema. [ConfigurationFileReader](../../Sources/ProxyKernel/Support/ConfigurationFileReader.swift)
-  (its file keeps the name `ConfigurationFileReader.swift` until the parent moves it) reads any file under a caller's
+  reads any file under a caller's
   budget. [ConfigurationFileFilter.swift](../../Sources/ProxyKernel/Support/ConfigurationFileFilter.swift) holds the one format gate,
   `ConfigurationFileGate`, which applies the budget and then the strict filter. [ConfigurationFileSchema.swift](../../Sources/ProxyKernel/Support/ConfigurationFileSchema.swift)
   builds each root from the real `CodingKeys`: the runtime file, and the platform and preferences sidecars, which refuse a wrong

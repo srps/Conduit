@@ -1,12 +1,12 @@
 # Verification: platform and preferences sidecar boundary (2026-10-24)
 
-Scope: [decision 0026](decisions/0026-bounded-platform-and-preferences-files.md), partial implementation on branch
+Scope: [decision 0026](decisions/0026-bounded-platform-and-preferences-files.md), implementation on branch
 `codex/bounded-configuration-sidecars`. Synthetic scratch files only. No real configuration, serving app or helper was read or changed.
 This is not owner or real-machine validation, not the sole store, and not a release check.
 
 ## What ran
 
-One run of `bash /private/tmp/conduit-runtime-stage1-20261024/verify-sidecars.sh` on the final source. It exited 0 and printed
+Initial focused run of `bash /private/tmp/conduit-runtime-stage1-20261024/verify-sidecars.sh` before the independent-review corrections below. It exited 0 and printed
 `PASS: sidecar checks`. Logs are under `/private/tmp/conduit-runtime-stage1-20261024/sidecar-checks/`.
 
 | Step | Result |
@@ -47,13 +47,10 @@ Earlier runs on an earlier source state found one warning from the reader catch.
 
 ## Limits and not run
 
-- `pm-sim all`, `scripts/perf-gate.sh`, the full `.github/workflows/swift.yml` sequence, and the other `scripts/check-*` and
-  `scripts/test-*` checks were not run here. The parent owns the full workflow and the release decision.
+- The initial focused run did not include the full workflow. The final complete run is recorded below.
 - No real-machine, owner or release validation is claimed. The async store, physical sidecar replacement, writer adoption and
   startup adoption beyond these reads are not implemented.
-- File names still say `Runtime*` where the shared reader, filter and schema now serve sidecars: `ConfigurationFileReader.swift`,
-  `ConfigurationFileFilter.swift` and `ConfigurationFileSchema.swift`. The types inside are `ConfigurationFileReader`, `ConfigurationFileGate`,
-  `ConfigurationFileFilter` and `ConfigurationFileSchema`. Renaming the files is a mechanical follow-up.
+- The shared reader, filter and schema files now use their generic `ConfigurationFile*` names.
 - The 16 KiB URL check and the 128 KiB sidecar budget do not establish memory or RSS bounds. No global memory claim is made.
 
 ## Independent review corrections
@@ -74,6 +71,25 @@ normalization or exact-preferences round-trip policy.
 
 The corrected focused wrapper passed 299 tests (30 sidecar boundary tests and two
 AppState harness refusal tests), the import/event/decision checks, and all three
-focused simulator scenarios (13/17/29 assertions). The complete workflow must still
-run on this corrected source; the first run is archived separately. These checks
-are not owner/real-machine validation or release readiness.
+focused simulator scenarios (13/17/29 assertions). The first complete run is archived
+separately. These checks are not owner/real-machine validation or release readiness.
+
+
+## Final complete local workflow
+
+All 39 checks passed on immutable source commit
+`7f7989d167742e798cc4243cc0749d61f27b881d`. The source SHA-256 was
+`cd1cb8064b83f4d5c69a778390b2f0cc9d90bc2c959ad7eb3d7f284897399ee7`
+before and after the run. The runner recorded stable source and no failed checks
+in `/private/tmp/conduit-runtime-stage1-20261024/sidecar-full-gates/results.json`.
+
+The complete Swift suite passed 2,897 tests with two skips and no failures.
+`pm-sim all` passed all 94 scenario records. Every workflow script check, the
+signed and unsigned updater harnesses, headless security/redaction and stream
+checks, and the performance gate passed. The existing performance workload took
+10.210 seconds with 33,652,736 bytes maximum RSS and 91.12% CPU. This is that
+workload's measured process usage, not a maximal-configuration memory claim.
+
+This completes local verification for the sidecar boundary slice. Hosted CI, PR
+integration, asynchronous store adoption and release validation remain separate.
+No serving app/helper was replaced and no owner or real-machine validation is claimed.
