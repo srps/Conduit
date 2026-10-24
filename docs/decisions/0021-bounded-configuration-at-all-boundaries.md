@@ -122,8 +122,7 @@ coverage, control responsiveness or complete startup/import boundary enforcement
 
 ## Open questions
 
-Inventory uncovered field categories and bring concrete compatibility choices
-back before implementing them. Persistence precision/schema policy in #224 is
+The field inventory is completed by accepted [0022](0022-configuration-identity-path-and-host-bounds.md); its implementation remains planned. Persistence precision/schema policy in #224 is
 separate and unselected. Revisit resource ceilings for a demonstrated supported
 workflow, measured supported-case memory failure, or a changed matching/listener
 model. A changed compatibility/capacity policy needs a new record. Later daemon

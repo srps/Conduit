@@ -24,7 +24,7 @@ Date: 2026-10-24. **Owner selected this profile and startup enforcement; impleme
 
 Codex inspected only configuration shape/counts and URL lengths, without printing values:3 DoH providers,11 upstreams,2 tunnels,2 DNS entries,6 intercept rules,2 allowed clients,23 bypass patterns,1 forced-proxy pattern; maximum2 servers/entry and43 URL UTF-8 bytes. These are the current file's shape, not a product-wide usage study. The proposed ceilings accommodate it.
 
-Every remaining string/array must be inventoried and covered; this table is not permission for unlisted fields to remain unbounded. Authentication identities and paths need appropriate semantic byte bounds, not accidental classification as display labels. Disabled definitions still consume configuration memory and count against resource ceilings.
+The completed field inventory and owner selection are recorded in [0022](decisions/0022-configuration-identity-path-and-host-bounds.md): identities1024UTF-8 bytes each, audit path1023, host/domain/address253, and intercept pattern255 with a leading `*.`. Preserve stricter grammars, and apply bounds to raw stored values and disabled definitions. URL-valued preferences use the URL bucket. Legacy unknown fields and first-duplicate-wins behavior are preserved with bounded filtering; private wire remains strict. Disabled definitions still consume configuration memory and count against resource ceilings.
 
 ## Enforcement shape
 

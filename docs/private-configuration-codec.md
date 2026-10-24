@@ -164,8 +164,8 @@ These are open. None is closed by this pass.
    (`ProxyConfig.swift`), on the probe path (`ConnectionPool.swift`), and on the request
    path. Tracked in #224. The kernel is unchanged in this slice, and the codec does not
    quantize or clamp the seconds.
-2. **NaN and out-of-range upstream ports (D2).** `validate()` has no check for
-   `upstreams[].port`, and `NaN` passes the non-negative and positive checks. So
+2. **Duration NaN and out-of-range upstream ports (D2, separate field types).** `validate()` has no check for
+   `upstreams[].port` (an Int), while duration `NaN` passes the non-negative and positive checks. So
    `makeRequest` can succeed, and the later `encode` throws `invalidValue` with no field
    name. No data is written wrongly, because the writer refuses. Tracked in #224.
 3. **Receiver memory before validation.** `makeValues` takes the exact count, but not the
@@ -211,4 +211,4 @@ On corrected source: Xcode-prefixed debug build, **174 selected tests with zero 
 
 The corrected codec stacked over the lease foundation passed all 39 local workflow-equivalent gates on unchanged source at206e478: 2,631 tests, two skips, zero failures;87 simulator results; perf10.14s /34,078,720B RSS. Relevant-source SHA256 before/after: `8827441b6fe8ed002c95a0ca4566579e693e797278f5b7b819450a3650ebfe89`. This is correctness evidence for an unadopted foundation, not memory-budget acceptance.
 
-The owner then explicitly rejected supporting millions of providers and requested sane limits. The [resource-bounds review](design-runtime-configuration-bounds-review.md) proposes early schema-aware rejection and shared domain limits before further adoption. The speculative packed-array optimization was stopped before it edited source. Two proposed-profile fixtures measured17.4/19.3MB peak RSS with the same codec, as recorded in the [probe note](experiments/private-configuration-codec/README.md). No new limits, startup compatibility policy or ADR are selected yet.
+The owner then explicitly rejected supporting millions of providers and requested sane limits. The [resource-bounds review](design-runtime-configuration-bounds-review.md) proposes early schema-aware rejection and shared domain limits before further adoption. The speculative packed-array optimization was stopped before it edited source. Two proposed-profile fixtures measured17.4/19.3MB peak RSS with the same codec, as recorded in the [probe note](experiments/private-configuration-codec/README.md). The owner subsequently selected the domain/startup policy in0021 and remaining string categories/legacy compatibility in0022. Enforcement remains under implementation, not adopted.
