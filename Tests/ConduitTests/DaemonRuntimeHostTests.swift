@@ -1,10 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 import ConduitShared
-@testable import ConduitDaemon
+@testable import ConduitRuntime
 @testable import PlatformMac
 @testable import ProxyKernel
 import RuntimeEvents
+
+/// The process start the harnesses report. Fixed, so no test reads the clock.
+private let testStartedAt = Date(timeIntervalSince1970: 1_700_000_000)
+
+/// A host test never ends the process. A terminal stop that reaches this hook is a failure.
+private let unexpectedTerminalExit: @MainActor () -> Void = { XCTFail("the runtime host ended the process") }
+
+/// A synthetic satisfied path, the report `FakeNetworkPathObserver` delivers in place of `NWPathMonitor`.
+private func satisfiedPath() -> NetworkPathState {
+    NetworkPathState(
+        status: .satisfied, interfaces: [], gateways: [],
+        supportsIPv4: true, supportsIPv6: false, supportsDNS: true,
+        isExpensive: false, isConstrained: false
+    )
+}
 
 @MainActor
 final class DaemonRuntimeHostTests: XCTestCase {
@@ -43,12 +58,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
         try CredentialManager(identityProvider: { (domain: "DOMAIN", username: "user", profileName: profileName) }, store: secrets)
             .saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
 
-        let host = DaemonRuntimeHost(
+        let host = RuntimeHost(
             environment: environment, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
             configFilePredatesLaunch: true,
-            networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: RecordingPrivilegeClient(),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: RecordingPrivilegeClient(),
             credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
         // Recovery writes the journal under `directory`; let it land before
@@ -72,12 +87,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
         try PlatformConfigPersistence.save(platform, in: environment)
         try AppPreferencesPersistence.save(preferences, in: environment)
         let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
-        let host = DaemonRuntimeHost(
+        let host = RuntimeHost(
             environment: environment, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
             configFilePredatesLaunch: true,
-            networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
             commandRunner: { path, arguments in try machine.run(path, arguments) },
             homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
         )
@@ -111,11 +126,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
         try ProxyConfigPersistence.save(config, in: environment)
         let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
-        let host = DaemonRuntimeHost(environment: environment, logger: DiscardingLogSink(),
+        let host = RuntimeHost(environment: environment, logger: DiscardingLogSink(),
                                      loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
                                      configFilePredatesLaunch: true,
-                                     networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), privilegeClient: machine,
+                                     startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: machine,
                                      credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                                      commandRunner: { path, arguments in try machine.run(path, arguments) },
                                      homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path)
@@ -149,13 +164,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
         try ProxyConfigPersistence.save(config, in: environment)
 
         let loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment)
-        let host = DaemonRuntimeHost(
+        let host = RuntimeHost(
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
             configFilePredatesLaunch: true,
-            networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
 
@@ -184,13 +199,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
             migrated: false,
             warnings: []
         )
-        let host = DaemonRuntimeHost(
+        let host = RuntimeHost(
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
             configFilePredatesLaunch: false,
-            networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
         // Recovery writes the journal under the state directory; let it land
@@ -227,13 +242,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
             migrated: false,
             warnings: []
         )
-        let host = DaemonRuntimeHost(
+        let host = RuntimeHost(
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
             configFilePredatesLaunch: false,
-            networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
         await host.awaitLaunchRecovery()
@@ -268,13 +283,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
             migrated: false,
             warnings: []
         )
-        let host = DaemonRuntimeHost(
+        let host = RuntimeHost(
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
             configFilePredatesLaunch: false,
-            networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer,
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
         // Recovery writes the journal under the state directory; let it land
@@ -327,7 +342,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.maxConnections = 0
 
         let recording = RecordingPrivilegeClient()
-        let host = DaemonRuntimeHost(
+        let host = RuntimeHost(
             environment: environment,
             logger: DiscardingLogSink(),
             loadedConfiguration: RuntimeConfigurationLoadResult(
@@ -338,8 +353,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 warnings: []
             ),
             configFilePredatesLaunch: false,
-            networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
+            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: recording,
             credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
         )
@@ -370,10 +385,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let machine: FakeMachine
         let vpn = FakeVPNStatusObserver()
         let locationObserver = FakeNetworkLocationObserver()
+        let pathObserver = FakeNetworkPathObserver()
+        /// Ends a terminal stop. Replaced by a test that asserts on the exit.
+        var terminalExit: @MainActor () -> Void = unexpectedTerminalExit
         var locationStore: FakeNetworkLocationStore?
         var locationLimits = NetworkLocationLimits()
-        /// The production path debounce unless a scenario waits on a report.
-        var networkPathDebounce = NetworkMonitor.defaultDebounceInterval
         /// As `AppStateHarness.reapplyRetrySchedule`.
         var reapplyRetrySchedule = ConfigReapplyRetry.Schedule(delays: [.seconds(3600)])
         /// Holds the machine's `networksetup` listings when armed, so a
@@ -412,20 +428,21 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         var wifi: FakeMachine.Service { machine.service("Wi-Fi") }
 
-        func makeHost() throws -> DaemonRuntimeHost {
+        func makeHost() throws -> RuntimeHost {
             let machine = self.machine
             let listings = self.listings
             let hold = self.hold
-            return DaemonRuntimeHost(
+            return RuntimeHost(
                 environment: environment,
                 logger: DiscardingLogSink(),
                 loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
                 // The harness writes the config file before the host exists,
                 // the way an established install has one.
                 configFilePredatesLaunch: true,
+                startedAt: testStartedAt, terminalExit: terminalExit,
                 networkLocationObserver: locationObserver,
                 networkLocationStoreFactory: { [locationStore] _ in locationStore },
-                networkLocationLimits: locationLimits, vpnStatusMonitor: vpn,
+                networkLocationLimits: locationLimits, vpnStatusMonitor: vpn, networkPathObserver: pathObserver,
                 privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
                 credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                 commandRunner: { launchPath, arguments in
@@ -435,7 +452,6 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 },
                 // As `AppStateHarness`: never the real port 53.
                 dnsResponds: FakeDNSProbe().responds(onPort:),
-                networkPathDebounce: networkPathDebounce,
                 reapplyRetrySchedule: reapplyRetrySchedule,
                 helperStatus: helper,
                 splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
@@ -446,7 +462,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         /// The switch goes off on disk, the way the app or a hand edit
         /// changes it for the daemon, and the daemon reloads.
-        func flip(_ platformConfig: PlatformIntegrationConfig, on host: DaemonRuntimeHost) async throws {
+        func flip(_ platformConfig: PlatformIntegrationConfig, on host: RuntimeHost) async throws {
             try PlatformConfigPersistence.save(platformConfig, in: environment)
             await host.reloadConfiguration()
         }
@@ -497,7 +513,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     /// Ephemeral ports, one split-DNS entry: the same config the app
     /// scenarios run on.
-    private func launch(platform: PlatformIntegrationConfig, dnsForwarderEnabled: Bool = false) throws -> DaemonRuntimeHost {
+    private func launch(platform: PlatformIntegrationConfig, dnsForwarderEnabled: Bool = false) throws -> RuntimeHost {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
@@ -505,6 +521,58 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
         harness = try DaemonHarness(config: config, platformConfig: platform)
         return try harness.makeHost()
+    }
+
+    /// A terminal stop hands the process exit to the injected hook once, after
+    /// its snapshot is written. A plain stop never reaches the hook.
+    func testTerminalStopEndsTheProcessOnceAfterItsSnapshot() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let snapshotFile = harness.environment.snapshotFile
+        var snapshotWrittenAtExit: [Bool] = []
+        harness.terminalExit = { snapshotWrittenAtExit.append(FileManager.default.fileExists(atPath: snapshotFile.path)) }
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+
+        await host.stopRuntime()
+        XCTAssertEqual(snapshotWrittenAtExit, [], "a stop that does not exit leaves the process running")
+
+        // The ordinary stop wrote a snapshot too. Remove it, so the hook can
+        // only see the one the terminal stop writes before it exits.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: snapshotFile.path), "the ordinary stop wrote a snapshot")
+        try FileManager.default.removeItem(at: snapshotFile)
+
+        await host.stopRuntime(exitAfterStop: true)
+        XCTAssertEqual(snapshotWrittenAtExit, [true], "the exit comes once, after the snapshot is written")
+    }
+
+    /// `status()` reports the start the entry point passed in and reads no
+    /// clock of its own.
+    func testStatusReportsTheInjectedStartTime() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig())
+        await host.awaitLaunchRecovery()
+
+        XCTAssertEqual(host.status().daemon?.startedAt, testStartedAt)
+        await host.stopRuntime()
+    }
+
+    /// The runtime starts and stops the injected path observer, and a report
+    /// it delivers reaches the orchestrator as a path decision.
+    func testRuntimeDrivesTheInjectedPathObserver() async throws {
+        let host = try launch(platform: PlatformIntegrationConfig())
+        await host.awaitLaunchRecovery()
+
+        try await host.startRuntime()
+        XCTAssertTrue(harness.pathObserver.isObserving)
+
+        harness.pathObserver.emit(satisfiedPath())
+        await host.deliveries.drain()
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "network.path_changed" })
+
+        await host.stopRuntime()
+        XCTAssertFalse(harness.pathObserver.isObserving)
     }
 
     func testLocationSwitchWithoutVPNOrPathChangeRestoresInactiveStateAndPreservesExternalEdits() async throws {
@@ -579,18 +647,14 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let locations = NetworkLocationFixture.store()
         harness.locationStore = locations
         harness.locationLimits = NetworkLocationLimits(maximumDriftRepairs: 1, driftRepairWindow: .milliseconds(300))
-        // The real path monitor's first report is waited for below.
-        harness.networkPathDebounce = 0.05
         let host = try harness.makeHost()
         await host.awaitLaunchRecovery()
         try await host.startRuntime()
-        // The real path monitor's first report also reconciles; let it land first,
-        // so only the scheduled retry can repair the withheld write below.
-        for _ in 0..<10_000 where !host.orchestrator.eventLog.events.contains(where: { $0.event == "network.path_changed" }) {
-            try await Task.sleep(for: .milliseconds(1))
-        }
-        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "network.path_changed" })
+        // The first path report also reconciles; let it land first, so only
+        // the scheduled retry can repair the withheld write below.
+        harness.pathObserver.emit(satisfiedPath())
         await host.deliveries.drain()
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "network.path_changed" })
         let url = try XCTUnwrap(host.orchestrator.snapshot.bindings.localPACURL)
         let enforced = NetworkSettingValue.text("http://enforced.example/proxy.pac")
         func pac() throws -> NetworkSettingValue? { try locations.snapshot().services[0].proxies["ProxyAutoConfigURLString"] }
@@ -970,7 +1034,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         try newer.write(to: harness.environment.platformStateFile)
 
         let machine = harness.machine
-        let events = await DaemonRuntimeHost.recoverWithoutConfiguration(
+        let events = await RuntimeHost.recoverWithoutConfiguration(
             environment: harness.environment,
             logger: DiscardingLogSink(),
             privilegeClient: machine,
@@ -1041,7 +1105,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertThrowsError(try ProxyConfigPersistence.loadAllMigrating(in: harness.environment), "the load main rejects")
 
         let machine = harness.machine
-        let events = await DaemonRuntimeHost.recoverWithoutConfiguration(
+        let events = await RuntimeHost.recoverWithoutConfiguration(
             environment: harness.environment,
             logger: DiscardingLogSink(),
             privilegeClient: machine,
@@ -1284,7 +1348,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
-    private func reapplyEvents(_ host: DaemonRuntimeHost) -> [String] {
+    private func reapplyEvents(_ host: RuntimeHost) -> [String] {
         host.orchestrator.eventLog.events.filter { $0.event.hasPrefix("config.reapply_") }.map { "\($0.event) \($0.detail ?? "")" }
     }
 

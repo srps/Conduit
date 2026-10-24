@@ -716,6 +716,36 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
     }
 }
 
+/// Test/sim injection point for `NetworkMonitor`. `emit(_:)` delivers a
+/// synthetic path report only between `start()` and `stop()`, as the
+/// production observer gates its callbacks. The callback runs on the caller's
+/// thread. A delivery already selected when `stop()` runs still completes
+/// after it, as a debounced callback already queued on `NetworkMonitor`'s
+/// queue does in production; `stop()` does not wait for it, so the host must
+/// gate such a report on its own state.
+package final class FakeNetworkPathObserver: NetworkPathObserving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var callback: (@Sendable (NetworkPathState) -> Void)?
+    private var started = false
+    package init() {}
+
+    package func setOnChange(_ onChange: @Sendable @escaping (NetworkPathState) -> Void) {
+        lock.withLock { callback = onChange }
+    }
+
+    package func start() { lock.withLock { started = true } }
+
+    package func stop() { lock.withLock { started = false } }
+
+    /// Whether `start()` has been called since the last `stop()`.
+    package var isObserving: Bool { lock.withLock { started } }
+
+    package func emit(_ state: NetworkPathState) {
+        let delivery = lock.withLock { started ? callback : nil }
+        delivery?(state)
+    }
+}
+
 // MARK: - Updates
 
 /// Stands in for the nested updater: records each start, can refuse them,

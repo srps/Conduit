@@ -5,6 +5,7 @@ import PlatformMac
 import ProxyAuth
 import ProxyControlBridge
 import ProxyKernel
+import ConduitRuntime
 import ConduitShared
 import ProxyPAC
 
@@ -14,14 +15,19 @@ import ProxyPAC
 /// - `pm-proxy`, which remains side-effect-free for CI and isolated testing.
 /// - `ConduitHelper`, which remains privileged-only and must not own
 ///   user Keychain / Kerberos / CFNetwork PAC state.
+///
+/// It owns the process concerns only: arguments, config loading, signals,
+/// `--print-status` and the resident wait. The runtime policy is `RuntimeHost`
+/// in `ConduitRuntime`. This file is where the process exit and the start time
+/// are injected into it.
 @main
 enum ConduitDaemon {
-    static let startedAt = Date()
     @MainActor
     private static var retainedSources: [DispatchSourceSignal] = []
 
     @MainActor
     static func main() async {
+        let startedAt = Date()
         signal(SIGPIPE, SIG_IGN)
         let args = Array(CommandLine.arguments.dropFirst())
         if let status = KerberosTicketRecoveryWorker.run(arguments: args) {
@@ -36,7 +42,7 @@ enum ConduitDaemon {
         let logger = ConsoleLogSink(minLevel: args.contains("--verbose") ? .debug : .notice)
         let environment = runtimeEnvironment(from: args)
         // Read before the load, which writes a migrated file back. See
-        // `DaemonRuntimeHost.init`.
+        // `RuntimeHost.init`.
         let configFilePredatesLaunch = FileManager.default.fileExists(atPath: environment.configFile.path)
         let loaded: RuntimeConfigurationLoadResult
         do {
@@ -45,9 +51,9 @@ enum ConduitDaemon {
             let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
             failure.report(to: logger)
             // The journal restores need no config; see
-            // `DaemonRuntimeHost.recoverWithoutConfiguration`. The exit status
+            // `RuntimeHost.recoverWithoutConfiguration`. The exit status
             // is still the load failure's.
-            await DaemonRuntimeHost.recoverWithoutConfiguration(environment: environment, logger: logger, commandRunner: CommandRunner.host)
+            await RuntimeHost.recoverWithoutConfiguration(environment: environment, logger: logger, commandRunner: CommandRunner.host)
             logger.flush()
             exit(1)
         }
@@ -58,11 +64,13 @@ enum ConduitDaemon {
             logger.log(.notice, "Configuration files migrated to the current schema.", category: .system)
         }
 
-        let host = DaemonRuntimeHost(
+        let host = RuntimeHost(
             environment: environment,
             logger: logger,
             loadedConfiguration: loaded,
             configFilePredatesLaunch: configFilePredatesLaunch,
+            startedAt: startedAt,
+            terminalExit: { exit(0) },
             commandRunner: CommandRunner.host,
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
@@ -118,7 +126,7 @@ enum ConduitDaemon {
 
     private static func printStatus(_ status: ControlDaemonStatus) {
         do {
-            let data = try DaemonRuntimeHost.prettyEncoder.encode(status)
+            let data = try RuntimeHost.prettyEncoder.encode(status)
             FileHandle.standardOutput.write(data)
             FileHandle.standardOutput.write(Data([0x0A]))
         } catch {

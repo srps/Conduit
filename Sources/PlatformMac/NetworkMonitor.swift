@@ -13,7 +13,7 @@ import ProxyKernel
 /// orchestrator's call (`ProxyOrchestrator.admitNetworkPath`), so both hosts
 /// dedupe alike and the decision is a `RuntimeEvent` (#101). The hosts' DNS
 /// reconcile runs for every report (`NetworkPathReports`).
-package final class NetworkMonitor {
+package final class NetworkMonitor: NetworkPathObserving {
     /// `NWPathMonitor` reports several updates per wake or roam within a second.
     package static let defaultDebounceInterval: TimeInterval = 2
 
@@ -29,7 +29,12 @@ package final class NetworkMonitor {
     private let monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "io.github.srps.Conduit.NetworkMonitor")
     private let debounceInterval: TimeInterval
+    /// The one object that crosses to the monitor's queue. Lock-guarded, so the
+    /// callback reads a consistent `onChange` whenever it fires.
     private let handler = Handler()
+    /// Written only by `start()` and `stop()`, which the owning runtime calls
+    /// serially and without a lock. The path handler captures the debouncer
+    /// that `start()` created, not this property.
     private var debouncer: TrailingDebouncer<NetworkPathState>?
 
     /// Fires once per burst of path updates with the newest path. Read at
@@ -37,6 +42,10 @@ package final class NetworkMonitor {
     package var onChange: (@Sendable (NetworkPathState) -> Void)? {
         get { handler.value }
         set { handler.value = newValue }
+    }
+
+    package func setOnChange(_ onChange: @Sendable @escaping (NetworkPathState) -> Void) {
+        self.onChange = onChange
     }
 
     package init(debounceInterval: TimeInterval = NetworkMonitor.defaultDebounceInterval) {
