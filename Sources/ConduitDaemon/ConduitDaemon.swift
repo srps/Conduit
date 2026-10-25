@@ -79,6 +79,9 @@ enum ConduitDaemon {
         // close while this process runs.
         let session = await acquireStateRoot(runtimeEnvironment(from: args))
         stateSession = session
+        // The production machine effects, selected once here (decision 0033). Both the config-less recovery and the
+        // host take this value, so no adapter is chosen inside either of them.
+        let effects = RuntimeHostEffects.production(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
         let loaded: RuntimeConfigurationLoadResult
         do {
             loaded = try ProxyConfigPersistence.loadAllMigrating(in: session.environment, allowMissing: !args.contains("--config"))
@@ -89,7 +92,7 @@ enum ConduitDaemon {
             // `RuntimeHost.recoverWithoutConfiguration`. They run under the
             // root's authority, which this process already holds. The exit status
             // is still the load failure's.
-            await RuntimeHost.recoverWithoutConfiguration(stateSession: session, logger: logger, commandRunner: CommandRunner.host)
+            await RuntimeHost.recoverWithoutConfiguration(stateSession: session, logger: logger, effects: effects)
             logger.flush()
             exit(1)
         }
@@ -106,8 +109,7 @@ enum ConduitDaemon {
             loadedConfiguration: loaded,
             startedAt: startedAt,
             terminalExit: { exit(0) },
-            commandRunner: CommandRunner.host,
-            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
+            effects: effects
         )
 
         if args.contains("--start-runtime") {

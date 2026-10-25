@@ -14,22 +14,6 @@ private struct RuntimeVPNFlapWindowConfig: Sendable {
     var minVisibleSeconds: TimeInterval
 }
 
-private final class RuntimePrivilegeAuditEventSink: @unchecked Sendable {
-    private let lock = NSLock()
-    private var sink: (@Sendable (RuntimeEvent) -> Void)?
-
-    func set(_ sink: @escaping @Sendable (RuntimeEvent) -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.sink = sink
-    }
-
-    func emit(_ event: RuntimeEvent) {
-        let current = lock.withLock { sink }
-        current?(event)
-    }
-}
-
 /// Shared runtime host, run by `ConduitDaemon` (decision 0013).
 ///
 /// This is the production-daemon counterpart to the runtime ownership that
@@ -66,13 +50,11 @@ package final class RuntimeHost {
     /// touching the real system configuration.
     private let privilegeClient: any PrivilegeClient
     private let auditedPrivilegeClient: any PrivilegeClient
-    private let privilegeAuditSink = RuntimePrivilegeAuditEventSink()
     /// The subprocess runner behind the `networksetup` and `launchctl`
-    /// managers, and the directories they write. Injectable for the same
-    /// reason as `privilegeClient`: a host test must not rewrite the machine
-    /// it runs on. Same seams as `AppState`.
+    /// managers, and the directories they write. Supplied by `effects`, so a
+    /// host test never rewrites the machine it runs on.
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
-    /// Twin of `AppState.dnsResponds`.
+    /// Twin of `AppState.dnsResponds`, from `effects`.
     private let dnsResponds: @Sendable (Int) -> Bool
     private let homeDirectory: URL
     private let resolverDirectory: String
@@ -168,8 +150,8 @@ package final class RuntimeHost {
     private var locationReconcileWanted = false
     private var proxySettingsReconcileInFlight = false
     private var proxySettingsReconcileWanted = false
-    /// The path source. Production is `NetworkMonitor`; a harness injects
-    /// `FakeNetworkPathObserver`, so no test reads the machine's network.
+    /// The path source, from `effects`. Production is `NetworkMonitor`; a harness
+    /// injects `FakeNetworkPathObserver`, so no test reads the machine's network.
     private let networkPathObserver: any NetworkPathObserving
     /// The hops from the observers and the orchestrator's callbacks onto the
     /// main actor. Internal so the tests can `drain()` them instead of
@@ -190,6 +172,12 @@ package final class RuntimeHost {
     /// that window, so VPN transitions and config reloads must not touch
     /// them outside it.
     private var runtimeStarted = false
+    /// The one settle in flight. It stays set until the join it started has finished, whatever its caller saw
+    /// (`settleStoppedEffects`). The join holds the root's session, not this host.
+    private var stoppedEffectsJoin: StoppedEffectsJoin?
+    /// Settles admitted and not yet finished on this host: 0 or 1. Read-only, and internal for `@testable` tests, which
+    /// wait on it to know that a settle has been admitted. It is not a public or package API.
+    var stoppedEffectsJoinCount: Int { stoppedEffectsJoin == nil ? 0 : 1 }
     /// `startRuntime` / `stopRuntime`: which is the latest, and a repeat of
     /// the one in flight joins it. See `LifecycleLane`. Twin of
     /// `AppState.proxyLane`.
@@ -218,10 +206,8 @@ package final class RuntimeHost {
     /// The resolver flag's baseline covers it too, and a split-DNS retry
     /// writes no intercept files, so a repair does not stand in for it.
     private var resolverSwitchInterceptRefreshFailed = false
-    /// Where the helper check reads the helper's status. The helper client
-    /// this host builds when none is injected; a host given a privilege
-    /// client and no status source makes no observation, so a test never
-    /// reaches the installed helper.
+    /// Where the helper check reads the helper's status, from `effects`. `nil`
+    /// makes no observation, so a test never reaches the installed helper.
     private let helperStatusSource: (any HelperLifecycleManaging)?
     /// Stamps VPN reports on the monitor's callback; the split-DNS gate
     /// and the orchestrator each apply only reports newer than the last
@@ -250,40 +236,29 @@ package final class RuntimeHost {
     ///   - startedAt: the process start that `status()` reports.
     ///   - terminalExit: called once a terminal stop (`stopRuntime(exitAfterStop:
     ///     true)`) has flushed its events. The entry point passes `exit(0)`.
-    ///   - networkPathObserver: the path source. `nil` makes the production
-    ///     `NetworkMonitor`; a harness passes `FakeNetworkPathObserver`.
+    ///   - effects: every machine-facing adapter and owned path (decision 0033).
+    ///     Production passes the real ones from `ConduitDaemon`; a simulator or
+    ///     test passes fakes and scratch paths. Nothing is defaulted here.
     package init(
         stateSession: StateRootSession,
         logger: any LogSink,
         loadedConfiguration: RuntimeConfigurationLoadResult,
         startedAt: Date,
         terminalExit: @escaping @MainActor () -> Void,
-        networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
-        networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) },
+        effects: RuntimeHostEffects,
         networkLocationLimits: NetworkLocationLimits = .init(),
-        vpnStatusMonitor: VPNStatusObserving? = nil,
-        networkPathObserver: (any NetworkPathObserving)? = nil,
-        privilegeClient: (any PrivilegeClient)? = nil,
-        credentialStore: (any SecretStore)? = nil,
-        kerberosTicketRecovery: any KerberosTicketRecovering = SystemKerberosTicketRecovery(),
-        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
-        dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
-        networkPathDebounce: TimeInterval = NetworkMonitor.defaultDebounceInterval,
         environmentDriftInterval: Duration = .seconds(300),
         reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
-        helperStatus: (any HelperLifecycleManaging)? = nil,
-        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval,
-        homeDirectory: URL,
-        resolverDirectory: String? = nil
+        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval
     ) {
         self.startedAt = startedAt
         self.terminalExit = terminalExit
-        self.dnsResponds = dnsResponds
+        self.dnsResponds = effects.dnsResponds
         self.environmentDriftInterval = environmentDriftInterval
         self.reapplyRetrySchedule = reapplyRetrySchedule
-        self.networkPathObserver = networkPathObserver ?? NetworkMonitor(debounceInterval: networkPathDebounce)
-        self.networkLocationObserver = networkLocationObserver
-        self.networkLocationStoreFactory = networkLocationStoreFactory
+        self.networkPathObserver = effects.networkPath
+        self.networkLocationObserver = effects.networkLocation
+        self.networkLocationStoreFactory = effects.networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits
         self.stateSession = stateSession
         self.environment = stateSession.environment
@@ -292,9 +267,9 @@ package final class RuntimeHost {
         self.config = loadedConfiguration.config
         self.platformConfig = loadedConfiguration.platformConfig
         self.appPreferences = loadedConfiguration.appPreferences
-        self.commandRunner = commandRunner
-        self.homeDirectory = homeDirectory
-        self.resolverDirectory = resolverDirectory ?? "/etc/resolver"
+        self.commandRunner = effects.commandRunner
+        self.homeDirectory = effects.homeDirectory
+        self.resolverDirectory = effects.resolverDirectory
         self.reconciler = RuntimeReconciler(
             config: loadedConfiguration.config,
             platformConfig: loadedConfiguration.platformConfig
@@ -306,19 +281,12 @@ package final class RuntimeHost {
             )
         )
         self.vpnFlapWindowBox = flapBox
-        let helperClient = privilegeClient == nil
-            ? HelperToolPrivilegeClient(eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) })
-            : nil
-        self.privilegeClient = privilegeClient ?? helperClient!
-        self.helperStatusSource = helperStatus ?? helperClient
-        self.splitDNSHelperCheckInterval = splitDNSHelperCheckInterval
-        self.auditedPrivilegeClient = AuditingPrivilegeClient(
-            base: self.privilegeClient,
-            eventSink: { [privilegeAuditSink] event in privilegeAuditSink.emit(event) }
-        )
-        // Shared with the orchestrator below: a refused events destination reports through this log (#222).
+        // The diagnostics log and its writers come before any privileged adapter. `RuntimeEventLog.setSink` does not
+        // replay records appended before it, so the sink is bound here, before the factory can emit. An event from the
+        // adapter's construction or from its first command then reaches the log and `events.ndjson` exactly once. The
+        // log is the orchestrator's log below (#222 shares it with the diagnostic writers).
         let diagnosticsEventLog = RuntimeEventLog()
-        self.eventWriter = RuntimeEventFileWriter(
+        let eventWriter = RuntimeEventFileWriter(
             fileURL: environment.eventsFile,
             logger: logger,
             destinationGuard: diagnosticDestinationGuard(
@@ -326,6 +294,8 @@ package final class RuntimeHost {
             ),
             eventLog: diagnosticsEventLog
         )
+        self.eventWriter = eventWriter
+        diagnosticsEventLog.setSink { [eventWriter] event in eventWriter.record(event) }
         self.snapshotWriter = makeSnapshotArtifactWriter(
             fileURL: environment.snapshotFile,
             logger: logger,
@@ -334,52 +304,61 @@ package final class RuntimeHost {
             ),
             eventLog: diagnosticsEventLog
         )
-        self.vpnStatusMonitor = vpnStatusMonitor ?? VPNStatusMonitor(
-            graceSecondsProvider: { flapBox.withLockedValue { $0.graceSeconds } },
-            minVisibleSecondsProvider: { flapBox.withLockedValue { $0.minVisibleSeconds } }
+        let privilege = effects.privilege({ diagnosticsEventLog.append($0) })
+        self.privilegeClient = privilege.client
+        self.helperStatusSource = privilege.helperStatus
+        self.splitDNSHelperCheckInterval = splitDNSHelperCheckInterval
+        self.auditedPrivilegeClient = AuditingPrivilegeClient(
+            base: self.privilegeClient,
+            eventSink: { diagnosticsEventLog.append($0) }
+        )
+        // The flap-window readers close over the box, not a copy of its values: a reload's new timings reach the monitor.
+        self.vpnStatusMonitor = effects.vpnStatusMonitor(
+            { flapBox.withLockedValue { $0.graceSeconds } },
+            { flapBox.withLockedValue { $0.minVisibleSeconds } }
         )
 
-        let pacEvaluator = CFPACEvaluator()
         let tunnelResolverManager = TunnelResolverManager(
             privilegeClient: auditedPrivilegeClient,
-            logger: logger
+            logger: logger,
+            resolverDirectory: effects.resolverDirectory
         )
         let orchestrator = ProxyOrchestrator(
             config: loadedConfiguration.config,
             logger: logger,
             privilegeClient: auditedPrivilegeClient,
             authenticatorProvider: nil,
-            pacEvaluator: pacEvaluator,
+            pacEvaluator: effects.pacEvaluator,
             eventLog: diagnosticsEventLog,
             resolverManager: tunnelResolverManager,
-            portHolderProbe: PortHolderProbe()
+            portHolderProbe: effects.portHolderProbe
         )
         self.orchestrator = orchestrator
 
-        // The login Keychain in production. A host over a fake machine
-        // injects an in-memory store, or it would read and write the
-        // installed app's credentials. Same seam as `AppState`.
+        // The saved-password store is `effects.credentials`: production is the login Keychain. A host over a fake
+        // machine gets an in-memory store, or it would read and write the installed app's credentials.
         let credentialManager = CredentialManager(
             identityProvider: { [snapshotProvider = orchestrator.configSnapshotProvider] in
                 let c = snapshotProvider()
                 return (domain: c.domain, username: c.username, profileName: c.profileName)
             },
-            store: credentialStore ?? KeychainStore()
+            store: effects.credentials
         )
         self.credentialManager = credentialManager
 
+        // `effects.gss == .system` keeps the factory's own GSS construction, so the Kerberos recovery and `auth.*`
+        // event sink are bound there (see `RuntimeGSSSource`).
         let authenticatorProvider = credentialBasedAuthenticatorProvider(
             configProvider: orchestrator.configSnapshotProvider,
             credentialProvider: credentialManager,
-            kerberosTicketRecovery: kerberosTicketRecovery,
+            kerberosTicketRecovery: effects.kerberosTicketRecovery,
             outcomeHandler: { [weak orchestrator] outcome, host, reason, diagnostics in
                 orchestrator?.reportAuthOutcome(outcome, host: host, reason: reason, diagnostics: diagnostics)
             },
-            eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
+            eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) },
+            kerberosTokenProvider: effects.gss.tokenProviderOverride
         )
         orchestrator.setAuthenticatorProvider(authenticatorProvider)
-        orchestrator.eventLog.setSink { [eventWriter] event in eventWriter.record(event) }
-        privilegeAuditSink.set { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
 
         // The hop to the main actor is kept: deliveries share one ordering with the other observers. The state is read
         // when the delivery runs, not taken from the value emitted earlier. A delivery queued before a later state
@@ -805,6 +784,62 @@ package final class RuntimeHost {
         }
     }
 
+    /// Joins the work a stopped host still runs: its credential warm-up, and the observer deliveries admitted before
+    /// this call with their cascades. Those are the only two waits. Other OS callbacks that may arrive later are not
+    /// covered, and no other lifecycle work is joined here. The caller chooses the deadline; nothing here picks one.
+    ///
+    /// Contract (decision 0033):
+    /// - `.settled` means exactly this: the credential warm-up captured when the settle began, and the observer
+    ///   deliveries admitted before it with their cascades, have finished, and the runtime was down at that moment. It
+    ///   is not a claim that every writer, task or OS callback has ended.
+    /// - The caller keeps this host, and so the root, through its final diagnostic flush, and drops them only after
+    ///   that flush. A timed-out settle is not a release: the caller keeps the host and pins it, as the harness does
+    ///   for an unconfirmed shutdown, until a later settle reports `.settled`.
+    /// - One join is in flight per host, and a settle that finds one returns `.busy` before it allocates anything.
+    ///   A join runs past the caller's deadline. It holds the root's `StateRootSession` directly, as a defensive
+    ///   measure, so the root is not released while it still runs. That is not a write-quiescence claim.
+    /// - A start, a stop, or an adopted reload admitted while the join is pending makes the result `.superseded`.
+    package func settleStoppedEffects(until deadline: ContinuousClock.Instant) async -> StoppedEffectsSettlement {
+        guard stoppedEffectsJoin == nil else { return .busy }
+        guard runtimeIsDown else { return .runtimeActive }
+        guard ContinuousClock.now < deadline else { return .deadlineExpired }
+        let join = StoppedEffectsJoin(lifecycleGeneration: lifecycleGeneration, configGeneration: configGeneration)
+        stoppedEffectsJoin = join
+        let warmup = credentialWarmup
+        let deliveries = self.deliveries
+        let session = stateSession
+        join.armDeadline(deadline)
+        // The join holds the root's session itself, so the root stays claimed until the warm-up and deliveries have
+        // finished, whether or not the caller's deadline or the host's owner has gone. It holds the host weakly: the
+        // result is computed on the main actor from the host's state, and only if the host is still there.
+        Task { @MainActor [weak self] in
+            await warmup?.value
+            await deliveries.drain()
+            withExtendedLifetime(session) {}
+            self?.finishStoppedEffectsJoin(join)
+        }
+        return await join.outcome()
+    }
+
+    /// Whether the host's actual runtime is down: its lifecycle lane is idle, no proxy or DNS is up, and no tunnel is
+    /// bound. The `runtimeStarted` flag is one input, not the answer, since a reload can leave DNS up while it is false.
+    private var runtimeIsDown: Bool {
+        let state = runtimeState()
+        return runtimeLane.isIdle && !runtimeStarted && !state.proxyIsUp && !state.dnsIsUp
+            && orchestrator.snapshot.bindings.tunnels.isEmpty
+    }
+
+    /// Frees the slot and gives any still-waiting caller the join's answer. The answer is `.settled` only if both
+    /// generations are unchanged and the runtime is down at this moment.
+    private func finishStoppedEffectsJoin(_ join: StoppedEffectsJoin) {
+        if stoppedEffectsJoin === join { stoppedEffectsJoin = nil }
+        guard lifecycleGeneration == join.lifecycleGeneration, configGeneration == join.configGeneration else {
+            join.finish(.superseded)
+            return
+        }
+        join.finish(runtimeIsDown ? .settled : .runtimeActive)
+    }
+
     func reloadConfiguration() async {
         await awaitLaunchRecovery()
         let loaded: RuntimeConfigurationLoadResult
@@ -830,6 +865,8 @@ package final class RuntimeHost {
             window.minVisibleSeconds = config.vpnFlapMinVisibleSeconds
         }
         configGeneration += 1
+        // An adopted reload changes the host view a pending settle observed, so that settle's result is stale.
+        stoppedEffectsJoin?.finish(.superseded)
         // Queued and then awaited: a caller that reloads and then stops must
         // see the machine the reload left, and the control path has no
         // editor to hand back to while the pass runs. What the pass does is
@@ -872,6 +909,8 @@ package final class RuntimeHost {
         _ operation: LifecycleOperation,
         coalescing: Bool = true
     ) async -> LifecycleLane.Token? {
+        // A newer start or stop makes a pending settle's result stale. The join itself keeps running to its end.
+        stoppedEffectsJoin?.finish(.superseded)
         switch runtimeLane.begin(kind, coalescing: coalescing) {
         case .run(let token):
             return token
@@ -1443,15 +1482,16 @@ extension RuntimeHost {
     /// skipped.
     ///
     /// Events go to `events.ndjson` as a host's would, and are returned for
-    /// the tests. The seams are `init`'s.
+    /// the tests. The machine effects are the host's `effects`, the same value
+    /// production assembly builds for the daemon: the recovery takes the
+    /// client, runner, DNS responder and location store from it, and routes the
+    /// client's events to its own event log for this run. Its drain deadline
+    /// and failure reporting are unchanged from the earlier configless path.
     @discardableResult
     package static func recoverWithoutConfiguration(
         stateSession: StateRootSession,
         logger: any LogSink,
-        privilegeClient: (any PrivilegeClient)? = nil,
-        commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
-        dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
-        networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) }
+        effects: RuntimeHostEffects
     ) async -> [RuntimeEvent] {
         // Only under the root's authority (decision 0028): the journal it restores is the one the session names.
         let environment = stateSession.environment
@@ -1468,11 +1508,11 @@ extension RuntimeHost {
             emitted.append(event)
             writer.record(event)
         }
-        let base = privilegeClient ?? HelperToolPrivilegeClient(eventSink: emit)
-        let audited = AuditingPrivilegeClient(base: base, eventSink: emit)
-        let runner = commandRunner
+        let privilege = effects.privilege(emit)
+        let audited = AuditingPrivilegeClient(base: privilege.client, eventSink: emit)
+        let runner = effects.commandRunner
         let journal = PlatformStateJournal(fileURL: environment.platformStateFile, logger: logger, eventSink: emit)
-        let locationRecovery = networkLocationStoreFactory(audited).map {
+        let locationRecovery = effects.networkLocationStoreFactory(audited).map {
             LocationSettingsRecovery(store: $0, journal: journal, emit: emit)
         }
         let systemDNS = SystemDNSManager(
@@ -1480,7 +1520,7 @@ extension RuntimeHost {
             journal: journal,
             legacySnapshotFile: environment.legacySavedDNSFile,
             commandRunner: runner,
-            respondsOnPort: dnsResponds,
+            respondsOnPort: effects.dnsResponds,
             locationRecovery: locationRecovery
         )
         let systemProxy = SystemProxyManager(privilegeClient: audited, journal: journal, commandRunner: runner, locationRecovery: locationRecovery)

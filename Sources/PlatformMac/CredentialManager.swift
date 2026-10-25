@@ -67,6 +67,13 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// waiting on the answer.
     private let readQueue = DispatchQueue(label: "io.github.srps.Conduit.credential-read", qos: .userInitiated)
     private let warmQueue = DispatchQueue(label: "io.github.srps.Conduit.credential-warm", qos: .userInitiated)
+    /// The one warm-up worker in flight, and the one request waiting behind it. Guarded by `warmLock`.
+    private let warmLock = NSLock()
+    private var warmActive: Task<Void, Never>?
+    private var warmPending: WarmRequest?
+    private struct WarmRequest {
+        let eventSink: (@Sendable (RuntimeEvent) -> Void)?
+    }
     private var cacheEntry: CacheEntry?
     /// The account of the one store read that is out, if any. Never more
     /// than one: callers that need the store meanwhile wait for it instead
@@ -172,15 +179,44 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// cooperative pool, since an access prompt holds the thread until the
     /// user answers. Both hosts call it once their listeners are up;
     /// handshakes that need the password meanwhile wait for it at most
-    /// `pendingReadWait`. The task finishes when the read has.
+    /// `pendingReadWait`. The returned task is the active worker. It finishes only after the active read and any request
+    /// waiting behind it have both run.
+    ///
+    /// Bounded: at most one warm-up runs and at most one request waits behind it. A request that arrives meanwhile
+    /// replaces the waiting one (the newest sink wins), and every caller gets the active worker's handle. The worker
+    /// runs the waiting request once the active read has returned, then ends. A blocked store therefore grows no chain
+    /// of tasks, and the handle a caller holds covers all the warm-up work still pending when it was returned.
     @discardableResult
     package func warmCacheInBackground(eventSink: (@Sendable (RuntimeEvent) -> Void)?) -> Task<Void, Never> {
-        Task {
+        warmLock.withLock {
+            if let active = warmActive {
+                warmPending = WarmRequest(eventSink: eventSink)
+                return active
+            }
+            let worker = Task { await self.runWarmWorker(first: eventSink) }
+            warmActive = worker
+            return worker
+        }
+    }
+
+    /// Runs the first request, then the waiting one if there is one, serially. It clears `warmActive` only when nothing
+    /// is waiting, under the same lock that `warmCacheInBackground` takes, so no request is lost between the two.
+    private func runWarmWorker(first: (@Sendable (RuntimeEvent) -> Void)?) async {
+        var request: WarmRequest? = WarmRequest(eventSink: first)
+        while let current = request {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                self.warmQueue.async {
-                    self.warmCache(eventSink: eventSink)
+                warmQueue.async {
+                    self.warmCache(eventSink: current.eventSink)
                     continuation.resume()
                 }
+            }
+            request = warmLock.withLock {
+                if let next = warmPending {
+                    warmPending = nil
+                    return next
+                }
+                warmActive = nil
+                return nil
             }
         }
     }

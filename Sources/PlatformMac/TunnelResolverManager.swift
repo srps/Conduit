@@ -6,6 +6,9 @@ import ConduitShared
 package final class TunnelResolverManager: TunnelResolverApplying, @unchecked Sendable {
     private let privilegeClient: PrivilegeClient
     private let logger: any LogSink
+    /// The directory `cleanupStale` enumerates. Required, so a host or simulator names the directory it owns and never
+    /// reads the machine's `/etc/resolver` by default. Production passes `/etc/resolver`.
+    private let resolverDirectory: String
 
     /// Port carried in every `/etc/resolver/*` file this manager writes.
     /// Kernel-side constant — the listener that consumes the resolver files
@@ -15,9 +18,10 @@ package final class TunnelResolverManager: TunnelResolverApplying, @unchecked Se
     /// compiling; newer code reads `TunnelResolverPort.port` directly.
     package static let resolverPort = TunnelResolverPort.port
 
-    package init(privilegeClient: PrivilegeClient, logger: any LogSink) {
+    package init(privilegeClient: PrivilegeClient, logger: any LogSink, resolverDirectory: String) {
         self.privilegeClient = privilegeClient
         self.logger = logger
+        self.resolverDirectory = resolverDirectory
     }
 
     package func apply(hostname: String, listenIP: String) throws {
@@ -59,7 +63,7 @@ package final class TunnelResolverManager: TunnelResolverApplying, @unchecked Se
     }
 
     package func cleanupStale(activeHostnames: Set<String>) {
-        let resolverDir = "/etc/resolver"
+        let resolverDir = resolverDirectory
         guard let entries = try? FileManager.default.contentsOfDirectory(atPath: resolverDir) else { return }
 
         for entry in entries {
