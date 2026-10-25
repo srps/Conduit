@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import XCTest
 import ConduitShared
+import ProxyAuth
 @testable import ConduitRuntime
 @testable import PlatformMac
 @testable import ProxyKernel
@@ -15,6 +16,8 @@ private let unexpectedTerminalExit: @MainActor () -> Void = { XCTFail("the runti
 /// A test asked a harness for a second host while it still owns the first. The request fails before anything is built.
 private enum HarnessHostOwnershipError: Error {
     case secondHost
+    /// A harness whose shutdown could not be confirmed is still held in the retention slot, so no new one is built.
+    case retainedUnconfirmed
 }
 
 /// A synthetic satisfied path, the report `FakeNetworkPathObserver` delivers in place of `NWPathMonitor`.
@@ -24,6 +27,480 @@ private func satisfiedPath() -> NetworkPathState {
         supportsIPv4: true, supportsIPv6: false, supportsDNS: true,
         isExpensive: false, isConstrained: false
     )
+}
+
+/// A resolver directory the test owns, created empty, so a host never scans the machine's `/etc/resolver`.
+private func scratchResolverDirectory(_ environment: RuntimeEnvironment) throws -> String {
+    let url = environment.configDirectory.appendingPathComponent("resolver", isDirectory: true)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    return url.path
+}
+
+/// The token provider a host test injects for `.injected`: a Kerberos handshake fails here, and the system GSS stack is never reached.
+private final class UnscriptedGSSProvider: GSSTokenProvider, @unchecked Sendable {
+    func generateToken(host: String, inputToken: Data?) throws -> Data? {
+        throw UnplannedFakeEffect(effect: "GSS token for \(host)")
+    }
+
+    func resetContext() {}
+}
+
+/// Every machine effect a host test runs against (decision 0033). There is one construction path: `makeHostEffects` names
+/// every adapter, with no default. The Kerberos and port-probe fakes are fixed inside it, since no test varies them yet.
+private func makeHostEffects(
+    privilege: @escaping RuntimePrivilegeAdaptersFactory,
+    credentials: any SecretStore,
+    gss: RuntimeGSSSource,
+    pacEvaluator: any PacEvaluator,
+    commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
+    networkPath: any NetworkPathObserving,
+    networkLocation: any NetworkLocationObserving,
+    networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
+    vpnStatusMonitor: @escaping RuntimeVPNStatusMonitorFactory,
+    dnsResponds: @escaping @Sendable (Int) -> Bool,
+    homeDirectory: URL,
+    resolverDirectory: String
+) -> RuntimeHostEffects {
+    RuntimeHostEffects(
+        privilege: privilege,
+        credentials: credentials,
+        kerberosTicketRecovery: FakeKerberosTicketRecovery(),
+        gss: gss,
+        pacEvaluator: pacEvaluator,
+        portHolderProbe: FakeListenerPortHolderProbe(),
+        commandRunner: commandRunner,
+        dnsResponds: dnsResponds,
+        networkPath: networkPath,
+        networkLocation: networkLocation,
+        networkLocationStoreFactory: networkLocationStoreFactory,
+        vpnStatusMonitor: vpnStatusMonitor,
+        homeDirectory: homeDirectory,
+        resolverDirectory: resolverDirectory
+    )
+}
+
+/// The machine effects of a test that does not vary the GSS, PAC or VPN seams: each of those fails or records, and
+/// never reaches the system GSS stack, the network or a real VPN observer.
+private func hostEffects(
+    privilege: @escaping RuntimePrivilegeAdaptersFactory,
+    credentials: any SecretStore,
+    commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
+    networkPath: any NetworkPathObserving,
+    networkLocation: any NetworkLocationObserving,
+    networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
+    vpnStatus: any VPNStatusObserving,
+    dnsResponds: @escaping @Sendable (Int) -> Bool,
+    homeDirectory: URL,
+    resolverDirectory: String
+) -> RuntimeHostEffects {
+    makeHostEffects(
+        privilege: privilege,
+        credentials: credentials,
+        gss: .injected { UnscriptedGSSProvider() },
+        pacEvaluator: FakePacEvaluator(),
+        commandRunner: commandRunner,
+        networkPath: networkPath,
+        networkLocation: networkLocation,
+        networkLocationStoreFactory: networkLocationStoreFactory,
+        vpnStatusMonitor: { _, _ in vpnStatus },
+        dnsResponds: dnsResponds,
+        homeDirectory: homeDirectory,
+        resolverDirectory: resolverDirectory
+    )
+}
+
+/// A saved-password store whose read waits until `open()`, so a credential warm-up stays in flight for as long as a test
+/// needs. Reads are counted, so a test sees that the warm-up made its read.
+private final class GatedSecretStore: SecretStore, @unchecked Sendable {
+    /// The read a gated store refuses once it opens, as a store with an unavailable entry would.
+    struct RefusedRead: Error {}
+
+    private let base = InMemorySecretStore()
+    private let condition = NSCondition()
+    private var isOpen = false
+    private var refusesReads = false
+    private var reads = 0
+
+    /// Saved-password reads started so far, including the ones still waiting.
+    var loadCount: Int { condition.withLock { reads } }
+
+    /// Lets every read, waiting or future, through, or refuses them when `refusing` is true.
+    func open(refusing: Bool = false) {
+        condition.withLock {
+            isOpen = true
+            refusesReads = refusing
+            condition.broadcast()
+        }
+    }
+
+    func save(secret: SecretBytes, account: String) throws {
+        try base.save(secret: secret, account: account)
+    }
+
+    func load(account: String) throws -> SecretBytes? {
+        let refused = condition.withLock { () -> Bool in
+            reads += 1
+            while !isOpen { condition.wait() }
+            return refusesReads
+        }
+        if refused { throw RefusedRead() }
+        return try base.load(account: account)
+    }
+
+    func exists(account: String) throws -> Bool {
+        try base.exists(account: account)
+    }
+
+    func delete(account: String) throws {
+        try base.delete(account: account)
+    }
+}
+
+/// A configuration with a fixed saved-password identity, so a warm-up test names the account its read uses.
+private func identityConfig(profileName: String) -> ProxyConfig {
+    var config = GenericDefaults.shared.makeConfig()
+    config.domain = "DOMAIN"
+    config.username = "user"
+    config.profileName = profileName
+    return config
+}
+
+/// Counts the events a warm-up sink receives, so a test sees which request's sink ran.
+private final class CountingSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var received = 0
+
+    var count: Int { lock.withLock { received } }
+
+    func record(_ event: RuntimeEvent) {
+        lock.withLock { received += 1 }
+    }
+}
+
+/// Emits one structured event per command through the sink its host gave the privilege factory, then forwards the
+/// command to a recording client, so no command reaches the machine.
+private final class EmittingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
+    private let base = RecordingPrivilegeClient()
+    private let emit: @Sendable (RuntimeEvent) -> Void
+
+    init(emit: @escaping @Sendable (RuntimeEvent) -> Void) {
+        self.emit = emit
+    }
+
+    func execute(_ operation: PrivilegedOperation, values: [String]) throws {
+        emit(RuntimeEvent(kind: .config, event: "platform.settings_observed", detail: "witness=command"))
+        try base.execute(operation, values: values)
+    }
+}
+
+/// Whether the root's lease can be taken now. A success gives the lease back at once, so the probe holds nothing.
+private func leaseIsFree(_ environment: RuntimeEnvironment) -> Bool {
+    let outcome = StateRootBootstrap.acquire(
+        environment,
+        createRootIfMissing: true,
+        fileSystem: OSStateRootFileSystem(),
+        leasing: OSStateWriterLeasing(),
+        onReleaseFailure: { failure in XCTFail("a probe lease could not be closed: errno \(failure.errno)") }
+    )
+    if case .success = outcome { return true }
+    return false
+}
+
+private enum GatedSettleFixtureError: Error {
+    case retainedSlotOccupied
+}
+
+/// The fixture of the gated settle tests, and their one teardown path. The teardown opens the gate, joins the settle the
+/// test started, stops the host, and settles it with a bounded wait. The final diagnostic flush must be confirmed. Only
+/// then does the owner drop the host and session, and a fresh acquisition prove the lease free, before the directory goes.
+/// Otherwise the fixture is kept in one retention slot, with its host and root. Nothing in the teardown waits unbounded.
+@MainActor
+private final class GatedSettleFixture {
+    /// The fixture an unconfirmed teardown kept. One slot: no new gated fixture is built while it is occupied.
+    private static var retained: GatedSettleFixture?
+
+    let store = GatedSecretStore()
+    let directory: URL
+    let environment: RuntimeEnvironment
+    private var session: StateRootSession?
+    var host: RuntimeHost?
+    /// The one settle the test started, which the teardown awaits before it stops anything. A host admits one settle join
+    /// at a time, so one slot matches it.
+    private var settle: Task<StoppedEffectsSettlement, Never>?
+
+    init() throws {
+        guard Self.retained == nil else { throw GatedSettleFixtureError.retainedSlotOccupied }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-gated-settle-\(UUID().uuidString)", isDirectory: true)
+        self.directory = directory
+        do {
+            session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        } catch {
+            // Taking the root failed, so nothing is held. Only the directory this fixture named can remain.
+            removeScratch([directory])
+            throw error
+        }
+        environment = session!.environment
+    }
+
+    /// Builds the host over the fixture's root. It runs once, before the test's first step.
+    func start(_ build: (StateRootSession, GatedSecretStore) throws -> RuntimeHost) throws {
+        host = try build(session!, store)
+    }
+
+    /// Records the test's one settle, so the teardown joins it. A second call is a test bug and traps.
+    @discardableResult
+    func track(_ task: Task<StoppedEffectsSettlement, Never>) -> Task<StoppedEffectsSettlement, Never> {
+        precondition(settle == nil, "a gated settle fixture tracks one settle")
+        settle = task
+        return task
+    }
+
+    /// The one teardown. See the type's comment for the order and the retention rule.
+    func teardown() async {
+        store.open()
+        if let settle {
+            _ = await settle.value
+        }
+        settle = nil
+        var confirmed = true
+        if let host {
+            await host.stopRuntime()
+            var outcome = StoppedEffectsSettlement.busy
+            var attempts = 0
+            while outcome == .busy, attempts < 200 {
+                attempts += 1
+                outcome = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(1)))
+                if outcome == .busy {
+                    do {
+                        try await Task.sleep(for: .milliseconds(10))
+                    } catch {
+                        break
+                    }
+                }
+            }
+            confirmed = outcome == .settled
+            if confirmed {
+                confirmed = (await host.flushEvents()).allConfirmed
+            }
+        }
+        guard confirmed else {
+            Self.retain(self, why: "the shutdown is not confirmed")
+            return
+        }
+        host = nil
+        session = nil
+        var free = false
+        var attempts = 0
+        while !free, attempts < 200 {
+            attempts += 1
+            free = leaseIsFree(environment)
+            if !free {
+                do {
+                    try await Task.sleep(for: .milliseconds(10))
+                } catch {
+                    break
+                }
+            }
+        }
+        guard free else {
+            Self.retain(self, why: "the root's lease did not close")
+            return
+        }
+        removeScratch([directory])
+    }
+
+    private static func retain(_ fixture: GatedSettleFixture, why: String) {
+        XCTFail("gated settle fixture kept because \(why): its host and root stay claimed")
+        if retained == nil {
+            retained = fixture
+        }
+    }
+}
+
+/// Runs one gated settle test over its fixture. The teardown runs on every path: after the body returns, and after a
+/// thrown error from the body or from the host's construction.
+@MainActor
+private func withGatedSettleFixture(
+    build: (StateRootSession, GatedSecretStore) throws -> RuntimeHost,
+    _ body: (GatedSettleFixture) async throws -> Void
+) async throws {
+    let fixture = try GatedSettleFixture()
+    do {
+        try fixture.start(build)
+        try await body(fixture)
+    } catch {
+        await fixture.teardown()
+        throw error
+    }
+    await fixture.teardown()
+}
+
+/// The SplitMix64 step of `LifecycleLaneModelTests`, kept private here because that file's type of the same name is
+/// private too, so the two cannot share one declaration.
+private struct WarmupBatchGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var value = state
+        value = (value ^ (value >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        value = (value ^ (value >> 27)) &* 0x94D0_49BB_1331_11EB
+        return value ^ (value >> 31)
+    }
+}
+
+/// A bounded model of the credential warm-up producer's coalescing, run over the real `CredentialManager` and the gated
+/// store fixture. Only one state is explored: a first physical read held open, a batch of requests sent meanwhile, then
+/// the release. The alphabet is three request choices, one per counting sink. The oracle is computed from the batch
+/// alone and never calls the producer. The model does not explore thread interleavings; the actual-host scenario covers
+/// the production effects around it.
+final class DaemonRuntimeHostWarmupModelTests: XCTestCase {
+    private enum Choice: CaseIterable, Hashable {
+        case a, b, c
+    }
+
+    /// Every batch of length 0 through 3: 1 + 3 + 9 + 27 = 40 traces.
+    private func exhaustiveBatches() -> [[Choice]] {
+        var batches: [[Choice]] = []
+        for length in 0...3 {
+            var prefixes: [[Choice]] = [[]]
+            for _ in 0..<length {
+                prefixes = prefixes.flatMap { prefix in Choice.allCases.map { prefix + [$0] } }
+            }
+            batches += prefixes
+        }
+        return batches
+    }
+
+    /// Sixteen batches of eight requests, drawn from the same alphabet with a fixed seed.
+    private func seededBatches() -> [[Choice]] {
+        var generator = WarmupBatchGenerator(seed: 0x0033_5EED)
+        return (0..<16).map { _ in (0..<8).map { _ in Choice.allCases.randomElement(using: &generator)! } }
+    }
+
+    private func describe(_ batch: [Choice]) -> String {
+        batch.isEmpty ? "(empty)" : batch.map { "\($0)".uppercased() }.joined(separator: " ")
+    }
+
+    /// One trace. The first physical read is held, the batch is sent, the read is released, and the handle returned
+    /// first is awaited alone. Its answer must already cover the pending request.
+    private func runTrace(_ batch: [Choice], label: String) async throws {
+        let store = GatedSecretStore()
+        let config = identityConfig(profileName: "Model")
+        let manager = CredentialManager(
+            identityProvider: { (domain: config.domain, username: config.username, profileName: config.profileName) },
+            store: store
+        )
+        try manager.saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
+        let sinks: [Choice: CountingSink] = [.a: CountingSink(), .b: CountingSink(), .c: CountingSink()]
+
+        // Oracle, from the batch alone: the active request's sink runs once, and the latest pending request's sink runs
+        // once if there is one. A reading is one physical read, plus one more if a request waits behind it.
+        var expected: [Choice: Int] = [.a: 1, .b: 0, .c: 0]
+        if let latest = batch.last { expected[latest, default: 0] += 1 }
+        let expectedReads = batch.isEmpty ? 1 : 2
+
+        let active = manager.warmCacheInBackground(eventSink: sinks[.a]!.record)
+        var attempts = 0
+        while store.loadCount < 1, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        var handles = [active]
+        for request in batch {
+            handles.append(manager.warmCacheInBackground(eventSink: sinks[request]!.record))
+        }
+        if store.loadCount != 1 {
+            XCTFail("\(label): \(store.loadCount) physical reads while the first read is blocked, expected 1")
+        }
+
+        store.open(refusing: true)
+        await active.value
+        let actual = Dictionary(uniqueKeysWithValues: Choice.allCases.map { ($0, sinks[$0]!.count) })
+        if actual != expected {
+            XCTFail("\(label): sinks ran \(actual.sorted { "\($0.key)" < "\($1.key)" }), expected \(expected.sorted { "\($0.key)" < "\($1.key)" })")
+        }
+        if store.loadCount != expectedReads {
+            XCTFail("\(label): \(store.loadCount) physical reads after release, expected \(expectedReads)")
+        }
+        for handle in handles {
+            await handle.value
+        }
+    }
+
+    func testWarmupCoalescingModelOverFiftySixBoundedTraces() async throws {
+        let exhaustive = exhaustiveBatches()
+        let seeded = seededBatches()
+        XCTAssertEqual(exhaustive.count, 40)
+        XCTAssertEqual(seeded.count, 16)
+        for (index, batch) in exhaustive.enumerated() {
+            try await runTrace(batch, label: "exhaustive \(index) [\(describe(batch))]")
+        }
+        for (index, batch) in seeded.enumerated() {
+            try await runTrace(batch, label: "seeded \(index) [\(describe(batch))]")
+        }
+        print("warmup coalescing model: traces=\(exhaustive.count + seeded.count) exhaustive=\(exhaustive.count) seeded=\(seeded.count)")
+    }
+}
+
+/// Holds the adapter a privilege factory built, so a test can drive it after the host exists.
+private final class PrivilegeAdapterBox: @unchecked Sendable {
+    var client: EmittingPrivilegeClient?
+}
+
+/// Records what the host's flap-window readers return, so a test sees the values the monitor reads after a reload.
+private final class FlapWindowRecorder: @unchecked Sendable {
+    var grace: (@Sendable () -> TimeInterval)?
+    var minVisible: (@Sendable () -> TimeInterval)?
+}
+
+/// A token provider that returns one fixed token and records the hosts it was asked for.
+private final class FixedGSSProvider: GSSTokenProvider, @unchecked Sendable {
+    static let token = Data([0x60, 0x03, 0x06, 0x01])
+    private let lock = NSLock()
+    private var hosts: [String] = []
+
+    var requestedHosts: [String] { lock.withLock { hosts } }
+
+    func generateToken(host: String, inputToken: Data?) throws -> Data? {
+        lock.withLock { hosts.append(host) }
+        return Self.token
+    }
+
+    func resetContext() {}
+}
+
+/// A PAC evaluator whose fetch returns a fixed script and records each URL it was asked for. The URL is a scratch
+/// file, so a wrong wiring that reached the system's fetcher would still read only the test's own file.
+private final class RecordingPACEvaluator: PacEvaluator, @unchecked Sendable {
+    private let lock = NSLock()
+    private var fetched: [String] = []
+
+    var fetchedURLs: [String] { lock.withLock { fetched } }
+
+    func fetchPAC(from urlString: String) async throws -> String {
+        lock.withLock { fetched.append(urlString) }
+        return "function FindProxyForURL(url, host) { return \"DIRECT\"; }"
+    }
+
+    func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating {
+        FixedPACRoute()
+    }
+
+    func routeChain(for entries: [String]) -> PACChain {
+        PACChain.classify(entries) { _ in nil }
+    }
+}
+
+private struct FixedPACRoute: PacScriptEvaluating {
+    func resolveProxyChain(for url: URL) throws -> [String] {
+        ["DIRECT"]
+    }
 }
 
 @MainActor
@@ -46,6 +523,430 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// Keychain. Without the seam a host over a fake machine read and wrote
     /// the installed app's Keychain entries, the gap #24's review closed in
     /// `AppState`.
+    // MARK: - Stopped-effects settle (decision 0033)
+
+    /// A host over a scratch root whose saved-password read waits on `store`, so the credential warm-up its start makes
+    /// stays in flight until the test opens the store. Its machine is the fake, and its listeners are ephemeral.
+    private func gatedHost(_ session: StateRootSession, store: GatedSecretStore) throws -> RuntimeHost {
+        let environment = session.environment
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderEnabled = false
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        try ProxyConfigPersistence.save(config, in: environment)
+        let saved = config
+        try CredentialManager(
+            identityProvider: { (domain: saved.domain, username: saved.username, profileName: saved.profileName) },
+            store: store
+        ).saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: saved)
+        let machine = FakeMachine(resolverDirectory: environment.configDirectory.appendingPathComponent("resolver", isDirectory: true))
+        return RuntimeHost(
+            stateSession: session, logger: DiscardingLogSink(),
+            loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: makeHostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: nil) },
+                credentials: store,
+                gss: .injected { UnscriptedGSSProvider() },
+                pacEvaluator: FakePacEvaluator(),
+                commandRunner: { path, arguments in try machine.run(path, arguments) },
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil },
+                vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: machine.resolverDirectory.path
+            )
+        )
+    }
+
+    /// A stopped host's warm-up and deliveries join before its flush. Only `.settled` lets a test go on to the flush.
+    private func quiesce(_ host: RuntimeHost) async {
+        let outcome = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+        XCTAssertEqual(outcome, .settled)
+        await host.flushEvents()
+    }
+
+    /// A deadline that passes first returns `.deadlineExpired`, and that is not quiescence. The owner keeps the host and
+    /// the root through its own settle and its final flush, and drops them only after both. A timed-out wait is not an
+    /// owner release, so the root is removed only when a fresh acquisition proves the lease free.
+    func testASettleDeadlineIsNotQuiescenceAndTheOwnerKeepsTheRootThroughItsFinalFlush() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-settle-deadline-\(UUID().uuidString)", isDirectory: true)
+        var removable = false
+        defer { if removable { removeScratch([directory]) } }
+        var session: StateRootSession? = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        let environment = session!.environment
+        let store = GatedSecretStore()
+        // Opened on every path, so no gated read outlives the test. Opening only lets the warm-up finish; it releases nothing.
+        defer { store.open() }
+        var host: RuntimeHost? = try gatedHost(session!, store: store)
+        session = nil
+        try await host!.startRuntime()
+        await host!.stopRuntime()
+
+        let timedOut = await host!.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .milliseconds(200)))
+        XCTAssertEqual(timedOut, .deadlineExpired)
+        XCTAssertFalse(leaseIsFree(environment), "the owner's host still holds the root while the warm-up is gated")
+
+        store.open()
+        // Bounded: the join frees its slot when the warm-up ends, so a settle is busy until then. 200 tries, 10 ms apart.
+        var settled = StoppedEffectsSettlement.busy
+        var attempts = 0
+        while settled == .busy, attempts < 200 {
+            attempts += 1
+            settled = await host!.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(1)))
+            if settled == .busy { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        XCTAssertEqual(settled, .settled)
+        XCTAssertEqual(store.loadCount, 1, "the warm-up made its one read")
+
+        let finalFlush = await host!.flushEvents()
+        XCTAssertTrue(finalFlush.allConfirmed, "the owner's final flush is confirmed before the owner drops anything")
+
+        host = nil
+        var free = false
+        attempts = 0
+        while !free, attempts < 200 {
+            attempts += 1
+            free = leaseIsFree(environment)
+            if !free { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        XCTAssertTrue(free, "the root is taken again once the owner has dropped its host")
+        removable = free
+    }
+
+    /// An adopted reload while a settle's join is pending makes that settle's result `.superseded`, since the host view the
+    /// settle observed has changed. A settle after the gate opens then reports `.settled` for the reloaded host.
+    func testAnAdoptedReloadWhileTheJoinIsPendingSupersedesIt() async throws {
+        try await withGatedSettleFixture(build: { try self.gatedHost($0, store: $1) }) { fixture in
+            let host = fixture.host!
+            try await host.startRuntime()
+            await host.stopRuntime()
+            let first = fixture.track(Task { @MainActor in
+                await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            })
+            // Wait, bounded, until the first settle has been admitted: its join is then the one in flight.
+            var admitted = 0
+            while host.stoppedEffectsJoinCount == 0, admitted < 200 {
+                admitted += 1
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertEqual(host.stoppedEffectsJoinCount, 1, "the first settle was admitted before the reload")
+            await host.reloadConfiguration()
+            let firstOutcome = await first.value
+            XCTAssertEqual(firstOutcome, .superseded)
+        }
+    }
+
+    /// A settle that follows the gate's opening returns `.settled` once the warm-up has made its read, and the flush comes after it.
+    func testASettleSettlesOnlyAfterTheWarmupReadAndBeforeTheFlush() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-settle-ok-\(UUID().uuidString)", isDirectory: true)
+        defer { removeScratch([directory]) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let store = GatedSecretStore()
+        let host = try gatedHost(session, store: store)
+        try await host.startRuntime()
+        await host.stopRuntime()
+        store.open()
+        let outcome = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+        XCTAssertEqual(outcome, .settled)
+        XCTAssertEqual(store.loadCount, 1, "the warm-up made its read before the settle returned")
+        await host.flushEvents()
+    }
+
+    /// While one settle's join is pending, a second settle returns `.busy` before it allocates anything. The first
+    /// settle still ends `.settled` once the gate opens.
+    func testASecondSettleIsBusyWhileTheFirstJoinIsPending() async throws {
+        try await withGatedSettleFixture(build: { try self.gatedHost($0, store: $1) }) { fixture in
+            let host = fixture.host!
+            try await host.startRuntime()
+            await host.stopRuntime()
+            let first = fixture.track(Task { @MainActor in
+                await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            })
+            // Wait, bounded, until the first settle has been admitted: its join is then the one in flight.
+            var admitted = 0
+            while host.stoppedEffectsJoinCount == 0, admitted < 200 {
+                admitted += 1
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertEqual(host.stoppedEffectsJoinCount, 1, "the first settle was admitted before the second")
+            let second = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            XCTAssertEqual(second, .busy)
+            fixture.store.open()
+            let firstOutcome = await first.value
+            XCTAssertEqual(firstOutcome, .settled)
+        }
+    }
+
+    /// A start admitted while a settle's join is pending makes that settle's result `.superseded`, not `.settled`. The
+    /// join itself runs on until its gated warm-up ends, and then a settle of the newer stop succeeds.
+    func testAStartAdmittedWhileTheJoinIsPendingSupersedesIt() async throws {
+        try await withGatedSettleFixture(build: { try self.gatedHost($0, store: $1) }) { fixture in
+            let host = fixture.host!
+            try await host.startRuntime()
+            await host.stopRuntime()
+            let first = fixture.track(Task { @MainActor in
+                await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            })
+            // Wait, bounded, until the first settle has been admitted: its join is then the one in flight.
+            var admitted = 0
+            while host.stoppedEffectsJoinCount == 0, admitted < 200 {
+                admitted += 1
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            XCTAssertEqual(host.stoppedEffectsJoinCount, 1, "the first settle was admitted before the start")
+            try await host.startRuntime()
+            let firstOutcome = await first.value
+            XCTAssertEqual(firstOutcome, .superseded)
+            // The teardown opens the gate, stops the started host, and settles it with a bounded wait before the flush.
+        }
+    }
+
+    // MARK: - Credential warm-up coalescing (decision 0033)
+
+    /// While the store blocks the first read, repeated warm-ups start no second producer. One request waits behind the
+    /// active read and the newest one replaces the older waiting ones, so two reads happen, not three, and the middle
+    /// request's sink never runs.
+    func testRepeatedWarmupsWhileTheStoreBlocksRunOneWorkerAndOneWaitingRequest() async throws {
+        let store = GatedSecretStore()
+        let config = identityConfig(profileName: "Coalesce")
+        let manager = CredentialManager(
+            identityProvider: { (domain: config.domain, username: config.username, profileName: config.profileName) },
+            store: store
+        )
+        try manager.saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
+        let sinks = [CountingSink(), CountingSink(), CountingSink()]
+
+        let first = manager.warmCacheInBackground(eventSink: sinks[0].record)
+        var attempts = 0
+        while store.loadCount < 1, attempts < 200 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(store.loadCount, 1, "the first warm-up is reading the store")
+
+        let second = manager.warmCacheInBackground(eventSink: sinks[1].record)
+        let third = manager.warmCacheInBackground(eventSink: sinks[2].record)
+        XCTAssertEqual(store.loadCount, 1, "no second producer starts while the first read is blocked")
+
+        // Refused reads make each warm-up report through its own sink, so the counts show which requests ran.
+        store.open(refusing: true)
+        await first.value
+        await second.value
+        await third.value
+        XCTAssertEqual(store.loadCount, 2, "one active read and one waiting request: two reads, not three")
+        XCTAssertEqual(sinks.map(\.count), [1, 0, 1], "the newest waiting request ran, and the middle one was replaced")
+
+        // Once the worker has ended, a new request starts a new one, so nothing is stuck behind the old handle.
+        let fourth = manager.warmCacheInBackground(eventSink: nil)
+        await fourth.value
+        XCTAssertEqual(store.loadCount, 3)
+    }
+
+    /// A warm-up requested while nothing is blocked runs, and is reported once, through its own sink.
+    func testAWarmupWithNothingBlockedRunsOnceThroughItsOwnSink() async throws {
+        let store = GatedSecretStore()
+        store.open(refusing: true)
+        let config = identityConfig(profileName: "Single")
+        let manager = CredentialManager(
+            identityProvider: { (domain: config.domain, username: config.username, profileName: config.profileName) },
+            store: store
+        )
+        try manager.saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
+        let sink = CountingSink()
+        await manager.warmCacheInBackground(eventSink: sink.record).value
+        XCTAssertEqual(store.loadCount, 1)
+        XCTAssertEqual(sink.count, 1)
+    }
+
+    // MARK: - Effect witnesses (decision 0033)
+
+    /// The log's sink is bound before the privilege factory runs, so an event from the adapter's construction and one from
+    /// its later command each reach the in-memory log and `events.ndjson` exactly once.
+    func testAnAdapterEventFromConstructionAndFromACommandIsRecordedOnce() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-witness-events-\(UUID().uuidString)", isDirectory: true)
+        defer { removeScratch([directory]) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
+        try ProxyConfigPersistence.save(GenericDefaults.shared.makeConfig(), in: environment)
+
+        let adapter = PrivilegeAdapterBox()
+        let host = RuntimeHost(
+            stateSession: session, logger: DiscardingLogSink(),
+            loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { emit in
+                    emit(RuntimeEvent(kind: .config, event: "platform.settings_observed", detail: "witness=construction"))
+                    let client = EmittingPrivilegeClient(emit: emit)
+                    adapter.client = client
+                    return RuntimePrivilegeAdapters(client: client, helperStatus: nil)
+                },
+                credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
+        )
+        try XCTUnwrap(adapter.client).execute(.removeDNS, values: ["witness.example"])
+        await quiesce(host)
+
+        let inMemory = host.orchestrator.eventLog.events
+        XCTAssertEqual(inMemory.filter { $0.detail == "witness=construction" }.count, 1)
+        XCTAssertEqual(inMemory.filter { $0.detail == "witness=command" }.count, 1)
+        let written = try String(contentsOf: environment.eventsFile, encoding: .utf8)
+        XCTAssertEqual(written.components(separatedBy: "witness=construction").count - 1, 1)
+        XCTAssertEqual(written.components(separatedBy: "witness=command").count - 1, 1)
+    }
+
+    /// The VPN monitor reads the flap-window timings through the host's readers, so a reload's new values reach it
+    /// without a restart. A recording factory sees the readers the host passes.
+    func testTheVPNMonitorReadsTheFlapWindowAsAReloadLeavesIt() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-witness-flap-\(UUID().uuidString)", isDirectory: true)
+        defer { removeScratch([directory]) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
+        var config = GenericDefaults.shared.makeConfig()
+        config.vpnFlapGraceSeconds = 2
+        config.vpnFlapMinVisibleSeconds = 0.5
+        try ProxyConfigPersistence.save(config, in: environment)
+
+        let recorder = FlapWindowRecorder()
+        let host = RuntimeHost(
+            stateSession: session, logger: DiscardingLogSink(),
+            loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: makeHostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: InMemorySecretStore(),
+                gss: .injected { UnscriptedGSSProvider() },
+                pacEvaluator: FakePacEvaluator(),
+                commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil },
+                vpnStatusMonitor: { grace, minVisible in
+                    recorder.grace = grace
+                    recorder.minVisible = minVisible
+                    return FakeVPNStatusObserver()
+                },
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
+        )
+        await host.awaitLaunchRecovery()
+        XCTAssertEqual(recorder.grace?(), 2)
+        XCTAssertEqual(recorder.minVisible?(), 0.5)
+
+        config.vpnFlapGraceSeconds = 7
+        config.vpnFlapMinVisibleSeconds = 3
+        try ProxyConfigPersistence.save(config, in: environment)
+        await host.reloadConfiguration()
+        XCTAssertEqual(recorder.grace?(), 7)
+        XCTAssertEqual(recorder.minVisible?(), 3)
+        // The stopped effects join before the flush, or a late writer recreates files in the scratch directory.
+        await quiesce(host)
+    }
+
+    /// Negotiated auth takes its token from the injected provider, through the host's own authenticator provider, and the
+    /// system GSS stack is never reached.
+    func testNegotiatedAuthTakesItsTokenFromTheInjectedProvider() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-witness-gss-\(UUID().uuidString)", isDirectory: true)
+        defer { removeScratch([directory]) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
+        var config = GenericDefaults.shared.makeConfig()
+        let upstream = UpstreamProxy(name: "Synthetic", host: "upstream.example", port: 9, priority: 0)
+        config.authMode = .systemNegotiated
+        config.upstreams = [upstream]
+        try ProxyConfigPersistence.save(config, in: environment)
+
+        let gss = FixedGSSProvider()
+        let host = RuntimeHost(
+            stateSession: session, logger: DiscardingLogSink(),
+            loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: makeHostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: InMemorySecretStore(),
+                gss: .injected { gss },
+                pacEvaluator: FakePacEvaluator(),
+                commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil },
+                vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
+        )
+        await host.awaitLaunchRecovery()
+
+        let authenticator = try host.orchestrator.lateBoundAuthenticatorProvider(upstream)
+        XCTAssertEqual(authenticator.scheme, "Negotiate")
+        XCTAssertEqual(try authenticator.initialToken(for: "upstream.example"),
+                       "Negotiate " + FixedGSSProvider.token.base64EncodedString())
+        XCTAssertEqual(gss.requestedHosts, ["upstream.example"])
+        // The stopped effects join before the flush, or a late writer recreates files in the scratch directory.
+        await quiesce(host)
+    }
+
+    /// A PAC refresh fetches through the injected evaluator, the production path `refreshPACRouting` takes. The URL is a
+    /// scratch file, so a wrong wiring would still read only the test's own file.
+    func testAPACRefreshFetchesThroughTheInjectedEvaluator() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-witness-pac-\(UUID().uuidString)", isDirectory: true)
+        defer { removeScratch([directory]) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
+        let pacFile = directory.appendingPathComponent("proxy.pac")
+        try "function FindProxyForURL(url, host) { return \"DIRECT\"; }".write(to: pacFile, atomically: true, encoding: .utf8)
+        var config = GenericDefaults.shared.makeConfig()
+        config.pacRoutingEnabled = true
+        config.pacURL = pacFile.absoluteString
+        try ProxyConfigPersistence.save(config, in: environment)
+
+        let pac = RecordingPACEvaluator()
+        let host = RuntimeHost(
+            stateSession: session, logger: DiscardingLogSink(),
+            loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: makeHostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: InMemorySecretStore(),
+                gss: .injected { UnscriptedGSSProvider() },
+                pacEvaluator: pac,
+                commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil },
+                vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
+        )
+        await host.awaitLaunchRecovery()
+        await host.orchestrator.refreshPACRouting(force: true)
+        XCTAssertEqual(pac.fetchedURLs, [pacFile.absoluteString])
+        // The stopped effects join before the flush, or a late writer recreates files in the scratch directory.
+        await quiesce(host)
+    }
+
     func testCredentialsComeFromTheInjectedStore() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-credential-store-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -68,9 +969,16 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = RuntimeHost(
             stateSession: session, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
-            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: RecordingPrivilegeClient(),
-            credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: secrets, commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
         )
         // Recovery writes the journal under `directory`; let it land before
         // the `defer` removes it.
@@ -98,10 +1006,15 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let host = RuntimeHost(
             stateSession: session, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
-            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
-            commandRunner: { path, arguments in try machine.run(path, arguments) },
-            homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: { path, arguments in try machine.run(path, arguments) },
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
+            )
         )
         var candidate = config
         candidate.profileName = "Must not replace the active runtime"
@@ -137,11 +1050,15 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
         let host = RuntimeHost(stateSession: session, logger: DiscardingLogSink(),
                                      loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
-                                     startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: machine,
-                                     credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
-                                     commandRunner: { path, arguments in try machine.run(path, arguments) },
-                                     homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path)
+                                     startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: { path, arguments in try machine.run(path, arguments) },
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
+            ))
         let originalPlatform = try Data(contentsOf: environment.platformConfigFile)
         let originalPreferences = try Data(contentsOf: environment.preferencesFile)
         for content in ["{", "{\"localHost\":\"192.0.2.1\",\"manageSystemProxy\":true,\"showMenuBarIcon\":false}"] {
@@ -177,9 +1094,16 @@ final class DaemonRuntimeHostTests: XCTestCase {
             stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(),
-            privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
         )
 
         XCTAssertEqual(host.status().configGeneration, 0)
@@ -212,9 +1136,16 @@ final class DaemonRuntimeHostTests: XCTestCase {
             stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
-            privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: observer,
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
         )
         // Recovery writes the journal under the state directory; let it land
         // before the `defer` removes it.
@@ -255,9 +1186,16 @@ final class DaemonRuntimeHostTests: XCTestCase {
             stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
-            privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: observer,
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
         )
         await host.awaitLaunchRecovery()
         observer.start()
@@ -296,9 +1234,16 @@ final class DaemonRuntimeHostTests: XCTestCase {
             stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
-            privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: observer,
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
         )
         // Recovery writes the journal under the state directory; let it land
         // before the `defer` removes it.
@@ -361,10 +1306,16 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 migrated: false,
                 warnings: []
             ),
-            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
-            networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(),
-            privilegeClient: recording,
-            credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: recording, helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
         )
 
         do {
@@ -419,7 +1370,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
         /// The scratch home the host edits shell profiles in.
         var homeDirectory: URL { stateDirectory.appendingPathComponent("home", isDirectory: true) }
 
+        /// The harness whose shutdown was not confirmed. It keeps its host and root, and fails the test that owned it. One
+        /// slot: a second unconfirmed shutdown never overwrites it, and no new harness is built while it is occupied.
+        private static var retainedUnconfirmed: DaemonHarness?
+
         init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
+            guard DaemonHarness.retainedUnconfirmed == nil else { throw HarnessHostOwnershipError.retainedUnconfirmed }
             let stateDirectory = URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("pm-daemon-harness-\(UUID().uuidString)", isDirectory: true)
             self.stateDirectory = stateDirectory
@@ -457,28 +1413,30 @@ final class DaemonRuntimeHostTests: XCTestCase {
             let machine = self.machine
             let listings = self.listings
             let hold = self.hold
+            let helper = self.helper
             return RuntimeHost(
                 stateSession: stateSession,
                 logger: DiscardingLogSink(),
                 loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
                 startedAt: testStartedAt, terminalExit: terminalExit,
-                networkLocationObserver: locationObserver,
-                networkLocationStoreFactory: { [locationStore] _ in locationStore },
-                networkLocationLimits: locationLimits, vpnStatusMonitor: vpn, networkPathObserver: pathObserver,
-                privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
-                credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery(),
-                commandRunner: { launchPath, arguments in
-                    if arguments.first == "-listallnetworkservices" { listings.passThrough() }
-                    hold.pass(launchPath, arguments)
-                    return try machine.run(launchPath, arguments)
-                },
-                // As `AppStateHarness`: never the real port 53.
-                dnsResponds: FakeDNSProbe().responds(onPort:),
+                effects: hostEffects(
+                    privilege: { _ in RuntimePrivilegeAdapters(client: HoldingPrivilegeClient(base: machine, hold: hold), helperStatus: helper) },
+                    credentials: secrets,
+                    commandRunner: { launchPath, arguments in
+                        if arguments.first == "-listallnetworkservices" { listings.passThrough() }
+                        hold.pass(launchPath, arguments)
+                        return try machine.run(launchPath, arguments)
+                    },
+                    networkPath: pathObserver, networkLocation: locationObserver,
+                    networkLocationStoreFactory: { [locationStore] _ in locationStore }, vpnStatus: vpn,
+                    // As `AppStateHarness`: never the real port 53.
+                    dnsResponds: FakeDNSProbe().responds(onPort:),
+                    homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
+                    resolverDirectory: machine.resolverDirectory.path
+                ),
+                networkLocationLimits: locationLimits,
                 reapplyRetrySchedule: reapplyRetrySchedule,
-                helperStatus: helper,
-                splitDNSHelperCheckInterval: splitDNSHelperCheckInterval,
-                homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
-                resolverDirectory: machine.resolverDirectory.path
+                splitDNSHelperCheckInterval: splitDNSHelperCheckInterval
             )
         }
 
@@ -487,6 +1445,29 @@ final class DaemonRuntimeHostTests: XCTestCase {
         func flip(_ platformConfig: PlatformIntegrationConfig, on host: RuntimeHost) async throws {
             try PlatformConfigPersistence.save(platformConfig, in: environment)
             await host.reloadConfiguration()
+        }
+
+        /// Both record queues are empty of in-flight records. Recorded loss is not checked, since a test may expect a refused
+        /// destination. `eventsRetry` can be the early retry, spent before the snapshot's marker is appended, so a drained
+        /// retry does not prove the marker's queue state. `snapshotSettled` covers the marker.
+        private static func recordQueuesDrained(_ report: DiagnosticFlushReport) -> Bool {
+            report.audit == .drained && (report.events == .drained || report.eventsRetry == .drained)
+        }
+
+        /// The snapshot write is physically complete, and any unconfirmed-result marker is covered by a later events drain.
+        /// `.current` is a successful replacement with no marker. `.refused`, `.writeFailed` and `.noSubmission` come after
+        /// the writer's group drained, or before any submission, so no write is in flight. The marker is then covered only
+        /// by the one late events drain (`.confirmed`). The other outcomes end without a result, so a write may still be in
+        /// flight, and none of them is proven here.
+        private static func snapshotSettled(_ report: DiagnosticFlushReport) -> Bool {
+            switch report.snapshot {
+            case .current:
+                return true
+            case .refused, .writeFailed, .noSubmission:
+                return report.snapshotEvent == .confirmed
+            case .timedOut, .busy, .skippedBudget, .cancelled, .exhausted:
+                return false
+            }
         }
 
         /// Stops and flushes the owned host, then ends the root's authority and removes the directory. The flush joins the
@@ -499,10 +1480,25 @@ final class DaemonRuntimeHostTests: XCTestCase {
             listings.release()
             if let host = ownedHost {
                 await host.stopRuntime()
-                await host.flushEvents()
+                // The stopped effects join before the flush, so a late writer cannot land after the root is released.
+                let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+                let report = await host.flushEvents()
+                let flushed = Self.recordQueuesDrained(report) && Self.snapshotSettled(report)
+                guard settled == .settled, flushed else {
+                    // Unknown: keep the host, the session and the root claimed, and fail the owning test.
+                    XCTFail("the harness's shutdown is unconfirmed (settle \(settled), flush confirmed \(flushed), "
+                        + "snapshot \(report.snapshot)): its host and root are kept")
+                    DaemonHarness.retainedUnconfirmed = self
+                    return
+                }
             }
             ownedHost = nil
-            releaseScratchStateRoot(stateSession)
+            // The release is checked before the directory goes. A release that is not confirmed keeps the directory.
+            let release = releaseScratchStateRoot(stateSession)
+            guard release == .released else {
+                XCTFail("the harness's root lease did not close (\(release)): its directory is kept")
+                return
+            }
             removeScratch([stateDirectory])
         }
     }
@@ -1123,10 +2119,14 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let events = await RuntimeHost.recoverWithoutConfiguration(
             stateSession: harness.stateSession,
             logger: DiscardingLogSink(),
-            privilegeClient: machine,
-            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            dnsResponds: FakeDNSProbe().responds(onPort:),
-            networkLocationStoreFactory: { _ in nil }
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: harness.homeDirectory, resolverDirectory: machine.resolverDirectory.path
+            )
         )
 
         XCTAssertEqual(events.filter { $0.event == "platform.journal_unreadable" }.count, 1)
@@ -1149,10 +2149,14 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let events = await RuntimeHost.recoverWithoutConfiguration(
             stateSession: harness.stateSession,
             logger: DiscardingLogSink(),
-            privilegeClient: machine,
-            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            dnsResponds: FakeDNSProbe().responds(onPort:),
-            networkLocationStoreFactory: { _ in nil }
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: harness.homeDirectory, resolverDirectory: machine.resolverDirectory.path
+            )
         )
 
         XCTAssertEqual(
@@ -1268,10 +2272,14 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let events = await RuntimeHost.recoverWithoutConfiguration(
             stateSession: harness.stateSession,
             logger: DiscardingLogSink(),
-            privilegeClient: machine,
-            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
-            dnsResponds: FakeDNSProbe().responds(onPort:),
-            networkLocationStoreFactory: { _ in nil }
+            effects: hostEffects(
+                privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: harness.homeDirectory, resolverDirectory: machine.resolverDirectory.path
+            )
         )
 
         XCTAssertEqual(harness.wifi.webProxy.host, "prior.example.test", "journal recovery proceeds despite the broken file")

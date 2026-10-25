@@ -489,7 +489,8 @@ final class AppState: ObservableObject {
         )
         let tunnelResolverManager = TunnelResolverManager(
             privilegeClient: auditedPrivilegeClient,
-            logger: logStore
+            logger: logStore,
+            resolverDirectory: self.resolverDirectory
         )
         let orchestrator = ProxyOrchestrator(
             config: initialConfig,

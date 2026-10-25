@@ -145,15 +145,21 @@ package final class RecordingPrivilegeClient: PrivilegeClient, @unchecked Sendab
 /// configuration a machine without admin rights presents.
 package final class FakeMachine: PrivilegeClient, @unchecked Sendable {
     package struct ProxyEndpoint: Equatable {
-        var enabled = false
-        var host = ""
-        var port = ""
+        package var enabled = false
+        package var host = ""
+        package var port = ""
+
+        package init(enabled: Bool = false, host: String = "", port: String = "") {
+            self.enabled = enabled
+            self.host = host
+            self.port = port
+        }
     }
 
     package struct Service: Equatable {
         var connected = true
-        var webProxy = ProxyEndpoint()
-        var secureWebProxy = ProxyEndpoint()
+        package var webProxy = ProxyEndpoint()
+        package var secureWebProxy = ProxyEndpoint()
         var autoproxyURL = ""
         var autoproxyEnabled = false
         var bypassDomains: [String] = []
@@ -714,6 +720,67 @@ package final class FakeNetworkLocationObserver: NetworkLocationObserving, @unch
     package func pendingDelivery(_ locationID: String) -> (@Sendable () -> Void)? {
         guard let callback = lock.withLock({ callback }) else { return nil }
         return { callback(.success(locationID)) }
+    }
+}
+
+/// The error an explicit fake throws for an effect its scenario did not plan (decision 0033). A simulator
+/// or test that reaches one has an unplanned effect, which is a failure, not a silent default. The effect names
+/// the kind of work only, never a URL or a payload.
+package struct UnplannedFakeEffect: Error, Equatable, CustomStringConvertible {
+    package let effect: String
+    package var description: String { "unplanned fake effect: \(effect)" }
+
+    package init(effect: String) {
+        self.effect = effect
+    }
+}
+
+/// Names no holder for a port. It counts the lookups and keeps the last one, so a host or simulator never runs the
+/// platform's process lookup, and a test sees how often a bind failure asked.
+package final class FakeListenerPortHolderProbe: ListenerPortHolderProbing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var last: String?
+
+    package init() {}
+
+    /// How many lookups were made.
+    package var lookupCount: Int { lock.withLock { count } }
+
+    /// The `host:port` of the most recent lookup.
+    package var lastLookup: String? { lock.withLock { last } }
+
+    package func describeHolder(host: String, port: Int) -> String? {
+        lock.withLock {
+            count += 1
+            last = "\(host):\(port)"
+        }
+        return nil
+    }
+}
+
+/// A PAC evaluator that fetches and evaluates nothing. It counts each fetch and fails it, so no host or simulator
+/// reaches a PAC URL on the network. A scenario that plans PAC work scripts its own.
+package final class FakePacEvaluator: PacEvaluator, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    package init() {}
+
+    /// How many fetches were attempted.
+    package var fetchCount: Int { lock.withLock { count } }
+
+    package func fetchPAC(from urlString: String) async throws -> String {
+        lock.withLock { count += 1 }
+        throw UnplannedFakeEffect(effect: "PAC fetch")
+    }
+
+    package func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating {
+        throw UnplannedFakeEffect(effect: "PAC evaluation")
+    }
+
+    package func routeChain(for entries: [String]) -> PACChain {
+        PACChain.classify(entries) { _ in nil }
     }
 }
 

@@ -6,6 +6,12 @@ import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
 
+/// A resolver directory that does not exist, so a tunnel test's stale-file sweep finds nothing and never reads the machine's `/etc/resolver`.
+func unscannedTunnelResolverDirectory() -> String {
+    FileManager.default.temporaryDirectory
+        .appendingPathComponent("conduit-no-tunnel-resolvers-\(UUID().uuidString)", isDirectory: true).path
+}
+
 final class TunnelDNSResponderTests: XCTestCase {
 
     private var group: MultiThreadedEventLoopGroup!
@@ -171,11 +177,34 @@ final class TunnelDNSResponderTests: XCTestCase {
 
     // MARK: - TunnelResolverManager with Recording
 
+    /// The stale sweep reads the directory it is given, never the machine's `/etc/resolver`: a tunnel file in it is removed,
+    /// while an active tunnel file and a file that is not a tunnel's are kept.
+    @MainActor
+    func testResolverManagerStaleSweepReadsOnlyItsOwnDirectory() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tunnel-resolver-sweep-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { removeScratch([directory]) }
+        let tunnelFile = "nameserver 127.0.0.1\nport \(TunnelResolverManager.resolverPort)\n"
+        try tunnelFile.write(to: directory.appendingPathComponent("stale.example"), atomically: true, encoding: .utf8)
+        try tunnelFile.write(to: directory.appendingPathComponent("active.example"), atomically: true, encoding: .utf8)
+        try "nameserver 10.0.0.53\n".write(to: directory.appendingPathComponent("corporate.example"), atomically: true, encoding: .utf8)
+        let recording = TestPrivilegeClient()
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: DiscardingLogSink(), resolverDirectory: directory.path)
+
+        manager.cleanupStale(activeHostnames: ["active.example"])
+
+        let commands = recording.executedCommands
+        XCTAssertEqual(commands.count, 1)
+        XCTAssertEqual(commands[0].0, .removeDNS)
+        XCTAssertEqual(commands[0].1, ["stale.example"])
+    }
+
     @MainActor
     func testResolverManagerApplyCallsApplyDNSWithPort() throws {
         let recording = TestPrivilegeClient()
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger)
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
 
         try manager.apply(hostname: "cluster0.mongodb.net", listenIP: "127.0.0.1")
 
@@ -191,7 +220,7 @@ final class TunnelDNSResponderTests: XCTestCase {
     func testResolverManagerRemoveCallsRemoveDNS() throws {
         let recording = TestPrivilegeClient()
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger)
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
 
         try manager.remove(hostname: "cluster0.mongodb.net")
 
@@ -206,7 +235,7 @@ final class TunnelDNSResponderTests: XCTestCase {
         let recording = TestPrivilegeClient()
         recording.failingDomains.insert("bad.host")
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger)
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
 
         let result = manager.applyAll(hostnames: ["good.host", "bad.host", "another.host"], listenIP: "127.0.0.1")
 
@@ -261,7 +290,7 @@ final class TunnelDNSResponderTests: XCTestCase {
     func testResolverManagerPortValueIsAlways15053() throws {
         let recording = TestPrivilegeClient()
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger)
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
 
         try manager.apply(hostname: "a.example.com", listenIP: "127.0.0.1")
         try manager.apply(hostname: "b.example.com", listenIP: "127.0.0.1")
@@ -276,7 +305,7 @@ final class TunnelDNSResponderTests: XCTestCase {
     func testResolverManagerRemoveAllCleansUpAfterApplyAll() {
         let recording = TestPrivilegeClient()
         let logger = DiscardingLogSink()
-        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger)
+        let manager = TunnelResolverManager(privilegeClient: recording, logger: logger, resolverDirectory: unscannedTunnelResolverDirectory())
 
         let hostnames = ["x.host", "y.host"]
         let result = manager.applyAll(hostnames: hostnames, listenIP: "127.0.0.1")

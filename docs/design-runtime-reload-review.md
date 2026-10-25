@@ -1,8 +1,9 @@
 # Explicit configuration reload: owner policy review
 
-Status: proposed, 2026-10-25. This selects no behavior, writes no ADR and changes
-no runtime path. The session/store capability slice can complete independently.
-The actual-host workflow must settle this before replacing its reload path.
+Status: selected by the owner, 2026-10-25: **reload and reconcile eligible changes**.
+Decision [0032](decisions/0032-explicit-reload-and-reconcile.md) records the choice;
+implementation remains planned. This review preserves the alternatives and observed
+current paths. The session/store capability slice merged independently in PR #242.
 
 ## Decision to settle
 
@@ -66,7 +67,7 @@ merge of editor and disk values is selected. Lifecycle-intent merge remains
 selected under 0015. Relevant component preconditions stay distinct from unrelated
 preferences and runtime-view revisions.
 
-Before implementation, record the owner's choice and cover valid/invalid/missing
+The owner's choice is recorded in 0032. Before adoption, cover valid/invalid/missing
 inputs, external-edit conflicts, Stop during read, newer edits/reloads, partial
 component observations and retained dirty drafts with typed events, focused tests,
 an independent bounded model and pm-sim. This policy does not select private
