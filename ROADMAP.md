@@ -126,7 +126,7 @@ not a requirement to finish every event or property test before extraction:
    one `RuntimeClient` factory; its concrete implementation is private. The final
    combined local workflow passed all 39 checks (2,936 tests, two skips; 95 simulator
    records and perf). See [adapter evidence](./docs/runtime-framed-client-2026-10-24.md).
-   This does not implement the service/ledger/stream engine or host adoption.
+   The adapter is separate from the service engine merged in PR #235; actual host adoption remains open.
    The owner-selected persistence policy is save-before-apply for durable edits,
    with Stop/Quit admitted despite save failure. Define separate durable/session/
    applied outcomes and stop-fenced retries; Quit does not persist a disable.
@@ -217,8 +217,7 @@ not a requirement to finish every event or property test before extraction:
    remain open.
 2. **Stage 2 — extract the shared host.** Merged in PR #221 (`3d566d8`): `RuntimeHost` now lives
    in ConduitRuntime, with the daemon as its entry point; AppState remains its twin.
-   The move keeps MainActor and current policy. Extract `RuntimeHost` from
-   `DaemonRuntimeHost` with no policy change. Retain the daemon fake-machine
+   The move preserves MainActor and existing policy, with the daemon fake-machine
    suite and explicit composition dependencies. The owner selected ConduitRuntime
    for the host and an event-only RuntimeEvents target; control values/client/
    codec stay in ConduitShared with ProxyControlBridge mapping. Broad kernel/file
@@ -316,7 +315,7 @@ ownership work. Refactor size alone does not require a minor version.
 3. [~] **Owner-death recovery and one mutation authority ([#48](https://github.com/srps/Conduit/issues/48))** — app and daemon launch recovery exist. A separate production-daemon milestone after shared-host convergence, not a gate for the 0.6 core extraction. Remaining: exclusive ownership of platform mutations and durable recovery when no replacement runtime starts. Coordinate journal authority, authenticated helper sessions, and any helper-owned leases; preserve later external changes. This is a production daemon-migration gate. [Rel, Sec, Dmn, Sim]
 4. [~] **Request-body replay bounds and isolation ([#81](https://github.com/srps/Conduit/issues/81))** — per-body bounded spooling exists. Remaining: runtime-owned private spool storage, aggregate disk/queued-write budgets, replay backpressure tied to downstream completion/writability, off-event-loop cleanup, and structured failure reporting. Cover slow origins, disk failures, cancellation, and concurrent runtimes. [Rel, Sec, Eff, Sim]
 5. [~] **Typed event contracts ([#180](https://github.com/srps/Conduit/issues/180))** — begin with #186's client boundary and migrate complete families alongside each host slice. Closed typed payloads derive stable names, categories, fields and human detail; compatibility and redaction cross the same codec/control bridge. Completion of every family is not a prerequisite for host extraction. Status (branch checkpoint): the `lifecycle.*` family is typed through its producers, the file and wire codecs, the bridge and tests; every other family is still legacy, and the catalogue is still hand-maintained. [Obs, Rel, Sim]
-6. [~] **Model-based verification ([#183](https://github.com/srps/Conduit/issues/183))** — independent reference models, bounded exhaustive exploration for small finite state spaces, and seeded/shrunk sequences for larger inputs. Begin with lifecycle/subscription ordering; add applied-state and scheduler models when those owners change. Fail on exhausted exploration budgets and show sensitivity to injected bugs. Status (branch checkpoint): a bounded lifecycle-lane model runs against the production `LifecycleLane`, with breadth-first, seeded and adapter-fault checks; the subscription/admission and config models are not started. [Rel, Sim]
+6. [~] **Model-based verification ([#183](https://github.com/srps/Conduit/issues/183))** — independent reference models, bounded exhaustive exploration for small finite state spaces, and seeded/shrunk sequences for larger inputs. Begin with lifecycle/subscription ordering; add applied-state and scheduler models when those owners change. Fail on exhausted exploration budgets and show sensitivity to injected bugs. Status: production lifecycle, admission/replay and verified-store models are implemented. The actual adopted-workflow model and host integration remain in progress; broader scheduler/applied-state coverage follows its owning changes. [Rel, Sim]
 
 ## Next
 

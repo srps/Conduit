@@ -1,37 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
-// Keychain-backed `CredentialProvider` conformer. Value types
-// (`ProxyCredentials`, `CredentialManagerError`) live in
-// `Sources/ProxyKernel/Security/ProxyCredentials.swift`
-// so `ProxyAuth` + headless daemons can reference them without linking
-// `PlatformMac`. This file carries only the Keychain-backed concrete.
+// Profile-keyed CredentialProvider over an injected SecretStore. Value types live
+// in ProxyKernel/Security/ProxyCredentials.swift so auth and headless callers do
+// not need PlatformMac. Every upstream uses the active profile's credential;
+// the Keychain account remains "domain|username|profileName".
 //
-// The protocol is keyed `credentials(for: UpstreamProxy)`. The UI stays
-// profile-keyed (per-upstream credential UX is future work), so this
-// implementation:
-//
-//   1. Ignores the `UpstreamProxy` parameter on the protocol methods —
-//      every upstream returns the same profile-level credential. AppState
-//      saves once per profile and every upstream auth handshake uses that
-//      single credential.
-//   2. Keeps the existing Keychain key shape `"\(domain)|\(username)|\(profileName)"`
-//      unchanged — no migration needed because the storage shape didn't
-//      change. When the per-upstream UX lands, the key shape evolves
-//      to include `host:port` and a one-time lazy migration handles the
-//      transition then.
-//   3. Takes an `identityProvider` closure at construction so the
-//      protocol-required methods can reach the active profile's identity
-//      without taking config as a method parameter (which the protocol
-//      doesn't allow). AppState wires it from the orchestrator's config
-//      snapshot provider; tests can pass a fixed identity.
-//   4. Caches the last read, keyed by account, as `SecretBytes`-backed
-//      `ProxyCredentials` (#98). Each NTLM fallback used to read the
-//      Keychain, 1,248 reads on one day; now a save, a clear, a proxy start
-//      (`warmCache`) or a rejecting 407 invalidates, an identity change
-//      misses, and concurrent callers share one read. Capacity one entry.
-//
-// The richer per-config API (`saveHash`, `clear`, `hasSavedCredentials`)
-// stays as the AppState-facing surface — it predates the protocol and
-// remains the right shape for the profile-level UX.
+// The identity provider reads the active configuration snapshot. The cache holds
+// one SecretBytes-backed credential by account (#98): saves, clears, warmCache
+// and rejecting 407s invalidate it; identity changes miss; concurrent callers
+// share one read. saveHash, clear and hasSavedCredentials serve the profile UX.
 
 import Foundation
 import ProxyKernel

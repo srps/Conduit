@@ -169,12 +169,12 @@ it must be a deliberate tested refinement, not inferred from individual saved fl
 
 The runtime boundary, exact schema-two staging and bridge correction merged in
 PR #228; the runtime physical replacement seam/model merged in PR #229. The
-shared sidecar boundary merged in PR #230. These are building blocks, not the async
-store. Implement the selected external-edit check (0027) alongside expected-prior revisions.
-Add the sole leased writer,
-intent/revision fencing and bounded metadata, followed by the client workflow and
-host adoption. Startup must acquire authority before migration/recovery, and every
-journal/configuration writer must participate before shipping lease enforcement.
+shared sidecar boundary merged in PR #230. PR232 implements the verified-store core and selected external-edit check (0027),
+with expected-prior revisions. PR236 takes startup authority before migration and
+recovery, and PR242 gives the store its session-owned replacement capability.
+Actual intent/revision fencing and eligible apply through the sole host workflow
+remain in progress. Complete journal/configuration writer accounting and logical
+shutdown proof still precede convergence.
 
 Drive actual production adapters against an independent bounded model. Cover
 rename followed by error, unknown read-back, old queued writes, Stop during save,

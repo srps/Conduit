@@ -203,7 +203,7 @@ The matrix lists **direct** dependencies declared in `Package.swift`. `ConduitUp
 - **`Conduit`** (app target) — SwiftUI GUI + `AppState`, the wiring layer that owns every `PlatformMac` concrete and passes protocol-typed references into the orchestrator. It declares `ProxyKernel`, `ProxyAuth`, `ProxyPAC`, `PlatformMac`, `ConduitShared` and `RuntimeEvents` directly. Also hosts `AppLogStore` (the `@MainActor` ring-buffered log store) because it imports `Combine` and can't live in the kernel.
 - **`ConduitHelper`** — privileged LaunchDaemon at `/Library/PrivilegedHelperTools/io.github.srps.Conduit.Helper`. Communicates with the app over a Unix-domain socket at `/var/run/io.github.srps.Conduit.Helper.sock` using the `ConduitShared` contract. Depends on the kernel for `UDPRelay` / `TCPRelay` implementations.
 - **Executables: `pm-proxy`, `pm-dns`, `pm-tunnel`, `pm-sim`, `pm-vpn-check`, `pm-auth-check`** — each is a narrow tool. `pm-proxy` is the flagship: it runs the full HTTP/SOCKS5/DNS/tunnel stack off `ProxyKernel`, `ProxyAuth` and `ProxyPAC`, and declares `ProxyControlBridge` and `ConduitShared` for its control socket, with no system-side effects (no Keychain, no `networksetup`, no `/etc/resolver`). `pm-sim` is the fault-injection harness used by CI.
-- **`ConduitRuntime`** — the shared `RuntimeHost`, extracted with lifecycle policy and MainActor isolation preserved. It owns runtime composition and uses explicit start-time, terminal-exit and network-path collaborators. The existing FakeMachine suite drives this library; the app has not adopted it yet.
+- **`ConduitRuntime`** — the shared `RuntimeHost`, extracted with lifecycle policy and MainActor isolation preserved. It owns runtime composition with required explicit effects (decision0033), start-time and terminal-exit inputs. The existing FakeMachine suite drives this library; the app has not adopted it yet.
 - **`ConduitDaemon`** — the user-session entry point over `RuntimeHost`, retaining arguments, configuration loading, signals and status output. It is not yet the production owner; the daemon milestones are in [ROADMAP](../ROADMAP.md).
 - **`ConduitUpdater`** — the nested Sparkle updater. It is the only target that links Sparkle; see the updater section below.
 - **`pmctl`** — command-line client for the control socket. It depends only on `ConduitShared`.
@@ -401,7 +401,7 @@ The popover is shown in a clear `NSPanel` hosting `StatusBarView`, presented fro
 - No `PrivilegeClient` — privileged operations (`applyDNS`, port 53 relay) throw `PrivilegeClientError.executionFailed` and the kernel downgrades to an info log. The `--no-system-*` flags are implicit: `pm-proxy` cannot write `/etc/resolver`, cannot set system DNS, cannot install login items, cannot send user notifications. `otool -L .build/debug/pm-proxy` shows no linkage against `Security.framework`, `SystemConfiguration.framework`, `UserNotifications.framework`, or `ServiceManagement.framework`.
 - NDJSON status writer — emits a `ready` event after successful bind; periodic snapshots when `--status-interval` is set.
 
-This is the invariant the module split encoded and that the CI grep keeps honest.
+The package graph keeps these platform dependencies out of pm-proxy; the kernel import fence checks its narrower allowlist.
 
 ### Simulator (`pm-sim`)
 
@@ -415,7 +415,7 @@ The module dependency grants reach, not isolation. A scenario must supply every 
 
 `ProxyOrchestrator.configSnapshotProvider: @Sendable () -> ProxyConfig` is the **one** authoritative mirror of the live config, readable from any thread (MainActor or NIO event loop). Allocated once at init; the orchestrator's `config` setter updates the box before running side-effects, so the closure never returns a snapshot older than the in-flight reload.
 
-Before the module split there were three parallel boxes — orchestrator, `AppState.configBox` fed by a `$config` Combine sink, and `pm-proxy`'s local `NIOLockedValueBox<ProxyConfig>`. The split collapsed the two caller-side mirrors into captures of `configSnapshotProvider`. CI grep enforces this:
+Before the module split there were three parallel boxes — orchestrator, `AppState.configBox` fed by a `$config` Combine sink, and `pm-proxy`'s local `NIOLockedValueBox<ProxyConfig>`. The split collapsed the two caller-side mirrors into captures of `configSnapshotProvider`. A manual source check shows this:
 
 ```text
 rg 'NIOLockedValueBox<ProxyConfig>' Sources/ -l | wc -l  →  1

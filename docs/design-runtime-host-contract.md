@@ -45,12 +45,12 @@ schema2 exact persistence in
 [0023](decisions/0023-exact-schema-two-persistence.md). These records override earlier
 provisional/no-count/startup-unchanged assumptions in this working design.
 
-The profile caps DoH providers8, DNS servers/domain8, upstreams32, configured local
-tunnel forwards128 (primary performance case64), and DNS entries/intercepts/client/
-forced-proxy lists256. Existing bypass bounds remain. Display/identity strings are
-1024UTF-8 bytes, URLs16384, audit path1023, host/domain/address253 and wildcard
-intercept patterns255 with leading `*.`; retain stricter grammars. Keep the complete
-8MiB private frame and bound actual runtime-file reads at8MiB. Count disabled/raw
+The profile caps DoH providers 8, DNS servers/domain 8, upstreams 32, configured local
+tunnel forwards 128 (primary performance case 64), and DNS entries/intercepts/client/
+forced-proxy lists 256. Existing bypass bounds remain. Display/identity strings are
+1,024 UTF-8 bytes, URLs 16,384, audit path 1,023, host/domain/address 253 and wildcard
+intercept patterns 255 with leading `*.`; retain stricter grammars. Keep the complete
+8 MiB private frame and bound actual runtime-file reads at 8 MiB. Count disabled/raw
 stored values, reject before typed JSON expansion/save, and preserve rejected
 files. Legacy unknown fields and first-known-duplicate-wins semantics survive
 bounded filtering; private wire remains strict. One active private body/decode
@@ -77,9 +77,9 @@ AppState convergence, RuntimeActor and release readiness remain open. Current
 status belongs in [ROADMAP](../ROADMAP.md), with per-slice verification linked there.
 
 Release scratch probes distinguish high-water RSS, current footprint and live
-allocator bytes. All-forms128-tunnel fixtures peaked17.3/21.0MB RSS; a separate
-staged-lifetime probe retained roughly1.1MB additional live allocator bytes with
-only final values, while RSS remained15.6/20.4MB. These are single-run synthetic
+allocator bytes. All-forms128-tunnel fixtures peaked at 17.3/21.0 MB RSS; a separate
+staged-lifetime probe retained roughly 1.1 MB additional live allocator bytes with
+only final values, while RSS remained at 15.6/20.4 MB. These are single-run synthetic
 codec observations, not active-listener, traffic, steady-app, busy-peer, exhaustive
 maximum or Stop-latency evidence. See the [sources and raw results](experiments/private-configuration-codec/README.md).
 
@@ -808,8 +808,9 @@ slices after owner approval and the necessary decisions:
    substantial isolation work, without declaring its race cause established.
 2. Contract, codec, in-memory transport and conformance/model tests; lifecycle
    event family through producer, wire/file output, consumers and assertions.
-   Status: the contract, codec and lifecycle family are in the working tree. The
-   in-memory transport, conformance tests and consumers are not.
+   Status: the contract, codec, framed adapter, bounded service and lifecycle family
+   are merged with conformance/model tests. Actual RuntimeHost/AppState client
+   consumption remains open.
 3. Extract ConduitRuntime from the daemon with existing policy and fake-machine
    coverage. No production process switch or helper contract change.
 4. Under decision 0031, develop and verify DNS, tunnels, then proxy in the shared
