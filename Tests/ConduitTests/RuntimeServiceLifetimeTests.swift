@@ -87,7 +87,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         harness.scheduling.drainAll()
         XCTAssertEqual(harness.core.parkedWaiterCount, 0, "the cleanup removed exactly this pull's registration")
         // The timer part ends at the end of its task body, which runs after the caller resumed. The pull is refused until then.
-        let released = await awaitState { transport.lanes.inFlight(.read) == 0 }
+        let released = await awaitState { transport.lanes.inFlight(.stream) == 0 }
         XCTAssertTrue(released, "the reservation releases once the timer task has ended")
         let again = Task { try await subscription.next(deadline) }
         let againQueued = await awaitState { harness.scheduling.pendingCount > 0 }
@@ -166,18 +166,18 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         let held = await awaitState { harness.timing.heldCancellationCount == 1 }
         XCTAssertTrue(held, "the cancelled timer's completion is held")
         XCTAssertEqual(harness.scheduling.pendingCount, 1, "the registration's cleanup is queued")
-        XCTAssertEqual(transport.lanes.inFlight(.read), 1, "the timer and the cleanup still hold the reservation")
+        XCTAssertEqual(transport.lanes.inFlight(.stream), 1, "the timer and the cleanup still hold the reservation")
         let refusedWhileHeld = await thrownError { try await subscription.next(deadline) }
         XCTAssertEqual(refusedWhileHeld, .readAborted(.transportBusy))
 
         harness.scheduling.drainAll()
         XCTAssertEqual(harness.core.parkedWaiterCount, 0, "the cleanup ran")
-        XCTAssertEqual(transport.lanes.inFlight(.read), 1, "the held cancellation still holds the timer part")
+        XCTAssertEqual(transport.lanes.inFlight(.stream), 1, "the held cancellation still holds the timer part")
         let refusedAfterCleanup = await thrownError { try await subscription.next(deadline) }
         XCTAssertEqual(refusedAfterCleanup, .readAborted(.transportBusy))
 
         harness.timing.releaseHeldCancellations()
-        let released = await awaitState { transport.lanes.inFlight(.read) == 0 }
+        let released = await awaitState { transport.lanes.inFlight(.stream) == 0 }
         XCTAssertTrue(released, "the reservation releases once the timer ends")
         subscription.cancel()
         harness.scheduling.drainAll()
@@ -287,7 +287,7 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
             return XCTFail("the subscription must open")
         }
         let flag = ReleaseFlag()
-        let ticket = try XCTUnwrap(transport.lanes.reserve(.read, onQuiesced: { flag.released = true }))
+        let ticket = try XCTUnwrap(transport.lanes.reserve(.stream, onQuiesced: { flag.released = true }))
         let token = RuntimeWaiterToken()
         let gate = RuntimeWaitGate(
             ticket: ticket,
@@ -308,17 +308,17 @@ final class RuntimeServiceLifetimeTests: XCTestCase {
         XCTAssertEqual(gate.currentPhase, .resolved)
         XCTAssertEqual(harness.core.parkedWaiterCount, 1, "the registration is installed until its cleanup runs")
         XCTAssertEqual(harness.scheduling.pendingCount, 1, "exactly the cleanup is queued")
-        XCTAssertEqual(transport.lanes.inFlight(.read), 1, "the waiter part holds the reservation, not only the hop")
+        XCTAssertEqual(transport.lanes.inFlight(.stream), 1, "the waiter part holds the reservation, not only the hop")
         XCTAssertFalse(flag.released)
 
         XCTAssertTrue(harness.scheduling.runNext(), "the cleanup runs")
         XCTAssertEqual(harness.core.parkedWaiterCount, 0, "the registration is removed by its own cleanup")
-        XCTAssertEqual(transport.lanes.inFlight(.read), 1, "the timer part still holds the reservation")
+        XCTAssertEqual(transport.lanes.inFlight(.stream), 1, "the timer part still holds the reservation")
         XCTAssertFalse(flag.released, "the pull slot is still held")
 
         // This gate was never started, so its timer part is ended here, as its timer task would end it.
         ticket.end(.timer)
-        XCTAssertEqual(transport.lanes.inFlight(.read), 0)
+        XCTAssertEqual(transport.lanes.inFlight(.stream), 0)
         XCTAssertTrue(flag.released, "the release callback frees the pull slot only once every part has ended")
     }
 

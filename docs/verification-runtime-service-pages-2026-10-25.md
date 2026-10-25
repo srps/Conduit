@@ -109,13 +109,28 @@ and CPU 101.03%; this is not a client-service or whole-app memory measurement.
 This is the retained-page/service foundation checkpoint, before the separate
 observation/coalescing changes are integrated. It is not evidence for that later combined source.
 
-## Remaining gates
+## M2B observation slice (2026-10-25, local)
 
-The independent Claude recheck of the three corrected paths found them resolved.
-It noted one wording gap: the unreachable loop-invariant branch occurs after mutation,
-so only capacity refusals and the entry accounting check are guaranteed before any change.
-That invariant branch and its closed release-build result remain unwitnessed; no claim of coverage is made.
-Actual production-owner adaptation, observation/coalescing/replay models and a measured
-owner-reviewed shipping profile remain required. The snapshot read's invalid
-owner-state classification is deferred to that observation slice. No v2 socket,
+On `codex/runtime-observation-stream`, based on `53a050e`, the exact wrapper
+`verify-runtime-observation.sh` passes with the M2B, M2C and M2D source: 309 filtered tests with 0 failures.
+M2D gives stream pulls their own finite lane, adds a real upstream-probe outcome witness through the framed client, and changes an
+end that does not fit into a bounded disconnect.
+Earlier, at M2C, the run was 305 filtered tests with 0 failures,
+and both `pm-sim` scenarios pass. M2C adds a replay model over the production observation log
+(19,607 exhaustive sequences and 200 seeded walks), replay tests through the core, and fake-owner pressure metrics. The logs are under
+`/private/tmp/conduit-runtime-stage1-20261024/runtime-observation-checks/`. The
+live observation model passes, but no source mutant of the M2B rules has been run,
+so it is not sensitivity evidence. Limits, sizing and the exact gaps are in the
+[service checkpoint](runtime-service-engine-checkpoint-2026-10-25.md), section
+"M2B observation slice".
+
+## Combined integration and remaining gates
+
+The retained-page fixes, snapshot/replay service and merged PR234 are now combined locally.
+Earlier source fingerprints and test counts above identify only those separate checkpoints.
+Focused checks, independent review and all workflow checks must run on the combined source.
+The previously noted invariant wording has been narrowed; the unreachable invariant result remains unwitnessed.
+Observation/coalescing and replay models exist with the bounds above, and snapshot reads now classify invalid owner state as internal failure.
+Actual production-owner adaptation and a measured owner-reviewed shipping profile remain required.
+The display-text policy is pending the owner. No v2 socket,
 installed-app validation, total shutdown or release-readiness claim follows.

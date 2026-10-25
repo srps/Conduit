@@ -16,7 +16,7 @@ struct RuntimeControlEntry {
     let bytes: Int
 }
 
-/// One subscriber's cursor. It is a fixed-size value: it holds positions, not queued frames.
+/// One subscriber's cursor. It is a fixed-size value: it holds positions and generations, not queued frames.
 struct RuntimeSubscriberCursor: Sendable, Equatable {
     /// The next event position to deliver.
     var nextEvent: Int
@@ -24,6 +24,10 @@ struct RuntimeSubscriberCursor: Sendable, Equatable {
     var replayThrough: Int?
     /// The next control-log sequence number to deliver.
     var nextControl: Int
+    /// The private delivery generation of the snapshot this subscriber has seen. It is not the owner's revision.
+    var seenSnapshotGeneration: Int
+    /// Whether the last frame delivered was a snapshot. The next ordered log frame then goes first, so snapshots and log frames alternate.
+    var lastWasSnapshot: Bool
 }
 
 /// The result of one pull for one subscriber.
@@ -108,6 +112,24 @@ struct RuntimeObservationLog {
     func controlEntry(atSequence sequence: Int) -> RuntimeControlEntry? {
         guard sequence >= controlFloor, sequence < controlNext else { return nil }
         return control[sequence - controlFloor]
+    }
+
+    /// The first control sequence a replay that starts at event position `first` reads. It is the first retained outcome whose boundary
+    /// is at or after `first`, or the next sequence when none is. An outcome before that boundary is not part of the replay. Nil means an
+    /// evicted outcome may have been in the replay range: the floor is past one, and its boundary is at or after `first`. The caller
+    /// then refuses the replay explicitly, because a silent gap is not allowed.
+    func controlStart(forEvent first: Int) -> Int? {
+        if controlFloor > 1, let oldest = controlEntry(atSequence: controlFloor), oldest.boundary >= first {
+            return nil
+        }
+        var sequence = controlFloor
+        while sequence < controlNext {
+            if let entry = controlEntry(atSequence: sequence), entry.boundary >= first {
+                return sequence
+            }
+            sequence += 1
+        }
+        return controlNext
     }
 
     // MARK: - Publication
@@ -217,11 +239,14 @@ struct RuntimeObservationLog {
         let limit = cursor.replayThrough ?? highWater
         let control = controlEntry(atSequence: cursor.nextControl)
         if let control, control.boundary < cursor.nextEvent {
-            guard let nextControl = RuntimeCounter.successor(cursor.nextControl) else {
+            // Every frame must fit the caller's frame, as an event batch does. An outcome that does not fit ends the stream as a resync,
+            // and the cursor does not move, so nothing is consumed.
+            let frame = ControlRuntimeFrame.operationFinished(control.finished)
+            guard fits(frame), let nextControl = RuntimeCounter.successor(cursor.nextControl) else {
                 return (.end(.resyncRequired), start)
             }
             cursor.nextControl = nextControl
-            return (.frame(.operationFinished(control.finished)), cursor)
+            return (.frame(frame), cursor)
         }
         if cursor.nextEvent <= limit {
             let ceiling = min(limit, control?.boundary ?? limit)
@@ -261,8 +286,10 @@ struct RuntimeObservationLog {
             guard let caughtUp = ControlEventCursor(rawValue: through) else {
                 throw ControlRuntimeWireError.invalidValue
             }
+            let frame = ControlRuntimeFrame.replayCaughtUp(caughtUp)
+            guard fits(frame) else { return (.end(.resyncRequired), start) }
             cursor.replayThrough = nil
-            return (.frame(.replayCaughtUp(caughtUp)), cursor)
+            return (.frame(frame), cursor)
         }
         return (.idle, cursor)
     }

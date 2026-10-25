@@ -76,6 +76,25 @@ enum RuntimeServiceWireScenario {
         }
         check("a frame over its limit is refused, not truncated", refused)
 
+        // The observation representations: a resync is a stream end, a baseline that does not fit is a typed first frame, and a
+        // failed snapshot read is a closed internal failure. None of them is a transport error or a silent gap.
+        let resync = try roundTrip(
+            .frame(.end(ControlStreamEnd(reason: .resyncRequired))), correlation: correlation, limits: limits
+        )
+        check("a resync end frame round-trips", resync)
+        let baselineRefusal = try roundTrip(
+            .response(.failure(.frameTooLarge)), correlation: correlation, limits: limits
+        )
+        check("a baseline refused as too large round-trips as its first frame", baselineRefusal)
+        let internalFailure = try roundTrip(
+            .response(.failure(.internalFailure)), correlation: correlation, limits: limits
+        )
+        check("a closed internal read failure round-trips", internalFailure)
+        let refusalData = try ControlRuntimeCodec.makeEncoder().encode(
+            ControlRuntimeMessage(correlation: correlation, body: .response(.failure(.frameTooLarge)))
+        )
+        check("a frame-too-large refusal names its stable code on the wire", String(decoding: refusalData, as: UTF8.self).contains("frame_too_large"))
+
         notes.append("representations only: the service is driven by the ConduitTests runtime-service suites")
         notes.append("no socket, machine, network or helper effects")
         return ScenarioResult(

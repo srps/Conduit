@@ -325,10 +325,12 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         case .outcome(let query):
             return replyOutcome(.response(.lookup(core.operationLookup(query))), correlation: correlation, limits: limits)
         case .readSnapshot:
-            guard let snapshot = core.currentSnapshot() else {
-                return replyOutcome(.response(.failure(.invalidValue)), correlation: correlation, limits: limits)
+            switch core.readSnapshot() {
+            case .snapshot(let snapshot):
+                return snapshotOutcome(snapshot, correlation: correlation, limits: limits)
+            case .internalFailure:
+                return replyOutcome(.response(.failure(.internalFailure)), correlation: correlation, limits: limits)
             }
-            return replyOutcome(.response(.snapshot(snapshot)), correlation: correlation, limits: limits)
         case .readPage(let page):
             return pageOutcome(page, correlation: correlation, limits: limits)
         case .subscribe:
@@ -453,7 +455,23 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         return false
     }
 
-    /// The open's first frame, encoded. A failure after a subscriber was registered releases that subscriber.
+    /// A snapshot reply. A snapshot that does not fit the caller's frame is a closed `frameTooLarge` answer, and any other encoding
+    /// failure is a closed `internalFailure`. Neither is reported as a disconnect or as an invalid reply.
+    @MainActor
+    private func snapshotOutcome(_ snapshot: ControlRuntimeSnapshot, correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
+        let message = ControlRuntimeMessage(correlation: correlation, body: .response(.snapshot(snapshot)))
+        do {
+            return answered(try ControlRuntimeCodec.encodeFrame(message, limits: limits))
+        } catch ControlRuntimeWireError.frameTooLarge {
+            return replyOutcome(.response(.failure(.frameTooLarge)), correlation: correlation, limits: limits)
+        } catch {
+            return replyOutcome(.response(.failure(.internalFailure)), correlation: correlation, limits: limits)
+        }
+    }
+
+    /// The open's first frame, encoded. A failure after a subscriber was registered releases that subscriber. A baseline that does
+    /// not fit the caller's frame is refused as a typed `frameTooLarge` first frame, so the subscriber is released and nothing is
+    /// reported as an invalid reply.
     @MainActor
     private func openOutcome(
         _ body: ControlRuntimeBody,
@@ -464,10 +482,41 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         do {
             let bytes = try ControlRuntimeCodec.encodeFrame(ControlRuntimeMessage(correlation: correlation, body: body), limits: limits)
             return .opened(subscriber: subscriber, first: bytes)
+        } catch ControlRuntimeWireError.frameTooLarge {
+            if let subscriber {
+                core.removeSubscriber(subscriber)
+            }
+            return refusedOpen(.frameTooLarge, correlation: correlation, limits: limits)
         } catch {
             if let subscriber {
                 core.removeSubscriber(subscriber)
             }
+            return .failed(.sent(.invalidReply))
+        }
+    }
+
+    /// The typed end of a stream, as its last reply. The subscription is already released when this runs. An end that does not fit the
+    /// caller's frame cannot be sent, so the wait ends as a disconnect, once, with no refusal substituted and no retry. That is the same
+    /// classification as a reply that cannot be encoded for its caller, and it is not an invalid reply.
+    static func streamEndOutcome(_ reason: ControlStreamEndReason, correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
+        let end = ControlRuntimeMessage(correlation: correlation, body: .frame(.end(ControlStreamEnd(reason: reason))))
+        do {
+            return .reply(try ControlRuntimeCodec.encodeFrame(end, limits: limits))
+        } catch {
+            return .failed(.sent(.disconnected))
+        }
+    }
+
+    /// A refused open's first frame. It registers nothing, so it carries no subscriber.
+    @MainActor
+    private func refusedOpen(_ code: ControlRuntimeErrorCode, correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
+        do {
+            let refusal = try ControlRuntimeCodec.encodeFrame(
+                ControlRuntimeMessage(correlation: correlation, body: .response(.failure(code))),
+                limits: limits
+            )
+            return .opened(subscriber: nil, first: refusal)
+        } catch {
             return .failed(.sent(.invalidReply))
         }
     }
@@ -553,7 +602,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         case .released:
             throw RuntimeWaitEnd.disconnected
         }
-        let outcome = await run(lane: .read, deadline: deadline, onQuiesced: { handle.endPull() }) { gate in
+        let outcome = await run(lane: .stream, deadline: deadline, onQuiesced: { handle.endPull() }) { gate in
             self.pullOnce(handle, limits: limits, gate: gate)
         }
         switch outcome {
@@ -602,15 +651,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
             if let ended = handle.release() {
                 core.removeSubscriber(ended)
             }
-            do {
-                let bytes = try ControlRuntimeCodec.encodeFrame(
-                    ControlRuntimeMessage(correlation: correlation, body: .frame(.end(ControlStreamEnd(reason: reason)))),
-                    limits: limits
-                )
-                gate.finish(.reply(bytes))
-            } catch {
-                gate.finish(.failed(.sent(.invalidReply)))
-            }
+            gate.finish(Self.streamEndOutcome(reason, correlation: correlation, limits: limits))
             return nil
         case .idle:
             switch installRegistration(subscriber, token: RuntimeWaiterToken(), gate: gate) {

@@ -36,7 +36,13 @@ enum RuntimeServiceFixtures {
         collectionRetainedBytes: Int = 1 << 14,
         collectionProofs: Int = 4,
         collectionRowSets: Int = 2,
-        collectionRowAge: Duration = .seconds(60)
+        collectionRowAge: Duration = .seconds(60),
+        snapshotBytes: Int = 1 << 14,
+        subscriberRecordBytes: Int = 256,
+        ringCapacity: Int = 16,
+        controlLogCapacity: Int = 8,
+        replayChunkItems: Int = 4,
+        streamLanes: Int = 2
     ) throws -> RuntimeServiceLimits {
         try RuntimeServiceLimits(
             maxRequestBytes: requestBytes,
@@ -50,18 +56,19 @@ enum RuntimeServiceFixtures {
             janitorBatch: 4,
             ordinaryLaneCapacity: 2,
             readLaneCapacity: 2,
+            streamLaneCapacity: streamLanes,
             stopLaneCapacityPerModule: 1,
             subscriberLimit: subscribers,
-            ringCapacity: 16,
+            ringCapacity: ringCapacity,
             ringByteCapacity: 1 << 16,
             maxEventBytes: 4096,
             ingressCapacity: 8,
             ingressByteCapacity: 1 << 15,
             drainItemsPerTurn: 4,
             drainBytesPerTurn: 1 << 14,
-            controlLogCapacity: 8,
+            controlLogCapacity: controlLogCapacity,
             controlLogByteCapacity: 1 << 14,
-            replayChunkItems: 4,
+            replayChunkItems: replayChunkItems,
             replayChunkBytes: 1 << 14,
             collectionRowCapacity: 16,
             collectionByteCapacity: collectionCaptureBytes,
@@ -69,6 +76,8 @@ enum RuntimeServiceFixtures {
             collectionRowRevisionsPerKind: collectionRowSets,
             collectionRetainedByteCapacity: collectionRetainedBytes,
             collectionRowRetentionAge: collectionRowAge,
+            latestSnapshotByteCapacity: snapshotBytes,
+            subscriberRecordBytes: subscriberRecordBytes,
             retainedByteCeiling: retainedByteCeiling
         )
     }
@@ -373,6 +382,7 @@ struct RuntimeServiceHarness {
         subscribers: Int = 2,
         positionSeed: Int = 0,
         limits: RuntimeServiceLimits? = nil,
+        snapshotGenerationSeed: Int = 0,
         encodeCommand: @escaping @Sendable (ControlRuntimeCommand) throws -> Data = { try RuntimeWireSize.encode($0) },
         measureOutcome: @escaping @Sendable (ControlOperationOutcome, ControlOperationID) throws -> RuntimeOutcomeSizes = RuntimeServiceCore.measureRetained
     ) throws {
@@ -396,7 +406,8 @@ struct RuntimeServiceHarness {
             makeOperationID: { ControlOperationID(rawValue: UUID()) },
             encodeCommand: encodeCommand,
             measureOutcome: measureOutcome,
-            positionSeed: positionSeed
+            positionSeed: positionSeed,
+            snapshotGenerationSeed: snapshotGenerationSeed
         )
     }
 

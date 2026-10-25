@@ -45,7 +45,8 @@ enum RuntimePageDecision {
     case notCaptured
 }
 
-/// The closed result of one capture. A refusal changes no state. Each refusal is decided before the first change.
+/// The closed result of one capture. Capacity and owner-data refusals precede mutation.
+/// An internal invariant failure does not promise recovery or unchanged corrupted state.
 enum RuntimeCaptureResult: Equatable {
     case stored
     /// The rows exceed the row bound, the per-capture byte bound, or the retained-byte bound. Nothing was stored.
