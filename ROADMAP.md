@@ -42,8 +42,14 @@ checks pass (3,233 tests, two skips; 98 simulator records), including actual-ent
 subprocess controls; real built-entry refusal and isolated native callback probes
 pass. Combined-source verification also passes all 40 checks (3,258 tests, two skips;
 99 simulator records), with actual composed hardlink refusal/callback proof.
-The correction PR/hosted gates remain open. See
+The correction merged in [PR #239](https://github.com/srps/Conduit/pull/239)
+(`f4d8e77`) after hosted Swift/CodeQL passed; #237 is resolved. See
 [the handoff evidence](./docs/verification-gui-startup-handoff-2026-10-25.md).
+The next [production-adoption checkpoint](./docs/design-runtime-store-workflow.md#production-adoption-checkpoint-2026-10-25)
+keeps the semantic store in ConduitRuntime and private file authority in
+PlatformMac, with actual host/client adoption and replaced-path deletion in one
+cohesive cut. The pending display-text policy and measured ordinary-v2 profile
+gate that cut; reload apply semantics are a later affected-slice review item.
 The fixed logical writable filenames are selected in
 [0028](./docs/decisions/0028-fixed-writable-state-filenames.md), superseding 0020;
 app/daemon startup lease and naming adoption merged in
