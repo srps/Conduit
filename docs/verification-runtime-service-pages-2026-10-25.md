@@ -142,7 +142,31 @@ Base: the combined focused suite at **314 tests, 0 failures**. This slice runs *
 Both runs used the exact wrapper `bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-service.sh`.
 
 - **Red**, on the unfixed production source with the new witnesses and the extended model: exit 1, 323 tests executed, 12 failures. The failing witnesses and their observed values are listed in the checkpoint's M2E section. They include the model's shortest counterexample `[event, oversizeOperation, openReplay, pull(0)]`, a `controlStart` that accepted a replay across a skipped outcome, a framed baseline `replay(from: 1, through: 2)` where expired history was expected, and `exchange` answering `sent(invalidReply)` for a subscribe with one owner hop queued.
-- **Green**, on the fixed source: printed `PASS: runtime-service focused checks`. **323 tests, 0 failures.** Both `pm-sim` scenarios, the imports fence, the event catalogue, the decisions check and its tests passed under `set -e`. The build log has one warning, at `RuntimePressureMetricsTests.swift:222`, in a file this slice does not touch.
-- The green run overwrote the logs in `/private/tmp/conduit-runtime-stage1-20261024/runtime-service-checks/`. The red output above was read from that directory before the fix, and it is not kept separately.
+- **Green**, on the fixed source: printed `PASS: runtime-service focused checks`. **323 tests, 0 failures.** Both `pm-sim` scenarios, the imports fence, the event catalogue, the decisions check and its tests passed under `set -e`. The parent subsequently removed the unnecessary outer try at RuntimeServicePressureMetricsTests.swift:222.
+- The green run overwrote the logs in `/private/tmp/conduit-runtime-stage1-20261024/runtime-service-checks/`. The original complete red log was overwritten. The parent recovered four Read/Grep tool-result excerpts from the actual pre-correction CLI transcript into /private/tmp/conduit-runtime-stage1-20261024/runtime-replay-gap-red-tool-evidence.txt (12,249 bytes); this is an excerpt, not the complete original log.
 
 Model: the exhaustive depth 1 to 5 over eight actions runs **37,448 sequences**, where it was 19,607 over seven. The 200 seeded walks of 40 actions are unchanged. Both pass. The byte bound is 250, with 100-byte ordinary outcomes and 300-byte oversize outcomes.
+
+## Parent combined workflow and test correction
+
+The first combined all-workflow run completed all 39 checks on stable source
+fingerprint 3ebb6c72bd3ed34aa6a00084aec2cf51570083e1089932bacafb1a2c6ae89330
+(the source committed at ac07b15). Thirty-eight checks passed. The full test run
+executed 3,201 tests, two skipped, and failed one existing PAC test at
+PACDecisionTests.swift:308: its positive hint count was still zero.
+
+Production decrements strictHintInFlight before calling onReachable. The test used
+the count as a callback-completion barrier. A test-only change now awaits an XCTest
+expectation fulfilled by the actual positive callback, preserving all gateway and
+listener assertions. Its PAC/route/detector focused wrapper passes 38 tests.
+The first complete workflow is failed evidence, not a pass; logs are preserved in
+/private/tmp/conduit-runtime-stage1-20261024/runtime-service-combined-full-gates-first-run/.
+The final full workflow must pass after this correction before pushing.
+
+The independent Claude review and final scoped recheck confirmed the bounded loss
+proof, independent outcome-fate oracle, front-door refusal and conditional framed
+lookup. A mixed encoded/in-memory budget wording issue was corrected. The new
+quiescence accounting invariant branch remains unwitnessed, as documented.
+
+Display-text policy remains proposed in [the review draft](design-runtime-display-bounds-review.md);
+no truncation or shipping profile has been implemented.
