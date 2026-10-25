@@ -15,24 +15,6 @@ enum ControlOwnerFenceResult: Sendable, Equatable {
     case rejected(ControlRejectionCode)
 }
 
-/// The projected rows of one collection, from the owner's current turn. The count and encoded bytes are
-/// bounded by the service, which refuses an over-budget capture instead of truncating it.
-enum ControlProjectedRows: Sendable {
-    case activeConnections([ControlConnectionRow])
-    case upstreamHealth([ControlUpstreamRow])
-    case tunnelBindings([ControlTunnelBindingRow])
-    case tunnelDNSHosts([ControlTunnelDNSHostRow])
-
-    var kind: ControlCollectionKind {
-        switch self {
-        case .activeConnections: .activeConnections
-        case .upstreamHealth: .upstreamHealth
-        case .tunnelBindings: .tunnelBindings
-        case .tunnelDNSHosts: .tunnelDNSHosts
-        }
-    }
-}
-
 /// The owner's two reports for one launched effect. `settled` is the logical outcome. `quiesced` is the physical fact
 /// that the owner has no work left for the operation. Both are idempotent, and the first settlement is the one that
 /// counts. `quiesced` may arrive without `settled`, and the service then closes the operation as an internal failure.
@@ -50,6 +32,16 @@ enum ControlServiceFault: Sendable, Equatable {
     case submitCommandNotEncodable
     /// An operation outcome could not be encoded. The measured internal failure stands in for it in the lookup and the control log.
     case outcomeNotEncodable
+    /// A collection's rows could not be built or encoded during a capture. The read is answered as an internal failure, and nothing is stored.
+    case projectionNotEncodable
+    /// The owner's rows for a capture disagree with its kind or with the snapshot's exact total, in the same owner turn. The owner
+    /// broke its own invariant, so nothing is stored, and the read is answered as an internal failure, not as a capacity refusal.
+    case projectionCountMismatch
+    /// The owner's snapshot names another incarnation than the service's. Nothing is read from it, and the read is an internal failure.
+    case snapshotIncarnationMismatch
+    /// The owner's snapshot now reports a different exact total for a revision that the service holds with its own total. A revision
+    /// is immutable, so the owner broke its invariant. The retained rows are not served, not replaced, and not recaptured.
+    case revisionTotalChanged
 }
 
 /// The one owner of intent and lifecycle, seen from the service. The actual runtime host adopts this
@@ -62,8 +54,10 @@ protocol ControlCommandOwner: AnyObject {
     /// The current safe projected state. It is captured in the same owner turn as the caller's registration.
     func snapshot() -> ControlRuntimeSnapshot
 
-    /// The projected rows of one collection, in the same owner turn as the snapshot that names its revision.
-    func projectedRows(for kind: ControlCollectionKind) -> ControlProjectedRows
+    /// The projected rows of one collection, in the same owner turn as the snapshot that names its revision. The owner projects them
+    /// through the shared bounded projection, which stops at the first row past a bound, so an over-budget capture is never built in
+    /// full. The service refuses an over-budget answer as a whole capture, never truncated. An internal failure is a closed fault.
+    func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection
 
     /// Synchronous admission and fence. `candidate` is the pending stop of the same module, when one exists.
     /// It starts no effect and calls no report.

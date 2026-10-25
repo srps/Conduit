@@ -48,12 +48,6 @@ private struct RuntimeOutcomeEntry {
     let finishedAt: ContinuousClock.Instant
 }
 
-/// A collection's captured rows for one revision. Only the newest revision of each kind is retained.
-private struct RuntimeCollectionCapture {
-    let revision: ControlCollectionRevision
-    let rows: ControlProjectedRows
-}
-
 /// The one parked wait a subscriber may hold. Its token names the registration exactly, so a stale cleanup cannot remove a newer one.
 private struct RuntimeParkedWaiter {
     let token: RuntimeWaiterToken
@@ -95,10 +89,18 @@ extension ControlRuntimeCollections {
     }
 }
 
-/// The source of one page, read in one owner turn.
+/// The source of one page, read in one owner turn. `status` is `current`, or `staleRevision` when the rows are an older retained
+/// revision, and `revision` names the revision that the rows belong to.
 enum RuntimePageSource {
-    case rows(revision: ControlCollectionRevision, rows: ControlProjectedRows, offset: Int)
-    case unavailable(ControlCollectionUnavailableReason)
+    case rows(revision: ControlCollectionRevision, rows: ControlProjectedRows, offset: Int, status: ControlPageStatus)
+    /// A refusal with no rows. `knownTotal` is the exact total the refusal is about, or nil when no proof or snapshot states one.
+    case unavailable(ControlCollectionUnavailableReason, knownTotal: ControlCount?)
+    /// The request names another incarnation. Nothing was read.
+    case changedIncarnation
+    /// The cursor's offset is past the total its revision is known to have. It is an invalid request, decided before any capture.
+    case invalidOffset
+    /// The read failed internally. Nothing was stored, and the reply is a closed failure, not a refusal of the caller's request.
+    case internalFailure
 }
 
 /// The runtime service facade. It composes three owned parts and holds the observation state directly:
@@ -139,7 +141,8 @@ final class RuntimeServiceCore {
     private var outcomeOrder: [ControlOperationID] = []
     private var outcomeBytes = 0
     private var observation: RuntimeObservationLog
-    private var captures: [ControlCollectionKind: RuntimeCollectionCapture] = [:]
+    /// The bounded proofs and retained rows of collections. Its eviction is best effort, and it reports each outcome in a page.
+    private var collections: RuntimeCollectionLedger
     private var subscribers: [Int: RuntimeSubscriberCursor] = [:]
     private var waiters: [Int: RuntimeParkedWaiter] = [:]
     private var nextSubscriber = 1
@@ -166,6 +169,7 @@ final class RuntimeServiceCore {
         self.ingress = RuntimeIngress(limits: limits)
         self.observation = RuntimeObservationLog(limits: limits, positionSeed: positionSeed)
         self.aliasTable = RuntimeAliasTable(limits: limits)
+        self.collections = RuntimeCollectionLedger(limits: limits)
     }
 
     // MARK: - Admission
@@ -219,9 +223,11 @@ final class RuntimeServiceCore {
             recordAlias(request, fingerprint: fingerprint, partition: partition, admission: .joined(candidate))
             return .joined(candidate)
         case .admitted:
+            // A superseded candidate's fault is held until the replacement is installed, so the owner sees the new stop.
+            var supersessionFault: ControlServiceFault?
             if let module = stopModule {
                 if let candidate {
-                    settleLogically(candidate, .superseded(by: operation))
+                    supersessionFault = settleLogically(candidate, .superseded(by: operation))
                 }
                 dropQueuedStop(module)
                 stopSlots[module, default: RuntimeStopSlots()].queued = operation
@@ -240,6 +246,7 @@ final class RuntimeServiceCore {
             case .stop(let module): scheduleStopLaunch(module)
             }
             sweepRetention()
+            deliver(supersessionFault)
             return .accepted(operation)
         }
     }
@@ -347,51 +354,88 @@ final class RuntimeServiceCore {
 
     // MARK: - Pages
 
-    /// The source of one page, read in this owner turn. It is nil when the request names another incarnation.
-    /// The newest revision of each kind is captured on first read, within the row and byte bounds. An over-budget
-    /// capture is refused as unavailable, never truncated. A cursor from an older revision is expired.
-    func pageSource(_ request: ControlPageRequest) -> RuntimePageSource? {
-        guard request.expectedIncarnation == incarnation, let snapshot = currentSnapshot() else { return nil }
+    /// The source of one page, read in this owner turn. The ledger decides from the bounded proofs and the owner's current revision,
+    /// and it never orders revisions. A current revision without retained rows is captured on demand. Each answer is closed:
+    /// - the rows of an older retained revision, as stale with the current revision named;
+    /// - `expiredRevision` with the proof's exact total, when the proof shows that the rows were evicted or aged out;
+    /// - `notCaptured` with no total, when no proof is held, which covers a forgotten proof and a revision never captured;
+    /// - `retentionBudgetExceeded` with the snapshot's exact total, when the current revision is over budget, whole and unstored;
+    /// - `changedIncarnation` or `internalFailure`, for a request this host is not answering or a failed read.
+    ///
+    /// The retention is best effort. No lease is promised, so a retained revision can be evicted by a later capture.
+    func pageSource(_ request: ControlPageRequest) -> RuntimePageSource {
+        guard request.expectedIncarnation == incarnation else { return .changedIncarnation }
+        guard let snapshot = currentSnapshot() else {
+            // The owner's snapshot names another incarnation than this service. The owner broke its invariant, so nothing is read.
+            deliver(.snapshotIncarnationMismatch)
+            return .internalFailure
+        }
         let kind = request.collection
-        switch snapshot.collections.reference(for: kind).state {
-
+        let reference = snapshot.collections.reference(for: kind)
+        let offset = request.cursor.map { Int($0.offset.rawValue) } ?? 0
+        switch reference.state {
         case .unavailable(let reason):
-            return .unavailable(reason)
+            // No revision is readable, so an offset cannot be checked against a total it belongs to. The refusal is the answer.
+            return .unavailable(reason, knownTotal: reference.totalCount)
         case .available(let current):
-            if captures[kind]?.revision != current {
-                let rows = owner.projectedRows(for: kind)
-                guard rows.kind == kind, let bounded = boundedRows(rows) else {
-                    return .unavailable(.retentionBudgetExceeded)
+            switch collections.decision(kind: kind, cursor: request.cursor?.revision, current: current, at: timing.now()) {
+            case .current(let rows, let total):
+                // A revision names one total for its whole life. A different exact total in this turn is the owner's broken invariant,
+                // so the rows are not served, and nothing is replaced or recaptured.
+                guard total.rawValue == reference.totalCount.rawValue else {
+                    deliver(.revisionTotalChanged)
+                    return .internalFailure
                 }
-                captures[kind] = RuntimeCollectionCapture(revision: current, rows: bounded)
+                guard offset <= total.rawValue else { return .invalidOffset }
+                return .rows(revision: current, rows: rows, offset: offset, status: .current)
+            case .stale(let revision, let rows):
+                // A stale revision keeps the total it was captured with. It is never compared with the current total.
+                guard offset <= rows.rowCount else { return .invalidOffset }
+                return .rows(revision: revision, rows: rows, offset: offset, status: .staleRevision(current: current))
+            case .expired(let total):
+                return .unavailable(.expiredRevision, knownTotal: total)
+            case .notCaptured:
+                return .unavailable(.notCaptured, knownTotal: nil)
+            case .needsCapture:
+                // The current total is known from the snapshot, so an offset past it is refused before any capture or projection.
+                guard offset <= reference.totalCount.rawValue else { return .invalidOffset }
+                return captureCurrent(kind, revision: current, total: reference.totalCount, offset: offset)
             }
-            if let cursor = request.cursor, cursor.revision != current {
-                return .unavailable(.expiredRevision)
-            }
-            guard let capture = captures[kind] else { return .unavailable(.notCaptured) }
-            let offset = request.cursor.map { Int($0.offset.rawValue) } ?? 0
-            return .rows(revision: current, rows: capture.rows, offset: offset)
         }
     }
 
-    /// The rows, when they fit the row count and the encoded byte bound. Every row is measured, so the bound is exact.
-    private func boundedRows(_ rows: ControlProjectedRows) -> ControlProjectedRows? {
-        switch rows {
-        case .activeConnections(let list): boundedBytes(list) == nil ? nil : rows
-        case .upstreamHealth(let list): boundedBytes(list) == nil ? nil : rows
-        case .tunnelBindings(let list): boundedBytes(list) == nil ? nil : rows
-        case .tunnelDNSHosts(let list): boundedBytes(list) == nil ? nil : rows
+    /// Captures the current revision within the row and byte bounds, in this owner turn. The snapshot's exact total is checked first, so
+    /// a total past the row bound is refused before the owner projects any row. The owner's rows must then match the kind and the total
+    /// of the same turn. Every refusal and every failure is decided before any state changes, so no partial capture is stored.
+    private func captureCurrent(
+        _ kind: ControlCollectionKind,
+        revision: ControlCollectionRevision,
+        total: ControlCount,
+        offset: Int
+    ) -> RuntimePageSource {
+        guard total.rawValue <= limits.collectionRowCapacity else {
+            return .unavailable(.retentionBudgetExceeded, knownTotal: total)
         }
-    }
-
-    private func boundedBytes<Row: Encodable>(_ list: [Row]) -> Int? {
-        guard list.count <= limits.collectionRowCapacity else { return nil }
-        var total = 0
-        for row in list {
-            guard let size = Self.encodedSize(row), size <= limits.collectionByteCapacity - total else { return nil }
-            total += size
+        let budget = ControlRowBudget(maxRows: limits.collectionRowCapacity, maxBytes: limits.collectionByteCapacity)
+        switch owner.projectedRows(for: kind, within: budget) {
+        case .rows(let rows, let encodedBytes):
+            switch collections.capture(kind, revision: revision, total: total, rows: rows, encodedBytes: encodedBytes, at: timing.now()) {
+            case .stored:
+                return .rows(revision: revision, rows: rows, offset: offset, status: .current)
+            case .overBudget:
+                return .unavailable(.retentionBudgetExceeded, knownTotal: total)
+            case .countOrKindMismatch:
+                // The owner's rows and the snapshot's exact count disagree within one turn. That is the owner's invariant, so nothing
+                // is stored or served, and the fault is reported after this turn's state is complete.
+                deliver(.projectionCountMismatch)
+                return .internalFailure
+            }
+        case .overBudget:
+            return .unavailable(.retentionBudgetExceeded, knownTotal: total)
+        case .internalFailure:
+            deliver(.projectionNotEncodable)
+            return .internalFailure
         }
-        return total
     }
 
     // MARK: - Introspection for tests and the scenario
@@ -412,6 +456,10 @@ final class RuntimeServiceCore {
     var observedFirstRetained: Int { observation.firstRetained }
     var controlFloor: Int { observation.controlFloor }
     var isObservationExhausted: Bool { observation.exhausted }
+    /// The collection ledger's held state for one kind: its proofs, the row sets still physically held, and the retained bytes of all kinds.
+    func collectionRetention(_ kind: ControlCollectionKind) -> (proofs: Int, rowSets: Int, retainedBytes: Int) {
+        (collections.proofCount(kind), collections.retainedRowSetCount(kind), collections.retainedRowBytes)
+    }
 
     /// Whether a module's stop slots hold an active effect, and whether one is queued behind it.
     func stopSlotState(_ module: ControlModule) -> (active: Bool, queued: Bool) {
@@ -497,10 +545,14 @@ final class RuntimeServiceCore {
 
     /// Settles one operation's outcome logically, and publishes it. The first settlement counts. A settlement for an
     /// operation that is not pending, which includes one after supersession or after quiescence, changes nothing.
+    ///
+    /// It returns the fault staged for this settlement, if any, and does not deliver it. The caller delivers it with
+    /// `deliver` only after its own transaction is complete: a supersession after the replacement is installed, and a
+    /// quiescence after the capacity is returned. Otherwise the owner would read a state that is still being changed.
     @discardableResult
-    private func settleLogically(_ operation: ControlOperationID, _ outcome: ControlOperationOutcome) -> Bool {
-        guard var record = operations[operation], record.logical == .pending else { return false }
-        // The retained form is staged as pure data before any state changes. A fault it carries is delivered last.
+    private func settleLogically(_ operation: ControlOperationID, _ outcome: ControlOperationOutcome) -> ControlServiceFault? {
+        guard var record = operations[operation], record.logical == .pending else { return nil }
+        // The retained form is staged as pure data before any state changes. A fault it carries is returned, not called.
         let staged = stageRetained(outcome: outcome, operation: operation)
         record.logical = .settled
         operations[operation] = record
@@ -511,12 +563,14 @@ final class RuntimeServiceCore {
         observation.appendControl(staged.finished, bytes: staged.finishedBytes)
         wakeWaiters()
         sweepRetention()
-        // The owner is called only after the settlement is complete: the outcome is retained, the control entry is appended, the
-        // operation is settled and the candidate is cleared. So a fault callback that reads the service sees one coherent state.
-        if let fault = staged.fault {
+        return staged.fault
+    }
+
+    /// Delivers a staged fault to the owner. A caller invokes it last, after every state change of its transaction.
+    private func deliver(_ fault: ControlServiceFault?) {
+        if let fault {
             owner.serviceFault(fault)
         }
-        return true
     }
 
     /// The owner reports that an operation's physical work has ended. The operation's record is then removed, and its
@@ -524,8 +578,9 @@ final class RuntimeServiceCore {
     /// its work is gone. A duplicate, or a report for an unknown operation, changes nothing.
     private func quiesce(_ operation: ControlOperationID) {
         guard let record = operations[operation], record.isRunning else { return }
+        var closingFault: ControlServiceFault?
         if record.logical == .pending {
-            settleLogically(operation, .failed(.internalFailure))
+            closingFault = settleLogically(operation, .failed(.internalFailure))
         }
         operations.removeValue(forKey: operation)
         switch record.partition {
@@ -542,6 +597,8 @@ final class RuntimeServiceCore {
             }
         }
         sweepRetention()
+        // The capacity is returned above, so the owner sees the operation closed and its slot free.
+        deliver(closingFault)
     }
 
     /// Drops the module's queued stop, if any. It has not launched, so no effect is ever started for it. Its command is
@@ -593,7 +650,7 @@ final class RuntimeServiceCore {
         operations[operation] = record
         let report = ControlEffectReport(
             settled: { [weak self] outcome in
-                _ = self?.settleLogically(operation, outcome)
+                self?.deliver(self?.settleLogically(operation, outcome))
             },
             quiesced: { [weak self] in
                 self?.quiesce(operation)
@@ -627,6 +684,7 @@ final class RuntimeServiceCore {
     private func sweepRetention() {
         let now = timing.now()
         aliasTable.sweep(now: now, batch: limits.janitorBatch)
+        collections.sweep(now: now, batch: limits.janitorBatch)
         var removed = 0
         while removed < limits.janitorBatch,
               let oldest = outcomeOrder.first,

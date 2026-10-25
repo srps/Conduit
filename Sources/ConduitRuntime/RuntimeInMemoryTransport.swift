@@ -337,21 +337,33 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         }
     }
 
-    /// A page answer. A capture that cannot fit the frame is refused as a typed failure, never truncated.
+    /// A page answer. Each closed source is one closed reply. A failed read is a closed internal failure, not a corrupt transport,
+    /// so the client receives a stable wire error. A capture that cannot fit the frame is refused the same way, never truncated.
     @MainActor
     private func pageOutcome(_ page: ControlPageRequest, correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
-        guard let source = core.pageSource(page) else {
+        switch core.pageSource(page) {
+        case .changedIncarnation:
+            return replyOutcome(.response(.failure(.changedIncarnation)), correlation: correlation, limits: limits)
+        case .invalidOffset:
             return replyOutcome(.response(.failure(.invalidValue)), correlation: correlation, limits: limits)
-        }
-        switch source {
-        case .unavailable(let reason):
-            return replyOutcome(.response(.page(.unavailable(page.collection, reason))), correlation: correlation, limits: limits)
-        case .rows(let revision, let rows, let offset):
+        case .unavailable(let reason, let knownTotal):
+            return replyOutcome(
+                .response(.page(.unavailable(page.collection, reason, knownTotal: knownTotal))),
+                correlation: correlation,
+                limits: limits
+            )
+        case .internalFailure:
+            return replyOutcome(.response(.failure(.internalFailure)), correlation: correlation, limits: limits)
+        case .rows(let revision, let rows, let offset, let status):
             do {
-                let message = try pack(rows, offset: offset, revision: revision, correlation: correlation, limits: limits)
+                let message = try pack(rows, offset: offset, revision: revision, status: status, correlation: correlation, limits: limits)
                 return finishReply(message, limits: limits)
+            } catch ControlRuntimeWireError.frameTooLarge {
+                // The rows, or one of them, do not fit this caller's frame. The host's rows are sound, so the caller learns the size.
+                return replyOutcome(.response(.failure(.frameTooLarge)), correlation: correlation, limits: limits)
             } catch {
-                return .failed(.sent(.invalidReply))
+                // Any other refusal of the page is a failed projection, not a corrupt transport, and it says nothing more.
+                return replyOutcome(.response(.failure(.internalFailure)), correlation: correlation, limits: limits)
             }
         }
     }
@@ -361,6 +373,7 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         _ rows: ControlProjectedRows,
         offset: Int,
         revision: ControlCollectionRevision,
+        status: ControlPageStatus,
         correlation: ControlRequestID,
         limits: ControlFrameLimits
     ) throws -> ControlRuntimeMessage {
@@ -369,22 +382,22 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         case .activeConnections(let list):
             return try ControlPagePacker.page(
                 of: list, offset: offset, incarnation: incarnation, revision: revision,
-                correlation: correlation, limits: limits
+                status: status, correlation: correlation, limits: limits
             ) { .activeConnections($0) }
         case .upstreamHealth(let list):
             return try ControlPagePacker.page(
                 of: list, offset: offset, incarnation: incarnation, revision: revision,
-                correlation: correlation, limits: limits
+                status: status, correlation: correlation, limits: limits
             ) { .upstreamHealth($0) }
         case .tunnelBindings(let list):
             return try ControlPagePacker.page(
                 of: list, offset: offset, incarnation: incarnation, revision: revision,
-                correlation: correlation, limits: limits
+                status: status, correlation: correlation, limits: limits
             ) { .tunnelBindings($0) }
         case .tunnelDNSHosts(let list):
             return try ControlPagePacker.page(
                 of: list, offset: offset, incarnation: incarnation, revision: revision,
-                correlation: correlation, limits: limits
+                status: status, correlation: correlation, limits: limits
             ) { .tunnelDNSHosts($0) }
         }
     }

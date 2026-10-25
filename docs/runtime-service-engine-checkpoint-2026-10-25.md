@@ -1,205 +1,123 @@
 # Runtime service engine: checkpoint (2026-10-25)
 
-Status: **M1, M3, the Phase 3 request envelope, and the focused correction slice pass the 216-test wrapper. Independent review found remaining D2 enclosing-transaction fault windows and documentation overclaims; these are queued for correction before this slice can ship.** The engine is still partial: **M2 is NOT IMPLEMENTED** (observation models, snapshot coalescing, retained pages, replay and control-log models). This is not an engine-complete, PR-ready or release claim. Local checkpoint only. No RuntimeHost, AppState, Store, helper, v1 or private-wire edits. Production host adoption is not part of this revision.
+Status: **local worker checkpoint, not PR-ready and not engine-complete.** The exact wrapper passes (`PASS: runtime-service focused checks`) with 262 focused tests and 0 failures. M2 is partial: the collection ledger, the shared bounded projection, the page decisions with logical expiry and the closed read failures are implemented and tested. Not implemented: the subscription table, the latest-snapshot slot, observation, replay and control-log models, the owner adapter in the actual host, and any host adoption. No RuntimeHost, AppState, ConfigurationStore, helper, v1 or private-wire edits. No shipping values were chosen.
 
-Branch: `codex/runtime-service-engine`, base `3195be6` plus `482caf8`. The local checkpoint will be rebased onto merged store PR 232 before further source work.
+Branch: `codex/runtime-service-engine`, based on `ff7d859` over merged PR232. Local checkpoint; nothing pushed or installed. Source identity and parent verification are in [the verification note](verification-runtime-service-pages-2026-10-25.md).
 
 ## Verification record
 
-Latest run: the exact wrapper `bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-service.sh` printed `PASS: runtime-service focused checks`. Logs are under `/private/tmp/conduit-runtime-stage1-20261024/runtime-service-checks/`.
+- Latest run: the exact wrapper `bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-service.sh` printed `PASS: runtime-service focused checks; logs under /private/tmp/conduit-runtime-stage1-20261024/runtime-service-checks`. Its filter selects `RuntimeCollection|RuntimeRowBudget|RuntimeService|ControlService|AdmissionLedger|Subscription|Replay|ControlTransport|ControlCollectionRetention|FramedRuntimeClient|RuntimeClient|ControlRuntime|RuntimeSnapshotProjection`.
+- Filtered `swift test`: **262 tests, 0 failures** (fresh `tests.log`). The prior checkpoint ran 240, so the net change is +22: 10 in `RuntimeCollectionLedgerTests` (11 new, and the DNS-count check moved out into `RuntimeSnapshotProjectionTests`), 5 in `RuntimeServiceTransportTests`, 3 in `RuntimeClientCodecTests` and 4 in `RuntimeSnapshotProjectionTests`. `RuntimeCollectionLedgerTests` runs 29 tests.
+- The build and the test logs contain no warnings. The two unnecessary `try` warnings in `ScenarioRuntimeServiceWire.swift`, which this slice owns, were removed.
+- Imports fence, event catalogue (207 names), decisions check, decisions tests, `pm-sim framed-runtime-client` and `pm-sim runtime-service-wire` all pass under `set -e`.
+- **Parent source-variant runs followed this worker checkpoint.** The gate probe detected under-lock release; a restricted-kind scan hit a production invariant; a reversed eviction tie-break produced a three-action model counterexample. All original source bytes were restored. Exact provenance and limitations are in [the verification note](verification-runtime-service-pages-2026-10-25.md). No historical-commit fail-before claim is made.
+- Not run in this slice: the full `swift.yml` workflow, `pm-sim all`, `scripts/perf-gate.sh`, and any review gate. The parent's independent recheck and final review follow.
 
-- `swift build`: no warnings from the runtime-service files. One warning is in `Tests/ConduitTests/ConfigRuntimeRangeRefusalTests.swift` (main-actor `group` mutated from a nonisolated context). That file is outside this slice and was not edited here.
-- `swift test`, filter `RuntimeService|ControlService|AdmissionLedger|Subscription|Replay|ControlTransport|ControlCollectionRetention|FramedRuntimeClient|RuntimeClient|ControlRuntime|RuntimeSnapshotProjection`: **216 tests, 0 failures** (211 before this slice).
-  - Added in this slice: `RuntimeServiceWorkTests` 19 → 23 (outcome-fault witness, request-cap delta, exact ceiling, maximal-frame boundary) and `RuntimeServiceLifetimeTests` 11 → 12 (parked closure released after the gate lock). No other suite changed count.
-- Imports fence, event catalogue, decisions check and decisions tests: PASS. `pm-sim framed-runtime-client` and `pm-sim runtime-service-wire`: PASS (the script runs under `set -e`).
-- The probe test in the lifetime suite was **not run against the pre-fix gate** in this slice, because the slice's verification was limited to the one wrapper. Its ability to fail on the old code rests on reading the path (see Gaps).
+## Bounded model counts (fresh log)
 
-## Bounded models: actual explored counts
+- **Single-kind ledger model** (`testTheLedgerMatchesItsLogicalModelOnEveryBoundedSequenceAndSeededWalk`): 12 actions. Exhaustive depth 1 to 4, **22,620 sequences**, then **100 seeded walks** of 25 actions (SplitMix64, seeds 1 to 100). The test asserts `checked == 22,720`, and it passes. It covers one kind, uniform row sizes, a fixed janitor batch of 2 and fixed cursors. It never refuses a capture for the per-capture bound.
+- **Cross-kind ledger model** (`testTheCrossKindLedgerMatchesItsModelOnEveryBoundedSequenceAndSeededWalk`): 16 actions. Two kinds (`upstreamHealth`, `tunnelDNSHosts`), two revisions per kind, three size classes (one, forty and three hundred characters), with the largest refused by the per-capture bound. Two advances (30 s and 60 s, which straddle the 60 s age) and janitor batches of 1 and 3. Exhaustive depth 1 to 4, **69,904 sequences**, then **100 seeded walks** of 25 actions. The test asserts `checked == 70,004`, and it passes. Its bounds: a retained bound of two accepted sets (`2 × captureCap − 1`), three proofs per kind, two row sets per kind, and a row age of 60 s. It claims those bounds only. It does not claim more kinds, more sizes, more revisions, or longer walks.
+- Both models were written from the same design as the production ledger. They are not an independent specification. Their representations differ. The single-kind model is a flat list with a per-entry held flag, and it recomputes byte totals by reduction. The cross-kind model is also a flat list in capture order, with totals recomputed each time, and it has no per-kind table, no running counter and no janitor rotation. Physical release is modelled only by the logical rules, and the drain checks the end state. Both share the test harness and the codec size.
+- Tie order: eviction takes the earliest capture instant, and a tie across kinds goes to the kind earlier in `ControlCollectionKind.allCases`. The production ledger and the cross-kind model use this same rule, and it is written in the ledger's doc comment.
 
-Unchanged in this slice: the alphabets are the same, so the counts are the same.
+### Harness issue, recorded (not a production defect)
 
-- **Wait model** (`WaitAction`, 9 actions): exhaustive over every sequence of depth 1 to 4, **7,380 sequences, all agree** (9 + 81 + 729 + 6,561). Then **150 seeded walks of 40 actions** (SplitMix64, seeds 1 to 150). Budget 25,000: not reached.
-- **Work model** (`WorkAction`, 12 actions): exhaustive over depth 1 to 4, **22,620 sequences, all agree** (12 + 144 + 1,728 + 20,736). Then **150 seeded walks of 40 actions**. Budget 25,000: not reached.
-- **Join and reject are qualified: `.dns` only.** The model submits a proxy stop but never joins or rejects it. Adding `.joinStop(.proxy)` and `.rejectStop(.proxy)` would make the exhaustive depth-4 enumeration 41,370 sequences, past the 25,000 budget. So the proxy join and reject paths have no model witness. The admission suite covers joining for dns; rejection coverage must be verified separately.
-- Independence limit: the wait reference's park and wake ordering is written from the design rule "begin the next hop before the waiter part ends". It is partly derived from the rule the code follows, so it is not independent evidence for that ordering. The work reference is written from the supersession, drop, slot and capacity rules.
+- The first cross-kind run failed on the shortest trace `[capture(kind 1, revision 1, size 0), advance 60]`. The drain budget was computed from the two modelled kinds, `crossKinds.count × proofs`. The production janitor rotates over every `ControlCollectionKind` case, `allCases.count × proofs`. A drain of the modelled count ended before the slot of kind 1 was visited, for the kind indices used here.
+- The fix is in the harness: the drain now uses `ControlCollectionKind.allCases.count`, as the single-kind replay already did. The logical expiry rule and the production janitor were not changed, and the counterexample was not relaxed. The fixed harness passes all 69,904 sequences and the 100 walks.
 
-## Focused correction slice (2026-10-25)
+## What changed in this slice
 
-### D1: payload release after the gate lock
+### Known total on the unavailable page reply
 
-- `RuntimeWaitGate.resolve` moves the spent payloads (the round's closure and the typed refusal) out under the lock into a local, and it releases them after the unlock. The payloads are released before the timer is cancelled and before the caller resumes. The local is retained explicitly through the unlock with `withExtendedLifetime`, then released with an explicit assignment.
-- The refusal is now cleared at resolution as well. It is kept until resolution, because a round that parks can return the wait to open on a wake.
-- `runRound` runs the claim and the attempt in a helper, `runClaimedAttempt`, so the round's own local closure is gone when the helper returns. The gate is then the only holder.
-- Test seam: `RuntimeWaitGate.isLockFreeForTesting` tries the lock. It never waits, so a regression fails the test and cannot hang it.
-- Witness `testTheParkedClosureIsReleasedAfterTheGateLockIsFreeAndBeforeTheCallerResumes`: the round parks, so the gate holds the closure, and the deadline ends the wait. The probe's destructor records `isLockFreeForTesting`. The test asserts `true` and asserts the caller's outcome is `.failed(.notSent(.deadlineExpired))`.
-- The earlier witness `testAResolvedWaitReleasesItsCapturedRequestWhileItsHeldTimerKeepsTheLane` is unchanged. It checks that payload release does not free the lane while the timer holds it.
+- `ControlPageReply.unavailable(kind, reason, knownTotal:)` carries `knownTotal: ControlCount?`. Encoding writes the key only when present. Decoding reads an absent key as nil, so replies from before the total still decode. A present key must be a valid count, and `null`, negative values and non-integers are refused.
+- Sources: an over-budget current revision and the snapshot's unavailable reference use the snapshot's exact total for the current collection. An expired revision uses the total its proof recorded. A revision with no proof reports nil, and no total is borrowed from another revision.
 
-### D2: outcome fault staged as data, delivered last
+### Closed read failures on the wire
 
-- `settleLogically` now stages the retained form as pure data first (`stageRetained`). Then it runs the whole transaction: the operation is marked settled, the candidate is cleared, the outcome is stored, the control entry is appended, the waiters wake and retention is swept. Only then does it call `owner.serviceFault(.outcomeNotEncodable)`, if one was staged.
-- The outcome measure is a fault-injection seam: `RuntimeServiceCore.init(measureOutcome:)`, default `RuntimeServiceCore.measureRetained`. The current codec encodes every outcome, so the production path cannot reach the fault without the seam. Provenance: the seam is internal, and only test harnesses substitute it.
-- The fault path no longer uses the `try?` size helper. A `do/catch` stages the closed case, and the error text is not kept.
-- Reentrant witness `testAnOutcomeEncodeFaultReachesTheOwnerOnlyAfterTheSettlementIsComplete`: the fake owner's fault hook reads the service and sees the replacement outcome already retained, zero pending operations, and the fault recorded before the callback.
-- The submit path is unchanged in ordering. A command that fails to encode records nothing and fences nothing, so the owner call there is already coherent.
-- Host limit: the production host's `serviceFault` implementation (the event emitter) remains an adoption step. This slice does not weaken the event-before-publishing outcome rule, and the canonical host emitter is still the adoption gate.
+- `ControlRuntimeErrorCode` gains `changedIncarnation` and `internalFailure`. They are read answers, and they are separate from the parse-error namespace (`ControlRuntimeWireError`) and from `ControlRejectionCode`. Each read failure reaches the framed client as `.wire(code)`, not as `admissionUnknown` and not as an invalid reply.
+- Transport mapping: another incarnation → `changedIncarnation`; an offset past the known total → `invalidValue`; a page that cannot fit the caller's frame (a single row, or the rows, larger than the frame) → `frameTooLarge`; an internal projection or pack failure → `internalFailure`. A projection failure no longer surfaces as `sent(invalidReply)`.
+- Wire addition: `changed_incarnation` and `internal_failure` are new raw values. A client built before this slice, which decodes an unknown error code, fails to decode the reply rather than reporting it. No shipping v2 socket exists yet.
 
-### Custody accounting: lane reservation
+### Core page path (`RuntimeServiceCore.pageSource` and `captureCurrent`)
 
-Derivation. Each reservation holds the following at its peak, counted in encoded payload bytes.
+- A changed total under an unchanged revision: the retained `current` proof's total is compared with the same turn's snapshot total. A mismatch delivers `revisionTotalChanged` and returns `internalFailure`. The rows are not served, the proof is not replaced, and nothing is recaptured.
+- A stale revision keeps its own captured total. It is never compared with the current total.
+- An offset past the total the revision is known to have → `invalidOffset`, before any capture or projection. The offset is checked only when the revision it refers to has a provable total: the current revision, from the snapshot, and a retained proof. An unavailable reference with a cursor is not checked.
+- A total past the row bound is refused before the owner projects a row: `retentionBudgetExceeded` with the snapshot's total. The owner is not called.
+- Owner results: `rows` goes to the ledger; `overBudget` is refused whole; `internalFailure` delivers `projectionNotEncodable`. A count or kind mismatch returns `countOrKindMismatch` from the ledger and delivers `projectionCountMismatch`. Each fault is delivered after the state is complete, and nothing is stored on a refusal.
+- The owner's snapshot naming another incarnation delivers `snapshotIncarnationMismatch` and returns `internalFailure`.
+- `RuntimeServiceCore.collectionRetention(_:)` is a read-only accessor for tests. It is not a count accessor for the bridge.
 
-| Custody item | Holder | Live across the await? | Bound |
-| --- | --- | --- | --- |
-| Request frame (the `Data` parameter of `exchange` or `openStream`) | the caller's call | yes, for the whole call | `maxRequestBytes`. A larger frame is refused in the front door before any reservation. |
-| Decoded message (`ControlRuntimeMessage`, captured by the round) | the round closure, then the local in `exchange` | yes | `maxRequestBytes`, as the encoded size. This is not the in-memory size. |
-| Typed refusal (`boundRefusal`) | the gate, until resolution | yes, because a parked round can return to open | `maxReplyBytes` |
-| Produced answer (reply, first frame or page) | the round's result, handed to the caller | at peak, together with the refusal | `maxReplyBytes` |
+### Shared bounded projection (one path)
 
-Per reservation: **`2 × maxRequestBytes + 2 × maxReplyBytes`**. Lanes: `laneCount ×` that. A stream pull carries no request, and its produced frame is within the same bound.
+- `Sources/ConduitShared/ControlRowProjection.swift` (new): `ControlProjectedRows` (moved from ConduitRuntime, with `kind` and `rowCount`), `ControlProjection` (`rows`, `overBudget`, `internalFailure`), `ControlRowsMeasure` and `ControlRowBudget`. `ControlRowBudget.measure` takes any `Sequence`. It checks the count before a row is mapped, and it checks the encoded bytes before a row is kept. The first row past either bound ends the measure as `overBudget`, so the rest is not built. A throwing map or an encoder failure ends it as `internalFailure`, and the error text is dropped. Row bytes come from `ControlRuntimeCodec.makeEncoder()`, which is the same encoder the packer uses.
+- `RuntimeSnapshotControlProjection.projectRows(_:from:within:)` in ProxyControlBridge is the one production projection. The owner adapter that the host will later adopt calls it. The fake owner in the tests also calls it, over a kernel snapshot built from its hostnames. The fake holds no bound logic of its own.
+- The old full-array builders and page functions (`connectionRows`, `upstreamRows`, `tunnelBindingRows`, `tunnelDNSHostRows` and the `*Page` functions) are removed. They had no production caller.
+- Counts: the bridge checks each collection's exact count before any mapping. Connections are sorted only after that check passes. DNS hosts use a private `TunnelDNSHostSource` view over the status arrays. Its count sums the groups with checked addition, so it costs one step per group, not per host, and it allocates nothing. The row mapping and the count share that one view, with no second switch. `tunnelDNSHostCount` throws on overflow.
+- ProxyControlBridge does not import ConduitRuntime, and this slice adds no import between them.
 
-Prompt release. The round's closure and the refusal are released at resolution, after the lock and before the caller resumes. The request frame cannot be released by the service, because the caller owns it, so it is counted for the whole call. The decoded message local in `exchange` and `openStream` lives until the function returns. It is counted in the bound, and no earlier release is claimed.
+### Packer and rowless statuses
 
-Not claimed: exact RAM, the in-memory size of the decoded value, and optimizer release timing. The bound is the encoded payload that the service can hold at once.
+- `ControlPagePacker.page` packs only `current` and `staleRevision` pages. `expiredRevision` and `unavailable` are refused as `invalidValue`.
+- `ControlCollectionPage` decoding treats `expiredRevision` as rowless, like `unavailable`. A page that claims it with rows is refused. The nested `expiredRevision` is kept only for decoding from older peers, and no producer emits it. The canonical no-rows reply is the top-level `unavailable`.
 
-Outside the budget: caller-held stream handles, including the first frames of refused opens and budget refusals, which the caller holds after the service has released them. Process memory. Those are stated as limits.
+### Ledger (`RuntimeCollectionLedger.swift`)
 
-Fixture values (test values, not policy): `maxRequestBytes` 4,096 and `maxReplyBytes` 65,536. `laneCount` is 7: two ordinary, two read, and one stop per each of the three `ControlModule` cases. Per reservation: 139,264 bytes. Lane term: 974,848 bytes, up from 946,176 under the old single-request formula. The request-cap delta is `(2 × laneCount + operationCapacity) × 4,096`, which is 90,112 bytes for the 8-operation fixture.
+- `capture(_:revision:total:rows:encodedBytes:at:)` returns `RuntimeCaptureResult` (`stored`, `overBudget`, `countOrKindMismatch`). Every refusal is checked before any state changes. The ledger now bounds the total by its row capacity, so a proof's total is always within the bound its metadata is charged for.
+- `RuntimePageDecision.current` carries the proof's total. `expired` carries the total.
+- The janitor's doc states that physical cleanup is driven by activity. Each janitor turn is called by the service, and there is no timer. An expired row set stays resident while the service is idle. That residence sits inside the fixed byte bound, and a read never serves it, because expiry is decided from the proof's capture time.
+- Re-projection of an over-budget or evicted current revision happens on every read, on the owner's turn. No negative cache is added, because no measurement justifies one. Measurement decides later.
 
-### Limits and product tests updated
+### Tests
 
-- `RuntimeServiceLimits`: `perReservation` is `checkedSum([maxRequestBytes, maxRequestBytes, maxReplyBytes, maxReplyBytes])`. The lane documentation states the custody items above.
-- `testTheRetainedByteBudgetIsTheExactSumOfEveryTerm`: the lane term is `laneCount × (2 × maxRequestBytes + 2 × maxReplyBytes)`.
-- `testDoublingTheReplyCapChangesTheBudgetByItsReservationAndFirstFrameTermsOnly`: unchanged in formula. The reply coefficient is still 2 per reservation plus one per subscriber.
-- `testDoublingTheRequestCapChangesTheBudgetByItsCustodyTermsOnly` (new).
-- `testTheCeilingAcceptsExactlyTheBudgetAndRefusesOneByteLess` (new): the ceiling is inclusive.
-- `testAMaximalEventFrameFitsTheSmallestAcceptedReplyCapExactly` (new): the record is sized to exactly `maxEventBytes`, at the maximal cursor. The frame at its exact size is accepted at that cap and refused at one byte less, by the codec and by construction. The measured overhead is exact for a maximal event, not an over-estimate. That is asserted, not hard-coded.
-- Ceiling values are fixture values. No shipping default was added.
+- `RuntimeCollectionLedgerTests` (29). The earlier ledger tests are kept and updated to the new API, and the DNS-count check moved to `RuntimeSnapshotProjectionTests`. New (11): the deterministic cross-kind witness, the cross-kind model, the changed-total fault, the snapshot incarnation fault, the encoding-failure seam (`UnencodableRow`, which the shared measure reports as `internalFailure`), the over-row-bound refusal with no state change, the refused-capture state check, the mapping-failure and exact-bounds measure tests, and the exact-total and unavailable-revision page tests.
+- `RuntimeServiceTransportTests` (new through the framed client): an internal projection failure → `wire(internalFailure)` with `projectionNotEncodable`; another incarnation → `wire(changedIncarnation)`; an offset past the total → `wire(invalidValue)` with no projection; a row larger than the caller's frame → `wire(frameTooLarge)` with the capture stored; an over-budget refusal keeps its exact total.
+- `RuntimeClientCodecTests` (new): the known-total round trip, the absent key, the legacy decode, the refused malformed totals, and the rowless status rules, including the packer refusal.
+- `RuntimeSnapshotProjectionTests`: refactored onto the shared projection, with new kernel-based tests for the count refusal, the exact byte bound, the DNS order and count, and the unmappable row.
+- `RuntimeServiceFixtures`: the fake owner delegates to the production projection, with a `projectionOverride` seam for mismatch and failure tests.
+- `pm-sim runtime-service-wire`: the unavailable reply is checked with and without its total, a legacy reply decodes with no total, and a null total is refused.
 
-## Wire and budget envelope (unchanged in this slice)
+## Not implemented, explicitly
 
-- The request envelope is `ControlRuntimeRequest { budget, call }`, with the six calls unchanged. Zero is a valid budget, answered pre-admission with the typed refusal. The receiver deadline is `min(caller absolute, arrival + budget)`.
-- The byte budget is an exact checked sum of the encoded payload terms. A configuration whose budget exceeds the owner's ceiling is refused at construction. A reply cap too small for one maximal event is refused at construction.
-- `maxRequestBytes` and `maxReplyBytes` are the server's frame caps. A caller can narrow them, never widen them.
+1. **Subscription table and latest-snapshot slot.** `RuntimeSubscriptionTable`, the latest DTO slot, `ownerDidChange()`, and coalescing are not built. This is M2B and is not started.
+2. **Snapshot frame.** `ControlRuntimeFrame.snapshot(ControlRuntimeSnapshot)` already exists (`Sources/ConduitShared/ControlRuntimeMessages.swift:401`), next to `baseline`, `events`, `replayCaughtUp`, `operationFinished` and `end`. The earlier claim that no snapshot frame exists was wrong, and no new frame or owner decision is needed for M2B.
+3. **Observation, replay and control-log models.** Not built. The ledger models above are the only M2 models.
+4. **Owner adapter and host adoption.** The real owner does not implement `projectedRows(for:within:)` yet. The shared projection is ready for it. Nothing in `Sources/` constructs `RuntimeServiceCore`.
+5. **`readSnapshot` nil path** still answers `invalidValue`. It is not part of this slice. The page path is closed.
+6. **Sizing and frames.** No new measurement this slice. The existing points are `empty 1425B` and `widest 4771B`. The widest fixture is plain ASCII and is not the largest encoded JSON. **4,771 B is not a maximum.** No shipping profile is proposed.
+7. **Cross-kind coverage** is two kinds, as stated above. No witness covers more than two kinds.
+8. **Budget formula test.** `RuntimeServiceWorkTests` asserts the retained-byte formula with the same arithmetic as production, so it cannot catch a formula error shared by both.
+9. **Historical fail-before evidence** was not produced. Parent source variants now cover the gate release and two eviction defects, with different detection mechanisms; D2 and rejection witnesses have no executed source-variant evidence. See the verification note.
+10. **Row measure.** Row bytes come from the codec encoder, which is the same bytes the packer writes. The packer's own free-text pre-check is not applied in the budget, because the budget has no reply frame. A row that is too large for a caller's frame is answered `frameTooLarge` at the packer.
 
-## What the current source does (seams)
+## Earlier history (unchanged, still valid)
 
-- `RuntimeOwnerScheduling.swift`: `RuntimeOwnerScheduling.hop(_:)` is the one dispatch seam. Tests use a finite manual FIFO.
-- `RuntimeServiceLimits.swift`: validated limits with no shipping values. `retainedByteBudget` is the checked sum of alias partitions, the operation table, outcomes, the ring, the control log, the ingress, the collections, the transport's lane reservations, and subscribers' first frames.
-- `RuntimeAliasTable.swift`: request aliases as their own component, with per-partition bounds, oldest-first eviction and expiry. An alias keeps a fingerprint of the encoded command, not the body.
-- `ControlCommandOwner.swift`: `startEffect` receives the command at launch. `ControlEffectReport` carries `settled` (logical) and `quiesced` (physical). `serviceFault(_:)` receives a closed `ControlServiceFault` with no body and no error text.
-- `RuntimeServiceCore.swift` (facade): composes the alias table, the operation table, the observation log, subscribers, parked waits and captures. Stop slots: one active and one queued per module. Ordinary capacity is released only by quiescence.
-- `RuntimeTransportGate.swift`: `RuntimeLaneTicket` with named parts (`hop`, `timer`, `waiterCleanup`). The slot releases after every part ends, and the release callback runs outside every lock. `RuntimeWaitGate` is one caller wait with one timer and any number of owner rounds.
-- `RuntimeInMemoryTransport.swift`: the request is decoded once and the lane is classified from the decoded envelope. Typed registration, pull-start and release results. A stream `end` frame releases the subscriber in the same owner turn.
+- D1: payload release after the gate lock. The comment is corrected, and the witness is the deadline path (`testTheParkedClosureIsReleasedAfterTheGateLockIsFreeAndBeforeTheCallerResumes`). The parent reintroduced an under-lock release variant and observed the probe fail; no historical commit was checked out.
+- D2: supersession, quiescence and the outcome measure deliver faults after their transaction is complete (`testASupersessionFaultReachesTheOwnerOnlyAfterTheReplacementIsInstalled`, `testAQuiescenceFaultReachesTheOwnerOnlyAfterTheCapacityIsReturned`, `testAnOutcomeEncodeFaultReachesTheOwnerOnlyAfterTheSettlementIsComplete`).
+- Rejection coverage: `testARejectedStopIsRecordedAndRecoversItsRejectionWithoutAFreshFence` for `.dns` and `.proxy`.
+- Stream end is terminal and releases the subscriber in the same owner turn. A held timer keeps the lane, not the payload. A dropped framed subscription releases its subscriber without a cancel. An evicted accepted alias is the selected best-effort contract.
+- The wait model (`WaitAction`) and the earlier work model (`WorkAction`), each with exhaustive depth 1 to 4 and seeded walks, are unchanged.
 
-## Witnesses (current)
+## Frozen source paths for this checkpoint
 
-- Stream end is terminal (`testAStreamEndReleasesTheSubscriberInTheSameOwnerTurn`).
-- Held timer keeps the lane, not the payload (`testAResolvedWaitReleasesItsCapturedRequestWhileItsHeldTimerKeepsTheLane`).
-- Parked closure released after the gate lock and before the caller resumes (`testTheParkedClosureIsReleasedAfterTheGateLockIsFreeAndBeforeTheCallerResumes`), new.
-- Dropped framed subscription (`testADroppedFramedSubscriptionReleasesItsSubscriberWithoutACancel`).
-- Evicted accepted alias (`testAnEvictedAcceptedAliasAnswersNotRecordedAndAFreshRetryIsFencedAgain`): the selected best-effort contract. No exactly-once promise survives eviction, and no retry is replayed blindly.
-- Encoding faults: command (`testAnEncodeFailureIsReportedAsATypedFaultWithItsOriginAndNoBody`) and outcome, with the reentrant witness above.
-- Exact budget, reply-cap delta, request-cap delta, exact ceiling, ceiling refusal, reply cap that carries one event, and the exact maximal-frame boundary.
-- Registration resolved before park (`testARegistrationResolvedBeforeItParksKeepsItsReservationUntilItsCleanupRuns`).
-- Open cancelled after registration (`testAnOpenCancelledAfterItsSubscriberRegisteredRemovesIt`), gate-level.
+Changed in this slice:
 
-## Gaps, stated plainly
+- `Sources/ConduitShared/ControlRowProjection.swift` (new)
+- `Sources/ConduitShared/ControlRuntimeErrors.swift`
+- `Sources/ConduitShared/ControlRuntimeCollections.swift`
+- `Sources/ProxyControlBridge/RuntimeSnapshotControlProjection.swift`
+- `Sources/ConduitRuntime/ControlCommandOwner.swift`
+- `Sources/ConduitRuntime/RuntimeCollectionLedger.swift`
+- `Sources/ConduitRuntime/RuntimeServiceCore.swift`
+- `Sources/ConduitRuntime/RuntimeInMemoryTransport.swift`
+- `Sources/pm-sim/ScenarioRuntimeServiceWire.swift`
+- `Tests/ConduitTests/RuntimeCollectionLedgerTests.swift`
+- `Tests/ConduitTests/RuntimeServiceFixtures.swift`
+- `Tests/ConduitTests/RuntimeSnapshotProjectionTests.swift`
+- `Tests/ConduitTests/RuntimeServiceTransportTests.swift`
+- `Tests/ConduitTests/RuntimeClientCodecTests.swift`
+- `docs/runtime-service-engine-checkpoint-2026-10-25.md`, `docs/design-runtime-client-engine.md`, `docs/decisions/0014-runtime-client-stream.md`
 
-- No transport-level open-abandonment witness. The open's attempt and its finish are one owner turn, so a concurrent expiry can only land from another thread during that turn. The gate-level witness covers the abandon path.
-- The refusal-encode failure path (`notSent(invalidReply)`) is code-only. With the fixture caps a refusal is always smaller than its request, so no test reaches it.
-- The outcome-encode fault is reachable only through the measure seam, because the current codec encodes every outcome.
-- The parked-closure probe was not shown to fail against the pre-fix gate in this slice. The brief limited verification to one wrapper. Its meaning rests on the path: before this change, a parked wait's gate was the closure's only holder, and `resolve` released the closure inside the lock. A revert run would settle it.
-- The work model's join and reject are `.dns` only (see Bounded models).
-- `ControlRuntimeStream` has no deinit, and its drop obligation is not written down. The framed client's own drop path is tested. A raw caller that drops a stream without cancel holds one subscriber slot until `subscriberLimit`.
-- The tests wait on observable state with fixed limits (`awaitState`, `runCall`). They do not sleep, and they are not timing proofs.
-- Encoded payload accounting is not a process-memory guarantee. Caller-held stream handles are outside the budget.
-- A missed owner quiescence holds ordinary capacity and the module's stop slot permanently, with no watchdog. That is the cost of physical quiescence. No test makes that state observable.
+Changed in earlier slices and unchanged here: `RuntimeServiceLimits.swift`, `RuntimeTransportGate.swift` (D1 comments), `RuntimeServiceWorkTests.swift`, `RuntimeServiceAdmissionTests.swift`, `ControlRuntimeCollections.swift` (packer `status:` parameter), `RuntimeInMemoryTransport.swift` (stale status, `internalFailure`).
 
-## History of the counterexamples (corrected)
-
-Three counterexamples were found while the models were being built. The artifacts record each one as a model or replay-harness error:
-
-1. The replay's round parked without beginning the waiter part.
-2. The reference ended the waiter part before it began the next round's hop, so it saw a released reservation.
-3. The replay's wake skipped the registration removal that the service's own wake performs.
-
-Separately, the current production code has these hop-count and registration properties. They are listed as code properties, not as defects that were reproduced:
-
-- `RuntimeLaneTicket` counts hop parts. A round that queues the next round begins the next hop before the current one ends, so two hops can be live at once, and the slot holds until both end.
-- `installRegistration` begins the waiter-cleanup part before the registration exists. A resolution that lands before the park queues the cleanup, and the part holds until that cleanup runs.
-
-**Attribution is unresolved.** An earlier phase-2 writer response also reported one real production hop-count ticket defect. A search of `docs/` and the run directory found no artifact that shows it, and an independent review of the run directory checked the same. So this checkpoint makes no attribution. The earlier statement "none of the counterexamples were production defects" is withdrawn as a proof. The artifacts do not establish whether either production property above was an observed failure.
-
-## Independent correction review
-
-A read-only Claude review after the focused writer froze confirmed D1 lock-free release, exact boundary tests and the revised accounting formula. It found two remaining fault callback windows: superseding a queued stop calls settlement before installing the replacement, and quiescing an unsettled operation calls settlement before releasing physical capacity. Those encode faults require the injected seam with today's codec, but the enclosing transaction must still finish before reporting. Correct both and add reentrant witnesses before adoption. It also found a release comment stronger than actual in-attempt lifetimes, and an accounting comment excluding the request buffer despite counting it. These remain correction work, not passing evidence.
-
-## M2: proposal, not implemented
-
-M2 is not implemented. The final review of this proposal comes before any M2 code. Decisions in this section come from the parent's direction.
-
-Principles:
-
-- Collection revisions are the owner's `ControlCollectionRevision` (an opaque `ControlOrdinal`). The service compares them **by equality only**. It assumes no ordering, no density and no range. `ControlOrdinal`'s `Comparable` is not removed.
-- No second lifecycle or collection revision namespace. The service never invents a revision.
-- Proof is bounded and exact. A captured revision is retained as a proof record: the revision, the exact total from `ControlCollectionReference.totalCount` in the same owner turn, and capture and last-served times. Rows are optional.
-- Outcomes by page request, against the owner's current revision `C` and a proof table for the kind:
-  - cursor revision equals `C`: serve the current capture. Over budget means the whole capture is `unavailable` (budget), with no truncation.
-  - cursor revision is an older captured revision with its rows retained: `staleRevision` with rows.
-  - cursor revision has a proof, but its rows were evicted (known row-eviction proof): `expiredRevision`.
-  - no proof, forgotten proof or never captured: `notCaptured`. Unknown or unproven is never a false expiry.
-- A proof eviction is `notCaptured`, not `expired`. No unbounded tombstones are kept.
-- One producer path on the wire. The canonical no-rows reply is the top-level `ControlPageReply.unavailable(kind, reason, knownTotal?)`. The service must not emit both a nested `page.status.expiredRevision` and a top-level `unavailable` for the same case. An old decode case may stay for compatibility, but it is documented as not produced.
-
-Components and API sketch (internal, fixture values only):
-
-```swift
-/// Bounded proof for one captured revision. Equality-only key. No ordering is assumed.
-struct RuntimeCaptureProof {
-    let revision: ControlCollectionRevision   // owner-issued, opaque
-    let total: ControlCount                   // exact, from the same owner turn's snapshot reference
-    let capturedAt: ContinuousClock.Instant
-    var lastServedAt: ContinuousClock.Instant?
-    var rows: ControlProjectedRows?           // nil after row eviction; the proof stays
-}
-
-/// Per kind: at most `proofCapacityPerKind` proofs, and at most `rowRetentionPerKind` retained row sets.
-/// Charged in the budget: proofCapacityPerKind × kinds × fixed proof bytes, plus the retained row bytes.
-struct RuntimeCollectionLedger {
-    mutating func capture(kind: ControlCollectionKind, proof: RuntimeCaptureProof) -> Bool   // false: over budget
-    func decision(kind: ControlCollectionKind, cursor: ControlCollectionRevision?, current: ControlCollectionRevision) -> RuntimePageDecision
-}
-```
-
-Owner projection and count:
-
-- Use the snapshot's existing exact total (`ControlCollectionReference.totalCount`, read in the same owner turn) as the count preflight. Do not add a second count accessor or a second data path.
-- The owner's bounded projection accepts a row count and byte budget. It stops building once over budget and returns an over-budget result, so the whole capture is `unavailable`, and no array is built to learn its size.
-- Bridge fix: `RuntimeSnapshotControlProjection.swift` at `:272` and `:300` builds `tunnelDNSHostRows(...)` in full only to take `.count`. It takes the direct count instead. This is a `ProxyControlBridge` change and is part of the M2 implementation, not of this slice.
-
-Subscription and publication:
-
-- One subscription table owns cursors, parked waiters, the last-seen snapshot generation per subscriber, and the sticky terminal state.
-- The buffered first frame stays in the existing `RuntimeStreamHandle`. It is not duplicated into the table.
-- One latest safe DTO slot per incarnation, with a private delivery generation for coalescing (`RuntimeCounter.successor`, exhausted by counter). The generation is internal delivery state. It is not a lifecycle authority. The slot keeps the owner's wire stamp and revisions unchanged.
-- Snapshot encoding happens per pull, under the frame limit. It is not one global encode. The byte budget counts the retained DTO. It is not a CPU bound.
-- Publication: `ownerDidChange()` or `refresh()` runs in one owner turn. It captures the snapshot, updates the latest slot, and wakes subscribers whose last-seen generation is behind.
-- Baseline: the snapshot, the event high water and the registration are captured in one owner turn, as now.
-- The page read may refuse for budget or expiry even when the scalar reference identifies the current revision. The owner's stamp is not rewritten, and no placeholder revision is invented to report cache availability.
-
-Reference comments: the retention comments must state that no retention lease is promised. Eviction is best-effort, bounded, and reported as `notCaptured` or `expiredRevision` only with proof.
-
-Model and tests (planned, not built):
-
-- An M2 reference model over capture, row eviction, proof eviction, page read by revision, publish, subscribe, park and wake, and terminal. Compare the page decision and the subscriber state after each action. Exhaustive to depth 4, then seeded walks, with a finite budget.
-- Tests: over-budget capture is whole `unavailable` with no truncation; stale-with-rows; expired after row eviction; `notCaptured` after proof eviction and for a never-captured revision; a single producer for each reply shape; coalescing (many publishes, one latest generation delivered to each subscriber); sticky terminal; baseline atomicity in one turn.
-
-Open questions for the parent:
-
-1. The per-kind proof capacity and row retention are fixture values. Which shipping values does the owner choose? Not decided here.
-2. Does the old nested `expiredRevision` decode case stay after the producer is unified? Recommended: keep the decode, and document that nothing produces it.
-3. The bridge's direct-count change lands in M2, not in this slice. Confirm.
-
-## Remaining M2 pending items
-
-- Count and the page-reply shape are settled in the proposal above, pending parent review.
-- No M2 code is written. The next step is the parent's review of this proposal.
+No file under `docs/architecture-review-2026-09-18.md` or `docs/issue-triage-2026-09-23.md` was touched. No commit, no push, and no install.

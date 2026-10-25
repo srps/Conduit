@@ -701,6 +701,58 @@ final class RuntimeClientCodecTests: XCTestCase {
             + unbroken + #"]}}}"#).utf8)
     }
 
+    // MARK: - The unavailable page reply's known total, and the rowless statuses
+
+    func testAnUnavailablePageReplyCarriesItsKnownTotalAndDecodesWithoutOne() throws {
+        let decoder = ControlRuntimeCodec.makeDecoder()
+        let encoder = ControlRuntimeCodec.makeEncoder()
+        let withTotal = ControlPageReply.unavailable(.tunnelDNSHosts, .retentionBudgetExceeded, knownTotal: try ControlCount(17))
+        let data = try encoder.encode(withTotal)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(#""knownTotal":17"#))
+        XCTAssertEqual(try decoder.decode(ControlPageReply.self, from: data), withTotal)
+
+        let none = ControlPageReply.unavailable(.tunnelDNSHosts, .notCaptured, knownTotal: nil)
+        let noneData = try encoder.encode(none)
+        XCTAssertFalse(String(decoding: noneData, as: UTF8.self).contains("knownTotal"), "an absent total is not written")
+        XCTAssertEqual(try decoder.decode(ControlPageReply.self, from: noneData), none)
+        // A reply from before the total was carried has no key, and it decodes with no total.
+        let legacy = Data(#"{"collection":"tunnelDNSHosts","reason":"not_captured","type":"unavailable"}"#.utf8)
+        XCTAssertEqual(try decoder.decode(ControlPageReply.self, from: legacy), none)
+    }
+
+    func testAMalformedKnownTotalIsRefusedNotReadAsNoTotal() {
+        let decoder = ControlRuntimeCodec.makeDecoder()
+        for total in ["null", "-1", #""17""#, "1.5"] {
+            let json = Data(#"{"collection":"tunnelDNSHosts","knownTotal":\#(total),"reason":"not_captured","type":"unavailable"}"#.utf8)
+            XCTAssertThrowsError(try decoder.decode(ControlPageReply.self, from: json), "knownTotal \(total) is not a count")
+        }
+    }
+
+    /// A page keeps rows only under a status that holds rows. The rowless statuses refuse rows, so no second "no rows" form carries data.
+    func testARowlessPageStatusCannotCarryRows() throws {
+        let decoder = ControlRuntimeCodec.makeDecoder()
+        let row = #"{"hostname":"a.example","outcome":"active"}"#
+        func page(status: String, total: Int, rows: String) -> Data {
+            Data(#"{"incarnation":"\#(incarnationText)","revision":1,"offset":0,"totalCount":\#(total),"rows":\#(rows),"status":\#(status)}"#.utf8)
+        }
+        let expired = #"{"type":"expiredRevision"}"#
+        let unavailable = #"{"type":"unavailable","reason":"not_captured"}"#
+        let current = #"{"type":"current"}"#
+        XCTAssertThrowsError(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: expired, total: 1, rows: "[\(row)]")))
+        XCTAssertThrowsError(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: unavailable, total: 1, rows: "[\(row)]")))
+        XCTAssertNoThrow(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: expired, total: 0, rows: "[]")))
+        XCTAssertNoThrow(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: unavailable, total: 0, rows: "[]")))
+        XCTAssertNoThrow(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: current, total: 1, rows: "[\(row)]")))
+        // The packer produces only current and stale pages, so a rowless status is refused before any row is packed.
+        XCTAssertThrowsError(try ControlPagePacker.page(
+            of: [ControlTunnelDNSHostRow](), offset: 0, incarnation: incarnation(1),
+            revision: try XCTUnwrap(ControlCollectionRevision(rawValue: 1)), status: .expiredRevision,
+            correlation: requestID(10), limits: limits, wrap: ControlPageReply.tunnelDNSHosts
+        )) { error in
+            XCTAssertEqual(error as? ControlRuntimeWireError, .invalidValue)
+        }
+    }
+
     private func decodeRecord(_ json: String) throws -> ControlRuntimeEventRecord {
         let message = try ControlRuntimeCodec.decodeFrame(eventFrame(json), limits: limits)
         guard case .frame(.events(let batch)) = message.body, let record = batch.events.first else {

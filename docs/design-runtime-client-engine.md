@@ -92,7 +92,13 @@ Collections retain bounded immutable projected rows per revision. Bound revision
 count, rows, per-revision bytes, total retained bytes, page rows and ages. Reuse the
 existing projection/packer. Over-budget capture reports honest unavailable with
 totals where known, never a truncated collection. An unavailable page reply has
-no fabricated revision. Retained superseded pages report staleness. A revision with bounded proof of row
+no fabricated revision. Its optional `knownTotal` is the snapshot's exact total for
+the current collection, or the total a retained proof recorded, and it is nil when
+no proof states one. Each row set is measured through one shared bounded projection
+(`ControlRowBudget` in ConduitShared, `projectRows` in ProxyControlBridge): the count
+is checked before any row is mapped, and the encoded bytes before each row is kept.
+A capture whose exact total is past the row bound is refused before the owner projects
+a row. The owner's rows must match the snapshot's kind and total in the same turn. Retained superseded pages report staleness. A revision with bounded proof of row
 eviction reports expiry, and anything unproven reports `notCaptured`. Stable upstream UUIDs remain their identity.
 
 ## Limits, types and verification
@@ -106,7 +112,12 @@ survive the await. The derivation is in the runtime checkpoint.
 
 Minimal unshipped-v2 refinements express already-selected states: changed
 incarnation and request conflict rejection, subscriber limit, local transport busy,
-observation loss and a revision-free unavailable page reply. Keep v1/helper
+observation loss and a revision-free unavailable page reply. Reads also answer
+closed codes: `changed_incarnation` for another incarnation, `internal_failure` for a
+projection or pack that the host could not complete (never a corrupt transport), and
+`frame_too_large` when a row does not fit the caller's frame. An offset past the known
+total is `invalid_value`, decided before any capture. The rowless page statuses carry
+no rows, and the packer produces only current and stale pages. Keep v1/helper
 unchanged and preserve codec sizing, malformed-value checks and rejection order.
 No unknown informational wire record becomes a domain producer escape hatch.
 
@@ -117,6 +128,12 @@ per-module Stop under ordinary/read load, baseline atomicity, event gaps,
 mid-catch-up eviction, control-outcome overflow and page retention. Report actual
 bounds and shortest replayable counterexamples; exhausted budgets fail. Adapter
 fault witnesses are not source mutants unless source edits were actually tested.
+The collection ledger has two bounded logical models: one kind, 22,620 exhaustive
+sequences of depth 1 to 4 plus 100 walks, and two kinds with unequal row sizes,
+refused captures and janitor batches of 1 and 3, 69,904 plus 100. Both were written
+from the same design as the production ledger, so they are not independent
+specifications, and they claim only their stated bounds. No source mutant of the
+cross-kind eviction has been executed.
 
 The actual host adapter, full configuration event family and writer/shutdown
 adoption remain separate integration steps. pm-sim keeps its current target graph;

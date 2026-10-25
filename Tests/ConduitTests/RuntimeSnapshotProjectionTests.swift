@@ -156,6 +156,57 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
         )
     }
 
+    /// The rows one bounded projection keeps for a kind, through the production projection. The fixture bounds are large enough for
+    /// these snapshots, so a test that needs a refusal passes its own bound.
+    private func projectedRows(
+        _ kernel: ProxyOrchestratorSnapshot,
+        _ kind: ControlCollectionKind,
+        maxRows: Int = 300,
+        maxBytes: Int = 1 << 20
+    ) throws -> ControlProjectedRows {
+        switch RuntimeSnapshotControlProjection.projectRows(kind, from: kernel, within: ControlRowBudget(maxRows: maxRows, maxBytes: maxBytes)) {
+        case .rows(let rows, _): return rows
+        case .overBudget: throw ProjectionRefusal.overBudget
+        case .internalFailure: throw ProjectionRefusal.internalFailure
+        }
+    }
+
+    private enum ProjectionRefusal: Error {
+        case overBudget
+        case internalFailure
+    }
+
+    /// One page of projected rows from `offset`, packed the way the host packs a reply.
+    private func packPage(
+        _ rows: ControlProjectedRows,
+        offset: Int = 0,
+        revision: ControlCollectionRevision = ControlCollectionRevision(rawValue: 1)!,
+        limits: ControlFrameLimits
+    ) throws -> ControlRuntimeMessage {
+        switch rows {
+        case .activeConnections(let list):
+            return try ControlPagePacker.page(
+                of: list, offset: offset, incarnation: stamp().incarnation, revision: revision, correlation: correlation, limits: limits,
+                wrap: ControlPageReply.activeConnections
+            )
+        case .upstreamHealth(let list):
+            return try ControlPagePacker.page(
+                of: list, offset: offset, incarnation: stamp().incarnation, revision: revision, correlation: correlation, limits: limits,
+                wrap: ControlPageReply.upstreamHealth
+            )
+        case .tunnelBindings(let list):
+            return try ControlPagePacker.page(
+                of: list, offset: offset, incarnation: stamp().incarnation, revision: revision, correlation: correlation, limits: limits,
+                wrap: ControlPageReply.tunnelBindings
+            )
+        case .tunnelDNSHosts(let list):
+            return try ControlPagePacker.page(
+                of: list, offset: offset, incarnation: stamp().incarnation, revision: revision, correlation: correlation, limits: limits,
+                wrap: ControlPageReply.tunnelDNSHosts
+            )
+        }
+    }
+
     // MARK: - Every scalar
 
     func testScalarProjectionCarriesEveryPresentationScalar() throws {
@@ -321,22 +372,8 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
         ])
 
         let snapshot = try project(kernel)
-        let connections = try RuntimeSnapshotControlProjection.connectionPage(
-            kernel.activeConnections.ordered,
-            incarnation: stamp().incarnation,
-            revision: ControlCollectionRevision(rawValue: 1)!,
-            offset: 0,
-            correlation: correlation,
-            limits: limits16KiB
-        )
-        let upstreams = try RuntimeSnapshotControlProjection.upstreamPage(
-            kernel.upstreamStatuses,
-            incarnation: stamp().incarnation,
-            revision: ControlCollectionRevision(rawValue: 1)!,
-            offset: 0,
-            correlation: correlation,
-            limits: limits16KiB
-        )
+        let connections = try packPage(try projectedRows(kernel, .activeConnections), limits: limits16KiB)
+        let upstreams = try packPage(try projectedRows(kernel, .upstreamHealth), limits: limits16KiB)
         let encoder = ControlRuntimeCodec.makeEncoder()
         let encoded = [
             String(decoding: try encoder.encode(snapshot), as: UTF8.self),
@@ -361,7 +398,11 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
             ActiveConnectionInfo(id: uuid(1), destination: "c:443", upstream: "u", method: "CONNECT",
                                  startedAt: Date(timeIntervalSince1970: 1_700_000_000)),
         ]
-        let rows = try RuntimeSnapshotControlProjection.connectionRows(connections)
+        var kernel = fullKernelSnapshot()
+        kernel.activeConnections = ActiveConnectionStore(connections)
+        guard case .activeConnections(let rows) = try projectedRows(kernel, .activeConnections) else {
+            return XCTFail("the connections project as their own kind")
+        }
         XCTAssertEqual(rows.map { $0.id.rawValue }, [uuid(1), uuid(2), uuid(3)])
     }
 
@@ -385,15 +426,12 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
         var offset = 0
         var pages: [Int] = []
 
+        var kernel = fullKernelSnapshot()
+        kernel.activeConnections = ActiveConnectionStore(connections)
+        let projected = try projectedRows(kernel, .activeConnections, maxRows: connections.count)
+        guard case .activeConnections(let all) = projected else { return XCTFail("the connections project as their own kind") }
         while true {
-            let message = try RuntimeSnapshotControlProjection.connectionPage(
-                connections,
-                incarnation: stamp().incarnation,
-                revision: revision,
-                offset: offset,
-                correlation: correlation,
-                limits: limits16KiB
-            )
+            let message = try packPage(projected, offset: offset, revision: revision, limits: limits16KiB)
             let frame = try ControlRuntimeCodec.encodeFrame(message, limits: limits16KiB)
             XCTAssertLessThanOrEqual(frame.count, ControlSocket.maxFrameBytes)
             guard case .response(.page(.activeConnections(let page))) = message.body else {
@@ -408,8 +446,94 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
 
         XCTAssertEqual(collected.count, 300)
         XCTAssertEqual(Set(collected.map(\.id)).count, 300)
-        XCTAssertEqual(collected, try RuntimeSnapshotControlProjection.connectionRows(connections))
+        XCTAssertEqual(collected, all)
         print("RUNTIME_MEASURE connection_pages_16KiB rows_per_page=\(pages) total=\(pages.reduce(0, +))")
+    }
+
+    // MARK: - The shared bounded projection, from kernel snapshots
+
+    private func connection(_ value: Int, startedAt: TimeInterval = 1_700_000_000) -> ActiveConnectionInfo {
+        ActiveConnectionInfo(
+            id: uuid(value),
+            destination: "host\(value).example:443",
+            upstream: "corp-1",
+            method: "CONNECT",
+            startedAt: Date(timeIntervalSince1970: startedAt),
+            lastActivityAt: Date(timeIntervalSince1970: startedAt + 1)
+        )
+    }
+
+    private func kernel(connections: [ActiveConnectionInfo]) -> ProxyOrchestratorSnapshot {
+        var snapshot = fullKernelSnapshot()
+        snapshot.activeConnections = ActiveConnectionStore(connections)
+        return snapshot
+    }
+
+    /// The encoded bytes of one projection that fits every bound, so a test can state exact bounds from the codec.
+    private func projectedBytes(_ connections: [ActiveConnectionInfo]) throws -> Int {
+        guard case .rows(_, let encodedBytes) = RuntimeSnapshotControlProjection.projectRows(
+            .activeConnections, from: kernel(connections: connections), within: ControlRowBudget(maxRows: 10, maxBytes: 1 << 20)
+        ) else {
+            throw ProjectionRefusal.overBudget
+        }
+        return encodedBytes
+    }
+
+    func testAnOverCountCollectionIsRefusedWholeBeforeAnyRowIsKept() {
+        let snapshot = kernel(connections: (1...3).map { connection($0) })
+        guard case .overBudget = RuntimeSnapshotControlProjection.projectRows(
+            .activeConnections, from: snapshot, within: ControlRowBudget(maxRows: 2, maxBytes: 1 << 20)
+        ) else {
+            return XCTFail("three connections are refused whole against a two-row bound")
+        }
+    }
+
+    func testAByteBoundRefusesTheWholeCollectionAndAnExactFitKeepsEveryRow() throws {
+        let first = connection(1)
+        let second = connection(2)
+        let firstBytes = try projectedBytes([first])
+        let secondBytes = try projectedBytes([second])
+        let both = kernel(connections: [first, second])
+        guard case .overBudget = RuntimeSnapshotControlProjection.projectRows(
+            .activeConnections, from: both, within: ControlRowBudget(maxRows: 10, maxBytes: firstBytes)
+        ) else {
+            return XCTFail("the second row past the byte bound refuses the whole collection, not its first row")
+        }
+        guard case .rows(let rows, let encodedBytes) = RuntimeSnapshotControlProjection.projectRows(
+            .activeConnections, from: both, within: ControlRowBudget(maxRows: 10, maxBytes: firstBytes + secondBytes)
+        ) else {
+            return XCTFail("an exact fit keeps every row")
+        }
+        XCTAssertEqual(rows.rowCount, 2)
+        XCTAssertEqual(encodedBytes, firstBytes + secondBytes, "the bytes are the rows' own encodings, summed")
+    }
+
+    func testTheDNSProjectionKeepsSucceededThenFailedAndCountsEveryHost() throws {
+        var snapshot = fullKernelSnapshot()
+        snapshot.tunnelDNSOverrideStatus = .partial(succeeded: ["a.example", "b.example"], failed: ["c.example"])
+        XCTAssertEqual(try RuntimeSnapshotControlProjection.tunnelDNSHostCount(snapshot.tunnelDNSOverrideStatus), 3)
+        guard case .rows(.tunnelDNSHosts(let rows), _) = RuntimeSnapshotControlProjection.projectRows(
+            .tunnelDNSHosts, from: snapshot, within: ControlRowBudget(maxRows: 3, maxBytes: 1 << 20)
+        ) else {
+            return XCTFail("three hosts fit a three-row bound")
+        }
+        XCTAssertEqual(rows.map(\.hostname), ["a.example", "b.example", "c.example"])
+        XCTAssertEqual(rows.map(\.outcome), [.succeeded, .succeeded, .failed])
+        guard case .overBudget = RuntimeSnapshotControlProjection.projectRows(
+            .tunnelDNSHosts, from: snapshot, within: ControlRowBudget(maxRows: 2, maxBytes: 1 << 20)
+        ) else {
+            return XCTFail("a two-row bound refuses three hosts whole")
+        }
+    }
+
+    /// A row the bridge cannot map is a closed internal failure. It is not reported as a capacity refusal, and no row is kept.
+    func testAnUnmappableRowIsAnInternalFailureNotACapacityRefusal() {
+        let snapshot = kernel(connections: [connection(1, startedAt: .nan)])
+        guard case .internalFailure = RuntimeSnapshotControlProjection.projectRows(
+            .activeConnections, from: snapshot, within: ControlRowBudget(maxRows: 10, maxBytes: 1 << 20)
+        ) else {
+            return XCTFail("a timestamp that cannot be mapped is an internal failure")
+        }
     }
 
     func testAScalarSnapshotThatCannotFitTheFrameIsRefusedNotTruncated() throws {

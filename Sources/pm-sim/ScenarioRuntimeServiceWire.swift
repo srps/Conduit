@@ -15,7 +15,7 @@ enum RuntimeServiceWireScenario {
         func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
 
         let limits = try ControlFrameLimits(maxFrameBytes: 64 * 1024)
-        let correlation = try ControlRequestID(rawValue: UUID(uuidString: "00000000-0000-0000-0000-0000000000C1") ?? UUID())
+        let correlation = ControlRequestID(rawValue: UUID(uuidString: "00000000-0000-0000-0000-0000000000C1") ?? UUID())
 
         let changed = try roundTrip(
             .response(.admission(.rejected(.changedIncarnation))), correlation: correlation, limits: limits
@@ -37,24 +37,38 @@ enum RuntimeServiceWireScenario {
         )
         check("a not-recorded lookup still round-trips beside the new reasons", loss)
 
-        let replayLoss = try ControlReplayAvailability.unavailable(.observationLoss)
+        let replayLoss = ControlReplayAvailability.unavailable(.observationLoss)
         let replayData = try ControlRuntimeCodec.makeEncoder().encode(replayLoss)
         let replayBack = try ControlRuntimeCodec.makeDecoder().decode(ControlReplayAvailability.self, from: replayData)
         check("an observation-loss replay reason round-trips", replayBack == replayLoss)
         check("the observation-loss reason is named on the wire", String(decoding: replayData, as: UTF8.self).contains("observation_loss"))
 
         let page = try roundTrip(
-            .response(.page(.unavailable(.activeConnections, .notCaptured))), correlation: correlation, limits: limits
+            .response(.page(.unavailable(.activeConnections, .notCaptured, knownTotal: nil))), correlation: correlation, limits: limits
         )
         check("a revision-free unavailable page round-trips", page)
-        let pageData = try ControlRuntimeCodec.makeEncoder().encode(ControlPageReply.unavailable(.tunnelBindings, .expiredRevision))
+        let totaled = try roundTrip(
+            .response(.page(.unavailable(.tunnelDNSHosts, .retentionBudgetExceeded, knownTotal: ControlCount(17)))),
+            correlation: correlation,
+            limits: limits
+        )
+        check("an unavailable page with its known total round-trips", totaled)
+        let pageData = try ControlRuntimeCodec.makeEncoder().encode(
+            ControlPageReply.unavailable(.tunnelBindings, .expiredRevision, knownTotal: ControlCount(4))
+        )
         check("an unavailable page names no revision on the wire", !String(decoding: pageData, as: UTF8.self).contains("\"revision\""))
+        check("an unavailable page names its known total on the wire", String(decoding: pageData, as: UTF8.self).contains("\"knownTotal\":4"))
+        let legacy = Data(#"{"collection":"tunnelBindings","reason":"expired_revision","type":"unavailable"}"#.utf8)
+        let legacyReply = try ControlRuntimeCodec.makeDecoder().decode(ControlPageReply.self, from: legacy)
+        check("an unavailable page from before the total decodes with no total", legacyReply == .unavailable(.tunnelBindings, .expiredRevision, knownTotal: nil))
+        let nullTotal = Data(#"{"collection":"tunnelBindings","knownTotal":null,"reason":"expired_revision","type":"unavailable"}"#.utf8)
+        check("a null known total is refused, not read as no total", (try? ControlRuntimeCodec.makeDecoder().decode(ControlPageReply.self, from: nullTotal)) == nil)
 
         let tiny = try ControlFrameLimits(maxFrameBytes: 16)
         var refused = false
         do {
             _ = try ControlRuntimeCodec.encodeFrame(
-                ControlRuntimeMessage(correlation: correlation, body: .response(.page(.unavailable(.upstreamHealth, .notCaptured)))),
+                ControlRuntimeMessage(correlation: correlation, body: .response(.page(.unavailable(.upstreamHealth, .notCaptured, knownTotal: nil)))),
                 limits: tiny
             )
         } catch ControlRuntimeWireError.frameTooLarge {

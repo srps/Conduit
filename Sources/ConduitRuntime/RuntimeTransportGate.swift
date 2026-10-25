@@ -417,8 +417,12 @@ final class RuntimeWaitGate: @unchecked Sendable {
 
     /// Chooses the outcome from the current phase under the lock, and makes it the first resolution when one is returned.
     /// The spent payloads, the timer, the registration end and the continuation are handled only after the lock is released.
-    /// The payloads are released before the timer is cancelled and before the caller resumes, so no destructor runs under
-    /// the lock and the caller never resumes while the captured request is still held.
+    /// No destructor runs under the lock: the payloads are moved out of it first and released after it.
+    ///
+    /// The payloads are released before the caller resumes only when no attempt is still running. A resolution from outside a
+    /// round, such as the deadline timer or a wake's cleanup, releases them first. A `finish` that runs inside an attempt is
+    /// different: that attempt's own frame still holds its closure while the continuation resumes. No universal pre-resume
+    /// release is claimed.
     @discardableResult
     private func resolve(_ choose: (RuntimeGatePhase) -> RuntimeWaitOutcome?) -> Bool {
         var resumeCaller: CheckedContinuation<RuntimeWaitOutcome, Never>?
@@ -443,8 +447,8 @@ final class RuntimeWaitGate: @unchecked Sendable {
             parkedEnd = nil
             chosen = outcome
         }
-        // The moved payloads are retained through the unlock, then released explicitly, outside the lock. The round's closure
-        // goes first, so its captured request is freed here.
+        // The moved payloads are retained through the unlock, then released explicitly, outside the lock. When the resolution came
+        // from outside a round, the round's closure is freed here. Inside a running attempt, the attempt's frame keeps it longer.
         withExtendedLifetime(spent) {}
         spent = SpentPayloads()
         timerToCancel?.cancel()

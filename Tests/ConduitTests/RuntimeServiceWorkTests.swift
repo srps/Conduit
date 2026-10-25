@@ -264,6 +264,68 @@ final class RuntimeServiceWorkTests: XCTestCase {
         XCTAssertEqual(RuntimeServiceFixtures.lookup(core, operation), .finished(.failed(.internalFailure)))
     }
 
+    /// A superseded candidate whose outcome cannot be measured reports its fault only after the replacement is installed. The
+    /// fault callback sees the replacement pending in its stop slot, and the dropped queued candidate already gone. Before the
+    /// fix the owner was called inside the settlement, before the replacement existed.
+    func testASupersessionFaultReachesTheOwnerOnlyAfterTheReplacementIsInstalled() throws {
+        let harness = try RuntimeServiceHarness(measureOutcome: { outcome, operation in
+            if case .superseded = outcome { throw RuntimeServiceTestError.refusedEncoding }
+            return try RuntimeServiceCore.measureRetained(outcome, operation)
+        })
+        harness.owner.answer = { _, _ in .admitted }
+        let first = try admitted(harness, 1, .stop(.dns))
+        let core = harness.core
+        var pendingInCallback: Int?
+        var queuedInCallback: Bool?
+        var liveInCallback: Int?
+        harness.owner.onFault = { [weak core] _ in
+            guard let core else { return }
+            pendingInCallback = core.pendingOperationCount
+            queuedInCallback = core.stopSlotState(.dns).queued
+            liveInCallback = core.liveOperationCount
+        }
+
+        guard case .accepted = harness.core.submit(try RuntimeServiceFixtures.request(2, .stop(.dns))) else {
+            return XCTFail("the replacement stop must be accepted")
+        }
+
+        XCTAssertEqual(pendingInCallback, 1, "the callback sees only the replacement pending")
+        XCTAssertEqual(queuedInCallback, true, "the callback sees the replacement in the stop slot")
+        XCTAssertEqual(liveInCallback, 1, "the callback sees only the replacement live, because the dropped candidate has left the table")
+        XCTAssertEqual(harness.owner.faults, [.outcomeNotEncodable])
+        XCTAssertEqual(RuntimeServiceFixtures.lookup(core, first), .finished(.failed(.internalFailure)))
+    }
+
+    /// An unsettled operation that quiesces reports its closing fault only after its physical capacity is returned. The fault
+    /// callback sees no live record, no pending operation and a free ordinary slot.
+    func testAQuiescenceFaultReachesTheOwnerOnlyAfterTheCapacityIsReturned() throws {
+        let harness = try RuntimeServiceHarness(measureOutcome: { outcome, operation in
+            if case .failed(.internalFailure) = outcome { throw RuntimeServiceTestError.refusedEncoding }
+            return try RuntimeServiceCore.measureRetained(outcome, operation)
+        })
+        let lifecycle = ControlLifecycleRevision(rawValue: 5) ?? ControlLifecycleRevision(rawValue: 0)!
+        let operation = try admitted(harness, 1, .restart(.proxy, ifLifecycleRevision: lifecycle))
+        harness.scheduling.drainAll()
+        let core = harness.core
+        var liveInCallback: Int?
+        var ordinaryInCallback: Int?
+        var pendingInCallback: Int?
+        harness.owner.onFault = { [weak core] _ in
+            guard let core else { return }
+            liveInCallback = core.liveOperationCount
+            ordinaryInCallback = core.ordinaryUnquiescedCount
+            pendingInCallback = core.pendingOperationCount
+        }
+
+        harness.owner.quiesce(operation)
+
+        XCTAssertEqual(liveInCallback, 0, "the callback sees the operation's record already removed")
+        XCTAssertEqual(ordinaryInCallback, 0, "the callback sees its capacity already returned")
+        XCTAssertEqual(pendingInCallback, 0, "the callback sees the operation settled")
+        XCTAssertEqual(harness.owner.faults, [.outcomeNotEncodable])
+        XCTAssertEqual(RuntimeServiceFixtures.lookup(core, operation), .finished(.failed(.internalFailure)))
+    }
+
     /// A reply cap that cannot carry one maximal event in one frame is refused at construction, so every event stays deliverable.
     func testAReplyCapThatCannotCarryOneMaximalEventIsRefusedAtConstruction() throws {
         XCTAssertThrowsError(try RuntimeServiceFixtures.limits(replyBytes: 1024))
@@ -352,6 +414,10 @@ final class RuntimeServiceWorkTests: XCTestCase {
             replayChunkBytes: 4096,
             collectionRowCapacity: 1,
             collectionByteCapacity: 1,
+            collectionProofCapacityPerKind: 1,
+            collectionRowRevisionsPerKind: 1,
+            collectionRetainedByteCapacity: 1,
+            collectionRowRetentionAge: .seconds(1),
             retainedByteCeiling: 1 << 20
         ))
     }
@@ -370,7 +436,8 @@ final class RuntimeServiceWorkTests: XCTestCase {
         let expected = partitions * limits.aliasByteCapacityPerPartition
             + operations * (limits.operationRecordBytes + limits.maxRequestBytes)
             + limits.outcomeByteCapacity + limits.ringByteCapacity + limits.controlLogByteCapacity + limits.ingressByteCapacity
-            + collectionKinds * limits.collectionByteCapacity
+            + limits.collectionRetainedByteCapacity + collectionKinds * limits.collectionProofCapacityPerKind * limits.collectionProofBytes
+            + limits.collectionByteCapacity
             + limits.laneRetainedBytes + limits.firstFrameRetainedBytes
         XCTAssertEqual(limits.retainedByteBudget, expected)
         XCTAssertLessThanOrEqual(limits.retainedByteBudget, limits.retainedByteCeiling)

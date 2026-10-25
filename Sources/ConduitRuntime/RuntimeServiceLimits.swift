@@ -40,8 +40,11 @@ enum RuntimeWireSize {
 /// record it holds, so one record always fits. `retainedByteBudget` is the checked sum of every encoded-byte term the
 /// configuration can hold at once: the alias partitions, the operation table, the outcome table, the ring, the control
 /// log, the ingress, the collections, and the transport's in-flight reservations and subscriber first frames. It counts
-/// encoded payload bytes only. It excludes object overhead, the caller's own request buffer and process memory. It must
-/// not exceed `retainedByteCeiling`, which the owner passes explicitly, so an over-large configuration is refused at
+/// encoded payload bytes only. It excludes object overhead and process memory. The lane term does count the caller's
+/// request frame, as one of the two request-sized values each reservation holds (see `laneRetainedBytes`), so the caller's
+/// buffer is not excluded from the budget. Two request and two reply terms per reservation are a conservative bound on
+/// encoded custody. They are not an RSS guarantee, and not a claim about when the optimizer releases a value. The budget
+/// must not exceed `retainedByteCeiling`, which the owner passes explicitly, so an over-large configuration is refused at
 /// construction.
 struct RuntimeServiceLimits: Sendable, Equatable {
     /// The server's ingress cap for one request frame, applied before any parsing.
@@ -100,9 +103,18 @@ struct RuntimeServiceLimits: Sendable, Equatable {
     /// The events one replay frame may carry, by count and by encoded bytes. The frame limit still applies on top.
     let replayChunkItems: Int
     let replayChunkBytes: Int
-    /// The rows one collection capture may hold, and their encoded bytes. Each kind keeps only its newest capture.
+    /// The rows one collection capture may hold, and its encoded bytes. A capture over either bound is refused whole.
     let collectionRowCapacity: Int
     let collectionByteCapacity: Int
+    /// Captured revisions with a proof, per kind. A proof is bounded metadata. Evicting it leaves no trace, so the revision reads as not captured.
+    let collectionProofCapacityPerKind: Int
+    /// Retained row sets per kind, and the encoded bytes of every retained row set together, across all kinds.
+    let collectionRowRevisionsPerKind: Int
+    let collectionRetainedByteCapacity: Int
+    /// How long a retained row set lasts from its capture. Proofs are bounded by count, not by age.
+    let collectionRowRetentionAge: Duration
+    /// The encoded bytes one proof's metadata charges: the worst revision and the largest total the row bound allows.
+    let collectionProofBytes: Int
     /// Each in-flight reservation holds two request-sized values and two reply-sized values, so one reservation is bounded by
     /// `2 × maxRequestBytes + 2 × maxReplyBytes`. The request-sized values are the caller's request frame and the decoded message
     /// that the wait's round reads. Both are live across the await, because the frame is the transport's parameter for the whole
@@ -147,6 +159,10 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         replayChunkBytes: Int,
         collectionRowCapacity: Int,
         collectionByteCapacity: Int,
+        collectionProofCapacityPerKind: Int,
+        collectionRowRevisionsPerKind: Int,
+        collectionRetainedByteCapacity: Int,
+        collectionRowRetentionAge: Duration,
         retainedByteCeiling: Int
     ) throws {
         let counts = [
@@ -155,10 +171,11 @@ struct RuntimeServiceLimits: Sendable, Equatable {
             stopLaneCapacityPerModule, subscriberLimit, ringCapacity, ringByteCapacity, maxEventBytes,
             ingressCapacity, ingressByteCapacity, drainItemsPerTurn, drainBytesPerTurn, controlLogCapacity,
             controlLogByteCapacity, replayChunkItems, replayChunkBytes, collectionRowCapacity, collectionByteCapacity,
+            collectionProofCapacityPerKind, collectionRowRevisionsPerKind, collectionRetainedByteCapacity,
             retainedByteCeiling,
         ]
         // A frame needs at least one payload byte and its line feed, the smallest frame that can exist.
-        guard counts.allSatisfy({ $0 >= 1 }), retentionAge > .zero,
+        guard counts.allSatisfy({ $0 >= 1 }), retentionAge > .zero, collectionRowRetentionAge > .zero,
               maxRequestBytes >= 2, maxReplyBytes >= 2
         else {
             throw ControlRuntimeWireError.invalidValue
@@ -166,7 +183,7 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         // One event must fit every byte bound that carries events, so each turn, each queue and each frame makes progress.
         guard replayChunkBytes >= maxEventBytes, ringByteCapacity >= maxEventBytes,
               drainBytesPerTurn >= maxEventBytes, ingressByteCapacity >= maxEventBytes,
-              controlLogByteCapacity >= 1
+              controlLogByteCapacity >= 1, collectionRetainedByteCapacity >= collectionByteCapacity
         else {
             throw ControlRuntimeWireError.invalidValue
         }
@@ -179,6 +196,7 @@ struct RuntimeServiceLimits: Sendable, Equatable {
             of: ControlOperationFinished(operationID: ControlOperationID(rawValue: UUID()), outcome: failedOutcome)
         )
         let fingerprint = SHA256.Digest.byteCount
+        let proofBytes = try Self.worstProofBytes(rowCapacity: collectionRowCapacity)
         // One alias record is an identifier, an admission and a command fingerprint. A partition must hold one.
         guard let worstAlias = Self.checkedSum([requestIDWorst, admissionWorst, fingerprint]),
               aliasByteCapacityPerPartition >= worstAlias
@@ -198,7 +216,13 @@ struct RuntimeServiceLimits: Sendable, Equatable {
               let aliasTotal = Self.checkedProduct(partitions, aliasByteCapacityPerPartition),
               let perOperation = Self.checkedSum([operationRecord, maxRequestBytes]),
               let operationBytes = Self.checkedProduct(operations, perOperation),
-              let collectionTotal = Self.checkedProduct(collectionKinds, collectionByteCapacity),
+              // The collections term has three encoded-byte parts. Every retained row set is counted once, in the retained total. The
+              // metadata of every proof the bounds allow is charged. One per-capture bound is charged as staging: the owner builds a new
+              // capture before the ledger releases older rows, so a capture and the retained rows can coexist in one owner turn. This is
+              // an encoded-byte bound on that transient, not a claim about RSS, encoder scratch, or optimizer lifetimes.
+              let proofSlots = Self.checkedProduct(collectionKinds, collectionProofCapacityPerKind),
+              let proofTotal = Self.checkedProduct(proofSlots, proofBytes),
+              let collectionTotal = Self.checkedSum([collectionRetainedByteCapacity, proofTotal, collectionByteCapacity]),
               let stopLaneTotal = Self.checkedProduct(stopLaneCapacityPerModule, modules),
               let laneCount = Self.checkedSum([ordinaryLaneCapacity, readLaneCapacity, stopLaneTotal]),
               // Two request-sized and two reply-sized values per reservation: the request frame and the decoded message, the refusal
@@ -249,6 +273,11 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         self.replayChunkBytes = replayChunkBytes
         self.collectionRowCapacity = collectionRowCapacity
         self.collectionByteCapacity = collectionByteCapacity
+        self.collectionProofCapacityPerKind = collectionProofCapacityPerKind
+        self.collectionRowRevisionsPerKind = collectionRowRevisionsPerKind
+        self.collectionRetainedByteCapacity = collectionRetainedByteCapacity
+        self.collectionRowRetentionAge = collectionRowRetentionAge
+        self.collectionProofBytes = proofBytes
         self.laneRetainedBytes = laneBytes
         self.firstFrameRetainedBytes = firstFrameBytes
         self.retainedByteBudget = budget
@@ -292,6 +321,16 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         let record = try RuntimeWireSize.bytes(of: sample)
         guard frame.count >= record else { throw ControlRuntimeWireError.invalidValue }
         return frame.count - record
+    }
+
+    /// The encoded metadata of one proof: the revision and the total, each at its measured worst. The revision is unbounded
+    /// in principle, so its worst is the widest non-negative value. The total is bounded by the row capacity, because a capture
+    /// is refused unless its count equals the total. Capture times and the struct's own layout are not encoded, so they are not
+    /// charged, and the budget says so.
+    private static func worstProofBytes(rowCapacity: Int) throws -> Int {
+        guard let revision = ControlCollectionRevision(rawValue: Int.max) else { throw ControlRuntimeWireError.invalidValue }
+        let total = try ControlCount(rowCapacity)
+        return try RuntimeWireSize.bytes(of: revision) + RuntimeWireSize.bytes(of: total)
     }
 
     static func checkedSum(_ values: [Int]) -> Int? {

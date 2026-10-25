@@ -93,6 +93,29 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
         }
     }
 
+    /// A rejected stop is recorded as its rejection, and a retry of the same payload recovers that rejection without a fresh
+    /// fence. A rejection takes no stop slot, so a later stop for the module is fenced on its own. This covers both modules,
+    /// and the bounded model's join and reject alphabet covers `.dns` only.
+    func testARejectedStopIsRecordedAndRecoversItsRejectionWithoutAFreshFence() throws {
+        for module in [ControlModule.dns, .proxy] {
+            let harness = try RuntimeServiceHarness()
+            harness.owner.answer = { _, _ in .rejected(.hostStopping) }
+            let request = try RuntimeServiceFixtures.request(1, .stop(module))
+
+            XCTAssertEqual(harness.core.submit(request), .rejected(.hostStopping), "\(module): the owner's rejection is the admission")
+            XCTAssertEqual(harness.core.submit(request), .rejected(.hostStopping), "\(module): the recorded rejection is recovered")
+            XCTAssertEqual(harness.owner.fenceLog.count, 1, "\(module): a recovered rejection is never fenced again")
+            XCTAssertEqual(harness.core.stopSlotState(module).queued, false, "\(module): a rejected stop takes no stop slot")
+            XCTAssertEqual(harness.core.liveOperationCount, 0, "\(module): a rejected stop creates no operation")
+            XCTAssertTrue(harness.owner.startedOperations.isEmpty, "\(module): no effect is started for a rejection")
+
+            harness.owner.answer = { _, _ in .admitted }
+            guard case .accepted = harness.core.submit(try RuntimeServiceFixtures.request(2, .stop(module))) else {
+                return XCTFail("\(module): a later stop is fenced on its own, after a rejection")
+            }
+        }
+    }
+
     func testSynchronousCompletionFindsTheFinalRecord() throws {
         let harness = try RuntimeServiceHarness()
         harness.owner.completesSynchronously = true

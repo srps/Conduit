@@ -407,8 +407,13 @@ package struct ControlCollectionPage<Row: ControlCollectionRow>: Codable, Sendab
         nextCursor: ControlPageCursor?,
         status: ControlPageStatus
     ) -> Bool {
-        if case .unavailable = status {
+        switch status {
+        case .unavailable, .expiredRevision:
+            // A rowless status carries no rows and no continuation, whatever its offsets. `expiredRevision` is decoded for older peers
+            // only: no producer emits it, and a page that claims it with rows is refused.
             return rowCount == 0 && nextCursor == nil
+        case .current, .staleRevision:
+            break
         }
         // Subtract before adding: an untrusted offset near Int.max must refuse, not trap.
         // Once the row count is known to fit in the remaining total, the end cannot overflow.
@@ -433,8 +438,10 @@ package enum ControlPageReply: Codable, Sendable, Equatable {
     case tunnelBindings(ControlCollectionPage<ControlTunnelBindingRow>)
     case tunnelDNSHosts(ControlCollectionPage<ControlTunnelDNSHostRow>)
     /// A truthful refusal with no rows and no revision. It names the reason the collection cannot be read now,
-    /// so no revision is invented for a page that has none.
-    case unavailable(ControlCollectionKind, ControlCollectionUnavailableReason)
+    /// so no revision is invented for a page that has none. `knownTotal` is the exact row count the refusal is about, when the
+    /// host knows it: the current snapshot's total, or the total a retained proof recorded. It is nil when nothing proves a total,
+    /// and it is never a total borrowed from a different revision.
+    case unavailable(ControlCollectionKind, ControlCollectionUnavailableReason, knownTotal: ControlCount?)
 
     package var collection: ControlCollectionKind {
         switch self {
@@ -442,7 +449,7 @@ package enum ControlPageReply: Codable, Sendable, Equatable {
         case .upstreamHealth: .upstreamHealth
         case .tunnelBindings: .tunnelBindings
         case .tunnelDNSHosts: .tunnelDNSHosts
-        case .unavailable(let kind, _): kind
+        case .unavailable(let kind, _, _): kind
         }
     }
 
@@ -451,16 +458,20 @@ package enum ControlPageReply: Codable, Sendable, Equatable {
         case page
         case collection
         case reason
+        case knownTotal
     }
 
     package init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let raw = try container.decode(String.self, forKey: .type)
         guard raw != "unavailable" else {
-            self = .unavailable(
-                try container.decode(ControlCollectionKind.self, forKey: .collection),
-                try container.decode(ControlCollectionUnavailableReason.self, forKey: .reason)
-            )
+            let kind = try container.decode(ControlCollectionKind.self, forKey: .collection)
+            let reason = try container.decode(ControlCollectionUnavailableReason.self, forKey: .reason)
+            // An absent key is a reply from before the total was carried. A present key must be a valid count, and `null` is refused.
+            let knownTotal = try container.contains(.knownTotal)
+                ? container.decode(ControlCount.self, forKey: .knownTotal)
+                : nil
+            self = .unavailable(kind, reason, knownTotal: knownTotal)
             return
         }
         guard let kind = ControlCollectionKind(rawValue: raw) else {
@@ -480,10 +491,11 @@ package enum ControlPageReply: Codable, Sendable, Equatable {
 
     package func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        if case .unavailable(let kind, let reason) = self {
+        if case .unavailable(let kind, let reason, let knownTotal) = self {
             try container.encode("unavailable", forKey: .type)
             try container.encode(kind, forKey: .collection)
             try container.encode(reason, forKey: .reason)
+            try container.encodeIfPresent(knownTotal, forKey: .knownTotal)
             return
         }
         try container.encode(collection, forKey: .type)
@@ -514,10 +526,16 @@ package enum ControlPagePacker {
         offset: Int,
         incarnation: ControlHostIncarnation,
         revision: ControlCollectionRevision,
+        status: ControlPageStatus = .current,
         correlation: ControlRequestID,
         limits: ControlFrameLimits,
         wrap: (ControlCollectionPage<Row>) -> ControlPageReply
     ) throws -> ControlRuntimeMessage {
+        // Only rows that the host holds are packed: a current or stale revision. A rowless answer is the top-level unavailable reply.
+        switch status {
+        case .current, .staleRevision: break
+        case .expiredRevision, .unavailable: throw ControlRuntimeWireError.invalidValue
+        }
         guard offset >= 0, offset <= rows.count else { throw ControlRuntimeWireError.invalidValue }
         let remaining = rows[offset...]
 
@@ -530,7 +548,7 @@ package enum ControlPagePacker {
         let total = try ControlCount(rows.count)
         let probe = try ControlCollectionPage<Row>(
             incarnation: incarnation, revision: revision, offset: total, totalCount: total,
-            rows: [], nextCursor: nil, status: .current
+            rows: [], nextCursor: nil, status: status
         )
         let probeSize = try ControlRuntimeCodec.encodeBoundedPayload(
             ControlRuntimeMessage(correlation: correlation, body: .response(.page(wrap(probe)))),
@@ -568,7 +586,7 @@ package enum ControlPagePacker {
             totalCount: total,
             rows: Array(remaining.prefix(fitting)),
             nextCursor: nextCursor,
-            status: .current
+            status: status
         )
         let message = ControlRuntimeMessage(correlation: correlation, body: .response(.page(wrap(page))))
         // The sizing above is an upper bound, so this encoding fits. Encoding it

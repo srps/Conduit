@@ -31,7 +31,12 @@ enum RuntimeServiceFixtures {
         subscribers: Int = 2,
         requestBytes: Int = 4096,
         replyBytes: Int = 64 * 1024,
-        retainedByteCeiling: Int = 1 << 24
+        retainedByteCeiling: Int = 1 << 24,
+        collectionCaptureBytes: Int = 1 << 14,
+        collectionRetainedBytes: Int = 1 << 14,
+        collectionProofs: Int = 4,
+        collectionRowSets: Int = 2,
+        collectionRowAge: Duration = .seconds(60)
     ) throws -> RuntimeServiceLimits {
         try RuntimeServiceLimits(
             maxRequestBytes: requestBytes,
@@ -59,7 +64,11 @@ enum RuntimeServiceFixtures {
             replayChunkItems: 4,
             replayChunkBytes: 1 << 14,
             collectionRowCapacity: 16,
-            collectionByteCapacity: 1 << 14,
+            collectionByteCapacity: collectionCaptureBytes,
+            collectionProofCapacityPerKind: collectionProofs,
+            collectionRowRevisionsPerKind: collectionRowSets,
+            collectionRetainedByteCapacity: collectionRetainedBytes,
+            collectionRowRetentionAge: collectionRowAge,
             retainedByteCeiling: retainedByteCeiling
         )
     }
@@ -67,10 +76,11 @@ enum RuntimeServiceFixtures {
     /// A safe scalar snapshot from the projection, stamped with an incarnation.
     static func snapshot(
         incarnation value: Int,
-        collections: ControlCollectionRevisions = ControlCollectionRevisions()
+        collections: ControlCollectionRevisions = ControlCollectionRevisions(),
+        dnsStatus: TunnelDNSOverrideStatus = .notNeeded
     ) throws -> ControlRuntimeSnapshot {
         try RuntimeSnapshotControlProjection.snapshot(
-            ProxyOrchestratorSnapshot(),
+            ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: dnsStatus),
             stamp: ControlRuntimeStamp(
                 incarnation: incarnation(value),
                 presentationRevision: ControlPresentationRevision(rawValue: 9) ?? ControlPresentationRevision(rawValue: 0)!,
@@ -257,7 +267,12 @@ final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
 @MainActor
 final class FakeCommandOwner: ControlCommandOwner {
     let incarnation: ControlHostIncarnation
-    private let snapshotValue: ControlRuntimeSnapshot
+    /// The snapshot the owner reports. A test changes it, with the DNS hosts below, to move the owner to a new revision.
+    var snapshotValue: ControlRuntimeSnapshot
+    /// The hostnames the owner projects as tunnel DNS rows. They must match the snapshot's count in the same turn.
+    var dnsHostnames: [String] = []
+    /// How many captures the service asked the owner to project, so a test can see on-demand capture happen.
+    private(set) var projectionCount = 0
     var answer: (ControlRuntimeCommand, ControlOperationID?) -> ControlOwnerFenceResult = { _, candidate in
         candidate == nil ? .admitted : .joinedCandidate
     }
@@ -290,13 +305,20 @@ final class FakeCommandOwner: ControlCommandOwner {
         snapshotValue
     }
 
-    func projectedRows(for kind: ControlCollectionKind) -> ControlProjectedRows {
-        switch kind {
-        case .activeConnections: .activeConnections([])
-        case .upstreamHealth: .upstreamHealth([])
-        case .tunnelBindings: .tunnelBindings([])
-        case .tunnelDNSHosts: .tunnelDNSHosts([])
+    /// Replaces the projection for one test, to reach a mismatch or a failure the production projection cannot produce.
+    var projectionOverride: ((ControlCollectionKind, ControlRowBudget) -> ControlProjection)?
+
+    /// The production bounded projection, over a kernel snapshot that holds this fake's hostnames. The fake adds no bound of its own.
+    func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection {
+        projectionCount += 1
+        if let projectionOverride {
+            return projectionOverride(kind, budget)
         }
+        return RuntimeSnapshotControlProjection.projectRows(
+            kind,
+            from: ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: .active(hostnames: dnsHostnames)),
+            within: budget
+        )
     }
 
     func fence(
