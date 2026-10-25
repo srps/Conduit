@@ -123,6 +123,13 @@ enum PMProxy {
                 destinationGuard: diagnosticDestinationGuard(for: .runtimeEvents, in: environment),
                 eventLog: eventLog
             )
+            // The same writer serves every snapshot: ready, status changes, reload and the final stopped state.
+            let snapshotWriter = makeSnapshotArtifactWriter(
+                fileURL: environment.snapshotFile,
+                logger: logger,
+                destinationGuard: diagnosticDestinationGuard(for: .snapshot, in: environment),
+                eventLog: eventLog
+            )
             writerStatistics = {
                 ["events": eventFileWriter.statistics, "audit": auditSink.statistics, "console": logger.statistics]
             }
@@ -164,12 +171,13 @@ enum PMProxy {
                     args: args,
                     environment: environment,
                     orchestrator: orchestrator,
-                    logger: logger
+                    logger: logger,
+                    snapshotWriter: snapshotWriter
                 )
                 configGeneration += 1
             } stopHandler: {
                 logger.log(.notice, "Received control stop, stopping...", category: .general)
-                await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter)
+                await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter, snapshotWriter: snapshotWriter)
             } upstreamTestHandler: { upstreamName in
                 await orchestrator.testUpstream(named: upstreamName)
             }
@@ -181,7 +189,7 @@ enum PMProxy {
                     logger.log(.notice, "Received \(name), stopping...", category: .general)
                     Task { @MainActor in
                         controlServer.stop()
-                        await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter)
+                        await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter, snapshotWriter: snapshotWriter)
                     }
                 }
                 source.resume()
@@ -198,7 +206,8 @@ enum PMProxy {
                             args: args,
                             environment: environment,
                             orchestrator: orchestrator,
-                            logger: logger
+                            logger: logger,
+                            snapshotWriter: snapshotWriter
                         )
                         configGeneration += 1
                     } catch {
@@ -240,7 +249,8 @@ enum PMProxy {
                     startupMilliseconds: startupMilliseconds
                 )
                 writeReadyFile(snapshot: orchestrator.snapshot, environment: environment)
-                writeSnapshotFile(snapshot: orchestrator.snapshot, environment: environment, logger: logger)
+                // The ready file precedes this submission. Readiness never promises the snapshot is visible yet.
+                snapshotWriter.submit(orchestrator.snapshot)
                 if let readyBudgetMS, startupMilliseconds > readyBudgetMS {
                     logger.log(
                         .error,
@@ -248,18 +258,19 @@ enum PMProxy {
                         category: .general
                     )
                     controlServer.stop()
-                    await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter, exitCode: 1)
+                    await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter, snapshotWriter: snapshotWriter, exitCode: 1)
                 }
                 if exitAfterReady {
                     controlServer.stop()
-                    await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter)
+                    await stopRuntime(orchestrator: orchestrator, eventFileWriter: eventFileWriter, snapshotWriter: snapshotWriter)
                 }
                 if let statusInterval, statusInterval > 0 {
                     startStatusStream(
                         interval: statusInterval,
                         environment: environment,
                         orchestrator: orchestrator,
-                        logger: logger
+                        logger: logger,
+                        snapshotWriter: snapshotWriter
                     )
                 }
                 logger.log(.notice, "pm-proxy is running. Press Ctrl-C to stop.", category: .general)
@@ -278,7 +289,8 @@ enum PMProxy {
         args: [String],
         environment: RuntimeEnvironment,
         orchestrator: ProxyOrchestrator,
-        logger: any LogSink
+        logger: any LogSink,
+        snapshotWriter: any SnapshotArtifactWriting
     ) async throws {
         var newConfig: ProxyConfig
         do {
@@ -294,7 +306,7 @@ enum PMProxy {
         // applyConfigChange updates the orchestrator's configBox, so the auth
         // factory's snapshotProvider observes the new config on the next 407.
         await orchestrator.applyConfigChange(newConfig)
-        writeSnapshotFile(snapshot: orchestrator.snapshot, environment: environment, logger: logger)
+        snapshotWriter.submit(orchestrator.snapshot)
         do {
             try emitStatusEvent(kind: .status, snapshot: orchestrator.snapshot)
         } catch {
@@ -307,17 +319,27 @@ enum PMProxy {
         logger.log(.notice, "Config reload complete.", category: .general)
     }
 
+    /// The final stopped state is submitted before the shared diagnostic phase flushes it. The phase's report
+    /// does not gate the exit: the process exits with `exitCode` whatever the writers confirmed.
     @MainActor
     private static func stopRuntime(
         orchestrator: ProxyOrchestrator,
         eventFileWriter: RuntimeEventFileWriter,
+        snapshotWriter: any SnapshotArtifactWriting,
         exitCode: Int32 = 0
     ) async {
         await orchestrator.stopTunnels()
         await orchestrator.stopDNS()
         await orchestrator.stopProxy()
-        let auditFlushed = orchestrator.auditSink.flush(timeout: 2)
-        eventFileWriter.flushReportingTimeout(auditFlushed: auditFlushed, eventLog: orchestrator.eventLog)
+        snapshotWriter.submit(orchestrator.snapshot)
+        _ = await DiagnosticFlush.run(
+            phase: DiagnosticFlushPhase(),
+            audit: orchestrator.auditSink,
+            events: eventFileWriter,
+            snapshot: snapshotWriter,
+            eventLog: orchestrator.eventLog,
+            logger: ConsoleLogSink()
+        )
         // Shutdown diagnostics use bounded stderr; an unread stdout pipe must
         // not introduce a new unbounded wait after the flush deadline.
         do {
@@ -462,7 +484,8 @@ enum PMProxy {
         interval: TimeInterval,
         environment: RuntimeEnvironment,
         orchestrator: ProxyOrchestrator,
-        logger: any LogSink
+        logger: any LogSink,
+        snapshotWriter: any SnapshotArtifactWriting
     ) {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         // Match the orchestrator's maximum counter publication rate (10 Hz).
@@ -477,7 +500,7 @@ enum PMProxy {
                 let statistics = writerStatistics?()
                 guard current != lastEmittedSnapshot || statistics != lastEmittedWriterStatistics else { return }
                 if current != lastEmittedSnapshot {
-                    writeSnapshotFile(snapshot: current, environment: environment, logger: logger)
+                    snapshotWriter.submit(current)
                 }
                 do {
                     try emitStatusEvent(kind: .status, snapshot: current, observability: statistics)
@@ -507,29 +530,6 @@ enum PMProxy {
         FileHandle.standardOutput.write(Data([0x0A]))
         lastEmittedSnapshot = snapshot
         lastEmittedWriterStatistics = statistics
-    }
-
-    private static let snapshotFileEncoder: JSONEncoder = CanonicalJSON.encoder(prettyPrinted: true)
-
-    private static func writeSnapshotFile(
-        snapshot: ProxyOrchestratorSnapshot,
-        environment: RuntimeEnvironment,
-        logger: any LogSink
-    ) {
-        do {
-            try FileManager.default.createDirectory(
-                at: environment.snapshotFile.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let data = try snapshotFileEncoder.encode(snapshot)
-            try data.write(to: environment.snapshotFile, options: .atomic)
-        } catch {
-            logger.log(
-                .warning,
-                "Failed to write snapshot.json: \(error.localizedDescription)",
-                category: .general
-            )
-        }
     }
 
     // MARK: - Argument Parsing

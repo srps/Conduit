@@ -98,7 +98,9 @@ from fixture tests alone.
 
 ## Implementation evidence
 
-None yet for the fixed writable-name requirement. Existing resolver/store and
+None yet for the fixed writable-name requirement. Snapshot-guard implementation for the carried-forward
+diagnostic protection is recorded in [the protected-snapshot verification note](../verification-protected-snapshot-2026-10-25.md),
+which does not change this decision's status: startup naming enforcement is still planned. Existing resolver/store and
 lease foundations implement portions of the carried-forward root policy; their
 bounded evidence and outstanding startup adoption are recorded in 0020.
 

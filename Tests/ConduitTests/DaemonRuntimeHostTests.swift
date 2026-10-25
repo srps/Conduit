@@ -539,13 +539,64 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
         XCTAssertEqual(snapshotWrittenAtExit, [], "a stop that does not exit leaves the process running")
 
-        // The ordinary stop wrote a snapshot too. Remove it, so the hook can
-        // only see the one the terminal stop writes before it exits.
+        // The ordinary stop submits its snapshot without waiting, so file currency is confirmed by the explicit
+        // diagnostic flush. Then remove it, so the hook can only see the one the terminal stop writes before it exits.
+        await host.flushEvents()
         XCTAssertTrue(FileManager.default.fileExists(atPath: snapshotFile.path), "the ordinary stop wrote a snapshot")
         try FileManager.default.removeItem(at: snapshotFile)
 
         await host.stopRuntime(exitAfterStop: true)
         XCTAssertEqual(snapshotWrittenAtExit, [true], "the exit comes once, after the snapshot is written")
+    }
+
+    /// The `ConduitDaemon --exit-after-ready --start-runtime` sequence, run through the FakeMachine harness rather
+    /// than the executable. The non-terminal stop only submits the stopped state, so the explicit flush at the
+    /// process boundary must be what confirms it: the readiness flush happened before the stop.
+    func testExitAfterReadySequenceConfirmsTheStoppedStateInTheFile() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let snapshotFile = harness.environment.snapshotFile
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+
+        try await host.startRuntime()
+        await host.markReady(mode: "runtime-started")
+        await host.flushEvents()
+        await host.stopRuntime()
+        // Observer deliveries from earlier changes are joined first, so the final state is the one compared.
+        await host.deliveries.drain()
+        await host.flushEvents()
+
+        // Compared as bytes under the writer's own encoding: a decoded value can differ from the live one at sub-second precision.
+        let expected = try CanonicalJSON.encoder(prettyPrinted: true).encode(host.orchestrator.snapshot)
+        XCTAssertEqual(try Data(contentsOf: snapshotFile), expected, "the file holds the final stopped state")
+    }
+
+    /// A snapshot delivery that reaches the main actor only after the final stop was submitted must not write the
+    /// older state it was emitted with. The callback reads canonical state when it runs, so the file keeps the
+    /// final state after the explicit flush.
+    func testDeferredOlderSnapshotDeliveryCannotResurrectTheFileAfterTheFinalStop() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let snapshotFile = harness.environment.snapshotFile
+        let host = try harness.makeHost()
+        await host.awaitLaunchRecovery()
+
+        await host.stopRuntime()
+        // An older state, delivered after the final stop was already submitted.
+        var older = host.orchestrator.snapshot
+        older.dnsQueryCount = 999
+        host.orchestrator.onSnapshotChange?(older)
+        await host.deliveries.drain()
+        await host.flushEvents()
+
+        let expected = try CanonicalJSON.encoder(prettyPrinted: true).encode(host.orchestrator.snapshot)
+        XCTAssertEqual(try Data(contentsOf: snapshotFile), expected, "the late delivery wrote the canonical state, not its own")
+        XCTAssertFalse(String(decoding: try Data(contentsOf: snapshotFile), as: UTF8.self).contains("\"dnsQueryCount\" : 999"))
     }
 
     /// `status()` reports the start the entry point passed in and reads no

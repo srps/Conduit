@@ -80,7 +80,7 @@ enum ConduitDaemon {
                 try await host.startRuntime()
             } catch {
                 logger.log(.error, "Daemon runtime start failed: \(error.localizedDescription)", category: .general)
-                host.flushEvents()
+                await host.flushEvents()
                 logger.flush()
                 exit(1)
             }
@@ -106,11 +106,14 @@ enum ConduitDaemon {
             printStatus(host.status())
         }
 
-        host.flushEvents()
+        await host.flushEvents()
 
         if args.contains("--exit-after-ready") {
             if args.contains("--start-runtime") {
                 await host.stopRuntime()
+                // The non-terminal stop only submits the stopped state. The readiness flush above does not cover it,
+                // so the process boundary confirms it here, before the process returns.
+                await host.flushEvents()
             }
             logger.flush()
             return

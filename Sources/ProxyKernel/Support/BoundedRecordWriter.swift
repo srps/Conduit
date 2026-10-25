@@ -30,16 +30,22 @@ package final class BoundedRecordWriter: @unchecked Sendable {
     }
     private let state = NIOLockedValueBox(State())
     private let queue = DispatchQueue(label: "conduit.observability-writer", qos: .utility)
-    private let drained = DispatchGroup()
+    private let drained: DispatchGroup
+    private let waiter: RecordDrainWaiter
     private let limits: RecordWriterLimits
     private let write: @Sendable ([Data]) throws -> Void
     private let reportFailure: @Sendable (String) -> Void
 
+    /// `onDrainCleanup` is a test seam: it runs when a timed-out async drain's physical cleanup has finished.
     package init(limits: RecordWriterLimits = .init(),
                  write: @escaping @Sendable ([Data]) throws -> Void,
-                 reportFailure: @escaping @Sendable (String) -> Void) {
+                 reportFailure: @escaping @Sendable (String) -> Void,
+                 onDrainCleanup: (@Sendable () -> Void)? = nil) {
         precondition(limits.maxPendingRecords > 0 && limits.maxPendingBytes > 0)
         precondition(limits.maxBatchRecords > 0 && limits.maxBatchBytes > 0)
+        let group = DispatchGroup()
+        drained = group
+        waiter = RecordDrainWaiter(group: group, onCleanup: onDrainCleanup)
         self.limits = limits
         self.write = write
         self.reportFailure = reportFailure
@@ -78,6 +84,14 @@ package final class BoundedRecordWriter: @unchecked Sendable {
         let completed = drained.wait(timeout: .now() + timeout) == .success
         if !completed { state.withLockedValue { $0.statistics.flushTimeouts &+= 1 } }
         return completed
+    }
+
+    /// Awaits the queued records without blocking the caller, until the absolute `deadline`. A timeout is counted
+    /// as a flush timeout. See `RecordDrainWaiter` for what a timed-out, busy or cancelled wait leaves registered.
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        let outcome = await waiter.drain(until: deadline)
+        if outcome == .timedOut { state.withLockedValue { $0.statistics.flushTimeouts &+= 1 } }
+        return outcome
     }
 
     private func drain() {

@@ -45,7 +45,7 @@ enum BoundedWriterScenarios {
               writer.statistics.writtenRecords == 16 else {
             throw Failure(message: "Storage capacity failed to recover after unblocking")
         }
-        try shutdownTimeoutPersistence()
+        try await shutdownTimeoutPersistence()
         let appendNote = try appendAmplification()
         return ScenarioResult(
             name: "bounded-writers", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
@@ -60,7 +60,14 @@ enum BoundedWriterScenarios {
         signal.wait(timeout: .now() + 2) == .success
     }
 
-    private static func shutdownTimeoutPersistence() throws {
+    /// An audit sink that cannot drain asynchronously reports `.unavailable`, so the shared phase
+    /// must mark it as unflushed rather than claim success.
+    private struct UnavailableAuditSink: ConnectionAuditSink {
+        func record(_ record: ConnectionAuditRecord) {}
+        @discardableResult func flush(timeout: TimeInterval) -> Bool { false }
+    }
+
+    private static func shutdownTimeoutPersistence() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("conduit-flush-\(UUID())")
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("events.ndjson")
@@ -68,14 +75,24 @@ enum BoundedWriterScenarios {
         let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink(),
                                             destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
         events.setSink { writer.record($0) }
-        guard !writer.flushReportingTimeout(auditFlushed: false, eventLog: events) else {
+        let snapshots = makeSnapshotArtifactWriter(
+            fileURL: directory.appendingPathComponent("snapshot.json"), logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
+        let report = await DiagnosticFlush.run(phase: DiagnosticFlushPhase(), audit: UnavailableAuditSink(),
+                                               events: writer, snapshot: snapshots, eventLog: events,
+                                               logger: DiscardingLogSink())
+        guard report.audit == .unavailable, report.events == .drained, !report.allConfirmed else {
             throw Failure(message: "Shutdown concealed the audit flush failure")
+        }
+        // The snapshot outcome event was appended after the events wait. Drain it so the file can be read.
+        guard writer.flush(timeout: 2), writer.statistics.pendingRecords == 0 else {
+            throw Failure(message: "Shutdown events did not persist")
         }
         let rows = try Data(contentsOf: url).split(separator: 0x0A).map {
             try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0))
         }
-        guard rows.count == 1, rows.first?.event == "observability.flush_timeout",
-              writer.statistics.pendingRecords == 0 else {
+        guard rows.first?.event == "observability.flush_timeout",
+              rows.first?.detail == "auditFlushed=false eventsFlushed=true audit=unavailable events=drained" else {
             throw Failure(message: "Shutdown returned before persisting its timeout event")
         }
     }
