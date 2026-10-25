@@ -1,13 +1,18 @@
 # 0013: Shared runtime modules and control isolation
 
 - Date: 2026-10-24
-- Decision: accepted (owner, 2026-10-24, #186 implementation checkpoint)
+- Decision: superseded (owner, 2026-10-24, #186 implementation checkpoint)
 - Implementation: partial
 - Validation: none
 - Supersedes: none
-- Superseded by: none
+- Superseded by: 0031
 
 ## Context
+
+[0031](0031-incremental-runtime-development-single-activation.md) replaces this
+record, preserving its shared-runtime/module/isolation direction while selecting
+incremental host development followed by one final AppState activation. The
+historical decision and evidence below are retained.
 
 [0001](0001-one-runtime-host.md) selected one host in stages, leaving target
 placement open. AppState and the daemon still own duplicated lifecycle policy.

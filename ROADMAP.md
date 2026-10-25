@@ -24,14 +24,14 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 
 The v2 display slice now passes all 40 local checks (3,286 tests, two skips; all 100 simulator records and perf), independent Claude review and actual release allocation probes. One shared sanitizer lifetime correction prevents temporary accumulation without caller pools. The owner selected **64 KiB ordinary replies/stream frames** in [0030](./docs/decisions/0030-ordinary-runtime-reply-frame-cap.md); collections remain separately paged and the private 8 MiB channel is unchanged. The ceiling is recorded, with production-profile enforcement still planned. [PR #241](https://github.com/srps/Conduit/pull/241) merged the measured test-only profile and a shared kernel sanitizer lifetime fix after all 40 local checks (3,301 tests, two skips; all 100 simulator records and perf), independent subscription-backed Claude review, and hosted Swift/CodeQL passed. Direct Release before/after controls reproduce the scoped allocation correction; they do not establish app steady-state RAM. Remaining profile values and actual store/client/RuntimeHost adoption are still open; test candidate limits are not shipping defaults. See [the display verification](./docs/verification-runtime-display-2026-10-25.md).
 
-**Owner review pending:** [the activation-boundary draft](./docs/design-runtime-adoption-cut-review.md)
-proposes incremental DNS→tunnels→proxy development and parity tests followed by
-one final AppState switch, deleting the replaced runtime/writer paths together.
-This would revise 0001/0013's separate lifecycle activations; it is not selected.
-The alternative retains separate switches with temporary private coordination.
-Save-before-apply and Stop/Quit policies stay selected, and the whole-cluster
-RuntimeActor move remains later. A replacement ADR and affected migration code
-wait for the owner choice. Bounded profile experiments continue independently.
+**Owner selected:** [0031](./docs/decisions/0031-incremental-runtime-development-single-activation.md)
+develops and verifies DNS→tunnels→proxy incrementally, then activates AppState once
+and deletes its replaced runtime/save paths together. The larger activation review
+replaces temporary cross-owner execution bridges. Save-before-apply, Stop/Quit
+and the later whole-control-cluster RuntimeActor move remain selected. Shared-host
+parity/model tests and the sole store/workflow precede activation; actual host
+latency and the remaining profile still gate adoption. See the
+[implementation checkpoint](./docs/design-runtime-adoption-cut-review.md).
 
 0.5.8 shipped on 2026-10-23 with the Settings fixes in #216. An edit that brings up
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
@@ -74,7 +74,7 @@ replacement, avoiding writes that bypass store baselines.
 The merged service checkpoint passes 323 focused tests after the replay-gap
 correction and independent review. The final combined workflow passed all 39 checks (3,201 tests, two skips; 98 simulator records) after an existing PAC test was corrected to await its actual completion callback. Hosted Swift/CodeQL passed for the merged service PR. Its separate foundation passed all
 39 checks; that result does not cover subsequent observation/integration changes.
-Current status (2026-10-25): [PR #235](https://github.com/srps/Conduit/pull/235), [PR #238](https://github.com/srps/Conduit/pull/238), [PR #239](https://github.com/srps/Conduit/pull/239) and [PR #240](https://github.com/srps/Conduit/pull/240) are merged. The service remains unadopted. The display-text slice (0029) passes all 40 checks, independent review and the recorded allocation probes; ordinary reply/stream frames are selected at 64 KiB (0030), with production-profile enforcement still planned. The remaining queue/retention/deadline/collection values are being measured, not selected from test fixtures. The activation-boundary proposal above awaits owner choice. No production-owner adoption, RuntimeActor move or release readiness is claimed.
+Current status (2026-10-25): [PR #235](https://github.com/srps/Conduit/pull/235), [PR #238](https://github.com/srps/Conduit/pull/238), [PR #239](https://github.com/srps/Conduit/pull/239) and [PR #240](https://github.com/srps/Conduit/pull/240) are merged. The service remains unadopted. The display-text slice (0029) passes all 40 checks, independent review and the recorded allocation probes; ordinary reply/stream frames are selected at 64 KiB (0030), with production-profile enforcement still planned. The remaining queue/retention/deadline/collection values are being measured, not selected from test fixtures. The owner-selected activation sequence is recorded in 0031. No production-owner adoption, RuntimeActor move or release readiness is claimed.
 
 0.5.7 shipped on 2026-10-22. The #205 Settings commit paths (Return, Apply,
 section close, quit with an invalid port) passed the owner's check in a `--dev`
@@ -132,7 +132,7 @@ new runtime behavior adds unit tests and a pm-sim scenario. This is one program,
 not a requirement to finish every event or property test before extraction:
 
 1. **One runtime host ([#186](https://github.com/srps/Conduit/issues/186)),
-   accepted** ([decision 0001](./docs/decisions/0001-one-runtime-host.md)).
+   accepted** ([decision 0031](./docs/decisions/0031-incremental-runtime-development-single-activation.md)).
    **Stage 1:** define AppState's async runtime client, typed commands/outcomes,
    full presentation snapshots, and bounded cancellable subscriptions over the
    same versioned contract in memory and later on a socket. Start
@@ -241,8 +241,9 @@ not a requirement to finish every event or property test before extraction:
    for the host and an event-only RuntimeEvents target; control values/client/
    codec stay in ConduitShared with ProxyControlBridge mapping. Broad kernel/file
    splitting is not a prerequisite. Client/stream semantics are selected in decision 0014.
-3. **Stage 3 — AppState adopts the client, one lifecycle at a time.** Move DNS,
-   tunnels and proxy onto the shared host, deleting each old implementation.
+3. **Stage 3 — incremental host development, one AppState activation.** Develop
+   and verify DNS, tunnels and proxy in reviewable host increments, then switch
+   AppState once and delete its replaced runtime/save paths together (0031).
    AppState retains editor drafts and UI responsibilities. Migrate the event
    families touched by each slice. Bring
    [#183](https://github.com/srps/Conduit/issues/183)'s independent models,

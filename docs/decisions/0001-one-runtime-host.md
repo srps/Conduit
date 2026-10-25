@@ -1,13 +1,18 @@
 # 0001: One runtime host for the app and the daemon
 
 - Date: 2026-10-21
-- Decision: accepted (owner, 2026-10-21, #186 option B)
+- Decision: superseded (owner, 2026-10-21, #186 option B)
 - Implementation: planned
 - Validation: none
 - Supersedes: 0004
-- Superseded by: none
+- Superseded by: 0031
 
 ## Context
+
+[0031](0031-incremental-runtime-development-single-activation.md) replaces this
+record, preserving its shared-runtime/module/isolation direction while selecting
+incremental host development followed by one final AppState activation. The
+historical decision and evidence below are retained.
 
 `AppState` is both the SwiftUI model and a complete runtime host. `DaemonRuntimeHost` is a second complete runtime host. Both grew in parallel: on 2026-10-21 they were 2,347 and 1,325 lines, and 26 of the daemon host's 38 function names also exist in `AppState` (#186). Fixes have to land twice (#165), and AppState's runtime half runs on the main actor, which is why #47 exists.
 

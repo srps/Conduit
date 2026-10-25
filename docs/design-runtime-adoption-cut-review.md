@@ -1,21 +1,22 @@
 # AppState adoption: integration-cut review
 
-Status: **proposed for owner review**, 2026-10-25. This changes no accepted ADR and
-implements no new runtime path. PRs #240/#241 are merged; reply/stream frames are
+Status: **activation sequence selected by the owner**, 2026-10-25, recorded in
+[0031](decisions/0031-incremental-runtime-development-single-activation.md).
+Implementation remains planned; this checkpoint implements no runtime path. PRs #240/#241 are merged; reply/stream frames are
 selected at 64 KiB in 0030. The measured candidate profile remains test-only;
 actual-host scheduling and selection of its remaining values are still open. Claude Code
 and Codex source-review findings are recorded below; Claude used the owner's
 claude.ai subscription.
 
-## Decision to settle before affected implementation
+## Selected activation sequence
 
-We recommend implementing and verifying DNS, tunnels and proxy incrementally in
-the shared host, then **activating the AppState-to-RuntimeClient switch once**.
+The owner selected implementing and verifying DNS, tunnels and proxy incrementally
+in the shared host, then **activating the AppState-to-RuntimeClient switch once**.
 Delete the replaced AppState runtime/writer paths in that integration change.
-This revisits 0001's separate lifecycle adoption steps; the owner must choose
-before we record a replacement decision or implement the affected integration.
+Decision 0031 replaces 0001/0013's separate lifecycle activation steps while
+carrying forward their shared-runtime, module and isolation direction.
 
-The alternative keeps separate active DNS, tunnel and proxy switches. It remains
+The unselected alternative keeps separate active DNS, tunnel and proxy switches. It remains
 feasible in principle, but needs temporary private capability/execution bridges
 and coordination until each remaining lifecycle moves. It is not categorically
 forbidden by the client boundary: an internal executor behind that boundary is
@@ -27,7 +28,7 @@ exception to the owner before implementation.
 
 | Choice | Benefit | Cost and risk |
 | --- | --- | --- |
-| **One final AppState activation (recommended)** | One orchestrator, intent/store owner and reconciler baseline at activation; no transitional runtime escape route to maintain. Aligns with the later daemon transport swap. | Larger final integration review and broader acceptance. All lifecycles and UI flows must pass before activation. |
+| **One final AppState activation (selected)** | One orchestrator, intent/store owner and reconciler baseline at activation; no transitional runtime escape route to maintain. Aligns with the later daemon transport swap. | Larger final integration review and broader acceptance. All lifecycles and UI flows must pass before activation. |
 | **Separate lifecycle activations** | Smaller user-visible integration increments, retaining the original sequence. | Temporary narrow drivers/capabilities and extra deletion/parity checks; shared DNS/config/reconciler paths still need coordination at the first switch. |
 
 This is a choice about the **activation boundary**, not permission to develop an
@@ -59,7 +60,7 @@ Source inventory: `AppState.startProxy` and DNS lifecycle/reapply/recovery/
 termination paths; `ProxyOrchestrator.startDNS/stopDNS/startProxy`;
 `RuntimeReconciler.reconcile`; `SystemDNSManager.serialized`; the existing
 `ConfigurationStore` and `StateRootSession`. The staged design details still need
-to name each moved/remaining responsibility if that option is selected.
+to name each moved/remaining responsibility if the owner later revisits the activation sequence.
 
 ## Invariants under either choice
 
@@ -132,8 +133,10 @@ actual framed client/subscription behavior and bounded page work under pressure.
 Run the complete repository workflow, then isolated native app validation.
 Real VPN/Kerberos or installed-app acceptance remains separate where needed.
 
-No decision record replacing 0001/0013 is written by this proposal. No production
-profile or activation code is implemented here.
+Decision 0031 records the selected replacement sequence. No production profile
+or activation code is implemented by this checkpoint. Workflow/API and profile
+review still precede their affected implementation; the selected sequence itself
+is no longer an owner gate.
 
 ## Source-review findings (2026-10-25)
 
@@ -144,5 +147,5 @@ incorporated here distinguish the proposed session seam from existing code and
 the selected persistence policy from current DNS behavior. The temporary-driver
 interpretation of 0001 and the still-incomplete intent-generation observation API
 are explicitly qualified. Both reviewers recommend incremental verification with
-one final activation, subject to the owner's staging decision. No claim of
+one final activation, subsequently selected by the owner in #186. No claim of
 implemented migration or complete API specification follows from this review.

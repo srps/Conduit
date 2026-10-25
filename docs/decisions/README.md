@@ -24,7 +24,7 @@ Each record carries three statuses, because merged does not mean it works:
 
 | ID | Title | Decision | Implementation | Validation |
 | --- | --- | --- | --- | --- |
-| [0001](0001-one-runtime-host.md) | One runtime host for the app and the daemon | accepted | planned | none |
+| [0001](0001-one-runtime-host.md) | One runtime host for the app and the daemon | superseded | planned | none |
 | [0002](0002-daemon-first-ownership.md) | Daemon-first runtime ownership | accepted | partial | pending |
 | [0003](0003-thin-appstate-harness.md) | Thin AppState harness over FakeMachine | accepted | implemented | none |
 | [0004](0004-staged-host-policy-sharing.md) | Share app and daemon platform policy piece by piece | superseded | partial | none |
@@ -36,7 +36,7 @@ Each record carries three statuses, because merged does not mean it works:
 | [0010](0010-self-update.md) | Self-update with a nested Sparkle updater | accepted | implemented | pending |
 | [0011](0011-vpn-path-based-socket-sweeps.md) | Path-based socket sweeps for VPN transitions | accepted | implemented | pending |
 | [0012](0012-commit-attribution.md) | Optional attribution trailers, no session URLs | accepted | implemented | none |
-| [0013](0013-runtime-module-isolation.md) | Shared runtime modules and control isolation | accepted | partial | none |
+| [0013](0013-runtime-module-isolation.md) | Shared runtime modules and control isolation | superseded | partial | none |
 | [0014](0014-runtime-client-stream.md) | Async runtime client and bounded observation contract | accepted | partial | none |
 | [0015](0015-save-before-apply.md) | Save durable intent before apply, with Stop and Quit exceptions | accepted | partial | none |
 | [0016](0016-isolated-development-bundle.md) | Isolated ad-hoc development app bundle | accepted | implemented | passed |
@@ -54,3 +54,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0028](0028-fixed-writable-state-filenames.md) | Fixed writable state filenames within the canonical root | accepted | partial | none |
 | [0029](0029-bound-runtime-display-text.md) | Bound runtime display text with explicit notices | accepted | partial | none |
 | [0030](0030-ordinary-runtime-reply-frame-cap.md) | Ordinary v2 replies and stream frames capped at 64 KiB | accepted | planned | none |
+| [0031](0031-incremental-runtime-development-single-activation.md) | Incremental runtime development with one AppState activation | accepted | planned | none |
