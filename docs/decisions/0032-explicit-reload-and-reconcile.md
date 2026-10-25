@@ -25,12 +25,17 @@ the sole configuration store, adopts that observation with matching baselines,
 and reconciles eligible effects in the same deliberate action. Reload itself
 writes no migration output or missing defaults. Startup migration finishes before
 store baselines are adopted. Preserve the existing loader's accepted and refused
-missing-file combinations.
+missing-file combinations. This replaces the old test-only host reload's blanket
+missing-runtime refusal; explicit --config startup keeps its existing refusal.
 
 Adopt supported repair drafts for editing while holding ineligible apply. Permitted
 absence remains uncommitted; required inputs must verify through the normal commit
 workflow before apply. A later explicit Start commits required defaults first.
-Malformed or unreadable inputs cannot authorize new apply or overwrite originals.
+Malformed or unreadable inputs refuse the whole observation: keep the last known
+values without new baseline authority. Validation-only repair problems are adopted.
+Neither refusal nor a repair draft can authorize ineligible apply or overwrite originals.
+Eligible runtime apply requires verified required inputs, no start-blocking problem,
+current intent and an open lifecycle fence.
 Runtime/platform changes keep the whole mixed-input gate under 0025; preferences
 retain their selected independence.
 
@@ -38,7 +43,9 @@ Reload never clears an accepted Stop fence or restores a stale enabled flag.
 Only newer explicit Start/Enable can re-enable that lifecycle. Check current intent,
 incarnation and shutdown fences around suspension; late reload completion cannot
 overtake newer intent. Another client's reload cannot discard a client's dirty
-draft or replace its originally observed save tokens.
+draft or refresh its originally observed save tokens. A changed observation can
+make those original tokens stale, so the subsequent save refuses rather than
+retokenizing the draft.
 
 A normal private editor read captures current in-memory values and their matching
 baselines in one owner turn, with no disk read and no apply. Disk reload and local
