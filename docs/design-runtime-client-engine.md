@@ -25,8 +25,9 @@ the twin rule. Fake-owner tests are not that host proof.
 The same retained request ID and semantic fingerprint recovers its admission;
 a changed payload conflicts. The budget is excluded from that fingerprint.
 Unretained IDs return unknown/notRecorded, which means no retained record, not
-never admitted. Expired history is reported only when bounded issued-range metadata
-proves it. No tombstones or exactly-once/mutation-replay guarantee is introduced.
+never admitted. Expired history is reported only when bounded proof metadata shows
+the revision was captured and its rows were evicted. Anything unproven is `notCaptured`, never a false expiry.
+No tombstones or exactly-once/mutation-replay guarantee is introduced.
 
 ## Framed endpoint and reservations
 
@@ -44,6 +45,28 @@ or timed-out pulls consume no frame. A transient wait-capacity refusal must rema
 typed and nonterminal if it consumes nothing. Timer cleanup is part of capacity,
 not merely a Task.cancel call. Callbacks, continuation resumes and Task cancellation
 run outside leaf locks.
+
+## Request budget envelope and aliases
+
+Every request carries one mandatory budget in its envelope, beside the correlation. It is never a field of a command
+body. The budget is the caller's remaining time in whole milliseconds, read once per call from the one absolute
+deadline, so a nested call takes what remains and never a fresh budget. The receiver derives its own deadline on
+arrival as the earlier of the caller's absolute deadline and arrival plus budget. One timer enforces that deadline.
+A budget that ends before a claim answers with a typed refusal: a rejected admission for a submit, and
+`deadlineExpired` for the reads, a subscription open and a page. Zero is valid and is never malformed. A budget that
+ends after a claim never cancels admitted work; the caller's wait ends as admission unknown, and lookup recovers the
+outcome. The budget is excluded from a request's fingerprint, and a refusal is never recorded. A stream `next` has no
+request and no budget. Private configuration keeps its own budget contract.
+
+A request alias keeps a fixed-size fingerprint of the command, never its body, and it expires from its admission. Aliases
+are evictable within their partition and never pin an operation. An expired or evicted alias answers not recorded, while
+an operation that is still pending stays pending.
+
+An encoding failure is never silent. The service reports the failing site to the owner as a closed `ControlServiceFault`
+(`submitCommandNotEncodable` or `outcomeNotEncodable`), which carries no command body and no error text, and then refuses
+the request as `internalFailure`, or substitutes the measured internal failure for an outcome. The owner is the canonical
+diagnostic producer, so no second event authority exists here. The fault is staged as data and delivered after the
+settlement or refusal is complete, so the owner reads a coherent state. The production host's emitter remains an adoption step.
 
 ## Observation and pages
 
@@ -69,15 +92,17 @@ Collections retain bounded immutable projected rows per revision. Bound revision
 count, rows, per-revision bytes, total retained bytes, page rows and ages. Reuse the
 existing projection/packer. Over-budget capture reports honest unavailable with
 totals where known, never a truncated collection. An unavailable page reply has
-no fabricated revision. Retained superseded pages report staleness; missing known
-old revisions report expiry. Stable upstream UUIDs remain their identity.
+no fabricated revision. Retained superseded pages report staleness. A revision with bounded proof of row
+eviction reports expiry, and anything unproven reports `notCaptured`. Stable upstream UUIDs remain their identity.
 
 ## Limits, types and verification
 
 All limits are finite, explicit and validated; fixture values are not shipping
 defaults. Check sum/product/counter overflow. One bounded retention janitor sweeps
 bounded work; it does not duplicate caller deadline handling or create one Task
-per retained entry. Encoded byte accounting is not a process-RSS guarantee.
+per retained entry. Encoded byte accounting is not a process-RSS guarantee. Each lane reservation is bounded by two request-sized values, the
+caller's frame and its decoded message, plus two reply-sized values, the refusal and one answer, because the request values
+survive the await. The derivation is in the runtime checkpoint.
 
 Minimal unshipped-v2 refinements express already-selected states: changed
 incarnation and request conflict rejection, subscriber limit, local transport busy,

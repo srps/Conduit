@@ -29,16 +29,18 @@ final class RuntimeClientCodecTests: XCTestCase {
         try ControlWireBudget(milliseconds)
     }
 
-    private func request(_ request: ControlRuntimeRequest, correlation: Int = 10) -> ControlRuntimeMessage {
-        ControlRuntimeMessage(correlation: requestID(correlation), body: .request(request))
+    private func request(_ call: ControlRuntimeCall, budget milliseconds: Int = 1_000, correlation: Int = 10) throws -> ControlRuntimeMessage {
+        ControlRuntimeMessage(
+            correlation: requestID(correlation),
+            body: .request(ControlRuntimeRequest(budget: try budget(milliseconds), call: call))
+        )
     }
 
     private func submit(_ command: ControlRuntimeCommand, id: Int = 10) throws -> ControlRuntimeMessage {
-        request(.submit(ControlOperationRequest(
+        try request(.submit(ControlOperationRequest(
             requestID: requestID(id),
             expectedIncarnation: incarnation(1),
-            command: command,
-            budget: try budget(1_000)
+            command: command
         )), correlation: id)
     }
 
@@ -57,9 +59,9 @@ final class RuntimeClientCodecTests: XCTestCase {
         }
     }
 
-    /// A complete v2 request envelope for a submit. Each argument can be replaced by a
-    /// bad value, or dropped, to build one malformed fixture at a time. A nil
-    /// incarnation omits the field.
+    /// A complete v2 request envelope for a submit. The budget is the envelope's own field, next to the correlation. Each
+    /// argument can be replaced by a bad value, or dropped, to build one malformed fixture at a time. A nil incarnation
+    /// omits the field.
     private func submitRequest(
         correlation: String? = nil,
         requestID: String? = nil,
@@ -70,10 +72,11 @@ final class RuntimeClientCodecTests: XCTestCase {
         let incarnationField = incarnation.map { ",\"expectedIncarnation\":\"\($0)\"" } ?? ""
         return #"{"version":2,"kind":"request","correlation":""#
             + (correlation ?? correlationText)
-            + #"","body":{"type":"submit","submit":{"requestID":""#
-            + (requestID ?? correlationText)
             + #"","budget":"#
             + budget
+            + #","body":{"type":"submit","submit":{"requestID":""#
+            + (requestID ?? correlationText)
+            + "\""
             + incarnationField
             + #","command":"#
             + command
@@ -104,18 +107,18 @@ final class RuntimeClientCodecTests: XCTestCase {
 
     func testSubmitFrameBytesMatchTheGoldenV2Shape() throws {
         let frame = try ControlRuntimeCodec.encodeFrame(try submit(.stop(.dns)), limits: limits)
-        let expected = #"{"body":{"submit":{"budget":1000,"command":{"module":"dns","type":"stop"},"expectedIncarnation":"00000000-0000-0000-0000-000000000001","requestID":"00000000-0000-0000-0000-00000000000A"},"type":"submit"},"correlation":"00000000-0000-0000-0000-00000000000A","kind":"request","version":2}"#
+        let expected = #"{"body":{"submit":{"command":{"module":"dns","type":"stop"},"expectedIncarnation":"00000000-0000-0000-0000-000000000001","requestID":"00000000-0000-0000-0000-00000000000A"},"type":"submit"},"budget":1000,"correlation":"00000000-0000-0000-0000-00000000000A","kind":"request","version":2}"#
         XCTAssertEqual(String(decoding: frame.dropLast(), as: UTF8.self), expected)
     }
 
     func testAStaleOrdinalFromAnotherIncarnationIsAnotherCommand() throws {
         // The same ordinal under a restarted host's incarnation must not look equal.
         let restart = ControlRuntimeCommand.restart(.dns, ifLifecycleRevision: try XCTUnwrap(ControlLifecycleRevision(rawValue: 9)))
-        let before = request(.submit(ControlOperationRequest(
-            requestID: requestID(10), expectedIncarnation: incarnation(1), command: restart, budget: try budget(1_000)
+        let before = try request(.submit(ControlOperationRequest(
+            requestID: requestID(10), expectedIncarnation: incarnation(1), command: restart
         )))
-        let after = request(.submit(ControlOperationRequest(
-            requestID: requestID(10), expectedIncarnation: incarnation(2), command: restart, budget: try budget(1_000)
+        let after = try request(.submit(ControlOperationRequest(
+            requestID: requestID(10), expectedIncarnation: incarnation(2), command: restart
         )))
         XCTAssertNotEqual(before, after)
         XCTAssertNotEqual(
@@ -125,9 +128,9 @@ final class RuntimeClientCodecTests: XCTestCase {
     }
 
     func testReadSnapshotIsAPayloadlessRequestWithItsCorrelation() throws {
-        // No incarnation and no budget: a bootstrap has nothing to expect yet.
-        let frame = try ControlRuntimeCodec.encodeFrame(request(.readSnapshot, correlation: 12), limits: limits)
-        let expected = #"{"body":{"type":"readSnapshot"},"correlation":"00000000-0000-0000-0000-00000000000C","kind":"request","version":2}"#
+        // No incarnation: a bootstrap has nothing to expect yet. The budget is still mandatory on every request.
+        let frame = try ControlRuntimeCodec.encodeFrame(try request(.readSnapshot, correlation: 12), limits: limits)
+        let expected = #"{"body":{"type":"readSnapshot"},"budget":1000,"correlation":"00000000-0000-0000-0000-00000000000C","kind":"request","version":2}"#
         XCTAssertEqual(String(decoding: frame.dropLast(), as: UTF8.self), expected)
     }
 
@@ -144,16 +147,16 @@ final class RuntimeClientCodecTests: XCTestCase {
 
     func testEveryRequestKindRoundTrips() throws {
         let page = ControlPageRequest(expectedIncarnation: incarnation(1), collection: .activeConnections)
-        let requests: [ControlRuntimeRequest] = [
-            .outcome(ControlOperationQuery(expectedIncarnation: incarnation(1), operationID: operationID(2), budget: try budget(5))),
-            .requestLookup(ControlRequestQuery(expectedIncarnation: incarnation(1), requestID: requestID(3), budget: try budget(5))),
+        let calls: [ControlRuntimeCall] = [
+            .outcome(ControlOperationQuery(expectedIncarnation: incarnation(1), operationID: operationID(2))),
+            .requestLookup(ControlRequestQuery(expectedIncarnation: incarnation(1), requestID: requestID(3))),
             .subscribe(.live),
             .subscribe(.resume(incarnation: incarnation(1), from: try XCTUnwrap(ControlEventCursor(rawValue: 4)))),
             .readPage(page),
             .readSnapshot,
         ]
-        for value in requests {
-            let message = request(value)
+        for value in calls {
+            let message = try request(value, budget: 5)
             XCTAssertEqual(try ControlRuntimeCodec.decodeFrame(
                 Data(try ControlRuntimeCodec.encodeFrame(message, limits: limits).dropLast()), limits: limits
             ), message)

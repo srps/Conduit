@@ -1,0 +1,86 @@
+import ConduitShared
+import Foundation
+
+/// `runtime-service-wire` (decision 0014): the v2 representations the service engine answers with, checked
+/// headlessly. It covers the approved refinements: the changed-incarnation and request-conflict rejections, the
+/// subscriber-limit failure, the observation-loss replay reason, and the revision-free unavailable page. Each one
+/// must round-trip through the one codec, and a frame over its limit is refused, not truncated. The scenario
+/// drives the shared representations only: `pm-sim` cannot depend on the `ConduitRuntime` service, so the service
+/// itself is driven by the `ConduitTests` runtime-service suites through `@testable`.
+enum RuntimeServiceWireScenario {
+    static func run() async throws -> ScenarioResult {
+        let began = Date()
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+
+        let limits = try ControlFrameLimits(maxFrameBytes: 64 * 1024)
+        let correlation = try ControlRequestID(rawValue: UUID(uuidString: "00000000-0000-0000-0000-0000000000C1") ?? UUID())
+
+        let changed = try roundTrip(
+            .response(.admission(.rejected(.changedIncarnation))), correlation: correlation, limits: limits
+        )
+        check("a changed-incarnation rejection round-trips", changed)
+
+        let conflict = try roundTrip(
+            .response(.admission(.rejected(.requestConflict))), correlation: correlation, limits: limits
+        )
+        check("a request-conflict rejection round-trips", conflict)
+
+        let subscriberLimit = try roundTrip(
+            .response(.failure(.subscriberLimit)), correlation: correlation, limits: limits
+        )
+        check("a subscriber-limit failure round-trips", subscriberLimit)
+
+        let loss = try roundTrip(
+            .response(.requestLookup(.unknown(.notRecorded))), correlation: correlation, limits: limits
+        )
+        check("a not-recorded lookup still round-trips beside the new reasons", loss)
+
+        let replayLoss = try ControlReplayAvailability.unavailable(.observationLoss)
+        let replayData = try ControlRuntimeCodec.makeEncoder().encode(replayLoss)
+        let replayBack = try ControlRuntimeCodec.makeDecoder().decode(ControlReplayAvailability.self, from: replayData)
+        check("an observation-loss replay reason round-trips", replayBack == replayLoss)
+        check("the observation-loss reason is named on the wire", String(decoding: replayData, as: UTF8.self).contains("observation_loss"))
+
+        let page = try roundTrip(
+            .response(.page(.unavailable(.activeConnections, .notCaptured))), correlation: correlation, limits: limits
+        )
+        check("a revision-free unavailable page round-trips", page)
+        let pageData = try ControlRuntimeCodec.makeEncoder().encode(ControlPageReply.unavailable(.tunnelBindings, .expiredRevision))
+        check("an unavailable page names no revision on the wire", !String(decoding: pageData, as: UTF8.self).contains("\"revision\""))
+
+        let tiny = try ControlFrameLimits(maxFrameBytes: 16)
+        var refused = false
+        do {
+            _ = try ControlRuntimeCodec.encodeFrame(
+                ControlRuntimeMessage(correlation: correlation, body: .response(.page(.unavailable(.upstreamHealth, .notCaptured)))),
+                limits: tiny
+            )
+        } catch ControlRuntimeWireError.frameTooLarge {
+            refused = true
+        }
+        check("a frame over its limit is refused, not truncated", refused)
+
+        notes.append("representations only: the service is driven by the ConduitTests runtime-service suites")
+        notes.append("no socket, machine, network or helper effects")
+        return ScenarioResult(
+            name: "runtime-service-wire", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
+            clientsClosedEarly: 0, totalBytes: 0, durationSeconds: Date().timeIntervalSince(began),
+            aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0,
+            earliestClose: nil, latestClose: nil,
+            assertions: assertions.isEmpty ? [.init("scenario produced assertions", false)] : assertions,
+            notes: notes
+        )
+    }
+
+    private static func roundTrip(
+        _ body: ControlRuntimeBody,
+        correlation: ControlRequestID,
+        limits: ControlFrameLimits
+    ) throws -> Bool {
+        let frame = try ControlRuntimeCodec.encodeFrame(ControlRuntimeMessage(correlation: correlation, body: body), limits: limits)
+        let decoded = try ControlRuntimeCodec.decodeFullFrame(frame, limits: limits)
+        return decoded.body == body
+    }
+}

@@ -432,6 +432,9 @@ package enum ControlPageReply: Codable, Sendable, Equatable {
     case upstreamHealth(ControlCollectionPage<ControlUpstreamRow>)
     case tunnelBindings(ControlCollectionPage<ControlTunnelBindingRow>)
     case tunnelDNSHosts(ControlCollectionPage<ControlTunnelDNSHostRow>)
+    /// A truthful refusal with no rows and no revision. It names the reason the collection cannot be read now,
+    /// so no revision is invented for a page that has none.
+    case unavailable(ControlCollectionKind, ControlCollectionUnavailableReason)
 
     package var collection: ControlCollectionKind {
         switch self {
@@ -439,17 +442,31 @@ package enum ControlPageReply: Codable, Sendable, Equatable {
         case .upstreamHealth: .upstreamHealth
         case .tunnelBindings: .tunnelBindings
         case .tunnelDNSHosts: .tunnelDNSHosts
+        case .unavailable(let kind, _): kind
         }
     }
 
     private enum CodingKeys: String, CodingKey {
         case type
         case page
+        case collection
+        case reason
     }
 
     package init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        switch try container.decode(ControlCollectionKind.self, forKey: .type) {
+        let raw = try container.decode(String.self, forKey: .type)
+        guard raw != "unavailable" else {
+            self = .unavailable(
+                try container.decode(ControlCollectionKind.self, forKey: .collection),
+                try container.decode(ControlCollectionUnavailableReason.self, forKey: .reason)
+            )
+            return
+        }
+        guard let kind = ControlCollectionKind(rawValue: raw) else {
+            throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown page collection")
+        }
+        switch kind {
         case .activeConnections:
             self = .activeConnections(try container.decode(ControlCollectionPage<ControlConnectionRow>.self, forKey: .page))
         case .upstreamHealth:
@@ -463,6 +480,12 @@ package enum ControlPageReply: Codable, Sendable, Equatable {
 
     package func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
+        if case .unavailable(let kind, let reason) = self {
+            try container.encode("unavailable", forKey: .type)
+            try container.encode(kind, forKey: .collection)
+            try container.encode(reason, forKey: .reason)
+            return
+        }
         try container.encode(collection, forKey: .type)
         switch self {
         case .activeConnections(let page):
@@ -473,6 +496,8 @@ package enum ControlPageReply: Codable, Sendable, Equatable {
             try container.encode(page, forKey: .page)
         case .tunnelDNSHosts(let page):
             try container.encode(page, forKey: .page)
+        case .unavailable:
+            break
         }
     }
 }

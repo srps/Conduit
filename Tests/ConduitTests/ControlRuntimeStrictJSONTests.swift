@@ -10,7 +10,10 @@ final class ControlRuntimeStrictJSONTests: XCTestCase {
     private let correlation = ControlRequestID(rawValue: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!)
 
     private var base: ControlRuntimeMessage {
-        ControlRuntimeMessage(correlation: correlation, body: .request(.readSnapshot))
+        ControlRuntimeMessage(
+            correlation: correlation,
+            body: .request(ControlRuntimeRequest(budget: try! ControlWireBudget(1), call: .readSnapshot))
+        )
     }
 
     /// The valid payload of a read-snapshot request with one unknown top-level field. `value` is the field's

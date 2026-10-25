@@ -10,6 +10,14 @@ package enum ControlRejectionCode: String, Codable, Sendable, Equatable, CaseIte
     case queueFull = "queue_full"
     case hostStopping = "host_stopping"
     case deadlineExpired = "deadline_expired"
+    /// The request names another host incarnation, so none of its preconditions can be applied here.
+    case changedIncarnation = "changed_incarnation"
+    /// The request ID was recorded with a different payload. The earlier admission is never reused for it.
+    case requestConflict = "request_conflict"
+    /// The command is larger than the request cap the host accepts, so it cannot be recorded. Nothing was admitted.
+    case commandTooLarge = "command_too_large"
+    /// The host failed to record the command for a reason of its own. Nothing was admitted, and the cause is not reported.
+    case internalFailure = "internal_failure"
 
     /// Sanitized text for display. The code, not this text, carries the meaning.
     package var humanDescription: String {
@@ -20,6 +28,10 @@ package enum ControlRejectionCode: String, Codable, Sendable, Equatable, CaseIte
         case .queueFull: "The runtime has no free command slot right now."
         case .hostStopping: "The runtime is shutting down and admits no new commands."
         case .deadlineExpired: "The time budget ended before the command was admitted."
+        case .changedIncarnation: "The runtime restarted since the command was read, so it was not applied."
+        case .requestConflict: "This request ID was already used for a different command."
+        case .commandTooLarge: "The command is larger than the runtime accepts, so it was not admitted."
+        case .internalFailure: "The runtime could not record this command, so it was not admitted."
         }
     }
 }

@@ -10,6 +10,10 @@ package enum ControlRuntimeErrorCode: String, Codable, Sendable, Equatable, Case
     case unknownCommand = "unknown_command"
     case malformedMessage = "malformed_message"
     case invalidValue = "invalid_value"
+    /// The host already has its maximum number of open subscriptions.
+    case subscriberLimit = "subscriber_limit"
+    /// The request's budget ended before the host could answer with a result. Nothing was admitted, and a read answers this.
+    case deadlineExpired = "deadline_expired"
 }
 
 /// A failure while building, encoding or decoding a v2 value. Each case maps to

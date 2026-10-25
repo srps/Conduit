@@ -435,7 +435,10 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
         }
         XCTAssertEqual(snapshot.stamp.incarnation, stamp().incarnation)
 
-        let request = ControlRuntimeMessage(correlation: correlation, body: .request(.readSnapshot))
+        let request = ControlRuntimeMessage(
+            correlation: correlation,
+            body: .request(ControlRuntimeRequest(budget: try ControlWireBudget(1), call: .readSnapshot))
+        )
         let requestBytes = try ControlRuntimeCodec.encodeBoundedPayload(request, limits: limits16KiB)
         XCTAssertEqual(try ControlRuntimeCodec.decodeFrame(requestBytes, limits: limits16KiB), request)
         XCTAssertFalse(String(decoding: requestBytes, as: UTF8.self).contains("expectedIncarnation"))

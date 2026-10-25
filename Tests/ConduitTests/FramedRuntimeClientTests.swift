@@ -157,12 +157,11 @@ final class FramedRuntimeClientTests: XCTestCase {
         XCTAssertEqual(call.deadline, deadline(epoch))
         let sent = try ControlRuntimeCodec.decodeFullFrame(call.frame, limits: limits)
         XCTAssertEqual(sent.correlation, id, "a submit is correlated by its request ID")
-        let expected = ControlRuntimeBody.request(.submit(ControlOperationRequest(
+        let expected = ControlRuntimeBody.request(ControlRuntimeRequest(budget: try fiveSecondBudget(), call: .submit(ControlOperationRequest(
             requestID: id,
             expectedIncarnation: incarnation(3),
-            command: .stop(.dns),
-            budget: try fiveSecondBudget()
-        )))
+            command: .stop(.dns)
+        ))))
         XCTAssertEqual(sent.body, expected)
     }
 
@@ -176,7 +175,7 @@ final class FramedRuntimeClientTests: XCTestCase {
         var incomplete = try frame(.response(.admission(.accepted(operation(9)))), correlation: id)
         incomplete.removeLast()
         let wrongCorrelation = try frame(.response(.admission(.accepted(operation(9)))), correlation: requestID(12))
-        let wrongKind = try frame(.request(.readSnapshot), correlation: id)
+        let wrongKind = try frame(.request(ControlRuntimeRequest(budget: try ControlWireBudget(1), call: .readSnapshot)), correlation: id)
 
         let cases: [(label: String, step: ScriptedTransport.Step, end: RuntimeWaitEnd)] = [
             ("disconnect", .fail(.sent(.disconnected)), .disconnected),
@@ -359,12 +358,11 @@ final class FramedRuntimeClientTests: XCTestCase {
 
             let call = try XCTUnwrap(transport.recordedCalls.first)
             let sentFrame = try ControlRuntimeCodec.decodeFullFrame(call.frame, limits: limits)
-            let expected = ControlRuntimeBody.request(.submit(ControlOperationRequest(
+            let expected = ControlRuntimeBody.request(ControlRuntimeRequest(budget: try ControlWireBudget(testCase.milliseconds), call: .submit(ControlOperationRequest(
                 requestID: id,
                 expectedIncarnation: incarnation(3),
-                command: .stop(.dns),
-                budget: try ControlWireBudget(testCase.milliseconds)
-            )))
+                command: .stop(.dns)
+            ))))
             XCTAssertEqual(sentFrame.body, expected, testCase.label)
         }
     }
@@ -398,12 +396,11 @@ final class FramedRuntimeClientTests: XCTestCase {
         let sendingClient = try makeClient(sending, epoch: epoch, now: { sendingClock.read() })
         _ = try await sendingClient.submit(.stop(.dns), requestID: id, expectedIncarnation: incarnation(3), deadline: oneMillisecond)
         let sentFrame = try ControlRuntimeCodec.decodeFullFrame(try XCTUnwrap(sending.recordedCalls.first).frame, limits: limits)
-        XCTAssertEqual(sentFrame.body, .request(.submit(ControlOperationRequest(
+        XCTAssertEqual(sentFrame.body, .request(ControlRuntimeRequest(budget: try ControlWireBudget(1), call: .submit(ControlOperationRequest(
             requestID: id,
             expectedIncarnation: incarnation(3),
-            command: .stop(.dns),
-            budget: try ControlWireBudget(1)
-        ))))
+            command: .stop(.dns)
+        )))))
 
         // The budget reads the epoch and sees one millisecond. The live check reads one millisecond later, after
         // encoding, and sees none. The frame is refused before the transport is called.
@@ -458,11 +455,10 @@ final class FramedRuntimeClientTests: XCTestCase {
         let call = try XCTUnwrap(transport.recordedCalls.first)
         let sent = try ControlRuntimeCodec.decodeFullFrame(call.frame, limits: limits)
         XCTAssertEqual(sent.correlation, minted, "a lookup is correlated with a minted value, not the request ID")
-        let expected = ControlRuntimeBody.request(.requestLookup(ControlRequestQuery(
+        let expected = ControlRuntimeBody.request(ControlRuntimeRequest(budget: try fiveSecondBudget(), call: .requestLookup(ControlRequestQuery(
             expectedIncarnation: incarnation(4),
-            requestID: id,
-            budget: try fiveSecondBudget()
-        )))
+            requestID: id
+        ))))
         XCTAssertEqual(sent.body, expected, "the lookup names the incarnation it expects")
     }
 
@@ -789,7 +785,7 @@ final class FramedRuntimeClientTests: XCTestCase {
     // MARK: - Full-frame codec
 
     func testAFullFrameDecodesOnlyAsOneFrameWithItsLineFeed() throws {
-        let valid = try frame(.request(.readSnapshot), correlation: requestID(1))
+        let valid = try frame(.request(ControlRuntimeRequest(budget: try ControlWireBudget(1), call: .readSnapshot)), correlation: requestID(1))
         XCTAssertNoThrow(try ControlRuntimeCodec.decodeFullFrame(valid, limits: limits))
 
         XCTAssertThrowsError(try ControlRuntimeCodec.decodeFullFrame(valid + valid, limits: limits)) { error in
@@ -808,7 +804,7 @@ final class FramedRuntimeClientTests: XCTestCase {
     }
 
     func testAnInteriorLineFeedIsRefusedByThePayloadCheckAfterSizeAndTheTrailingFeed() throws {
-        let valid = try frame(.request(.readSnapshot), correlation: requestID(1))
+        let valid = try frame(.request(ControlRuntimeRequest(budget: try ControlWireBudget(1), call: .readSnapshot)), correlation: requestID(1))
         var split = valid
         split.insert(0x0A, at: 1)
         XCTAssertThrowsError(try ControlRuntimeCodec.decodeFullFrame(split, limits: limits)) { error in

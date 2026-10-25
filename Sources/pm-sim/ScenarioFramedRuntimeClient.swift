@@ -193,9 +193,9 @@ private final class FramedSimHost: ControlRuntimeTransport, @unchecked Sendable 
     /// The host's answer, and whether the reply is lost after the command was admitted.
     private func answer(to body: ControlRuntimeBody) -> (ControlRuntimeResponse, Bool) {
         lock.withLock { () -> (ControlRuntimeResponse, Bool) in
-            guard case .request(let request) = body else { return (.failure(.unknownCommand), false) }
+            guard case .request(let envelope) = body else { return (.failure(.unknownCommand), false) }
             received += 1
-            switch request {
+            switch envelope.call {
             case .submit(let submit):
                 if let refusal { return (.failure(refusal), false) }
                 admitted = submit.requestID

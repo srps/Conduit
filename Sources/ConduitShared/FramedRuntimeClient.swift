@@ -10,11 +10,13 @@ import Foundation
 /// deadline down, so one budget covers a whole call and no nested phase starts a fresh one.
 ///
 /// Limits are explicit. `limits` bounds every request this client sends and every reply or stream
-/// frame it accepts. A budgeted call (`submit`, `lookupAdmission`, `outcome`) carries the caller's
-/// remaining time, capped at `wireBudgetCap` and rounded down to whole milliseconds. A budget that
-/// rounds to zero is refused before any send. The transport receives the same absolute deadline and
-/// owns the wait. This client does not claim that it was enforced. The budget is the time left when
-/// the request was encoded, an upper bound on the receiver's wait, not an exact figure at send.
+/// frame it accepts. Every request carries one mandatory budget in its envelope: the caller's remaining
+/// time, capped at `wireBudgetCap` and rounded down to whole milliseconds. Each call reads its budget
+/// once from the one absolute deadline, so a nested call takes what remains and never a fresh budget. A
+/// budget that rounds to zero is refused before any send. The transport receives the same absolute
+/// deadline and owns the wait. This client does not claim that it was enforced. The budget is the time
+/// left when the request was encoded, an upper bound on the receiver's wait, not an exact figure at send.
+/// A stream `next` carries no request, so it has no budget and waits within its caller's deadline.
 ///
 /// A mutation is sent once. A submit whose send may have happened and whose answer is lost is
 /// `admissionUnknown`, and the client never resends it.
@@ -55,14 +57,13 @@ private struct FramedRuntimeClient: RuntimeClient {
         deadline: RuntimeDeadline
     ) async throws -> ControlAdmission {
         let budget = try requestBudget(for: deadline)
-        let request = ControlRuntimeRequest.submit(ControlOperationRequest(
+        let call = ControlRuntimeCall.submit(ControlOperationRequest(
             requestID: requestID,
             expectedIncarnation: expectedIncarnation,
-            command: command,
-            budget: budget
+            command: command
         ))
         do {
-            let response = try await exchange(request, correlation: requestID, expecting: .admission, deadline: deadline)
+            let response = try await exchange(call, budget: budget, correlation: requestID, expecting: .admission, deadline: deadline)
             guard case .admission(let admission) = response else { throw ExchangeFailure.invalidReply }
             return admission
         } catch let failure as ExchangeFailure {
@@ -76,13 +77,12 @@ private struct FramedRuntimeClient: RuntimeClient {
         deadline: RuntimeDeadline
     ) async throws -> ControlRequestLookup {
         let budget = try requestBudget(for: deadline)
-        let request = ControlRuntimeRequest.requestLookup(ControlRequestQuery(
+        let call = ControlRuntimeCall.requestLookup(ControlRequestQuery(
             expectedIncarnation: expectedIncarnation,
-            requestID: requestID,
-            budget: budget
+            requestID: requestID
         ))
         do {
-            let response = try await exchange(request, correlation: makeCorrelation(), expecting: .requestLookup, deadline: deadline)
+            let response = try await exchange(call, budget: budget, correlation: makeCorrelation(), expecting: .requestLookup, deadline: deadline)
             guard case .requestLookup(let lookup) = response else { throw ExchangeFailure.invalidReply }
             return lookup
         } catch let failure as ExchangeFailure {
@@ -96,13 +96,12 @@ private struct FramedRuntimeClient: RuntimeClient {
         deadline: RuntimeDeadline
     ) async throws -> ControlOperationLookup {
         let budget = try requestBudget(for: deadline)
-        let request = ControlRuntimeRequest.outcome(ControlOperationQuery(
+        let call = ControlRuntimeCall.outcome(ControlOperationQuery(
             expectedIncarnation: expectedIncarnation,
-            operationID: operation,
-            budget: budget
+            operationID: operation
         ))
         do {
-            let response = try await exchange(request, correlation: makeCorrelation(), expecting: .lookup, deadline: deadline)
+            let response = try await exchange(call, budget: budget, correlation: makeCorrelation(), expecting: .lookup, deadline: deadline)
             guard case .lookup(let lookup) = response else { throw ExchangeFailure.invalidReply }
             return lookup
         } catch let failure as ExchangeFailure {
@@ -113,8 +112,9 @@ private struct FramedRuntimeClient: RuntimeClient {
     // MARK: - Reads and subscriptions
 
     func readPage(_ request: ControlPageRequest, deadline: RuntimeDeadline) async throws -> ControlPageReply {
+        let budget = try requestBudget(for: deadline)
         do {
-            let response = try await exchange(.readPage(request), correlation: makeCorrelation(), expecting: .page, deadline: deadline)
+            let response = try await exchange(.readPage(request), budget: budget, correlation: makeCorrelation(), expecting: .page, deadline: deadline)
             guard case .page(let reply) = response else { throw ExchangeFailure.invalidReply }
             return reply
         } catch let failure as ExchangeFailure {
@@ -123,8 +123,9 @@ private struct FramedRuntimeClient: RuntimeClient {
     }
 
     func readSnapshot(deadline: RuntimeDeadline) async throws -> ControlRuntimeSnapshot {
+        let budget = try requestBudget(for: deadline)
         do {
-            let response = try await exchange(.readSnapshot, correlation: makeCorrelation(), expecting: .snapshot, deadline: deadline)
+            let response = try await exchange(.readSnapshot, budget: budget, correlation: makeCorrelation(), expecting: .snapshot, deadline: deadline)
             guard case .snapshot(let snapshot) = response else { throw ExchangeFailure.invalidReply }
             return snapshot
         } catch let failure as ExchangeFailure {
@@ -135,7 +136,8 @@ private struct FramedRuntimeClient: RuntimeClient {
     /// Opens one stream. The subscription mints its own correlation, and every frame must answer it.
     func subscribe(_ request: ControlSubscriptionRequest, deadline: RuntimeDeadline) async throws -> RuntimeSubscription {
         let correlation = makeCorrelation()
-        let frame = try encodeRequest(.subscribe(request), correlation: correlation)
+        let budget = try requestBudget(for: deadline)
+        let frame = try encodeRequest(.subscribe(request), budget: budget, correlation: correlation)
         if let end = notLiveEnd(deadline) {
             throw RuntimeClientError.notSent(end)
         }
@@ -157,12 +159,13 @@ private struct FramedRuntimeClient: RuntimeClient {
     /// Sends one request and validates its reply. Every failure leaves here as an `ExchangeFailure`
     /// or as a `RuntimeClientError` from local encoding. The caller decides what the failure may claim.
     private func exchange(
-        _ request: ControlRuntimeRequest,
+        _ call: ControlRuntimeCall,
+        budget: ControlWireBudget,
         correlation: ControlRequestID,
         expecting kind: ControlRuntimeResponseKind,
         deadline: RuntimeDeadline
     ) async throws -> ControlRuntimeResponse {
-        let frame = try encodeRequest(request, correlation: correlation)
+        let frame = try encodeRequest(call, budget: budget, correlation: correlation)
         if let end = notLiveEnd(deadline) {
             throw ExchangeFailure.notSent(end)
         }
@@ -189,10 +192,10 @@ private struct FramedRuntimeClient: RuntimeClient {
     }
 
     /// The one place a request becomes bytes. A refusal here is local, and nothing is sent.
-    private func encodeRequest(_ request: ControlRuntimeRequest, correlation: ControlRequestID) throws -> Data {
+    private func encodeRequest(_ call: ControlRuntimeCall, budget: ControlWireBudget, correlation: ControlRequestID) throws -> Data {
         do {
             return try ControlRuntimeCodec.encodeFrame(
-                ControlRuntimeMessage(correlation: correlation, body: .request(request)),
+                ControlRuntimeMessage(correlation: correlation, body: .request(ControlRuntimeRequest(budget: budget, call: call))),
                 limits: limits
             )
         } catch {
@@ -447,7 +450,7 @@ private final class FramedSubscription: @unchecked Sendable {
     /// stays valid and no frame was consumed. Any other error is terminal, and it releases the stream.
     private func waitFailure(_ error: any Error) -> RuntimeClientError {
         switch error {
-        case let end as RuntimeWaitEnd where end == .deadlineExpired || end == .cancelled:
+        case let end as RuntimeWaitEnd where end == .deadlineExpired || end == .cancelled || end == .transportBusy:
             return .readAborted(end)
         case is CancellationError:
             return .readAborted(.cancelled)

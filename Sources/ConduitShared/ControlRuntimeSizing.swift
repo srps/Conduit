@@ -144,6 +144,8 @@ extension ControlPageReply {
             try page.measure(into: &budget)
         case .tunnelDNSHosts(let page):
             try page.measure(into: &budget)
+        case .unavailable:
+            break
         }
     }
 }
