@@ -1,16 +1,18 @@
 # Writer authority: canonical state-root checkpoint
 
-Status: owner selected this shape on 2026-10-24;
-[0020](decisions/0020-canonical-runtime-writer-root.md) records the decision.
-It refines 0017 writer-lease coverage before persistence adoption; no lease or
-asynchronous store is implemented yet.
+Status: canonical-root shape selected on 2026-10-24 in
+[0020](decisions/0020-canonical-runtime-writer-root.md), refined by the owner on
+2026-10-25 to fixed writable filenames in
+[0028](decisions/0028-fixed-writable-state-filenames.md). Lease and verified-store
+foundations are merged; production startup/writer adoption and naming enforcement
+remain planned. The root/component alternatives below retain the original rationale.
 
 ## Recommendation
 
 Keep authoritative runtime configuration, platform settings, app preferences and
 the platform recovery journal within one canonical state root. Acquire its lease
-before migration writes or recovery/reconciliation. Custom in-root config names
-remain valid: the rule is containment, not a requirement to use `config.json`.
+before migration writes or recovery/reconciliation. The fixed writable slots are `config.json`, `platform.json`, `preferences.json`
+and `platform-state.json`. Containment and canonical identity checks still apply.
 Two cooperating hosts cannot write that root concurrently. The future daemon
 owns it while clients retain drafts and submit private updates.
 
@@ -24,7 +26,8 @@ This has a narrow compatibility effect:
 | Invocation or caller | Proposed behavior |
 | --- | --- |
 | App using its default or isolated state directory | Unchanged paths |
-| `ConduitDaemon --config /somewhere/custom.json` | Remains valid: the file's parent is its state root |
+| `ConduitDaemon --config /somewhere/config.json` | Derive its root from the parent when no other root is selected |
+| `ConduitDaemon --config /somewhere/custom.json` | Refuse before migration/recovery; give explicit move/rename guidance, preserving bytes |
 | Daemon with `--state-dir X --config Y`, where Y is outside X | Refuse before migration writes or machine recovery |
 | Daemon with `PM_CONFIG_DIR=X` and outside `--config Y` | Same refusal |
 | `pm-proxy --state-dir X --config Y` | Keep Y as read-only input; runtime artifacts remain in X |
@@ -73,7 +76,7 @@ Claude reviewed the inventory through the owner's claude.ai Max subscription;
 Codex checked the actual executable parsers and persistence entry points.
 The review initially overstated the compatibility change: `--config` alone
 already derives its root from the parent and pm-proxy does not save migrations.
-The table above reflects those corrections. No split-path production usage was
+The original review corrected those points; the table above now reflects the later fixed-name choice in 0028. No split-path production usage was
 found in checked docs/scripts; that is not proof nobody uses it.
 
 The root lease also establishes which host may own runtime resources such as

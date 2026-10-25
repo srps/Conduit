@@ -149,7 +149,10 @@ not a requirement to finish every event or property test before extraction:
    after all 39 local checks (3,004 tests, two skips, 96 simulator records) and hosted Swift/CodeQL passed.
    [#233](https://github.com/srps/Conduit/issues/233) tracks the confirmed snapshot/config collision and
    remaining log protection; its [focused checkpoint](./docs/design-protected-runtime-artifacts.md)
-   precedes startup writer adoption. This does not change the accepted filename policy.
+   precedes startup writer adoption. The owner selected fixed writable filenames in
+   [0028](./docs/decisions/0028-fixed-writable-state-filenames.md): config/platform/preferences/journal
+   use their fixed logical slots; arbitrary read-only tool inputs remain supported.
+   Custom writable-name refusal and migration guidance remain planned; aliases still require protection.
    The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding

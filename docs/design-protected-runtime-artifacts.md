@@ -1,12 +1,12 @@
 # Protected runtime artifacts: implementation checkpoint
 
-Status: proposed implementation API, reviewed with Claude Code through the owner’s claude.ai Max subscription. No source implementation. This applies the existing diagnostic-protection policy in decision 0020 and issue [233](https://github.com/srps/Conduit/issues/233); it selects no new filename or snapshot-size policy.
+Status: proposed implementation API, reviewed with Claude Code through the owner’s claude.ai Max subscription. No source implementation. This applies the existing diagnostic-protection policy in decisions 0020/0028 and issue [233](https://github.com/srps/Conduit/issues/233); the owner has separately selected fixed writable filenames in 0028; no snapshot-size policy is selected here.
 
 ## Confirmed failure
 
 An owned scratch run of the built pm-proxy at the source merged by PR 232 used a configuration containing `{"schemaVersion":2,"witness":"original-intent"}` at `snapshot.json`. Running with `--state-dir SCRATCH --config SCRATCH/snapshot.json --port 0 --socks-port 0 --dns-port 0 --exit-after-ready` exited successfully and replaced the configuration with the runtime snapshot. No installed app, helper, credentials or machine settings were touched.
 
-RuntimeHost has the same direct snapshot replacement. App log append/rotation is also outside the existing audit/events guard; that is source evidence, not yet an executed log composition reproduction. Fixed writable names would remove the direct name case, while filesystem aliases and arbitrary read-only inputs still require protection. Decision 0020 continues to permit custom writable config names until the owner chooses a replacement policy.
+RuntimeHost has the same direct snapshot replacement. App log append/rotation is also outside the existing audit/events guard; that is source evidence, not yet an executed log composition reproduction. Fixed writable names selected in decision 0028 remove the direct writable-name case after adoption; filesystem aliases and arbitrary read-only inputs still require protection. Naming enforcement remains planned.
 
 ## Focused ownership
 
