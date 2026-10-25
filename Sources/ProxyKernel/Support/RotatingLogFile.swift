@@ -27,16 +27,21 @@ package protocol RotatingByteWriter: Sendable {
 /// refusal changes nothing on disk. The archive is removed with `unlink` only, never recursively.
 ///
 /// Unsupported files are refused by kind, not by the guard: an existing path that is not a regular file (directly
-/// or through a symbolic link) is not opened, so a FIFO or device cannot block the open. Admitted symbolic links
-/// to ordinary files keep working.
+/// or through a symbolic link) is not opened, so a FIFO or device cannot block the open. The kind check judges what
+/// it observes before the open. A path swapped after that check, or a device open that blocks, is not bounded here.
+/// Admitted symbolic links to ordinary files keep working.
 ///
 /// All file work happens on one serial queue; `write` returns immediately, and `flush()` drains the queue.
 ///
 /// Failures publish through the record gate's event log and logger, event first, then one derived line. A
 /// failure streak costs one event and one line, and the first successful write after it publishes recovery.
-/// `failing` is set before publication, so the derived line's own write is not reported again. A failed close
-/// is never retried and never followed by another open: the writer is retired for its lifetime. Detail carries
-/// a stage and a code, never a path or a value.
+/// `failing` is set before publication, so the derived line's own write is not reported again.
+///
+/// A failed close is never retried and never followed by another open: the writer is retired for its lifetime.
+/// Its close uncertainty is a separate fact, `observability.log_file_cleanup_unconfirmed`, published once per writer
+/// after the primary failure or refusal that led to it, and independently of the failure streak. Retirement is
+/// terminal, so no second close can happen and no second fact is possible. Detail carries a stage and a code, never
+/// a path or a value.
 ///
 /// The event log is held weakly, as the gate holds it. The gate's owner outlives the writer's drains.
 package func rotatingLogFile(
@@ -78,6 +83,8 @@ struct RotatingLogFileFailure: Error, Equatable, Sendable {
 }
 
 final class RotatingLogFile: @unchecked Sendable {
+    static let cleanupEventName = "observability.log_file_cleanup_unconfirmed"
+
     private let url: URL
     private let maxBytes: Int
     private let archives: Int
@@ -95,6 +102,9 @@ final class RotatingLogFile: @unchecked Sendable {
     private var failing = false
     /// Set when a close fails. The writer then opens no descriptor and closes none again.
     private var retired = false
+    /// The errno of a close that could not be confirmed, held until the primary failure or refusal that led to it has
+    /// been published. Set once, because retirement is terminal, and cleared by `reportPendingCleanup`.
+    private var pendingCleanup: Int32?
 
     init(
         url: URL, maxBytes: Int, archives: Int,
@@ -102,6 +112,8 @@ final class RotatingLogFile: @unchecked Sendable {
         gate: RecordFileDestinationGate, eventLog: RuntimeEventLog, logger: any LogSink,
         effects: RotatingLogFileEffects
     ) {
+        precondition(maxBytes > 0, "a file log needs a positive size bound")
+        precondition(archives >= 1, "a file log keeps at least one archive")
         self.url = url
         self.maxBytes = maxBytes
         self.archives = archives
@@ -113,10 +125,13 @@ final class RotatingLogFile: @unchecked Sendable {
     }
 
     deinit {
-        // A writer released with its descriptor open closes it once. A failure is still reported while the event
-        // log exists. Once the owner has released the log, the derived line is the only trace.
+        // A writer released with its descriptor open closes it once. The close fact is reported while an owner of the
+        // event log and of the logger still exists. Once both are gone, no observer is guaranteed to receive it.
         guard fd >= 0, effects.closeDescriptor(fd) != 0 else { return }
-        fail(RotatingLogFileFailure(stage: .close, code: errno))
+        let code = errno
+        retire(code: code)
+        fail(RotatingLogFileFailure(stage: .close, code: code))
+        reportPendingCleanup()
     }
 
     // MARK: - Public entry points
@@ -132,6 +147,7 @@ final class RotatingLogFile: @unchecked Sendable {
     func close() {
         queue.sync {
             if let failure = releaseDescriptor() { fail(failure) }
+            reportPendingCleanup()
         }
     }
 
@@ -143,11 +159,14 @@ final class RotatingLogFile: @unchecked Sendable {
             try gate.perform { try writeOne(data) }
             recover()
         } catch is RecordFileDestinationRefusal {
-            // The gate has latched and published the refusal. Nothing more is touched.
+            // The gate has latched and published the refusal. Only the close fact can remain to report.
+            reportPendingCleanup()
         } catch let failure as RotatingLogFileFailure {
             fail(failure)
+            reportPendingCleanup()
         } catch {
             fail(RotatingLogFileFailure(stage: .other, code: 0))
+            reportPendingCleanup()
         }
     }
 
@@ -186,10 +205,10 @@ final class RotatingLogFile: @unchecked Sendable {
         size = Int(info.st_size)
     }
 
-    /// Closes a descriptor that failed validation, and returns the error that caused it. The validation error is the
-    /// one reported. A failed close here retires the writer, and its report is not separate from that streak.
+    /// Closes a descriptor that failed validation, and returns the error that caused it. The caller publishes that error
+    /// first. A failed close here retires the writer and leaves its code pending as a separate cleanup fact.
     private func abandon(_ descriptor: Int32, _ error: Error) -> Error {
-        if effects.closeDescriptor(descriptor) != 0 { retired = true }
+        if effects.closeDescriptor(descriptor) != 0 { retire(code: errno) }
         return error
     }
 
@@ -206,6 +225,7 @@ final class RotatingLogFile: @unchecked Sendable {
 
     /// A missing path, or an existing regular file, passes. A symbolic link passes when its target is regular, since
     /// `stat` follows it. Any other kind (directory, FIFO, socket, device) is refused before it is opened or renamed.
+    /// This judges the path as it is observed here. It does not stop a later swap of the path before the open.
     private func requireRegularOrAbsent(_ path: String) throws {
         var info = stat()
         guard stat(path, &info) == 0 else {
@@ -239,7 +259,7 @@ final class RotatingLogFile: @unchecked Sendable {
     /// Judges the active file and every archive slot, then closes and shifts. Nothing is renamed or removed until every
     /// slot has passed the guard and the kind check. Removal is `unlink`, so a directory is never removed.
     private func rotate() throws {
-        let last = max(archives, 1)
+        let last = archives
         for index in 0...last {
             let path = slot(index)
             try destinationGuard.admit(destination: URL(fileURLWithPath: path))
@@ -258,14 +278,34 @@ final class RotatingLogFile: @unchecked Sendable {
     }
 
     /// Closes the active descriptor once and forgets it. A failed close is ambiguous, so the descriptor is never
-    /// closed again, and the writer is retired for its lifetime.
+    /// closed again, and the writer is retired for its lifetime. The caller publishes the returned failure.
     private func releaseDescriptor() -> RotatingLogFileFailure? {
         guard fd >= 0 else { return nil }
         let descriptor = fd
         fd = -1
         guard effects.closeDescriptor(descriptor) != 0 else { return nil }
+        let code = errno
+        retire(code: code)
+        return RotatingLogFileFailure(stage: .close, code: code)
+    }
+
+    /// Retires the writer for its lifetime and holds the close's errno for its one cleanup fact. Only the single close
+    /// that failed can reach this, so the pending code is set once.
+    private func retire(code: Int32) {
         retired = true
-        return RotatingLogFileFailure(stage: .close, code: errno)
+        pendingCleanup = code
+    }
+
+    /// Publishes the close uncertainty once, after the primary failure or refusal, and clears it. Event first, then the
+    /// derived line. It is not part of the failure streak, so a write failure and a close failure each keep their own fact.
+    private func reportPendingCleanup() {
+        guard let code = pendingCleanup else { return }
+        pendingCleanup = nil
+        let detail = "stage=\(RotatingLogFileFailure.Stage.close.rawValue) code=\(code)"
+        publish(
+            event: Self.cleanupEventName, detail: detail, level: .warning,
+            line: "File logging stopped writing to its file: the close could not be confirmed — \(detail). This writer writes nothing further."
+        )
     }
 
     /// Event first, then the derived line. `failing` is set before publication, so the line's own write, which comes
