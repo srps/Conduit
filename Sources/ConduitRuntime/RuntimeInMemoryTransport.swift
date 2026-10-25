@@ -411,18 +411,46 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         finishReply(ControlRuntimeMessage(correlation: correlation, body: body), limits: limits)
     }
 
-    /// Encodes one reply. A lost reply is dropped after encoding, so the answer was real and only its delivery failed.
+    /// Encodes one reply. An answer that the caller's frame cannot hold is replaced by one `frameTooLarge` failure. A failure is never
+    /// replaced, since its size is its own answer, and a failure that does not fit ends the reply as a disconnect. Any other encoding
+    /// invalidity is an invalid reply.
     @MainActor
     private func finishReply(_ message: ControlRuntimeMessage, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
         do {
-            let bytes = try ControlRuntimeCodec.encodeFrame(message, limits: limits)
-            if faults.consumeLostReply() {
-                return .failed(.sent(.disconnected))
-            }
-            return .reply(bytes)
+            return answered(try ControlRuntimeCodec.encodeFrame(message, limits: limits))
+        } catch ControlRuntimeWireError.frameTooLarge {
+            guard !Self.isFailure(message) else { return .failed(.sent(.disconnected)) }
+            return oversizedReply(correlation: message.correlation, limits: limits)
         } catch {
             return .failed(.sent(.invalidReply))
         }
+    }
+
+    /// The one failure that stands in for an answer the caller's frame cannot hold. It is encoded once, with no further fallback.
+    @MainActor
+    private func oversizedReply(correlation: ControlRequestID, limits: ControlFrameLimits) -> RuntimeWaitOutcome {
+        let failure = ControlRuntimeMessage(correlation: correlation, body: .response(.failure(.frameTooLarge)))
+        do {
+            return answered(try ControlRuntimeCodec.encodeFrame(failure, limits: limits))
+        } catch ControlRuntimeWireError.frameTooLarge {
+            return .failed(.sent(.disconnected))
+        } catch {
+            return .failed(.sent(.invalidReply))
+        }
+    }
+
+    /// The reply for one encoded answer. A lost reply is dropped after encoding, so the answer was real and only its delivery failed.
+    @MainActor
+    private func answered(_ bytes: Data) -> RuntimeWaitOutcome {
+        if faults.consumeLostReply() {
+            return .failed(.sent(.disconnected))
+        }
+        return .reply(bytes)
+    }
+
+    private static func isFailure(_ message: ControlRuntimeMessage) -> Bool {
+        if case .response(.failure) = message.body { return true }
+        return false
     }
 
     /// The open's first frame, encoded. A failure after a subscriber was registered releases that subscriber.

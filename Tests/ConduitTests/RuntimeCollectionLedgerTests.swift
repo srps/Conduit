@@ -439,6 +439,68 @@ final class RuntimeCollectionLedgerTests: XCTestCase {
         XCTAssertEqual(harness.core.collectionRetention(kind).proofs, 1, "the held proof is neither replaced nor removed")
     }
 
+    /// The current revision's rows aged out, so its proof is the only record of its total. The owner then reports the same revision with
+    /// another exact total. The total is compared before any decision, so the aged revision is not recaptured or replaced, and the fault
+    /// callback still sees the proof with the total it recorded.
+    func testAChangedTotalUnderAnAgedCurrentRevisionIsAnOwnerInvariantFaultAndNothingIsRecaptured() throws {
+        let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionRowAge: .seconds(60)))
+        try publish(harness, revision: 1, hosts: ["a", "b"])
+        _ = page(harness)
+        harness.timing.advance(by: .seconds(61))
+        try publish(harness, revision: 1, hosts: ["a", "b", "c"])
+        var totalInCallback: Int?
+        harness.owner.onFault = { _ in
+            totalInCallback = harness.core.collectionProofTotal(self.kind, revision: self.rev(1))?.rawValue
+        }
+        let source = page(harness)
+        guard case .internalFailure = source else {
+            return XCTFail("a changed total under an aged revision is an internal failure, got \(source)")
+        }
+        XCTAssertEqual(harness.owner.faults, [.revisionTotalChanged])
+        XCTAssertEqual(totalInCallback, 2, "the fault callback sees the aged proof with the total it recorded")
+        XCTAssertEqual(harness.owner.projectionCount, 1, "nothing is recaptured from an immutable revision")
+        XCTAssertEqual(harness.core.collectionRetention(kind).rowSets, 1, "the aged rows are neither released nor replaced")
+    }
+
+    /// Capturing the next revision released the current revision's rows, and its proof stayed. The owner then reports that revision again
+    /// with another exact total. A released proof answers the same fault as a held one.
+    func testAChangedTotalUnderAReleasedCurrentRevisionIsAnOwnerInvariantFault() throws {
+        let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionRowSets: 1))
+        try publish(harness, revision: 1, hosts: ["a", "b"])
+        _ = page(harness)
+        try publish(harness, revision: 2, hosts: ["x"])
+        _ = page(harness)
+        XCTAssertEqual(harness.core.collectionRetention(kind).rowSets, 1, "the capture of revision two released revision one's rows")
+        try publish(harness, revision: 1, hosts: ["a", "b", "c"])
+        let source = page(harness)
+        guard case .internalFailure = source else {
+            return XCTFail("a changed total under a released revision is an internal failure, got \(source)")
+        }
+        XCTAssertEqual(harness.owner.faults, [.revisionTotalChanged])
+        XCTAssertEqual(harness.owner.projectionCount, 2, "nothing is recaptured from an immutable revision")
+        XCTAssertEqual(harness.core.collectionProofTotal(kind, revision: rev(1))?.rawValue, 2, "the released proof keeps the total it recorded")
+    }
+
+    /// Eviction forgot the proof of the current revision, so no old total exists to compare. The revision is captured again, with the
+    /// owner's rows and total, and no fault is raised.
+    func testAForgottenProofLeavesNoOldTotalToCompareSoTheCurrentRevisionIsCapturedAgain() throws {
+        let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(collectionProofs: 1))
+        try publish(harness, revision: 1, hosts: ["a"])
+        _ = page(harness)
+        try publish(harness, revision: 2, hosts: ["b"])
+        _ = page(harness)
+        XCTAssertNil(harness.core.collectionProofTotal(kind, revision: rev(1)), "the proof of revision one was evicted")
+        try publish(harness, revision: 1, hosts: ["a", "b", "c"])
+        let source = page(harness)
+        guard case .rows(let revision, let rows, _, .current) = source else {
+            return XCTFail("a revision whose proof was forgotten is captured again, got \(source)")
+        }
+        XCTAssertEqual(revision, rev(1))
+        XCTAssertEqual(rows.rowCount, 3)
+        XCTAssertEqual(harness.owner.faults, [])
+        XCTAssertEqual(harness.owner.projectionCount, 3)
+    }
+
     /// The owner's snapshot names another incarnation than the service. Nothing is read, and the owner is told as a closed fault.
     func testASnapshotFromAnotherIncarnationIsAClosedInternalFailureNotAnInvalidValue() throws {
         let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits())

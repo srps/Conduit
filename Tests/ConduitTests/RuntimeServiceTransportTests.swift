@@ -123,6 +123,68 @@ final class RuntimeServiceTransportTests: XCTestCase {
         XCTAssertEqual(reply, .unavailable(.tunnelDNSHosts, .retentionBudgetExceeded, knownTotal: try ControlCount(17)))
     }
 
+    /// The byte sizes of the three frames a snapshot read touches, under one fixed correlation: the request, the `frameTooLarge` failure, and the snapshot.
+    private func snapshotFrameSizes(_ harness: RuntimeServiceHarness) throws -> (request: Int, failure: Int, snapshot: Int) {
+        let correlation = RuntimeServiceFixtures.requestID(7)
+        let request = try ControlRuntimeCodec.encodeFrame(
+            ControlRuntimeMessage(
+                correlation: correlation,
+                body: .request(ControlRuntimeRequest(budget: try RuntimeServiceFixtures.budget(), call: .readSnapshot))
+            ),
+            limits: frameLimits
+        )
+        let failure = try ControlRuntimeCodec.encodeFrame(
+            ControlRuntimeMessage(correlation: correlation, body: .response(.failure(.frameTooLarge))),
+            limits: frameLimits
+        )
+        let snapshot = try ControlRuntimeCodec.encodeFrame(
+            ControlRuntimeMessage(correlation: correlation, body: .response(.snapshot(harness.owner.snapshotValue))),
+            limits: frameLimits
+        )
+        return (request.count, failure.count, snapshot.count)
+    }
+
+    /// The snapshot is larger than the caller's frame, while the request that asks for it fits. The caller learns the size as the stable
+    /// `frameTooLarge` wire error, not as a corrupt reply.
+    func testASnapshotLargerThanTheCallersFrameIsAStableFrameTooLargeWireError() async throws {
+        let harness = try RuntimeServiceHarness()
+        let sizes = try snapshotFrameSizes(harness)
+        XCTAssertLessThan(max(sizes.request, sizes.failure), sizes.snapshot, "the snapshot is the one reply that cannot fit the caller's frame")
+        let small = try ControlFrameLimits(maxFrameBytes: max(sizes.request, sizes.failure))
+        let client = try makeClient(harness, harness.transport(), frame: small)
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        let error = await thrownError {
+            try await runCall(harness.scheduling) { try await client.readSnapshot(deadline: deadline) }
+        }
+        XCTAssertEqual(error, .wire(.frameTooLarge))
+    }
+
+    /// No failure fits the frame that holds the request, so the answer ends as a bounded disconnect. It is never reported as a corrupt reply.
+    func testAnAnswerThatNoFailureCanFitIsADisconnectNotAnInvalidReply() async throws {
+        let harness = try RuntimeServiceHarness()
+        let sizes = try snapshotFrameSizes(harness)
+        XCTAssertGreaterThan(sizes.failure, sizes.request, "the failure is larger than the request, so the request's frame cannot hold it")
+        let limits = try ControlFrameLimits(maxFrameBytes: sizes.request)
+        let transport = harness.transport()
+        let frame = try ControlRuntimeCodec.encodeFrame(
+            ControlRuntimeMessage(
+                correlation: RuntimeServiceFixtures.requestID(7),
+                body: .request(ControlRuntimeRequest(budget: try RuntimeServiceFixtures.budget(), call: .readSnapshot))
+            ),
+            limits: limits
+        )
+        let deadline = RuntimeDeadline.after(.seconds(1), from: harness.timing.now)
+        var failure: ControlRuntimeTransportFailure?
+        do {
+            _ = try await runCall(harness.scheduling) {
+                try await transport.exchange(frame, limits: limits, deadline: deadline)
+            }
+        } catch {
+            failure = error as? ControlRuntimeTransportFailure
+        }
+        XCTAssertEqual(failure, .sent(.disconnected), "the request was admitted and read, and its reply has no frame that can carry it")
+    }
+
     func testAnAdmittedCommandAnswersThroughTheFramedClient() async throws {
         let harness = try RuntimeServiceHarness()
         let client = try makeClient(harness, harness.transport())

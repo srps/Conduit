@@ -42,6 +42,9 @@ enum ControlServiceFault: Sendable, Equatable {
     /// The owner's snapshot now reports a different exact total for a revision that the service holds with its own total. A revision
     /// is immutable, so the owner broke its invariant. The retained rows are not served, not replaced, and not recaptured.
     case revisionTotalChanged
+    /// The collection ledger's byte accounting disagrees with the row sets it holds. That is the service's own bug, not the owner's, and
+    /// it is not a capacity answer. The capture is refused before any change, and the read is answered as an internal failure.
+    case collectionAccountingMismatch
 }
 
 /// The one owner of intent and lifecycle, seen from the service. The actual runtime host adopts this

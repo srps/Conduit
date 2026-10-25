@@ -378,14 +378,15 @@ final class RuntimeServiceCore {
             // No revision is readable, so an offset cannot be checked against a total it belongs to. The refusal is the answer.
             return .unavailable(reason, knownTotal: reference.totalCount)
         case .available(let current):
+            // A revision names one total for its whole life. A held proof of the current revision is compared with this turn's snapshot
+            // before any decision, so an aged or released proof is checked too. A different exact total is the owner's broken invariant:
+            // nothing is served, replaced or recaptured. A forgotten proof has no total to compare, so it is captured again.
+            if let held = collections.proof(kind, revision: current)?.total, held.rawValue != reference.totalCount.rawValue {
+                deliver(.revisionTotalChanged)
+                return .internalFailure
+            }
             switch collections.decision(kind: kind, cursor: request.cursor?.revision, current: current, at: timing.now()) {
             case .current(let rows, let total):
-                // A revision names one total for its whole life. A different exact total in this turn is the owner's broken invariant,
-                // so the rows are not served, and nothing is replaced or recaptured.
-                guard total.rawValue == reference.totalCount.rawValue else {
-                    deliver(.revisionTotalChanged)
-                    return .internalFailure
-                }
                 guard offset <= total.rawValue else { return .invalidOffset }
                 return .rows(revision: current, rows: rows, offset: offset, status: .current)
             case .stale(let revision, let rows):
@@ -429,6 +430,10 @@ final class RuntimeServiceCore {
                 // is stored or served, and the fault is reported after this turn's state is complete.
                 deliver(.projectionCountMismatch)
                 return .internalFailure
+            case .invariantFailure:
+                // The ledger's own accounting is broken. It is the service's bug, not a capacity answer, so nothing is stored or served.
+                deliver(.collectionAccountingMismatch)
+                return .internalFailure
             }
         case .overBudget:
             return .unavailable(.retentionBudgetExceeded, knownTotal: total)
@@ -459,6 +464,10 @@ final class RuntimeServiceCore {
     /// The collection ledger's held state for one kind: its proofs, the row sets still physically held, and the retained bytes of all kinds.
     func collectionRetention(_ kind: ControlCollectionKind) -> (proofs: Int, rowSets: Int, retainedBytes: Int) {
         (collections.proofCount(kind), collections.retainedRowSetCount(kind), collections.retainedRowBytes)
+    }
+    /// The exact total a held proof recorded for one revision, whether or not its rows are still held. Nil when no proof is held.
+    func collectionProofTotal(_ kind: ControlCollectionKind, revision: ControlCollectionRevision) -> ControlCount? {
+        collections.proof(kind, revision: revision)?.total
     }
 
     /// Whether a module's stop slots hold an active effect, and whether one is queued behind it.

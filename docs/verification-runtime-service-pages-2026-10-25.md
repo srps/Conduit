@@ -11,6 +11,10 @@ The frozen source is based on `ff7d859a340f4b13b8400e8c30093c932b14d740`, over
 merged store PR232 (`6535fc8`). Its source/test/script/resource fingerprint is
 `b08710674ba2a3b43dfc59d042cbbe5a3c1ade9cce2bb53532f886d168def4b6`.
 Documentation is excluded from this fingerprint, as in the full-workflow runner.
+That fingerprint identifies the earlier frozen source used for the source variants.
+The parent computed the corrected current source fingerprint as
+`b69b6dfa2633f75ad7ea1f4c7df8d8af362803e35c53bfc665dde112ee1c417c`.
+The full workflow is running against this corrected source; no complete result is claimed yet.
 Claude implemented and verified the slice through the owner's authenticated
 claude.ai Max subscription. No API credential or Agent SDK was used.
 
@@ -19,6 +23,22 @@ projection suites. The writer's final run passed 262 tests, both relevant pm-sim
 scenarios and the import/catalogue/decision checks. The parent reran that same wrapper after restoring every source variant: 262
 tests, zero failures, both simulator scenarios and the checks passed. Broader
 workflow gates have not run yet.
+
+## Final review-fix pass
+
+Three findings from the independent recheck were fixed in the runtime service,
+ledger and transport files, with witnesses in the collection-ledger and
+service-transport suites. The wrapper ran red first on the earlier source:
+four of the five new witnesses failed. Those were the aged and released changed
+totals, the framed snapshot reply, and the raw disconnect. On the fixed source,
+the same wrapper passes with 267 tests and 0 failures. Both simulator scenarios,
+the imports fence, the event catalogue, the decisions check and its tests pass.
+The fixes are described in the checkpoint's review-fix section.
+
+The only fresh runs of the fixed source are that wrapper. The restricted-scan
+and reversed-tie source variants, and the gate-release variant, were run only
+against the earlier files. They have not been re-run here, and no
+source-variant claim extends to the review fixes.
 
 ## Executed source-variant sensitivity
 
@@ -79,7 +99,11 @@ cap until activity, while page reads enforce logical expiry immediately.
 
 ## Remaining gates
 
-Independent review of the corrected frozen source, all workflow checks, actual
+The independent Claude recheck of the three corrected paths found them resolved.
+It noted one wording gap: the unreachable loop-invariant branch occurs after mutation,
+so only capacity refusals and the entry accounting check are guaranteed before any change.
+That invariant branch and its closed release-build result remain unwitnessed; no claim of coverage is made.
+The full workflow checks, actual
 production-owner adaptation, observation/coalescing/replay models and a measured
 owner-reviewed shipping profile remain required. The snapshot read's invalid
 owner-state classification is deferred to that observation slice. No v2 socket,

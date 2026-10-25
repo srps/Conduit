@@ -31,7 +31,7 @@ struct RuntimeCaptureProof {
 /// What a page request for one kind resolves to, decided against the owner's current revision and the bounded proofs.
 enum RuntimePageDecision {
     /// The current revision's rows are retained and not logically expired, so they serve the page. `total` is the exact count the proof
-    /// recorded, which the service compares with the same turn's snapshot before it serves the rows.
+    /// recorded. The service has already compared it with the same turn's snapshot, before it asked for this decision.
     case current(ControlProjectedRows, total: ControlCount)
     /// An older revision whose rows are retained and not logically expired. The page names that revision, and it reports the
     /// current one as stale.
@@ -45,13 +45,16 @@ enum RuntimePageDecision {
     case notCaptured
 }
 
-/// The closed result of one capture. A refusal changes no state, except in the owner-invariant case, which is refused before any change.
+/// The closed result of one capture. A refusal changes no state. Each refusal is decided before the first change.
 enum RuntimeCaptureResult: Equatable {
     case stored
     /// The rows exceed the row bound, the per-capture byte bound, or the retained-byte bound. Nothing was stored.
     case overBudget
     /// The owner's rows are of another kind, or they do not count the snapshot's exact total. Nothing was stored.
     case countOrKindMismatch
+    /// The ledger's own byte accounting disagrees with the row sets it holds. That is a bug in the service, not a capacity answer. It is
+    /// detected before any change, so nothing was stored or released.
+    case invariantFailure
 }
 
 /// The bounded collection ledger. It keeps one proof per captured revision, up to a fixed count per kind. It keeps the rows of the
@@ -170,6 +173,11 @@ struct RuntimeCollectionLedger {
         guard total.rawValue <= maxRows, encodedBytes <= captureByteCapacity, encodedBytes <= rowByteCapacity else {
             return .overBudget
         }
+        // The accounting is checked before the first change, so an accounting bug is refused whole and never applied in part.
+        guard retainedRowBytes == heldRowBytes() else {
+            assertionFailure("the retained bytes disagree with the held row sets")
+            return .invariantFailure
+        }
         // A revision that is captured again replaces its own proof, so no revision is held twice.
         if let index = proofs[kind]?.lastIndex(where: { $0.revision == revision }) {
             release(kind, at: index)
@@ -183,9 +191,10 @@ struct RuntimeCollectionLedger {
         // `retainedRowBytes` never exceeds `rowByteCapacity`, so the remaining room is never negative and nothing is summed.
         while encodedBytes > rowByteCapacity - retainedRowBytes {
             guard let oldest = oldestRowSet() else {
-                // Unreachable: with no row set held, the room is the whole bound, and the check above has passed it.
+                // Unreachable once the accounting check above has passed: with no row set held, no bytes are held, and the encoded bytes
+                // already fit the whole bound. The assertion catches the bug in a debug build, and the result stays closed in a release build.
                 assertionFailure("the retained bytes name no row set")
-                return .overBudget
+                return .invariantFailure
             }
             release(oldest.kind, at: oldest.index)
         }
@@ -236,6 +245,18 @@ struct RuntimeCollectionLedger {
                 release(kind, at: index)
             }
         }
+    }
+
+    /// The encoded bytes of every physically held row set, summed from the proofs. It equals `retainedRowBytes` while the accounting holds.
+    /// It scans the bounded proof table once, and it changes nothing.
+    private func heldRowBytes() -> Int {
+        var held = 0
+        for entries in proofs.values {
+            for entry in entries where entry.rows != nil {
+                held += entry.rowBytes
+            }
+        }
+        return held
     }
 
     /// Releases one proof's rows and returns their bytes to the total.
