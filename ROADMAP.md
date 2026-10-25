@@ -121,7 +121,8 @@ not a requirement to finish every event or property test before extraction:
    accompanied the local workflow checks. Runtime-file startup/import adoption merged in PR #228 through the
    shared lexical/resource policy. Open gates:
    measured memory/capacity/latency and complete writer coverage under
-   the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
+   the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md)
+   and fixed writable layout in [0028](./docs/decisions/0028-fixed-writable-state-filenames.md),
    listener handoff, and measured bounds and shutdown. Exact legacy duration representability
    ([#224](https://github.com/srps/Conduit/issues/224)) merged in PR #228. The
    [review draft](./docs/design-runtime-store-precision-review.md) records the
