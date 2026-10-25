@@ -1,7 +1,13 @@
 # Kernel sanitizer lifetime and runtime profile verification
 
 Status: source/test review complete and all 40 local checks pass (2026-10-25).
-Hosted checks are pending publication. This does not select a shipping resource
+Hosted Swift and CodeQL passed on exact reviewed head
+`765c4ab0f86aa1705006229ed625415cfcee2f7b`;
+[PR #241](https://github.com/srps/Conduit/pull/241) merged at
+`8b00af6cea20e0e11932622ba74afddf99228741`. Optional automated code/security
+reviews failed to complete and Devin skipped; no actual review submissions or
+inline findings were present at merge. Runner notices concern capacity/OS
+migration. Those optional services supply no clean-review evidence. This does not select a shipping resource
 profile or establish release readiness.
 
 ## Change and evidence

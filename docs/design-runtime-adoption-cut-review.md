@@ -1,8 +1,9 @@
 # AppState adoption: integration-cut review
 
 Status: **proposed for owner review**, 2026-10-25. This changes no accepted ADR and
-implements no new runtime path. PR #240 is merged; reply/stream frames are selected
-at 64 KiB in 0030. The remaining profile is being measured separately. Claude Code
+implements no new runtime path. PRs #240/#241 are merged; reply/stream frames are
+selected at 64 KiB in 0030. The measured candidate profile remains test-only;
+actual-host scheduling and selection of its remaining values are still open. Claude Code
 and Codex source-review findings are recorded below; Claude used the owner's
 claude.ai subscription.
 
