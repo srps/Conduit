@@ -20,7 +20,7 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
-## Immediate priorities (2026-10-24)
+## Immediate priorities (2026-10-25)
 
 0.5.8 shipped on 2026-10-23 with the Settings fixes in #216. An edit that brings up
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
@@ -31,11 +31,19 @@ Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](http
 
 Snapshot destination protection and asynchronous diagnostic drains merged in
 [PR #234](https://github.com/srps/Conduit/pull/234) (`a623088`) after all 39 local
-checks and hosted Swift/CodeQL passed. Rotating app logs remain under #233. Their focused protection slice is implemented locally;
-independent review exposed close-uncertainty reporting and test-lifetime gaps, now
-corrected. All 39 local checks pass (3,258 tests, two skips; 99 simulator records),
-with final scoped review complete. Hosted PR gates remain open; native callback
-verification exposed the separate #237 release blocker.
+checks and hosted Swift/CodeQL passed. Rotating app-log protection merged in
+[PR #238](https://github.com/srps/Conduit/pull/238) (`306f36c`), after independent review,
+all 39 local checks (3,258 tests, two skips; 99 simulator records) and hosted
+Swift/CodeQL passed. Existing log queue/flush work remains #47. Native callback
+verification exposed the separate unreleased [#237](https://github.com/srps/Conduit/issues/237)
+release blocker. Its correction restores direct synchronous GUI entry with a
+private one-result bridge to the existing PlatformWork. All 40 startup-only local
+checks pass (3,233 tests, two skips; 98 simulator records), including actual-entry
+subprocess controls; real built-entry refusal and isolated native callback probes
+pass. Combined-source verification also passes all 40 checks (3,258 tests, two skips;
+99 simulator records), with actual composed hardlink refusal/callback proof.
+The correction PR/hosted gates remain open. See
+[the handoff evidence](./docs/verification-gui-startup-handoff-2026-10-25.md).
 The fixed logical writable filenames are selected in
 [0028](./docs/decisions/0028-fixed-writable-state-filenames.md), superseding 0020;
 app/daemon startup lease and naming adoption merged in

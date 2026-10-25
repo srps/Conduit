@@ -104,6 +104,8 @@ second writer busy; audit composition remains source-reviewed plus guarded-sink
 coverage. [Verification and limits](../verification-protected-log-2026-10-25.md).
 This does not establish complete non-owning-tool coverage or production shutdown.
 
+The startup handoff correction for [#237](https://github.com/srps/Conduit/issues/237) restores a synchronous GUI entry while keeping actual bootstrap effects on `PlatformWork`, before AppState composition. Real built-entry busy/name/root refusal probes preserve original bytes, and a separate FakeMachine dev launch delivers the background file-log failure and a network-path callback. The prior window-only smoke missed the async-main starvation. See [the scoped startup handoff evidence](../verification-gui-startup-handoff-2026-10-25.md). This does not complete store/workflow adoption, bounded shutdown or installed-version handoff.
+
 ## Open questions
 
 Concrete lease/store APIs, acquisition failures and writer inventory are
