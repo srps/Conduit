@@ -410,9 +410,9 @@ client's reload event.
 ## Next consumed host cut: reviewed shape (2026-10-25)
 
 Claude and Codex reviewed this shape against the actual host/store/daemon source.
-Decision 0032 selects reload-and-reconcile. The simulator dependency exception in
-[the host simulation review](design-runtime-host-simulation-review.md) is still
-an owner gate; no new workflow implementation or simulator access is claimed.
+Decision 0032 selects reload-and-reconcile. The owner selected the scoped simulator dependency and explicit effect injection
+in [0033](decisions/0033-headless-real-host-simulation.md). No new workflow
+implementation or simulator scenario is claimed.
 
 - **Store:** retain one physical-work slot, existing frozen reader/decoder and
   verified replacement. Preserve ConfigurationOperationContext. Add an explicit
@@ -456,8 +456,8 @@ an owner gate; no new workflow implementation or simulator access is claimed.
   resume checks and apply. Cover Stop during recovery/read/write, stale reload,
   a verified platform step followed by revoked runtime, invalid/missing inputs,
   no reload writes and required-default commit before Start. Report exploration
-  bounds and injected-defect sensitivity. Real-host pm-sim coverage depends on
-  the explicit simulator choice; old physical/client-fixture scenarios do not
+  bounds and injected-defect sensitivity. Real-host pm-sim coverage must consume
+  the scoped 0033 dependency with explicit effects; old physical/client-fixture scenarios do not
   count as adopted-workflow coverage.
 
 Private editor observation/reply encoding and its measured ceiling remain a later

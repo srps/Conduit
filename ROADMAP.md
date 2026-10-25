@@ -35,7 +35,9 @@ authority seam now passes all 40 local checks (3,307 tests, two skips; all 101
 simulator records and perf) and independent subscription-backed Claude review.
 [Verification](./docs/verification-session-store-authority-2026-10-25.md) separates
 that preparation from actual Host/AppState adoption. The owner selected [explicit reload-and-reconcile](./docs/decisions/0032-explicit-reload-and-reconcile.md);
-actual sole-store/workflow adoption and its independent model are the next cut. See the
+actual sole-store/workflow adoption and its independent model are the next cut.
+The owner also selected [0033](./docs/decisions/0033-headless-real-host-simulation.md):
+scoped real-host pm-sim coverage with explicit effect injection. See the
 [implementation checkpoint](./docs/design-runtime-adoption-cut-review.md).
 
 0.5.8 shipped on 2026-10-23 with the Settings fixes in #216. An edit that brings up

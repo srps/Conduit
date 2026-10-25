@@ -1,7 +1,8 @@
 # Real shared-host simulator coverage: owner review
 
-Status: proposed, 2026-10-25. No dependency, access widening, harness or runtime
-behavior is implemented by this review.
+Status: selected by the owner, 2026-10-25. Decision
+[0033](decisions/0033-headless-real-host-simulation.md) records the scoped dependency
+and explicit effect injection. Implementation remains planned.
 
 ## Decision needed
 
@@ -88,5 +89,5 @@ selected here. RuntimeActor and the final AppState activation remain later gates
 
 Official Claude Code, authenticated through the owner's claude.ai Max subscription,
 reviewed the source and confirmed the graph/rule conflict. No API fallback was used.
-The reload decision is recorded in 0032; this simulator question is separate. No
-simulator exception or implementation is authorized until the owner selects it.
+The reload decision is recorded in 0032; this simulator question is separate. The owner selected the scoped simulator exception and explicit effect injection;
+implementation and verification remain required.
