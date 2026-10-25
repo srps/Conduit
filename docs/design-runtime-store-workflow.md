@@ -3,7 +3,8 @@
 Status: reviewed with Claude Code through the owner's claude.ai Max subscription.
 The store core below is implemented and checked in focused tests (2026-10-25, see
 [the verification note](verification-configuration-store-2026-10-25.md)). The client
-engine, host adoption and the apply path are still proposed. This refines
+engine is implemented but unadopted; host adoption and the apply path remain
+unimplemented. This refines
 implementation planning for decisions 0014, 0015, 0017 and 0018. The owner selected
 holding a mixed apply in [0025](decisions/0025-hold-mixed-configuration-apply.md);
 the affected apply path remains unimplemented.
@@ -208,7 +209,7 @@ it introduces no additional lifecycle authority or shipping engine defaults.
 - **ConduitRuntime:** an internal MainActor store owns parsed current values,
   private component baselines/versions and one active I/O slot. All three files
   use that slot; preferences are an independent operation, not another writer.
-  It borrows the root lease and reports its own busy/idle state. It never releases
+  It retains the writer-owned StateRootSession and reports its own busy/idle state. It never releases
   root authority or claims journal/runtime quiescence. Blocking reads, parsing,
   staging, hashing and writes run through dedicated PlatformWork.
 
@@ -277,8 +278,8 @@ nominal Data lengths alone do not establish RSS, transport capacity or Stop fair
   commit is not vetoed. The explicit `commitPreferences` save is the migration path. A
   sidecar changed after the check is not excluded, and the tests pin that limit.
 - Not implemented: the Start/Stop fences, the apply path and the mixed-apply hold, the
-  RuntimeClient configuration submission, the configuration event emitter, lease
-  acquisition at startup, and host adoption. Those remain owner adoption work.
+  RuntimeClient configuration submission, the configuration event emitter and
+  host adoption. Startup lease acquisition is now implemented; Those remain owner adoption work.
 
 
 ## Production-adoption checkpoint (2026-10-25)
@@ -300,11 +301,12 @@ The next production cut connects AppState to the real RuntimeHost through the
 selected typed RuntimeClient and its in-memory framed transport. Configuration
 workflow adoption moves with that cut. Delete each replaced save/reconcile/lifecycle
 path; another writer-only AppState coordinator or transport bypass would postpone
-convergence. The selected one-lifecycle-at-a-time migration remains in force:
-each cut names the responsibilities moved and those still owned by AppState,
-and proves there are no overlapping writers or runtime effects. The table below
-is the resulting target ownership, not a claim that the first cut completes every
-lifecycle. The existing ConduitRuntime dependency condition permits the app's
+convergence. Under [0031](decisions/0031-incremental-runtime-development-single-activation.md),
+DNS→tunnels→proxy development and parity/model verification proceed incrementally,
+then AppState switches once and its replaced runtime/save paths are deleted
+together. Each development slice names implemented responsibilities and remaining
+parity gaps; activation proves there are no overlapping writers or runtime effects.
+The table below is the target ownership, not a claim of completed activation. The existing ConduitRuntime dependency condition permits the app's
 edge when it actually adopts the host. The v1 control socket belongs to pm-proxy;
 ConduitDaemon has no control socket yet. A production daemon socket is later work.
 
@@ -316,7 +318,7 @@ ConduitDaemon has no control socket yet. A production daemon socket is later wor
 | PlatformMac StateRootSession | Private lease, resolved plan and narrowly scoped file authority; no raw lease accessor. |
 | AppState | Editor drafts, presentation and app administration; invokes the client and AppKit Quit policy. |
 
-The legal construction seam keeps the semantic store in ConduitRuntime. A
+The consumed construction seam now keeps the semantic store in ConduitRuntime. A
 session-owned configuration replacement operation in PlatformMac accepts the
 existing ConfigurationComponent identity (runtime/platform/preferences), staged
 bytes and expected private baseline, and delegates to the existing verified
@@ -360,3 +362,46 @@ populates the editor or also admits runtime apply remains an affected-slice revi
 item; no behavior is selected here. That question does not reopen the chosen
 conflict/refusal policy or block unrelated work. No new ADR is written by this
 checkpoint, and no production adoption or RuntimeActor migration is claimed.
+
+
+## Next workflow contract checkpoint (2026-10-25)
+
+The session/store capability is implemented and focused verification passes.
+Actual host/workflow/client adoption remains open. The editor contract below is
+an API refinement for review, not an implemented private read protocol or a
+selected reply budget.
+
+Expected-prior component revisions already follow from 0015/0018. Two editors
+can observe durable D5 and runtime-view R5; one saves an invalid repair draft,
+creating durable D6 while runtime-view R5 stays unchanged. Checking only R5 or the
+server's current baseline would let the other editor overwrite that draft. A save
+must compare the original client-observed durable baseline. Ordinary snapshots
+cannot silently refresh the draft's baseline tokens.
+
+Proposed private editor observation: capture current values and runtime/platform/
+preferences baselines in one owner turn, without re-reading disk; pair them with
+the host incarnation and current intent generation. Preserve the store namespace,
+component and version when matching a supplied expected revision to a token the
+store actually issued. A version alone is not an identity across fresh stores.
+This needs no registry or retained observation history. Host incarnation, store
+baseline identity, runtime-view revisions and applied facts have different roles.
+
+Absent/uncommitted, current verified, last-known without authority and unavailable
+inputs need closed states. A missing file's defaults are not verified persisted;
+required defaults commit first through the same workflow. Conflicts and unknown
+writes keep the selected reload/review gate. A consistent last-verified view can
+be stale by its next use, so admission rechecks it; whether a private read is busy
+is a capacity decision rather than a substitute for those checks.
+
+Private values reuse the explicit runtime/platform bridge and codec. Preferences
+need an equally explicit private representation: their browser URL can contain
+tokens. Values remain off ordinary status/events/outcome lookup. The new reply
+direction, its full encoded ceiling and lifetime/copy measurements are still
+unimplemented and unselected. Do not silently borrow the request's 8 MiB cap or
+add an envelope allowance to it. Ordinary stamp metadata additions also require
+bounded sizing under 0030 before adoption. The v1 status counters stay unchanged.
+
+Explicit disk reload remains a separate owner policy gate: editor-only versus
+verified reload-and-reconcile. A normal private editor read performs neither disk
+I/O nor runtime apply. Client-owned dirty drafts cannot be discarded by another
+client's reload event.

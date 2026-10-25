@@ -61,8 +61,9 @@ classification, ownership/handoff refinements and sized bounds remain gates for
 the affected slices.
 
 The 0.6 core is the async client boundary, behavior-preserving shared-host
-extraction, AppState adoption by lifecycle (DNS, tunnels, proxy), then runtime
-isolation off the main actor. Test-suite consolidation follows demonstrated
+extraction, incremental DNS/tunnel/proxy development and verification followed
+by one final AppState activation ([0031](decisions/0031-incremental-runtime-development-single-activation.md)),
+then runtime isolation off the main actor. Test-suite consolidation follows demonstrated
 parity. #180 migrates complete typed-event families through this boundary as the
 corresponding code moves; #183 brings independent models, bounded exhaustive
 exploration and replayable seeded sequences to each state owner being changed.

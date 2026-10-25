@@ -231,12 +231,3 @@ struct ConfigurationValues: Sendable {
     var platform: PlatformIntegrationConfig
     var preferences: AppPreferences
 }
-
-/// Why a store cannot be made for a plan. It is refused before any read or write. A read-only configuration input, such as the
-/// one `pm-proxy` loads, is never an owner, so it stays on the kernel's read-only entry point.
-enum ConfigurationStoreRefusal: Error, Equatable, Sendable {
-    case readOnlyConfigAccess
-    case leaseMismatch
-    case roleMismatch(StateRootRole)
-    case fileOutsideRoot(StateRootRole)
-}

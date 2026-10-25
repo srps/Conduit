@@ -808,8 +808,10 @@ slices after owner approval and the necessary decisions:
    in-memory transport, conformance tests and consumers are not.
 3. Extract ConduitRuntime from the daemon with existing policy and fake-machine
    coverage. No production process switch or helper contract change.
-4. AppState DNS, tunnels, then proxy adoption, deleting copies and migrating each
-   slice's events/models. Keep both harnesses until parity permits consolidation.
+4. Under decision 0031, develop and verify DNS, tunnels, then proxy in the shared
+   host with each slice's events/models; activate AppState once and delete its
+   replaced runtime/save paths together. Keep both harnesses until parity permits
+   consolidation.
 5. Cohesive runtime isolation including ProxyOrchestrator, lane/reconciler/retry
    state and observer delivery; meet every #47/#79 acceptance item and total quit
    bound. This completes the proposed 0.6 core.

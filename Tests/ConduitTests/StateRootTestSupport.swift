@@ -43,9 +43,13 @@ func removeScratch(_ urls: [URL], file: StaticString = #filePath, line: UInt = #
     }
 }
 
-/// Ends a scratch session's authority and checks that its close was confirmed.
-func releaseScratchStateRoot(_ session: StateRootSession, file: StaticString = #filePath, line: UInt = #line) {
-    XCTAssertEqual(session.releaseForTesting(), .released, "the scratch state-root lease closed", file: file, line: line)
+/// Ends a scratch session's authority and checks that its close was confirmed. Any outcome other than `.released` fails the test here, and the
+/// outcome is returned, so a caller that must keep its root on an unconfirmed close can branch on it.
+@discardableResult
+func releaseScratchStateRoot(_ session: StateRootSession, file: StaticString = #filePath, line: UInt = #line) -> StateWriterRelease {
+    let outcome = session.releaseForTesting()
+    XCTAssertEqual(outcome, .released, "the scratch state-root lease closed", file: file, line: line)
+    return outcome
 }
 
 /// An absolute path of exactly `byteCount` UTF-8 bytes, built from names under the 255-byte NAME_MAX limit.
