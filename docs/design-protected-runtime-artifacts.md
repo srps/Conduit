@@ -70,3 +70,15 @@ Implemented in source, not yet release-validated. Actual scratch pm-proxy alias 
 - **Archive limits**: `maxBytes` must be positive and `archives` at least one. The initializer asserts both, and nothing normalizes them.
 - **Not claimed**: global boundedness of the app's log path. The pending-write queue (#47) is still unbounded, and the flush and close still block the main thread through `queue.sync` (#47). Infinite Settings toggles are not bounded across their lifetime. Physical disk IO is not bounded. The pre-open kind check judges only the path it observes: a path swapped after that check, or a device open that blocks, is not bounded. The guard narrows the retarget window and does not close it. A non-cooperating process that retargets a path between an admit and a write is not excluded.
 - **Verification**: see [the protected-log verification note](verification-protected-log-2026-10-25.md).
+
+
+### Physical-backend alternative considered
+
+A common rotation/open/lifetime policy matrix was considered and rejected for
+this slice. NDJSON retires a torn tail and truncates its single generation per
+batch; the app log preserves archives, persistent append and oversized lines.
+Combining those contracts would expose unsupported combinations and broaden
+the record backend. They share identity policy, resource inventory and refusal
+publication. Revisit a shared physical backend only with a demonstrated common
+contract and parity evidence, rather than combining the policies to reduce a
+class count.

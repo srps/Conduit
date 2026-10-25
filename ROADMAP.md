@@ -32,8 +32,10 @@ Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](http
 Snapshot destination protection and asynchronous diagnostic drains merged in
 [PR #234](https://github.com/srps/Conduit/pull/234) (`a623088`) after all 39 local
 checks and hosted Swift/CodeQL passed. Rotating app logs remain under #233. Their focused protection slice is implemented locally;
-independent review exposed close-uncertainty reporting and test-lifetime gaps now under correction.
-No final verification or merge is claimed for that slice.
+independent review exposed close-uncertainty reporting and test-lifetime gaps, now
+corrected. All 39 local checks pass (3,258 tests, two skips; 99 simulator records),
+with final scoped review complete. Hosted PR gates remain open; native callback
+verification exposed the separate #237 release blocker.
 The fixed logical writable filenames are selected in
 [0028](./docs/decisions/0028-fixed-writable-state-filenames.md), superseding 0020;
 app/daemon startup lease and naming adoption merged in
@@ -90,6 +92,12 @@ Owner acceptance is a separate lane: #99 needs a real KDC-failure recurrence;
 #111's normal 0.5.3→0.5.4 preflight/install passed, but negative paths, platform
 coverage and key-backup evidence remain. Do not add more happy-path tests merely
 to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
+
+Native startup blocker ([#237](https://github.com/srps/Conduit/issues/237)): the
+lease startup's async GUI entry lets windows open while queued MainActor/dispatch
+callbacks starve. A synchronous/async native AppKit comparison reproduced it.
+The entry handoff is being corrected separately before release; window logs
+alone are not callback verification. The serving 0.5.8 app remains unchanged.
 
 ## Proposed release scope
 

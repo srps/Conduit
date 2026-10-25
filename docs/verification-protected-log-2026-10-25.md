@@ -116,3 +116,47 @@ Limits, stated exactly:
 - Full `swift.yml` and `pm-sim all` are not run here; the parent runs them.
 - Hosted CI and installed-app behaviour are not verified.
 - The source SHA256 was not recomputed in this phase.
+
+
+## Final scoped source review
+
+Independent Claude review of the frozen corrected source found no blocking
+defects in close-uncertainty publication, guard ordering, constructor invariants,
+actual composition witnesses or explicit simulator cleanup. This was source
+reading, not execution; the parent owns full workflow and native evidence.
+The review also narrowed the cleanup claim: the harness-owned daemon cases
+reported zero cleanup errors. Standalone historical host fixtures still use
+best-effort removal outside that harness, so their quiescence is not established.
+AppState harness log draining remains a #47/#118 fixture follow-up; the review
+identified a possible late write, not a reproduced new failure.
+
+
+## Parent final workflow and native handoff finding
+
+All **39** local workflow checks passed on stable relevant-source SHA256
+`136c9732c4019f19bf3301ac0e28274ad61f9a61196bcb4e3826579c7a17deb6`,
+starting at `e26ead55d038a210de5f730081435da3ad1ec43e`. Full XCTest ran
+**3,258 tests, two skipped, zero failures**; all **99 simulator records** passed.
+The existing proxy performance gate passed and is not a whole-app/log-queue or
+maximum-configuration memory measurement. Logs:
+`/private/tmp/conduit-runtime-stage1-20261024/log-protection-full-gates/`.
+Subsequent edits are documentation only. Hosted PR checks remain required.
+
+An actual rebuilt ad-hoc native dev bundle was launched with a scratch
+log/config hardlink. Configuration bytes and the linked inode stayed intact,
+and FakeMachine/preview/DNS window startup logged, but the expected background
+warning did not reach captured stderr during the run. This is NOT a successful
+native refusal-delivery assertion. The installed serving process stayed intact.
+
+The parent isolated an inherited startup regression from PR #236: calling
+SwiftUI/AppKit main from the new async main occupies the main executor. Two
+bounded native AppKit probes use identical run loops and three-second global
+watchdogs. Synchronous main executes queued dispatch-main and MainActor callbacks;
+async main executes neither before its watchdog. The app sample places
+NSApplicationMain under ConduitMain's async task. Evidence:
+`/private/tmp/conduit-runtime-stage1-20261024/mainloop-probes/` and
+`log-protection-native.json`, `log-protection-native-sample.txt` in the same
+parent directory. [Issue #237](https://github.com/srps/Conduit/issues/237) tracks
+the separate entry-handoff correction and native callback regression. This is a
+release blocker, independent of the guarded physical writer. No release-ready
+or complete installed-app behavior claim follows from this log checkpoint.
