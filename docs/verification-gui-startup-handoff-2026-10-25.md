@@ -4,7 +4,7 @@ Branch `codex/gui-startup-handoff`, based on `main` at fc8e420 (PR #236).
 
 ## Status
 
-The focused suite, app-entry regression, actual built-entry refusal probes and isolated native callback smoke pass. Full local workflow passes on the startup-only source; combined-source and hosted checks remain pending. This is a startup correction, not shared-host adoption or release readiness.
+The focused suite, app-entry regression, actual built-entry refusal probes and isolated native callback smoke pass. All 40 local workflow checks pass on the combined source; hosted correction checks remain pending. This is a startup correction, not shared-host adoption or release readiness.
 
 ## Root cause
 
@@ -81,3 +81,19 @@ The initial 20-second observation ended before startup logs appeared; the owned 
 ## Full local workflow on the startup-only source
 
 All **40 checks** passed on unchanged relevant-source SHA256 `e20ab18dfd789f438e934373338ef746477a52ba3120e887f20d755f94fa3ca2`: **3,233 tests, two skips, zero failures; all 98 simulator records passed**, plus the new subprocess app-entry regression, packaging/signing stand-ins, updater checks and existing proxy performance gate. The runner exited0 and confirmed identical initial/final fingerprints. Logs and commands: `/private/tmp/conduit-runtime-stage1-20261024/gui-handoff-full-gates/results.json`. This source was based on fc8e420; combined verification after merged log protection is a separate checkpoint. The doc-only evidence updates do not change that fingerprint. Hosted PR checks remain pending.
+
+
+## Combined source and native acceptance
+
+After PR #238 merged at `306f36c`, the correction was rebased onto it. The two conflicts were evidence additions at the same insertion point in decisions0017/0028; both additions and the existing Open questions sections are retained. The initial conflict resolution accidentally dropped those final sections; they were restored exactly from merged main and the unpublished commit amended before publication. Relevant-source SHA256 is `b1d32d7d208d9816389090c27a59ec2630135caea291bc2e1ea8844e666f8a5c`. The first full-run head was0463a5b; the amended858c620 differs only in those decision documents, outside that source fingerprint.
+
+Actual built-entry refusal probes repeated on the combined binaries pass all four cases, preserve originals and create no unexpected outputs: `/private/tmp/pm-startup-proof-i3p3ggk8/result.json`.
+
+A new ad-hoc dev bundle on `/private/tmp/pm-gui-combined-e7runn5p` had `proxy.log` hardlinked to `config.json`. Actual PID22935 emitted exactly one `config.diagnostic_destination_refused sink=log reason=protected_identity resource=config`, displayed the FakeMachine preview and DNS windows, and processed the later network-path callback. Original config SHA256 `1e834dbe0d098d039a5679d76feb6fbe0c4692b577a0928c697eb4da5aa62049`, inode302648512 and both links remained; a real contender was busy on the state-root lease. Executable SHA256 `8b3a9c25ac86d6f152379411ac98a09942a161637348f5f4c8e9f42b93901c87` stayed unchanged. Only the verified dev bundle was asked to quit and its exit was confirmed. Serving PID35326, start time and executable path stayed unchanged. This is actual composed alias/callback evidence for #233/#237, not only the stand-in process model.
+
+Metadata and raw stderr/stdout: `/private/tmp/conduit-runtime-stage1-20261024/gui-handoff-combined-native.json` and adjacent files. Combined full workflow and hosted PR gates remain pending at this checkpoint. The existing #47 queue/flush and physical-I/O limits remain open.
+
+
+## Final combined local workflow
+
+All **40 checks** passed on unchanged combined relevant-source SHA256 `b1d32d7d208d9816389090c27a59ec2630135caea291bc2e1ea8844e666f8a5c`: **3,258 tests, two skips, zero failures; all 99 simulator records passed**, the actual-entry subprocess regression with both starvation controls, existing proxy performance gate, packaging/signing stand-ins, updater and protocol regressions. Initial/final fingerprints match and the runner exited0. Results and exact commands: `/private/tmp/conduit-runtime-stage1-20261024/gui-handoff-full-gates/results.json`. Earlier pending statements are checkpoint history; the remaining correction gate is hosted PR verification/merge. Owner production acceptance, store/client adoption, RuntimeActor migration and release readiness remain open.
