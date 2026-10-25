@@ -2,11 +2,13 @@
 import Foundation
 import NIOConcurrencyHelpers
 
-/// The diagnostic writers that append to a `RotatingRecordFile`. The role decides
-/// which protected resources a writer may not touch; a writer may always write its own file.
+/// The diagnostic writers that write a destination the gate guards: append-only record files and
+/// the whole-file snapshot replacement. The role decides which protected resources a writer may
+/// not touch; a writer may always write its own file.
 package enum RecordFileDiagnosticSink: String, Sendable {
     case connectionAudit = "audit"
     case runtimeEvents = "events"
+    case snapshot = "snapshot"
 }
 
 /// The closed set of authoritative files a diagnostic destination must never write. Each code
@@ -111,9 +113,16 @@ package final class RecordFileDestinationGate: @unchecked Sendable {
 
     /// Writes one batch. A latched gate throws without touching storage.
     package func write(_ batch: [Data], to file: RotatingRecordFile) throws {
+        try perform { try file.append(batch) }
+    }
+
+    /// Runs one guarded write a writer performs itself, such as a whole-file replacement. It shares the
+    /// latch and the event-first refusal with `write(_:to:)`, so no writer copies that policy. A latched
+    /// gate throws without running `work`. Errors other than a refusal pass through unchanged.
+    package func perform<T>(_ work: () throws -> T) throws -> T {
         if let refusal { throw refusal }
         do {
-            try file.append(batch)
+            return try work()
         } catch let refusal as RecordFileDestinationRefusal {
             refuse(refusal)
             throw refusal

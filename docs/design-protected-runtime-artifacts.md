@@ -1,0 +1,53 @@
+# Protected runtime artifacts: implementation checkpoint
+
+Status: agreed implementation API, reviewed with Claude Code through the owner’s claude.ai Max subscription. Partly implemented: the snapshot writer, the shared drain waiter and the diagnostic phase are in source (see the checkpoint at the end); log rotation and startup adoption are not. This applies the existing diagnostic-protection policy in decisions 0020/0028 and issue [233](https://github.com/srps/Conduit/issues/233); the owner has separately selected fixed writable filenames in 0028; no snapshot-size policy is selected here.
+
+## Confirmed failure
+
+An owned scratch run of the built pm-proxy at the source merged by PR 232 used a configuration containing `{"schemaVersion":2,"witness":"original-intent"}` at `snapshot.json`. Running with `--state-dir SCRATCH --config SCRATCH/snapshot.json --port 0 --socks-port 0 --dns-port 0 --exit-after-ready` exited successfully and replaced the configuration with the runtime snapshot. No installed app, helper, credentials or machine settings were touched.
+
+RuntimeHost had the same direct snapshot replacement at that reproduced base. App log append/rotation is also outside the existing audit/events guard; that is source evidence, not yet an executed log composition reproduction. Fixed writable names selected in decision 0028 remove the direct writable-name case after adoption; filesystem aliases and arbitrary read-only inputs still require protection. Naming enforcement remains planned.
+
+## Focused ownership
+
+- Reuse `RecordFileDestinationGuarding`, `RecordFileDestinationGate` and the one protected-resource map. The gate owns latching/reporting, the guard owns metadata checks, and a physical writer owns encoding and file effects. No second path parser or collision policy.
+- Keep the snapshot writer in ProxyKernel’s existing portable diagnostic-file family, using Foundation/Dispatch filesystem support. It takes a protocol and returns a protocol through a factory. This is not authority for helper, resolver, system-settings or other machine effects in the kernel.
+- RuntimeHost and pm-proxy use the same snapshot writer. Encoding, guard inspection and replacement run on its serial drain, off the runtime owner. At most one snapshot is active and one latest value is pending; updates coalesce without a per-update task or an unbounded queue.
+- Count bounds are structural. Raw snapshot strings and encoded bytes have no newly selected ceiling. Record measured encoded sizes and retained-value behavior; do not describe this as a process-memory bound or silently impose a new legacy snapshot-file limit.
+- A destination refusal latches once and emits the existing structured refusal before its derived log line. Later submissions do not reopen the destination. Other write/encoding errors and recovery remain observable, without reflecting snapshot values.
+
+## Flush and integration gates
+
+The shared async composition is now implemented; final review and workflow verification precede release. Waiting must leave the runtime owner available. Preserve a finite physical-work reservation until it really ends; caller cancellation/timeout cannot free it early or release writer authority.
+
+Reuse one absolute deadline for the diagnostic phase rather than adding a fresh readiness timeout or nested retry. Today the audit/events phase can wait 2 + 2 + 2 seconds, with the logger’s separate 2 seconds afterward. This is an existing diagnostic envelope, not the total shutdown budget. Preserve audit/events priority when adding snapshot flushing. Report exact queue/write/timeout facts; an empty queue after a refused or failed write is not proof the snapshot file is current. A timeout marker gets only the remaining budget, and its persistence must not be claimed without confirmation.
+
+The ready file currently precedes snapshot output. It supplies no promise that a snapshot exists when that file becomes visible. Preserve the existing snapshot-at-return/terminal-exit behavior when the relevant write and flush actually succeed; report partial outcomes otherwise. No power-loss durability, whole-process shutdown bound or forced cancellation of physical I/O is established. Total shutdown remains the separate reviewed #47 gate.
+
+## Verification and remaining slices
+
+Use deterministic held-worker tests for coalescing, one scheduled drain, refusal latching, error recovery, timeout without a second wait, and the distinction between drained work and successful output. Verify guards/encoding do not execute on the main thread. Actual scratch host/headless tests must preserve config bytes for direct names and supported symlink/hardlink aliases, keep serving, and cover final state at exit. Run all workflow gates before pushing.
+
+Rotating logs are a separate focused follow-up: protect the active file and every rotation source/destination plus the opened descriptor, attach the canonical event log before opening, and stop retrying a latched refusal. Updater metadata and legacy DNS import remain administrative/recovery owners; they are not relabeled as diagnostics.
+
+Startup lease adoption follows protection: acquire off the owner before migration/recovery, use resolved authoritative paths everywhere, retain one authority at the executable boundary until actual process exit, and refuse busy before constructing a host. Store adoption must replace the legacy migration writer directly using the shared frozen loader and verified commits, rather than add a second observation/write path. Pending migration rewrites need an explicit internal fact; AppState receives a client through staged shared-host composition and never gains a concrete store API.
+
+## Implementation checkpoint (2026-10-25)
+
+Implemented in source, not yet release-validated. Actual scratch pm-proxy alias and final-stopped-output witnesses passed; FakeMachine covers the host boundary. Full review and workflow gates precede a PR.
+
+- **Snapshot writer** (`ProxyKernel/Support/SnapshotArtifactWriter.swift`): `SnapshotArtifactWriting` from `makeSnapshotArtifactWriter`; the concrete writer is internal. `submit` is constant in the number of values and never encodes, guards or touches the file. Steady state is one value being written and one pending, so a burst coalesces to the latest. A superseded pending value is released after the lock, so for a moment up to three values can be alive. This is not a size bound: no raw or encoded ceiling is selected. Measured encoded sizes are recorded (`lastEncodedBytes`, `maxEncodedBytes`).
+- **Generations** never wrap. At the last generation the writer closes and reports `generation_exhausted`.
+- **Destination**: the snapshot sink excludes only its own `snapshot` resource. The config, the events, and every other protected resource still apply, so `--config` aliasing `snapshot.json` is refused, and the config bytes are preserved while the process keeps serving. Refusal latches once through `RecordFileDestinationGate.perform`.
+- **Write**: a temporary file in the destination's directory is created exclusively (`O_EXCL`), the opened descriptor is checked, the path is checked again immediately before `rename`. This narrows the window and does not close it against a non-cooperating process. No fsync, no readback, no power-loss claim.
+- **Waiter** (`RecordDrainWaiter`): one reservation at a time, with two parts, the group notify and one detached timer task that sleeps until the absolute deadline on the continuous clock. The physical reservation is released only when both have ended. A drained, timed-out or cancelled caller resolves at once, without waiting for the timer task. A later non-empty wait is `busy` until the timer body ends. This is conservative and accepted. The timer is a task because a dispatch timer runs on uptime and excludes sleep.
+- **Writer cleanup**: a failed attempt removes its temporary file. If the removal fails, or a close reports failure, the writer latches. It then creates no further temporary file and reports `disabled`. The latch is per writer lifetime.
+- **Drain versus confirmation**: `drained` is a queue fact. A confirmation of events or of a marker also requires zero recorded drops and failures.
+- **Phase** (`DiagnosticFlush`): one absolute deadline, 6 s, computed once. Each writer waits at most 2 s, cut to the phase deadline. Audit and events have priority; one further events confirmation is spent early on a shortfall or after a late snapshot result, never both. The marker also derives a bounded warning log so an events-file failure is visible without claiming that log persisted. A writer that cannot drain asynchronously reports `unavailable`, not success.
+- **Integration**: RuntimeHost and pm-proxy submit the snapshot and await the phase at readiness and at terminal exit. The ready file still precedes the snapshot write. Ordinary `startRuntime`, `reloadConfiguration` and ordinary `stopRuntime` submit and continue, with no diagnostic wait on the lifecycle lane. Their file currency is confirmed only by an explicit `flushEvents`. The alternative, a 2 s control-path wait, would keep the old file timing but delay settlement, so it was not chosen. `ConduitDaemon` awaits `flushEvents`.
+- **Late events**: at most one events confirmation beyond the first events wait. It is spent early after an audit or events shortfall, or late for the snapshot's own unconfirmed-result event. A late event with no time left is reported as unconfirmed, with the console line still derived.
+- **Callbacks**: `RuntimeHost`'s snapshot-change delivery reads the canonical orchestrator snapshot when it runs. An older delivery therefore writes the current state, not the value it was emitted with, and it cannot resurrect an older file after the final stop. The main-actor hop is kept for ordering with the other observers.
+- **Bounds claim**: the snapshot writer holds one value being written and one pending. It does not bound the `ObserverDeliveries` tasks that precede it. Those tasks queue on the main actor and are not limited by the writer's two slots.
+- **Verification**: see [the protected-snapshot verification note](verification-protected-snapshot-2026-10-25.md).
+- **Remaining synchronous work**: the logger's own 2 s flush still blocks the caller (documented, #47). The app's twin and the `ProxyOrchestrator` termination cleanup are unchanged.
+- **Not proved**: power-loss durability, readback, the whole shutdown bound (#47), log rotation (#233), startup naming or lease adoption, and the owner's real-machine behavior.

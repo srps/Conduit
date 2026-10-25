@@ -12,6 +12,8 @@ package final class DiscardingConnectionAuditSink: ConnectionAuditSink, @uncheck
     package func record(_ record: ConnectionAuditRecord) {
         // Intentionally empty.
     }
+    /// Nothing is ever queued, so nothing can be pending.
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { .drained }
 }
 
 // MARK: - RecordingConnectionAuditSink
@@ -53,6 +55,9 @@ package final class RecordingConnectionAuditSink: ConnectionAuditSink, @unchecke
             captured.withLockedValue { $0.statistics.failedRecords &+= 1 }
         }
     }
+
+    /// Records are captured synchronously in `record(_:)`, so nothing is ever pending.
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { .drained }
 
     /// Insertion-ordered bounded capture; overflow drops incoming records.
     package func records() -> [ConnectionAuditRecord] {
@@ -121,4 +126,8 @@ package final class FileConnectionAuditSink: ConnectionAuditSink, @unchecked Sen
 
     @discardableResult
     package func flush(timeout: TimeInterval = 2) -> Bool { writer.flush(timeout: timeout) }
+
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome {
+        await writer.drain(until: deadline)
+    }
 }

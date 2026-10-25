@@ -43,6 +43,8 @@ package final class RuntimeHost {
     let environment: RuntimeEnvironment
     let logger: any LogSink
     let eventWriter: RuntimeEventFileWriter
+    /// Writes `snapshot.json` on its own serial drain. Callers submit and never wait for the file.
+    private let snapshotWriter: any SnapshotArtifactWriting
 
     private(set) var config: ProxyConfig
     private(set) var platformConfig: PlatformIntegrationConfig
@@ -317,6 +319,12 @@ package final class RuntimeHost {
             destinationGuard: diagnosticDestinationGuard(for: .runtimeEvents, in: environment),
             eventLog: diagnosticsEventLog
         )
+        self.snapshotWriter = makeSnapshotArtifactWriter(
+            fileURL: environment.snapshotFile,
+            logger: logger,
+            destinationGuard: diagnosticDestinationGuard(for: .snapshot, in: environment),
+            eventLog: diagnosticsEventLog
+        )
         self.vpnStatusMonitor = vpnStatusMonitor ?? VPNStatusMonitor(
             graceSecondsProvider: { flapBox.withLockedValue { $0.graceSeconds } },
             minVisibleSecondsProvider: { flapBox.withLockedValue { $0.minVisibleSeconds } }
@@ -364,9 +372,14 @@ package final class RuntimeHost {
         orchestrator.eventLog.setSink { [eventWriter] event in eventWriter.record(event) }
         privilegeAuditSink.set { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
 
-        orchestrator.onSnapshotChange = { [weak self, deliveries] snapshot in
+        // The hop to the main actor is kept: deliveries share one ordering with the other observers. The state is read
+        // when the delivery runs, not taken from the value emitted earlier. A delivery queued before a later state
+        // (the final stop, for one) must not submit an older snapshot after it. The canonical snapshot is the only
+        // source, so no second revision counter is needed.
+        orchestrator.onSnapshotChange = { [weak self, deliveries] _ in
             deliveries.deliver {
-                self?.writeSnapshotFile(snapshot: snapshot)
+                guard let self else { return }
+                self.writeSnapshotFile(snapshot: self.orchestrator.snapshot)
             }
         }
         orchestrator.onConfigChange = { [weak self, deliveries] updatedConfig in
@@ -460,8 +473,9 @@ package final class RuntimeHost {
         await awaitLaunchRecovery()
         orchestrator.eventLog.append(RuntimeEvent(kind: .lifecycle, event: "daemon.ready", detail: "mode=\(mode)"))
         writeReadyFile()
+        // The ready file precedes the snapshot write; readiness never promises the snapshot is already visible.
         writeSnapshotFile(snapshot: orchestrator.snapshot)
-        flushEvents()
+        await flushEvents()
     }
 
     package func status() -> ControlDaemonStatus {
@@ -657,6 +671,8 @@ package final class RuntimeHost {
         vpnStatusMonitor.start()
         runtimeStarted = true
         logger.log(.notice, "Daemon runtime started.", category: .general)
+        // Submitted, not awaited: a diagnostic write never holds the lifecycle lane. Readiness and the terminal
+        // exit are the boundaries that confirm it (`flushEvents`).
         writeSnapshotFile(snapshot: orchestrator.snapshot)
     }
 
@@ -771,9 +787,11 @@ package final class RuntimeHost {
         guard terminal || isCurrent(token, .runtimeStop) else { return }
 
         logger.log(.notice, "Daemon runtime stopped.", category: .general)
+        // The stopped state is submitted. Only the terminal stop awaits the shared phase before exit, and it
+        // exits whatever the report says: diagnostics never gate the exit. An ordinary stop does not hold the lane.
         writeSnapshotFile(snapshot: orchestrator.snapshot)
-        flushEvents()
         if exitAfterStop {
+            await flushEvents()
             terminalExit()
         }
     }
@@ -810,6 +828,7 @@ package final class RuntimeHost {
         reconciler.reconcile(config: config, platformConfig: platformConfig)
         await reconciler.drain()
         logger.log(.notice, "Daemon configuration reloaded.", category: .general)
+        // Submitted, not awaited, as in `startRuntime`.
         writeSnapshotFile(snapshot: orchestrator.snapshot)
     }
 
@@ -874,13 +893,25 @@ package final class RuntimeHost {
         await orchestrator.testUpstream(named: name)
     }
 
-    package func flushEvents() {
-        let auditFlushed = orchestrator.auditSink.flush(timeout: 2)
+    /// The readiness and shutdown flush: audit, events, then the snapshot, inside one `DiagnosticFlushPhase`
+    /// (see `DiagnosticFlush`). Every writer is awaited. The logger's own flush stays a separate, bounded,
+    /// synchronous call; moving the whole runtime owner off the main actor is #47.
+    @discardableResult
+    package func flushEvents() async -> DiagnosticFlushReport {
         reportWriterLoss()
-        if !eventWriter.flushReportingTimeout(auditFlushed: auditFlushed, eventLog: orchestrator.eventLog) {
-            logger.log(.warning, "Observability shutdown flush deadline exceeded.", category: .general)
+        let report = await DiagnosticFlush.run(
+            phase: DiagnosticFlushPhase(),
+            audit: orchestrator.auditSink,
+            events: eventWriter,
+            snapshot: snapshotWriter,
+            eventLog: orchestrator.eventLog,
+            logger: logger
+        )
+        if !report.allConfirmed {
+            logger.log(.warning, "Observability flush not fully confirmed: audit=\(report.audit.rawValue) events=\(report.events.rawValue) snapshot=\(report.snapshot.rawValue).", category: .general)
         }
         logger.flush(timeout: 2)
+        return report
     }
 
     private var lastWriterLoss: UInt64 = 0
@@ -1378,16 +1409,13 @@ package final class RuntimeHost {
         }
     }
 
+    /// Hands the snapshot to the writer's drain. Encoding, the destination guard and the replacement all run there,
+    /// never on this actor, and a failed write is reported by the writer's own events.
     private func writeSnapshotFile(snapshot: ProxyOrchestratorSnapshot) {
         reportWriterLoss()
-        do {
-            try FileManager.default.createDirectory(at: environment.snapshotFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try Self.prettyEncoder.encode(snapshot)
-            try data.write(to: environment.snapshotFile, options: .atomic)
-        } catch {
-            logger.log(.warning, "Failed to write snapshot.json: \(error.localizedDescription)", category: .general)
-        }
+        snapshotWriter.submit(snapshot)
     }
+
 
     package nonisolated static let prettyEncoder: JSONEncoder = CanonicalJSON.encoder(prettyPrinted: true)
 }
@@ -1454,7 +1482,7 @@ extension RuntimeHost {
             )
         }
         await recovery.join()
-        if !writer.flush() {
+        if await writer.drain(until: ContinuousClock.now.advanced(by: .seconds(2))) != .drained {
             logger.log(.warning, "Launch recovery events were not all written to \(environment.eventsFile.path) before the deadline.", category: .general)
         }
         return emitted.events
