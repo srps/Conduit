@@ -1,0 +1,81 @@
+Source: /private/tmp/conduit-runtime-stage1-20261024/runtime-profile-checks/tests.log (current logs; run 1 is archived as runtime-profile-checks-attempt1).
+Run: exact wrapper `bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-profile.sh`, exit 0, after the repairs listed in README.md.
+Result: Build passed. Filtered suites: RuntimeServiceProfileEvidenceTests 5 passed; RuntimeServiceProfileProjectionTests 6 passed; RuntimeServiceProfilePressureTests 4 passed; total 15 executed, 0 failures.
+Checks: imports.log, events.log ("PASS: docs/events.md catalogues all 218 event names in product sources, and nothing more"), decisions.log all PASS; service-sim.log and display-sim.log as written by the wrapper.
+Lines are copied verbatim, grouped by the test that prints them. Nothing is recomputed.
+
+--- candidate and derived (EvidenceTests) ---
+RUNTIME-SERVICE-PROFILE candidate constructed=true subscriberRecordBytes=80 retainedByteBudget=31942548 retainedByteCeiling=33554432 headroom=1611884
+RUNTIME-SERVICE-PROFILE derived admissionWorstBytes=70 requestIDWorstBytes=38 fingerprintBytes=32 aliasRecordWorstBytes=140 internalFailureOutcomeBytes=46 internalFailureFinishedBytes=111 operationCapacity=14 operationRecordBytes=38
+RUNTIME-SERVICE-PROFILE derived laneCount=30 laneRetainedBytes=4177920 firstFrameRetainedBytes=524288 snapshotRetainedBytes=114688 subscriberRecordRetainedBytes=640 collectionProofBytes=24 baselineFrameOverheadBytes=303 maxEventBytes=8192
+RUNTIME-SERVICE-PROFILE request call=submit-stop frameBytes=297 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=submit-restart frameBytes=340 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=submit-test-dns frameBytes=282 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=submit-test-upstream frameBytes=389 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=submit-refresh-preflight frameBytes=291 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=outcome frameBytes=256 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=request-lookup frameBytes=266 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=subscribe-live frameBytes=160 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=subscribe-resume frameBytes=244 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-page-activeConnections frameBytes=309 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-page-upstreamHealth frameBytes=306 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-page-tunnelBindings frameBytes=306 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-page-tunnelDNSHosts frameBytes=306 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-snapshot frameBytes=135 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE page64KiB sample=typical rows=1000 pages=5 firstPageRows=217 maxFrameBytes=65256 cap=65536
+RUNTIME-SERVICE-PROFILE page64KiB sample=mixed-escape rows=64 pages=7 firstPageRows=10 maxFrameBytes=62474 cap=65536
+RUNTIME-SERVICE-PROFILE page64KiB sample=all-nul rows=64 pages=13 firstPageRows=5 maxFrameBytes=64169 cap=65536
+
+--- pressure (PressureTests) ---
+RUNTIME-SERVICE-PROFILE pressure-state highWater=665 firstRetained=154 snapshotGeneration=40 retainedSnapshotBytes=1330 latestSnapshotByteCapacity=57344 outcomes=0 aliasBytes=140 retainedByteBudget=31942548
+RUNTIME-SERVICE-PROFILE pressure candidate-ordinary-flood: streams held=0 | ordinary attempted=12 answered=8 refused=4 | stop modules answered=3/3 | status attempted=12 answered=8 refused=4
+RUNTIME-SERVICE-PROFILE pressure candidate-ordinary-flood+stream-lane-full: streams held=8 | ordinary attempted=12 answered=8 refused=4 | stop modules answered=3/3 | status attempted=12 answered=8 refused=4
+RUNTIME-SERVICE-PROFILE stop-lane dns attempts=3 stopLanePerModule=2 answered=2 refused=1 otherModulesAnswered=2
+(The ninth-subscription test prints nothing on success; it passed with RuntimeClientError.wire(.subscriberLimit) asserted at the first pull.)
+
+--- projection, all-NUL encoded maximum (ProjectionTests) ---
+RUNTIME-SERVICE-PROFILE projection all-nul encoded-maximum maxFitRows=657 firstRefusedRows=658 probes=20 encodedBytesAtMaxFit=8388576 byteCap=8388608 rowBytesMean=12768 rowBytesP95=12768 rowBytesMax=12768 pages64KiB=132 maxFrameBytes=64172
+RUNTIME-SERVICE-PROFILE projection all-nul-derived rowBytes=12768 byteCapQuotient=657 derivedFit=657 measuredFit=657 nulEscapeSeen=true
+
+--- projection, mixed escape (labelled not the encoded maximum) ---
+RUNTIME-SERVICE-PROFILE projection mixed-escape (not encoded maximum) maxFitRows=1349 firstRefusedRows=1350 probes=22 encodedBytesAtMaxFit=8382686 byteCap=8388608 rowBytesMean=6214 rowBytesP95=6214 rowBytesMax=6214 pages64KiB=135 maxFrameBytes=62480
+
+--- projection, typical (ProjectionTests) ---
+RUNTIME-SERVICE-PROFILE projection typical connections=1 encodedRowBytesTotal=268 rowBytesMean=268 rowBytesP95=268 rowBytesMax=268 pages64KiB=1 firstPageRows=1 maxFrameBytes=551 projectionElapsed=8.8875e-05 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection typical connections=64 encodedRowBytesTotal=18820 rowBytesMean=294 rowBytesP95=304 rowBytesMax=304 pages64KiB=1 firstPageRows=64 maxFrameBytes=19167 projectionElapsed=0.004179167 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection typical connections=256 encodedRowBytesTotal=75817 rowBytesMean=296 rowBytesP95=306 rowBytesMax=307 pages64KiB=2 firstPageRows=218 maxFrameBytes=65206 projectionElapsed=0.017236 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection typical connections=1000 encodedRowBytesTotal=297676 rowBytesMean=297 rowBytesP95=307 rowBytesMax=308 pages64KiB=5 firstPageRows=217 maxFrameBytes=65256 projectionElapsed=0.06709975 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection typical connections=10000 encodedRowBytesTotal=3006968 rowBytesMean=300 rowBytesP95=310 rowBytesMax=311 pages64KiB=47 firstPageRows=214 maxFrameBytes=65314 projectionElapsed=0.641984584 seconds (observation, not a deadline)
+
+--- resource, construction-only (run first; alphabetical test order) ---
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-before-first peakRSSBytes=123977728 mallocInUseBytes=1826784 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-1 peakRSSBytes=124043264 mallocInUseBytes=2576720 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-2 peakRSSBytes=124272640 mallocInUseBytes=3330736 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-3 peakRSSBytes=124600320 mallocInUseBytes=4084784 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-4 peakRSSBytes=124944384 mallocInUseBytes=4834672 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-5 peakRSSBytes=125272064 mallocInUseBytes=5588816 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-6 peakRSSBytes=125616128 mallocInUseBytes=6342800 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-7 peakRSSBytes=125943808 mallocInUseBytes=7096784 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-8 peakRSSBytes=126320640 mallocInUseBytes=7850768 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-9 peakRSSBytes=126664704 mallocInUseBytes=8600656 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-10 peakRSSBytes=127205376 mallocInUseBytes=9354960 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-11 peakRSSBytes=127959040 mallocInUseBytes=10108944 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only firstToEleventhMallocGrowthBytes=7532224
+
+--- resource, projection-only on a retained kernel (run after; alphabetical order) ---
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-before-first peakRSSBytes=215515136 mallocInUseBytes=2882208 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-1 peakRSSBytes=215793664 mallocInUseBytes=2882272 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-2 peakRSSBytes=215793664 mallocInUseBytes=2882368 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-3 peakRSSBytes=215793664 mallocInUseBytes=2882496 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-4 peakRSSBytes=215793664 mallocInUseBytes=2882560 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-5 peakRSSBytes=215793664 mallocInUseBytes=2882784 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-6 peakRSSBytes=215793664 mallocInUseBytes=2882848 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-7 peakRSSBytes=215793664 mallocInUseBytes=2882912 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-8 peakRSSBytes=215793664 mallocInUseBytes=2882976 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-9 peakRSSBytes=215793664 mallocInUseBytes=2883040 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-10 peakRSSBytes=215793664 mallocInUseBytes=2883424 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-11 peakRSSBytes=215793664 mallocInUseBytes=2883488 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only firstToEleventhMallocGrowthBytes=1216 flat=true extendTo101=true
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-101 peakRSSBytes=215793664 mallocInUseBytes=2883552 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only completed=101 finalPagesPerCapture=5
+(Iterations 12 to 100 are in the log at the same format and are not excerpted; the final line of that series is the iteration-101 line above.)

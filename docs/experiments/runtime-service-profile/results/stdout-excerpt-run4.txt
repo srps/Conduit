@@ -1,0 +1,37 @@
+Source: /private/tmp/conduit-runtime-stage1-20261024/runtime-profile-checks/tests.log (current logs after the single wrapper pass; earlier logs archived as attempt1 to attempt3).
+Run: exact wrapper `bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-profile.sh`, exit 0. Source at this run: `SensitiveValueSanitizer.sanitize` wraps its empty-check-then-`sanitizeContent` in one synchronous `autoreleasepool` under `#if canImport(ObjectiveC)`. `observableTarget` is the original one-line delegate.
+Filter: RuntimeServiceProfile|ObservableTargetRedaction|ConnectFailureEvent|RuntimeEventTyped|AuditRegression (68 tests executed, 0 failures).
+Lines are copied verbatim. Nothing is recomputed.
+
+--- test suites ---
+Test Suite 'AuditRegressionTests' passed; Executed 16 tests, with 0 failures (0 unexpected)
+Test Suite 'ConnectFailureEventTests' passed; Executed 9 tests, with 0 failures (0 unexpected)
+Test Suite 'ObservableTargetRedactionTests' passed; Executed 4 tests, with 0 failures (0 unexpected)
+Test Suite 'RuntimeEventTypedTests' passed; Executed 24 tests, with 0 failures (0 unexpected)
+Test Suite 'RuntimeServiceProfileEvidenceTests' passed; Executed 5 tests, with 0 failures (0 unexpected)
+Test Suite 'RuntimeServiceProfilePressureTests' passed; Executed 4 tests, with 0 failures (0 unexpected)
+Test Suite 'RuntimeServiceProfileProjectionTests' passed; Executed 6 tests, with 0 failures (0 unexpected)
+Executed 68 tests, with 0 failures (0 unexpected) in 29.076 (29.089) seconds
+
+--- resource, construction-only (run first in the process) ---
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-before-first peakRSSBytes=51068928 mallocInUseBytes=5229072 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-1 peakRSSBytes=51068928 mallocInUseBytes=5229136 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only stage=construction-iteration-11 peakRSSBytes=51068928 mallocInUseBytes=5230352 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=construction-only firstToEleventhMallocGrowthBytes=1216
+
+--- resource, projection-only on a retained kernel ---
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-before-first peakRSSBytes=52822016 mallocInUseBytes=5529488 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-1 peakRSSBytes=53084160 mallocInUseBytes=5529552 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-11 peakRSSBytes=53084160 mallocInUseBytes=5530768 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only firstToEleventhMallocGrowthBytes=1216 flat=true extendTo101=true
+RUNTIME-SERVICE-PROFILE resource scope=projection-only stage=projection-iteration-101 peakRSSBytes=53346304 mallocInUseBytes=5530832 pagesPerCapture=5 process=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource scope=projection-only completed=101 finalPagesPerCapture=5
+
+--- checks ---
+PASS: docs/events.md catalogues all 218 event names in product sources, and nothing more
+
+--- comparison basis (not part of the run output) ---
+Run 2 (15 filtered tests, no sanitizer fix): construction-only iteration 1 to 11 growth 7532224 B (results/stdout-excerpt-run2.txt).
+Run 4 (68 filtered tests, sanitizer fix): construction-only iteration 1 to 11 growth 1216 B.
+Attempt 3 (68 filtered tests, observableTarget-only pool, not the approved location): construction-only iteration 1 to 11 growth 1216 B, archived.
+No same-filter run without the fix exists, so the run-2 to run-4 change mixes the fix with the larger filter and process state.

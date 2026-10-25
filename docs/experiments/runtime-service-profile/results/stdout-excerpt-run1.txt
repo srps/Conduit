@@ -1,0 +1,54 @@
+Source: /private/tmp/conduit-runtime-stage1-20261024/runtime-profile-checks/tests.log, lines 33-103 and 38-60, first run of the exact wrapper
+(`bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-profile.sh`), after the candidate test files were written.
+Build: the build step compiled. Filtered run: 13 tests executed, 1 failure (RuntimeServiceProfilePressureTests, ninth subscription; repaired afterwards, not re-run).
+Lines copied verbatim from the log; nothing below is recomputed or estimated.
+
+--- test failure (run 1, before repair) ---
+Pressure.swift:187: error: testCandidateNinthSubscriptionIsRefusedWholeAndLeavesTheEightParkedPulls : failed - a subscription beyond the candidate subscriber limit must be refused
+Test Suite 'RuntimeServiceProfilePressureTests' failed; Executed 4 tests, with 1 failure
+Test Suite 'ConduitTests.xctest' failed; Executed 13 tests, with 1 failure
+
+--- stdout ---
+RUNTIME-SERVICE-PROFILE candidate constructed=true subscriberRecordBytes=80 retainedByteBudget=31942548 retainedByteCeiling=33554432 headroom=1611884
+RUNTIME-SERVICE-PROFILE derived admissionWorstBytes=70 requestIDWorstBytes=38 fingerprintBytes=32 aliasRecordWorstBytes=140 internalFailureOutcomeBytes=46 internalFailureFinishedBytes=111 operationCapacity=14 operationRecordBytes=38
+RUNTIME-SERVICE-PROFILE derived laneCount=30 laneRetainedBytes=4177920 firstFrameRetainedBytes=524288 snapshotRetainedBytes=114688 subscriberRecordRetainedBytes=640 collectionProofBytes=24 baselineFrameOverheadBytes=303 maxEventBytes=8192
+RUNTIME-SERVICE-PROFILE request call=submit-stop frameBytes=297 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=submit-restart frameBytes=340 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=submit-test-dns frameBytes=282 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=submit-test-upstream frameBytes=389 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=submit-refresh-preflight frameBytes=291 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=outcome frameBytes=256 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=request-lookup frameBytes=266 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=subscribe-live frameBytes=160 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=subscribe-resume frameBytes=244 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-page-activeConnections frameBytes=309 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-page-upstreamHealth frameBytes=306 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-page-tunnelBindings frameBytes=306 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-page-tunnelDNSHosts frameBytes=306 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE request call=read-snapshot frameBytes=135 serverRequestCap=4096
+RUNTIME-SERVICE-PROFILE page64KiB sample=typical rows=1000 pages=5 firstPageRows=217 maxFrameBytes=65256 cap=65536
+RUNTIME-SERVICE-PROFILE page64KiB sample=worst-text rows=64 pages=7 firstPageRows=10 maxFrameBytes=62474 cap=65536
+RUNTIME-SERVICE-PROFILE pressure-state highWater=665 firstRetained=154 snapshotGeneration=40 retainedSnapshotBytes=1330 latestSnapshotByteCapacity=57344 outcomes=0 aliasBytes=140 retainedByteBudget=31942548
+RUNTIME-SERVICE-PROFILE pressure candidate-ordinary-flood: streams held=0 | ordinary attempted=12 answered=8 refused=4 | stop modules answered=3/3 | status attempted=12 answered=8 refused=4
+RUNTIME-SERVICE-PROFILE pressure candidate-ordinary-flood+stream-lane-full: streams held=8 | ordinary attempted=12 answered=8 refused=4 | stop modules answered=3/3 | status attempted=12 answered=8 refused=4
+RUNTIME-SERVICE-PROFILE stop-lane dns attempts=3 stopLanePerModule=2 answered=2 refused=1 otherModulesAnswered=2
+RUNTIME-SERVICE-PROFILE resource stage=before-first peakRSSBytes=299057152 mallocInUseBytes=3489888 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-1 peakRSSBytes=299057152 mallocInUseBytes=4239760 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-2 peakRSSBytes=299057152 mallocInUseBytes=4993712 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-3 peakRSSBytes=299057152 mallocInUseBytes=5747696 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-4 peakRSSBytes=299057152 mallocInUseBytes=6497520 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-5 peakRSSBytes=299057152 mallocInUseBytes=7251600 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-6 peakRSSBytes=299057152 mallocInUseBytes=8005520 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-7 peakRSSBytes=299057152 mallocInUseBytes=8759440 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-8 peakRSSBytes=299057152 mallocInUseBytes=9513360 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-9 peakRSSBytes=299057152 mallocInUseBytes=10263184 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-10 peakRSSBytes=299057152 mallocInUseBytes=11017424 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource stage=iteration-11 peakRSSBytes=299057152 mallocInUseBytes=11771344 pagesPerCapture=5 scope=XCTest-test-process-Debug typical-1000-rows no-caller-autoreleasepool
+RUNTIME-SERVICE-PROFILE resource firstToEleventhMallocGrowthBytes=7531584 extendTo101=false
+RUNTIME-SERVICE-PROFILE resource expansion withheld: report before repeating
+RUNTIME-SERVICE-PROFILE projection typical connections=1 encodedRowBytesTotal=268 rowBytesMean=268 rowBytesP95=268 rowBytesMax=268 pages64KiB=1 firstPageRows=1 maxFrameBytes=551 projectionElapsed=0.000127083 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection typical connections=64 encodedRowBytesTotal=18820 rowBytesMean=294 rowBytesP95=304 rowBytesMax=304 pages64KiB=1 firstPageRows=64 maxFrameBytes=19167 projectionElapsed=0.004345042 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection typical connections=256 encodedRowBytesTotal=75817 rowBytesMean=296 rowBytesP95=306 rowBytesMax=307 pages64KiB=2 firstPageRows=218 maxFrameBytes=65206 projectionElapsed=0.017323708 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection typical connections=1000 encodedRowBytesTotal=297676 rowBytesMean=297 rowBytesP95=307 rowBytesMax=308 pages64KiB=5 firstPageRows=217 maxFrameBytes=65256 projectionElapsed=0.067295917 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection typical connections=10000 encodedRowBytesTotal=3006968 rowBytesMean=300 rowBytesP95=310 rowBytesMax=311 pages64KiB=47 firstPageRows=214 maxFrameBytes=65314 projectionElapsed=0.667707 seconds (observation, not a deadline)
+RUNTIME-SERVICE-PROFILE projection worst-text maxFitRows=1349 firstRefusedRows=1350 probes=22 encodedBytesAtMaxFit=8382686 byteCap=8388608 rowBytesMean=6214 rowBytesP95=6214 rowBytesMax=6214 pages64KiB=135 maxFrameBytes=62480 sharedBodiesUTF8Bytes=[1025, 1025, 1025, 1036] (rows share four bodies, so the sum of per-row bytes is not physical memory)

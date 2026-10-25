@@ -1,0 +1,39 @@
+Source: /private/tmp/conduit-runtime-stage1-20261024/runtime-profile-checks/tests.log (the current logs after pass 7; earlier logs are archived).
+Run: exact wrapper `bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-profile.sh`, exit 0, with a 180 s bound in the wrapper.
+Result: 68 filtered tests executed, 0 failures. The event catalogue check passed (218 names).
+Lines are copied verbatim, grouped by the test that prints them.
+Provenance: this pass follows aborted attempts 5 and 6 (see README). Those attempts hung in the ninth-subscription test. The cause was in the test helper, not the product: `parkStreamPulls` started each pull in the same loop as the next stream's open, so the next open waited behind a queued pull. Pass 7 opens every stream first, then starts the pulls.
+
+--- test suites ---
+Test Suite 'AuditRegressionTests' passed; Executed 16 tests, with 0 failures (0 unexpected)
+Test Suite 'ConnectFailureEventTests' passed; Executed 9 tests, with 0 failures (0 unexpected)
+Test Suite 'ObservableTargetRedactionTests' passed; Executed 4 tests, with 0 failures (0 unexpected)
+Test Suite 'RuntimeEventTypedTests' passed; Executed 24 tests, with 0 failures (0 unexpected)
+Test Suite 'RuntimeServiceProfileEvidenceTests' passed; Executed 5 tests, with 0 failures (0 unexpected)
+Test Suite 'RuntimeServiceProfilePressureTests' passed; Executed 4 tests, with 0 failures (0 unexpected)
+Test Suite 'RuntimeServiceProfileProjectionTests' passed; Executed 6 tests, with 0 failures (0 unexpected)
+Executed 68 tests, with 0 failures (0 unexpected) in 28.822 (28.830) seconds
+
+--- pressure (PressureTests) ---
+RUNTIME-SERVICE-PROFILE pressure-state highWater=665 firstRetained=154 snapshotGeneration=40 retainedSnapshotBytes=1330 latestSnapshotByteCapacity=57344 outcomes=0 aliasBytes=140 retainedByteBudget=31942548
+RUNTIME-SERVICE-PROFILE pressure candidate-ordinary-flood: streams held=0 | ordinary attempted=12 answered=8 laneBusy=4 | stop modules answered=3/3 | status attempted=12 answered=8 laneBusy=4 | hostFailures=0 unexpected=0
+RUNTIME-SERVICE-PROFILE pressure candidate-ordinary-flood+stream-lane-full: streams held=8 | ordinary attempted=12 answered=8 laneBusy=4 | stop modules answered=3/3 | status attempted=12 answered=8 laneBusy=4 | hostFailures=0 unexpected=0
+RUNTIME-SERVICE-PROFILE stop-lane dns attempts=3 stopLanePerModule=2 admitted=2 laneBusy=1 hostFailures=0 otherModulesAdmitted=2
+
+--- projection, all-NUL strongest string (ProjectionTests) ---
+RUNTIME-SERVICE-PROFILE projection all-nul strongest-string maxFitRows=657 firstRefusedRows=658 probes=20 encodedBytesAtMaxFit=8388576 byteCap=8388608 rowBytesMean=12768 rowBytesP95=12768 rowBytesMax=12768 pages=132 maxFrameBytes=64172
+RUNTIME-SERVICE-PROFILE projection all-nul-derived rowBytes=12768 byteCapQuotient=657 measuredFit=657 nulEscapeSeen=true
+
+--- projection, mixed escape (labelled not a maximum) ---
+RUNTIME-SERVICE-PROFILE projection mixed-escape (not a maximum) maxFitRows=1349 firstRefusedRows=1350 probes=22 encodedBytesAtMaxFit=8382686 byteCap=8388608 rowBytesMean=6214 rowBytesP95=6214 rowBytesMax=6214 pages=135 maxFrameBytes=62480
+
+--- projection, typical (ProjectionTests) ---
+RUNTIME-SERVICE-PROFILE projection typical connections=10000 encodedRowBytesTotal=3006968 rowBytesMean=300 rowBytesP95=310 rowBytesMax=311 pages=47 firstPageRows=214 maxFrameBytes=65314 replyCap=65536 projectionElapsed=0.658069666 seconds (observation, not a deadline)
+
+--- resource (log-only observations; no assertion depends on them) ---
+RUNTIME-SERVICE-PROFILE resource scope=construction-only firstToEleventhMallocGrowthBytes=1216
+RUNTIME-SERVICE-PROFILE resource scope=projection-only firstToEleventhMallocGrowthBytes=1216 observationGateBytes=1048576 extendTo101=true
+RUNTIME-SERVICE-PROFILE resource scope=projection-only completed=101 finalPagesPerCapture=5
+
+--- checks ---
+PASS: docs/events.md catalogues all 218 event names in product sources, and nothing more
