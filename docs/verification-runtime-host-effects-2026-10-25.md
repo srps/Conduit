@@ -114,7 +114,11 @@ logs. The fingerprint covers the relevant source, tests, package and workflow
 inputs; subsequent decision/evidence prose updates are checked separately.
 The earlier full run also passed each check but changed source during execution;
 its stable=false result is historical and does not validate the final tree.
-Hosted checks will be verified on the PR's exact head before merge.
+Hosted Swift and CodeQL passed on exact head
+62b3b71dad943d7df6a874aa52c91fe16ae7f169; [PR243](https://github.com/srps/Conduit/pull/243)
+merged at80144373555e0a02fb22b3fd06f0f57c45c4589b. Optional automated code/security
+reviews failed to complete and Devin skipped; no actual review submissions or
+inline findings were present. Those services supply no clean-review evidence.
 The full run includes the app harness, which consumes the shared warmup producer. No serving app/helper was stopped, replaced or installed;
 no VPN was required. No real-session auth/PAC/VPN or installed-app validation is
 claimed. Decision 0032 records the chosen reload policy but is still planned;

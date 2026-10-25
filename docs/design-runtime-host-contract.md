@@ -1,7 +1,7 @@
 # Shared runtime contracts and host: owner review draft
 
 Date: 2026-10-24. Status: **selected architecture; staged implementation authorized**.
-Implementation status: the stage-1 foundation (typed lifecycle events, control value types and codec, the `RuntimeClient` protocol) is implemented on this branch. `ConduitRuntime` holds the mechanically extracted RuntimeHost. PR #235 supplies the unadopted bounded service behind the framed client; actual RuntimeHost adaptation, AppState adoption and the production v2 socket remain pending. See the [stage-1 inventory](./runtime-client-stage1-inventory.md).
+Implementation status: the stage-1 foundation (typed lifecycle events, control value types and codec, the `RuntimeClient` protocol) is merged and unreleased. `ConduitRuntime` holds the mechanically extracted RuntimeHost. PR #235 supplies the unadopted bounded service behind the framed client; actual RuntimeHost adaptation, AppState adoption and the production v2 socket remain pending. See the [stage-1 inventory](./runtime-client-stage1-inventory.md).
 
 Prepared by Codex with Claude Code architecture and persistence-policy review,
 using the owner's `claude.ai` Max subscription. The owner selected the module and
@@ -33,7 +33,8 @@ app/daemon components use `config.json`, `platform.json`, `preferences.json` and
 Unsupported daemon custom names must refuse before migration/recovery with
 move/rename guidance and preserved bytes. No automatic import is selected.
 Fixed names do not replace diagnostic destination or canonical identity checks.
-Naming enforcement and startup adoption remain planned.
+Naming enforcement and startup lease adoption are implemented in PR #236. Complete
+store/workflow adoption and writer quiescence remain open.
 
 The owner
 subsequently selected resource limits at update/startup/import boundaries in
@@ -60,19 +61,20 @@ cannot reproduce required frozen runtime fields after bounded encode/decode.
 Private/domain values remain canonical seconds. No silent normalization/schema3.
 The alternatives and revisit triggers are in the records above.
 
-PR225 merged the unadopted layout/OS-lease primitives at1bb79b7; no shipping startup
-or persistence writer acquires them yet. PR226 merged diagnostic destination
+PR225 introduced the layout/OS-lease primitives; PR236 consumes them at app and
+daemon startup, before migration or recovery. PR226 merged diagnostic destination
 guards at e5156b2 after local/hosted checks; #222 is closed. The private codec/bridge
 is merged and unadopted. Runtime/file bounds and exact persistence merged in
 PRs 227–230; PR231 adds the ordinary framed client. PR232 merges the unadopted
 verified-store core with one shared loader and replacement path. It passed all
 39 local checks and hosted Swift/CodeQL; optional hosted review failures are not
 clean-review evidence. See [the store verification](verification-configuration-store-2026-10-25.md).
-The separate `codex/runtime-service-engine` branch has a partial service foundation
-and bounded wait/work models; observation/pages/coalescing and review corrections
-are in progress with Claude through the verified claude.ai Max subscription.
-Production startup ownership, store/workflow/host adoption, AppState convergence,
-RuntimeActor migration and release readiness remain open.
+PR235 merges the bounded admission, observation, page and replay service with its
+models; the real host/client adapter remains unadopted. PR242 connects the store to
+private session authority. PR243 implements mandatory effects and actual-host
+pm-sim coverage under decision0033. Actual store/workflow adoption is in progress;
+AppState convergence, RuntimeActor and release readiness remain open. Current
+status belongs in [ROADMAP](../ROADMAP.md), with per-slice verification linked there.
 
 Release scratch probes distinguish high-water RSS, current footprint and live
 allocator bytes. All-forms128-tunnel fixtures peaked17.3/21.0MB RSS; a separate
@@ -102,7 +104,8 @@ The current sources establish several constraints:
   on main-actor isolation. Moving the host alone cannot complete isolation.
 - [DaemonClient](../Sources/ConduitShared/DaemonClient.swift) is synchronous and
   reads a response until EOF; it is not the proposed subscription-capable client.
-  The current control frame bound is 16 KiB.
+  That v1 control frame bound is 16 KiB. The separate v2 ordinary reply/stream
+  ceiling is 64 KiB under0030; its remaining production profile is unselected.
 - [ControlDaemonStatus](../Sources/ConduitShared/ControlProtocol.swift) omits VPN,
   error, upstream, connection and other state rendered by
   [RuntimePresentationAdapter](../Sources/Conduit/App/RuntimePresentationAdapter.swift).
@@ -218,8 +221,9 @@ Before integration, review each slice for duplicated field walks, implicit copie
 and policy added to AppState. The local resource slice now uses one typed walk
 through `ConfigurationResourceSource` views; each adapter only exposes existing
 storage. Shared constants and parity tests alone did not satisfy this requirement.
-File/startup adoption remains pending. The exact-save correction needs an explicit
-migration into the sole shared workflow, without introducing another coordinator.
+Runtime and sidecar bounded-file startup/import adoption is implemented in
+PRs228/230. The exact-save rule is implemented in the store core; connecting it to
+the sole actual-host workflow remains open, without another coordinator.
 Tests should exercise the real adapters against independent expected outcomes and
 models, including refusal before side effects; they should not merely compare two
 copies of production policy.
@@ -663,9 +667,9 @@ an old writer still alive during relaunch/update overlap could overwrite a new
 instance. A one-writer object or a payload digest alone does not prevent this.
 Before allowing such overlap, prove the old writer has quiesced/exited or design
 bounded exclusive state-directory write ownership. A pending marker alone would
-not stop an old writer. No existing process lock or new durable marker is claimed
-here. The owner selected exclusive OS-backed writer authority in decision 0017;
-its implementation remains planned. Legacy binaries still need old-process-exit
+not stop an old writer. The owner selected exclusive OS-backed writer authority in decision0017.
+App/daemon startup now acquires it under0028 before any state migration/recovery;
+complete workflow adoption and logical/physical shutdown proof remain open. Legacy binaries still need old-process-exit
 handoff. A crash's unsaved
 stop warning is emitted in the old session; reliably repeating it next launch
 would require separately approved durable evidence, which this policy does not add.

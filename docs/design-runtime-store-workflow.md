@@ -119,7 +119,8 @@ requires an ordinary save to refuse observed byte changes since the verified
 baseline, preserving the file/draft and holding the new apply until explicit
 reload/review. Formatting-only edits conflict. A failed pre-read cannot authorize
 a replacement. Reload uses the same owner and cannot bypass eligibility or
-Stop/shutdown fences. This is a planned store check, not filesystem compare-and-swap;
+Stop/shutdown fences. The store core implements this check; actual-host adoption
+remains open. It is not filesystem compare-and-swap;
 nonparticipating editors can still race after it. The owner selected this over
 legacy overwrite authority on 2026-10-24.
 
@@ -240,9 +241,10 @@ to establish those unadopted host fences.
 Verify the production store against an independent bounded model for open/reload,
 conditional writes, stale baseline tokens, busy refusal, missing files, read
 failures, formatting/unknown-field edits, partial results and unchanged verification.
-Keep the physical classifier matrix and scratch OS witnesses. pm-sim exercises
-the physical mechanism through PlatformMac; it does not gain a ConduitRuntime
-dependency. The complete configuration event family and one owner emitter move
+Keep the physical classifier matrix and scratch OS witnesses. The initial store-core scenarios exercised the physical mechanism through
+PlatformMac. Decision0033 subsequently adds the scoped ConduitRuntime dependency
+and actual-host scenarios with explicit effects; workflow coverage must use that
+same boundary. The complete configuration event family and one owner emitter move
 with actual workflow/host adoption. This core reports typed persistence facts
 and does not invent a parallel configuration/lifecycle coordinator.
 
@@ -411,8 +413,9 @@ client's reload event.
 
 Claude and Codex reviewed this shape against the actual host/store/daemon source.
 Decision 0032 selects reload-and-reconcile. The owner selected the scoped simulator dependency and explicit effect injection
-in [0033](decisions/0033-headless-real-host-simulation.md). No new workflow
-implementation or simulator scenario is claimed.
+in [0033](decisions/0033-headless-real-host-simulation.md). PR243 implements the
+effect boundary and actual-host scenario. The workflow responsibilities below
+remain the next cut, rather than a claim that its implementation has passed.
 
 - **Store:** retain one physical-work slot, existing frozen reader/decoder and
   verified replacement. Preserve ConfigurationOperationContext. Add an explicit

@@ -256,8 +256,8 @@ Notes:
 | `ConfigDefaults.swift`       | `ConfigDefaultsProvider` protocol + `GenericDefaults` + `LegacyConfigMigration` (additive `decodeIfPresent` paths)     |
 | `PresetLoader.swift`         | Bundled preset index/record loader for `Resources/Presets/*.json`; validates decoded configs before returning them      |
 | `ConfigSections.swift`       | Nested `Codable` struct groupings referenced from `ProxyConfig`                                                        |
-| `ConfigValidation.swift`     | Field-level validators — errors surface in `SettingsView` inline and block `ProxyConfigPersistence.save`                |
-| `ConfigDiff.swift`           | Subsystem-level delta between two `ProxyConfig`s; the planned targeted reload will reuse this                          |
+| `ConfigValidation.swift`     | Runtime problem classification for Settings and start/subsystem gates; storage format/resource acceptance is separate                |
+| `ConfigDiff.swift`           | Subsystem-level delta between two `ProxyConfig`s, consumed by the runtime reconciler and reload                          |
 | `ProxyStatus.swift`          | `ProxyRuntimeStatus`, `ProxyMetrics`, `DirectModeCause` — the runtime snapshot fields                                  |
 | `UpstreamProxy.swift`        | `Hashable` value type — the key for `CredentialProvider` conformers                                                    |
 | `RuntimeEvent.swift`         | Structured event kinds + `RuntimeEventLog` (NIO-safe ring buffer). Optional typed `RuntimeEventPayload` (`typed`) for migrated `lifecycle.*` names; the legacy initializer refuses that namespace. See STYLE rule 3 and [`events.md`](./events.md#typed-lifecycle-payloads). |

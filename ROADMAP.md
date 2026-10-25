@@ -22,75 +22,45 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 
 ## Immediate priorities (2026-10-25)
 
-The v2 display slice now passes all 40 local checks (3,286 tests, two skips; all 100 simulator records and perf), independent Claude review and actual release allocation probes. One shared sanitizer lifetime correction prevents temporary accumulation without caller pools. The owner selected **64 KiB ordinary replies/stream frames** in [0030](./docs/decisions/0030-ordinary-runtime-reply-frame-cap.md); collections remain separately paged and the private 8 MiB channel is unchanged. The ceiling is recorded, with production-profile enforcement still planned. [PR #241](https://github.com/srps/Conduit/pull/241) merged the measured test-only profile and a shared kernel sanitizer lifetime fix after all 40 local checks (3,301 tests, two skips; all 100 simulator records and perf), independent subscription-backed Claude review, and hosted Swift/CodeQL passed. Direct Release before/after controls reproduce the scoped allocation correction; they do not establish app steady-state RAM. Remaining profile values and actual store/client/RuntimeHost adoption are still open; test candidate limits are not shipping defaults. See [the display verification](./docs/verification-runtime-display-2026-10-25.md).
+The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/186),
+[#180](https://github.com/srps/Conduit/issues/180),
+[#183](https://github.com/srps/Conduit/issues/183)) is merged in foundations and
+still converging in production. These changes are **unreleased**; 0.5.8 remains
+the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history.
 
-**Owner selected:** [0031](./docs/decisions/0031-incremental-runtime-development-single-activation.md)
-develops and verifies DNS→tunnels→proxy incrementally, then activates AppState once
-and deletes its replaced runtime/save paths together. The larger activation review
-replaces temporary cross-owner execution bridges. Save-before-apply, Stop/Quit
-and the later whole-control-cluster RuntimeActor move remain selected. Shared-host
-parity/model tests and the sole store/workflow precede activation; actual host
-latency and the remaining profile still gate adoption. The consumed session/store
-authority seam now passes all 40 local checks (3,307 tests, two skips; all 101
-simulator records and perf) and independent subscription-backed Claude review.
-[Verification](./docs/verification-session-store-authority-2026-10-25.md) separates
-that preparation from actual Host/AppState adoption. The owner selected [explicit reload-and-reconcile](./docs/decisions/0032-explicit-reload-and-reconcile.md);
-actual sole-store/workflow adoption and its independent model are the next cut.
-The owner also selected [0033](./docs/decisions/0033-headless-real-host-simulation.md):
-scoped real-host pm-sim coverage with explicit effect injection. That consumed
-composition slice now passes all 40 local checks (3,320 tests, two skips; all 102
-simulator records and perf) and independent subscription-backed Claude review.
-Required effects replace hidden production fallbacks; bounded producer settlement
-and coalescing support safe scratch cleanup. It does not yet adopt the actual
-store/workflow or activate AppState. See [verification](./docs/verification-runtime-host-effects-2026-10-25.md) and the
-[implementation checkpoint](./docs/design-runtime-adoption-cut-review.md).
+| Stage | Current state | Remaining work |
+| --- | --- | --- |
+| Contracts and mechanisms | Typed lifecycle values, framed RuntimeClient, bounded admission/observation/replay service, verified-store core and bounded file readers are merged. | Consume them through the real host/client path; broader event families migrate with their owners. |
+| Ownership and isolation seams | App/daemon startup takes root authority before migration/recovery; fixed writable names, diagnostic protection and explicit fake/production effects are implemented. PR243 adds actual-host pm-sim coverage. | Complete store/workflow adoption and logical/physical shutdown accounting. |
+| Shared runtime convergence | Actual store/workflow integration is in progress, with typed configuration decisions and an independent model. | Verify DNS→tunnels→proxy parity, then switch AppState once and delete replaced runtime/save paths (0031). |
+| Client, isolation and release | Display bounds and the 64 KiB ordinary reply/stream ceiling are selected. | Select the remaining measured production profile and private editor reply ceiling; integrate the client, move the whole control cluster to RuntimeActor, and validate the release. |
 
-0.5.8 shipped on 2026-10-23 with the Settings fixes in #216. An edit that brings up
-the listener note no longer shifts the window, a fixed configuration problem clears its Overview
-warning, and the Overview "active" counter no longer repeats the word.
+Next: consume the sole ConfigurationStore/RuntimeConfigurationWorkflow in the
+shared host. [0032](./docs/decisions/0032-explicit-reload-and-reconcile.md) selects
+read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
+mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
+Private editor replies and service defaults must not inherit experimental limits.
 
-Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has its typed lifecycle/value foundation merged in PR #220 (`fd630d1`) and the framed `RuntimeClient` adapter merged in PR #231 (`3195be6`). The bounded service behind the adapter, with admission, retained pages, coalesced snapshots and replay models, merged in
-[PR #235](https://github.com/srps/Conduit/pull/235) (`29f0484`) after independent review, all 39 local checks and hosted Swift/CodeQL passed. Production v2 socket and AppState adoption remain open. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
+Latest completed slice: [PR243](https://github.com/srps/Conduit/pull/243), merged at
+`8014437`, implements [0033](./docs/decisions/0033-headless-real-host-simulation.md).
+All 40 local checks pass on stable source (3,320 tests, two skips; all 102 simulator
+records and perf), with independent subscription-backed Claude review and exact-head
+hosted Swift/CodeQL passing. Optional automated reviews failed/skipped and provide
+no clean-review evidence. See [verification and limits](./docs/verification-runtime-host-effects-2026-10-25.md).
 
-Snapshot destination protection and asynchronous diagnostic drains merged in
-[PR #234](https://github.com/srps/Conduit/pull/234) (`a623088`) after all 39 local
-checks and hosted Swift/CodeQL passed. Rotating app-log protection merged in
-[PR #238](https://github.com/srps/Conduit/pull/238) (`306f36c`), after independent review,
-all 39 local checks (3,258 tests, two skips; 99 simulator records) and hosted
-Swift/CodeQL passed. Existing log queue/flush work remains #47. Native callback
-verification exposed the separate unreleased [#237](https://github.com/srps/Conduit/issues/237)
-release blocker. Its correction restores direct synchronous GUI entry with a
-private one-result bridge to the existing PlatformWork. All 40 startup-only local
-checks pass (3,233 tests, two skips; 98 simulator records), including actual-entry
-subprocess controls; real built-entry refusal and isolated native callback probes
-pass. Combined-source verification also passes all 40 checks (3,258 tests, two skips;
-99 simulator records), with actual composed hardlink refusal/callback proof.
-The correction merged in [PR #239](https://github.com/srps/Conduit/pull/239)
-(`f4d8e77`) after hosted Swift/CodeQL passed; #237 is resolved. See
-[the handoff evidence](./docs/verification-gui-startup-handoff-2026-10-25.md).
-The next [production-adoption checkpoint](./docs/design-runtime-store-workflow.md#production-adoption-checkpoint-2026-10-25)
-keeps the semantic store in ConduitRuntime and private file authority in
-PlatformMac, with actual host/client adoption and replaced-path deletion in one
-cohesive cut. The measured ordinary-v2 profile still gates that cut; the display-text
-policy is selected (decision 0029, 2026-10-25) and implemented locally on the v2 wire, so
-it no longer gates it. Reload apply semantics are a later affected-slice review item.
-The fixed logical writable filenames are selected in
-[0028](./docs/decisions/0028-fixed-writable-state-filenames.md), superseding 0020;
-app/daemon startup lease and naming adoption merged in
-[PR #236](https://github.com/srps/Conduit/pull/236) (`fc8e420`), after independent review,
-actual built-entry-point refusal probes, isolated native startup, all 39 local
-checks (3,233 tests, two skips; 98 simulator records) and hosted Swift/CodeQL passed. It creates no store yet: existing legacy writes
-remain behind one required lifetime authority until the coordinated store/workflow
-replacement, avoiding writes that bypass store baselines.
+Supporting evidence stays with its owning slice:
+[client/service](./docs/runtime-client-stage1-inventory.md),
+[store](./docs/verification-configuration-store-2026-10-25.md),
+[session authority](./docs/verification-session-store-authority-2026-10-25.md),
+[display/profile measurements](./docs/verification-runtime-display-2026-10-25.md),
+[GUI startup correction](./docs/verification-gui-startup-handoff-2026-10-25.md), and
+[adoption checkpoint](./docs/design-runtime-adoption-cut-review.md).
+The GUI callback regression #237 is resolved in PR239. App-log queue/flush work
+remains in #47. No RuntimeActor, installed-app or release-readiness claim follows
+from the foundation checks.
 
-The merged service checkpoint passes 323 focused tests after the replay-gap
-correction and independent review. The final combined workflow passed all 39 checks (3,201 tests, two skips; 98 simulator records) after an existing PAC test was corrected to await its actual completion callback. Hosted Swift/CodeQL passed for the merged service PR. Its separate foundation passed all
-39 checks; that result does not cover subsequent observation/integration changes.
-Current status (2026-10-25): [PR #235](https://github.com/srps/Conduit/pull/235), [PR #238](https://github.com/srps/Conduit/pull/238), [PR #239](https://github.com/srps/Conduit/pull/239) and [PR #240](https://github.com/srps/Conduit/pull/240) are merged. The service remains unadopted. The display-text slice (0029) passes all 40 checks, independent review and the recorded allocation probes; ordinary reply/stream frames are selected at 64 KiB (0030), with production-profile enforcement still planned. The remaining queue/retention/deadline/collection values are being measured, not selected from test fixtures. The owner-selected activation sequence is recorded in 0031. No production-owner adoption, RuntimeActor move or release readiness is claimed.
-
-0.5.7 shipped on 2026-10-22. The #205 Settings commit paths (Return, Apply,
-section close, quit with an invalid port) passed the owner's check in a `--dev`
-build of 0.5.8 on 2026-10-22; the installed build still needs a check.
+The owner's #205 Settings-path check passed in a dev build before 0.5.8 shipped;
+installed-build validation remains separate.
 
 1. **Safe dev bundle ([#23](https://github.com/srps/Conduit/issues/23)) [Rel, Sim]**
    — separate identity/name, automatic fake-machine mode, scratch state and
