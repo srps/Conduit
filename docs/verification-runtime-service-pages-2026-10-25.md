@@ -170,3 +170,16 @@ quiescence accounting invariant branch remains unwitnessed, as documented.
 
 Display-text policy remains proposed in [the review draft](design-runtime-display-bounds-review.md);
 no truncation or shipping profile has been implemented.
+
+## Final combined workflow
+
+All 39 checks corresponding to .github/workflows/swift.yml passed on the source
+at 0458569, with the same relevant-source fingerprint before and after the run.
+Fingerprint: 655adef801e5789e3992e8d4651d031c967f49e91dcc55c837e1619ea3e361b5.
+Full XCTest: 3,201 tests, two skipped, zero failures. All 98 simulator records passed.
+The existing proxy performance gate measured wall 10.163 s, maximum RSS 34,062,336 bytes
+and CPU 102.56%. This measures the existing proxy workload, not a whole-app or
+maximum-configuration memory bound.
+Logs: /private/tmp/conduit-runtime-stage1-20261024/runtime-service-combined-full-gates/.
+Only documentation changes follow this run. It does not establish host adoption,
+shipping resource defaults, real-machine behavior or release readiness.

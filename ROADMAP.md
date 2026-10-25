@@ -39,8 +39,7 @@ remain behind one required lifetime authority until the coordinated store/workfl
 replacement, avoiding writes that bypass store baselines.
 
 The combined local service checkpoint passes 323 focused tests after the replay-gap
-correction and independent review. The final full workflow is being rerun after an
-existing PAC test was corrected to await its actual completion callback. Its separate foundation passed all
+correction and independent review. The final combined workflow passed all 39 checks (3,201 tests, two skips; 98 simulator records) after an existing PAC test was corrected to await its actual completion callback. Hosted PR checks remain required. Its separate foundation passed all
 39 checks; that result does not cover subsequent observation/integration changes.
 A display-text policy and measured shipping ordinary-v2 profile are still owner
 gates. No production-owner adoption, RuntimeActor move or release readiness is claimed.
