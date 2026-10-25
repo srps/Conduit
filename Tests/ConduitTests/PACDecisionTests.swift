@@ -300,10 +300,15 @@ final class PACDecisionTests: XCTestCase {
 
         // Control: the same target outside gateway mode is probed and hinted,
         // so the counts above would have seen a connection.
+        // drain() waits for the in-flight count, which drops before onReachable
+        // runs, so wait for the callback itself.
+        let reachable = expectation(description: "hint reports the open target reachable")
         let open = hintDetector(resolver: ProbeResolver(.addresses([blocked])))
         XCTAssertEqual(open.probeForStrictModeHint(host: "rebind.example", port: listener.port, gatewayMode: false) {
             hinted.withLockedValue { $0 += 1 }
+            reachable.fulfill()
         }, .started)
+        await fulfillment(of: [reachable], timeout: 10)
         try await drain(open)
         XCTAssertEqual(hinted.withLockedValue { $0 }, 1)
         for _ in 0..<500 where listener.accepted == 0 {

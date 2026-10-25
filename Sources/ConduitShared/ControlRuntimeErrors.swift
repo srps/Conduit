@@ -10,6 +10,15 @@ package enum ControlRuntimeErrorCode: String, Codable, Sendable, Equatable, Case
     case unknownCommand = "unknown_command"
     case malformedMessage = "malformed_message"
     case invalidValue = "invalid_value"
+    /// The host already has its maximum number of open subscriptions.
+    case subscriberLimit = "subscriber_limit"
+    /// The request's budget ended before the host could answer with a result. Nothing was admitted, and a read answers this.
+    case deadlineExpired = "deadline_expired"
+    /// The request names another host incarnation, so no answer from this host is valid for it. Nothing was read.
+    case changedIncarnation = "changed_incarnation"
+    /// The host could not build the answer a valid read asked for. It is a closed failure with no text and no body.
+    /// Its answer is not a refusal of the request, so a caller must not treat it as a corrupt transport.
+    case internalFailure = "internal_failure"
 }
 
 /// A failure while building, encoding or decoding a v2 value. Each case maps to

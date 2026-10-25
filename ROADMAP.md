@@ -26,7 +26,23 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
 warning, and the Overview "active" counter no longer repeats the word.
 
-Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has its typed lifecycle/value foundation merged in PR #220 (`fd630d1`) and the framed `RuntimeClient` adapter merged in PR #231 (`3195be6`). The working service behind the adapter, admission and subscription engine, production v2 socket and AppState adoption remain open. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
+Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has its typed lifecycle/value foundation merged in PR #220 (`fd630d1`) and the framed `RuntimeClient` adapter merged in PR #231 (`3195be6`). The service behind the adapter is implemented locally with admission, retained pages, coalesced snapshots and replay models; its combined review and workflow/PR gates remain open. Production v2 socket and AppState adoption remain open. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
+
+Snapshot destination protection and asynchronous diagnostic drains merged in
+[PR #234](https://github.com/srps/Conduit/pull/234) (`a623088`) after all 39 local
+checks and hosted Swift/CodeQL passed. Rotating app logs remain under #233.
+The fixed logical writable filenames are selected in
+[0028](./docs/decisions/0028-fixed-writable-state-filenames.md), superseding 0020;
+app/daemon startup lease and naming adoption is in progress on
+`codex/runtime-startup-ownership`. It creates no store yet: existing legacy writes
+remain behind one required lifetime authority until the coordinated store/workflow
+replacement, avoiding writes that bypass store baselines.
+
+The combined local service checkpoint passes 323 focused tests after the replay-gap
+correction and independent review. The final combined workflow passed all 39 checks (3,201 tests, two skips; 98 simulator records) after an existing PAC test was corrected to await its actual completion callback. Hosted PR checks remain required. Its separate foundation passed all
+39 checks; that result does not cover subsequent observation/integration changes.
+A display-text policy and measured shipping ordinary-v2 profile are still owner
+gates. No production-owner adoption, RuntimeActor move or release readiness is claimed.
 
 0.5.7 shipped on 2026-10-22. The #205 Settings commit paths (Return, Apply,
 section close, quit with an invalid port) passed the owner's check in a `--dev`

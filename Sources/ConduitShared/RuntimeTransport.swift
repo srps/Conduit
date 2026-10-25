@@ -28,7 +28,7 @@ package protocol ControlRuntimeTransport: Sendable {
 
 /// One open stream. `next` waits for the next complete frame, with its line feed, within the deadline.
 ///
-/// Allowed wait failures: `RuntimeWaitEnd.deadlineExpired`, `RuntimeWaitEnd.cancelled`, and Swift's
+/// Allowed wait failures: `RuntimeWaitEnd.deadlineExpired`, `RuntimeWaitEnd.cancelled`, `RuntimeWaitEnd.transportBusy` (a wait that consumed nothing), and Swift's
 /// `CancellationError` (a cancelled task). Each one ends the wait with the stream still valid. No frame
 /// was consumed, and a later `next` receives the frame. A transport must not consume a frame on these.
 ///

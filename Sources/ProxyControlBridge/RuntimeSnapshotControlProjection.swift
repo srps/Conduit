@@ -55,152 +55,112 @@ package enum RuntimeSnapshotControlProjection {
         )
     }
 
-    // MARK: - Pages
+    // MARK: - Rows
 
-    /// One page of connections, in the projection's stable order: newest first, then ID.
-    /// The page names the host incarnation and answers the request's correlation.
-    package static func connectionPage(
-        _ connections: [ActiveConnectionInfo],
-        incarnation: ControlHostIncarnation,
-        revision: ControlCollectionRevision,
-        offset: Int,
-        correlation: ControlRequestID,
-        limits: ControlFrameLimits
-    ) throws -> ControlRuntimeMessage {
-        try ControlPagePacker.page(
-            of: connectionRows(connections),
-            offset: offset,
-            incarnation: incarnation,
-            revision: revision,
-            correlation: correlation,
-            limits: limits,
-            wrap: ControlPageReply.activeConnections
-        )
+    /// The one bounded projection of a collection's rows, read from one kernel snapshot in one owner turn. The exact count is checked
+    /// before any row is mapped, so a collection past the row bound is refused without being copied or built. The rows that remain are
+    /// then measured through `budget`, which stops at the first row past either bound. Every answer is closed: rows, over budget, or an
+    /// internal failure. The production owner adapter and the tests both call this, so no second projection path exists.
+    package static func projectRows(
+        _ kind: ControlCollectionKind,
+        from snapshot: ProxyOrchestratorSnapshot,
+        within budget: ControlRowBudget
+    ) -> ControlProjection {
+        switch kind {
+        case .activeConnections:
+            let connections = snapshot.activeConnections
+            guard connections.count <= budget.maxRows else { return .overBudget }
+            return answer(budget.measure(orderedConnections(connections.ordered), connectionRow)) { .activeConnections($0) }
+        case .upstreamHealth:
+            guard snapshot.upstreamStatuses.count <= budget.maxRows else { return .overBudget }
+            return answer(budget.measure(snapshot.upstreamStatuses, upstreamRow)) { .upstreamHealth($0) }
+        case .tunnelBindings:
+            guard snapshot.bindings.tunnels.count <= budget.maxRows else { return .overBudget }
+            return answer(budget.measure(snapshot.bindings.tunnels, tunnelBindingRow)) { .tunnelBindings($0) }
+        case .tunnelDNSHosts:
+            return projectDNSHosts(snapshot.tunnelDNSOverrideStatus, within: budget)
+        }
     }
 
-    /// One page of upstream health rows.
-    package static func upstreamPage(
-        _ statuses: [UpstreamRuntimeStatus],
-        incarnation: ControlHostIncarnation,
-        revision: ControlCollectionRevision,
-        offset: Int,
-        correlation: ControlRequestID,
-        limits: ControlFrameLimits
-    ) throws -> ControlRuntimeMessage {
-        try ControlPagePacker.page(
-            of: upstreamRows(statuses),
-            offset: offset,
-            incarnation: incarnation,
-            revision: revision,
-            correlation: correlation,
-            limits: limits,
-            wrap: ControlPageReply.upstreamHealth
-        )
-    }
-
-    /// One page of tunnel binding rows.
-    package static func tunnelBindingPage(
-        _ bindings: [TunnelBindingInfo],
-        incarnation: ControlHostIncarnation,
-        revision: ControlCollectionRevision,
-        offset: Int,
-        correlation: ControlRequestID,
-        limits: ControlFrameLimits
-    ) throws -> ControlRuntimeMessage {
-        try ControlPagePacker.page(
-            of: tunnelBindingRows(bindings),
-            offset: offset,
-            incarnation: incarnation,
-            revision: revision,
-            correlation: correlation,
-            limits: limits,
-            wrap: ControlPageReply.tunnelBindings
-        )
-    }
-
-    /// One page of tunnel DNS override hosts.
-    package static func tunnelDNSHostPage(
-        _ status: TunnelDNSOverrideStatus,
-        incarnation: ControlHostIncarnation,
-        revision: ControlCollectionRevision,
-        offset: Int,
-        correlation: ControlRequestID,
-        limits: ControlFrameLimits
-    ) throws -> ControlRuntimeMessage {
-        try ControlPagePacker.page(
-            of: tunnelDNSHostRows(status),
-            offset: offset,
-            incarnation: incarnation,
-            revision: revision,
-            correlation: correlation,
-            limits: limits,
-            wrap: ControlPageReply.tunnelDNSHosts
-        )
-    }
-
-    /// Connection rows in the projection's stable order: newest start first, then ID.
-    package static func connectionRows(_ connections: [ActiveConnectionInfo]) throws -> [ControlConnectionRow] {
-        let ordered = connections.sorted { lhs, rhs in
+    /// Connection rows in the projection's stable order: newest start first, then ID. Sorting copies the array, so it runs only
+    /// after the count has passed the bound.
+    private static func orderedConnections(_ connections: [ActiveConnectionInfo]) -> [ActiveConnectionInfo] {
+        connections.sorted { lhs, rhs in
             if lhs.startedAt != rhs.startedAt { return lhs.startedAt > rhs.startedAt }
             return lhs.id.uuidString < rhs.id.uuidString
         }
-        return try ordered.map { connection in
-            ControlConnectionRow(
-                id: ControlConnectionID(rawValue: connection.id),
-                destination: displayText(connection.destination),
-                upstream: displayText(connection.upstream),
-                method: displayText(connection.method),
-                startedAt: try timestamp(connection.startedAt),
-                lastActivityAt: try timestamp(connection.lastActivityAt),
-                bytesSent: try ControlCount(connection.bytesSent),
-                bytesReceived: try ControlCount(connection.bytesReceived),
-                tunnel: connection.tunnel,
-                authMethod: connection.authMethod.map(displayText)
-            )
+    }
+
+    /// The hosts in row order, with the count taken from the same view, so the count the snapshot references and the rows cannot disagree.
+    private static func projectDNSHosts(_ status: TunnelDNSOverrideStatus, within budget: ControlRowBudget) -> ControlProjection {
+        let source = TunnelDNSHostSource(status)
+        guard let count = source.count else { return .internalFailure }
+        guard count <= budget.maxRows else { return .overBudget }
+        return answer(budget.measure(source.hosts, { dnsHostRow($0.hostname, $0.outcome) })) { .tunnelDNSHosts($0) }
+    }
+
+    /// The number of hosts the override reports, which is the count the snapshot references. The sum is checked, so an overflowing
+    /// count is an invariant failure and never a wrapped total.
+    package static func tunnelDNSHostCount(_ status: TunnelDNSOverrideStatus) throws -> Int {
+        guard let count = TunnelDNSHostSource(status).count else { throw ControlRuntimeWireError.invalidValue }
+        return count
+    }
+
+    private static func answer<Row: ControlCollectionRow>(
+        _ measured: ControlRowsMeasure<Row>,
+        _ wrap: ([Row]) -> ControlProjectedRows
+    ) -> ControlProjection {
+        switch measured {
+        case .complete(let rows, let bytes): .rows(wrap(rows), encodedBytes: bytes)
+        case .overBudget: .overBudget
+        case .internalFailure: .internalFailure
         }
     }
 
-    package static func upstreamRows(_ statuses: [UpstreamRuntimeStatus]) throws -> [ControlUpstreamRow] {
-        try statuses.map { status in
-            ControlUpstreamRow(
-                id: ControlUpstreamID(rawValue: status.id),
-                name: displayText(status.name),
-                endpoint: displayText(status.endpoint),
-                circuitState: circuitState(status.circuitState),
-                ewmaLatencyMilliseconds: try status.ewmaLatencyMS.map { try ControlNonNegativeNumber($0) },
-                consecutiveFailures: try ControlCount(status.consecutiveFailures),
-                openUntil: try status.openUntil.map(timestamp)
-            )
-        }
+    private static func connectionRow(_ connection: ActiveConnectionInfo) throws -> ControlConnectionRow {
+        ControlConnectionRow(
+            id: ControlConnectionID(rawValue: connection.id),
+            destination: displayText(connection.destination),
+            upstream: displayText(connection.upstream),
+            method: displayText(connection.method),
+            startedAt: try timestamp(connection.startedAt),
+            lastActivityAt: try timestamp(connection.lastActivityAt),
+            bytesSent: try ControlCount(connection.bytesSent),
+            bytesReceived: try ControlCount(connection.bytesReceived),
+            tunnel: connection.tunnel,
+            authMethod: connection.authMethod.map(displayText)
+        )
     }
 
-    package static func tunnelBindingRows(_ bindings: [TunnelBindingInfo]) throws -> [ControlTunnelBindingRow] {
-        try bindings.map { binding in
-            ControlTunnelBindingRow(
-                id: ControlTunnelID(rawValue: binding.id),
-                label: displayText(binding.label),
-                localHost: displayText(binding.localHost),
-                localPort: try ControlPort(binding.localPort),
-                remoteHost: displayText(binding.remoteHost),
-                remotePort: try ControlPort(binding.remotePort),
-                proxied: binding.proxied,
-                healthy: binding.healthy
-            )
-        }
+    private static func upstreamRow(_ status: UpstreamRuntimeStatus) throws -> ControlUpstreamRow {
+        ControlUpstreamRow(
+            id: ControlUpstreamID(rawValue: status.id),
+            name: displayText(status.name),
+            endpoint: displayText(status.endpoint),
+            circuitState: circuitState(status.circuitState),
+            ewmaLatencyMilliseconds: try status.ewmaLatencyMS.map { try ControlNonNegativeNumber($0) },
+            consecutiveFailures: try ControlCount(status.consecutiveFailures),
+            openUntil: try status.openUntil.map(timestamp)
+        )
     }
 
-    /// Successful hosts first, then failed ones, each in the kernel's order.
-    package static func tunnelDNSHostRows(_ status: TunnelDNSOverrideStatus) -> [ControlTunnelDNSHostRow] {
-        switch status {
-        case .active(let hostnames):
-            return hostnames.map { ControlTunnelDNSHostRow(hostname: displayText($0), outcome: .active) }
-        case .partial(let succeeded, let failed):
-            return succeeded.map { ControlTunnelDNSHostRow(hostname: displayText($0), outcome: .succeeded) }
-                + failed.map { ControlTunnelDNSHostRow(hostname: displayText($0), outcome: .failed) }
-        case .unavailable, .notNeeded:
-            return []
-        }
+    private static func tunnelBindingRow(_ binding: TunnelBindingInfo) throws -> ControlTunnelBindingRow {
+        ControlTunnelBindingRow(
+            id: ControlTunnelID(rawValue: binding.id),
+            label: displayText(binding.label),
+            localHost: displayText(binding.localHost),
+            localPort: try ControlPort(binding.localPort),
+            remoteHost: displayText(binding.remoteHost),
+            remotePort: try ControlPort(binding.remotePort),
+            proxied: binding.proxied,
+            healthy: binding.healthy
+        )
     }
+
+    private static func dnsHostRow(_ hostname: String, _ outcome: ControlTunnelDNSHostOutcome) -> ControlTunnelDNSHostRow {
+        ControlTunnelDNSHostRow(hostname: displayText(hostname), outcome: outcome)
+    }
+
 
     // MARK: - Scalars
 
@@ -269,7 +229,7 @@ package enum RuntimeSnapshotControlProjection {
             unavailableReason: unavailableReason,
             hosts: ControlCollectionReference(
                 kind: .tunnelDNSHosts,
-                totalCount: try ControlCount(tunnelDNSHostRows(status).count),
+                totalCount: try ControlCount(tunnelDNSHostCount(status)),
                 state: collectionState(revision)
             )
         )
@@ -297,7 +257,7 @@ package enum RuntimeSnapshotControlProjection {
             ),
             tunnelDNSHosts: ControlCollectionReference(
                 kind: .tunnelDNSHosts,
-                totalCount: try ControlCount(tunnelDNSHostRows(snapshot.tunnelDNSOverrideStatus).count),
+                totalCount: try ControlCount(tunnelDNSHostCount(snapshot.tunnelDNSOverrideStatus)),
                 state: collectionState(revisions.tunnelDNSHosts)
             )
         )
@@ -384,5 +344,35 @@ package enum RuntimeSnapshotControlProjection {
     /// Sanitized display text, through the one policy the wire shares (`ControlDisplayText`).
     package static func displayText(_ value: String) -> String {
         ControlDisplayText.sanitize(value)
+    }
+}
+
+/// One view of a tunnel DNS status: its host groups in row order, each with its outcome. The view shares the status's arrays and copies
+/// nothing. Its count sums the groups with each addition checked, so counting costs one step per group, not one per host.
+private struct TunnelDNSHostSource {
+    let groups: [(hostnames: [String], outcome: ControlTunnelDNSHostOutcome)]
+
+    init(_ status: TunnelDNSOverrideStatus) {
+        switch status {
+        case .active(let hostnames): groups = [(hostnames, .active)]
+        case .partial(let succeeded, let failed): groups = [(succeeded, .succeeded), (failed, .failed)]
+        case .unavailable, .notNeeded: groups = []
+        }
+    }
+
+    /// The host count, or nil when the sum would overflow.
+    var count: Int? {
+        var total = 0
+        for group in groups {
+            let (sum, overflow) = total.addingReportingOverflow(group.hostnames.count)
+            guard !overflow else { return nil }
+            total = sum
+        }
+        return total
+    }
+
+    /// Every host in row order. It is lazy, so a bounded measure reads one host at a time and no mapped array is built.
+    var hosts: some Sequence<(hostname: String, outcome: ControlTunnelDNSHostOutcome)> {
+        groups.lazy.flatMap { group in group.hostnames.lazy.map { (hostname: $0, outcome: group.outcome) } }
     }
 }

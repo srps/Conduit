@@ -17,8 +17,8 @@ package enum ControlRuntimeRequestKind: String, Sendable, Equatable, CaseIterabl
     case readSnapshot
 }
 
-/// A client-to-host request.
-package enum ControlRuntimeRequest: Codable, Sendable, Equatable {
+/// The calls a client makes. Each call is one request body. Its budget travels in the request envelope, `ControlRuntimeRequest`.
+package enum ControlRuntimeCall: Codable, Sendable, Equatable {
     case submit(ControlOperationRequest)
     case outcome(ControlOperationQuery)
     case requestLookup(ControlRequestQuery)
@@ -87,6 +87,23 @@ package enum ControlRuntimeRequest: Codable, Sendable, Equatable {
         case .readSnapshot:
             break
         }
+    }
+}
+
+/// A client-to-host request: one call and the one budget it carries. The budget is mandatory for every request. It is the
+/// caller's remaining time in whole milliseconds, and it is read on arrival, so the host derives its own deadline from it.
+/// Zero is a valid budget, and it grants no time.
+package struct ControlRuntimeRequest: Sendable, Equatable {
+    package var budget: ControlWireBudget
+    package var call: ControlRuntimeCall
+
+    package init(budget: ControlWireBudget, call: ControlRuntimeCall) {
+        self.budget = budget
+        self.call = call
+    }
+
+    package var kind: ControlRuntimeRequestKind {
+        call.kind
     }
 }
 
@@ -180,6 +197,8 @@ package enum ControlRuntimeResponse: Codable, Sendable, Equatable {
 package enum ControlReplayUnavailableReason: String, Codable, Sendable, Equatable, CaseIterable {
     case expiredHistory = "expired_history"
     case changedIncarnation = "changed_incarnation"
+    /// An ingress loss reserved a position the replay would cross. The stream resyncs; no expiry is implied.
+    case observationLoss = "observation_loss"
 }
 
 /// The replay range a baseline declares. A gap is explicit: a baseline restores
@@ -472,6 +491,7 @@ package struct ControlRuntimeMessage: Codable, Sendable, Equatable {
         case version
         case kind
         case correlation
+        case budget
         case body
     }
 
@@ -483,7 +503,10 @@ package struct ControlRuntimeMessage: Codable, Sendable, Equatable {
         correlation = try container.decode(ControlRequestID.self, forKey: .correlation)
         switch try container.decode(String.self, forKey: .kind) {
         case "request":
-            body = .request(try container.decode(ControlRuntimeRequest.self, forKey: .body))
+            // The budget is mandatory on every request, and it is read before the call it belongs to.
+            let budget = try container.decode(ControlWireBudget.self, forKey: .budget)
+            let call = try container.decode(ControlRuntimeCall.self, forKey: .body)
+            body = .request(ControlRuntimeRequest(budget: budget, call: call))
         case "response":
             body = .response(try container.decode(ControlRuntimeResponse.self, forKey: .body))
         case "frame":
@@ -500,7 +523,8 @@ package struct ControlRuntimeMessage: Codable, Sendable, Equatable {
         switch body {
         case .request(let request):
             try container.encode("request", forKey: .kind)
-            try container.encode(request, forKey: .body)
+            try container.encode(request.budget, forKey: .budget)
+            try container.encode(request.call, forKey: .body)
         case .response(let response):
             try container.encode("response", forKey: .kind)
             try container.encode(response, forKey: .body)

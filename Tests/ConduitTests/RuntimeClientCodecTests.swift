@@ -29,16 +29,18 @@ final class RuntimeClientCodecTests: XCTestCase {
         try ControlWireBudget(milliseconds)
     }
 
-    private func request(_ request: ControlRuntimeRequest, correlation: Int = 10) -> ControlRuntimeMessage {
-        ControlRuntimeMessage(correlation: requestID(correlation), body: .request(request))
+    private func request(_ call: ControlRuntimeCall, budget milliseconds: Int = 1_000, correlation: Int = 10) throws -> ControlRuntimeMessage {
+        ControlRuntimeMessage(
+            correlation: requestID(correlation),
+            body: .request(ControlRuntimeRequest(budget: try budget(milliseconds), call: call))
+        )
     }
 
     private func submit(_ command: ControlRuntimeCommand, id: Int = 10) throws -> ControlRuntimeMessage {
-        request(.submit(ControlOperationRequest(
+        try request(.submit(ControlOperationRequest(
             requestID: requestID(id),
             expectedIncarnation: incarnation(1),
-            command: command,
-            budget: try budget(1_000)
+            command: command
         )), correlation: id)
     }
 
@@ -57,9 +59,9 @@ final class RuntimeClientCodecTests: XCTestCase {
         }
     }
 
-    /// A complete v2 request envelope for a submit. Each argument can be replaced by a
-    /// bad value, or dropped, to build one malformed fixture at a time. A nil
-    /// incarnation omits the field.
+    /// A complete v2 request envelope for a submit. The budget is the envelope's own field, next to the correlation. Each
+    /// argument can be replaced by a bad value, or dropped, to build one malformed fixture at a time. A nil incarnation
+    /// omits the field.
     private func submitRequest(
         correlation: String? = nil,
         requestID: String? = nil,
@@ -70,10 +72,11 @@ final class RuntimeClientCodecTests: XCTestCase {
         let incarnationField = incarnation.map { ",\"expectedIncarnation\":\"\($0)\"" } ?? ""
         return #"{"version":2,"kind":"request","correlation":""#
             + (correlation ?? correlationText)
-            + #"","body":{"type":"submit","submit":{"requestID":""#
-            + (requestID ?? correlationText)
             + #"","budget":"#
             + budget
+            + #","body":{"type":"submit","submit":{"requestID":""#
+            + (requestID ?? correlationText)
+            + "\""
             + incarnationField
             + #","command":"#
             + command
@@ -104,18 +107,18 @@ final class RuntimeClientCodecTests: XCTestCase {
 
     func testSubmitFrameBytesMatchTheGoldenV2Shape() throws {
         let frame = try ControlRuntimeCodec.encodeFrame(try submit(.stop(.dns)), limits: limits)
-        let expected = #"{"body":{"submit":{"budget":1000,"command":{"module":"dns","type":"stop"},"expectedIncarnation":"00000000-0000-0000-0000-000000000001","requestID":"00000000-0000-0000-0000-00000000000A"},"type":"submit"},"correlation":"00000000-0000-0000-0000-00000000000A","kind":"request","version":2}"#
+        let expected = #"{"body":{"submit":{"command":{"module":"dns","type":"stop"},"expectedIncarnation":"00000000-0000-0000-0000-000000000001","requestID":"00000000-0000-0000-0000-00000000000A"},"type":"submit"},"budget":1000,"correlation":"00000000-0000-0000-0000-00000000000A","kind":"request","version":2}"#
         XCTAssertEqual(String(decoding: frame.dropLast(), as: UTF8.self), expected)
     }
 
     func testAStaleOrdinalFromAnotherIncarnationIsAnotherCommand() throws {
         // The same ordinal under a restarted host's incarnation must not look equal.
         let restart = ControlRuntimeCommand.restart(.dns, ifLifecycleRevision: try XCTUnwrap(ControlLifecycleRevision(rawValue: 9)))
-        let before = request(.submit(ControlOperationRequest(
-            requestID: requestID(10), expectedIncarnation: incarnation(1), command: restart, budget: try budget(1_000)
+        let before = try request(.submit(ControlOperationRequest(
+            requestID: requestID(10), expectedIncarnation: incarnation(1), command: restart
         )))
-        let after = request(.submit(ControlOperationRequest(
-            requestID: requestID(10), expectedIncarnation: incarnation(2), command: restart, budget: try budget(1_000)
+        let after = try request(.submit(ControlOperationRequest(
+            requestID: requestID(10), expectedIncarnation: incarnation(2), command: restart
         )))
         XCTAssertNotEqual(before, after)
         XCTAssertNotEqual(
@@ -125,9 +128,9 @@ final class RuntimeClientCodecTests: XCTestCase {
     }
 
     func testReadSnapshotIsAPayloadlessRequestWithItsCorrelation() throws {
-        // No incarnation and no budget: a bootstrap has nothing to expect yet.
-        let frame = try ControlRuntimeCodec.encodeFrame(request(.readSnapshot, correlation: 12), limits: limits)
-        let expected = #"{"body":{"type":"readSnapshot"},"correlation":"00000000-0000-0000-0000-00000000000C","kind":"request","version":2}"#
+        // No incarnation: a bootstrap has nothing to expect yet. The budget is still mandatory on every request.
+        let frame = try ControlRuntimeCodec.encodeFrame(try request(.readSnapshot, correlation: 12), limits: limits)
+        let expected = #"{"body":{"type":"readSnapshot"},"budget":1000,"correlation":"00000000-0000-0000-0000-00000000000C","kind":"request","version":2}"#
         XCTAssertEqual(String(decoding: frame.dropLast(), as: UTF8.self), expected)
     }
 
@@ -144,16 +147,16 @@ final class RuntimeClientCodecTests: XCTestCase {
 
     func testEveryRequestKindRoundTrips() throws {
         let page = ControlPageRequest(expectedIncarnation: incarnation(1), collection: .activeConnections)
-        let requests: [ControlRuntimeRequest] = [
-            .outcome(ControlOperationQuery(expectedIncarnation: incarnation(1), operationID: operationID(2), budget: try budget(5))),
-            .requestLookup(ControlRequestQuery(expectedIncarnation: incarnation(1), requestID: requestID(3), budget: try budget(5))),
+        let calls: [ControlRuntimeCall] = [
+            .outcome(ControlOperationQuery(expectedIncarnation: incarnation(1), operationID: operationID(2))),
+            .requestLookup(ControlRequestQuery(expectedIncarnation: incarnation(1), requestID: requestID(3))),
             .subscribe(.live),
             .subscribe(.resume(incarnation: incarnation(1), from: try XCTUnwrap(ControlEventCursor(rawValue: 4)))),
             .readPage(page),
             .readSnapshot,
         ]
-        for value in requests {
-            let message = request(value)
+        for value in calls {
+            let message = try request(value, budget: 5)
             XCTAssertEqual(try ControlRuntimeCodec.decodeFrame(
                 Data(try ControlRuntimeCodec.encodeFrame(message, limits: limits).dropLast()), limits: limits
             ), message)
@@ -696,6 +699,58 @@ final class RuntimeClientCodecTests: XCTestCase {
         let unbroken = records.replacingOccurrences(of: "\n", with: " ")
         return Data((#"{"version":2,"kind":"frame","correlation":"\#(correlationText)","body":{"type":"events","events":{"firstCursor":1,"events":["#
             + unbroken + #"]}}}"#).utf8)
+    }
+
+    // MARK: - The unavailable page reply's known total, and the rowless statuses
+
+    func testAnUnavailablePageReplyCarriesItsKnownTotalAndDecodesWithoutOne() throws {
+        let decoder = ControlRuntimeCodec.makeDecoder()
+        let encoder = ControlRuntimeCodec.makeEncoder()
+        let withTotal = ControlPageReply.unavailable(.tunnelDNSHosts, .retentionBudgetExceeded, knownTotal: try ControlCount(17))
+        let data = try encoder.encode(withTotal)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(#""knownTotal":17"#))
+        XCTAssertEqual(try decoder.decode(ControlPageReply.self, from: data), withTotal)
+
+        let none = ControlPageReply.unavailable(.tunnelDNSHosts, .notCaptured, knownTotal: nil)
+        let noneData = try encoder.encode(none)
+        XCTAssertFalse(String(decoding: noneData, as: UTF8.self).contains("knownTotal"), "an absent total is not written")
+        XCTAssertEqual(try decoder.decode(ControlPageReply.self, from: noneData), none)
+        // A reply from before the total was carried has no key, and it decodes with no total.
+        let legacy = Data(#"{"collection":"tunnelDNSHosts","reason":"not_captured","type":"unavailable"}"#.utf8)
+        XCTAssertEqual(try decoder.decode(ControlPageReply.self, from: legacy), none)
+    }
+
+    func testAMalformedKnownTotalIsRefusedNotReadAsNoTotal() {
+        let decoder = ControlRuntimeCodec.makeDecoder()
+        for total in ["null", "-1", #""17""#, "1.5"] {
+            let json = Data(#"{"collection":"tunnelDNSHosts","knownTotal":\#(total),"reason":"not_captured","type":"unavailable"}"#.utf8)
+            XCTAssertThrowsError(try decoder.decode(ControlPageReply.self, from: json), "knownTotal \(total) is not a count")
+        }
+    }
+
+    /// A page keeps rows only under a status that holds rows. The rowless statuses refuse rows, so no second "no rows" form carries data.
+    func testARowlessPageStatusCannotCarryRows() throws {
+        let decoder = ControlRuntimeCodec.makeDecoder()
+        let row = #"{"hostname":"a.example","outcome":"active"}"#
+        func page(status: String, total: Int, rows: String) -> Data {
+            Data(#"{"incarnation":"\#(incarnationText)","revision":1,"offset":0,"totalCount":\#(total),"rows":\#(rows),"status":\#(status)}"#.utf8)
+        }
+        let expired = #"{"type":"expiredRevision"}"#
+        let unavailable = #"{"type":"unavailable","reason":"not_captured"}"#
+        let current = #"{"type":"current"}"#
+        XCTAssertThrowsError(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: expired, total: 1, rows: "[\(row)]")))
+        XCTAssertThrowsError(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: unavailable, total: 1, rows: "[\(row)]")))
+        XCTAssertNoThrow(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: expired, total: 0, rows: "[]")))
+        XCTAssertNoThrow(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: unavailable, total: 0, rows: "[]")))
+        XCTAssertNoThrow(try decoder.decode(ControlCollectionPage<ControlTunnelDNSHostRow>.self, from: page(status: current, total: 1, rows: "[\(row)]")))
+        // The packer produces only current and stale pages, so a rowless status is refused before any row is packed.
+        XCTAssertThrowsError(try ControlPagePacker.page(
+            of: [ControlTunnelDNSHostRow](), offset: 0, incarnation: incarnation(1),
+            revision: try XCTUnwrap(ControlCollectionRevision(rawValue: 1)), status: .expiredRevision,
+            correlation: requestID(10), limits: limits, wrap: ControlPageReply.tunnelDNSHosts
+        )) { error in
+            XCTAssertEqual(error as? ControlRuntimeWireError, .invalidValue)
+        }
     }
 
     private func decodeRecord(_ json: String) throws -> ControlRuntimeEventRecord {

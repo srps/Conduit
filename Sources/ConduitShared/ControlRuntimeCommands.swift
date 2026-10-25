@@ -101,24 +101,21 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
 
 /// One submitted command. The expected incarnation is the host lifetime the caller
 /// read its preconditions from; a host that restarted refuses the command rather than
-/// applying an ordinal from the previous lifetime. The budget is the remaining time
-/// the caller grants, never a process-local instant.
+/// applying an ordinal from the previous lifetime. The time the caller grants is the
+/// request envelope's budget, not a field of the command.
 package struct ControlOperationRequest: Codable, Sendable, Equatable {
     package var requestID: ControlRequestID
     package var expectedIncarnation: ControlHostIncarnation
     package var command: ControlRuntimeCommand
-    package var budget: ControlWireBudget
 
     package init(
         requestID: ControlRequestID,
         expectedIncarnation: ControlHostIncarnation,
-        command: ControlRuntimeCommand,
-        budget: ControlWireBudget
+        command: ControlRuntimeCommand
     ) {
         self.requestID = requestID
         self.expectedIncarnation = expectedIncarnation
         self.command = command
-        self.budget = budget
     }
 }
 
@@ -128,12 +125,10 @@ package struct ControlOperationRequest: Codable, Sendable, Equatable {
 package struct ControlOperationQuery: Codable, Sendable, Equatable {
     package var expectedIncarnation: ControlHostIncarnation
     package var operationID: ControlOperationID
-    package var budget: ControlWireBudget
 
-    package init(expectedIncarnation: ControlHostIncarnation, operationID: ControlOperationID, budget: ControlWireBudget) {
+    package init(expectedIncarnation: ControlHostIncarnation, operationID: ControlOperationID) {
         self.expectedIncarnation = expectedIncarnation
         self.operationID = operationID
-        self.budget = budget
     }
 }
 
@@ -143,12 +138,10 @@ package struct ControlOperationQuery: Codable, Sendable, Equatable {
 package struct ControlRequestQuery: Codable, Sendable, Equatable {
     package var expectedIncarnation: ControlHostIncarnation
     package var requestID: ControlRequestID
-    package var budget: ControlWireBudget
 
-    package init(expectedIncarnation: ControlHostIncarnation, requestID: ControlRequestID, budget: ControlWireBudget) {
+    package init(expectedIncarnation: ControlHostIncarnation, requestID: ControlRequestID) {
         self.expectedIncarnation = expectedIncarnation
         self.requestID = requestID
-        self.budget = budget
     }
 }
 

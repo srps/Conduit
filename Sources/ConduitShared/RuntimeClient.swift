@@ -51,6 +51,8 @@ package struct RuntimeDeadline: Sendable, Equatable {
 package enum RuntimeWaitEnd: Sendable, Equatable, Error {
     case deadlineExpired
     case cancelled
+    /// The transport had no free wait slot, so this wait consumed nothing. It is non-terminal for a stream.
+    case transportBusy
     /// The transport closed while the caller waited. Before a send, nothing was admitted;
     /// after one, admission is unknown, and the lookup path is the only recovery.
     case disconnected
