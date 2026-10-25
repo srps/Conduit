@@ -405,3 +405,62 @@ The owner selected explicit disk reload-and-reconcile in
 [0032](decisions/0032-explicit-reload-and-reconcile.md). A normal private editor read performs neither disk
 I/O nor runtime apply. Client-owned dirty drafts cannot be discarded by another
 client's reload event.
+
+
+## Next consumed host cut: reviewed shape (2026-10-25)
+
+Claude and Codex reviewed this shape against the actual host/store/daemon source.
+Decision 0032 selects reload-and-reconcile. The simulator dependency exception in
+[the host simulation review](design-runtime-host-simulation-review.md) is still
+an owner gate; no new workflow implementation or simulator access is claimed.
+
+- **Store:** retain one physical-work slot, existing frozen reader/decoder and
+  verified replacement. Preserve ConfigurationOperationContext. Add an explicit
+  allowMissing input for startup compatibility and a narrow Sendable write claim
+  provided by the workflow. Check the claim inside the worker immediately before
+  replacement, after any preservation read; do not hold its lock across I/O.
+  Once replacement starts, finish read-back and record its persistence facts even
+  if intent changed. Return an exact verified runtime/platform pair only when
+  both required inputs verify; never treat the store's independently updated
+  per-file values as a coupled apply candidate.
+- **RuntimeConfigurationWorkflow:** one internal MainActor owner per host,
+  privately holding the store. Own bounded, non-wrapping intent generations,
+  synchronous Start/Stop admission and the session Stop fence. Start admission
+  happens before launch recovery suspension; preparation after the join checks
+  that same admission and cannot clear a newer Stop. Required absent defaults
+  commit through the store before Start. A runtime Stop does not revoke an
+  independent preferences operation. No parallel intent counter lives in the store.
+- **RuntimeHost:** consume the workflow in an asynchronous open factory before
+  constructing orchestrator/reconciler baselines. The daemon's existing startup
+  migration stays before store observation. A reload facade delegates to the
+  workflow, replacing the migration-capable reload body. Push verified eligible
+  input before starting listeners rather than relying on a prior reconcile.
+  Reconcile only eligible current input; held input never becomes the reconciler's
+  requestedConfig or retry baseline. Keep v1 host config and configGeneration
+  aligned with their existing host-view meaning; store durable tokens are separate.
+- **Reload settlement:** one store slot excludes overlapping loads/commits.
+  A stale observation may remain an honest store observation, while workflow
+  apply is held and newer Start/Stop intent wins. It cannot update the applied
+  host view, retokenize a client's draft or authorize later retry. Whole decode
+  refusal retains last-known values without new baseline authority; representable
+  validation problems are adopted as repair drafts with held apply.
+- **Events:** a complete new typed config.workflow.* family belongs to the
+  workflow, with closed phase/component/reason fields and derived detail. Extend
+  the closed-namespace gate and exhaustive payload/control mappings. Preserve
+  unaffected legacy config.* producers and pm-proxy behavior. Remove the old
+  host reload event producer in the same implementation; retire replaced app
+  workflow producers at final activation. The two runtime owners do not execute
+  competing paths after activation.
+- **Verification:** focused store/host integration tests and an independent
+  bounded workflow model exercise admission, worker claim, physical completion,
+  resume checks and apply. Cover Stop during recovery/read/write, stale reload,
+  a verified platform step followed by revoked runtime, invalid/missing inputs,
+  no reload writes and required-default commit before Start. Report exploration
+  bounds and injected-defect sensitivity. Real-host pm-sim coverage depends on
+  the explicit simulator choice; old physical/client-fixture scenarios do not
+  count as adopted-workflow coverage.
+
+Private editor observation/reply encoding and its measured ceiling remain a later
+separate cut. This host/store cut neither silently adopts the 8 MiB request cap
+for replies nor selects production queue/retention/deadline defaults. AppState
+activation and the whole-control-cluster RuntimeActor move remain later gates.
