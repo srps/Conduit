@@ -1,7 +1,6 @@
 # Runtime service and retained pages: verification checkpoint
 
-This is an unadopted service foundation and retained-page slice, before full
-workflow gates or a service PR. RuntimeHost/AppState/store adoption, the latest
+This is an unadopted service foundation and retained-page slice, after all 39 local workflow checks, before a service PR. RuntimeHost/AppState/store adoption, the latest
 snapshot slot, subscription table and observation/replay models remain open.
 No shipping ordinary-v2 resource profile is selected.
 
@@ -14,15 +13,15 @@ Documentation is excluded from this fingerprint, as in the full-workflow runner.
 That fingerprint identifies the earlier frozen source used for the source variants.
 The parent computed the corrected current source fingerprint as
 `b69b6dfa2633f75ad7ea1f4c7df8d8af362803e35c53bfc665dde112ee1c417c`.
-The full workflow is running against this corrected source; no complete result is claimed yet.
+All 39 workflow-equivalent checks passed on that unchanged corrected source.
+The run began while HEAD was `53a050e`; its frozen edits were subsequently committed as `5920ae6`.
 Claude implemented and verified the slice through the owner's authenticated
 claude.ai Max subscription. No API credential or Agent SDK was used.
 
 The focused wrapper selects the actual service, collection, transport, codec and
 projection suites. The writer's final run passed 262 tests, both relevant pm-sim
 scenarios and the import/catalogue/decision checks. The parent reran that same wrapper after restoring every source variant: 262
-tests, zero failures, both simulator scenarios and the checks passed. Broader
-workflow gates have not run yet.
+tests, zero failures, both simulator scenarios and the checks passed. Those earlier runs preceded the full workflow checkpoint below.
 
 ## Final review-fix pass
 
@@ -35,7 +34,7 @@ the same wrapper passes with 267 tests and 0 failures. Both simulator scenarios,
 the imports fence, the event catalogue, the decisions check and its tests pass.
 The fixes are described in the checkpoint's review-fix section.
 
-The only fresh runs of the fixed source are that wrapper. The restricted-scan
+The focused wrapper and the full workflow below ran on the fixed source. The restricted-scan
 and reversed-tie source variants, and the gate-release variant, were run only
 against the earlier files. They have not been re-run here, and no
 source-variant claim extends to the review fixes.
@@ -97,14 +96,26 @@ model, not an RSS bound; object/allocator/encoder overhead and caller-owned valu
 are separate. Idle expired rows may remain physically resident within the byte
 cap until activity, while page reads enforce logical expiry immediately.
 
+## Full local workflow (parent)
+
+All 39 checks corresponding to `.github/workflows/swift.yml` passed on unchanged
+source fingerprint `b69b6dfa2633f75ad7ea1f4c7df8d8af362803e35c53bfc665dde112ee1c417c`.
+The exact per-check results are in
+`/private/tmp/conduit-runtime-stage1-20261024/runtime-service-full-gates/`.
+Full XCTest: 3,112 tests, two skipped, zero failures. All 97 simulator records passed.
+The existing proxy performance gate measured wall 10.209 s, maximum RSS 34,045,952 bytes
+and CPU 101.03%; this is not a client-service or whole-app memory measurement.
+
+This is the retained-page/service foundation checkpoint, before the separate
+observation/coalescing changes are integrated. It is not evidence for that later combined source.
+
 ## Remaining gates
 
 The independent Claude recheck of the three corrected paths found them resolved.
 It noted one wording gap: the unreachable loop-invariant branch occurs after mutation,
 so only capacity refusals and the entry accounting check are guaranteed before any change.
 That invariant branch and its closed release-build result remain unwitnessed; no claim of coverage is made.
-The full workflow checks, actual
-production-owner adaptation, observation/coalescing/replay models and a measured
+Actual production-owner adaptation, observation/coalescing/replay models and a measured
 owner-reviewed shipping profile remain required. The snapshot read's invalid
 owner-state classification is deferred to that observation slice. No v2 socket,
 installed-app validation, total shutdown or release-readiness claim follows.
