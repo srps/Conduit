@@ -145,6 +145,11 @@ not a requirement to finish every event or property test before extraction:
    sidecar boundary and raw browser-URL check; its complete local workflow passed
    2,897 tests (two skips) and all 94 simulator records. It merged at `2e75d94`
    after hosted Swift and CodeQL passed.
+   [PR #232](https://github.com/srps/Conduit/pull/232) merged the unadopted typed store core at `6535fc8`,
+   after all 39 local checks (3,004 tests, two skips, 96 simulator records) and hosted Swift/CodeQL passed.
+   [#233](https://github.com/srps/Conduit/issues/233) tracks the confirmed snapshot/config collision and
+   remaining log protection; its [focused checkpoint](./docs/design-protected-runtime-artifacts.md)
+   precedes startup writer adoption. This does not change the accepted filename policy.
    The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding
