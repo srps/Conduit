@@ -378,16 +378,28 @@ Selected stream semantics:
    disconnect does not shut down RuntimeHost. Page cursors and pending waiters
    have bounded lifetimes too.
 
-Suggested starting limits for review, not new shipping defaults: a 16 KiB v2
-frame bound (including its envelope), 8 subscribers,
-32 pending commands, 128 retained terminal operation outcomes, a 512-event replay
-ring, 64 queued frames and 1 MiB queued bytes per subscriber, and at most 64 rows
-per page subject to the frame byte bound. Also bound individual strings, event
-batches, active operations, page-cursor state and replay lifetime. Stage-1 sizing
-must show the largest valid baseline/page fits the chosen frame bound; if it
-cannot, bring a specific paging/schema or larger-v2-bound choice to owner review.
-The v1 bound is unchanged. Reject
-or explicitly split oversize data; do not rely on item count alone.
+The owner selected a **64 KiB ordinary-v2 reply/stream frame ceiling**, including
+its envelope and line feed, in [0030](decisions/0030-ordinary-runtime-reply-frame-cap.md).
+Keep one complete baseline; collections remain separately paged. The measured
+escape-heavy, widened-metadata baseline is 49,376 bytes, with 16,160 bytes of
+margin. This is a measured point, not a universal floating-point/schema maximum.
+The separate 8 MiB private configuration channel and v1 remain unchanged.
+
+The remaining coherent shipping profile is still under review: request bounds,
+operation/admission capacities, subscribers, event ingress/replay budgets,
+collection retention, per-turn work and deadlines. Earlier numbers such as
+8 subscribers, 32 pending commands, 128 outcomes and 512 replay events are review
+inputs, not defaults. The implemented engine is pull-driven with coalesced
+snapshots and bounded first-frame custody; an old proposal for 64 queued frames
+and 1 MiB per subscriber is not a second queue to add beside it. Derive the next
+profile from the existing `RuntimeServiceLimits` ownership/accounting and measured
+pressure, rather than copying test fixture values into composition.
+
+Stage sizing must check complete baseline and individual rows against the selected
+reply ceiling, plus exact page packing. New snapshot/AppliedState shapes must stay
+closed and bounded and pass sizing checks before adoption. Narrower callers may
+still receive explicit `frameTooLarge`; never silently widen their bound. Reject
+oversize data explicitly; item counts alone do not bound encoded bytes.
 
 The in-memory default encodes/decodes the same frames and exercises the same
 bounded admission and stream rules as the future socket. It is not a direct

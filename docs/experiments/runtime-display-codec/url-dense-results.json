@@ -1,0 +1,14 @@
+[
+  {
+    "kind": "url-dense",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=0.000113084 peakRSSBytes=6160384 residentBytes=6209536 physicalFootprintBytes=1589608 mallocInUseBytes=88960\nrawBytesPerField=16380 frameBytes=10094 notices=14\nstage=sender-overlap seconds=0.038582417 peakRSSBytes=10387456 residentBytes=10387456 physicalFootprintBytes=3637704 mallocInUseBytes=332896\nstage=wire-only seconds=0.03862425 peakRSSBytes=10387456 residentBytes=10387456 physicalFootprintBytes=3637704 mallocInUseBytes=300832\nstage=decoded-only seconds=0.039102417 peakRSSBytes=10600448 residentBytes=10600448 physicalFootprintBytes=3801544 mallocInUseBytes=330688\nstage=after-first-release seconds=0.039137125 peakRSSBytes=10600448 residentBytes=10600448 physicalFootprintBytes=3801544 mallocInUseBytes=321024\nstage=after-2-released seconds=0.083905625 peakRSSBytes=10829824 residentBytes=10829824 physicalFootprintBytes=4030920 mallocInUseBytes=321040\nchecksum=3114 iterations=3 fixture=DisplayBoundsFixture single-active=true\n",
+    "stderr": ""
+  },
+  {
+    "kind": "userinfo-dense",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=3.5125e-05 peakRSSBytes=6144000 residentBytes=6193152 physicalFootprintBytes=1556816 mallocInUseBytes=88960\nrawBytesPerField=16380 frameBytes=10094 notices=14\nstage=sender-overlap seconds=0.041338834 peakRSSBytes=10698752 residentBytes=10698752 physicalFootprintBytes=3932592 mallocInUseBytes=332896\nstage=wire-only seconds=0.041370834 peakRSSBytes=10698752 residentBytes=10698752 physicalFootprintBytes=3932592 mallocInUseBytes=300832\nstage=decoded-only seconds=0.041689125 peakRSSBytes=10911744 residentBytes=10911744 physicalFootprintBytes=4096432 mallocInUseBytes=330688\nstage=after-first-release seconds=0.041717792 peakRSSBytes=10911744 residentBytes=10911744 physicalFootprintBytes=4096432 mallocInUseBytes=321024\nstage=after-2-released seconds=0.120184084 peakRSSBytes=11124736 residentBytes=11124736 physicalFootprintBytes=4309424 mallocInUseBytes=321040\nchecksum=3114 iterations=3 fixture=DisplayBoundsFixture single-active=true\n",
+    "stderr": ""
+  }
+]

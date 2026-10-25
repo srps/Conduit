@@ -152,19 +152,23 @@ package struct ControlUpstreamProbe: Codable, Sendable, Equatable {
     package var endpoint: String
     package var reachable: Bool
     package var latencyMilliseconds: ControlCount
+    /// The notices of `name` and `endpoint`, in canonical order.
+    package var displayNotices: [ControlDisplayNotice]
 
     package init(
         upstreamID: ControlUpstreamID,
         name: String,
         endpoint: String,
         reachable: Bool,
-        latencyMilliseconds: ControlCount
+        latencyMilliseconds: ControlCount,
+        displayNotices: [ControlDisplayNotice] = []
     ) {
         self.upstreamID = upstreamID
         self.name = name
         self.endpoint = endpoint
         self.reachable = reachable
         self.latencyMilliseconds = latencyMilliseconds
+        self.displayNotices = displayNotices
     }
 }
 

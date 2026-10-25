@@ -537,10 +537,15 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
     }
 
     func testAScalarSnapshotThatCannotFitTheFrameIsRefusedNotTruncated() throws {
+        // Text over the input limit is omitted (decision 0029), so the snapshot still fits the 16 KiB frame. A frame smaller than the
+        // snapshot still refuses it whole, and nothing is cut to make it fit.
         var kernel = fullKernelSnapshot()
         kernel.runtimeStatus.lastHealthSummary = String(repeating: "h", count: 20_000)
         let projected = try project(kernel)
-        XCTAssertThrowsError(try ControlRuntimeCodec.encodeFrame(frameMessage(.snapshot(projected)), limits: limits16KiB)) { error in
+        XCTAssertEqual(projected.healthSummary, ControlDisplayText.omittedValue)
+        XCTAssertNoThrow(try ControlRuntimeCodec.encodeFrame(frameMessage(.snapshot(projected)), limits: limits16KiB))
+        let tiny = try ControlFrameLimits(maxFrameBytes: 512)
+        XCTAssertThrowsError(try ControlRuntimeCodec.encodeFrame(frameMessage(.snapshot(projected)), limits: tiny)) { error in
             XCTAssertEqual(error as? ControlRuntimeWireError, .frameTooLarge)
         }
     }
@@ -571,7 +576,8 @@ final class RuntimeSnapshotProjectionTests: XCTestCase {
         var widest = fullKernelSnapshot()
         widest.runtimeStatus.lastHealthSummary = String(repeating: "h", count: 20_000)
         let oversize = ControlRuntimeMessage(correlation: correlation, body: .response(.snapshot(try project(widest))))
-        XCTAssertThrowsError(try ControlRuntimeCodec.encodeFrame(oversize, limits: limits16KiB)) { error in
+        let tiny = try ControlFrameLimits(maxFrameBytes: 512)
+        XCTAssertThrowsError(try ControlRuntimeCodec.encodeFrame(oversize, limits: tiny)) { error in
             XCTAssertEqual(error as? ControlRuntimeWireError, .frameTooLarge)
         }
     }

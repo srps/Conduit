@@ -125,6 +125,7 @@ extension ControlCommandResult {
         case .upstreamProbe(let probe):
             try budget.text(probe.name)
             try budget.text(probe.endpoint)
+            try budget.elements(probe.displayNotices.count)
         case .settled, .dnsLiveness, .preflight:
             break
         }
@@ -165,6 +166,7 @@ extension ControlConnectionRow {
         try budget.text(upstream)
         try budget.text(method)
         try budget.text(authMethod)
+        try budget.elements(displayNotices.count)
     }
 }
 
@@ -172,6 +174,7 @@ extension ControlUpstreamRow {
     package func measure(into budget: inout ControlFrameBudget) throws {
         try budget.text(name)
         try budget.text(endpoint)
+        try budget.elements(displayNotices.count)
     }
 }
 
@@ -180,12 +183,14 @@ extension ControlTunnelBindingRow {
         try budget.text(label)
         try budget.text(localHost)
         try budget.text(remoteHost)
+        try budget.elements(displayNotices.count)
     }
 }
 
 extension ControlTunnelDNSHostRow {
     package func measure(into budget: inout ControlFrameBudget) throws {
         try budget.text(hostname)
+        try budget.elements(displayNotices.count)
     }
 }
 
@@ -257,5 +262,6 @@ extension ControlRuntimeSnapshot {
         try budget.text(bindings.localPAC?.host)
         try budget.text(bindings.dns?.host)
         try budget.text(bindings.transparentProxy?.host)
+        try budget.elements(displayNotices.count)
     }
 }

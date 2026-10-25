@@ -295,6 +295,7 @@ enum PMSim {
         "state-writer-lease",
         "runtime-file-replacement",
         "framed-runtime-client",
+        "runtime-display-bounds",
         "config-file-conditional-replacement",
         "runtime-service-wire",
         "split-dns-helper-retry",
@@ -490,6 +491,8 @@ enum PMSim {
             return [try RuntimeFileReplacementScenario.run()]
         case "framed-runtime-client":
             return [try await FramedRuntimeClientScenario.run()]
+        case "runtime-display-bounds":
+            return [try await RuntimeDisplayBoundsScenario.run()]
         case "config-file-conditional-replacement":
             return [try ConfigFileConditionalReplacementScenario.run()]
         case "runtime-service-wire":

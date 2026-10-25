@@ -132,7 +132,7 @@ Focused checks, independent review and all workflow checks must run on the combi
 The previously noted invariant wording has been narrowed; the unreachable invariant result remains unwitnessed.
 Observation/coalescing and replay models exist with the bounds above, and snapshot reads now classify invalid owner state as internal failure.
 Actual production-owner adaptation and a measured owner-reviewed shipping profile remain required.
-The display-text policy is pending the owner. No v2 socket,
+(Historical, at that checkpoint.) The display-text policy was pending the owner; it is now selected as [decision 0029](decisions/0029-bound-runtime-display-text.md) and implemented locally. No v2 socket,
 installed-app validation, total shutdown or release-readiness claim follows.
 
 ## M2E replay gap, front-door refusal, framed lookup (local, 2026-10-25)

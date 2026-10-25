@@ -279,3 +279,84 @@ nominal Data lengths alone do not establish RSS, transport capacity or Stop fair
 - Not implemented: the Start/Stop fences, the apply path and the mixed-apply hold, the
   RuntimeClient configuration submission, the configuration event emitter, lease
   acquisition at startup, and host adoption. Those remain owner adoption work.
+
+
+## Production-adoption checkpoint (2026-10-25)
+
+Update after the display review: 0029 is implemented and verified on the unreleased
+v2 contract, and the owner selected 64 KiB replies/stream frames in
+[0030](decisions/0030-ordinary-runtime-reply-frame-cap.md). The complete widened
+baseline measures 49,376 bytes including LF. The remaining coherent service
+profile, actual-owner scheduling and the integration work below still gate
+production adoption. This does not move the semantic store or introduce a
+parallel writer/client path. See [display verification](verification-runtime-display-2026-10-25.md).
+
+
+Reviewed with official Claude Code through the owner's claude.ai Max subscription,
+against merged startup/log protection (PRs238/239). This checkpoint preserves the
+selected owners; it does not select presentation limits or shipping client defaults.
+
+The next production cut connects AppState to the real RuntimeHost through the
+selected typed RuntimeClient and its in-memory framed transport. Configuration
+workflow adoption moves with that cut. Delete each replaced save/reconcile/lifecycle
+path; another writer-only AppState coordinator or transport bypass would postpone
+convergence. The selected one-lifecycle-at-a-time migration remains in force:
+each cut names the responsibilities moved and those still owned by AppState,
+and proves there are no overlapping writers or runtime effects. The table below
+is the resulting target ownership, not a claim that the first cut completes every
+lifecycle. The existing ConduitRuntime dependency condition permits the app's
+edge when it actually adopts the host. The v1 control socket belongs to pm-proxy;
+ConduitDaemon has no control socket yet. A production daemon socket is later work.
+
+| Owner | Responsibility and boundary |
+| --- | --- |
+| ConduitRuntime store/workflow | Configuration semantics, intent ordering, component baselines/receipts and save-before-apply eligibility. App-owned during convergence, daemon-owned later. |
+| ConduitRuntime RuntimeHost | Runtime lifecycle, journal and machine reconciliation; consumes the exact verified immutable input. It does not become another configuration writer or re-read a path to substitute newer values. |
+| ConduitRuntime composition | Constructs and retains the sibling workflow/store and host behind the typed client; adds no policy, queue or second intent owner. |
+| PlatformMac StateRootSession | Private lease, resolved plan and narrowly scoped file authority; no raw lease accessor. |
+| AppState | Editor drafts, presentation and app administration; invokes the client and AppKit Quit policy. |
+
+The legal construction seam keeps the semantic store in ConduitRuntime. A
+session-owned configuration replacement operation in PlatformMac accepts the
+existing ConfigurationComponent identity (runtime/platform/preferences), staged
+bytes and expected private baseline, and delegates to the existing verified
+replacement primitive with its private lease. It resolves the file from the session's
+plan; callers cannot provide a fabricated foreign path or a journal component.
+The store retains the session instead of a naked lease. Existing bounded readers,
+classifiers and StateFileAccessing fakes remain the physical path. Exact method
+syntax and existing result/failure types are implementation details; this is no
+new generic lease callback, dependency cycle or store relocation.
+
+Adoption replaces AppState.persistConfiguration's three direct writers, its old
+editor baseline/save-to-reconcile gate, synchronous termination saves, and each
+migrated twin lifecycle. RuntimeHost's verified-input path replaces its reload
+re-read. Startup migration/seeding must be inventoried separately under the same
+session, complete before the store adopts baselines where retained, and never
+remain a later save/reload bypass. Platform-journal authority remains distinct.
+
+Stop fences at admission before waiting for recovery; physical cleanup still
+respects recovery ordering. Quit uses an asynchronous drain under one total
+remaining monotonic budget (AppKit terminateLater is a mechanism), with the fence
+first and no durable disable merely to exit. A drained PlatformWork queue alone
+cannot prove the logical store operation finished: coupled writes resume on the
+owner between phases. Report physical and logical outcomes honestly and retain
+process-lifetime authority for started work. Deadline sizing still needs evidence.
+
+Do not introduce a Start-last-applied fallback after a failed/unknown enable.
+Ordinary edits/enables still require verified eligible input; Stop/Quit remain the
+selected exceptions. Keeping an already-running prior configuration under0025
+is not permission to admit a new Start using an invalidated receipt.
+
+The [display-text policy](design-runtime-display-bounds-review.md) is now selected
+and implemented, and [0030](decisions/0030-ordinary-runtime-reply-frame-cap.md)
+selects the reply/stream ceiling. Full framed client adoption is still gated by
+the remaining coherent capacity/retention/work/deadline profile and its measured
+behavior. Test profiles cannot silently become production defaults. No prep-only
+interface is implemented merely to bypass that gate.
+
+For the later reload slice, confirmation before discarding a draft implements
+0027's explicit reload/review, with cancel preserving it. Whether reload only
+populates the editor or also admits runtime apply remains an affected-slice review
+item; no behavior is selected here. That question does not reopen the chosen
+conflict/refusal policy or block unrelated work. No new ADR is written by this
+checkpoint, and no production adoption or RuntimeActor migration is claimed.

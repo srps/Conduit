@@ -5,8 +5,9 @@ import ConduitShared
 
 /// Projects kernel snapshot values onto the v2 control values. Each mapping is an
 /// exhaustive switch, so a new kernel case fails to compile here until its wire
-/// spelling is chosen. Free text is sanitized before it leaves the process, and a
-/// URL loses its query and fragment.
+/// spelling is chosen. Free text is redacted and bounded through the one display
+/// policy (decision 0029), and every cut or omission becomes a notice of its record.
+/// A URL loses its query and fragment.
 ///
 /// The scalar snapshot is a read model of one orchestrator value. It is not the
 /// configuration: it never serializes a `ProxyConfig`. Runtime diagnostics may
@@ -21,37 +22,50 @@ package enum RuntimeSnapshotControlProjection {
         collectionRevisions: ControlCollectionRevisions
     ) throws -> ControlRuntimeSnapshot {
         let status = snapshot.runtimeStatus
+        var notices = ControlDisplayNoticeSink(owner: .snapshot)
+        let shownProfileName = notices.text(profileName, .profileName)
+        let shownActiveUpstream = notices.optionalText(status.activeUpstream, .activeUpstream)
+        let shownHealthSummary = notices.text(status.lastHealthSummary, .healthSummary)
+        let shownProxyError = notices.optionalText(snapshot.proxyError, .proxyError)
+        let shownDNSError = notices.optionalText(snapshot.dnsError, .dnsError)
+        let shownTunnelsError = notices.optionalText(snapshot.tunnelsError, .tunnelsError)
+        let shownVPNInterface = notices.optionalText(snapshot.vpnInterfaceName, .vpnInterfaceName)
+        let shownAuthFallback = notices.optionalText(snapshot.lastAuthFallbackReason, .lastAuthFallbackReason)
+        let shownBindings = try runtimeBindings(snapshot.bindings, notices: &notices)
+        let shownTunnelDNS = try tunnelDNSSummary(
+            snapshot.tunnelDNSOverrideStatus,
+            revision: collectionRevisions.tunnelDNSHosts,
+            notices: &notices
+        )
         return ControlRuntimeSnapshot(
             stamp: stamp,
-            profileName: displayText(profileName),
+            profileName: shownProfileName,
             proxyState: proxyState(status.state),
-            activeUpstream: status.activeUpstream.map(displayText),
-            healthSummary: displayText(status.lastHealthSummary),
-            proxyError: snapshot.proxyError.map(displayText),
+            activeUpstream: shownActiveUpstream,
+            healthSummary: shownHealthSummary,
+            proxyError: shownProxyError,
             dnsRunState: moduleRunState(snapshot.dnsRunState),
-            dnsError: snapshot.dnsError.map(displayText),
+            dnsError: shownDNSError,
             tunnelsRunState: moduleRunState(snapshot.tunnelsRunState),
-            tunnelsError: snapshot.tunnelsError.map(displayText),
+            tunnelsError: shownTunnelsError,
             directModeCause: directModeCause(snapshot.directModeCause),
             vpnState: vpnState(snapshot.vpnState),
-            vpnInterfaceName: snapshot.vpnInterfaceName.map(displayText),
-            bindings: try runtimeBindings(snapshot.bindings),
+            vpnInterfaceName: shownVPNInterface,
+            bindings: shownBindings,
             lastAuthOutcome: snapshot.lastAuthOutcome.map(authOutcome),
             lastAuthOutcomeAt: try snapshot.lastAuthOutcomeAt.map(timestamp),
-            lastAuthFallbackReason: snapshot.lastAuthFallbackReason.map(displayText),
+            lastAuthFallbackReason: shownAuthFallback,
             metrics: try runtimeMetrics(status.metrics),
             dnsQueryCount: try ControlCount(snapshot.dnsQueryCount),
             dnsDoHFallbackCount: try ControlCount(snapshot.dnsDoHFallbackCount),
             dnsCacheHitCount: try ControlCount(snapshot.dnsCacheHitCount),
             tunnelActiveCount: try ControlCount(snapshot.tunnelActiveCount),
             tunnelSessionCount: try ControlCount(snapshot.tunnelSessionCount),
-            tunnelDNSOverride: try tunnelDNSSummary(
-                snapshot.tunnelDNSOverrideStatus,
-                revision: collectionRevisions.tunnelDNSHosts
-            ),
+            tunnelDNSOverride: shownTunnelDNS,
             vpnFlap: try vpnFlapMetrics(status.metrics),
             collections: try collections(snapshot, revisions: collectionRevisions),
-            appliedState: .unavailable(.pendingAppliedStateSlice)
+            appliedState: .unavailable(.pendingAppliedStateSlice),
+            displayNotices: notices.canonicalNotices
         )
     }
 
@@ -118,67 +132,103 @@ package enum RuntimeSnapshotControlProjection {
     }
 
     private static func connectionRow(_ connection: ActiveConnectionInfo) throws -> ControlConnectionRow {
-        ControlConnectionRow(
+        var notices = ControlDisplayNoticeSink(owner: .connectionRow)
+        let destination = notices.text(connection.destination, .connectionDestination)
+        let upstream = notices.text(connection.upstream, .connectionUpstream)
+        let method = notices.text(connection.method, .connectionMethod)
+        let authMethod = notices.optionalText(connection.authMethod, .connectionAuthMethod)
+        return ControlConnectionRow(
             id: ControlConnectionID(rawValue: connection.id),
-            destination: displayText(connection.destination),
-            upstream: displayText(connection.upstream),
-            method: displayText(connection.method),
+            destination: destination,
+            upstream: upstream,
+            method: method,
             startedAt: try timestamp(connection.startedAt),
             lastActivityAt: try timestamp(connection.lastActivityAt),
             bytesSent: try ControlCount(connection.bytesSent),
             bytesReceived: try ControlCount(connection.bytesReceived),
             tunnel: connection.tunnel,
-            authMethod: connection.authMethod.map(displayText)
+            authMethod: authMethod,
+            displayNotices: notices.canonicalNotices
         )
     }
 
     private static func upstreamRow(_ status: UpstreamRuntimeStatus) throws -> ControlUpstreamRow {
-        ControlUpstreamRow(
+        var notices = ControlDisplayNoticeSink(owner: .upstreamRow)
+        let name = notices.text(status.name, .upstreamName)
+        let endpoint = notices.text(status.endpoint, .upstreamEndpoint)
+        return ControlUpstreamRow(
             id: ControlUpstreamID(rawValue: status.id),
-            name: displayText(status.name),
-            endpoint: displayText(status.endpoint),
+            name: name,
+            endpoint: endpoint,
             circuitState: circuitState(status.circuitState),
             ewmaLatencyMilliseconds: try status.ewmaLatencyMS.map { try ControlNonNegativeNumber($0) },
             consecutiveFailures: try ControlCount(status.consecutiveFailures),
-            openUntil: try status.openUntil.map(timestamp)
+            openUntil: try status.openUntil.map(timestamp),
+            displayNotices: notices.canonicalNotices
         )
     }
 
     private static func tunnelBindingRow(_ binding: TunnelBindingInfo) throws -> ControlTunnelBindingRow {
-        ControlTunnelBindingRow(
+        var notices = ControlDisplayNoticeSink(owner: .tunnelBindingRow)
+        let label = notices.text(binding.label, .tunnelLabel)
+        let localHost = notices.text(binding.localHost, .tunnelLocalHost)
+        let remoteHost = notices.text(binding.remoteHost, .tunnelRemoteHost)
+        return ControlTunnelBindingRow(
             id: ControlTunnelID(rawValue: binding.id),
-            label: displayText(binding.label),
-            localHost: displayText(binding.localHost),
+            label: label,
+            localHost: localHost,
             localPort: try ControlPort(binding.localPort),
-            remoteHost: displayText(binding.remoteHost),
+            remoteHost: remoteHost,
             remotePort: try ControlPort(binding.remotePort),
             proxied: binding.proxied,
-            healthy: binding.healthy
+            healthy: binding.healthy,
+            displayNotices: notices.canonicalNotices
         )
     }
 
     private static func dnsHostRow(_ hostname: String, _ outcome: ControlTunnelDNSHostOutcome) -> ControlTunnelDNSHostRow {
-        ControlTunnelDNSHostRow(hostname: displayText(hostname), outcome: outcome)
+        var notices = ControlDisplayNoticeSink(owner: .dnsHostRow)
+        let shown = notices.text(hostname, .dnsHostname)
+        return ControlTunnelDNSHostRow(hostname: shown, outcome: outcome, displayNotices: notices.canonicalNotices)
     }
-
 
     // MARK: - Scalars
 
-    package static func runtimeBindings(_ bindings: ProxyOrchestratorBindings) throws -> ControlRuntimeBindings {
-        ControlRuntimeBindings(
-            proxy: try endpoint(host: bindings.proxyHost, port: bindings.proxyPort),
-            socks: try endpoint(host: bindings.socksHost, port: bindings.socksPort),
-            localPAC: try endpoint(host: bindings.localPACHost, port: bindings.localPACPort),
-            dns: try endpoint(host: bindings.dnsHost, port: bindings.dnsPort),
-            transparentProxy: try endpoint(host: bindings.transparentProxyHost, port: bindings.transparentProxyPort)
+    /// The bindings, with each host bounded as a diagnostic endpoint. The notices of all five hosts go to the snapshot's sink.
+    private static func runtimeBindings(
+        _ bindings: ProxyOrchestratorBindings,
+        notices: inout ControlDisplayNoticeSink
+    ) throws -> ControlRuntimeBindings {
+        let proxy = try endpoint(host: bindings.proxyHost, port: bindings.proxyPort, field: .proxyHost, notices: &notices)
+        let socks = try endpoint(host: bindings.socksHost, port: bindings.socksPort, field: .socksHost, notices: &notices)
+        let localPAC = try endpoint(host: bindings.localPACHost, port: bindings.localPACPort, field: .localPACHost, notices: &notices)
+        let dns = try endpoint(host: bindings.dnsHost, port: bindings.dnsPort, field: .dnsHost, notices: &notices)
+        let transparent = try endpoint(
+            host: bindings.transparentProxyHost,
+            port: bindings.transparentProxyPort,
+            field: .transparentProxyHost,
+            notices: &notices
+        )
+        return ControlRuntimeBindings(
+            proxy: proxy,
+            socks: socks,
+            localPAC: localPAC,
+            dns: dns,
+            transparentProxy: transparent
         )
     }
 
-    /// A binding with neither part set is absent. One set part is kept as it is.
-    private static func endpoint(host: String?, port: Int?) throws -> ControlEndpoint? {
+    /// A binding with neither part set is absent. One set part is kept as it is, with its host bounded.
+    private static func endpoint(
+        host: String?,
+        port: Int?,
+        field: ControlDisplayField,
+        notices: inout ControlDisplayNoticeSink
+    ) throws -> ControlEndpoint? {
         guard host != nil || port != nil else { return nil }
+        let shownHost = notices.optionalText(host, field)
         return ControlEndpoint(
-            host: host.map(displayText),
+            host: shownHost,
             port: try port.map { try ControlPort($0) }
         )
     }
@@ -206,7 +256,8 @@ package enum RuntimeSnapshotControlProjection {
 
     private static func tunnelDNSSummary(
         _ status: TunnelDNSOverrideStatus,
-        revision: ControlCollectionRevision?
+        revision: ControlCollectionRevision?,
+        notices: inout ControlDisplayNoticeSink
     ) throws -> ControlTunnelDNSSummary {
         let kind: ControlTunnelDNSKind
         let unavailableReason: String?
@@ -219,7 +270,7 @@ package enum RuntimeSnapshotControlProjection {
             unavailableReason = nil
         case .unavailable(let reason):
             kind = .unavailable
-            unavailableReason = displayText(reason)
+            unavailableReason = notices.text(reason, .tunnelDNSUnavailableReason)
         case .notNeeded:
             kind = .notNeeded
             unavailableReason = nil
@@ -340,10 +391,39 @@ package enum RuntimeSnapshotControlProjection {
     private static func timestamp(_ date: Date) throws -> ControlTimestamp {
         try ControlTimestamp(date.timeIntervalSince1970)
     }
+}
 
-    /// Sanitized display text, through the one policy the wire shares (`ControlDisplayText`).
-    package static func displayText(_ value: String) -> String {
-        ControlDisplayText.sanitize(value)
+/// Collects the notices of one record while its display text is projected. It is the only producer of display notices: each text goes
+/// through `ControlDisplayText.bounded` once, under the field's own cap, and each cut or omission becomes one notice.
+struct ControlDisplayNoticeSink {
+    private let owner: ControlDisplayOwner
+    private var notices: [ControlDisplayNotice] = []
+
+    init(owner: ControlDisplayOwner) {
+        self.owner = owner
+    }
+
+    /// The display form of a present value. The field must belong to this sink's record, and each field is projected once, so a record
+    /// holds at most one notice per field. A violation is a programmer error in the projection, so it stops here rather than publishing.
+    mutating func text(_ value: String, _ field: ControlDisplayField) -> String {
+        precondition(field.owner == owner, "\(field) is a field of \(field.owner), not \(owner)")
+        precondition(!notices.contains { $0.field == field }, "\(field) is projected once per record")
+        let shown = ControlDisplayText.bounded(value, maxBytes: field.maxBytes)
+        if let treatment = shown.treatment {
+            notices.append(ControlDisplayNotice(field: field, treatment: treatment))
+        }
+        return shown.text
+    }
+
+    /// The display form of an optional value. An absent value stays absent, with no notice.
+    mutating func optionalText(_ value: String?, _ field: ControlDisplayField) -> String? {
+        guard let value else { return nil }
+        return text(value, field)
+    }
+
+    /// The notices in canonical field order, which the record's check requires.
+    var canonicalNotices: [ControlDisplayNotice] {
+        notices.sorted { $0.field.ordinal < $1.field.ordinal }
     }
 }
 

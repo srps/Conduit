@@ -291,6 +291,8 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
     package var vpnFlap: ControlVPNFlapMetrics
     package var collections: ControlRuntimeCollections
     package var appliedState: ControlAppliedState
+    /// The notices of the display text above, in canonical order. Each names a field whose text was shortened or omitted.
+    package var displayNotices: [ControlDisplayNotice]
 
     /// Derived from the typed cause, so it cannot disagree with it.
     package var isDirectMode: Bool {
@@ -324,7 +326,8 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
         tunnelDNSOverride: ControlTunnelDNSSummary,
         vpnFlap: ControlVPNFlapMetrics,
         collections: ControlRuntimeCollections,
-        appliedState: ControlAppliedState
+        appliedState: ControlAppliedState,
+        displayNotices: [ControlDisplayNotice] = []
     ) {
         self.stamp = stamp
         self.profileName = profileName
@@ -353,5 +356,6 @@ package struct ControlRuntimeSnapshot: Codable, Sendable, Equatable {
         self.vpnFlap = vpnFlap
         self.collections = collections
         self.appliedState = appliedState
+        self.displayNotices = displayNotices
     }
 }

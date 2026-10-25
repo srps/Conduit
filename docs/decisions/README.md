@@ -52,3 +52,5 @@ Each record carries three statuses, because merged does not mean it works:
 | [0026](0026-bounded-platform-and-preferences-files.md) | Bound platform and preferences files through the shared file contract | accepted | implemented | none |
 | [0027](0027-refuse-external-configuration-edits.md) | Refuse ordinary saves over changed configuration files | accepted | partial | none |
 | [0028](0028-fixed-writable-state-filenames.md) | Fixed writable state filenames within the canonical root | accepted | partial | none |
+| [0029](0029-bound-runtime-display-text.md) | Bound runtime display text with explicit notices | accepted | partial | none |
+| [0030](0030-ordinary-runtime-reply-frame-cap.md) | Ordinary v2 replies and stream frames capped at 64 KiB | accepted | planned | none |
