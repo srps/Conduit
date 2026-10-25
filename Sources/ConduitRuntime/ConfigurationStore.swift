@@ -83,8 +83,9 @@ final class ConfigurationStore {
     }
 
     private let incarnation = UUID()
-    private let plan: StateRootPlan
-    private let lease: StateWriterLease
+    /// The root's writer authority. The store keeps it for its whole life, so the lease stays held while the store or any physical step it
+    /// queued still runs. The session's paths are the only files this store writes.
+    private let session: StateRootSession
     private let access: any StateFileAccessing
     private let work: PlatformWork
     private var records = ConfigurationSlots(runtime: Record(), platform: Record(), preferences: Record())
@@ -92,17 +93,10 @@ final class ConfigurationStore {
     /// Whether one operation holds the store's single slot. It is set before the first suspension and cleared when the call returns.
     private(set) var isBusy = false
 
-    /// Admits only a writer-owned plan whose root is the leased root and whose four files resolve inside it. A read-only input
-    /// or a foreign plan is refused here, before any read or write is possible.
-    init(plan: StateRootPlan, lease: StateWriterLease, access: any StateFileAccessing, work: PlatformWork) throws(ConfigurationStoreRefusal) {
-        guard plan.configAccess == .writerOwned else { throw .readOnlyConfigAccess }
-        guard plan.root == lease.root else { throw .leaseMismatch }
-        try Self.admit(plan.config, as: .config, in: plan.root)
-        try Self.admit(plan.platformConfig, as: .platformConfig, in: plan.root)
-        try Self.admit(plan.preferences, as: .preferences, in: plan.root)
-        try Self.admit(plan.journal, as: .journal, in: plan.root)
-        self.plan = plan
-        self.lease = lease
+    /// Built over the root's session. The bootstrap is the one writer-owned capability, and it pairs a plan with the lease it was resolved
+    /// under, so a foreign plan cannot be paired with this lease. Other roots can validly own their own sessions and stores.
+    init(session: StateRootSession, access: any StateFileAccessing, work: PlatformWork) {
+        self.session = session
         self.access = access
         self.work = work
     }
@@ -121,7 +115,7 @@ final class ConfigurationStore {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
-        let currentPlan = plan
+        let currentPlan = session.plan
         let access = self.access
         let observed = await work.run { ConfigurationStoreIO.observeAndDecode(plan: currentPlan, access: access) }
         return .admitted(ConfigurationLoadReport(context: context, outcome: adopt(observed)))
@@ -184,7 +178,7 @@ final class ConfigurationStore {
         case .failure(let reason):
             return .admitted(PreferencesCommitResult(context: context, preferences: .notAttempted(reason)))
         }
-        let source = plan.preferences.path
+        let source = session.plan.preferences.path
         switch await work.run({ ConfigurationStoreIO.stagePreferences(preferences, source: source) }) {
         case .refused(let reason):
             return .admitted(PreferencesCommitResult(context: context, preferences: .notAttempted(.stagingRefused(reason))))
@@ -236,7 +230,7 @@ final class ConfigurationStore {
         _ platformBaseline: ConfigurationFileBaseline,
         context: ConfigurationOperationContext
     ) async -> RuntimePlatformCommitResult {
-        let platformSource = plan.platformConfig.path
+        let platformSource = session.plan.platformConfig.path
         let staged = await work.run {
             ConfigurationStoreIO.stageRuntimeAndPlatform(runtime, platform, platformSource: platformSource)
         }
@@ -278,7 +272,7 @@ final class ConfigurationStore {
             }
             preservation = ConfigurationPreservationCheck(
                 component: .preferences,
-                file: plan.preferences,
+                file: session.configurationFile(for: .preferences),
                 baseline: sidecar,
                 present: records[.preferences].present
             )
@@ -326,8 +320,7 @@ final class ConfigurationStore {
     ) async -> ConfigurationWriteOutcome {
         // Refused before any I/O: a verified write names a newer version, and the version never wraps.
         guard Self.canAdvance(records[component].version) else { return .notAttempted(.versionExhausted) }
-        let file = file(for: component)
-        let lease = self.lease
+        let session = self.session
         let access = self.access
         let attempt = await work.run { () -> ConfigurationWriteAttempt in
             if let preservation {
@@ -344,7 +337,7 @@ final class ConfigurationStore {
                     return .held(.sidecarUnreadable(error))
                 }
             }
-            let outcome = VerifiedConfigurationFileReplacement.replace(bytes, at: file, under: lease, access: access, expecting: baseline)
+            let outcome = session.replaceConfigurationFile(component, staged: bytes, expecting: baseline, access: access)
             // The read-back equals the staged bytes, so the new baseline is the identity of those bytes, hashed off the MainActor.
             if case .verifiedPersisted = outcome {
                 return .replaced(outcome, verifiedBaseline: ConfigurationFileBaseline(observing: .present(bytes)))
@@ -444,7 +437,7 @@ final class ConfigurationStore {
     }
 
     private func verification(_ component: ConfigurationComponent, baseline: ConfigurationFileBaseline) async -> ConfigurationFileVerification {
-        let file = file(for: component)
+        let file = session.configurationFile(for: component)
         let access = self.access
         return await work.run {
             VerifiedConfigurationFileReplacement.verifyUnchanged(file, expecting: baseline, access: access)
@@ -535,22 +528,9 @@ final class ConfigurationStore {
         ConfigurationReceipt(storeIncarnation: incarnation, component: component, version: records[component].version, context: context)
     }
 
-    private func file(for component: ConfigurationComponent) -> StateRootFile {
-        switch component {
-        case .runtime: plan.config
-        case .platform: plan.platformConfig
-        case .preferences: plan.preferences
-        }
-    }
-
     /// Whether one more file version exists. Versions never wrap, so a component at the maximum is refused before any change that needs
     /// a newer version. Latching needs none, because a nil baseline already refuses every token.
     private static func canAdvance(_ version: UInt64) -> Bool {
         version < UInt64.max
-    }
-
-    private static func admit(_ file: StateRootFile, as role: StateRootRole, in root: CanonicalStateRoot) throws(ConfigurationStoreRefusal) {
-        guard file.role == role else { throw .roleMismatch(file.role) }
-        guard file.path.hasPrefix(root.path + "/") else { throw .fileOutsideRoot(role) }
     }
 }

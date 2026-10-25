@@ -55,6 +55,30 @@ package final class StateRootSession: Sendable {
     func releaseForTesting() -> StateWriterRelease {
         lease.release()
     }
+
+    /// The resolved file of one configuration component. The map is exhaustive, so a component added to `ConfigurationComponent` does not
+    /// compile until it names its file.
+    package func configurationFile(for component: ConfigurationComponent) -> StateRootFile {
+        switch component {
+        case .runtime: plan.config
+        case .platform: plan.platformConfig
+        case .preferences: plan.preferences
+        }
+    }
+
+    /// One conditional, verified replacement of a component's resolved file (decisions 0015, 0021 and 0027). It delegates to
+    /// `VerifiedConfigurationFileReplacement.replace` under this session's lease. The caller supplies the component, the staged bytes and the
+    /// baseline it authorizes, and never a path or a lease. It is synchronous, so the store runs it on `PlatformWork`.
+    package func replaceConfigurationFile(
+        _ component: ConfigurationComponent,
+        staged: Data,
+        expecting baseline: ConfigurationFileBaseline,
+        access: any StateFileAccessing
+    ) -> ConfigurationFileReplacementOutcome {
+        VerifiedConfigurationFileReplacement.replace(
+            staged, at: configurationFile(for: component), under: lease, access: access, expecting: baseline
+        )
+    }
 }
 
 /// Why a process did not take its state root (decisions 0017 and 0028). Each

@@ -110,6 +110,7 @@ enum PMSim {
               runtime-file-replacement  Verified runtime config replacement: refusals before I/O, read-back classification over the OS adapter and a fake (0015, 0021)
               framed-runtime-client   Framed client over a simulated host: a lost reply is one send with no replay, a lookup recovers it, an oversize request never reaches the host, a stream ends typed (0014)
               config-file-conditional-replacement  Conditional config replacement: conflict before write on every observed change, pre-read failure, exact sidecar budget, after-check race not excluded (0021, 0026, 0027)
+              config-session-replacement  Session-held config replacement: component map, stale baseline kept, each file persists alone, journal untouched, root busy while held (0015, 0021, 0027, 0031)
               runtime-service-wire    v2 representations of the service's answers: changed-incarnation and conflict rejections, subscriber limit, observation loss, revision-free unavailable page (0014)
               split-dns-helper-retry  A refused split-DNS entry-file removal is retried once the helper is available, against the VPN state then (#165)
               lifecycle-stop-overtakes-start  A stop issued during a start's platform work lands last; repeats join it
@@ -297,6 +298,7 @@ enum PMSim {
         "framed-runtime-client",
         "runtime-display-bounds",
         "config-file-conditional-replacement",
+        "config-session-replacement",
         "runtime-service-wire",
         "split-dns-helper-retry",
         "lifecycle-stop-overtakes-start",
@@ -495,6 +497,8 @@ enum PMSim {
             return [try await RuntimeDisplayBoundsScenario.run()]
         case "config-file-conditional-replacement":
             return [try ConfigFileConditionalReplacementScenario.run()]
+        case "config-session-replacement":
+            return [try ConfigSessionReplacementScenario.run()]
         case "runtime-service-wire":
             return [try await RuntimeServiceWireScenario.run()]
         case "split-dns-helper-retry":

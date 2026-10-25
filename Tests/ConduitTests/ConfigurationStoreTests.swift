@@ -11,31 +11,33 @@ import XCTest
 /// keeps its trace short. Nothing here exercises a Stop, an apply, an incarnation fence of a host, or a physical power loss.
 @MainActor
 final class ConfigurationStoreTests: XCTestCase {
-    /// One store over a scratch root. `close` releases the lease first, and removes the directory only when the release is confirmed.
+    /// One store over a scratch root. The root's session is taken through the production bootstrap before anything is seeded, and the store
+    /// is built over that session. `close` releases the session's lease through the scratch helper, and removes the directory only when that
+    /// release returned `.released`. An unconfirmed close fails the test and keeps the directory, since its lock may still be held.
     /// Internal, so the preservation tests in `ConfigurationStorePreservationTests` share the same seeding.
     @MainActor
     final class Fixture {
         let directory: URL
-        let lease: StateWriterLease
+        let session: StateRootSession
         let plan: StateRootPlan
         let access: FakeStateFileAccess
         let store: ConfigurationStore
         /// The runtime bytes the fixture seeded, or nil when it seeded none. A test compares against these, so an unchanged file is shown
         /// to be unchanged, not merely present.
         let seededRuntime: Data?
+        /// Whether every queued physical step this fixture's store started has finished. It is true at setup. A test that launches queued work
+        /// clears it before the launch and sets it again only after that work's call is awaited. While it is false, `close` keeps the directory
+        /// and releases nothing: the queued step still holds the session.
+        var ownedWorkQuiesced = true
 
         init(runtime: Data? = nil, platform: Data? = nil, preferences: Data? = nil) throws {
             directory = try StateRootScratch.make("configuration-store")
-            let root = try StateRootScratch.canonicalRoot(directory)
-            guard case .acquired(let held) = OSStateWriterLeasing().acquire(root: root, onReleaseFailure: { _ in }) else {
-                throw ConfigurationStoreTests.LeaseUnavailable()
-            }
-            lease = held
-            plan = try StateRootLayout.resolve(
-                RuntimeEnvironment(configDirectory: directory, configFile: directory.appendingPathComponent("config.json")),
-                configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem()
+            // A refused bootstrap throws and the directory is kept on purpose. A refusal can be an unconfirmed close or a foreign holder of the
+            // root, so nothing is removed here. The original error propagates and fails the test.
+            session = try acquireScratchStateRoot(
+                RuntimeEnvironment(configDirectory: directory, configFile: directory.appendingPathComponent("config.json"))
             )
+            plan = session.plan
             var files: [String: Data] = [:]
             // A sidecar with no runtime file is refused at startup, as the legacy loader always refused it, so a sidecar fixture seeds defaults.
             let seeded = try runtime ?? (platform == nil && preferences == nil ? nil : ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()))
@@ -44,18 +46,20 @@ final class ConfigurationStoreTests: XCTestCase {
             if let platform { files[plan.platformConfig.path] = platform }
             if let preferences { files[plan.preferences.path] = preferences }
             access = FakeStateFileAccess(files: files)
-            store = try ConfigurationStore(plan: plan, lease: held, access: access, work: PlatformWork(label: "test.configuration-store"))
+            store = ConfigurationStore(session: session, access: access, work: PlatformWork(label: "test.configuration-store"))
         }
 
         func close() {
-            switch lease.release() {
-            case .released, .alreadyReleased: StateRootScratch.remove(directory)
-            case .releaseUnknown(let errno): XCTFail("the writer lease close was not confirmed (errno \(errno)); the directory was kept")
+            // While queued work may still hold the session, release nothing and keep the directory. The session then closes when its last
+            // reference goes, and that close reports through the helper's own callback.
+            guard ownedWorkQuiesced else { return }
+            // Only a confirmed close lets the protected root go. An unconfirmed one has already failed the test, and its directory stays.
+            if releaseScratchStateRoot(session) == .released {
+                StateRootScratch.remove(directory)
             }
         }
     }
 
-    private struct LeaseUnavailable: Error {}
     /// The staged runtime file is not a JSON object, so a witness cannot add a key to it.
     private struct SeedNotAnObject: Error {}
 
@@ -302,45 +306,6 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertEqual(describe(after.preferences), "persisted")
     }
 
-    /// A read-only input, or a root that is not the leased root, is refused before any store exists. No read or write is made.
-    func testAReadOnlyOrForeignPlanIsRefusedBeforeAnyStoreExists() throws {
-        let state = try StateRootScratch.make("store-state")
-        let outside = try StateRootScratch.make("store-outside")
-        defer {
-            StateRootScratch.remove(state)
-            StateRootScratch.remove(outside)
-        }
-        let stateRoot = try StateRootScratch.canonicalRoot(state)
-        let outsideRoot = try StateRootScratch.canonicalRoot(outside)
-        guard case .acquired(let stateLease) = OSStateWriterLeasing().acquire(root: stateRoot, onReleaseFailure: { _ in }),
-              case .acquired(let outsideLease) = OSStateWriterLeasing().acquire(root: outsideRoot, onReleaseFailure: { _ in }) else {
-            return XCTFail("the scratch roots were not both acquired")
-        }
-        defer {
-            _ = stateLease.release()
-            _ = outsideLease.release()
-        }
-        let fake = FakeStateFileAccess()
-        let work = PlatformWork(label: "test.configuration-store.refusal")
-        let readOnly = try StateRootLayout.resolve(
-            RuntimeEnvironment(configDirectory: state, configFile: outside.appendingPathComponent("config.json")),
-            configAccess: .readOnlyInput,
-            fileSystem: OSStateRootFileSystem()
-        )
-        XCTAssertThrowsError(try ConfigurationStore(plan: readOnly, lease: stateLease, access: fake, work: work)) { error in
-            XCTAssertEqual(error as? ConfigurationStoreRefusal, .readOnlyConfigAccess)
-        }
-        let writable = try StateRootLayout.resolve(
-            RuntimeEnvironment(configDirectory: state, configFile: state.appendingPathComponent("config.json")),
-            configAccess: .writerOwned,
-            fileSystem: OSStateRootFileSystem()
-        )
-        XCTAssertThrowsError(try ConfigurationStore(plan: writable, lease: outsideLease, access: fake, work: work)) { error in
-            XCTAssertEqual(error as? ConfigurationStoreRefusal, .leaseMismatch)
-        }
-        XCTAssertTrue(fake.observations.isEmpty)
-    }
-
     // MARK: - Busy slot
 
     /// Only one operation holds the store's slot. Of two overlapping calls, the one that finds the slot held returns busy, and nothing is queued.
@@ -421,7 +386,8 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.outcome, .refused(.versionExhausted(.preferences)))
         XCTAssertNil(fixture.store.baselineToken(for: .preferences))
 
-        let recovered = try ConfigurationStore(plan: fixture.plan, lease: fixture.lease, access: fixture.access, work: PlatformWork(label: "test.configuration-store.recovery"))
+        // A test-only second store over the same session models a fresh incarnation. The first store is not used after this point.
+        let recovered = ConfigurationStore(session: fixture.session, access: fixture.access, work: PlatformWork(label: "test.configuration-store.recovery"))
         guard case .admitted(let fresh) = await recovered.load(context: Self.context), case .adopted = fresh.outcome else {
             return XCTFail("the new store did not adopt the file")
         }
@@ -593,16 +559,20 @@ final class ConfigurationStoreTests: XCTestCase {
     /// and keep the fake's log unchanged. A cancelled caller detaches only its wait, so the slot stays held until the worker returns.
     func testAHeldWorkerReadKeepsTheSlotAndRefusesOtherOperationsWithoutQueuedIO() async throws {
         let fixture = try Fixture(preferences: try preferenceBytes(showMenuBarIcon: true))
+        // Registered first, so it runs last. It removes the directory only if no queued work is still in flight.
         defer { fixture.close() }
         let gated = GatedAccess(inner: fixture.access)
-        // Runs before `fixture.close`, so a failing test still lets the worker finish before the lease is released.
+        // Registered after `close`, so it runs first: a held worker read is released before `close` decides.
         defer { gated.releaseWorker() }
-        let store = try ConfigurationStore(plan: fixture.plan, lease: fixture.lease, access: gated, work: PlatformWork(label: "test.configuration-store.gate"))
+        let store = ConfigurationStore(session: fixture.session, access: gated, work: PlatformWork(label: "test.configuration-store.gate"))
         guard case .admitted = await store.load(context: Self.context) else { return XCTFail("the first load was not admitted") }
         let token = store.baselineToken(for: .preferences)
         let verifyToken = ConfigurationSlots(runtime: nil, platform: nil, preferences: token)
 
         gated.armOnNextRead()
+        // Queued work is in flight from here until its call is awaited below. A failing wait returns early with the flag clear, so `close`
+        // keeps the directory and releases nothing.
+        fixture.ownedWorkQuiesced = false
         let held = Task { await store.load(context: Self.context) }
         guard await gated.waitUntilEntered() else { return XCTFail("the held read was never entered within the bound") }
         XCTAssertTrue(store.isBusy, "the held read holds the slot")
@@ -630,7 +600,10 @@ final class ConfigurationStoreTests: XCTestCase {
         let afterCancel = await store.load(context: Self.context)
         XCTAssertTrue(isBusy(afterCancel), "a load after the cancellation is still refused as busy")
         gated.releaseWorker()
-        guard case .admitted = await held.value else { return XCTFail("the held load was not admitted") }
+        let heldAdmission = await held.value
+        // The awaited call has returned, so the queued read is finished and nothing this fixture started is in flight.
+        fixture.ownedWorkQuiesced = true
+        guard case .admitted = heldAdmission else { return XCTFail("the held load was not admitted") }
         XCTAssertFalse(store.isBusy, "the slot is released when the held call returns")
         XCTAssertNotNil(store.baselineToken(for: .preferences))
     }
