@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: selected “Incremental development; one final AppState switch (Recommended)”)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: 0001, 0013
 - Superseded by: none
@@ -123,8 +123,17 @@ installed over the serving daily-driver app for verification.
 
 ## Implementation evidence
 
-No final activation or changed adoption sequence is implemented yet. Existing
-foundations remain implemented as historically recorded in 0013: the shared
+Partial: [`StateRootSession`](../../Sources/PlatformMac/StateRootSession.swift)
+now owns the exhaustive component-to-file mapping and delegates replacement to
+the existing primitive with its private lease.
+[`ConfigurationStore`](../../Sources/ConduitRuntime/ConfigurationStore.swift)
+consumes that session and removes its independent raw-plan/raw-lease constructor.
+[`Session tests`](../../Tests/ConduitTests/StateRootSessionConfigurationTests.swift)
+and [`pm-sim`](../../Sources/pm-sim/ScenarioConfigSessionReplacement.swift) cover
+bootstrap refusal, alias preservation, conditional replacement and authority
+lifetime. This is consumed store preparation, not production store/workflow
+adoption or the final AppState activation. Existing foundations remain
+implemented as historically recorded in 0013: the shared
 [`RuntimeHost`](../../Sources/ConduitRuntime/RuntimeHost.swift), framed
 [`RuntimeClient`](../../Sources/ConduitShared/RuntimeClient.swift), unadopted
 [`service core`](../../Sources/ConduitRuntime/RuntimeServiceCore.swift) and
@@ -138,7 +147,8 @@ production daemon ownership, real-session auth/PAC or release readiness.
 
 Complete the workflow freshness/private-editor observation API, preserving
 client-observed prior component preconditions separately from runtime views and
-intent fences. Select the remaining coherent profile from measurements before
+intent fences, including a measured private editor-reply budget. Select the
+remaining coherent profile from measurements before
 the affected adoption. Reload-as-editor-only
 versus reload-and-apply remains a later explicit policy choice. Revisit the
 activation sequence if a demonstrated delivery/compatibility need outweighs the

@@ -2,7 +2,8 @@
 
 Status: **activation sequence selected by the owner**, 2026-10-25, recorded in
 [0031](decisions/0031-incremental-runtime-development-single-activation.md).
-Implementation remains planned; this checkpoint implements no runtime path. PRs #240/#241 are merged; reply/stream frames are
+Implementation is partial: the consumed session/store capability is implemented;
+actual host/workflow adoption and the final activation remain planned. PRs #240/#241 are merged; reply/stream frames are
 selected at 64 KiB in 0030. The measured candidate profile remains test-only;
 actual-host scheduling and selection of its remaining values are still open. Claude Code
 and Codex source-review findings are recorded below; Claude used the owner's
@@ -65,10 +66,11 @@ to name each moved/remaining responsibility if the owner later revisits the acti
 ## Invariants under either choice
 
 One semantic store/workflow remains in ConduitRuntime, sibling to RuntimeHost.
-StateRootSession already retains its private lease. Adoption must add a narrow
+StateRootSession already retains its private lease. Adoption uses a narrow
 component-scoped replacement seam delegating to the existing verified physical
-primitive; it does not exist today. The store currently takes a raw lease. Retire
-that production-composition need without exposing the lease or adding a registry.
+primitive. That seam is now consumed by the store; its raw-plan/raw-lease
+constructor is removed. Production host/workflow adoption is still open. The
+lease stays private and no registry is added.
 The host consumes the exact verified immutable input. AppState keeps editor drafts,
 presentation, notifications and app administration.
 

@@ -74,7 +74,11 @@ storage; select bounded drain behavior with measured shutdown budgets.
 ## Implementation evidence
 
 Partial: the OS lease primitive, its typed outcomes and a fake exist. The configuration
-store core borrows a held root lease and refuses a root it does not hold. App and
+store core now borrows a writer-owned StateRootSession; the session binds its
+resolved files and private lease, so a store cannot pair a foreign plan with the
+held root. Its component-scoped replacement operation reuses the existing
+verified primitive. [`Session tests`](../../Tests/ConduitTests/StateRootSessionConfigurationTests.swift)
+cover this consumed capability and lifetime. App and
 daemon startup now acquire authority through StateRootSession; neither constructs
 the store yet. Read-only tool and complete journal/workflow adoption remain open. See [the store verification note](../verification-configuration-store-2026-10-25.md). Code: [`StateWriterLease.swift`](../../Sources/PlatformMac/StateWriterLease.swift)
 (protocol, opaque lease, typed outcomes), [`StateWriterLeaseOS.swift`](../../Sources/PlatformMac/StateWriterLeaseOS.swift)
