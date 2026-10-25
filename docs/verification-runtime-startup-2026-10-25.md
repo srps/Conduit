@@ -18,15 +18,17 @@ and pm-tunnel read-only input, and the installed app or helper. No serving app w
 - Directory setup (`StateRootLayout.prepareRoot`, `createMissingDirectories`). It climbs from the root until it meets an
   existing entry, and makes each missing name with one `StateRootFileSystem.createDirectory`, which is `mkdir(2)` with mode
   0700. This is the leaf-only regression fixed: explicit fresh roots and a fresh user's Application Support get their missing
-  ancestors again. The earlier leaf-only wording was our implementation guidance, not an owner decision. The accepted
+  ancestors again. Every newly created ancestor is explicitly 0700; this preserves ancestor creation while choosing
+  owner-only permissions rather than inheriting Foundation intermediate-directory defaults. Existing modes are untouched.
+  The earlier leaf-only wording was our implementation guidance, not an owner decision. The accepted
   root, name and lease policy are unchanged. An existing ancestor must be a directory once links are followed. A
   file, a dangling link or an entry that cannot be examined is refused, and nothing beneath it is created. An EEXIST from
   a racing creator is accepted only when the entry is a directory.
 - Bound. `prepareRoot` refuses a root path whose C string, terminator included, exceeds `PATH_MAX` (1024 bytes on
   Darwin), as `rootUnavailable(ENAMETOOLONG)`, before any effect. The OS already enforces this bound, so the OS result
   is unchanged. The check makes it hold for every file system, fakes included. With the root at most `PATH_MAX - 1`
-  bytes, the missing-name list in `createMissingDirectories` holds at most 511 entries (each prefix step adds a separator
-  and a non-empty name, at least two bytes). Each entry is under `PATH_MAX` bytes. No count or size limit beyond the
+  bytes, the missing-name list in `createMissingDirectories` holds at most `PATH_MAX - 1` entries: each prefix step
+  strictly shortens the path. Each entry is under `PATH_MAX` bytes. No count or size limit beyond the
   platform's own is introduced, and the array is never unbounded.
 - `FakeStateRootFileSystem` follows the OS in two places. `createDirectory` needs an existing parent (ENOENT, or ENOTDIR
   under a file). `canonicalPath` of a link whose target is absent fails with ENOENT, as realpath(3) does. One

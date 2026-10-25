@@ -129,7 +129,7 @@ package enum StateRootFailure: Error, Equatable, Sendable {
 
 /// Resolves a runtime environment into one canonical root and checked file
 /// identities. This is a pure check over the file-system effects: it opens and
-/// locks nothing, and creates nothing except a missing root when the caller asks.
+/// locks nothing, and creates only missing root/ancestor directories when the caller asks.
 ///
 /// Sameness of two names is decided by the object they name, not their spelling
 /// (`sameEntry`). An existing name is compared by device and inode, so a case
@@ -144,8 +144,8 @@ package enum StateRootLayout {
     /// reserved names and disjointness. A writer-owned role must name its fixed
     /// leaf beneath the root (decision 0028); the configuration is checked the
     /// same way only when this host writes it.
-    /// - Parameter createRootIfMissing: creates a root that does not exist yet,
-    ///   with mode 0700. An existing root is never changed.
+    /// - Parameter createRootIfMissing: creates the missing root and ancestors with
+    ///   mode 0700. Existing directories are never changed.
     package static func resolve(
         _ environment: RuntimeEnvironment,
         configAccess: StateRootConfigAccess,
@@ -262,9 +262,9 @@ package enum StateRootLayout {
     /// directory once any link is followed: a file, another object or a dangling link is refused,
     /// and nothing beneath it is created. A directory that a racing creator makes first is accepted
     /// only when it is a directory. The bound is set by `prepareRoot`: the root path, terminator included,
-    /// is at most PATH_MAX bytes (1024 on Darwin). Each missing entry is a prefix of that path, and two
-    /// consecutive prefixes differ by a separator and a non-empty name, at least two bytes. So at most
-    /// 511 entries are held, each under PATH_MAX bytes, and the array is never unbounded. A failure leaves
+    /// is at most PATH_MAX bytes (1024 on Darwin). Each missing entry is a prefix of that path, and each
+    /// step strictly shortens it. Thus at most PATH_MAX - 1 entries are held, each under PATH_MAX
+    /// bytes, and the array is never unbounded. A failure leaves
     /// the directories already made in place: nothing is rolled back, and the refusal names the errno of
     /// the step that failed.
     private static func createMissingDirectories(endingAt path: String, fileSystem: any StateRootFileSystem) throws(StateRootFailure) {
