@@ -12,6 +12,17 @@ package enum StateRootRole: Sendable, Equatable {
     case platformConfig
     case preferences
     case journal
+
+    /// The fixed logical leaf this role may be written under (decision 0028).
+    /// A writer-owned file whose logical name is another spelling is refused.
+    package var fixedLeaf: String {
+        switch self {
+        case .config: RuntimeEnvironment.configFileName
+        case .platformConfig: RuntimeEnvironment.platformConfigFileName
+        case .preferences: RuntimeEnvironment.preferencesFileName
+        case .journal: RuntimeEnvironment.platformStateFileName
+        }
+    }
 }
 
 /// Whether the configuration file is this writer's authority. `readOnlyInput` is
@@ -98,6 +109,14 @@ package enum StateRootFailure: Error, Equatable, Sendable {
     /// A writer-owned file resolves outside the root. Migrate it into the root
     /// or pass it as read-only input; the daemon never imports it silently.
     case outsideRoot(StateRootRole)
+    /// A writer-owned file's logical name is not its fixed slot (decision 0028).
+    /// Only the fixed name is writable: move or rename the file to it beneath the
+    /// root. Nothing is copied, imported or renamed, and the file is not read.
+    case unsupportedFileName(StateRootRole)
+    /// The root directory's identity changed between the check before the lease
+    /// and the check after the layout, or the layout names another root. A check,
+    /// not a compare-and-swap: a retarget after the last check is not excluded.
+    case rootChanged
     case reservedName(StateRootRole, StateRootReservedName)
     case overlap(StateRootRole, StateRootRole)
     /// The volume could not say whether it distinguishes case. It was asked only
@@ -110,7 +129,7 @@ package enum StateRootFailure: Error, Equatable, Sendable {
 
 /// Resolves a runtime environment into one canonical root and checked file
 /// identities. This is a pure check over the file-system effects: it opens and
-/// locks nothing, and creates nothing except a missing root when the caller asks.
+/// locks nothing, and creates only missing root/ancestor directories when the caller asks.
 ///
 /// Sameness of two names is decided by the object they name, not their spelling
 /// (`sameEntry`). An existing name is compared by device and inode, so a case
@@ -121,21 +140,30 @@ package enum StateRootFailure: Error, Equatable, Sendable {
 /// names on a case-sensitive volume. The folding comparison is conservative, not
 /// APFS's own table, so the layout does not claim exact APFS equivalence.
 package enum StateRootLayout {
-    /// Resolves the writer layout: all four files, containment, reserved names and
-    /// disjointness.
-    /// - Parameter createRootIfMissing: creates a root that does not exist yet,
-    ///   with mode 0700. An existing root is never changed.
+    /// Resolves the writer layout: all four files, their fixed slots, containment,
+    /// reserved names and disjointness. A writer-owned role must name its fixed
+    /// leaf beneath the root (decision 0028); the configuration is checked the
+    /// same way only when this host writes it.
+    /// - Parameter createRootIfMissing: creates the missing root and ancestors with
+    ///   mode 0700. Existing directories are never changed.
     package static func resolve(
         _ environment: RuntimeEnvironment,
         configAccess: StateRootConfigAccess,
         createRootIfMissing: Bool = false,
         fileSystem: any StateRootFileSystem
     ) throws(StateRootFailure) -> StateRootPlan {
-        let root = try canonicalRoot(environment.configDirectory.path, createIfMissing: createRootIfMissing, fileSystem: fileSystem)
-        let config = try resolveFile(.config, environment.configFile.path, fileSystem: fileSystem)
-        let platformConfig = try resolveFile(.platformConfig, environment.platformConfigFile.path, fileSystem: fileSystem)
-        let preferences = try resolveFile(.preferences, environment.preferencesFile.path, fileSystem: fileSystem)
-        let journal = try resolveFile(.journal, environment.platformStateFile.path, fileSystem: fileSystem)
+        let root = try prepareRoot(environment.configDirectory.path, createIfMissing: createRootIfMissing, fileSystem: fileSystem)
+        let configSlot: String? = configAccess == .writerOwned ? StateRootRole.config.fixedLeaf : nil
+        let config = try resolveFile(.config, environment.configFile.path, root: root, slot: configSlot, fileSystem: fileSystem)
+        let platformConfig = try resolveFile(
+            .platformConfig, environment.platformConfigFile.path, root: root, slot: StateRootRole.platformConfig.fixedLeaf, fileSystem: fileSystem
+        )
+        let preferences = try resolveFile(
+            .preferences, environment.preferencesFile.path, root: root, slot: StateRootRole.preferences.fixedLeaf, fileSystem: fileSystem
+        )
+        let journal = try resolveFile(
+            .journal, environment.platformStateFile.path, root: root, slot: StateRootRole.journal.fixedLeaf, fileSystem: fileSystem
+        )
 
         var writers = [platformConfig, preferences, journal]
         if configAccess == .writerOwned {
@@ -172,22 +200,53 @@ package enum StateRootLayout {
         createRootIfMissing: Bool = false,
         fileSystem: any StateRootFileSystem
     ) throws(StateRootFailure) -> StateRootInputPlan {
-        let root = try canonicalRoot(environment.configDirectory.path, createIfMissing: createRootIfMissing, fileSystem: fileSystem)
-        let config = try resolveFile(.config, environment.configFile.path, fileSystem: fileSystem)
+        let root = try prepareRoot(environment.configDirectory.path, createIfMissing: createRootIfMissing, fileSystem: fileSystem)
+        let config = try resolveFile(.config, environment.configFile.path, root: root, slot: nil, fileSystem: fileSystem)
         try checkReserved(config, root: root.path, fileSystem: fileSystem)
         return StateRootInputPlan(root: root, config: config)
     }
 
-    private static func canonicalRoot(
+    /// The pure name check of the writer-owned files (decision 0028), run before anything is
+    /// touched. It takes no file-system effect, so it cannot create a directory, take the lease
+    /// or read a file. A writer role's logical leaf must be its fixed slot, or a fold alias that
+    /// the post-lease check in `fixedSlotPath` decides by asking the volume. Any other leaf is
+    /// `unsupportedFileName` here, so an arbitrary `custom.json` or a link named `alias.json`
+    /// creates nothing. Containment, reserved names and overlap stay in `resolve`, after the lease.
+    package static func preflightWritableNames(_ environment: RuntimeEnvironment) throws(StateRootFailure) {
+        let writers: [(role: StateRootRole, path: String)] = [
+            (.config, environment.configFile.path),
+            (.platformConfig, environment.platformConfigFile.path),
+            (.preferences, environment.preferencesFile.path),
+            (.journal, environment.platformStateFile.path),
+        ]
+        for writer in writers {
+            let leaf = try logicalLeaf(of: writer.path, role: writer.role)
+            guard slotSpelling(of: leaf, slot: writer.role.fixedLeaf) != .other else {
+                throw .unsupportedFileName(writer.role)
+            }
+        }
+    }
+
+    /// The canonical root of a configuration directory. A missing directory is
+    /// created only when `createIfMissing` is set. The root and each missing ancestor are
+    /// created with mode 0700, outermost first (`createMissingDirectories`). An existing
+    /// ancestor, and an existing root, is never changed. A racing creator is tolerated:
+    /// an EEXIST is judged by a directory recheck. Startup calls this before it takes the
+    /// lease, so creating the missing directories is the only change made to the root before
+    /// the lease is held.
+    package static func prepareRoot(
         _ path: String,
         createIfMissing: Bool,
         fileSystem: any StateRootFileSystem
     ) throws(StateRootFailure) -> CanonicalStateRoot {
+        // The OS refuses a path whose C string, terminator included, exceeds PATH_MAX. Refusing it here, before
+        // any effect, bounds the missing-name list in `createMissingDirectories` for every file system, fakes included.
+        guard path.utf8CString.count <= Int(PATH_MAX) else { throw .rootUnavailable(errno: ENAMETOOLONG) }
         let kind: StateRootEntryKind
         do { kind = try fileSystem.entryKind(at: path) } catch { throw .rootUnavailable(errno: error.errno) }
         if kind == .missing {
             guard createIfMissing else { throw .rootMissing }
-            do { try fileSystem.createDirectory(at: path) } catch { throw .rootUnavailable(errno: error.errno) }
+            try createMissingDirectories(endingAt: path, fileSystem: fileSystem)
         }
         let canonical: String
         do { canonical = try fileSystem.canonicalPath(of: path) } catch { throw .rootUnavailable(errno: error.errno) }
@@ -198,6 +257,59 @@ package enum StateRootLayout {
         return CanonicalStateRoot(canonicalPath: canonical)
     }
 
+    /// Creates the root and each of its missing ancestors, outermost first, one `createDirectory`
+    /// each. The walk climbs from the root until it meets an existing entry, which must be a
+    /// directory once any link is followed: a file, another object or a dangling link is refused,
+    /// and nothing beneath it is created. A directory that a racing creator makes first is accepted
+    /// only when it is a directory. The bound is set by `prepareRoot`: the root path, terminator included,
+    /// is at most PATH_MAX bytes (1024 on Darwin). Each missing entry is a prefix of that path, and each
+    /// step strictly shortens it. Thus at most PATH_MAX - 1 entries are held, each under PATH_MAX
+    /// bytes, and the array is never unbounded. A failure leaves
+    /// the directories already made in place: nothing is rolled back, and the refusal names the errno of
+    /// the step that failed.
+    private static func createMissingDirectories(endingAt path: String, fileSystem: any StateRootFileSystem) throws(StateRootFailure) {
+        var missing: [String] = []
+        var current = path
+        while current != "/" {
+            let kind: StateRootEntryKind
+            do { kind = try fileSystem.entryKind(at: current) } catch { throw .rootUnavailable(errno: error.errno) }
+            if kind != .missing {
+                try requireDirectory(current, fileSystem: fileSystem)
+                break
+            }
+            missing.append(current)
+            let parent = URL(fileURLWithPath: current).deletingLastPathComponent().path
+            // A path that has no parent to climb to would loop here. Paths are absolute, so this refuses rather than spins.
+            guard parent != current else { throw .rootUnavailable(errno: EINVAL) }
+            current = parent
+        }
+        for directory in missing.reversed() {
+            do {
+                try fileSystem.createDirectory(at: directory)
+            } catch {
+                guard error.errno == EEXIST else { throw .rootUnavailable(errno: error.errno) }
+                try requireDirectory(directory, fileSystem: fileSystem)
+            }
+        }
+    }
+
+    /// The entry at `path`, followed through any link, must be a directory. A dangling link fails
+    /// with the errno realpath gives. A file or another object is `rootNotDirectory`.
+    private static func requireDirectory(_ path: String, fileSystem: any StateRootFileSystem) throws(StateRootFailure) {
+        let resolved: String
+        do { resolved = try fileSystem.canonicalPath(of: path) } catch { throw .rootUnavailable(errno: error.errno) }
+        let kind: StateRootEntryKind
+        do { kind = try fileSystem.entryKind(at: resolved) } catch { throw .rootUnavailable(errno: error.errno) }
+        guard kind == .directory else { throw .rootNotDirectory }
+    }
+
+    /// The logical leaf of a configured path: its last component, which must name something.
+    private static func logicalLeaf(of path: String, role: StateRootRole) throws(StateRootFailure) -> String {
+        let leaf = URL(fileURLWithPath: path).lastPathComponent
+        guard !leaf.isEmpty, leaf != ".", leaf != "..", !leaf.contains("/") else { throw .invalidName(role) }
+        return leaf
+    }
+
     /// Resolves a file's identity without requiring that it exists. The parent
     /// must exist. A missing parent is refused as `parentUnavailable(ENOENT)`.
     /// That is a preflight result of this layout, which creates nothing and
@@ -205,24 +317,29 @@ package enum StateRootLayout {
     /// create the directory: the existing save paths do create parents. A store
     /// that does so must take the lease first, and must resolve the created path
     /// with this function again before it writes.
+    /// `slot` is the fixed logical leaf a writer-owned file must name, or nil for a
+    /// read-only input, which may be any file.
     private static func resolveFile(
         _ role: StateRootRole,
         _ path: String,
+        root: CanonicalStateRoot,
+        slot: String?,
         fileSystem: any StateRootFileSystem
     ) throws(StateRootFailure) -> StateRootFile {
-        let url = URL(fileURLWithPath: path)
-        let leaf = url.lastPathComponent
-        guard !leaf.isEmpty, leaf != ".", leaf != "..", !leaf.contains("/") else {
-            throw .invalidName(role)
-        }
-        let parentPath = url.deletingLastPathComponent().path
+        let leaf = try logicalLeaf(of: path, role: role)
+        let parentPath = URL(fileURLWithPath: path).deletingLastPathComponent().path
         let parent: String
         do { parent = try fileSystem.canonicalPath(of: parentPath) } catch { throw .parentUnavailable(role, errno: error.errno) }
         // A file beneath a regular file is not a missing file: it names nothing.
         let parentKind: StateRootEntryKind
         do { parentKind = try fileSystem.entryKind(at: parent) } catch { throw .parentUnavailable(role, errno: error.errno) }
         guard parentKind == .directory else { throw .parentUnavailable(role, errno: ENOTDIR) }
-        let candidate = parent == "/" ? "/" + leaf : parent + "/" + leaf
+        let candidate: String
+        if let slot {
+            candidate = try fixedSlotPath(role, leaf: leaf, slot: slot, parent: parent, root: root.path, fileSystem: fileSystem)
+        } else {
+            candidate = parent == "/" ? "/" + leaf : parent + "/" + leaf
+        }
 
         let kind: StateRootEntryKind
         do { kind = try fileSystem.entryKind(at: candidate) } catch { throw .pathUnavailable(role, errno: error.errno) }
@@ -239,6 +356,46 @@ package enum StateRootLayout {
         case .directory, .other:
             throw .notRegularFile(role)
         }
+    }
+
+    /// The logical name check of a writer-owned file (decision 0028), after the lease. The logical
+    /// parent must be the canonical root, reached through any root or directory alias. The logical
+    /// leaf must be the role's fixed slot (`slotSpelling`, the same predicate as `preflightWritableNames`).
+    /// A fold alias is a slot only on a volume that folds case, which only this check can ask. Nothing
+    /// else is a writable slot, whatever it links to. The result is the slot's spelling beneath the root,
+    /// so a case alias writes the fixed name. A link at the slot is still resolved afterwards.
+    private static func fixedSlotPath(
+        _ role: StateRootRole,
+        leaf: String,
+        slot: String,
+        parent: String,
+        root: String,
+        fileSystem: any StateRootFileSystem
+    ) throws(StateRootFailure) -> String {
+        guard parent == root else { throw .outsideRoot(role) }
+        switch slotSpelling(of: leaf, slot: slot) {
+        case .slot:
+            break
+        case .foldAlias:
+            guard try foldsCase(directory: root, fileSystem: fileSystem) else { throw .unsupportedFileName(role) }
+        case .other:
+            throw .unsupportedFileName(role)
+        }
+        return root + "/" + slot
+    }
+
+    /// How a logical leaf relates to its fixed slot: the slot itself, a fold alias that only a
+    /// case-folding volume can accept, or any other name. The one predicate for both the
+    /// pre-lease preflight and the post-lease check, so the two cannot disagree on a name.
+    private enum SlotSpelling: Equatable {
+        case slot
+        case foldAlias
+        case other
+    }
+
+    private static func slotSpelling(of leaf: String, slot: String) -> SlotSpelling {
+        if leaf == slot { return .slot }
+        return foldedLeaf(leaf) == foldedLeaf(slot) ? .foldAlias : .other
     }
 
     /// A writer-owned file must resolve inside the root. This compares canonical

@@ -38,8 +38,9 @@ package protocol StateRootFileSystem: Sendable {
     /// case. Nil when the volume does not say. The answer is asked only when two
     /// missing names match after case folding, and nil is refused, not assumed.
     func volumeSupportsCaseSensitiveNames(at directory: String) throws(StateRootFileSystemError) -> Bool?
-    /// mkdir(2) with mode 0700. Only for a root that is missing. An existing
-    /// directory is never chmod'ed or otherwise changed.
+    /// mkdir(2) with mode 0700, for one directory whose parent exists. The layout calls it
+    /// for a missing root and each missing ancestor, outermost first, and judges an EEXIST
+    /// itself. An existing directory is never chmod'ed or otherwise changed.
     func createDirectory(at path: String) throws(StateRootFileSystemError)
 }
 

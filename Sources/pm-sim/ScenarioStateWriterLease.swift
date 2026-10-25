@@ -45,15 +45,19 @@ enum StateWriterLeaseScenario {
         let platformFile = state.appendingPathComponent("platform.json")
         try Data("one".utf8).write(to: platformFile)
 
-        // Custom config name, root named through a symbolic link.
+        // The fixed config slot, named through a root alias. A custom name in the same root is refused (decision 0028).
         let aliased = resolve(
-            RuntimeEnvironment(configDirectory: alias, configFile: alias.appendingPathComponent("custom-config.json")),
+            RuntimeEnvironment(configDirectory: alias, configFile: alias.appendingPathComponent("config.json")),
             access: .writerOwned, fileSystem: fileSystem
         )
         check("alias of the state directory resolves to the canonical root",
               value(aliased)?.root.path == canonicalState)
-        check("custom config name inside the root is accepted",
-              value(aliased)?.config.path == canonicalState + "/custom-config.json")
+        check("the fixed config slot inside the root is accepted",
+              value(aliased)?.config.path == canonicalState + "/config.json")
+        check("a custom config name inside the root is refused as writer",
+              failure(resolve(RuntimeEnvironment(configDirectory: alias,
+                                                 configFile: alias.appendingPathComponent("custom-config.json")),
+                              access: .writerOwned, fileSystem: fileSystem)) == .unsupportedFileName(.config))
 
         guard let plan = value(aliased) else {
             notes.append("layout refused the alias: \(String(describing: failure(aliased)))")
@@ -106,10 +110,10 @@ enum StateWriterLeaseScenario {
               value(resolve(splitEnvironment, access: .readOnlyInput, fileSystem: fileSystem))?.config.path
                   == canonicalOutside + "/config.json")
 
-        // Overlapping authoritative files, and a root that does not exist.
-        let overlapping = RuntimeEnvironment(
-            configDirectory: state, preferencesFile: platformFile
-        )
+        // Overlapping authoritative files, and a root that does not exist. The preferences slot is a hard link of the
+        // platform file: a split path is not a writable slot (decision 0028), so the overlap is made by object identity.
+        try FileManager.default.linkItem(at: platformFile, to: state.appendingPathComponent("preferences.json"))
+        let overlapping = RuntimeEnvironment(configDirectory: state)
         check("preferences sharing the platform file is an overlap",
               failure(resolve(overlapping, access: .writerOwned, fileSystem: fileSystem))
                   == .overlap(.platformConfig, .preferences))
@@ -126,6 +130,67 @@ enum StateWriterLeaseScenario {
             check("the released root can be acquired again", false)
         }
         check("the lock file survives release on the same inode", identity(lockPath) == lockBefore)
+
+        // The production acquisition that startup takes (decisions 0017, 0020 and 0028), in its own scratch subroot. The
+        // same lease and layout as above, through the entry the app and the daemon call, so it checks what they keep.
+        let bootstrapRoot = scratch.appendingPathComponent("bootstrap", isDirectory: true)
+        try FileManager.default.createDirectory(at: bootstrapRoot, withIntermediateDirectories: false)
+        let canonicalBootstrap = try fileSystem.canonicalPath(of: bootstrapRoot.path)
+        let bootstrapEnvironment = RuntimeEnvironment(configDirectory: bootstrapRoot)
+        let configFile = bootstrapRoot.appendingPathComponent("config.json")
+        try Data("fixed-config".utf8).write(to: configFile)
+        func acquireRoot(_ environment: RuntimeEnvironment) -> Result<StateRootSession, StateRootAcquisitionFailure> {
+            StateRootBootstrap.acquire(
+                environment, createRootIfMissing: false, fileSystem: fileSystem, leasing: leasing, onReleaseFailure: report
+            )
+        }
+        func refusalOf(_ result: Result<StateRootSession, StateRootAcquisitionFailure>) -> StateRootAcquisitionFailure? {
+            if case .failure(let failure) = result { return failure }
+            return nil
+        }
+        func fixedConfigBytesUnchanged() -> Bool {
+            (try? Data(contentsOf: configFile)) == Data("fixed-config".utf8)
+        }
+
+        var session: StateRootSession?
+        if case .success(let taken) = acquireRoot(bootstrapEnvironment) { session = taken }
+        check("the production bootstrap takes an unheld fixed root", session != nil)
+        check("the bootstrap leaves the fixed configuration bytes unchanged", fixedConfigBytesUnchanged())
+        check("the session records that the configuration predates the launch", session?.configFilePredatesLaunch == true)
+        check("the session resolves the fixed config to its own path",
+              session?.environment.configFile.path == canonicalBootstrap + "/config.json")
+        check("a second bootstrap while the session lives is busy", refusalOf(acquireRoot(bootstrapEnvironment)) == .busy)
+        check("busy leaves the fixed configuration bytes unchanged", fixedConfigBytesUnchanged())
+        session = nil
+        var reacquired: StateRootSession?
+        if case .success(let again) = acquireRoot(bootstrapEnvironment) { reacquired = again }
+        check("dropping the session ends its authority, so the root is free again", reacquired != nil)
+        reacquired = nil
+
+        let customFile = bootstrapRoot.appendingPathComponent("custom.json")
+        try Data("custom-bytes".utf8).write(to: customFile)
+        check("a custom config name is refused by the production bootstrap",
+              refusalOf(acquireRoot(RuntimeEnvironment(configDirectory: bootstrapRoot, configFile: customFile)))
+                  == .refused(.unsupportedFileName(.config)))
+        check("the custom file's bytes are preserved on refusal", (try? Data(contentsOf: customFile)) == Data("custom-bytes".utf8))
+        check("the fixed configuration bytes are unchanged by the custom refusal", fixedConfigBytesUnchanged())
+
+        // A config link to a contained target: the target is the authority, and the link is kept.
+        try FileManager.default.removeItem(at: configFile)
+        let target = bootstrapRoot.appendingPathComponent("target-config.json")
+        try Data("target-bytes".utf8).write(to: target)
+        try FileManager.default.createSymbolicLink(at: configFile, withDestinationURL: target)
+        var linked: StateRootSession?
+        if case .success(let taken) = acquireRoot(bootstrapEnvironment) { linked = taken }
+        check("a config link to a contained target resolves through the production bootstrap", linked != nil)
+        check("the session's plan names the link's target, not the link",
+              linked?.plan.config.path == canonicalBootstrap + "/target-config.json")
+        check("the session's environment writes the target path",
+              linked?.environment.configFile.path == canonicalBootstrap + "/target-config.json")
+        check("the config link is kept after acquisition", (try? fileSystem.entryKind(at: configFile.path)) == .symbolicLink)
+        check("the target bytes are unchanged by acquisition", (try? Data(contentsOf: target)) == Data("target-bytes".utf8))
+        linked = nil
+
         let closeFailures = reportedCloseFailures.withLockedValue { $0.count }
         check("no close failure was reported to the destructor sink", closeFailures == 0)
         return finish(began, assertions, notes)

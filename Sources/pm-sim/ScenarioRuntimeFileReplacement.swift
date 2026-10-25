@@ -111,13 +111,15 @@ enum RuntimeFileReplacementScenario {
                           == .refused(.stagedTooLarge(limit: budget))
                           && oversizeAccess.observations.isEmpty && contents(config.path) == staged)
 
-        // Real OS: a symbolic-link config is written at its resolved target, and the link is kept.
+        // Real OS: the fixed config slot is a symbolic link to a target inside the root, and the write lands on the target while the
+        // link is kept. The scenario owns the slot, so it removes its own regular file first: the layout accepts only the fixed name.
         let realTarget = state.appendingPathComponent("real-config.json")
         try Data("old".utf8).write(to: realTarget)
-        let link = state.appendingPathComponent("linked-config.json")
+        let link = URL(fileURLWithPath: config.path)
+        try FileManager.default.removeItem(at: link)
         try FileManager.default.createSymbolicLink(at: link, withDestinationURL: realTarget)
         let linked = try StateRootLayout.resolve(
-            RuntimeEnvironment(configDirectory: state, configFile: link),
+            RuntimeEnvironment(configDirectory: state, configFile: state.appendingPathComponent("config.json")),
             configAccess: .writerOwned,
             fileSystem: fileSystem
         )
@@ -143,8 +145,12 @@ enum RuntimeFileReplacementScenario {
                       VerifiedConfigurationFileReplacement.replace(staged, at: plan.journal, under: held, access: journalAccess, expecting: fixedBaseline)
                           == .refused(.wrongRole(.journal))
                           && journalAccess.observations.isEmpty)
+        // Real OS: only the scenario's link at the fixed slot is removed, so the target it named must still hold the staged bytes.
+        try FileManager.default.removeItem(at: link)
+        verdict.check("the link is removed and its target stays",
+                      kind(link.path) == .missing && contents(realTarget.path) == staged)
         let directoryPlan = try StateRootLayout.resolve(
-            RuntimeEnvironment(configDirectory: state, configFile: state.appendingPathComponent("directory-config.json")),
+            RuntimeEnvironment(configDirectory: state, configFile: state.appendingPathComponent("config.json")),
             configAccess: .writerOwned,
             fileSystem: fileSystem
         )
@@ -224,7 +230,7 @@ enum RuntimeFileReplacementScenario {
 }
 
 /// The assertions and notes of one run. A class, so the helpers that run the checks record into the same verdict. Both lists have
-/// a fixed capacity: this scenario records 17 assertions, and a run past the capacity is a scenario bug, so recording traps.
+/// a fixed capacity: this scenario records 18 assertions, and a run past the capacity is a scenario bug, so recording traps.
 private final class Verdict {
     static let assertionCapacity = 32
     static let noteCapacity = 8

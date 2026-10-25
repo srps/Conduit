@@ -5,7 +5,9 @@ import XCTest
 @testable import PlatformMac
 @testable import ProxyKernel
 
-/// The root layout over a scripted tree (decision 0020). The real-file-system
+/// The root layout over a scripted tree (decisions 0020 and 0028). A writer-owned
+/// role names its fixed slot, so identity, reserved-name and case checks reach the
+/// slots through links and hard links of the fixed names. The real-file-system
 /// counterparts are in `StateRootOSProbeTests`.
 final class StateRootLayoutTests: XCTestCase {
     private func tree(caseSensitive: Bool? = true) -> FakeStateRootFileSystem {
@@ -61,7 +63,8 @@ final class StateRootLayoutTests: XCTestCase {
     }
 
     func testDefaultLayoutKeepsEveryAuthoritativeFileInsideTheRoot() throws {
-        let fileSystem = tree()
+        let fileSystem = FakeStateRootFileSystem()
+        fileSystem.addDirectory("/state")
         let result = try XCTUnwrap(plan(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: fileSystem)))
 
         XCTAssertEqual(result.root.path, "/state")
@@ -72,27 +75,24 @@ final class StateRootLayoutTests: XCTestCase {
         XCTAssertEqual(result.configAccess, .writerOwned)
     }
 
-    func testCustomConfigNameInsideTheRootIsAccepted() throws {
+    /// A custom in-root name is not a writable slot (decision 0028). It is refused before it is read.
+    func testCustomConfigNameInsideTheRootIsRefusedBeforeItIsRead() {
         let fileSystem = tree()
-        let environment = RuntimeEnvironment(
-            configDirectory: state(), configFile: state().appendingPathComponent("my-config.json")
-        )
-        let result = try XCTUnwrap(plan(resolve(environment, fileSystem: fileSystem)))
+        fileSystem.addFile("/state/my-config.json")
+        let environment = RuntimeEnvironment(configDirectory: state(), configFile: state().appendingPathComponent("my-config.json"))
 
-        XCTAssertEqual(result.config.path, "/state/my-config.json")
-        XCTAssertEqual(result.root.path, "/state")
+        XCTAssertEqual(refusal(resolve(environment, fileSystem: fileSystem)), .unsupportedFileName(.config))
     }
 
-    /// `--config` alone: the file's parent is the root, and the other three
-    /// files default beside it. This is the compatibility case that must not
-    /// change to a fixed `config.json` basename.
-    func testExplicitConfigParentBecomesTheRoot() throws {
+    /// `--config /state/config.json` derives its root from the parent, as the daemon always did.
+    func testExplicitFixedConfigParentBecomesTheRoot() throws {
         let fileSystem = tree()
-        let environment = RuntimeEnvironment.explicit(configFile: state().appendingPathComponent("custom.json"))
-        let result = try XCTUnwrap(plan(resolve(environment, fileSystem: fileSystem)))
+        let result = try XCTUnwrap(plan(resolve(
+            RuntimeEnvironment.explicit(configFile: state().appendingPathComponent("config.json")), fileSystem: fileSystem
+        )))
 
         XCTAssertEqual(result.root.path, "/state")
-        XCTAssertEqual(result.config.path, "/state/custom.json")
+        XCTAssertEqual(result.config.path, "/state/config.json")
         XCTAssertEqual(result.platformConfig.path, "/state/platform.json")
     }
 
@@ -205,30 +205,29 @@ final class StateRootLayoutTests: XCTestCase {
                        .parentUnavailable(.journal, errno: ENOTDIR))
     }
 
+    /// Two writer roles that name one file: `preferences.json` links to the platform file.
     func testOverlappingWriterFilesAreRefused() {
         let fileSystem = tree()
-        let environment = RuntimeEnvironment(
-            configDirectory: state(), preferencesFile: URL(fileURLWithPath: "/state/platform.json")
-        )
+        fileSystem.addFile("/state/platform.json")
+        fileSystem.addSymbolicLink("/state/preferences.json", to: "/state/platform.json")
 
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: fileSystem)),
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: fileSystem)),
                        .overlap(.platformConfig, .preferences))
     }
 
+    /// Each fixed slot that links to a runtime resource is refused for that resource.
     func testReservedRuntimeNamesAreRefusedForWriterFiles() {
-        let fileSystem = tree()
-        let cases: [(RuntimeEnvironment, StateRootFailure)] = [
-            (RuntimeEnvironment(configDirectory: state(),
-                                platformConfigFile: URL(fileURLWithPath: "/state/state-writer.lock")),
-             .reservedName(.platformConfig, .writerLock)),
-            (RuntimeEnvironment(configDirectory: state(),
-                                platformStateFile: URL(fileURLWithPath: "/state/control.sock")),
-             .reservedName(.journal, .controlSocket)),
-            (RuntimeEnvironment(configDirectory: state(), configFile: URL(fileURLWithPath: "/state/ready.json")),
-             .reservedName(.config, .readyFile)),
+        let cases: [(slot: String, target: String, role: StateRootRole, resource: StateRootReservedName)] = [
+            ("platform.json", "state-writer.lock", .platformConfig, .writerLock),
+            ("platform-state.json", "control.sock", .journal, .controlSocket),
+            ("config.json", "ready.json", .config, .readyFile),
         ]
-        for (environment, expected) in cases {
-            XCTAssertEqual(refusal(resolve(environment, fileSystem: fileSystem)), expected)
+        for testCase in cases {
+            let fileSystem = tree()
+            fileSystem.addFile("/state/\(testCase.target)")
+            fileSystem.addSymbolicLink("/state/\(testCase.slot)", to: "/state/\(testCase.target)")
+            XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: fileSystem)),
+                           .reservedName(testCase.role, testCase.resource), testCase.slot)
         }
     }
 
@@ -236,12 +235,10 @@ final class StateRootLayoutTests: XCTestCase {
     func testWriterFileBeneathAReservedDirectoryIsRefused() {
         let fileSystem = tree()
         fileSystem.addDirectory("/state/daemon-ready.json")
-        let environment = RuntimeEnvironment(
-            configDirectory: state(),
-            platformStateFile: URL(fileURLWithPath: "/state/daemon-ready.json/platform-state.json")
-        )
+        fileSystem.addFile("/state/daemon-ready.json/platform-state.json")
+        fileSystem.addSymbolicLink("/state/platform-state.json", to: "/state/daemon-ready.json/platform-state.json")
 
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: fileSystem)),
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: fileSystem)),
                        .reservedName(.journal, .daemonReadyFile))
     }
 
@@ -263,138 +260,91 @@ final class StateRootLayoutTests: XCTestCase {
 
     // MARK: Case, object identity and hard links
 
-    /// On a case-sensitive volume two spellings are two names, and both may be used.
-    func testCaseSensitiveVolumeKeepsCaseDistinctNamesApart() throws {
-        let fileSystem = tree(caseSensitive: true)
+    /// A case variant of a fixed slot is refused on a case-sensitive volume: it is a different name, not the slot.
+    func testCaseSensitiveVolumeRefusesACaseVariantOfAFixedSlot() {
         let environment = RuntimeEnvironment(
-            configDirectory: state(), configFile: state().appendingPathComponent("Platform.json")
+            configDirectory: state(), configFile: state().appendingPathComponent("CONFIG.json")
         )
-        let result = try XCTUnwrap(plan(resolve(environment, fileSystem: fileSystem)))
 
-        XCTAssertEqual(result.config.path, "/state/Platform.json")
-        XCTAssertEqual(result.platformConfig.path, "/state/platform.json")
+        XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: true))), .unsupportedFileName(.config))
     }
 
-    /// Missing names that differ by case alone are one file on a folding volume.
-    func testCaseFoldingVolumeFusesMissingCaseAliases() {
+    /// A case alias of the fixed config leaf is the slot on a folding volume, and it resolves to the fixed spelling.
+    func testCaseFoldingVolumeResolvesACaseAliasOfTheFixedSlot() throws {
         let environment = RuntimeEnvironment(
-            configDirectory: state(), configFile: state().appendingPathComponent("Platform.json")
+            configDirectory: state(), configFile: state().appendingPathComponent("CONFIG.json")
         )
+        let result = try XCTUnwrap(plan(resolve(environment, fileSystem: tree(caseSensitive: false))))
 
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: false))),
+        XCTAssertEqual(result.config.path, "/state/config.json")
+    }
+
+    /// An existing object reached through a case alias is the same object: a link to the folded config name overlaps it.
+    func testCaseFoldingVolumeFusesAnExistingCaseAliasAsAnOverlap() {
+        let fileSystem = tree(caseSensitive: false)
+        fileSystem.addFile("/state/config.json")
+        fileSystem.addSymbolicLink("/state/platform.json", to: "/state/CONFIG.JSON")
+
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: fileSystem)),
                        .overlap(.config, .platformConfig))
     }
 
-    /// An existing case alias is the same object, whatever its spelling.
-    func testCaseFoldingVolumeFusesAnExistingCaseAlias() {
-        let fileSystem = tree(caseSensitive: false)
-        fileSystem.addFile("/state/platform.json")
-        let environment = RuntimeEnvironment(
-            configDirectory: state(), configFile: state().appendingPathComponent("PLATFORM.JSON")
-        )
-
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: fileSystem)), .overlap(.config, .platformConfig))
-    }
-
-    /// A volume that answers nil refuses a case-only collision. Distinct names still resolve.
+    /// A volume that answers nil refuses a case-only collision with the fixed slot. The fixed names alone still resolve.
     func testUnknownCaseSemanticsRefusesACaseOnlyCollisionAndNothingElse() throws {
         let collision = RuntimeEnvironment(
-            configDirectory: state(), configFile: state().appendingPathComponent("Platform.json")
+            configDirectory: state(), configFile: state().appendingPathComponent("CONFIG.json")
         )
         XCTAssertEqual(refusal(resolve(collision, fileSystem: tree(caseSensitive: nil))), .caseSensitivityUnknown)
 
-        let distinct = RuntimeEnvironment(
-            configDirectory: state(), configFile: state().appendingPathComponent("custom.json")
-        )
-        _ = try XCTUnwrap(plan(resolve(distinct, fileSystem: tree(caseSensitive: nil))))
+        _ = try XCTUnwrap(plan(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: tree(caseSensitive: nil))))
     }
 
-    /// Missing names that match only after Unicode case folding are one file on a
-    /// folding volume: final sigma, micro sign and long s. The `lowercased()`
-    /// comparison this replaced missed each of them.
-    func testCaseFoldingVolumeFusesMissingFoldedAliases() {
-        let cases: [(config: String, platform: String)] = [
-            ("\u{03C2}.json", "\u{03A3}.json"),
-            ("\u{00B5}.json", "\u{03BC}.json"),
-            ("\u{017F}tate.json", "state.json"),
-        ]
-        for (config, platform) in cases {
-            let environment = RuntimeEnvironment(
-                configDirectory: state(),
-                configFile: state().appendingPathComponent(config),
-                platformConfigFile: state().appendingPathComponent(platform)
-            )
-            XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: false))),
-                           .overlap(.config, .platformConfig), "\(config) against \(platform)")
+    /// Custom names that differ from the fixed slots only by Unicode case folding (final sigma, micro sign, long s) are
+    /// not writable slots, on either case mode. They are refused before any file is read.
+    func testCustomFoldedNamesAreRefusedBeforeAnyWritableAccess() {
+        let names = ["\u{03C2}.json", "\u{00B5}.json", "\u{017F}tate.json"]
+        for caseSensitive in [false, true] {
+            for name in names {
+                let environment = RuntimeEnvironment(
+                    configDirectory: state(), platformConfigFile: state().appendingPathComponent(name)
+                )
+                XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: caseSensitive))),
+                               .unsupportedFileName(.platformConfig), "\(name), caseSensitive: \(caseSensitive)")
+            }
         }
     }
 
-    /// On a case-sensitive volume the folded spellings are four distinct names,
-    /// and all four may be used together.
-    func testCaseSensitiveVolumeKeepsFoldedSpellingsApart() throws {
-        let environment = RuntimeEnvironment(
-            configDirectory: state(),
-            configFile: state().appendingPathComponent("\u{03C2}.json"),
-            platformStateFile: state().appendingPathComponent("\u{00B5}.json"),
-            platformConfigFile: state().appendingPathComponent("\u{03A3}.json"),
-            preferencesFile: state().appendingPathComponent("\u{03BC}.json")
-        )
-        let result = try XCTUnwrap(plan(resolve(environment, fileSystem: tree(caseSensitive: true))))
-
-        XCTAssertEqual(result.config.path, "/state/\u{03C2}.json")
-        XCTAssertEqual(result.platformConfig.path, "/state/\u{03A3}.json")
-        XCTAssertEqual(result.preferences.path, "/state/\u{03BC}.json")
-        XCTAssertEqual(result.journal.path, "/state/\u{00B5}.json")
-    }
-
-    /// A volume that does not answer refuses a folded collision, and only that.
-    func testUnknownCaseSemanticsRefusesAFoldedCollisionOfFinalSigma() {
-        let environment = RuntimeEnvironment(
-            configDirectory: state(),
-            configFile: state().appendingPathComponent("\u{03C2}.json"),
-            platformConfigFile: state().appendingPathComponent("\u{03A3}.json")
-        )
-
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: nil))), .caseSensitivityUnknown)
-    }
-
-    /// Canonically equivalent spellings (precomposed and decomposed e-acute) are one
-    /// name. The volume's normalization behavior is not queryable, so the layout
-    /// refuses the pair on either case mode rather than guessing.
+    /// Canonically equivalent spellings (precomposed and decomposed e-acute) are one name. A config link and a platform
+    /// link to the two spellings overlap. The volume's normalization behavior is not queryable, so the layout refuses
+    /// the pair on either case mode rather than guessing.
     func testCanonicallyEquivalentSpellingsAreOneName() {
         for caseSensitive in [false, true] {
-            let environment = RuntimeEnvironment(
-                configDirectory: state(),
-                configFile: state().appendingPathComponent("caf\u{00E9}.json"),
-                platformConfigFile: state().appendingPathComponent("cafe\u{0301}.json")
-            )
-            XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: caseSensitive))),
+            let fileSystem = tree(caseSensitive: caseSensitive)
+            fileSystem.addFile("/state/caf\u{00E9}.json")
+            fileSystem.addSymbolicLink("/state/config.json", to: "/state/caf\u{00E9}.json")
+            fileSystem.addSymbolicLink("/state/platform.json", to: "/state/cafe\u{0301}.json")
+            XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: fileSystem)),
                            .overlap(.config, .platformConfig), "caseSensitive: \(caseSensitive)")
         }
     }
 
-    /// A folded and a canonically equivalent spelling of one name are one file on a
-    /// folding volume: upper-case `CAFÉ` (precomposed) against `cafe` plus a combining accent.
-    func testFoldedAndCanonicallyEquivalentSpellingsAreOneNameOnAFoldingVolume() {
+    /// A custom name that is a folded and canonically equivalent spelling of a slot is refused as a writable name.
+    func testCustomFoldedAndCanonicalSpellingsAreRefusedAsWritableNames() {
         let environment = RuntimeEnvironment(
-            configDirectory: state(),
-            configFile: state().appendingPathComponent("CAF\u{00C9}.json"),
-            platformConfigFile: state().appendingPathComponent("cafe\u{0301}.json")
+            configDirectory: state(), configFile: state().appendingPathComponent("CAF\u{00C9}.json")
         )
 
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: false))),
-                       .overlap(.config, .platformConfig))
+        XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: false))), .unsupportedFileName(.config))
     }
 
-    /// An existing file reached through a folded spelling is the same object.
+    /// An existing file reached through a folded link target is the same object.
     func testExistingFoldedAliasIsTheSameObjectOnAFoldingVolume() {
         let fileSystem = tree(caseSensitive: false)
         fileSystem.addFile("/state/preferences.json")
-        let environment = RuntimeEnvironment(
-            configDirectory: state(), configFile: state().appendingPathComponent("preference\u{017F}.json")
-        )
+        fileSystem.addSymbolicLink("/state/config.json", to: "/state/PREFERENCES.JSON")
 
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: fileSystem)), .overlap(.config, .preferences))
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: fileSystem)),
+                       .overlap(.config, .preferences))
     }
 
     /// A case query that fails is refused with its errno, not treated as an answer.
@@ -402,22 +352,113 @@ final class StateRootLayoutTests: XCTestCase {
         let fileSystem = tree(caseSensitive: nil)
         fileSystem.failCaseQuery(errno: EIO)
         let environment = RuntimeEnvironment(
-            configDirectory: state(), configFile: state().appendingPathComponent("Platform.json")
+            configDirectory: state(), configFile: state().appendingPathComponent("CONFIG.json")
         )
 
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: fileSystem)),
-                       .caseSensitivityUnavailable(errno: EIO))
+        XCTAssertEqual(refusal(resolve(environment, fileSystem: fileSystem)), .caseSensitivityUnavailable(errno: EIO))
     }
 
-    /// A reserved name is matched across case only on a folding volume.
+    /// A reserved name is matched across case only on a folding volume: a link to the lock by its upper-case
+    /// spelling is the lock there. On a case-sensitive volume that spelling names nothing, so the link dangles.
     func testReservedCaseAliasIsRefusedOnlyOnAFoldingVolume() {
-        let environment = RuntimeEnvironment(
-            configDirectory: state(), platformConfigFile: state().appendingPathComponent("State-Writer.LOCK")
-        )
-
-        XCTAssertEqual(refusal(resolve(environment, fileSystem: tree(caseSensitive: false))),
+        let folding = tree(caseSensitive: false)
+        folding.addFile("/state/state-writer.lock")
+        folding.addSymbolicLink("/state/platform.json", to: "/state/STATE-WRITER.LOCK")
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: folding)),
                        .reservedName(.platformConfig, .writerLock))
-        _ = plan(resolve(environment, fileSystem: tree(caseSensitive: true)))
+
+        let sensitive = tree(caseSensitive: true)
+        sensitive.addFile("/state/state-writer.lock")
+        sensitive.addSymbolicLink("/state/platform.json", to: "/state/STATE-WRITER.LOCK")
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: sensitive)),
+                       .pathUnavailable(.platformConfig, errno: ENOENT))
+    }
+
+    /// A dangling link at a fixed slot does not resolve, as realpath(3) reports it: `pathUnavailable` with ENOENT,
+    /// not a regular-file refusal. The missing target is not created.
+    func testDanglingFixedSlotLinkIsRefusedAsAnUnresolvedPath() throws {
+        let fileSystem = tree()
+        fileSystem.addSymbolicLink("/state/config.json", to: "/state/absent.json")
+
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: state()), fileSystem: fileSystem)),
+                       .pathUnavailable(.config, errno: ENOENT))
+        XCTAssertEqual(try fileSystem.entryKind(at: "/state/absent.json"), .missing)
+    }
+
+    /// The preflight is a pure check of the names, with no file system to call. It accepts the slot and a fold alias
+    /// (the volume decides that later), and it refuses any other name for each writer role.
+    func testPreflightAcceptsSlotSpellingsAndRefusesAnyOtherNameForEachRole() {
+        let root = state()
+        XCTAssertNoThrow(try StateRootLayout.preflightWritableNames(RuntimeEnvironment(configDirectory: root)))
+        let folded = RuntimeEnvironment(
+            configDirectory: root,
+            configFile: root.appendingPathComponent("CONFIG.json"),
+            platformStateFile: root.appendingPathComponent("Platform-State.JSON"),
+            platformConfigFile: root.appendingPathComponent("Platform.JSON"),
+            preferencesFile: root.appendingPathComponent("PREFERENCES.json")
+        )
+        XCTAssertNoThrow(try StateRootLayout.preflightWritableNames(folded))
+
+        let custom = root.appendingPathComponent("alias.json")
+        let cases: [(StateRootRole, RuntimeEnvironment)] = [
+            (.config, RuntimeEnvironment(configDirectory: root, configFile: custom)),
+            (.platformConfig, RuntimeEnvironment(configDirectory: root, platformConfigFile: custom)),
+            (.preferences, RuntimeEnvironment(configDirectory: root, preferencesFile: custom)),
+            (.journal, RuntimeEnvironment(configDirectory: root, platformStateFile: custom)),
+        ]
+        for (role, environment) in cases {
+            XCTAssertThrowsError(try StateRootLayout.preflightWritableNames(environment)) { error in
+                XCTAssertEqual(error as? StateRootFailure, .unsupportedFileName(role), "\(role)")
+            }
+        }
+    }
+
+    /// The root bound is PATH_MAX bytes with the terminator. A root of PATH_MAX - 1 bytes is accepted, and one of PATH_MAX
+    /// is refused as ENAMETOOLONG before any effect, even when the file system would accept it.
+    func testRootPathBoundIsPathMaxIncludingTheTerminator() throws {
+        let longest = absolutePath(byteCount: Int(PATH_MAX) - 1)
+        let fileSystem = FakeStateRootFileSystem()
+        fileSystem.addDirectory(longest)
+        XCTAssertEqual(try StateRootLayout.prepareRoot(longest, createIfMissing: false, fileSystem: fileSystem).path, longest)
+
+        let tooLong = absolutePath(byteCount: Int(PATH_MAX))
+        let log = StateRootEffectLog()
+        let recording = RecordingStateRootFileSystem(FakeStateRootFileSystem(), log: log)
+        XCTAssertThrowsError(try StateRootLayout.prepareRoot(tooLong, createIfMissing: true, fileSystem: recording)) { error in
+            XCTAssertEqual(error as? StateRootFailure, .rootUnavailable(errno: ENAMETOOLONG))
+        }
+        XCTAssertEqual(log.effects, [], "an overlong root touches nothing")
+    }
+
+    /// A missing nested root is created with each missing ancestor, outermost first, on the fake too.
+    func testMissingNestedRootCreatesItsAncestorsOnTheFake() throws {
+        let fileSystem = FakeStateRootFileSystem()
+        let nested = URL(fileURLWithPath: "/state/a/b", isDirectory: true)
+        _ = try XCTUnwrap(plan(resolve(RuntimeEnvironment(configDirectory: nested), fileSystem: fileSystem, createRoot: true)))
+
+        XCTAssertEqual(try fileSystem.entryKind(at: "/state"), .directory)
+        XCTAssertEqual(try fileSystem.entryKind(at: "/state/a"), .directory)
+        XCTAssertEqual(try fileSystem.entryKind(at: "/state/a/b"), .directory)
+    }
+
+    /// A file where an ancestor of a missing root belongs is refused, and nothing beneath it is created.
+    func testNonDirectoryAncestorOfAMissingRootIsRefusedOnTheFake() throws {
+        let fileSystem = tree()
+        fileSystem.addFile("/state/a")
+        let nested = URL(fileURLWithPath: "/state/a/b/c", isDirectory: true)
+
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: nested), fileSystem: fileSystem, createRoot: true)), .rootNotDirectory)
+        XCTAssertEqual(try fileSystem.entryKind(at: "/state/a/b"), .missing)
+    }
+
+    /// An ancestor that cannot be examined is refused with its errno, not treated as missing.
+    func testUnavailableAncestorOfAMissingRootIsRefusedWithItsErrno() {
+        let fileSystem = tree()
+        fileSystem.failPath("/state/a", errno: EACCES)
+        let nested = URL(fileURLWithPath: "/state/a/b", isDirectory: true)
+
+        XCTAssertEqual(refusal(resolve(RuntimeEnvironment(configDirectory: nested), fileSystem: fileSystem, createRoot: true)),
+                       .rootUnavailable(errno: EACCES))
     }
 
     /// A link is refused when its target is another role's file: the target is the identity.

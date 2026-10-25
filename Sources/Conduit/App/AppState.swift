@@ -85,6 +85,9 @@ final class AppState: ObservableObject {
     let credentialManager: CredentialManager
     let helperLifecycle: any HelperLifecycleManaging
     private let auditedPrivilegeClient: any PrivilegeClient
+    /// The root's writer authority (decision 0028). The app keeps it for its
+    /// lifetime, and the process pins its own copy until exit (`PreparedAppLaunch`).
+    private let stateSession: StateRootSession
     private let runtimeEnvironment: RuntimeEnvironment
     private let orchestrator: ProxyOrchestrator
     private let updateCoordinator: UpdateCoordinator
@@ -315,8 +318,12 @@ final class AppState: ObservableObject {
     ///   - credentialStore: where saved credentials live. In production the
     ///     login Keychain; a fake host keeps them in memory, or its
     ///     credential controls would edit the installed app's entries.
+    /// - Parameter stateSession: the prepared writer authority for the state root
+    ///   (decision 0028). Required: no construction path takes a raw environment,
+    ///   so no writer here exists without its lease. The launch takes the session
+    ///   before any load, and `AppStateHarness` and `DevLaunch` take theirs the same way.
     init(
-        runtimeEnvironment: RuntimeEnvironment? = nil,
+        stateSession: StateRootSession,
         privilegeClient: (any PrivilegeClient)? = nil,
         helperLifecycle: (any HelperLifecycleManaging)? = nil,
         credentialStore: (any SecretStore)? = nil,
@@ -343,12 +350,13 @@ final class AppState: ObservableObject {
         updaterAvailability: UpdaterAvailability? = nil,
         currentVersion: String? = nil
     ) {
-        let runtimeEnvironment = runtimeEnvironment ?? AppState.runtimeEnvironment()
+        let runtimeEnvironment = stateSession.environment
         let logStore = AppLogStore()
         // Read before the load, which writes a migrated file back: a config
         // file that predates this launch is what tells an upgrade from a
         // fresh install, and the resolver-file recovery at launch hangs on it.
-        let configFilePredatesLaunch = FileManager.default.fileExists(atPath: runtimeEnvironment.configFile.path)
+        // Taken under the root's authority (decision 0028), so no load can have written it yet.
+        let configFilePredatesLaunch = stateSession.configFilePredatesLaunch
         let loadedConfiguration: RuntimeConfigurationLoadResult
         let loadFailure: ConfigurationLoadError?
         do {
@@ -398,6 +406,7 @@ final class AppState: ObservableObject {
         self.networkLocationObserver = networkLocationObserver
         self.networkLocationStoreFactory = networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits
+        self.stateSession = stateSession
         self.runtimeEnvironment = runtimeEnvironment
         self.logStore = logStore
         self.helperLifecycle = helperLifecycle ?? helperClient
@@ -806,14 +815,6 @@ final class AppState: ObservableObject {
 
     private static func hasFlag(_ flag: String) -> Bool {
         CommandLine.arguments.contains(flag)
-    }
-
-    private static func runtimeEnvironment() -> RuntimeEnvironment {
-        if let override = ProcessInfo.processInfo.environment["PM_CONFIG_DIR"],
-           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return .isolated(stateDirectory: URL(fileURLWithPath: override, isDirectory: true))
-        }
-        return .userDefault()
     }
 
     private func rejectUnavailableConfiguration() -> Bool {

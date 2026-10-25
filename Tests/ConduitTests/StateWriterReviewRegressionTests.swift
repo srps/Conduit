@@ -18,26 +18,26 @@ final class StateWriterReviewRegressionTests: XCTestCase {
                        "a repeat must not turn an uncertain release into alreadyReleased")
     }
 
+    /// A link to an existing case alias of the platform file is that file, so the two roles overlap.
     func testExistingCaseAliasesCannotNameTwoComponents() throws {
         try withRoot { root in
             try Data("fixture".utf8).write(to: root.appendingPathComponent("platform.json"))
-            let environment = RuntimeEnvironment(configDirectory: root,
-                configFile: root.appendingPathComponent("PLATFORM.JSON"))
-            XCTAssertThrowsError(try StateRootLayout.resolve(environment, configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem())) {
-                XCTAssertEqual($0 as? StateRootFailure, .overlap(.config, .platformConfig))
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("preferences.json"),
+                withDestinationURL: root.appendingPathComponent("PLATFORM.JSON"))
+            XCTAssertThrowsError(try StateRootLayout.resolve(RuntimeEnvironment(configDirectory: root),
+                configAccess: .writerOwned, fileSystem: OSStateRootFileSystem())) {
+                XCTAssertEqual($0 as? StateRootFailure, .overlap(.platformConfig, .preferences))
             }
         }
     }
 
-    func testMissingCaseAliasesCannotBecomeTheSameComponentFile() throws {
+    /// A missing case alias of a fixed slot is the slot, so it names the fixed file and cannot be a second one.
+    func testMissingCaseAliasOfAFixedSlotResolvesToTheSlot() throws {
         try withRoot { root in
-            let environment = RuntimeEnvironment(configDirectory: root,
-                configFile: root.appendingPathComponent("Platform.json"))
-            XCTAssertThrowsError(try StateRootLayout.resolve(environment, configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem())) {
-                XCTAssertEqual($0 as? StateRootFailure, .overlap(.config, .platformConfig))
-            }
+            let plan = try StateRootLayout.resolve(RuntimeEnvironment(configDirectory: root,
+                configFile: root.appendingPathComponent("CONFIG.json")),
+                configAccess: .writerOwned, fileSystem: OSStateRootFileSystem())
+            XCTAssertEqual(plan.config.path, try OSStateRootFileSystem().canonicalPath(of: root.path) + "/config.json")
         }
     }
 
@@ -125,23 +125,24 @@ final class StateWriterReviewRegressionTests: XCTestCase {
     /// refused as the platform file before the lock exists.
     func testReservedCaseAliasIsRefusedOnACaseInsensitiveVolume() throws {
         try withRoot { root in
-            let environment = RuntimeEnvironment(
-                configDirectory: root, platformConfigFile: root.appendingPathComponent("STATE-WRITER.LOCK")
-            )
-            XCTAssertThrowsError(try StateRootLayout.resolve(environment, configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem())) {
+            try Data().write(to: root.appendingPathComponent("state-writer.lock"))
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("platform.json"),
+                withDestinationURL: root.appendingPathComponent("STATE-WRITER.LOCK"))
+            XCTAssertThrowsError(try StateRootLayout.resolve(RuntimeEnvironment(configDirectory: root),
+                configAccess: .writerOwned, fileSystem: OSStateRootFileSystem())) {
                 XCTAssertEqual($0 as? StateRootFailure, .reservedName(.platformConfig, .writerLock))
             }
         }
     }
 
-    /// An existing reserved file is matched by its object, so `READY.JSON` is `ready.json`.
+    /// An existing reserved file is matched by its object, so a link to `READY.JSON` is `ready.json`.
     func testExistingReservedCaseAliasIsRefusedOnACaseInsensitiveVolume() throws {
         try withRoot { root in
             try Data("ready".utf8).write(to: root.appendingPathComponent("ready.json"))
-            let environment = RuntimeEnvironment(configDirectory: root, configFile: root.appendingPathComponent("READY.JSON"))
-            XCTAssertThrowsError(try StateRootLayout.resolve(environment, configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem())) {
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("config.json"),
+                withDestinationURL: root.appendingPathComponent("READY.JSON"))
+            XCTAssertThrowsError(try StateRootLayout.resolve(RuntimeEnvironment(configDirectory: root),
+                configAccess: .writerOwned, fileSystem: OSStateRootFileSystem())) {
                 XCTAssertEqual($0 as? StateRootFailure, .reservedName(.config, .readyFile))
             }
         }
@@ -212,37 +213,33 @@ final class StateWriterReviewRegressionTests: XCTestCase {
         XCTAssertEqual(try OSStateRootFileSystem().entryKind(at: sidecar.path), .directory)
     }
 
+    /// A config link whose target is a long-s alias of the lock file is the lock: it is refused as a reserved name.
     func testMissingUnicodeCaseAliasCannotReplaceTheWriterLock() throws {
         try withRoot { root in
-            let probe = root.appendingPathComponent("probe", isDirectory: true)
-            try FileManager.default.createDirectory(at: probe, withIntermediateDirectories: false)
-            let ordinary = probe.appendingPathComponent("state-writer.lock")
-            try Data().write(to: ordinary)
-            guard FileManager.default.fileExists(atPath: probe.appendingPathComponent("ſtate-writer.lock").path) else {
+            try Data().write(to: root.appendingPathComponent("state-writer.lock"))
+            guard FileManager.default.fileExists(atPath: root.appendingPathComponent("ſtate-writer.lock").path) else {
                 throw XCTSkip("fixture volume does not fold long s")
             }
-            let environment = RuntimeEnvironment(configDirectory: root,
-                configFile: root.appendingPathComponent("ſtate-writer.lock"))
-            XCTAssertThrowsError(try StateRootLayout.resolve(environment, configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem())) {
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("config.json"),
+                withDestinationURL: root.appendingPathComponent("ſtate-writer.lock"))
+            XCTAssertThrowsError(try StateRootLayout.resolve(RuntimeEnvironment(configDirectory: root),
+                configAccess: .writerOwned, fileSystem: OSStateRootFileSystem())) {
                 XCTAssertEqual($0 as? StateRootFailure, .reservedName(.config, .writerLock))
             }
-            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("state-writer.lock").path))
         }
     }
 
+    /// A config link whose target is a long-s alias of the preferences file is that file, so the roles overlap.
     func testMissingUnicodeCaseAliasCannotOverlapPreferences() throws {
         try withRoot { root in
-            let probe = root.appendingPathComponent("probe", isDirectory: true)
-            try FileManager.default.createDirectory(at: probe, withIntermediateDirectories: false)
-            try Data().write(to: probe.appendingPathComponent("preferences.json"))
-            guard FileManager.default.fileExists(atPath: probe.appendingPathComponent("preferenceſ.json").path) else {
+            try Data().write(to: root.appendingPathComponent("preferences.json"))
+            guard FileManager.default.fileExists(atPath: root.appendingPathComponent("preferenceſ.json").path) else {
                 throw XCTSkip("fixture volume does not fold long s")
             }
-            let environment = RuntimeEnvironment(configDirectory: root,
-                configFile: root.appendingPathComponent("preferenceſ.json"))
-            XCTAssertThrowsError(try StateRootLayout.resolve(environment, configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem())) {
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("config.json"),
+                withDestinationURL: root.appendingPathComponent("preferenceſ.json"))
+            XCTAssertThrowsError(try StateRootLayout.resolve(RuntimeEnvironment(configDirectory: root),
+                configAccess: .writerOwned, fileSystem: OSStateRootFileSystem())) {
                 XCTAssertEqual($0 as? StateRootFailure, .overlap(.config, .preferences))
             }
         }
@@ -252,17 +249,16 @@ final class StateWriterReviewRegressionTests: XCTestCase {
     /// missing config name is refused as the same file. Lowercasing kept them apart.
     func testMissingFinalSigmaAliasCannotOverlapThePlatformFile() throws {
         try withRoot { root in
-            let probe = root.appendingPathComponent("probe", isDirectory: true)
-            try FileManager.default.createDirectory(at: probe, withIntermediateDirectories: false)
-            try Data().write(to: probe.appendingPathComponent("\u{03A3}.json"))
-            guard FileManager.default.fileExists(atPath: probe.appendingPathComponent("\u{03C2}.json").path) else {
+            try Data().write(to: root.appendingPathComponent("\u{03A3}.json"))
+            guard FileManager.default.fileExists(atPath: root.appendingPathComponent("\u{03C2}.json").path) else {
                 throw XCTSkip("fixture volume does not fold final sigma")
             }
-            let environment = RuntimeEnvironment(configDirectory: root,
-                configFile: root.appendingPathComponent("\u{03C2}.json"),
-                platformConfigFile: root.appendingPathComponent("\u{03A3}.json"))
-            XCTAssertThrowsError(try StateRootLayout.resolve(environment, configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem())) {
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("config.json"),
+                withDestinationURL: root.appendingPathComponent("\u{03A3}.json"))
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("platform.json"),
+                withDestinationURL: root.appendingPathComponent("\u{03C2}.json"))
+            XCTAssertThrowsError(try StateRootLayout.resolve(RuntimeEnvironment(configDirectory: root),
+                configAccess: .writerOwned, fileSystem: OSStateRootFileSystem())) {
                 XCTAssertEqual($0 as? StateRootFailure, .overlap(.config, .platformConfig))
             }
         }
@@ -272,17 +268,16 @@ final class StateWriterReviewRegressionTests: XCTestCase {
     /// names are one file.
     func testMissingMicroSignAliasCannotOverlapTheGreekMu() throws {
         try withRoot { root in
-            let probe = root.appendingPathComponent("probe", isDirectory: true)
-            try FileManager.default.createDirectory(at: probe, withIntermediateDirectories: false)
-            try Data().write(to: probe.appendingPathComponent("\u{03BC}.json"))
-            guard FileManager.default.fileExists(atPath: probe.appendingPathComponent("\u{00B5}.json").path) else {
+            try Data().write(to: root.appendingPathComponent("\u{03BC}.json"))
+            guard FileManager.default.fileExists(atPath: root.appendingPathComponent("\u{00B5}.json").path) else {
                 throw XCTSkip("fixture volume does not fold micro sign")
             }
-            let environment = RuntimeEnvironment(configDirectory: root,
-                configFile: root.appendingPathComponent("\u{00B5}.json"),
-                platformConfigFile: root.appendingPathComponent("\u{03BC}.json"))
-            XCTAssertThrowsError(try StateRootLayout.resolve(environment, configAccess: .writerOwned,
-                fileSystem: OSStateRootFileSystem())) {
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("config.json"),
+                withDestinationURL: root.appendingPathComponent("\u{00B5}.json"))
+            try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("platform.json"),
+                withDestinationURL: root.appendingPathComponent("\u{03BC}.json"))
+            XCTAssertThrowsError(try StateRootLayout.resolve(RuntimeEnvironment(configDirectory: root),
+                configAccess: .writerOwned, fileSystem: OSStateRootFileSystem())) {
                 XCTAssertEqual($0 as? StateRootFailure, .overlap(.config, .platformConfig))
             }
         }

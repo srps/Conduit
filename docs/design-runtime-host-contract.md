@@ -1,7 +1,7 @@
 # Shared runtime contracts and host: owner review draft
 
 Date: 2026-10-24. Status: **selected architecture; staged implementation authorized**.
-Implementation status: the stage-1 foundation (typed lifecycle events, control value types and codec, the `RuntimeClient` protocol) is implemented on this branch. `ConduitRuntime` now holds the mechanically extracted RuntimeHost on this branch; an in-memory client, AppState adoption and production v2 socket remain pending. See the [stage-1 inventory](./runtime-client-stage1-inventory.md).
+Implementation status: the stage-1 foundation (typed lifecycle events, control value types and codec, the `RuntimeClient` protocol) is implemented on this branch. `ConduitRuntime` holds the mechanically extracted RuntimeHost. PR #235 supplies the unadopted bounded service behind the framed client; actual RuntimeHost adaptation, AppState adoption and the production v2 socket remain pending. See the [stage-1 inventory](./runtime-client-stage1-inventory.md).
 
 Prepared by Codex with Claude Code architecture and persistence-policy review,
 using the owner's `claude.ai` Max subscription. The owner selected the module and

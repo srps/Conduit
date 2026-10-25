@@ -227,6 +227,7 @@ final class SnapshotArtifactWriterTests: XCTestCase {
     /// Once the gate has latched, later submissions are not encoded. The encode count is the witness: the first
     /// attempt encodes once, discovers the refusal, and every later attempt skips the encoder entirely.
     func testLatchedRefusalSkipsEncodingOfLaterSubmissions() async throws {
+        let cleaned = DispatchSemaphore(value: 0)
         let directory = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let config = directory.appendingPathComponent("config.json")
@@ -238,7 +239,7 @@ final class SnapshotArtifactWriterTests: XCTestCase {
             fileURL: config, logger: DiscardingLogSink(),
             destinationGuard: systemRecordFileDestinationGuard(
                 protected: [ProtectedRecordFile(resource: .config, url: config)]),
-            eventLog: events, onDrainCleanup: nil, initialGeneration: 0,
+            eventLog: events, onDrainCleanup: { cleaned.signal() }, initialGeneration: 0,
             encodeOverride: { value in
                 encodes.withLockedValue { $0 += 1 }
                 return try JSONEncoder().encode(value)
@@ -248,7 +249,7 @@ final class SnapshotArtifactWriterTests: XCTestCase {
         XCTAssertEqual(encodes.withLockedValue { $0 }, 1)
         writer.submit(snapshotValue(2))
         writer.submit(snapshotValue(3))
-        let second = await writer.drain(until: deadline(in: 10))
+        let second = await drainJoining(writer, cleaned: cleaned)
         XCTAssertEqual(first, .refused)
         XCTAssertEqual(second, .refused)
         XCTAssertEqual(encodes.withLockedValue { $0 }, 1, "no encoding after the refusal latched")
@@ -310,8 +311,10 @@ final class SnapshotArtifactWriterTests: XCTestCase {
     }
 
     /// A close that reports failure is ambiguous, so it is recorded and never retried. The descriptor is really closed
-    /// by the seam, so the test leaks nothing. The writer then latches, and no file is created.
+    /// by the seam, so the test leaks nothing. The writer then latches, and no file is created. The second drain joins the
+    /// first reservation's cleanup, so it is never busy.
     func testUncertainCloseLatchesWithoutRetryingTheClose() async throws {
+        let cleaned = DispatchSemaphore(value: 0)
         let directory = try makeScratchDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let destination = directory.appendingPathComponent("snapshot.json")
@@ -324,12 +327,12 @@ final class SnapshotArtifactWriterTests: XCTestCase {
         }
         let writer = SnapshotArtifactWriter(
             fileURL: destination, logger: DiscardingLogSink(), destinationGuard: UncheckedRecordFileDestination(),
-            eventLog: RuntimeEventLog(capacity: 8), onDrainCleanup: nil, initialGeneration: 0,
+            eventLog: RuntimeEventLog(capacity: 8), onDrainCleanup: { cleaned.signal() }, initialGeneration: 0,
             encodeOverride: nil, fileEffects: effects)
         writer.submit(snapshotValue(1))
         let first = await writer.drain(until: deadline(in: 10))
         writer.submit(snapshotValue(2))
-        let second = await writer.drain(until: deadline(in: 10))
+        let second = await drainJoining(writer, cleaned: cleaned)
         XCTAssertEqual(first, .writeFailed)
         XCTAssertEqual(second, .writeFailed)
         XCTAssertEqual(closes.withLockedValue { $0 }, 1, "the ambiguous close was not retried")

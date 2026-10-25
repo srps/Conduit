@@ -26,20 +26,23 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
 warning, and the Overview "active" counter no longer repeats the word.
 
-Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has its typed lifecycle/value foundation merged in PR #220 (`fd630d1`) and the framed `RuntimeClient` adapter merged in PR #231 (`3195be6`). The service behind the adapter is implemented locally with admission, retained pages, coalesced snapshots and replay models; its combined review and workflow/PR gates remain open. Production v2 socket and AppState adoption remain open. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
+Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](https://github.com/srps/Conduit/issues/180), [#183](https://github.com/srps/Conduit/issues/183)) has its typed lifecycle/value foundation merged in PR #220 (`fd630d1`) and the framed `RuntimeClient` adapter merged in PR #231 (`3195be6`). The bounded service behind the adapter, with admission, retained pages, coalesced snapshots and replay models, merged in
+[PR #235](https://github.com/srps/Conduit/pull/235) (`29f0484`) after independent review, all 39 local checks and hosted Swift/CodeQL passed. Production v2 socket and AppState adoption remain open. PR #218 is merged at `bba6ca3`. PR #219 (separate teardown) merged at `230681e`, with hosted CI green. Evidence and open gates are in [`docs/runtime-client-stage1-inventory.md`](./docs/runtime-client-stage1-inventory.md).
 
 Snapshot destination protection and asynchronous diagnostic drains merged in
 [PR #234](https://github.com/srps/Conduit/pull/234) (`a623088`) after all 39 local
 checks and hosted Swift/CodeQL passed. Rotating app logs remain under #233.
 The fixed logical writable filenames are selected in
 [0028](./docs/decisions/0028-fixed-writable-state-filenames.md), superseding 0020;
-app/daemon startup lease and naming adoption is in progress on
-`codex/runtime-startup-ownership`. It creates no store yet: existing legacy writes
+app/daemon startup lease and naming adoption is implemented on
+`codex/runtime-startup-ownership`, with 387 focused tests, actual built-entry-point refusal probes, isolated native
+startup and all 39 integrated local checks passing (3,233 tests, two skips;
+98 simulator records). Its PR/hosted gates remain open. It creates no store yet: existing legacy writes
 remain behind one required lifetime authority until the coordinated store/workflow
 replacement, avoiding writes that bypass store baselines.
 
-The combined local service checkpoint passes 323 focused tests after the replay-gap
-correction and independent review. The final combined workflow passed all 39 checks (3,201 tests, two skips; 98 simulator records) after an existing PAC test was corrected to await its actual completion callback. Hosted PR checks remain required. Its separate foundation passed all
+The merged service checkpoint passes 323 focused tests after the replay-gap
+correction and independent review. The final combined workflow passed all 39 checks (3,201 tests, two skips; 98 simulator records) after an existing PAC test was corrected to await its actual completion callback. Hosted Swift/CodeQL passed for the merged service PR. Its separate foundation passed all
 39 checks; that result does not cover subsequent observation/integration changes.
 A display-text policy and measured shipping ordinary-v2 profile are still owner
 gates. No production-owner adoption, RuntimeActor move or release readiness is claimed.
@@ -112,12 +115,13 @@ not a requirement to finish every event or property test before extraction:
    applied outcomes and stop-fenced retries; Quit does not persist a disable.
    Status (2026-10-24, branch checkpoint): the protocol, value types, frame codec,
    pages, snapshot projection and typed lifecycle family exist with tests. Not
-   implemented: the in-memory client and its admission, lookup and subscription
-   engine, the production v2 socket, the config commit/start DTO, and AppState
-   adoption. v1 control and helper IPC are unchanged. Writer lifetime is selected in
+   implemented: the production v2 socket, the config commit/start DTO, and AppState
+   adoption. PR #235 now supplies the unadopted in-memory admission, lookup, page and
+   subscription engine behind the existing framed client; actual RuntimeHost adaptation remains open. v1 control and helper IPC are unchanged. Writer lifetime is selected in
    [0017](./docs/decisions/0017-exclusive-state-directory-writer.md). The OS lease and
-   canonical-layout foundation exist with scratch/process tests; no shipping writer
-   or host startup path acquires the lease yet. The private configuration shape is selected in
+   canonical-layout foundation are merged. App/daemon startup acquisition is implemented
+   on the startup branch with all 39 local checks passing; its hosted PR gates, complete writer/store
+   workflow adoption and installed-app validation remain open. The private configuration shape is selected in
    [0018](./docs/decisions/0018-private-configuration-request.md): one explicitly
    encoded request containing full frozen values, with neutral SecretBytes in
    ConduitShared. Save, runtime admission and apply outcomes remain distinct.
@@ -169,7 +173,8 @@ not a requirement to finish every event or property test before extraction:
    precedes startup writer adoption. The owner selected fixed writable filenames in
    [0028](./docs/decisions/0028-fixed-writable-state-filenames.md): config/platform/preferences/journal
    use their fixed logical slots; arbitrary read-only tool inputs remain supported.
-   Custom writable-name refusal and migration guidance remain planned; aliases still require protection.
+   Custom writable-name refusal and migration guidance are implemented on the startup branch;
+   alias protection remains part of the shared layout checks. All 39 local checks pass; hosted PR gates remain open.
    The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding

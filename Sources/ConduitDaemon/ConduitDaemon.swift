@@ -25,6 +25,39 @@ enum ConduitDaemon {
     @MainActor
     private static var retainedSources: [DispatchSourceSignal] = []
 
+    /// The root's writer authority, pinned for the life of the process so the lease
+    /// does not close while the host runs (decision 0017). Set once, before any
+    /// load, and never cleared.
+    @MainActor
+    private static var stateSession: StateRootSession?
+
+    /// Takes the root's writer authority on `PlatformWork`, or exits with the
+    /// refusal's event on stderr. A busy or refused root is reported before any
+    /// load, migration, seed or journal restore.
+    @MainActor
+    private static func acquireStateRoot(_ environment: RuntimeEnvironment) async -> StateRootSession {
+        let work = PlatformWork(label: "io.github.srps.Conduit.daemon.state-root")
+        let outcome = await work.run {
+            StateRootBootstrap.acquire(
+                environment,
+                createRootIfMissing: true,
+                fileSystem: OSStateRootFileSystem(),
+                leasing: OSStateWriterLeasing(),
+                onReleaseFailure: { failure in
+                    FileHandle.standardError.write(Data("ConduitDaemon: \(failure.event.event) \(failure.event.detail ?? "")\n".utf8))
+                }
+            )
+        }
+        switch outcome {
+        case .success(let session):
+            return session
+        case .failure(let failure):
+            let event = failure.event
+            FileHandle.standardError.write(Data("ConduitDaemon: \(event.event) \(event.detail ?? "")\n".utf8))
+            exit(failure.exitStatus)
+        }
+    }
+
     @MainActor
     static func main() async {
         let startedAt = Date()
@@ -40,20 +73,23 @@ enum ConduitDaemon {
         }
 
         let logger = ConsoleLogSink(minLevel: args.contains("--verbose") ? .debug : .notice)
-        let environment = runtimeEnvironment(from: args)
-        // Read before the load, which writes a migrated file back. See
-        // `RuntimeHost.init`.
-        let configFilePredatesLaunch = FileManager.default.fileExists(atPath: environment.configFile.path)
+        // Before anything under the root is read, migrated, seeded or recovered:
+        // a busy or refused root exits here with its refusal on stderr (decisions
+        // 0017 and 0028). The session is pinned until exit, so the lease cannot
+        // close while this process runs.
+        let session = await acquireStateRoot(runtimeEnvironment(from: args))
+        stateSession = session
         let loaded: RuntimeConfigurationLoadResult
         do {
-            loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: !args.contains("--config"))
+            loaded = try ProxyConfigPersistence.loadAllMigrating(in: session.environment, allowMissing: !args.contains("--config"))
         } catch {
-            let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: environment.configFile.path, reason: error.localizedDescription)
+            let failure = error as? ConfigurationLoadError ?? ConfigurationLoadError(source: session.environment.configFile.path, reason: error.localizedDescription)
             failure.report(to: logger)
             // The journal restores need no config; see
-            // `RuntimeHost.recoverWithoutConfiguration`. The exit status
+            // `RuntimeHost.recoverWithoutConfiguration`. They run under the
+            // root's authority, which this process already holds. The exit status
             // is still the load failure's.
-            await RuntimeHost.recoverWithoutConfiguration(environment: environment, logger: logger, commandRunner: CommandRunner.host)
+            await RuntimeHost.recoverWithoutConfiguration(stateSession: session, logger: logger, commandRunner: CommandRunner.host)
             logger.flush()
             exit(1)
         }
@@ -65,10 +101,9 @@ enum ConduitDaemon {
         }
 
         let host = RuntimeHost(
-            environment: environment,
+            stateSession: session,
             logger: logger,
             loadedConfiguration: loaded,
-            configFilePredatesLaunch: configFilePredatesLaunch,
             startedAt: startedAt,
             terminalExit: { exit(0) },
             commandRunner: CommandRunner.host,

@@ -904,7 +904,9 @@ package final class FakeStateRootFileSystem: StateRootFileSystem, @unchecked Sen
     package func canonicalPath(of path: String) throws(StateRootFileSystemError) -> String {
         let (failure, resolved) = lock.withLock { () -> (Int32?, String?) in
             guard entries[key(path)] != nil else { return (failures[path], nil) }
-            return (failures[path], links[key(path)] ?? path)
+            guard let target = links[key(path)] else { return (failures[path], path) }
+            // As realpath(3) does, a link whose target is absent does not resolve.
+            return (failures[path], entries[key(target)] == nil ? nil : target)
         }
         if let failure { throw StateRootFileSystemError(errno: failure) }
         guard let resolved else { throw StateRootFileSystemError(errno: ENOENT) }
@@ -921,10 +923,26 @@ package final class FakeStateRootFileSystem: StateRootFileSystem, @unchecked Sen
         let failure: Int32? = lock.withLock { () -> Int32? in
             if let failure = failures[path] { return failure }
             if entries[key(path)] != nil { return EEXIST }
+            if let failure = missingParentErrno(of: path) { return failure }
             store(.directory, at: path)
             return nil
         }
         if let failure { throw StateRootFileSystemError(errno: failure) }
+    }
+
+    /// Caller holds `lock`. The errno mkdir(2) gives when the parent of `path` is absent or is not a
+    /// directory. `/` always exists, and a parent link is followed one level, as the OS follows it.
+    private func missingParentErrno(of path: String) -> Int32? {
+        let parent = URL(fileURLWithPath: path).deletingLastPathComponent().path
+        guard parent != "/" else { return nil }
+        let name = key(parent)
+        var kind = entries[name]
+        if kind == .symbolicLink, let target = links[name] { kind = entries[key(target)] }
+        switch kind {
+        case .directory?: return nil
+        case nil: return ENOENT
+        default: return ENOTDIR
+        }
     }
 }
 

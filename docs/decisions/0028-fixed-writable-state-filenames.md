@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186 fixed writable filenames checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: 0020
 - Superseded by: none
@@ -98,14 +98,24 @@ from fixture tests alone.
 
 ## Implementation evidence
 
-None yet for the fixed writable-name requirement. Snapshot-guard implementation for the carried-forward
-diagnostic protection is recorded in [the protected-snapshot verification note](../verification-protected-snapshot-2026-10-25.md),
-which does not change this decision's status: startup naming enforcement is still planned. Existing resolver/store and
-lease foundations implement portions of the carried-forward root policy; their
-bounded evidence and outstanding startup adoption are recorded in 0020.
+Partial: startup naming is enforced for the app and `ConduitDaemon`. `StateRootLayout.resolve`
+checks each writer-owned logical leaf against its fixed slot (`RuntimeEnvironment.configFileName` and its
+three siblings) before the file is read. A custom in-root name, and a case variant on a volume that does not
+fold case, are `unsupportedFileName`. A case alias of a fixed slot on a folding volume is the slot. A link at
+the slot resolves to its contained target, which keeps any name. A dangling link at a slot is `pathUnavailable` with ENOENT, as realpath reports it. `StateRootLayout.preflightWritableNames` is the pure check of the same names, run before any directory is created, lock is taken or file is read: an arbitrary name refuses with no effect, and a fold alias is decided after the lease by the volume. `StateRootBootstrap.acquire` takes the root's lease before any load,
+migration, seed or recovery, and `StateRootSession` carries the lease and the resolved environment to `AppState`,
+`RuntimeHost` and `DevLaunch`. Code: [`StateRootSession.swift`](../../Sources/PlatformMac/StateRootSession.swift),
+[`StateRootLayout.swift`](../../Sources/PlatformMac/StateRootLayout.swift),
+[`PreparedAppLaunch.swift`](../../Sources/Conduit/App/PreparedAppLaunch.swift),
+[`ConduitDaemon.swift`](../../Sources/ConduitDaemon/ConduitDaemon.swift). Tests:
+[`RuntimeStartupOwnershipTests.swift`](../../Tests/ConduitTests/RuntimeStartupOwnershipTests.swift),
+[`StateRootLayoutTests.swift`](../../Tests/ConduitTests/StateRootLayoutTests.swift),
+[`StateWriterReviewRegressionTests.swift`](../../Tests/ConduitTests/StateWriterReviewRegressionTests.swift).
+Evidence is in [the startup verification note](../verification-runtime-startup-2026-10-25.md).
 
-Does not prove: startup naming enforcement, complete writer adoption, installed
-version handoff, real-machine recovery or deployment-storage semantics.
+Does not prove: complete writer adoption (the configuration store and every journal writer still use the legacy
+functions, under the session, pending the store workflow), installed version handoff, real-machine recovery or
+deployment-storage semantics. A link's target is the identity: a retarget after the last check is not excluded.
 
 ## Open questions
 
