@@ -120,3 +120,104 @@ logs under `runtime-startup-checks/` are from the later one.
 Exact wrapper `verify-runtime-startup.sh`: exit 0, 387 tests with 0 failures, every static check and pm-sim scenario
 above passing. This is the final frozen source; the bound guard run was the single run after the guard. The parent reruns the final source and the all-39 run. Logs are under
 `/private/tmp/conduit-runtime-stage1-20261024/runtime-startup-checks/`.
+
+
+## Parent actual entry-point proof
+
+After rebasing onto the combined client-service branch, the parent built source at
+`82f2cfc280c78325cd047891c0a1a3860d3db408`; relevant-source SHA256 is
+`c567965a27b7eb567d0c29979ffcce815253a86ba80c74b1ba84d2549baa3e73`.
+The scratch subprocess probe completed all four cases with unchanged executable hashes:
+
+- Daemon and explicit-dev app against an externally held OS lease: exit 75,
+  `config.state_root_busy`, original configuration bytes preserved.
+- Daemon custom writable filename: exit 78, `unsupported_file_name`, configuration
+  preserved and no root lock file created.
+- Daemon outside-root configuration: exit 78, `outside_root`, configuration preserved.
+  Layout validation may create the root lock file; this is not an authoritative write.
+
+No platform/preferences/journal, ready, snapshot, event or proxy-log file named by
+the probe appeared in these roots. This is an actual startup-refusal witness, not
+a successful runtime, installed-app or handoff test. The first parent harness
+incorrectly required no lock file for the split-root case; the implementation
+correctly reached post-lease containment validation. That harness expectation was
+narrowed to the custom-name pure preflight, then all four cases passed.
+
+Evidence: `/private/tmp/pm-startup-proof-ccupmkcd/result.json`; executable SHA256:
+app `835c9d2eeacefa57b47233fee5b39cbea61cdf1e8431651fbb09332fe64c067e`,
+daemon `f9935e850c0180a75d27c4a739b03d0291fe8787a1d27d2aeae4790ef57c829d`.
+
+Independent Claude Code scoped review completed on the owner's claude.ai Max
+subscription with no blocking findings. The parent corrected conservative prefix
+bound wording and directory-creation documentation. The parent integrated workflow
+results below are separate from the focused wrapper above.
+
+
+## First integrated workflow and corrections
+
+The first parent run completed all 39 checks on stable source `c567965a…`.
+Thirty-seven checks passed; two failed:
+
+- Full XCTest: 3,233 tests, two skipped, one failure. The repeated uncertain-close
+  snapshot drain returned `busy` because its first wait's timer cleanup had not
+  quiesced. The test now uses the existing bounded cleanup witness before that
+  repeated wait; the adjacent identical latched-refusal pattern was corrected too.
+  All close-count, encoding-count, latching and file-preservation assertions remain.
+  No production waiter behavior or capacity changed.
+- `pm-sim all`: 98 records, with `runtime-file-replacement` failing when its old
+  `linked-config.json` fixture hit the newly selected fixed-name rule. The fixture
+  now reuses its own `config.json` slot for the symlink and directory-prior checks.
+  It preserves the writable layout and lease, with an additional target-preservation
+  assertion after removing the link. No layout refusal was relaxed.
+
+Claude Code implemented and verified the two focused corrections on the owner's
+subscription. The exact wrapper `verify-snapshot-close-test.sh` completed: 141
+focused tests, zero failures; static checks passed; bounded-writers and protected
+snapshot scenarios passed; runtime-file-replacement passed all 18 assertions.
+The earlier two-second test duration was not isolated; the corrected focused test
+took 0.005 seconds. This is not a separate timing or scheduler proof.
+
+Failed-run logs remain at
+`/private/tmp/conduit-runtime-stage1-20261024/runtime-startup-full-gates-first-run/`.
+The full rerun is on commit `846ed537f5fe34d9dd056afab59297a8037fa56f`,
+relevant-source SHA256
+`08db6d420e88a7f40decb0820dcb1c6c946a774f52c126b002d764c57ba419dd`.
+Actual startup-refusal probes were repeated successfully on that build, with
+unchanged app/daemon executable hashes, in
+`/private/tmp/pm-startup-proof-xrc7snpy/result.json`.
+
+
+## Final-source isolated native launch
+
+The parent rebuilt only `Conduit Dev.app` with `bundle-app.sh --dev` after closing
+its earlier owned dev process. No production install/replacement was used. The
+fresh launch selected bundle identity `io.github.srps.Conduit.dev` without an
+explicit `--dev` argument, with scratch root `/private/tmp/pm-final-dev-wxjtoqc2`.
+The app log confirms FakeMachine, popover preview and DNS window presentation.
+The state-root lock, configuration, sidecars and journal appeared in that scratch
+root. Notification and network-path adapters remain real as already documented.
+Window presentation is log evidence; no visual inspection was performed.
+
+Dev PID 37350; signed executable SHA256
+`37e962864ac4135f91c8da9bf4da15485b0b200859832f5b6829d1c0f2c94480`.
+Serving PID 35326, started Friday October 23 at 09:48:07, remained unchanged.
+Exact metadata: `/private/tmp/conduit-runtime-stage1-20261024/runtime-startup-final-dev.json`.
+This proves isolated native startup on this machine, not installed-app/helper
+handoff, maximum-configuration memory, startup latency or release readiness.
+
+
+## Final integrated workflow
+
+All **39** local checks corresponding to `.github/workflows/swift.yml` passed.
+The full XCTest suite ran **3,233 tests, two skipped, zero failures**; all
+**98 simulator records** passed, including the repaired replacement fixture.
+The existing proxy performance gate passed; it does not measure the new service's
+whole-app or maximum-configuration memory. Relevant-source SHA256 was identical
+before and after:
+`08db6d420e88a7f40decb0820dcb1c6c946a774f52c126b002d764c57ba419dd`.
+The run started at `846ed537f5fe34d9dd056afab59297a8037fa56f`; subsequent
+changes are documentation and the metadata-only rebase onto merged service
+PR #235. Source identity is checked again before push. Logs:
+`/private/tmp/conduit-runtime-stage1-20261024/runtime-startup-full-gates/`.
+Hosted PR checks remain required. Store/workflow convergence, rotating-log
+protection, full runtime isolation/shutdown and release acceptance remain open.
