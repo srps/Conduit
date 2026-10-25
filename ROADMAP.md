@@ -24,6 +24,15 @@ and [`docs/STYLE.md`](./docs/STYLE.md).
 
 The v2 display slice now passes all 40 local checks (3,286 tests, two skips; all 100 simulator records and perf), independent Claude review and actual release allocation probes. One shared sanitizer lifetime correction prevents temporary accumulation without caller pools. The owner selected **64 KiB ordinary replies/stream frames** in [0030](./docs/decisions/0030-ordinary-runtime-reply-frame-cap.md); collections remain separately paged and the private 8 MiB channel is unchanged. The ceiling is recorded, with production-profile enforcement still planned. Remaining profile values and actual store/client/RuntimeHost adoption are the next coherent cut. See [the display verification](./docs/verification-runtime-display-2026-10-25.md).
 
+**Owner review pending:** [the activation-boundary draft](./docs/design-runtime-adoption-cut-review.md)
+proposes incremental DNS→tunnels→proxy development and parity tests followed by
+one final AppState switch, deleting the replaced runtime/writer paths together.
+This would revise 0001/0013's separate lifecycle activations; it is not selected.
+The alternative retains separate switches with temporary private coordination.
+Save-before-apply and Stop/Quit policies stay selected, and the whole-cluster
+RuntimeActor move remains later. A replacement ADR and affected migration code
+wait for the owner choice. Bounded profile experiments continue independently.
+
 0.5.8 shipped on 2026-10-23 with the Settings fixes in #216. An edit that brings up
 the listener note no longer shifts the window, a fixed configuration problem clears its Overview
 warning, and the Overview "active" counter no longer repeats the word.
@@ -65,7 +74,7 @@ replacement, avoiding writes that bypass store baselines.
 The merged service checkpoint passes 323 focused tests after the replay-gap
 correction and independent review. The final combined workflow passed all 39 checks (3,201 tests, two skips; 98 simulator records) after an existing PAC test was corrected to await its actual completion callback. Hosted Swift/CodeQL passed for the merged service PR. Its separate foundation passed all
 39 checks; that result does not cover subsequent observation/integration changes.
-Current status (2026-10-25): [PR #235](https://github.com/srps/Conduit/pull/235) is merged and the service remains unadopted. [PR #238](https://github.com/srps/Conduit/pull/238) and [PR #239](https://github.com/srps/Conduit/pull/239) are merged. The display-text policy is selected (decision [0029](./docs/decisions/0029-bound-runtime-display-text.md)) and implemented locally; its focused verification ran 357 tests with 0 failures before the final allocation fix, and 28 targeted tests pass after it. The full 40-check workflow is pending on the final candidate, and independent review is pending. A measured shipping ordinary-v2 profile (reply cap, retention and deadlines) is still an owner gate. No production-owner adoption, RuntimeActor move or release readiness is claimed.
+Current status (2026-10-25): [PR #235](https://github.com/srps/Conduit/pull/235), [PR #238](https://github.com/srps/Conduit/pull/238), [PR #239](https://github.com/srps/Conduit/pull/239) and [PR #240](https://github.com/srps/Conduit/pull/240) are merged. The service remains unadopted. The display-text slice (0029) passes all 40 checks, independent review and the recorded allocation probes; ordinary reply/stream frames are selected at 64 KiB (0030), with production-profile enforcement still planned. The remaining queue/retention/deadline/collection values are being measured, not selected from test fixtures. The activation-boundary proposal above awaits owner choice. No production-owner adoption, RuntimeActor move or release readiness is claimed.
 
 0.5.7 shipped on 2026-10-22. The #205 Settings commit paths (Return, Apply,
 section close, quit with an invalid port) passed the owner's check in a `--dev`
