@@ -8,6 +8,9 @@ import ProxyKernel
 /// rename or unlink. A directory in the active or an archive slot is refused by kind and kept. Normal rotation and
 /// oversized lines keep their archive behaviour, and a latched refusal makes no further guard calls.
 /// Every case is a scratch directory under the temporary directory. No app, runtime or helper is touched.
+///
+/// The behavioural checks run first. The owned scratch root is then removed explicitly, and that outcome is one more
+/// assertion, so a removal that fails changes the verdict instead of disappearing into a `defer`.
 enum ProtectedLogScenarios {
     private static let witness = Data(#"{"intent":"preserve"}"#.utf8)
 
@@ -15,7 +18,30 @@ enum ProtectedLogScenarios {
         let began = Date()
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("conduit-app-log-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let body: Result<[ScenarioAssertion], Error>
+        do {
+            body = .success(try checks(in: root))
+        } catch {
+            body = .failure(error)
+        }
+        let cleanup = removeOwnedRoot(root)
+
+        switch (body, cleanup) {
+        case (.success(var assertions), .success):
+            assertions.append(.init("scratch root removed", true))
+            return result(began: began, assertions: assertions, notes: [])
+        case (.success(var assertions), .failure(let failure)):
+            assertions.append(.init("scratch root removed", false))
+            return result(began: began, assertions: assertions, notes: ["scratch root removal failed (code \(failure.code))"])
+        case (.failure(let error), .success):
+            throw error
+        case (.failure(let error), .failure(let failure)):
+            throw ScenarioSetupAndCleanupFailure(setup: String(describing: error), cleanupCode: failure.code)
+        }
+    }
+
+    /// The behavioural checks, each against its own scratch directory under `root`.
+    private static func checks(in root: URL) throws -> [ScenarioAssertion] {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var assertions: [ScenarioAssertion] = []
 
@@ -124,12 +150,28 @@ enum ProtectedLogScenarios {
                                 afterRefusal > 0 && counting.count == afterRefusal
                                     && details(latchedEvents, event: RecordFileDestinationGate.eventName).count == 1))
 
-        return ScenarioResult(
+        return assertions
+    }
+
+    /// Removes the owned scratch root recursively. This is the scenario's own UUID directory, never a product path.
+    /// A root that was never created is already gone, so it passes.
+    private static func removeOwnedRoot(_ root: URL) -> Result<Void, CleanupCode> {
+        guard FileManager.default.fileExists(atPath: root.path) else { return .success(()) }
+        do {
+            try FileManager.default.removeItem(at: root)
+            return .success(())
+        } catch {
+            return .failure(CleanupCode(code: (error as NSError).code))
+        }
+    }
+
+    private static func result(began: Date, assertions: [ScenarioAssertion], notes: [String]) -> ScenarioResult {
+        ScenarioResult(
             name: "protected-app-log", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: witness.count, durationSeconds: Date().timeIntervalSince(began),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: assertions,
-            notes: ["Scratch directory under the temporary directory only; no app, runtime, helper or system setting is touched."]
+            notes: ["Scratch directory under the temporary directory only; no app, runtime, helper or system setting is touched."] + notes
         )
     }
 
@@ -180,6 +222,21 @@ enum ProtectedLogScenarios {
 /// A setup step that could not be built, so the scenario reports which one.
 struct ScenarioSetupFailure: Error {
     let step: String
+}
+
+/// The owned scratch root could not be removed. Only the platform's code leaves the scenario, never the path.
+struct CleanupCode: Error {
+    let code: Int
+}
+
+/// The body and the scratch cleanup both failed. Both facts stay in the error, so neither hides the other.
+struct ScenarioSetupAndCleanupFailure: Error, CustomStringConvertible {
+    let setup: String
+    let cleanupCode: Int
+
+    var description: String {
+        "setup failed (\(setup)) and scratch root removal failed (code \(cleanupCode))"
+    }
 }
 
 /// Counts the guard's admit calls, so a latched refusal can show that it asks no more questions.

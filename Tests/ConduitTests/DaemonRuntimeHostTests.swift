@@ -12,6 +12,11 @@ private let testStartedAt = Date(timeIntervalSince1970: 1_700_000_000)
 /// A host test never ends the process. A terminal stop that reaches this hook is a failure.
 private let unexpectedTerminalExit: @MainActor () -> Void = { XCTFail("the runtime host ended the process") }
 
+/// A test asked a harness for a second host while it still owns the first. The request fails before anything is built.
+private enum HarnessHostOwnershipError: Error {
+    case secondHost
+}
+
 /// A synthetic satisfied path, the report `FakeNetworkPathObserver` delivers in place of `NWPathMonitor`.
 private func satisfiedPath() -> NetworkPathState {
     NetworkPathState(
@@ -440,10 +445,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
         var wifi: FakeMachine.Service { machine.service("Wi-Fi") }
 
         /// Builds the test's one host and keeps it owned, so `tearDown` stops and flushes it before the root's authority ends.
+        /// A second request throws before anything is built, so the owned host is never overwritten or left unstopped.
         func makeHost() throws -> RuntimeHost {
-            if ownedHost != nil {
-                XCTFail("this harness already owns a host; a test builds one host and stops it")
-            }
+            guard ownedHost == nil else { throw HarnessHostOwnershipError.secondHost }
             let host = try buildHost()
             ownedHost = host
             return host
@@ -486,7 +490,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         }
 
         /// Stops and flushes the owned host, then ends the root's authority and removes the directory. The flush joins the
-        /// host's audit, event and snapshot writers, so no file is written while the directory is removed.
+        /// host's audit, event and snapshot writers before removal, which is what this fixture relies on. It is not a
+        /// general proof that nothing else can write under the root.
         func tearDown() async {
             // A test that failed mid-hold leaves the hold armed, and the stop would wait on it. Releasing is harmless when
             // nothing waits.
