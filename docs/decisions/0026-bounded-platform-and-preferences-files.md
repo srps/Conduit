@@ -85,7 +85,7 @@ the serving app/helper. No global memory or real-machine validation is inferred.
 
 ## Implementation evidence
 
-Implemented on branch `codex/bounded-configuration-sidecars`; PR integration is tracked separately:
+Implemented and merged in [PR230](https://github.com/srps/Conduit/pull/230):
 
 - Shared reader, gate and schema. [ConfigurationFileReader](../../Sources/ProxyKernel/Support/ConfigurationFileReader.swift)
   reads any file under a caller's
