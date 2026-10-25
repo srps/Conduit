@@ -26,7 +26,7 @@ fallback and no external-edit policy. It is not the mixed-apply hold of
   other error the result is `unclassified`. No failure is mapped to `EIO` for lack of information.
   These mapping cases are synthetic witnesses of the classifier's input contract, not a claim that
   each shape occurs on this OS.
-- `PlatformMac/VerifiedRuntimeFileReplacement.swift`: the operation, its refusals, its
+- `PlatformMac/VerifiedConfigurationFileReplacement.swift`: the operation, its refusals, its
   unknown reasons and its outcome. The outcome carries no bytes and no path.
 - `PlatformMac/PlatformFakes.swift`: `FakeStateFileAccess`, a low-level fake with scripted
   reads and writes, external edits before and after a write, and an observation log.

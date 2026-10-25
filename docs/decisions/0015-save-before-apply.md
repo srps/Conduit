@@ -107,7 +107,9 @@ host. The Settings UI is not exercised by the gate tests.
 Does not prove: atomic multi-file commits, cancellation of started writes,
 exclusive ownership across processes or machine cleanup after a deadline.
 
-Physical verification primitive, unwired (2026-10-24): [`VerifiedRuntimeFileReplacement.swift`](../../Sources/PlatformMac/VerifiedRuntimeFileReplacement.swift)
+Store core, not adopted (2026-10-25): [`ConfigurationStore.swift`](../../Sources/ConduitRuntime/ConfigurationStore.swift) makes one serialized writer for the runtime, platform and preferences files. It stages the runtime and platform candidates before the first write, writes the platform file first, and reports typed persistence facts with the caller's context. Each operation holds one busy slot and refuses an overlapping call as busy without queuing it. It has no Start, Stop, apply, intent counter or request ledger, and no app path constructs it yet. Evidence and limits are in [the verification note](../verification-configuration-store-2026-10-25.md).
+
+Physical verification primitive, unwired (2026-10-24): [`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift)
 classifies one runtime-file replacement as verified persisted, verified not persisted, unknown or not started, from a pre-read, the write's own result and a bounded read-back. The outcome carries no bytes. It is not a store: it takes no intent generation, mints no receipt and does not check the expected prior. Evidence and limits are in [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
 
 ## Open questions

@@ -67,8 +67,16 @@ final class VerifiedRuntimeFileReplacementOSTests: XCTestCase {
         StateRootFile(role: .config, path: root.path + "/" + name)
     }
 
-    private func replace(_ bytes: Data, _ file: StateRootFile, _ lease: StateWriterLease) -> RuntimeFileReplacementOutcome {
-        VerifiedRuntimeFileReplacement.replace(bytes, at: file, under: lease, access: StateFileAccess.operatingSystem())
+    /// The baseline is the file as it is now, observed through the reader the replacement's pre-read uses. A file that cannot be
+    /// observed keeps a sentinel that the pre-read never reaches, because the pre-read reports the same failure first.
+    private func replace(_ bytes: Data, _ file: StateRootFile, _ lease: StateWriterLease) -> ConfigurationFileReplacementOutcome {
+        let access = StateFileAccess.operatingSystem()
+        let baseline: ConfigurationFileBaseline
+        switch VerifiedConfigurationFileReplacement.observe(file, access: access) {
+        case .observed(let input): baseline = ConfigurationFileBaseline(observing: input)
+        case .refused, .notObserved: baseline = ConfigurationFileBaseline(observing: .present(Data()))
+        }
+        return VerifiedConfigurationFileReplacement.replace(bytes, at: file, under: lease, access: access, expecting: baseline)
     }
 
     private func contents(_ path: String) throws -> Data {
@@ -134,8 +142,9 @@ final class VerifiedRuntimeFileReplacementOSTests: XCTestCase {
 
         let platform = scratch.root.path + "/platform.json"
         try Data("untouched".utf8).write(to: URL(fileURLWithPath: platform))
-        let wrongRole = StateRootFile(role: .platformConfig, path: platform)
-        XCTAssertEqual(replace(Self.staged, wrongRole, scratch.lease), .refused(.wrongRole(.platformConfig)))
+        // The platform and preferences sidecars are configuration roles now, so the journal is the foreign role.
+        let wrongRole = StateRootFile(role: .journal, path: platform)
+        XCTAssertEqual(replace(Self.staged, wrongRole, scratch.lease), .refused(.wrongRole(.journal)))
         XCTAssertEqual(try contents(platform), Data("untouched".utf8))
     }
 

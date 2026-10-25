@@ -12,7 +12,7 @@ final class StateFileAccessWriteErrorTests: XCTestCase {
     private static let cocoaWriteOutOfSpace = 640
     private static let cocoaWriteNoPermission = 513
 
-    private func classify(_ error: NSError) -> RuntimeFileWriteError {
+    private func classify(_ error: NSError) -> ConfigurationFileWriteError {
         OSStateFileAccess.writeError(for: error)
     }
 

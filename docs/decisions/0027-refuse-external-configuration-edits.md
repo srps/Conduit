@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 external-file edit checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -96,8 +96,51 @@ alone establishes real-machine behavior or physical compare-and-swap.
 
 ## Implementation evidence
 
-None yet. The existing runtime replacement primitive classifies read-back but
-deliberately has no expected-baseline policy. Store/client adoption remains planned.
+Partial: the store core implements the check before a replacement, for all three
+configuration files, in [`ConfigurationStore.swift`](../../Sources/ConduitRuntime/ConfigurationStore.swift)
+and its `ConfigurationStore*.swift` siblings. A baseline is the verified bytes the
+store observed or wrote. Each conditional replacement, and each verification, compares
+the observed bytes with that baseline first. A change refuses the replacement, reports
+`conflict`, and keeps the observed file and latches the component until an explicit
+reload. A formatting-only edit conflicts, because the check compares bytes. Creation
+and deletion relative to a verified absent or present baseline also conflict. A failed
+pre-read authorizes no write (`preReadFailed`). The replacement itself is
+[`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift),
+which runs the pre-read against an opaque baseline and then the existing write and read-back
+classifier. Parsed-value equality, with unknown fields and formatting ignored, decides
+only verify-without-rewrite, never whether a file counts as changed.
+
+Evidence is separate by kind, and each kind covers only what it names:
+
+- Gated and focused tests in [`ConfigurationStoreTests.swift`](../../Tests/ConduitTests/ConfigurationStoreTests.swift):
+  an external change latches until a reload even when the old bytes return; an unchanged
+  formatted file is verified and not rewritten; a valid unknown-field edit conflicts; an
+  external platform change holds the runtime write; each component's authority reason is
+  decided on its own. The busy slot is proven by the gated read, which holds the worker while
+  other operations are refused without queued I/O. The 7-row coupled fault matrix asserts
+  bytes, baselines and write counts per row.
+- The preservation guard in [`ConfigurationStorePreservationTests.swift`](../../Tests/ConduitTests/ConfigurationStorePreservationTests.swift)
+  (decision 0026): a runtime rewrite that would drop decoded legacy preference values is
+  held until the preferences sidecar verifies in the same physical step, and every held
+  outcome is typed. Its one known gap is pinned, not claimed closed: a sidecar changed after
+  the check and before the runtime replacement is not excluded. Shadowed legacy values (observe-only, a sidecar present) are witnessed for wrong-kind,
+  null, duplicate and explicit-default forms, and filter parity. The status stays partial, and validation stays none.
+- Sequential bounded models in the same store test file: a runtime/platform model and a
+  preferences model, each run over fixed seeds. They reach the outcome classes listed in
+  the verification note, and they assert that reach. They are not exhaustive, they do not
+  explore interleavings, and their fault injection is the fake's, not the store's.
+- The classifier matrix (432 cases, with 288 reaching the write) and the scratch witnesses
+  remain in [`VerifiedRuntimeFileReplacementModelTests.swift`](../../Tests/ConduitTests/VerifiedRuntimeFileReplacementModelTests.swift)
+  and [`ScenarioConfigFileConditionalReplacement.swift`](../../Sources/pm-sim/ScenarioConfigFileConditionalReplacement.swift).
+
+Counts, seeds and limits are in [the verification note](../verification-configuration-store-2026-10-25.md).
+
+Does not prove: a nonparticipating editor racing after the check (the check is not
+compare-and-swap), including a sidecar changed between the preservation check and the
+runtime replacement, power-loss durability, cross-process exclusion, the Stop, Quit or
+incarnation fences, or the mixed-apply hold of 0025. No app, daemon or `pm-proxy` path
+constructs the store yet, so no live configuration save is protected by it. Owner
+validation is none.
 
 ## Open questions
 

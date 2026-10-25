@@ -1,7 +1,9 @@
 # Verified store and client workflow: architecture checkpoint
 
-Status: reviewed with Claude Code through the owner's claude.ai Max subscription;
-proposed APIs, with no store or client-engine implementation claimed. This refines
+Status: reviewed with Claude Code through the owner's claude.ai Max subscription.
+The store core below is implemented and checked in focused tests (2026-10-25, see
+[the verification note](verification-configuration-store-2026-10-25.md)). The client
+engine, host adoption and the apply path are still proposed. This refines
 implementation planning for decisions 0014, 0015, 0017 and 0018. The owner selected
 holding a mixed apply in [0025](decisions/0025-hold-mixed-configuration-apply.md);
 the affected apply path remains unimplemented.
@@ -183,3 +185,97 @@ and Stop admission while a write is blocked. Retain actual fake-machine and
 headless scenarios alongside the model. No model,
 source review or hash comparison alone proves physical shutdown or serving-app
 behavior. Full workflow and owner validation remain separate evidence.
+
+
+## Agreed next store-core slice (2026-10-24)
+
+Codex and Claude reviewed the actual persistence, lease, queue and module graph
+through the owner's claude.ai Max subscription. This implements accepted decisions;
+it introduces no additional lifecycle authority or shipping engine defaults.
+
+- **ProxyKernel:** extract the existing loader into one pure entry over frozen
+  runtime/platform/preferences bytes, absence and existing typed read errors. The
+  existing file loader delegates to it and retains its migration/staging/failure
+  behavior. No PlatformMac identity, lease or control DTO enters the kernel. The
+  same component decode helpers and exact stagers serve both paths.
+- **PlatformMac:** generalize the existing verified replacement, not its algorithm.
+  A resolved file role selects the existing runtime/sidecar limit; journal and
+  foreign roles are refused. One pre-read checks a supplied opaque baseline, then
+  the existing write/read-back classifier runs. Observation and verify-only use
+  the same bounded reader. Identity is a private length plus SHA-256; descriptions
+  are redacted, no identity is Codable or sent in ordinary results. Digest
+  collision freedom and exclusion of after-check editor races are not claimed.
+- **ConduitRuntime:** an internal MainActor store owns parsed current values,
+  private component baselines/versions and one active I/O slot. All three files
+  use that slot; preferences are an independent operation, not another writer.
+  It borrows the root lease and reports its own busy/idle state. It never releases
+  root authority or claims journal/runtime quiescence. Blocking reads, parsing,
+  staging, hashing and writes run through dedicated PlatformWork.
+
+The internal API provides open/reload, a runtime/platform commit, an independent
+preferences commit and verify-without-rewrite. Runtime/platform candidates stage
+before their first write; a known staging refusal starts no coupled write. Both
+commit entry points use one private physical path. Per-file physical failures
+remain partial, with no rollback or automatic retry. Existing legacy migration
+semantics remain in the file-loader wrapper, not copied into the store.
+
+Open/reload adopt parsed values and baselines from the same observation. Missing
+files remain explicitly uncommitted. A malformed/unreadable refused startup input
+cannot become an authoritative baseline or an excuse to overwrite it. Explicit
+reload changes an internal file-baseline version when observed bytes change; it
+does not reinterpret machine-effect ControlConfigRevision/PrivatePlatformRevision.
+The existing loader supplies legacy/default launch-at-login values. No new
+missing-sidecar refusal or implicit bridge-local login-item value is introduced.
+Preferences keep existing whitespace/default normalization and the raw UTF-8 cap;
+0023's exact runtime-duration rule does not become an exact-preferences rule.
+
+Commit results contain persistence facts and echo caller context. The store has
+no owner-generation counter, Start/Stop/apply methods, terminal request ledger or
+configuration-body queue. The future actual workflow checks its one live intent,
+incarnation and per-module Stop fences before apply. An explicit newer Start/Enable
+can supersede Stop; an ordinary saved edit cannot. Store-core tests do not claim
+to establish those unadopted host fences.
+
+Verify the production store against an independent bounded model for open/reload,
+conditional writes, stale baseline tokens, busy refusal, missing files, read
+failures, formatting/unknown-field edits, partial results and unchanged verification.
+Keep the physical classifier matrix and scratch OS witnesses. pm-sim exercises
+the physical mechanism through PlatformMac; it does not gain a ConduitRuntime
+dependency. The complete configuration event family and one owner emitter move
+with actual workflow/host adoption. This core reports typed persistence facts
+and does not invent a parallel configuration/lifecycle coordinator.
+
+Measure actual memory/copies during composition. Compact retained identities and
+nominal Data lengths alone do not establish RSS, transport capacity or Stop fairness.
+
+### Implemented store core (2026-10-25)
+
+- Ownership: `ConfigurationComponent` is the kernel's existing identity. The loader
+  and `ConfigurationLegacyFallback` own each refused legacy component's classification
+  and fixed text. `VerifiedConfigurationFileReplacement` owns the observation, the
+  baseline pre-read and the write with read-back. `ConfigurationStore` owns the parsed
+  values, one baseline record and version per file, and the one busy slot.
+- Absence: a missing file is an explicit absent baseline. A missing sidecar beside a
+  present runtime file takes that component's valid legacy value when the runtime file
+  carries one, and the defaults when its keys are absent. Neither case warns. A malformed
+  legacy value refuses only that component, with a typed fallback.
+- Latch: a conflict, an unknown read-back or an observed change latches the component
+  until a reload. A latch does not change the version. A reload after a latch always takes
+  a newer version, even when the bytes are the old ones, so every token issued before the
+  latch stays refused. A version at its maximum refuses a write before any I/O.
+- Partial results: the platform file is written first, and the runtime file is written
+  only after the platform verifies. An unverified platform holds the runtime write. A
+  failed write keeps what landed, with no rollback and no retry. Each component's authority
+  is decided on its own: a refused file keeps its own reason, and an authorized one is held
+  behind the other (`heldBehindPlatform` or `heldBehindRuntime`).
+- Legacy preferences guard (decision 0026): a runtime rewrite that would drop decoded
+  legacy preference values is held until the preferences sidecar verifies. The sidecar is
+  re-verified in the same physical step, after the platform verifies and immediately before
+  the runtime replacement. The hold is typed (`sidecarAbsent`, `noAuthoritativeSidecarBaseline`,
+  `sidecarChanged`, `sidecarUnreadable`, `refused`), and only a changed sidecar latches.
+  A null value creates no dependency. A malformed value is not a dependency, so the coupled
+  commit is not vetoed. The explicit `commitPreferences` save is the migration path. A
+  sidecar changed after the check is not excluded, and the tests pin that limit.
+- Not implemented: the Start/Stop fences, the apply path and the mixed-apply hold, the
+  RuntimeClient configuration submission, the configuration event emitter, lease
+  acquisition at startup, and host adoption. Those remain owner adoption work.

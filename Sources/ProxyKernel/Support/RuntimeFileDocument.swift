@@ -21,6 +21,10 @@ package struct RuntimeFileDocument: Sendable {
     package let originalSchemaVersion: Int
     package let platform: LegacyComponent<PlatformIntegrationConfig>
     package let preferences: LegacyComponent<AppPreferences>
+    /// The legacy components whose values a rewrite of this file would drop: a shadowed component with a non-null known key, or a read
+    /// component that decoded with one. A refused component is not here, because its defaults and warning already stand. A null key is
+    /// absent, so it is not here either.
+    package let carriedLegacyComponents: Set<ConfigurationComponent>
 
     /// Decodes a runtime file's bytes through the format gate: the physical cap, the strict filter for the keys this read needs,
     /// one Foundation decode and the newer-schema refusal. The bytes are the caller's, and nothing is written here.
@@ -40,12 +44,33 @@ package struct RuntimeFileDocument: Sendable {
         guard envelope.originalSchemaVersion <= ProxyConfig.currentSchemaVersion else {
             throw ConfigurationLoadError(source: source, reason: "The configuration requires a newer version of Conduit.")
         }
+        let platform = legacy(requirements.platform, .platform, in: filtered, decoded: envelope.platform)
+        let preferences = legacy(requirements.preferences, .preferences, in: filtered, decoded: envelope.preferences)
+        var carried: Set<ConfigurationComponent> = []
+        if carries(.platform, required: requirements.platform, platform, in: filtered) { carried.insert(.platform) }
+        if carries(.preferences, required: requirements.preferences, preferences, in: filtered) { carried.insert(.preferences) }
         return RuntimeFileDocument(
             config: envelope.config,
             originalSchemaVersion: envelope.originalSchemaVersion,
-            platform: legacy(requirements.platform, .platform, in: filtered, decoded: envelope.platform),
-            preferences: legacy(requirements.preferences, .preferences, in: filtered, decoded: envelope.preferences)
+            platform: platform,
+            preferences: preferences,
+            carriedLegacyComponents: carried
         )
+    }
+
+    /// Whether a legacy component's values are in the file and must survive a rewrite. A shadowed component (not required) carries them
+    /// when a non-null value is present, because its sidecar is the authority and a rewrite must not replace it blindly. A required
+    /// component carries them only when it decoded, so a refused component keeps its defaults and warning and needs no guard.
+    private static func carries<Value: Sendable>(
+        _ component: ConfigurationComponent,
+        required: Bool,
+        _ legacy: LegacyComponent<Value>,
+        in filtered: ConfigurationFileFiltered
+    ) -> Bool {
+        guard filtered.legacyValuesPresent.contains(component) else { return false }
+        guard required else { return true }
+        if case .decoded = legacy { return true }
+        return false
     }
 
     /// A component that was not required is `.notRequired`, and so is never used. A required one is refused when the

@@ -27,6 +27,9 @@ package struct ConfigurationFileFiltered: Sendable {
     /// The filtered document, built in place so the typed decode reads it without another copy.
     package let bytes: Data
     package let refusedComponents: Set<ConfigurationComponent>
+    /// The legacy components whose first known key holds a non-null value. That value is present in the file whether the sidecar shadows
+    /// it (observed, never read), it is accepted, or it is refused. A null is absent to the typed decoders, so it is not presence.
+    package let legacyValuesPresent: Set<ConfigurationComponent>
 }
 
 /// The one format gate for a configuration file: the root's physical budget, then the strict filter over its known keys. It
@@ -76,6 +79,7 @@ struct ConfigurationFileFilter {
     private var containers = JSONContainerStack()
     private var keyBytes: [UInt8] = []
     private var refused: Set<ConfigurationComponent> = []
+    private var legacyValuesPresent: Set<ConfigurationComponent> = []
     /// Whether a wrong-kind legacy value falls back, which only the runtime file's root allows.
     private let fallsBackToLegacyComponents: Bool
 
@@ -102,7 +106,11 @@ struct ConfigurationFileFilter {
             throw ConfigurationFileRefusal.malformed
         }
         precondition(filter.output.count <= bytes.count, "a filtered file is never longer than its input")
-        return ConfigurationFileFiltered(bytes: filter.output, refusedComponents: filter.refused)
+        return ConfigurationFileFiltered(
+            bytes: filter.output,
+            refusedComponents: filter.refused,
+            legacyValuesPresent: filter.legacyValuesPresent
+        )
     }
 
     // MARK: - Objects and members
@@ -133,7 +141,14 @@ struct ConfigurationFileFilter {
             if let slot, !seen[slot] {
                 seen[slot] = true
                 let member = schema.members[slot]
-                if try retainOrRefuse(member, depth: depth) {
+                // The first occurrence's value is under the cursor, and it is the one the typed decoders read. A null is absent to them,
+                // so it is not presence. The check runs before the value is consumed, and it covers a shadowed value too.
+                if fallsBackToLegacyComponents, member.component != .runtime, cursor.current != UInt8(ascii: "n") {
+                    legacyValuesPresent.insert(member.component)
+                }
+                if member.observeOnly {
+                    try skipUnknown(depth: depth)
+                } else if try retainOrRefuse(member, depth: depth) {
                     if emitted > 0 {
                         output.append(UInt8(ascii: ","))
                     }
