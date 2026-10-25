@@ -48,6 +48,16 @@ existing accepted records retain their decisions. Claude implements and verifies
 bounded slices on the owner's subscription, and Codex reviews each checkpoint.
 Implementation and real-machine validation remain separate evidence.
 
+Decision [0033](./decisions/0033-headless-real-host-simulation.md) is implemented:
+actual-host pm-sim coverage consumes the shared lifecycle facade and requires
+explicit machine effects at composition. Production adapters stay at the daemon
+entry boundary; fake effects and owned scratch state exercise the same host.
+The verified slice includes bounded credential coalescing and stopped-producer
+settlement, without exposing store internals or activating AppState. Actual
+sole-store/workflow adoption, its typed decisions and independent model remain the
+next cut; [verification](./verification-runtime-host-effects-2026-10-25.md) records
+all 40 local checks and the scope limits.
+
 Module/isolation shape selected by the owner on 2026-10-24: a new ConduitRuntime
 hosts the shared runtime; Foundation-only RuntimeEvents holds producer events;
 ConduitShared holds control values/client/codec and ProxyControlBridge maps them.

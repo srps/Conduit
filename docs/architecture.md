@@ -126,6 +126,7 @@ graph TD
     PMProxy --> PAC
     PMProxy --> Shared
 
+    PMSim --> Runtime
     PMSim --> Kernel
     PMSim --> Auth
     PMSim --> PAC
@@ -174,7 +175,7 @@ graph TD
 | `ConduitRuntime` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | — | ✓ |
 | `ConduitUpdater`       | —           | —         | —        | ✓           | ✓             | —             | —                  | — | —    |
 | `pm-proxy`             | ✓           | ✓         | ✓        | —           | ✓             | —             | ✓                  | — | —    |
-| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | — | ✓    |
+| `pm-sim`               | ✓           | ✓         | ✓        | ✓           | ✓             | ✓             | ✓                  | ✓ | ✓    |
 | `pm-tunnel`            | ✓           | ✓         | —        | —           | —             | —             | —                  | — | —    |
 | `pm-dns`               | ✓           | —         | —        | —           | —             | —             | —                  | — | —    |
 | `pmctl`                | —           | —         | —        | —           | ✓             | —             | —                  | — | —    |
@@ -188,11 +189,11 @@ graph TD
 
 The matrix lists **direct** dependencies declared in `Package.swift`. `ConduitUpdater` is the only target that declares Sparkle. `Conduit` (app) and `ConduitDaemon` declare `ConduitShared` and `RuntimeEvents` themselves rather than reaching them through `PlatformMac`. Transitive reach is a separate question: `pm-proxy` declares no `PlatformMac`, and none of its declared targets (`ProxyKernel`, `ProxyAuth`, `ProxyPAC`, `ProxyControlBridge`, `ConduitShared`, `RuntimeEvents`) depends on it, so its closure contains no `PlatformMac`, Sparkle or `ConduitDaemon`. The kernel import fence in CI covers `ProxyKernel` and `RuntimeEvents`; the target graph is what keeps `PlatformMac` out of `pm-proxy`.
 
-`ConduitRuntime` contains the extracted `RuntimeHost`, currently composed by the daemon. `RuntimeClient` (in `ConduitShared`) remains a protocol with no production or in-memory conformer. AppState adoption and RuntimeActor isolation remain pending.
+`ConduitRuntime` contains the extracted `RuntimeHost`, currently composed by the daemon. `RuntimeClient` (in `ConduitShared`) has a framed adapter and bounded service components; the real RuntimeHost v2 adapter/socket remains unadopted. AppState adoption and RuntimeActor isolation remain pending.
 
 ### What each target owns
 
-- **`ConduitShared`** — zero-dependency wire contracts. The helper IPC (`HelperCommand`, `HelperRequest`, `HelperResponse`, input validation) is imported by the app and the helper so they can't drift. The control protocol carries the v1 socket types and the v2 runtime values (`ControlRuntime*.swift`), frame codec and `RuntimeClient` protocol (`RuntimeClient.swift`). The v2 files are stage-1 foundation only (decision 0014): there is no in-memory client, admission or subscription engine, and no production v2 socket. Helper IPC and v1 control keep their own versions.
+- **`ConduitShared`** — zero-dependency wire contracts. The helper IPC (`HelperCommand`, `HelperRequest`, `HelperResponse`, input validation) is imported by the app and the helper so they can't drift. The control protocol carries the v1 socket types and the v2 runtime values (`ControlRuntime*.swift`), frame codec and `RuntimeClient` protocol (`RuntimeClient.swift`). The v2 protocol, framed client and bounded admission/subscription service are implemented (decision 0014); real RuntimeHost and production v2 socket adoption remain pending. Helper IPC and v1 control keep their own versions.
 - **`ProxyKernel`** — portable library: proxy server, connection pool, PAC routing engine, DNS forwarder, transparent TCP proxy, tunnel forwarder, auto-recovery ladder, health checks, VPN state fusion, upstream probing, routing decisions, metadata blocklist, kernel-side abstractions. Imports only Foundation, Dispatch, NIO modules, Darwin/Glibc, `ConduitShared` (domain-name grammar) and `RuntimeEvents` (typed event values). CI runs `scripts/check-kernel-imports.py` to enforce this allowlist; `Process` is unavailable inside the kernel, and the script rejects a qualified `Foundation.Process` in the built object.
 - **`RuntimeEvents`** — Foundation-only typed event values (decision 0013), with no dependencies. `LifecycleEvent` types the four `lifecycle.*` names with closed operation and reason enums and numeric fields; `RuntimeEventPayload` is the envelope's `typed` value. `ProxyKernel` carries it on `RuntimeEvent`. The shapes and bounds are in [`events.md`](./events.md#typed-lifecycle-payloads). `scripts/check-kernel-imports.py` limits this target to Foundation.
 - **`ProxyControlBridge`** — maps kernel and `RuntimeEvents` values onto `ConduitShared` wire values, with exhaustive switches and no default cases. `ControlStatusMapping.swift` covers v1 status; `RuntimeEventControlProjection.swift` and `RuntimeSnapshotControlProjection.swift` cover the v2 values. `ProxyControlBridgeProtectedDiagnosticResources.swift` maps the runtime environment to the files a diagnostic writer must never write, including the control socket and daemon-ready names. Depends on `ProxyKernel`, `ConduitShared` and `RuntimeEvents`.
@@ -404,7 +405,11 @@ This is the invariant the module split encoded and that the CI grep keeps honest
 
 ### Simulator (`pm-sim`)
 
-`Sources/pm-sim/` runs fault-injection scenarios against the kernel in isolation. Each scenario constructs its own orchestrator with `DiscardingLogSink` / `RecordingLogSink`, `InMemoryCredentialProvider`, and `MockAuthenticator` (ProxyAuth). `FakeVPNStatusObserver` feeds synthetic VPN transitions; `RecordingPrivilegeClient` captures would-be helper calls. Scenarios assert on `orchestrator.eventLog` (structured events) rather than log lines — STYLE rule 3 in action.
+`Sources/pm-sim/` runs isolated fault-injection scenarios. Kernel scenarios construct their own orchestrator with recording/discarding logs and injected auth/credential/observer services. Under decision [0033](decisions/0033-headless-real-host-simulation.md), headless host scenarios may also depend on `ConduitRuntime` and compose the actual `RuntimeHost` through its production lifecycle facade. Store/workflow internals remain private. Scenarios inspect structured events and actual fake-machine state rather than copying the runtime policy.
+
+Host composition requires explicit effect inputs through `RuntimeHostEffects`. Production assembly in `ConduitDaemon` selects its real credential, helper, observer, auth/PAC, process/probe and path adapters; tests and simulator scenarios select fakes and owned scratch paths. The helper factory receives the existing event-log sink before it creates its client, and the VPN monitor factory receives readers of current flap timings. No second event buffer or runtime implementation is needed. Explicit system GSS selection retains the auth factory's KDC recovery/event binding.
+
+The module dependency grants reach, not isolation. A scenario must supply every effect, own its loopback listeners and scratch-root authority, and confirm logical/physical cleanup before removing state. AppState's activation gate and the updater's exclusion remain unchanged. The simulator edge adds no third-party package and does not change pm-proxy's platform exclusion.
 
 ### Config snapshot invariant
 

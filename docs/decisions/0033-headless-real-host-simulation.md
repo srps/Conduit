@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: approved “the scoped pm-sim dependency and explicit effect injection”)
-- Implementation: planned
+- Implementation: implemented
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -77,7 +77,20 @@ events. Run the full repository workflow and performance gate before shipping.
 
 ## Implementation evidence
 
-None yet. The reviewed scope and alternatives are in
+Source: [RuntimeHostEffects](../../Sources/ConduitRuntime/RuntimeHostEffects.swift),
+[daemon composition](../../Sources/ConduitDaemon/DaemonRuntimeEffects.swift) and the
+[consumed target edge](../../Package.swift) require explicit effects at the entry
+boundary. [RuntimeHost](../../Sources/ConduitRuntime/RuntimeHost.swift) exposes a
+bounded production lifecycle/settlement facade without opening store internals.
+
+Tests: [host integration and producer model](../../Tests/ConduitTests/DaemonRuntimeHostTests.swift)
+cover effect use, helper events, dynamic timing, bounded settlement and coalescing.
+Scenario: [actual-host simulation](../../Sources/pm-sim/RuntimeHostEffectsScenarios.swift)
+uses fake effects, owned listeners and scratch state, and confirms cleanup before
+root release. All 40 local checks pass on the frozen source (3,320 tests, two skips;
+102 simulator records and perf), with independent subscription-backed Claude review.
+See [verification and limits](../verification-runtime-host-effects-2026-10-25.md).
+The reviewed alternatives remain in
 [design-runtime-host-simulation-review.md](../design-runtime-host-simulation-review.md).
 
 Does not prove: real VPN/auth/PAC behavior, installed-app validation or daemon handoff.
