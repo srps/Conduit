@@ -39,7 +39,17 @@ package enum SensitiveValueSanitizer {
 
     package static func sanitize(_ value: String) -> String {
         guard !value.isEmpty else { return value }
+        // The regex and URL work bridges Objective-C temporaries where the runtime exists. A synchronous scope drains them before this
+        // returns, so a caller with no run loop does not accumulate them. The result is an ordinary Swift String that outlives the scope.
+        #if canImport(ObjectiveC)
+        return autoreleasepool { sanitizeContent(value) }
+        #else
+        return sanitizeContent(value)
+        #endif
+    }
 
+    /// The one implementation of the sanitizing steps. Every entry point reaches it through `sanitize`, so its scope is the only one.
+    private static func sanitizeContent(_ value: String) -> String {
         var output = redactURLs(in: value)
         output = replaceMatches(
             in: output,
