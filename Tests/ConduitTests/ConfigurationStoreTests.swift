@@ -12,8 +12,9 @@ import XCTest
 @MainActor
 final class ConfigurationStoreTests: XCTestCase {
     /// One store over a scratch root. `close` releases the lease first, and removes the directory only when the release is confirmed.
+    /// Internal, so the preservation tests in `ConfigurationStorePreservationTests` share the same seeding.
     @MainActor
-    private final class Fixture {
+    final class Fixture {
         let directory: URL
         let lease: StateWriterLease
         let plan: StateRootPlan
@@ -852,6 +853,104 @@ final class ConfigurationStoreTests: XCTestCase {
         XCTAssertEqual(writes(fixture, at: fixture.plan.config.path), 1)
     }
 
+    // MARK: - Per-component authority
+
+    /// A refused runtime keeps its own reason, and a platform file that is authorized is held behind it. Nothing is written.
+    func testAnAuthorizedPlatformIsHeldBehindARefusedRuntimeWithItsOwnReason() async throws {
+        let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
+        defer { fixture.close() }
+        guard await adoptedLoad(fixture) != nil else { return }
+        var renamed = GenericDefaults.shared.makeConfig()
+        renamed.profileName = "Renamed"
+        let runtimeTokens = ConfigurationSlots(runtime: fixture.store.baselineToken(for: .runtime), platform: nil, preferences: nil)
+        fixture.access.externalEdit(.replace(try ProxyConfigPersistence.stagedFileData(for: renamed)), at: fixture.plan.config.path)
+        // A verification of the changed runtime file latches its baseline, so the runtime is refused while the platform stays valid.
+        _ = await fixture.store.verifyUnchanged([.runtime], expecting: runtimeTokens, context: Self.context)
+        let tokens = ConfigurationSlots(
+            runtime: fixture.store.baselineToken(for: .runtime),
+            platform: fixture.store.baselineToken(for: .platform),
+            preferences: nil
+        )
+        let admission = await fixture.store.commitRuntimeAndPlatform(
+            GenericDefaults.shared.makeConfig(), PlatformIntegrationConfig(), expecting: tokens, context: Self.context
+        )
+        guard case .admitted(let result) = admission else { return XCTFail("the commit was not admitted") }
+        XCTAssertEqual(describe(result.runtime), "notAttempted(noAuthoritativeBaseline)")
+        XCTAssertEqual(describe(result.platform), "notAttempted(heldBehindRuntime)")
+        XCTAssertEqual(writes(fixture, at: fixture.plan.platformConfig.path), 0)
+        XCTAssertEqual(writes(fixture, at: fixture.plan.config.path), 0)
+    }
+
+    /// The reverse: a refused platform keeps its own reason, and an authorized runtime is held behind it.
+    func testAnAuthorizedRuntimeIsHeldBehindARefusedPlatformWithItsOwnReason() async throws {
+        let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
+        defer { fixture.close() }
+        guard await adoptedLoad(fixture) != nil else { return }
+        let platformTokens = ConfigurationSlots(runtime: nil, platform: fixture.store.baselineToken(for: .platform), preferences: nil)
+        fixture.access.externalEdit(.replace(Data("{\"launchAtLogin\":true}".utf8)), at: fixture.plan.platformConfig.path)
+        _ = await fixture.store.verifyUnchanged([.platform], expecting: platformTokens, context: Self.context)
+        let tokens = ConfigurationSlots(
+            runtime: fixture.store.baselineToken(for: .runtime),
+            platform: fixture.store.baselineToken(for: .platform),
+            preferences: nil
+        )
+        let admission = await fixture.store.commitRuntimeAndPlatform(
+            GenericDefaults.shared.makeConfig(), PlatformIntegrationConfig(), expecting: tokens, context: Self.context
+        )
+        guard case .admitted(let result) = admission else { return XCTFail("the commit was not admitted") }
+        XCTAssertEqual(describe(result.platform), "notAttempted(noAuthoritativeBaseline)")
+        XCTAssertEqual(describe(result.runtime), "notAttempted(heldBehindPlatform)")
+        XCTAssertEqual(writes(fixture, at: fixture.plan.config.path), 0)
+    }
+
+    /// Both refused, each with its own reason: the runtime has no authority, and the platform token names no baseline it holds.
+    func testBothRefusedComponentsKeepTheirOwnDifferentReasons() async throws {
+        let fixture = try Fixture(platform: try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()))
+        defer { fixture.close() }
+        guard await adoptedLoad(fixture) != nil else { return }
+        var renamed = GenericDefaults.shared.makeConfig()
+        renamed.profileName = "Renamed"
+        fixture.access.externalEdit(.replace(try ProxyConfigPersistence.stagedFileData(for: renamed)), at: fixture.plan.config.path)
+        // A valid token verifies the changed runtime file, which latches its baseline: the runtime now has no authority.
+        let runtimeToken = ConfigurationSlots(runtime: fixture.store.baselineToken(for: .runtime), platform: nil, preferences: nil)
+        _ = await fixture.store.verifyUnchanged([.runtime], expecting: runtimeToken, context: Self.context)
+        // The runtime is latched (no baseline), and the platform token is missing while the platform still holds its baseline (a mismatch).
+        let admission = await fixture.store.commitRuntimeAndPlatform(
+            GenericDefaults.shared.makeConfig(), PlatformIntegrationConfig(),
+            expecting: ConfigurationSlots(runtime: nil, platform: nil, preferences: nil), context: Self.context
+        )
+        guard case .admitted(let result) = admission else { return XCTFail("the commit was not admitted") }
+        XCTAssertEqual(describe(result.runtime), "notAttempted(noAuthoritativeBaseline)")
+        XCTAssertEqual(describe(result.platform), "notAttempted(baselineMismatch)")
+        XCTAssertEqual(writes(fixture, at: fixture.plan.platformConfig.path), 0)
+    }
+
+    // MARK: - Unknown fields
+
+    /// A valid runtime file with an unknown top-level field is accepted on read (decision 0022). An external edit that adds one changes the
+    /// bytes, so an ordinary save conflicts and latches the baseline until a reload. The file is kept as it was edited.
+    func testAValidUnknownFieldEditToTheRuntimeFileConflictsAndLatchesUntilAReload() async throws {
+        let fixture = try Fixture(runtime: try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()))
+        defer { fixture.close() }
+        guard await adoptedLoad(fixture) != nil else { return }
+        let tokenBefore = fixture.store.baselineToken(for: .runtime)
+        let edited = try runtimeFile(adding: ["futureField": "accepted-and-skipped"])
+        fixture.access.externalEdit(.replace(edited), at: fixture.plan.config.path)
+
+        let tokens = ConfigurationSlots(runtime: tokenBefore, platform: fixture.store.baselineToken(for: .platform), preferences: nil)
+        let admission = await fixture.store.commitRuntimeAndPlatform(
+            GenericDefaults.shared.makeConfig(), PlatformIntegrationConfig(), expecting: tokens, context: Self.context
+        )
+        guard case .admitted(let result) = admission else { return XCTFail("the commit was not admitted") }
+        XCTAssertEqual(describe(result.runtime), "conflict")
+        XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.config.path), edited, "the edited file is kept")
+        XCTAssertNil(fixture.store.baselineToken(for: .runtime), "the conflict latches the runtime baseline")
+
+        guard let reloaded = await adoptedLoad(fixture) else { return }
+        XCTAssertEqual(reloaded.runtime, ConfigurationComponentLoad(present: true, migrationPending: false))
+        XCTAssertNotEqual(fixture.store.baselineToken(for: .runtime), tokenBefore, "a reload issues a newer baseline")
+    }
+
     // MARK: - Bounded model over runtime and platform
 
     /// A bounded model of the runtime and platform files through the coupled commit, verification, reload and saved tokens. The model holds
@@ -914,8 +1013,10 @@ final class ConfigurationStoreTests: XCTestCase {
 
             // Every seed opens with a fixed scenario: the first load adopts the platform file as missing, a snapshot and a verification
             // report it unchangedAbsent, the platform then appears (op 6), and the fresh-token commit holds the runtime write behind that
-            // conflict. The random steps follow it. Those outcomes are therefore reached on every seed, not only by chance.
-            var pending: [Int] = [1, 2, 4, 6, 3]
+            // conflict. Then a runtime rename, a verification that latches it, and a fresh-token commit reach heldBehindRuntime. The random
+            // steps follow. Those outcomes are therefore reached on every seed, not only by chance.
+            // The reload re-adopts the platform file that the conflict latched, so the runtime probe below leaves the platform authorized.
+            var pending: [Int] = [1, 2, 4, 6, 3, 1, 7, 4, 3]
             var forceFresh = true
             var executedSteps = 0
             for step in 0..<stepsPerSeed {
@@ -979,9 +1080,11 @@ final class ConfigurationStoreTests: XCTestCase {
                     trace.append("commit runtime-value \(proposal)")
                     let expectRuntime: String
                     let expectPlatform: String
-                    if let refusal = authorityRefusal(0) ?? authorityRefusal(1) {
-                        expectRuntime = refusal
-                        expectPlatform = refusal
+                    // Each component's authority is decided on its own, as the store decides it. A refused file keeps its own reason. An
+                    // authorized file is held behind the refused one, so the two never share a cause. No state changes on any refusal.
+                    if authorityRefusal(0) != nil || authorityRefusal(1) != nil {
+                        expectRuntime = authorityRefusal(0) ?? "notAttempted(heldBehindPlatform)"
+                        expectPlatform = authorityRefusal(1) ?? "notAttempted(heldBehindRuntime)"
                     } else {
                         // The platform file first: a changed identity conflicts, a present file is verified, and a missing file is written.
                         if external[1] != baseline[1] {
@@ -1037,6 +1140,14 @@ final class ConfigurationStoreTests: XCTestCase {
                     fixture.access.externalEdit(edit, at: fixture.plan.platformConfig.path)
                     trace.append("platform identity \(external[1].map { String($0) } ?? "missing")")
 
+                case 7:
+                    // The runtime identity changes from the adopted baseline, and the next verification latches it. The fresh-token commit then
+                    // refuses the runtime while the platform stays authorized, so the platform is held behind the runtime (`heldBehindRuntime`).
+                    external[0] = 1
+                    fixture.access.externalEdit(.replace(runtimeFiles[1]), at: fixture.plan.config.path)
+                    trace.append("runtime identity renamed")
+                    forceFresh = true
+
                 default:
                     trace.append("verify")
                     var expected = ConfigurationSlots<String?>(runtime: nil, platform: nil, preferences: nil)
@@ -1065,7 +1176,7 @@ final class ConfigurationStoreTests: XCTestCase {
         }
         let required: Set<String> = [
             "persisted", "unchanged", "unchangedAbsent", "changed", "conflict", "notAttempted(noAuthoritativeBaseline)",
-            "notAttempted(baselineMismatch)", "notAttempted(heldBehindPlatform)",
+            "notAttempted(baselineMismatch)", "notAttempted(heldBehindPlatform)", "notAttempted(heldBehindRuntime)",
         ]
         XCTAssertTrue(covered.isSuperset(of: required), "the seeds did not reach every outcome class; missing \(required.subtracting(covered).sorted())")
     }
@@ -1092,12 +1203,17 @@ final class ConfigurationStoreTests: XCTestCase {
     /// operations, so the fake's 16-call log is not exceeded. The trace covers three seeds. It is not source mutation testing, and it does not
     /// explore interleavings.
     func testABoundedModelOverPreferencesMatchesTheStoreForReplayableSeeds() async throws {
-        for seed in [UInt64(1), 7, 42] {
+        let defaultRuntime = try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig())
+        // Every outcome class the preferences model can reach, across all seeds. The seeds must reach each one, or the run proves less.
+        var reached = Set<String>()
+        var refusedLoads = 0
+        for seed in [UInt64(1), 7, 42, 99, 123, 256, 1024, 2026] {
             var source = ReplaySource(seed: seed)
             let variants = [try preferenceBytes(showMenuBarIcon: true), try preferenceBytes(showMenuBarIcon: false)]
             var external: Data? = variants[0]
             // The parsed showMenuBarIcon of the external bytes: true for the defaults and their whitespace variant, false for the other value.
             var externalShows: Bool? = true
+            var trace: [String] = []
             for segment in 0..<3 {
                 let fixture = try Fixture(preferences: external)
                 defer { fixture.close() }
@@ -1105,6 +1221,8 @@ final class ConfigurationStoreTests: XCTestCase {
                 var latched = false
                 var modelBaseline: Data?
                 var modelVersion: UInt64 = 0
+                // Whether the runtime file is present. A segment starts with the runtime file the fixture seeded, and a step may remove it.
+                var runtimePresent = fixture.seededRuntime != nil
                 func adoptModel() {
                     if !adopted || latched || modelBaseline != external { modelVersion += 1 }
                     modelBaseline = external
@@ -1113,9 +1231,13 @@ final class ConfigurationStoreTests: XCTestCase {
                 }
                 guard await adoptedLoad(fixture) != nil else { return }
                 adoptModel()
+                // A token saved at the start of a segment. It goes stale once the version moves, and it is never valid in another segment.
+                let savedToken = fixture.store.baselineToken(for: .preferences)
 
                 for step in 0..<4 {
-                    let label = "seed \(seed), segment \(segment), step \(step)"
+                    let label = "seed \(seed), segment \(segment), step \(step), trace \(trace.joined(separator: " ; "))"
+                    // Each step has its own call log, so one step's calls never count against the fake's 16-call budget.
+                    fixture.access.clearObservations()
                     let token = fixture.store.baselineToken(for: .preferences)
                     let tokenValid = adopted && !latched && token?.version == modelVersion
                     switch source.next(4) {
@@ -1136,11 +1258,20 @@ final class ConfigurationStoreTests: XCTestCase {
                             fixture.access.externalEdit(.replace(variants[0] + Data("\n".utf8)), at: fixture.plan.preferences.path)
                         }
                         externalShows = external.map { $0 != variants[1] }
+                        trace.append("edit prefs \(external == nil ? "missing" : (externalShows == true ? "shows" : "other"))")
                     case 1:
-                        // The startup gate, unchanged: a missing runtime file is refused while a preferences sidecar exists, and a refusal
-                        // latches every component until a later load succeeds. A missing sidecar beside a present runtime file adopts the
-                        // defaults with no warning (the witness below), so the model does not refuse it.
-                        let refused = fixture.seededRuntime == nil && external != nil
+                        // The startup gate: a missing runtime file is refused while a preferences sidecar exists, and a refusal latches every
+                        // component until a later load succeeds. A missing sidecar beside a present runtime file adopts the defaults with no
+                        // warning (the witness below). The model removes or restores the runtime file itself, so the refusal is reached.
+                        if source.next(3) == 0 {
+                            runtimePresent = false
+                            fixture.access.externalEdit(.remove, at: fixture.plan.config.path)
+                        } else if !runtimePresent {
+                            runtimePresent = true
+                            fixture.access.externalEdit(.replace(defaultRuntime), at: fixture.plan.config.path)
+                        }
+                        let refused = !runtimePresent && external != nil
+                        trace.append("reload runtime \(runtimePresent ? "present" : "missing")")
                         guard case .admitted(let report) = await fixture.store.load(context: Self.context) else {
                             return XCTFail("the reload was not admitted, \(label)")
                         }
@@ -1149,17 +1280,21 @@ final class ConfigurationStoreTests: XCTestCase {
                         XCTAssertEqual(isRefused, refused, label)
                         if refused {
                             latched = true
+                            refusedLoads += 1
                         } else {
                             adoptModel()
                         }
                     case 2:
                         var proposed = AppPreferences()
                         proposed.showMenuBarIcon = source.next(2) == 0
+                        // One commit in four presents the segment's saved token, which goes stale once the version moves.
+                        let presented = source.next(4) == 0 ? savedToken : token
+                        let presentedValid = presented?.version == modelVersion
                         let staged = try AppPreferencesPersistence.stagedData(for: proposed)
                         let expected: String
                         if latched {
                             expected = "notAttempted(noAuthoritativeBaseline)"
-                        } else if !tokenValid {
+                        } else if !presentedValid {
                             expected = "notAttempted(baselineMismatch)"
                         } else if external != modelBaseline {
                             expected = "conflict"
@@ -1174,10 +1309,12 @@ final class ConfigurationStoreTests: XCTestCase {
                             externalShows = proposed.showMenuBarIcon
                             modelVersion += 1
                         }
-                        guard case .admitted(let result) = await fixture.store.commitPreferences(proposed, expecting: token, context: Self.context) else {
+                        trace.append("commit prefs \(proposed.showMenuBarIcon ? "shows" : "other") \(presented == token ? "current" : "saved")")
+                        guard case .admitted(let result) = await fixture.store.commitPreferences(proposed, expecting: presented, context: Self.context) else {
                             return XCTFail("the commit was not admitted, \(label)")
                         }
                         XCTAssertEqual(describe(result.preferences), expected, label)
+                        reached.insert(expected)
                         XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.preferences.path), external, label)
                     default:
                         let expected: String
@@ -1195,9 +1332,19 @@ final class ConfigurationStoreTests: XCTestCase {
                             [.preferences], expecting: ConfigurationSlots(runtime: nil, platform: nil, preferences: token), context: Self.context
                         ) else { return XCTFail("the verification was not admitted, \(label)") }
                         XCTAssertEqual(describe(verified.outcomes.preferences), expected, label)
+                        reached.insert(expected)
+                        trace.append("verify prefs \(expected)")
                     }
                 }
             }
         }
+        // The seeds reach every class the model can produce for the preferences file, and at least one refused load. The refusal is the
+        // runtime-missing case, which the store refuses at its own boundary (decision 0023).
+        let required: Set<String> = [
+            "persisted", "unchanged", "unchangedAbsent", "changed", "conflict",
+            "notAttempted(noAuthoritativeBaseline)", "notAttempted(baselineMismatch)",
+        ]
+        XCTAssertTrue(reached.isSuperset(of: required), "the seeds did not reach every outcome class; missing \(required.subtracting(reached).sorted())")
+        XCTAssertGreaterThan(refusedLoads, 0, "the seeds reached the refused load")
     }
 }

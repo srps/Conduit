@@ -265,7 +265,17 @@ nominal Data lengths alone do not establish RSS, transport capacity or Stop fair
   latch stays refused. A version at its maximum refuses a write before any I/O.
 - Partial results: the platform file is written first, and the runtime file is written
   only after the platform verifies. An unverified platform holds the runtime write. A
-  failed write keeps what landed, with no rollback and no retry.
+  failed write keeps what landed, with no rollback and no retry. Each component's authority
+  is decided on its own: a refused file keeps its own reason, and an authorized one is held
+  behind the other (`heldBehindPlatform` or `heldBehindRuntime`).
+- Legacy preferences guard (decision 0026): a runtime rewrite that would drop decoded
+  legacy preference values is held until the preferences sidecar verifies. The sidecar is
+  re-verified in the same physical step, after the platform verifies and immediately before
+  the runtime replacement. The hold is typed (`sidecarAbsent`, `noAuthoritativeSidecarBaseline`,
+  `sidecarChanged`, `sidecarUnreadable`, `refused`), and only a changed sidecar latches.
+  A null value creates no dependency. A malformed value is not a dependency, so the coupled
+  commit is not vetoed. The explicit `commitPreferences` save is the migration path. A
+  sidecar changed after the check is not excluded, and the tests pin that limit.
 - Not implemented: the Start/Stop fences, the apply path and the mixed-apply hold, the
   RuntimeClient configuration submission, the configuration event emitter, lease
   acquisition at startup, and host adoption. Those remain owner adoption work.

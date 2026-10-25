@@ -1058,6 +1058,8 @@ package final class FakeStateFileAccess: StateFileAccessing, @unchecked Sendable
     private var writeScripts: [WriteScript] = []
     private var log: [Observation] = []
     private var presenceFailure: ConfigurationPresenceError?
+    /// One scheduled edit, applied after the next read of its path returns. It is consumed by that read.
+    private var editAfterRead: (path: String, edit: ExternalEdit)?
 
     package init(files: [String: Data] = [:]) {
         for (path, bytes) in files { store(bytes, at: path) }
@@ -1135,20 +1137,40 @@ package final class FakeStateFileAccess: StateFileAccessing, @unchecked Sendable
         lock.withLock { log.removeAll() }
     }
 
+    /// Makes the next read of `path` apply `edit` once that read has returned, so a test can change a file between a check and a
+    /// replacement that follows it. The read itself reports the bytes before the edit. The edit is applied once, and it is not an observation.
+    package func scheduleEditAfterNextRead(_ edit: ExternalEdit, at path: String) {
+        lock.withLock { editAfterRead = (path: path, edit: edit) }
+    }
+
+    /// The same precondition as the OS adapter: a configuration role, and no more than that role's budget. A caller that breaks it is a
+    /// bug, so the fake traps where the OS adapter would.
     package func readConfigurationFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
-        lock.withLock { () -> Result<Data, ConfigurationFileError> in
+        precondition(
+            ConfigurationFileBudget.limit(for: file.role).map { limit <= $0 } ?? false,
+            "a configuration read names a configuration role and no more than its budget"
+        )
+        return lock.withLock { () -> Result<Data, ConfigurationFileError> in
             record(.read(path: file.path, limit: limit))
             let script = readScripts.isEmpty ? ReadScript.actual : readScripts.removeFirst()
+            let result: Result<Data, ConfigurationFileError>
             switch script {
             case .missing:
-                return .failure(.missing)
+                result = .failure(.missing)
             case .failed(let error):
-                return .failure(error)
+                result = .failure(error)
             case .actual:
-                guard let bytes = files[file.path] else { return .failure(.missing) }
-                guard bytes.count <= limit else { return .failure(.unreadable(.tooLarge(limit: limit), closeErrno: nil)) }
-                return .success(bytes)
+                if let bytes = files[file.path] {
+                    result = bytes.count <= limit ? .success(bytes) : .failure(.unreadable(.tooLarge(limit: limit), closeErrno: nil))
+                } else {
+                    result = .failure(.missing)
+                }
             }
+            if let pending = editAfterRead, pending.path == file.path {
+                editAfterRead = nil
+                apply(pending.edit, at: file.path)
+            }
+            return result
         }
     }
 

@@ -33,10 +33,21 @@ struct ConfigurationReceipt: Equatable, Sendable {
     }
 }
 
-/// What one physical write returned, with the baseline of the verified bytes. The hash of those bytes is computed on `PlatformWork`.
-private struct ConfigurationWriteAttempt: Sendable {
-    let outcome: ConfigurationFileReplacementOutcome
-    let verifiedBaseline: ConfigurationFileBaseline?
+/// The sidecar a runtime rewrite must verify first, when the runtime file carries legacy values the sidecar would otherwise hold (decision
+/// 0026). It is checked in the same physical step as the rewrite, after the platform file has verified, and it is always re-verified.
+private struct ConfigurationPreservationCheck: Sendable {
+    let component: ConfigurationComponent
+    let file: StateRootFile
+    let baseline: ConfigurationFileBaseline
+    /// Whether the sidecar existed when this baseline was adopted or verified. An absent baseline needs the sidecar saved first.
+    let present: Bool
+}
+
+/// What one physical step returned. A held step replaced nothing. A replacement carries its outcome, and the baseline of the verified
+/// bytes. The hash of those bytes is computed on `PlatformWork`.
+private enum ConfigurationWriteAttempt: Sendable {
+    case held(ConfigurationPreservationHold)
+    case replaced(ConfigurationFileReplacementOutcome, verifiedBaseline: ConfigurationFileBaseline?)
 }
 
 extension ConfigurationWriteOutcome {
@@ -66,6 +77,9 @@ final class ConfigurationStore {
         var baseline: ConfigurationFileBaseline?
         var version: UInt64 = 0
         var present = false
+        /// The legacy components whose values the runtime file carries, so a rewrite of it would drop them (the runtime record only). It
+        /// is recomputed on each reload, and a verified canonical runtime write clears it.
+        var carriedLegacy: Set<ConfigurationComponent> = []
     }
 
     private let incarnation = UUID()
@@ -117,7 +131,8 @@ final class ConfigurationStore {
     /// first write, and a staging refusal of either starts no write. The platform file is considered first. A present file whose
     /// verified value already equals the candidate is verified without a save, and the others are saved only when they differ. The runtime
     /// file is saved only once the platform file is verified, so a runtime rewrite cannot drop legacy platform values the platform file
-    /// does not yet hold. Each write is conditional on its own baseline (decision 0027). There is no rollback and no retry.
+    /// does not yet hold. A rewrite that would drop legacy preference values also waits for the preferences sidecar to verify, in the same
+    /// physical step (decision 0026). Each write is conditional on its own baseline (decision 0027). There is no rollback and no retry.
     func commitRuntimeAndPlatform(
         _ runtime: ProxyConfig,
         _ platform: PlatformIntegrationConfig,
@@ -127,11 +142,29 @@ final class ConfigurationStore {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
+        // Each component's authority is decided on its own. A refused file keeps its own reason. A file that is authorized is held
+        // behind the other one, and it reports that hold, not the other file's reason.
         switch (authority(expected.runtime, for: .runtime), authority(expected.platform, for: .platform)) {
         case (.success(let runtimeBaseline), .success(let platformBaseline)):
             return .admitted(await commitCoupled(runtime, platform, runtimeBaseline, platformBaseline, context: context))
-        case (.failure(let reason), _), (_, .failure(let reason)):
-            return .admitted(RuntimePlatformCommitResult(context: context, runtime: .notAttempted(reason), platform: .notAttempted(reason)))
+        case (.failure(let runtimeReason), .failure(let platformReason)):
+            return .admitted(RuntimePlatformCommitResult(
+                context: context,
+                runtime: .notAttempted(runtimeReason),
+                platform: .notAttempted(platformReason)
+            ))
+        case (.failure(let runtimeReason), .success):
+            return .admitted(RuntimePlatformCommitResult(
+                context: context,
+                runtime: .notAttempted(runtimeReason),
+                platform: .notAttempted(.heldBehindRuntime)
+            ))
+        case (.success, .failure(let platformReason)):
+            return .admitted(RuntimePlatformCommitResult(
+                context: context,
+                runtime: .notAttempted(.heldBehindPlatform),
+                platform: .notAttempted(platformReason)
+            ))
         }
     }
 
@@ -161,6 +194,7 @@ final class ConfigurationStore {
                 component: .preferences,
                 baseline: baseline,
                 sameValue: values?.preferences == staged.value,
+                preservation: nil,
                 context: context
             )
             if outcome.isVerified {
@@ -222,17 +256,39 @@ final class ConfigurationStore {
             component: .platform,
             baseline: platformBaseline,
             sameValue: values?.platform == pair.platform.value,
+            preservation: nil,
             context: context
         )
         guard platformOutcome.isVerified else {
             return RuntimePlatformCommitResult(context: context, runtime: .notAttempted(.heldBehindPlatform), platform: platformOutcome)
         }
         values?.platform = pair.platform.value
+        // The guard runs only when the runtime file would be rewritten. A verified unchanged runtime file drops nothing, so it stays independent.
+        let sameRuntime = values?.runtime == pair.runtime.value
+        let rewritesRuntime = !(sameRuntime && records[.runtime].present)
+        var preservation: ConfigurationPreservationCheck?
+        if rewritesRuntime, records[.runtime].carriedLegacy.contains(.preferences) {
+            // The guard needs the sidecar's own baseline. Without one, nothing is established about it, and no read is made.
+            guard let sidecar = records[.preferences].baseline else {
+                return RuntimePlatformCommitResult(
+                    context: context,
+                    runtime: .notAttempted(.preservationHeld(.noAuthoritativeSidecarBaseline)),
+                    platform: platformOutcome
+                )
+            }
+            preservation = ConfigurationPreservationCheck(
+                component: .preferences,
+                file: plan.preferences,
+                baseline: sidecar,
+                present: records[.preferences].present
+            )
+        }
         let runtimeOutcome = await commit(
             pair.runtime.bytes,
             component: .runtime,
             baseline: runtimeBaseline,
-            sameValue: values?.runtime == pair.runtime.value,
+            sameValue: sameRuntime,
+            preservation: preservation,
             context: context
         )
         if runtimeOutcome.isVerified {
@@ -249,19 +305,23 @@ final class ConfigurationStore {
         component: ConfigurationComponent,
         baseline: ConfigurationFileBaseline,
         sameValue: Bool,
+        preservation: ConfigurationPreservationCheck?,
         context: ConfigurationOperationContext
     ) async -> ConfigurationWriteOutcome {
         if sameValue, records[component].present {
             return await verifyCurrent(component, baseline: baseline, context: context)
         }
-        return await write(bytes, component: component, baseline: baseline, context: context)
+        return await write(bytes, component: component, baseline: baseline, preservation: preservation, context: context)
     }
 
     /// One conditional replacement of one file, and the store's bookkeeping for its result. Every physical step runs on `PlatformWork`.
+    /// A preservation check runs first, in the same `PlatformWork` step and immediately before the replacement, so the sidecar is verified
+    /// at the moment the runtime bytes are replaced. The check is a read only: it never writes the sidecar.
     private func write(
         _ bytes: Data,
         component: ConfigurationComponent,
         baseline: ConfigurationFileBaseline,
+        preservation: ConfigurationPreservationCheck?,
         context: ConfigurationOperationContext
     ) async -> ConfigurationWriteOutcome {
         // Refused before any I/O: a verified write names a newer version, and the version never wraps.
@@ -270,18 +330,53 @@ final class ConfigurationStore {
         let lease = self.lease
         let access = self.access
         let attempt = await work.run { () -> ConfigurationWriteAttempt in
+            if let preservation {
+                switch VerifiedConfigurationFileReplacement.verifyUnchanged(preservation.file, expecting: preservation.baseline, access: access) {
+                case .unchanged where preservation.present:
+                    break
+                case .unchanged:
+                    return .held(.sidecarAbsent)
+                case .changed:
+                    return .held(.sidecarChanged)
+                case .refused(let refusal):
+                    return .held(.refused(refusal))
+                case .notVerified(let error):
+                    return .held(.sidecarUnreadable(error))
+                }
+            }
             let outcome = VerifiedConfigurationFileReplacement.replace(bytes, at: file, under: lease, access: access, expecting: baseline)
             // The read-back equals the staged bytes, so the new baseline is the identity of those bytes, hashed off the MainActor.
             if case .verifiedPersisted = outcome {
-                return ConfigurationWriteAttempt(outcome: outcome, verifiedBaseline: ConfigurationFileBaseline(observing: .present(bytes)))
+                return .replaced(outcome, verifiedBaseline: ConfigurationFileBaseline(observing: .present(bytes)))
             }
-            return ConfigurationWriteAttempt(outcome: outcome, verifiedBaseline: nil)
+            return .replaced(outcome, verifiedBaseline: nil)
         }
-        switch attempt.outcome {
+        switch attempt {
+        case .held(let hold):
+            // Only a changed sidecar latches. An unreadable or absent one keeps its baseline, so a later check can establish it.
+            if case .sidecarChanged = hold, let preservation {
+                latch(preservation.component)
+            }
+            return .notAttempted(.preservationHeld(hold))
+        case .replaced(let outcome, let verifiedBaseline):
+            return settle(outcome, verifiedBaseline: verifiedBaseline, component: component, context: context)
+        }
+    }
+
+    /// The store's bookkeeping for one replacement's result. A verified canonical write clears the component's legacy presence, because the
+    /// file now holds only its canonical values. Every other outcome keeps it.
+    private func settle(
+        _ outcome: ConfigurationFileReplacementOutcome,
+        verifiedBaseline: ConfigurationFileBaseline?,
+        component: ConfigurationComponent,
+        context: ConfigurationOperationContext
+    ) -> ConfigurationWriteOutcome {
+        switch outcome {
         case .verifiedPersisted(let reported):
-            guard let verified = attempt.verifiedBaseline else { preconditionFailure("a persisted write carries its verified baseline") }
+            guard let verified = verifiedBaseline else { preconditionFailure("a persisted write carries its verified baseline") }
             records[component].baseline = verified
             records[component].present = true
+            records[component].carriedLegacy = []
             // Checked before the write. The busy slot keeps every other operation from changing the version in between.
             records[component].version += 1
             return .persisted(receipt(component, context: context), reportedWriteError: reported)
@@ -403,6 +498,8 @@ final class ConfigurationStore {
                 records[component].baseline = baseline
                 records[component].present = loaded[component].present
             }
+            // Recomputed from this observation only, so a rewrite that dropped the values is seen as absent on the next reload.
+            records[.runtime].carriedLegacy = frozen.runtimeCarriesLegacy
             return .adopted(loaded)
         }
     }

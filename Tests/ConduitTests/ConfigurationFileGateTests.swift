@@ -214,6 +214,45 @@ final class ConfigurationFileGateTests: XCTestCase {
         XCTAssertEqual(String(decoding: filtered.bytes, as: UTF8.self), #"{"profileName":"P"}"#, "no element of the array is retained")
     }
 
+    // MARK: - Shadowed legacy keys (observe-only membership, decision 0026)
+
+    /// The filter over a runtime-only read, with no decode. A shadowed legacy key is observed, and its value is skipped as an unknown key's is.
+    private func filter(_ bytes: Data) throws -> ConfigurationFileFiltered {
+        try bytes.withUnsafeBytes { raw in
+            try ConfigurationFileFilter.filter(
+                UnsafeBufferPointer(start: raw.baseAddress?.assumingMemoryBound(to: UInt8.self), count: raw.count),
+                root: ConfigurationFileSchema.runtime(.runtimeOnly)
+            )
+        }
+    }
+
+    /// A shadowed key of any shape changes nothing the typed decode reads: an over-limit string, a wrong-kind value and a nested value are all
+    /// skipped, so the output bytes match the same file without them. Only the observed presence differs. A null and a later duplicate of a
+    /// null are not presence. Strict JSON still applies under a shadowed key.
+    func testShadowedLegacyKeysAreFilteredLikeAFileWithoutThem() throws {
+        let oversize = String(repeating: "x", count: 20_000)
+        let shadowed = Data(#"{"profileName":"P","showMenuBarIcon":"bad","preferredBrowserTestURL":""#.utf8) + Data(oversize.utf8)
+            + Data(#"","launchAtLogin":{"nested":[1,2,{"deep":null}]},"manageSystemProxy":null,"localPort":8080}"#.utf8)
+        let without = Data(#"{"profileName":"P","localPort":8080}"#.utf8)
+        let withKeys = try filter(shadowed)
+        let withoutKeys = try filter(without)
+        XCTAssertEqual(withKeys.bytes, withoutKeys.bytes, "the typed decode reads the same bytes")
+        XCTAssertEqual(String(decoding: withKeys.bytes, as: UTF8.self), #"{"profileName":"P","localPort":8080}"#)
+        XCTAssertEqual(withKeys.refusedComponents, withoutKeys.refusedComponents)
+        XCTAssertEqual(withKeys.legacyValuesPresent, [.preferences, .platform], "a non-null shadowed value is presence, and a null is not")
+        XCTAssertEqual(withoutKeys.legacyValuesPresent, [])
+
+        let nullFirst = try filter(Data(#"{"profileName":"P","showMenuBarIcon":null,"showMenuBarIcon":true}"#.utf8))
+        XCTAssertEqual(String(decoding: nullFirst.bytes, as: UTF8.self), #"{"profileName":"P"}"#)
+        XCTAssertEqual(nullFirst.legacyValuesPresent, [], "the first null is absent, so the later duplicate is not presence")
+
+        for malformed in [#"{"profileName":"P","showMenuBarIcon":tru}"#, #"{"profileName":"P","launchAtLogin":[1,]}"#] {
+            XCTAssertThrowsError(try filter(Data(malformed.utf8)), malformed) { error in
+                XCTAssertEqual(error as? ConfigurationFileRefusal, ConfigurationFileRefusal.malformed)
+            }
+        }
+    }
+
     // MARK: - Adapter failures keep their facts
 
     func testAFifoRuntimeFileIsRefusedWithItsStepNamed() throws {

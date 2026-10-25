@@ -5,7 +5,7 @@ import PlatformMac
 import ProxyKernel
 
 /// One value per component, where the component is the kernel's `ConfigurationComponent`. It is the fixed shape of the tokens, the
-/// records and the results, so no array or queue is needed. It is the fixed shape of the tokens, the records and the results, so no array or queue is needed.
+/// records and the results, so no array or queue is needed.
 struct ConfigurationSlots<Value: Sendable>: Sendable {
     var runtime: Value
     var platform: Value
@@ -81,12 +81,33 @@ enum ConfigurationNotAttemptedReason: Error, Equatable, Sendable {
     case preReadFailed(ConfigurationFileError)
     /// The replacement refused its inputs before any I/O: a foreign role, a root it does not hold, or a staged size past its budget.
     case refused(ConfigurationFileReplacementRefusal)
-    /// The platform file did not verify, so the runtime write was held (decision 0025). Holding it keeps the runtime rewrite from
-    /// dropping legacy platform values that the platform file does not yet hold.
+    /// The platform file did not verify, or its baseline is not authorized, so the runtime write was held (decision 0025). Holding it
+    /// keeps the runtime rewrite from dropping legacy platform values that the platform file does not yet hold.
     case heldBehindPlatform
+    /// The runtime file's baseline is not authorized, so a platform file that is authorized was held behind it. The platform
+    /// file's own reason is reported on its outcome, so the two never share one cause.
+    case heldBehindRuntime
+    /// The runtime rewrite was held to keep legacy preference values that the runtime file carries. The reason names the sidecar's state,
+    /// and the runtime bytes are preserved. A platform write that already verified is not undone.
+    case preservationHeld(ConfigurationPreservationHold)
     /// The component's file version is at its maximum, so a verified write could not name a newer version. The write is refused before
     /// any I/O. Verification and latching still work, and only a new store incarnation recovers.
     case versionExhausted
+}
+
+/// Why a runtime rewrite was held so that legacy preference values the runtime file carries are not dropped unseen (decision 0026). The
+/// preferences sidecar is the only file the guard checks. Each case names a closed state, and none carries a value.
+enum ConfigurationPreservationHold: Equatable, Sendable {
+    /// The sidecar is absent, so the runtime file's legacy values have no saved home. Saving the preferences first, then retrying, is the path.
+    case sidecarAbsent
+    /// The store holds no authoritative baseline for the sidecar: its load was refused, or an earlier check or write was unknown.
+    case noAuthoritativeSidecarBaseline
+    /// The sidecar changed since its baseline: it was deleted, created or edited. The baseline is latched until a reload.
+    case sidecarChanged
+    /// The check could not read the sidecar, so its state is not established. Nothing is latched, and the same check may succeed later.
+    case sidecarUnreadable(ConfigurationFileError)
+    /// The check was refused before any I/O.
+    case refused(ConfigurationFileReplacementRefusal)
 }
 
 /// The persistence result of one component's write. It is typed, and it says only what the store verified.

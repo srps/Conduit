@@ -102,9 +102,14 @@ enum RuntimeFileReplacementScenario {
         try Data(repeating: 0x4C, count: 64).write(to: URL(fileURLWithPath: config.path))
         verdict.check("a larger prior is replaced by the staged bytes",
                       replaceOnDisk(staged, config) == .verifiedPersisted(writeError: nil) && contents(config.path) == staged)
+        // The refusals below pass a fixed baseline and a counting fake, so no read runs before the refusal. The fake records every read and
+        // write, so an empty log proves that no I/O reached the root.
+        let fixedBaseline = ConfigurationFileBaseline(observing: .missing)
+        let oversizeAccess = FakeStateFileAccess(files: [:])
         verdict.check("staged bytes one over the budget are refused before any I/O",
-                      replaceOnDisk(Data(count: budget + 1), config) == .refused(.stagedTooLarge(limit: budget))
-                          && contents(config.path) == staged)
+                      VerifiedConfigurationFileReplacement.replace(Data(count: budget + 1), at: config, under: held, access: oversizeAccess, expecting: fixedBaseline)
+                          == .refused(.stagedTooLarge(limit: budget))
+                          && oversizeAccess.observations.isEmpty && contents(config.path) == staged)
 
         // Real OS: a symbolic-link config is written at its resolved target, and the link is kept.
         let realTarget = state.appendingPathComponent("real-config.json")
@@ -128,11 +133,16 @@ enum RuntimeFileReplacementScenario {
             fileSystem: fileSystem
         )
         let foreign = outsideInput.config
+        let foreignAccess = FakeStateFileAccess(files: [:])
         verdict.check("a config outside the leased root is refused before any I/O",
-                      replaceOnDisk(staged, foreign) == .refused(.outsideLeasedRoot)
-                          && !FileManager.default.fileExists(atPath: foreign.path))
-        verdict.check("a journal role is refused as the runtime configuration",
-                      replaceOnDisk(staged, plan.journal) == .refused(.wrongRole(.journal)))
+                      VerifiedConfigurationFileReplacement.replace(staged, at: foreign, under: held, access: foreignAccess, expecting: fixedBaseline)
+                          == .refused(.outsideLeasedRoot)
+                          && foreignAccess.observations.isEmpty && !FileManager.default.fileExists(atPath: foreign.path))
+        let journalAccess = FakeStateFileAccess(files: [:])
+        verdict.check("a journal role is refused as the runtime configuration before any I/O",
+                      VerifiedConfigurationFileReplacement.replace(staged, at: plan.journal, under: held, access: journalAccess, expecting: fixedBaseline)
+                          == .refused(.wrongRole(.journal))
+                          && journalAccess.observations.isEmpty)
         let directoryPlan = try StateRootLayout.resolve(
             RuntimeEnvironment(configDirectory: state, configFile: state.appendingPathComponent("directory-config.json")),
             configAccess: .writerOwned,

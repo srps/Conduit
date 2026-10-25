@@ -64,11 +64,21 @@ indirect enum ConfigurationValueShape: Sendable {
     }
 }
 
-/// One known key of an object: its file name, the component that reads it and its shape.
+/// One known key of an object: its file name, the component that reads it and its shape. An observe-only key is a legacy key whose sidecar
+/// shadows it. Its presence is observed by the same scan, but its value is skipped exactly as an unknown key's is: it is never
+/// shape-checked, decoded or refused, so the file's acceptance does not change (decision 0026).
 package struct ConfigurationMember: Sendable {
     let name: String
     let component: ConfigurationComponent
     let shape: ConfigurationValueShape
+    let observeOnly: Bool
+
+    init(name: String, component: ConfigurationComponent, shape: ConfigurationValueShape, observeOnly: Bool = false) {
+        self.name = name
+        self.component = component
+        self.shape = shape
+        self.observeOnly = observeOnly
+    }
 }
 
 /// The known members of one object. A member is matched by its name's UTF-8 bytes, so a key is found without building a
@@ -114,20 +124,21 @@ package struct ConfigurationFileRoot: Sendable {
 
 /// The configuration files' schemas: the runtime file, and each sidecar that holds its own settings.
 package enum ConfigurationFileSchema {
-    /// The runtime file's root: the runtime keys, plus each legacy component whose sidecar is absent.
+    /// The runtime file's root. Every legacy key is in the one membership, so a single scan sees each key once. A legacy component whose
+    /// sidecar is absent is read; one whose sidecar exists is observe-only, so its presence is still known to the scan.
     package static func runtime(_ requirements: RuntimeFileRequirements) -> ConfigurationFileRoot {
-        var members = runtimeMembers
-        if requirements.platform {
-            members += platformMembers
-        }
-        if requirements.preferences {
-            members += preferenceMembers
-        }
+        let members = runtimeMembers
+            + legacyMembers(platformMembers, required: requirements.platform)
+            + legacyMembers(preferenceMembers, required: requirements.preferences)
         return ConfigurationFileRoot(
             maximumBytes: ConfigurationFileReader.maximumBytes,
             object: ConfigurationObjectSchema(members),
             fallsBackToLegacyComponents: true
         )
+    }
+
+    private static func legacyMembers(_ members: [ConfigurationMember], required: Bool) -> [ConfigurationMember] {
+        required ? members : members.map { ConfigurationMember(name: $0.name, component: $0.component, shape: $0.shape, observeOnly: true) }
     }
 
     /// The platform sidecar's root: its own keys, read from its own file under the sidecar budget (decision 0026).

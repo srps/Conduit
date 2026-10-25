@@ -129,6 +129,27 @@ package struct ConfigurationFrozenLoad: Sendable {
     package let runtimeFilePresent: Bool
     package let platformSidecarPresent: Bool
     package let preferencesSidecarPresent: Bool
+    /// The legacy components the runtime file carries as values (see `RuntimeFileDocument.carriedLegacyComponents`). A rewrite of the
+    /// runtime file drops these keys, so a caller must keep their values somewhere before it writes.
+    package let runtimeCarriesLegacy: Set<ConfigurationComponent>
+
+    package init(
+        runtime: ProxyConfigMigrationResult,
+        platform: PlatformConfigMigrationResult,
+        preferences: AppPreferencesMigrationResult,
+        runtimeFilePresent: Bool,
+        platformSidecarPresent: Bool,
+        preferencesSidecarPresent: Bool,
+        runtimeCarriesLegacy: Set<ConfigurationComponent>
+    ) {
+        self.runtime = runtime
+        self.platform = platform
+        self.preferences = preferences
+        self.runtimeFilePresent = runtimeFilePresent
+        self.platformSidecarPresent = platformSidecarPresent
+        self.preferencesSidecarPresent = preferencesSidecarPresent
+        self.runtimeCarriesLegacy = runtimeCarriesLegacy
+    }
 }
 
 /// The one pure load and decode over a frozen observation (decisions 0021, 0023 and 0026). It is the only place that decodes the
@@ -151,7 +172,8 @@ package enum ConfigurationFrozenLoader {
             preferences: AppPreferencesPersistence.resolve(sidecar: preferencesSidecar, legacy: loaded.preferences),
             runtimeFilePresent: runtimeFilePresent,
             platformSidecarPresent: platformSidecar != nil,
-            preferencesSidecarPresent: preferencesSidecar != nil
+            preferencesSidecarPresent: preferencesSidecar != nil,
+            runtimeCarriesLegacy: loaded.carried
         )
     }
 }
@@ -189,6 +211,7 @@ private struct RuntimeFileLoad {
     let result: ProxyConfigMigrationResult
     let platform: LegacyComponent<PlatformIntegrationConfig>
     let preferences: LegacyComponent<AppPreferences>
+    let carried: Set<ConfigurationComponent>
 }
 
 /// Decodes the runtime file's observed bytes once. A missing file is defaults when `allowMissing` is set, and a refusal otherwise.
@@ -208,7 +231,8 @@ private func loadRuntimeFile(
         return RuntimeFileLoad(
             result: ProxyConfigMigrationResult(config: GenericDefaults.shared.makeConfig(), migrated: false, warnings: []),
             platform: .notRequired,
-            preferences: .notRequired
+            preferences: .notRequired,
+            carried: []
         )
     case .success(.present(let data)):
         let document = try RuntimeFileDocument.decode(data, requirements: requirements, source: observed.source)
@@ -216,7 +240,8 @@ private func loadRuntimeFile(
         return RuntimeFileLoad(
             result: ProxyConfigMigrationResult(config: config, migrated: migrated, warnings: []),
             platform: document.platform,
-            preferences: document.preferences
+            preferences: document.preferences,
+            carried: document.carriedLegacyComponents
         )
     }
 }

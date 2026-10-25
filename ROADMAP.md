@@ -153,10 +153,14 @@ not a requirement to finish every event or property test before extraction:
    planned, with independent effect groups deferred. Exact schema-two
    staging and safe duration conversions merged in PR #228. External-file edit
    conflicts must refuse ordinary saves pending explicit reload/review under
-   [0027](./docs/decisions/0027-refuse-external-configuration-edits.md); the check
-   remains planned with the store.
-   These counts do not establish a verified
-   asynchronous store, read-back receipts, writer coverage or release readiness.
+   [0027](./docs/decisions/0027-refuse-external-configuration-edits.md). The internal
+   store core now uses one I/O slot for all three files, private baselines and typed
+   persistence facts, including latched conflicts and legacy-value preservation.
+   Its focused checks pass 193 tests and four simulator scenarios;
+   [the evidence](./docs/verification-configuration-store-2026-10-25.md) separates
+   seeded models, fault matrices and worker-lifetime witnesses. AppState and
+   RuntimeHost adoption, configuration events, apply fences, complete writer coverage
+   and release validation remain open.
    The owner selected a 128 KiB cap for each platform/preferences sidecar with the
    same strict reader/filter contract, valid unknown fields and first-key behavior
    in [0026](./docs/decisions/0026-bounded-platform-and-preferences-files.md).
