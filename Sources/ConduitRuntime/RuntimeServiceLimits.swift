@@ -42,7 +42,7 @@ enum RuntimeWireSize {
 /// record it holds, so one record always fits. `retainedByteBudget` is the checked sum of every encoded-byte term the
 /// configuration can hold at once: the alias partitions, the operation table, the outcome table, the ring, the control
 /// log, the ingress, the collections, and the transport's in-flight reservations and subscriber first frames. It counts
-/// encoded payload bytes only. It excludes object overhead and process memory. The lane term does count the caller's
+/// encoded payload bytes plus the stated in-memory subscriber charge. It excludes other object overhead and process memory. The lane term does count the caller's
 /// request frame, as one of the two request-sized values each reservation holds (see `laneRetainedBytes`), so the caller's
 /// buffer is not excluded from the budget. Two request and two reply terms per reservation are a conservative bound on
 /// encoded custody. They are not an RSS guarantee, and not a claim about when the optimizer releases a value. The budget

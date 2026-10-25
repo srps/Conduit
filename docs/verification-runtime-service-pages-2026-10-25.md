@@ -92,7 +92,7 @@ evidence. None of these are whole-program interleaving or fairness proofs.
 
 Capture budgeting includes global retained row payload, bounded proof metadata
 and one temporary capture before eviction. It is an encoded-payload accounting
-model, not an RSS bound; object/allocator/encoder overhead and caller-owned values
+model for the collection ledger, not an RSS bound. The service's checked total also adds the stated in-memory subscriber charge (`subscriberRecordBytes` times `subscriberLimit`), which is not an encoded size; object/allocator/encoder overhead and caller-owned values
 are separate. Idle expired rows may remain physically resident within the byte
 cap until activity, while page reads enforce logical expiry immediately.
 
@@ -134,3 +134,15 @@ Observation/coalescing and replay models exist with the bounds above, and snapsh
 Actual production-owner adaptation and a measured owner-reviewed shipping profile remain required.
 The display-text policy is pending the owner. No v2 socket,
 installed-app validation, total shutdown or release-readiness claim follows.
+
+## M2E replay gap, front-door refusal, framed lookup (local, 2026-10-25)
+
+Base: the combined focused suite at **314 tests, 0 failures**. This slice runs **323 tests, 0 failures** (314 plus 9 new). **Source identity is not computed** here. The parent computes the fingerprint after the freeze. Nothing is committed, pushed or installed. The 39 workflow checks are not run on this slice.
+
+Both runs used the exact wrapper `bash /private/tmp/conduit-runtime-stage1-20261024/verify-runtime-service.sh`.
+
+- **Red**, on the unfixed production source with the new witnesses and the extended model: exit 1, 323 tests executed, 12 failures. The failing witnesses and their observed values are listed in the checkpoint's M2E section. They include the model's shortest counterexample `[event, oversizeOperation, openReplay, pull(0)]`, a `controlStart` that accepted a replay across a skipped outcome, a framed baseline `replay(from: 1, through: 2)` where expired history was expected, and `exchange` answering `sent(invalidReply)` for a subscribe with one owner hop queued.
+- **Green**, on the fixed source: printed `PASS: runtime-service focused checks`. **323 tests, 0 failures.** Both `pm-sim` scenarios, the imports fence, the event catalogue, the decisions check and its tests passed under `set -e`. The build log has one warning, at `RuntimePressureMetricsTests.swift:222`, in a file this slice does not touch.
+- The green run overwrote the logs in `/private/tmp/conduit-runtime-stage1-20261024/runtime-service-checks/`. The red output above was read from that directory before the fix, and it is not kept separately.
+
+Model: the exhaustive depth 1 to 5 over eight actions runs **37,448 sequences**, where it was 19,607 over seven. The 200 seeded walks of 40 actions are unchanged. Both pass. The byte bound is 250, with 100-byte ordinary outcomes and 300-byte oversize outcomes.

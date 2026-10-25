@@ -12,11 +12,20 @@ enum ReplayDelivery: Equatable {
     case resync
 }
 
+/// How one outcome ends in the control log. A retained outcome is still in it. An evicted one left by count, when newer outcomes took its
+/// place. A skipped one was too large to retain at all: its sequence was consumed, and every outcome retained before it was evicted too.
+enum ReplayOutcomeFate: Equatable {
+    case retained
+    case evicted
+    case skipped
+}
+
 /// The reference model of replay. It is written from the design with arrays and counters, not from the production ring or control log. Each
-/// position is an event or a loss marker. The ring keeps the newest `ringCapacity` positions, and the control log keeps the newest
-/// `controlCapacity` outcomes. A reader is a position, an optional replay end, and the next outcome sequence. A pull delivers an event
-/// batch up to the chunk limit, a gap or the outcome boundary, whichever comes first. An outcome whose boundary has passed is delivered
-/// before later events. A reader that falls behind either log resyncs, and a replay that could miss an evicted outcome is refused.
+/// position is an event or a loss marker. The ring keeps the newest `ringCapacity` positions. The control log keeps the newest `controlCapacity`
+/// ordinary outcomes, and an oversize outcome is skipped, so it evicts every retained one. A reader is a position, an optional replay end, and
+/// the next outcome sequence. A pull delivers an event batch up to the chunk limit, a gap or the outcome boundary, whichever comes first. An
+/// outcome whose boundary has passed is delivered before later events. A reader that falls behind either log resyncs. A replay is refused when
+/// an outcome that is no longer retained may have been in its range, and that is decided from each outcome's own fate, not from a production guard.
 struct ReplayReferenceModel {
     struct Reader: Equatable {
         var next: Int
@@ -31,6 +40,8 @@ struct ReplayReferenceModel {
     private(set) var isGap: [Bool] = []
     /// Outcome sequence `s` has boundary `boundaries[s - 1]`, the position issued just before it.
     private(set) var boundaries: [Int] = []
+    /// Outcome sequence `s` ends as `fates[s - 1]`. Every outcome keeps its fate, so a refusal is decided from the whole history.
+    private(set) var fates: [ReplayOutcomeFate] = []
 
     init(ringCapacity: Int, controlCapacity: Int, chunk: Int) {
         self.ringCapacity = ringCapacity
@@ -41,7 +52,8 @@ struct ReplayReferenceModel {
     var highWater: Int { isGap.count }
     var firstRetained: Int { max(1, highWater - ringCapacity + 1) }
     var controlNext: Int { boundaries.count + 1 }
-    var controlFloor: Int { max(1, boundaries.count - controlCapacity + 1) }
+    /// The oldest retained outcome sequence, or the next one when none is retained.
+    var controlFloor: Int { fates.firstIndex(of: .retained).map { $0 + 1 } ?? controlNext }
     /// The highest gap position, or zero when no loss has happened.
     var lastGap: Int { isGap.lastIndex(of: true).map { $0 + 1 } ?? 0 }
 
@@ -53,8 +65,26 @@ struct ReplayReferenceModel {
         isGap.append(true)
     }
 
-    mutating func operation() {
+    /// An ordinary outcome is retained, and count eviction removes the oldest retained ones. An oversize outcome is skipped: it is never
+    /// retained, and every retained outcome before it is evicted with it. Ordinary outcomes fit the byte bound, so their count decides eviction.
+    mutating func operation(oversize: Bool = false) {
         boundaries.append(highWater)
+        if oversize {
+            fates = fates.map { $0 == .retained ? .evicted : $0 }
+            fates.append(.skipped)
+            return
+        }
+        fates.append(.retained)
+        var retained = fates.filter { $0 == .retained }.count
+        for index in fates.indices where retained > controlCapacity && fates[index] == .retained {
+            fates[index] = .evicted
+            retained -= 1
+        }
+    }
+
+    /// Whether an outcome that is no longer retained has a boundary at or after `position`. A replay from `position` may have lost it.
+    func lostOutcomeReaches(_ position: Int) -> Bool {
+        boundaries.indices.contains { fates[$0] != .retained && boundaries[$0] >= position }
     }
 
     /// A live reader starts after the high-water mark, with the next outcome.
@@ -63,20 +93,14 @@ struct ReplayReferenceModel {
     }
 
     /// A replay from the oldest retained position through the high-water mark. It is refused, and the reader is live instead, when
-    /// a loss lies in the range or when an evicted outcome may have been in it. The outcomes in range start at the first one whose
-    /// boundary is at or after the replay start.
+    /// a loss lies in the range or when a lost outcome may have been in it. The outcomes in range are the retained ones whose boundary
+    /// is at or after the replay start, and the first of them starts the replay.
     func replayReader() -> Reader {
         guard highWater >= 1 else { return liveReader() }
         let first = firstRetained
         if lastGap >= first { return liveReader() }
-        if controlFloor > 1, boundaries[controlFloor - 1] >= first { return liveReader() }
-        var control = controlNext
-        for sequence in controlFloor...max(controlFloor, boundaries.count) where sequence <= boundaries.count {
-            if boundaries[sequence - 1] >= first {
-                control = sequence
-                break
-            }
-        }
+        if lostOutcomeReaches(first) { return liveReader() }
+        let control = boundaries.indices.first { fates[$0] == .retained && boundaries[$0] >= first }.map { $0 + 1 } ?? controlNext
         return Reader(next: first, through: highWater, control: control)
     }
 
@@ -120,6 +144,8 @@ enum ReplayAction: Equatable, CustomStringConvertible {
     case event
     case loss
     case operation
+    /// An outcome larger than the control log's byte bound. It is skipped, not retained.
+    case oversizeOperation
     case openLive
     case openReplay
     case pull(Int)
@@ -129,6 +155,7 @@ enum ReplayAction: Equatable, CustomStringConvertible {
         case .event: "event"
         case .loss: "loss"
         case .operation: "operation"
+        case .oversizeOperation: "oversizeOperation"
         case .openLive: "openLive"
         case .openReplay: "openReplay"
         case .pull(let slot): "pull(\(slot))"
@@ -154,19 +181,26 @@ struct ReplaySplitMix64 {
 }
 
 /// The replay model against the production observation log. Every sequence runs on a fresh log with a ring of three, an outcome log of
-/// two and chunks of two, so eviction, loss and mid-catch-up expiry are reached within a short sequence. Each step compares the delivery
-/// of every pull, the open reader's start, and the retained window.
+/// two, a 250-byte outcome bound and chunks of two, so eviction, skip, loss and mid-catch-up expiry are reached within a short sequence. An
+/// ordinary outcome is 100 bytes, so its count decides eviction, and an oversize outcome is 300 bytes, which the bound skips. Each step
+/// compares the delivery of every pull, the open reader's start, the retained window and the outcome window.
 @MainActor
 final class RuntimeServiceReplayModelTests: XCTestCase {
     private static let ringCapacity = 3
     private static let controlCapacity = 2
+    private static let controlByteCapacity = 250
+    private static let operationBytes = 100
+    private static let oversizeBytes = 300
     private static let chunk = 2
-    private static let alphabet: [ReplayAction] = [.event, .loss, .operation, .openLive, .openReplay, .pull(0), .pull(1)]
+    private static let alphabet: [ReplayAction] = [
+        .event, .loss, .operation, .oversizeOperation, .openLive, .openReplay, .pull(0), .pull(1),
+    ]
 
     private func limits() throws -> RuntimeServiceLimits {
         try RuntimeServiceFixtures.limits(
             ringCapacity: Self.ringCapacity,
             controlLogCapacity: Self.controlCapacity,
+            controlLogByteCapacity: Self.controlByteCapacity,
             replayChunkItems: Self.chunk
         )
     }
@@ -245,11 +279,15 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
             case .loss:
                 log.apply([.loss])
                 model.loss()
-            case .operation:
+            case .operation, .oversizeOperation:
+                let oversize = action == .oversizeOperation
                 let identifier = RuntimeServiceFixtures.operation(model.controlNext)
                 sequences[identifier] = model.controlNext
-                log.appendControl(ControlOperationFinished(operationID: identifier, outcome: .failed(.internalFailure)), bytes: 100)
-                model.operation()
+                log.appendControl(
+                    ControlOperationFinished(operationID: identifier, outcome: .failed(.internalFailure)),
+                    bytes: oversize ? Self.oversizeBytes : Self.operationBytes
+                )
+                model.operation(oversize: oversize)
             case .openLive, .openReplay:
                 guard let free = modelReaders.firstIndex(where: { $0 == nil }) else { break }
                 let replay = action == .openReplay
@@ -284,7 +322,7 @@ final class RuntimeServiceReplayModelTests: XCTestCase {
             frontier = frontier.flatMap { prefix in Self.alphabet.map { prefix + [$0] } }
             sequences += frontier
         }
-        XCTAssertEqual(sequences.count, 7 + 49 + 343 + 2401 + 16807, "every sequence of depth one to five over seven actions")
+        XCTAssertEqual(sequences.count, 8 + 64 + 512 + 4_096 + 32_768, "every sequence of depth one to five over eight actions")
         for sequence in sequences {
             if let failure = try disagreement(sequence) {
                 return XCTFail("shortest counterexample \(sequence.map(\.description)): \(failure)")

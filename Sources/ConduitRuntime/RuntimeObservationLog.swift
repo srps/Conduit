@@ -65,6 +65,10 @@ struct RuntimeObservationLog {
     private(set) var firstRetained = 1
     /// The highest gap position ever issued. A replay that starts at or below it crossed a loss.
     private(set) var lastGap = 0
+    /// The boundary of the newest control outcome that was evicted or skipped, or nil when none was. Boundaries never decrease in sequence
+    /// order, so this is the highest lost boundary. A replay from `first` may have lost an outcome exactly when this is at or after `first`.
+    /// It is one value, so it stays fixed however many outcomes are lost.
+    private(set) var lastLostBoundary: Int?
     /// Set once a checked counter cannot advance. No later event or outcome can be recorded.
     private(set) var exhausted = false
     private var ring: [RuntimeRingEntry] = []
@@ -116,10 +120,10 @@ struct RuntimeObservationLog {
 
     /// The first control sequence a replay that starts at event position `first` reads. It is the first retained outcome whose boundary
     /// is at or after `first`, or the next sequence when none is. An outcome before that boundary is not part of the replay. Nil means an
-    /// evicted outcome may have been in the replay range: the floor is past one, and its boundary is at or after `first`. The caller
-    /// then refuses the replay explicitly, because a silent gap is not allowed.
+    /// evicted or skipped outcome may have been in the replay range: its boundary is at or after `first`. The caller then refuses the
+    /// replay explicitly, because a silent gap is not allowed.
     func controlStart(forEvent first: Int) -> Int? {
-        if controlFloor > 1, let oldest = controlEntry(atSequence: controlFloor), oldest.boundary >= first {
+        if let lost = lastLostBoundary, lost >= first {
             return nil
         }
         var sequence = controlFloor
@@ -190,7 +194,7 @@ struct RuntimeObservationLog {
 
     /// Appends one finished operation. The log keeps the newest entries within both bounds. An entry that cannot fit its
     /// byte bound alone is never retained: every older entry is evicted and its sequence is skipped, so each subscriber
-    /// behind it resyncs instead of missing it silently.
+    /// behind it resyncs instead of missing it silently. Its boundary is recorded as lost, so a replay that reaches it is refused.
     mutating func appendControl(_ finished: ControlOperationFinished, bytes: Int) {
         let next = controlNext
         guard next < Self.maximumPosition else {
@@ -198,22 +202,27 @@ struct RuntimeObservationLog {
             return
         }
         guard bytes <= controlByteCapacity else {
-            control.removeAll()
-            controlBytes = 0
+            // The successor is checked before anything changes, so an exhausted count leaves the log as it was. The newest boundary is
+            // the highest lost one, because every retained entry was issued at or before it.
             guard let skipped = RuntimeCounter.successor(next) else {
                 exhausted = true
                 return
             }
+            lastLostBoundary = highWater
+            control.removeAll()
+            controlBytes = 0
             controlFloor = skipped
             return
         }
         while !control.isEmpty, control.count >= controlCapacity || controlBytes > controlByteCapacity - bytes {
-            controlBytes -= control.removeFirst().bytes
             guard let floor = RuntimeCounter.successor(controlFloor) else {
                 exhausted = true
                 return
             }
+            let evicted = control.removeFirst()
+            controlBytes -= evicted.bytes
             controlFloor = floor
+            lastLostBoundary = evicted.boundary
         }
         control.append(RuntimeControlEntry(finished: finished, boundary: highWater, bytes: bytes))
         controlBytes += bytes

@@ -169,6 +169,11 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
         guard case .request(let envelope) = message.body else {
             throw ControlRuntimeTransportFailure.notSent(.invalidReply)
         }
+        // A subscribe is opened only by `openStream`. It is refused here, before any lane is reserved or owner hop is queued, so
+        // nothing was claimed and the refusal is not sent.
+        if case .subscribe = envelope.call {
+            throw ControlRuntimeTransportFailure.notSent(.invalidReply)
+        }
         let lane = laneOf(envelope)
         let bound = try receiverDeadline(
             envelope,

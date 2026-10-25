@@ -686,10 +686,15 @@ final class RuntimeServiceCore {
             closingFault = settleLogically(operation, .failed(.internalFailure))
         }
         operations.removeValue(forKey: operation)
+        var accountingFault: ControlServiceFault?
         switch record.partition {
         case .ordinary:
             if ordinaryUnquiesced > 0 {
                 ordinaryUnquiesced -= 1
+            } else {
+                // Admission raises the count and only quiescence lowers it, so zero here is the service's own bug. Nothing goes below zero.
+                assertionFailure("an ordinary quiescence found no unquiesced operation")
+                accountingFault = .quiescenceAccountingMismatch
             }
         case .stop(let module):
             if stopSlots[module, default: RuntimeStopSlots()].active == operation {
@@ -700,8 +705,9 @@ final class RuntimeServiceCore {
             }
         }
         sweepRetention()
-        // The capacity is returned above, so the owner sees the operation closed and its slot free.
+        // The capacity is returned above, so the owner sees the operation closed and its slot free. Both faults wait for the whole transaction.
         deliver(closingFault)
+        deliver(accountingFault)
     }
 
     /// Drops the module's queued stop, if any. It has not launched, so no effect is ever started for it. Its command is

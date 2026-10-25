@@ -25,14 +25,14 @@ Built on `53a050e`, which includes the retained-page foundation. Source is froze
 - `RuntimeInMemoryTransport.swift`: a snapshot read answers `internalFailure`, or `frameTooLarge` when the snapshot does not fit the caller's frame. A baseline that does not fit is a typed `frameTooLarge` first frame, and its subscriber is released. Neither is reported as an invalid reply or as a disconnect.
 - `ControlCommandOwner.swift`: four closed faults are added: `snapshotNotEncodable`, `snapshotOverBound`, `snapshotRevisionConflict` and `snapshotRevisionRegressed`. An incarnation mismatch reuses `snapshotIncarnationMismatch`.
 - `RuntimeObservationLog.swift`: `RuntimeSubscriberCursor` gains `seenSnapshotGeneration` and `lastWasSnapshot`.
-- `RuntimeServiceLimits.swift`: two new explicit inputs. `latestSnapshotByteCapacity` is a payload bound. `subscriberRecordBytes` is an in-memory charge per subscriber, and it is labelled as such. The derived terms are `baselineFrameOverheadBytes` (measured), `snapshotRetainedBytes = 2 × latestSnapshotByteCapacity` (the held snapshot plus one refresh scratch) and `subscriberRecordRetainedBytes = subscriberLimit × subscriberRecordBytes`. Both enter the checked budget.
+- `RuntimeServiceLimits.swift`: two new explicit inputs. `latestSnapshotByteCapacity` is a payload bound. `subscriberRecordBytes` is an in-memory charge per subscriber, and it is labelled as such. The derived terms are `baselineFrameOverheadBytes` (measured), `snapshotRetainedBytes = 2 × latestSnapshotByteCapacity` (the held snapshot plus one refresh scratch) and `subscriberRecordRetainedBytes = subscriberLimit × subscriberRecordBytes`. Both enter the checked budget, which is the encoded payload plus these in-memory charges. The subscriber charge is not an encoded size.
 - No Shared wire change. `ControlRuntimeFrame.snapshot` is used as it exists.
 - `pm-sim runtime-service-wire`: five Shared assertions are added, for the resync end, the refused baseline, the internal failure and the `frame_too_large` code. There is no runtime import.
 
 ### Limits derivation
 
 - The baseline overhead is measured with the codec at the worst cursor (`RuntimeObservationLog.maximumPosition`), with the widest replay range `(from, through)` equal to it. The snapshot inside the frame encodes to the same bytes as standalone, so the overhead is the frame metadata alone. Measured: **303 B**. The same overhead for a live baseline is 226 B, and the difference is the cursor digits and the replay range.
-- The constructor refuses unless `maxReplyBytes ≥ latestSnapshotByteCapacity + baselineFrameOverheadBytes` and `subscriberRecordBytes ≥ MemoryLayout<RuntimeSubscriberRecord>.size`. The record size is a conservative in-memory stand-in in the encoded budget, and nothing is claimed about its encoded size.
+- The constructor refuses unless `maxReplyBytes ≥ latestSnapshotByteCapacity + baselineFrameOverheadBytes` and `subscriberRecordBytes ≥ MemoryLayout<RuntimeSubscriberRecord>.size`. The record size is a conservative in-memory stand-in charged into the checked budget beside the encoded payload, and nothing is claimed about its encoded size.
 - The event boundary is split. `testAMaximalEventFrameHasAnExactRawCodecBoundary` checks the codec alone: the exact size encodes, and one byte less fails. `testTheServiceReplyCapIsTheExactBoundOfItsLargerTerm` uses a coherent service profile, where the snapshot bound is the largest one the event term allows. Both terms then meet at one exact cap, and each side is decided by construction.
 - A caller's narrower cap can still refuse a baseline or a snapshot read as `frameTooLarge`. Not every tiny caller limit is promised to work.
 
@@ -309,6 +309,58 @@ Residuals, not closed here:
 - The disconnect path emits no owner fault. The caller's frame is the caller's limit, not an owner or service invariant, and the caller receives the typed disconnect. An oversized error reply that becomes a disconnect has no separate witness. The snapshot witness covers the shape.
 - The ledger models are unchanged, because the decision semantics they check are unchanged. Their sequences (22,620 and 69,904, plus 100 walks each) pass on the fixed source in the final wrapper run.
 - No source-variant mutation has been executed against the three fixes.
+
+## M2E oversize-outcome replay gap, front-door refusal, framed lookup (local, 2026-10-25)
+
+Base: the combined focused suite at **314 tests, 0 failures**, before this slice. This slice runs **323 tests, 0 failures**: 314 plus 9 new tests. The framed-lookup test was changed, not added. Source identity is **not computed** in this slice. The parent computes the fingerprint after the freeze. The 39 workflow checks have not been run on this slice.
+
+### The gap, fixed
+
+- A skipped oversize outcome cleared the control log and moved the floor. `controlStart(forEvent:)` refused only when the oldest retained outcome's boundary was at or after the replay start. After a skip nothing was retained to compare, so a replay from before the skip was accepted with no outcome. Example: events 1 to 3, an oversize outcome at boundary 3, then a replay from 1. It delivered all three events and caught-up, with no outcome and no `expiredHistory`.
+- `RuntimeObservationLog.lastLostBoundary: Int?` is one value, nil when nothing was lost. It records the boundary of the newest evicted or skipped outcome, through ordinary evictions and oversize skips. Boundaries never decrease in sequence order, so it is the highest lost boundary. `controlStart(forEvent:)` refuses exactly when `lastLostBoundary >= first`, which is the inclusive start. The old comparison against the oldest retained boundary is removed. Consequence: a replay that starts after every lost boundary is now accepted, even when the oldest retained boundary is at or after it. The old code refused that case, so it was a false expiry.
+- A skip still consumes its sequence and no event position. It fabricates no wire event or cursor. The successor is checked before anything changes, and eviction checks its successor before it removes an entry. Live opens are unchanged.
+
+### Red, then green
+
+- **Red**: the unfixed production source, with the new witnesses and the extended model, under the exact wrapper. It exited 1 with **323 tests executed, 12 failures**:
+  - `RuntimeServiceReplayModelTests`, exhaustive: the shortest counterexample is `[event, oversizeOperation, openReplay, pull(0)]`. At step 3, the model is `idle` and production delivers `events(first: 1, count: 1)`. The seeded walks also failed.
+  - `testAReplayThatWouldCrossASkippedOutcomeIsRefused`: `controlStart(forEvent: 1)` returned 2, not nil.
+  - `testEverySkippedOutcomeRefusesTheReplaysThatReachIt`: `controlStart` returned 3 for both 1 and 2, not nil.
+  - `testANormalOutcomeAfterASkipIsReplayedFromItsBoundary`: from 2 returned nil, not 2.
+  - `testAnEvictedOutcomeRefusesOnlyTheReplaysThatReachIt`: from 2 returned nil, not 2.
+  - `testAReplayAcrossAnOversizedOutcomeIsRefusedAsExpiredHistory`: the baseline was `replay(from: 1, through: 2)`, not expired history. The refused subscriber then delivered `events(count: 2, firstCursor: 1)`, which is the silent gap.
+  - `testAReplayAcrossAnOversizedOutcomeIsRefusedOnTheFramedWire`: the baseline was `replay(from: 1, through: 2)`, not expired history.
+  - `testASubscribeThroughExchangeIsRefusedBeforeAnyOwnerHop`: `sent(invalidReply)`, not `notSent(invalidReply)`, with one owner hop queued.
+  - Passing on the old source, as intended guards: `testAReplayAfterAnOversizedOutcomeDeliversOnlyTheEventsAfterIt` (a replay after the skipped boundary is still accepted), `testAReplayCatchingUpWhenAnOversizedOutcomeLandsEndsWithAResync` (stale catch-up resyncs), and the framed outcome test.
+- **Green**: the same wrapper passed with **323 tests, 0 failures**. The imports fence, event catalogue, decisions check and decisions tests, and both `pm-sim` scenarios passed under `set -e`. The build log has one warning, at `Tests/ConduitTests/RuntimePressureMetricsTests.swift:222` (an unnecessary `try`). This slice does not touch that file, and I did not investigate it.
+
+### Replay model
+
+- `ReplayReferenceModel` has an oversize action, `oversizeOperation`, and a 250-byte outcome bound. Ordinary outcomes are 100 bytes, so their count decides eviction. Oversize outcomes are 300 bytes and are skipped.
+- Each outcome keeps its own fate (`ReplayOutcomeFate`: retained, evicted or skipped). A replay is refused when any outcome that is not retained has a boundary at or after the inclusive start. That scan runs over the full history, so it is not a copy of the production guard.
+- The alphabet grew from seven actions to eight. Depth stays one to five, so the exhaustive count is **37,448 sequences**, where it was 19,607 over seven actions. The seeded walks stay at 200 walks of 40 actions. The model passes on the fixed source. No source mutant of this rule has been run.
+
+### Other changes in this slice
+
+- **`exchange()` front door.** A `.subscribe` is refused as `notSent(.invalidReply)` before any lane is reserved or owner hop is queued. Before, it hopped, and the claimed-round switch answered `sent(.invalidReply)`. The `answer` switch's `.subscribe` branch stays fail-closed as `sent`.
+- **`quiesce`.** When an ordinary quiescence finds `ordinaryUnquiesced == 0`, it asserts (`assertionFailure`, active in debug) and delivers the new closed fault `ControlServiceFault.quiescenceAccountingMismatch` after the whole transaction. The D2 ordering is kept. There is no underflow absorption and no clamp. No test witnesses this branch, because the debug assertion would trap one.
+- **Framed lookup.** The M2D outcome test now recovers the outcome through the framed client, not the core. A 2 KiB caller gets `wire(frameTooLarge)`, and a 64 KiB caller gets `finished(outcome)`. Recovery is conditional: the outcome is retained, and its lookup reply fits the caller's frame. A non-retained outcome is best-effort history and answers `notRecorded`. No shipping value is chosen.
+- **Budget wording.** The checked service budget is the encoded payload plus the stated in-memory subscriber charge (`subscriberRecordBytes` times `subscriberLimit`). It is not a pure encoded size.
+
+### Files
+
+- Source: `Sources/ConduitRuntime/RuntimeObservationLog.swift` (`lastLostBoundary`, `controlStart`, `appendControl`), `RuntimeInMemoryTransport.swift` (`exchange`), `RuntimeServiceCore.swift` (`quiesce`), and `ControlCommandOwner.swift` (the new fault case).
+- Tests: `RuntimeServiceReplayTests.swift`, `RuntimeServiceReplayModelTests.swift`, `RuntimeServiceTransportTests.swift`, and `RuntimeServiceFixtures.swift` (a `controlLogByteCapacity` parameter and `ManualOwnerScheduling.queuedHopCount`).
+- Docs: this checkpoint and the verification note.
+
+### Gaps
+
+- Source identity and the parent fingerprint are not computed. The parent computes them after this freeze.
+- Not run in this slice: the full `swift.yml` set beyond the wrapper, `pm-sim all`, `scripts/perf-gate.sh`, and the 39-check set. The parent runs these.
+- No source mutant of the lost-boundary rule or the front-door refusal has been run. The red run is the unfixed production source, which is one variant, not a sensitivity sweep.
+- The `quiescenceAccountingMismatch` branch has no witness, by design.
+- The byte-bound witnesses use an 8,192-byte fixture bound. No shipping control-log bound is chosen.
+- The display-text policy is still pending the owner. No text cap or default is implemented.
 
 ## Not implemented, explicitly
 

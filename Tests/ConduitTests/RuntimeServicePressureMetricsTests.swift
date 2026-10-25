@@ -219,7 +219,7 @@ final class RuntimeServicePressureMetricsTests: XCTestCase {
         XCTAssertEqual(harness.core.snapshotGeneration, 40, "each real change is one generation, and the held snapshot is one")
         XCTAssertLessThanOrEqual(harness.core.retainedSnapshotBytes, harness.limits.latestSnapshotByteCapacity)
 
-        let stop = try harness.core.submit(try RuntimeServiceFixtures.request(700, .stop(.dns)))
+        let stop = harness.core.submit(try RuntimeServiceFixtures.request(700, .stop(.dns)))
         guard case .accepted = stop else {
             return XCTFail("a Stop is admitted under the event and snapshot flood, got \(stop)")
         }

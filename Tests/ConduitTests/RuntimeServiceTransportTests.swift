@@ -254,6 +254,34 @@ final class RuntimeServiceTransportTests: XCTestCase {
         XCTAssertTrue(harness.owner.fenceLog.isEmpty, "the owner never fenced the expired command")
     }
 
+    /// A subscribe is opened only through `openStream`. An exchange that carries one is refused at the front door, before any lane is
+    /// reserved or any owner hop is queued, so the answer is a closed not-sent refusal and the owner never sees the request.
+    func testASubscribeThroughExchangeIsRefusedBeforeAnyOwnerHop() async throws {
+        let harness = try RuntimeServiceHarness()
+        let transport = harness.transport()
+        let limits = frameLimits
+        let frame = try ControlRuntimeCodec.encodeFrame(
+            ControlRuntimeMessage(
+                correlation: RuntimeServiceFixtures.requestID(4),
+                body: .request(ControlRuntimeRequest(budget: try RuntimeServiceFixtures.budget(), call: .subscribe(.live)))
+            ),
+            limits: limits
+        )
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        var failure: ControlRuntimeTransportFailure?
+        do {
+            _ = try await runCall(harness.scheduling) {
+                try await transport.exchange(frame, limits: limits, deadline: deadline)
+            }
+        } catch {
+            failure = error as? ControlRuntimeTransportFailure
+        }
+        XCTAssertEqual(failure, .notSent(.invalidReply), "a subscribe through exchange is refused before any claim, so nothing was sent")
+        XCTAssertEqual(harness.scheduling.queuedHopCount, 0, "no owner hop was queued for the refused subscribe")
+        XCTAssertEqual(transport.lanes.inFlight(.read), 0, "no read lane was reserved for it")
+        XCTAssertEqual(harness.core.openSubscriberCount, 0)
+    }
+
     func testASubscriberPastTheLimitIsRefusedOnTheWire() async throws {
         let harness = try RuntimeServiceHarness(subscribers: 1)
         let client = try makeClient(harness, harness.transport())

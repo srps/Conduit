@@ -45,6 +45,10 @@ enum ControlServiceFault: Sendable, Equatable {
     /// The collection ledger's byte accounting disagrees with the row sets it holds. That is the service's own bug, not the owner's, and
     /// it is not a capacity answer. The read is answered as an internal failure; a corrupted internal state has no unchanged-state guarantee.
     case collectionAccountingMismatch
+    /// The service's count of ordinary operations awaiting quiescence was already zero when an ordinary operation quiesced. Admission raises
+    /// that count and only quiescence lowers it, so this is the service's own accounting bug, not the owner's. Nothing goes below zero, and
+    /// the fault is delivered after the whole transaction.
+    case quiescenceAccountingMismatch
     /// The owner's snapshot could not be encoded, so nothing is retained. The read or the open is an internal failure.
     case snapshotNotEncodable
     /// The owner's snapshot is larger than the slot's declared bound. The projection is bounded, so the owner broke its invariant.

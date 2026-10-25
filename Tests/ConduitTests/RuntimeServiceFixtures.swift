@@ -41,6 +41,7 @@ enum RuntimeServiceFixtures {
         subscriberRecordBytes: Int = 256,
         ringCapacity: Int = 16,
         controlLogCapacity: Int = 8,
+        controlLogByteCapacity: Int = 1 << 14,
         replayChunkItems: Int = 4,
         streamLanes: Int = 2
     ) throws -> RuntimeServiceLimits {
@@ -67,7 +68,7 @@ enum RuntimeServiceFixtures {
             drainItemsPerTurn: 4,
             drainBytesPerTurn: 1 << 14,
             controlLogCapacity: controlLogCapacity,
-            controlLogByteCapacity: 1 << 14,
+            controlLogByteCapacity: controlLogByteCapacity,
             replayChunkItems: replayChunkItems,
             replayChunkBytes: 1 << 14,
             collectionRowCapacity: 16,
@@ -238,13 +239,22 @@ final class ManualRuntimeTiming: @unchecked Sendable {
 final class ManualOwnerScheduling: RuntimeOwnerScheduling, @unchecked Sendable {
     private let lock = NSLock()
     private var queue: [RuntimeOwnerHop] = []
+    private var hopsQueued = 0
 
     var pendingCount: Int {
         lock.withLock { queue.count }
     }
 
+    /// Every hop ever queued, including ones already run. A refusal that never hops leaves it at zero.
+    var queuedHopCount: Int {
+        lock.withLock { hopsQueued }
+    }
+
     func hop(_ work: @escaping RuntimeOwnerHop) {
-        lock.withLock { queue.append(work) }
+        lock.withLock {
+            hopsQueued += 1
+            queue.append(work)
+        }
     }
 
     /// Runs the oldest queued hop. It returns false when none is queued.

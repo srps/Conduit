@@ -212,8 +212,9 @@ final class RuntimeServiceReplayTests: XCTestCase {
     }
 
     /// The baseline fits the caller's 2 KiB frame, and a completed probe whose escaped name encodes far past it. The stream ends as an
-    /// explicit resync, the subscription is released with the end, and the outcome stays recoverable by lookup. Nothing is lost silently,
-    /// and the client never sees an invalid reply.
+    /// explicit resync, the subscription is released with the end, and the outcome stays recoverable through the framed lookup. Recovery is
+    /// conditional: the outcome is retained, and the lookup's reply fits the caller's frame. A narrow caller learns the size instead. Nothing
+    /// is lost silently, and the client never sees an invalid reply.
     func testAnOutcomeLargerThanTheCallersFrameEndsTheStreamAsAResyncAndTheOutcomeStaysRecoverable() async throws {
         let harness = try RuntimeServiceHarness()
         let operation = try launchProbe(harness)
@@ -233,10 +234,17 @@ final class RuntimeServiceReplayTests: XCTestCase {
         let ended = await thrownError { try await runCall(harness.scheduling) { try await subscription.next(deadline) } }
         XCTAssertEqual(ended, .streamClosed(.resyncRequired), "the outcome that does not fit ends the stream explicitly")
         XCTAssertEqual(harness.core.openSubscriberCount, 0, "the subscription is released with the end")
-        guard case .finished(let recovered) = RuntimeServiceFixtures.lookup(harness.core, operation) else {
-            return XCTFail("the outcome stays recoverable by lookup")
+        let narrow = await thrownError {
+            try await runCall(harness.scheduling) {
+                try await client.outcome(of: operation, expectedIncarnation: RuntimeServiceFixtures.incarnation(1), deadline: deadline)
+            }
         }
-        XCTAssertEqual(recovered, outcome)
+        XCTAssertEqual(narrow, .wire(.frameTooLarge), "the retained outcome's lookup reply does not fit the 2 KiB frame")
+        let wide = try makeClient(harness, frame: try ControlFrameLimits(maxFrameBytes: 1 << 16))
+        let recovered = try await runCall(harness.scheduling) {
+            try await wide.outcome(of: operation, expectedIncarnation: RuntimeServiceFixtures.incarnation(1), deadline: deadline)
+        }
+        XCTAssertEqual(recovered, .finished(outcome), "the same retained outcome is recovered when its reply fits")
     }
 
     /// The same stream delivers a probe that fits, so the frame cap is what separated the two outcomes.
@@ -251,5 +259,149 @@ final class RuntimeServiceReplayTests: XCTestCase {
         let frame = try await runCall(harness.scheduling) { try await subscription.next(deadline) }
         XCTAssertEqual(frame.kind, .operationFinished)
         XCTAssertEqual(harness.core.openSubscriberCount, 1, "the stream stays open after a delivered outcome")
+    }
+
+    // MARK: - An oversize outcome is skipped, and its loss is kept
+
+    /// The fixture's control-log byte bound. An outcome of `oversizeBytes` is larger than it, so the log skips it instead of retaining it.
+    private static let oversizeFixtureBound = 8_192
+    private static let oversizeBytes = 9_000
+    /// Each quote and NUL pair encodes to 8 bytes, so this name encodes to about 16.8 KB, far past the fixture bound.
+    private static let oversizeName = String(repeating: "\"\u{0}", count: 2_100)
+
+    private func logEvent(_ log: inout RuntimeObservationLog) {
+        let record = ControlRuntimeEventRecord.known(
+            ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 1), kind: "proxy", event: "test.event")
+        )
+        log.apply([.event(record, bytes: 100)])
+    }
+
+    private func finished(_ value: Int) -> ControlOperationFinished {
+        ControlOperationFinished(operationID: RuntimeServiceFixtures.operation(value), outcome: .failed(.internalFailure))
+    }
+
+    /// A completed probe whose encoded outcome is larger than the fixture's control-log bound.
+    private func oversizeOutcome(_ harness: RuntimeServiceHarness) throws -> ControlOperationOutcome {
+        try upstreamOutcome(harness, name: Self.oversizeName, endpoint: "host")
+    }
+
+    /// The production log, with the replay gap at its own level. Event one, then a skipped outcome at boundary one, then event two.
+    /// A replay from one would cross the skipped outcome, so it is refused, while a replay from two is clean.
+    func testAReplayThatWouldCrossASkippedOutcomeIsRefused() throws {
+        var log = RuntimeObservationLog(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
+        logEvent(&log)
+        log.appendControl(finished(1), bytes: Self.oversizeBytes)
+        logEvent(&log)
+        XCTAssertEqual(log.highWater, 2, "the skipped outcome consumes no event position")
+        XCTAssertEqual(log.controlNext, 2, "the skipped sequence is consumed, and nothing is retained")
+        XCTAssertNil(log.controlStart(forEvent: 1), "a replay from one holds the skipped outcome at boundary one, so it is refused")
+        XCTAssertEqual(log.controlStart(forEvent: 2), 2, "a replay after the skipped boundary has no outcome in range, so it is accepted")
+    }
+
+    /// Two skips in a row. The newest lost boundary decides, and a replay that starts after both is clean.
+    func testEverySkippedOutcomeRefusesTheReplaysThatReachIt() throws {
+        var log = RuntimeObservationLog(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
+        logEvent(&log)
+        log.appendControl(finished(1), bytes: Self.oversizeBytes)
+        logEvent(&log)
+        log.appendControl(finished(2), bytes: Self.oversizeBytes)
+        logEvent(&log)
+        XCTAssertNil(log.controlStart(forEvent: 1))
+        XCTAssertNil(log.controlStart(forEvent: 2), "the second skip, at boundary two, is in a replay from two")
+        XCTAssertEqual(log.controlStart(forEvent: 3), 3, "a replay from three lies after both skipped boundaries")
+    }
+
+    /// A retained outcome after a skip is the first outcome of a replay that starts at its boundary. The skip before it is not in that range.
+    func testANormalOutcomeAfterASkipIsReplayedFromItsBoundary() throws {
+        var log = RuntimeObservationLog(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
+        logEvent(&log)
+        log.appendControl(finished(1), bytes: Self.oversizeBytes)
+        logEvent(&log)
+        log.appendControl(finished(2), bytes: 100)
+        logEvent(&log)
+        XCTAssertNil(log.controlStart(forEvent: 1))
+        XCTAssertEqual(log.controlStart(forEvent: 2), 2, "the retained outcome at boundary two is the first outcome of this replay")
+        XCTAssertEqual(log.controlStart(forEvent: 3), 3, "nothing retained lies at or after position three")
+    }
+
+    /// An ordinary eviction records its boundary the same way. Only a replay that reaches the evicted boundary is refused.
+    func testAnEvictedOutcomeRefusesOnlyTheReplaysThatReachIt() throws {
+        let limits = try RuntimeServiceFixtures.limits(controlLogCapacity: 1, controlLogByteCapacity: Self.oversizeFixtureBound)
+        var log = RuntimeObservationLog(limits: limits)
+        logEvent(&log)
+        log.appendControl(finished(1), bytes: 100)
+        logEvent(&log)
+        log.appendControl(finished(2), bytes: 100)
+        XCTAssertNil(log.controlStart(forEvent: 1), "the evicted outcome at boundary one is in a replay from one")
+        XCTAssertEqual(log.controlStart(forEvent: 2), 2, "the evicted boundary is before position two, so the replay from two is clean")
+    }
+
+    /// Through the core: a replay that starts before a completed oversize outcome is refused as expired history, never accepted without it.
+    /// The outcome itself is still recoverable by lookup, which is a separate path from replay.
+    func testAReplayAcrossAnOversizedOutcomeIsRefusedAsExpiredHistory() throws {
+        let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
+        ingest(harness)
+        let operation = try launchProbe(harness)
+        let outcome = try oversizeOutcome(harness)
+        harness.owner.settle(operation, with: outcome)
+        ingest(harness)
+        let refused = try XCTUnwrap(try openReplay(harness.core, from: 1))
+        XCTAssertEqual(refused.replay, .unavailable(.expiredHistory), "the skipped outcome at boundary one is in this replay's range")
+        XCTAssertEqual(try observePull(harness.core, refused.subscriber), .idle, "the refused subscriber reads live from the high-water mark")
+        guard case .finished(let recovered) = RuntimeServiceFixtures.lookup(harness.core, operation) else {
+            return XCTFail("the skipped outcome stays recoverable by lookup")
+        }
+        XCTAssertEqual(recovered, outcome)
+    }
+
+    /// A replay that starts after a skipped outcome is accepted, and it delivers only the events after its boundary. No outcome is made up for the skip.
+    func testAReplayAfterAnOversizedOutcomeDeliversOnlyTheEventsAfterIt() throws {
+        let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
+        ingest(harness)
+        let operation = try launchProbe(harness)
+        harness.owner.settle(operation, with: try oversizeOutcome(harness))
+        ingest(harness)
+        let replay = try XCTUnwrap(try openReplay(harness.core, from: 2))
+        XCTAssertEqual(replay.replay, .replay(from: try XCTUnwrap(ControlEventCursor(rawValue: 2)), through: try XCTUnwrap(ControlEventCursor(rawValue: 2))))
+        XCTAssertEqual(try observePull(harness.core, replay.subscriber), .events(count: 1, firstCursor: 2))
+        XCTAssertEqual(try observePull(harness.core, replay.subscriber), .replayCaughtUp(2))
+        XCTAssertEqual(try observePull(harness.core, replay.subscriber), .idle)
+    }
+
+    /// A replay that is catching up when a skip lands ends with a resync. Its reader still names the sequence the skip consumed, so it is stale.
+    func testAReplayCatchingUpWhenAnOversizedOutcomeLandsEndsWithAResync() throws {
+        let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(
+            controlLogByteCapacity: Self.oversizeFixtureBound,
+            replayChunkItems: 1
+        ))
+        ingest(harness)
+        ingest(harness)
+        let replay = try XCTUnwrap(try openReplay(harness.core, from: 1))
+        XCTAssertEqual(try observePull(harness.core, replay.subscriber), .events(count: 1, firstCursor: 1))
+        let operation = try launchProbe(harness)
+        harness.owner.settle(operation, with: try oversizeOutcome(harness))
+        XCTAssertEqual(try observePull(harness.core, replay.subscriber), .end(.resyncRequired))
+        XCTAssertEqual(harness.core.openSubscriberCount, 0)
+    }
+
+    /// The same refusal on the framed wire: the baseline answers the replay as expired history, not as a replay without the skipped outcome.
+    func testAReplayAcrossAnOversizedOutcomeIsRefusedOnTheFramedWire() async throws {
+        let harness = try RuntimeServiceHarness(limits: try RuntimeServiceFixtures.limits(controlLogByteCapacity: Self.oversizeFixtureBound))
+        ingest(harness)
+        let operation = try launchProbe(harness)
+        harness.owner.settle(operation, with: try oversizeOutcome(harness))
+        ingest(harness)
+        let client = try makeClient(harness, frame: try ControlFrameLimits(maxFrameBytes: 8192))
+        let deadline = RuntimeDeadline.after(.seconds(5), from: harness.timing.now)
+        let resume = ControlSubscriptionRequest.resume(
+            incarnation: RuntimeServiceFixtures.incarnation(1),
+            from: try XCTUnwrap(ControlEventCursor(rawValue: 1))
+        )
+        let subscription = try await runCall(harness.scheduling) { try await client.subscribe(resume, deadline: deadline) }
+        let first = try await subscription.next(deadline)
+        guard case .baseline(let baseline) = first else {
+            return XCTFail("the first frame is the baseline, got \(first.kind)")
+        }
+        XCTAssertEqual(baseline.replay, .unavailable(.expiredHistory))
     }
 }
