@@ -13,24 +13,22 @@ extension AppState {
     /// for by `--dev` or by the dev bundle identity (`Conduit Dev.app`). Dev
     /// mode is compiled into debug builds only; a release build refuses both
     /// rather than ignoring them.
+    ///
+    /// `PreparedAppLaunch` parsed the flags and took the state root before SwiftUI
+    /// built the app, so this only composes what it was given.
     @MainActor
-    static func forLaunch(
-        arguments: [String] = CommandLine.arguments,
-        bundleIdentifier: String? = Bundle.main.bundleIdentifier
-    ) -> AppState {
-        do {
-            if let options = try DevLaunchOptions.parse(arguments, bundleIdentifier: bundleIdentifier) {
-                #if DEBUG
-                return DevLaunch.makeAppState(options)
-                #else
-                // `parse` throws for every dev request in a release build, so this is not reached.
-                DevLaunch.fail("dev mode is available in debug builds only")
-                #endif
-            }
-        } catch {
-            DevLaunch.fail(error.localizedDescription)
+    static func forLaunch() -> AppState {
+        let launch = PreparedAppLaunch.current
+        if let options = launch.devOptions {
+            #if DEBUG
+            return DevLaunch.makeAppState(options, stateSession: launch.stateSession)
+            #else
+            // `DevLaunchOptions.parse` throws for every dev request in a release build, so none is prepared here.
+            DevLaunch.fail("dev mode is available in debug builds only")
+            #endif
         }
         return AppState(
+            stateSession: launch.stateSession,
             commandRunner: CommandRunner.host,
             homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
@@ -415,31 +413,37 @@ enum DevLaunch {
     /// The harness's `launch()`, with a state directory that survives
     /// relaunches so edits made in the dev instance's Settings persist.
     @MainActor
-    static func makeAppState(_ options: DevLaunchOptions) -> AppState {
+    static func makeAppState(_ options: DevLaunchOptions, stateSession: StateRootSession) -> AppState {
         do {
-            return try composeAppState(options)
+            return try composeAppState(options, stateSession: stateSession)
         } catch {
             fail(error.localizedDescription)
         }
     }
 
-    /// `makeAppState` after the state directory and its runtime files have been
-    /// checked. The check comes first, so a refused launch creates nothing and
-    /// reads no config from beneath the directory.
+    /// `makeAppState` after the session has been paired with its options and its
+    /// root has been checked. Both checks run before anything is created or
+    /// seeded: a session for another root, or one that names a protected
+    /// directory or a production alias, refuses the launch with nothing written.
+    /// The session was taken beforehand, from the same options (decision 0028).
     @MainActor
     static func composeAppState(
         _ options: DevLaunchOptions,
+        stateSession: StateRootSession,
         protectedDirectories: [URL] = DevLaunchOptions.productionStateDirectories
     ) throws -> AppState {
-        try DevLaunchOptions.refuseProductionState(options.stateDirectory, protectedDirectories: protectedDirectories)
-        let home = DevLaunchOptions.fakeHome(in: options.stateDirectory)
-        let resolverDirectory = DevLaunchOptions.fakeResolver(in: options.stateDirectory)
+        let environment = stateSession.environment
+        guard try DevLaunchOptions.canonicalPath(options.stateDirectory) == environment.configDirectory.path else {
+            throw DevLaunchOptions.ParseError("--dev-state-dir \(options.stateDirectory.path) is not the state root this launch prepared")
+        }
+        try DevLaunchOptions.refuseProductionState(environment.configDirectory, protectedDirectories: protectedDirectories)
+        let home = DevLaunchOptions.fakeHome(in: environment.configDirectory)
+        let resolverDirectory = DevLaunchOptions.fakeResolver(in: environment.configDirectory)
         do {
             try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         } catch {
             fail("cannot create \(home.path): \(error.localizedDescription)")
         }
-        let environment = RuntimeEnvironment.isolated(stateDirectory: options.stateDirectory)
         seed(environment, options: options)
 
         let machine = FakeMachine(resolverDirectory: resolverDirectory)
@@ -456,7 +460,7 @@ enum DevLaunch {
         // real app.
         let updater = FakeUpdaterLauncher()
         let state = AppState(
-            runtimeEnvironment: environment,
+            stateSession: stateSession,
             privilegeClient: machine,
             helperLifecycle: helper,
             credentialStore: secrets,

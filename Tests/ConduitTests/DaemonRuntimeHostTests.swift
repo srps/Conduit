@@ -43,8 +43,10 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// `AppState`.
     func testCredentialsComeFromTheInjectedStore() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-credential-store-\(UUID().uuidString)")
-        let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
         let upstream = UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)
         var config = GenericDefaults.shared.makeConfig()
         config.profileName = "Seam \(UUID().uuidString)"
@@ -59,9 +61,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
             .saveHash(SecretBytes(Array(repeating: UInt8(7), count: 16)), for: config)
 
         let host = RuntimeHost(
-            environment: environment, logger: DiscardingLogSink(),
+            stateSession: session, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
-            configFilePredatesLaunch: true,
             startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: RecordingPrivilegeClient(),
             credentialStore: secrets, kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
@@ -76,8 +77,10 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     func testMalformedSidecarsRejectReloadWithoutReplacingAnyConfiguration() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-sidecar-reload-\(UUID().uuidString)")
-        let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
         var config = GenericDefaults.shared.makeConfig()
         config.profileName = "Last good runtime"
         let platform = PlatformIntegrationConfig(manageSystemProxy: true)
@@ -88,9 +91,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         try AppPreferencesPersistence.save(preferences, in: environment)
         let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
         let host = RuntimeHost(
-            environment: environment, logger: DiscardingLogSink(),
+            stateSession: session, logger: DiscardingLogSink(),
             loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
-            configFilePredatesLaunch: true,
             startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: machine, credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
             commandRunner: { path, arguments in try machine.run(path, arguments) },
@@ -119,16 +121,17 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     func testRejectedReloadPreservesTheLastConfigurationAndGeneration() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-rejected-reload-\(UUID().uuidString)")
-        let environment = RuntimeEnvironment.isolated(stateDirectory: directory)
         defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
         var config = GenericDefaults.shared.makeConfig()
         config.profileName = "Last good config"
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
         try ProxyConfigPersistence.save(config, in: environment)
         let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
-        let host = RuntimeHost(environment: environment, logger: DiscardingLogSink(),
+        let host = RuntimeHost(stateSession: session, logger: DiscardingLogSink(),
                                      loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
-                                     configFilePredatesLaunch: true,
                                      startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(), privilegeClient: machine,
                                      credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(),
@@ -153,11 +156,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     func testConfigGenerationStartsAtZeroAndIncrementsOnReload() async throws {
-        let environment = RuntimeEnvironment.isolated(
-            stateDirectory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
-        )
-        defer { try? FileManager.default.removeItem(at: environment.configDirectory) }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
 
         var config = GenericDefaults.shared.makeConfig()
         config.profileName = "Initial"
@@ -165,10 +169,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         let loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment)
         let host = RuntimeHost(
-            environment: environment,
+            stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            configFilePredatesLaunch: true,
             startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
@@ -184,12 +187,13 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.status().profileName, "Reloaded")
     }
 
-    func testVPNObserverDrivesOrchestratorState() async {
-        let environment = RuntimeEnvironment.isolated(
-            stateDirectory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
-        )
-        defer { try? FileManager.default.removeItem(at: environment.configDirectory) }
+    func testVPNObserverDrivesOrchestratorState() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
 
         let observer = FakeVPNStatusObserver()
         let loaded = RuntimeConfigurationLoadResult(
@@ -200,10 +204,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
             warnings: []
         )
         let host = RuntimeHost(
-            environment: environment,
+            stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            configFilePredatesLaunch: false,
             startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
@@ -228,11 +231,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// for each other are stamped on the observer's turn, all applied in
     /// order, and the last one decides (#155).
     func testABurstOfVPNReportsEndsOnTheLastOneAndDropsNone() async throws {
-        let environment = RuntimeEnvironment.isolated(
-            stateDirectory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
-        )
-        defer { try? FileManager.default.removeItem(at: environment.configDirectory) }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
 
         let observer = FakeVPNStatusObserver()
         let loaded = RuntimeConfigurationLoadResult(
@@ -243,10 +247,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
             warnings: []
         )
         let host = RuntimeHost(
-            environment: environment,
+            stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            configFilePredatesLaunch: false,
             startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
@@ -269,11 +272,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// orchestrator, so a name read after the hop would be whatever the
     /// monitor had moved on to.
     func testVPNInterfaceNameIsTheOneDeliveredWithTheState() async throws {
-        let environment = RuntimeEnvironment.isolated(
-            stateDirectory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
-        )
-        defer { try? FileManager.default.removeItem(at: environment.configDirectory) }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
 
         let observer = FakeVPNStatusObserver()
         let loaded = RuntimeConfigurationLoadResult(
@@ -284,10 +288,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
             warnings: []
         )
         let host = RuntimeHost(
-            environment: environment,
+            stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: loaded,
-            configFilePredatesLaunch: false,
             startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: observer, networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: RecordingPrivilegeClient(), credentialStore: InMemorySecretStore(), kerberosTicketRecovery: FakeKerberosTicketRecovery(), commandRunner: Self.offMachine, homeDirectory: environment.configDirectory.appendingPathComponent("home")
@@ -329,11 +332,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// and environment cleanup shell out to `networksetup`/`launchctl` against
     /// the real machine, which a test must not do.
     func testFailedStartRevertsPlatformSideEffects() async throws {
-        let environment = RuntimeEnvironment.isolated(
-            stateDirectory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
-        )
-        defer { try? FileManager.default.removeItem(at: environment.configDirectory) }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
 
         var config = GenericDefaults.shared.makeConfig()
         config.dnsEntries = [DomainDNSEntry(domain: "revert-test.example", servers: ["10.9.9.9"])]
@@ -343,7 +347,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         let recording = RecordingPrivilegeClient()
         let host = RuntimeHost(
-            environment: environment,
+            stateSession: session,
             logger: DiscardingLogSink(),
             loadedConfiguration: RuntimeConfigurationLoadResult(
                 config: config,
@@ -352,7 +356,6 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 migrated: false,
                 warnings: []
             ),
-            configFilePredatesLaunch: false,
             startedAt: testStartedAt, terminalExit: unexpectedTerminalExit, networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in nil }, vpnStatusMonitor: FakeVPNStatusObserver(), networkPathObserver: FakeNetworkPathObserver(),
             privilegeClient: recording,
@@ -381,6 +384,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
     /// isolated environment.
     @MainActor
     private final class DaemonHarness {
+        /// The scratch root's writer authority, taken before any seed write. Released by `tearDown`, after the host's work.
+        let stateSession: StateRootSession
         let environment: RuntimeEnvironment
         let machine: FakeMachine
         let vpn = FakeVPNStatusObserver()
@@ -415,11 +420,15 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 at: stateDirectory.appendingPathComponent("home", isDirectory: true),
                 withIntermediateDirectories: true
             )
-            environment = .isolated(stateDirectory: stateDirectory)
+            // An established install: the files a previous launch left, written before this process takes the root,
+            // so the session reads the configuration as predating the launch.
+            let fixture = RuntimeEnvironment.isolated(stateDirectory: stateDirectory)
+            try ProxyConfigPersistence.save(config, in: fixture)
+            try PlatformConfigPersistence.save(platformConfig, in: fixture)
+            try AppPreferencesPersistence.save(AppPreferences(), in: fixture)
+            stateSession = try acquireScratchStateRoot(fixture)
+            environment = stateSession.environment
             machine = FakeMachine(resolverDirectory: stateDirectory.appendingPathComponent("resolver", isDirectory: true))
-            try ProxyConfigPersistence.save(config, in: environment)
-            try PlatformConfigPersistence.save(platformConfig, in: environment)
-            try AppPreferencesPersistence.save(AppPreferences(), in: environment)
         }
 
         /// A fresh reader over the journal file; the host's own instance
@@ -433,12 +442,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
             let listings = self.listings
             let hold = self.hold
             return RuntimeHost(
-                environment: environment,
+                stateSession: stateSession,
                 logger: DiscardingLogSink(),
                 loadedConfiguration: try ProxyConfigPersistence.loadAllMigrating(in: environment),
-                // The harness writes the config file before the host exists,
-                // the way an established install has one.
-                configFilePredatesLaunch: true,
                 startedAt: testStartedAt, terminalExit: terminalExit,
                 networkLocationObserver: locationObserver,
                 networkLocationStoreFactory: { [locationStore] _ in locationStore },
@@ -468,6 +474,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         }
 
         func tearDown() {
+            // The test's hosts have finished, so the root's authority ends before its files go.
+            releaseScratchStateRoot(stateSession)
             try? FileManager.default.removeItem(at: stateDirectory)
         }
     }
@@ -1086,7 +1094,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         let machine = harness.machine
         let events = await RuntimeHost.recoverWithoutConfiguration(
-            environment: harness.environment,
+            stateSession: harness.stateSession,
             logger: DiscardingLogSink(),
             privilegeClient: machine,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
@@ -1157,7 +1165,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         let machine = harness.machine
         let events = await RuntimeHost.recoverWithoutConfiguration(
-            environment: harness.environment,
+            stateSession: harness.stateSession,
             logger: DiscardingLogSink(),
             privilegeClient: machine,
             commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },

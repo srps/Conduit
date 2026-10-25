@@ -295,9 +295,12 @@ final class DevLaunchOptionsTests: XCTestCase {
     /// not exercised here: the updater's availability comes from the host
     /// bundle, which a test cannot set without a new seam.
     @MainActor
-    func testTheDevCompositionRunsOverTheFakes() async {
+    func testTheDevCompositionRunsOverTheFakes() async throws {
         let scratch = root.appendingPathComponent("composition", isDirectory: true)
-        let state = DevLaunch.makeAppState(DevLaunchOptions(stateDirectory: scratch))
+        let options = DevLaunchOptions(stateDirectory: scratch)
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: scratch))
+        defer { releaseScratchStateRoot(session) }
+        let state = DevLaunch.makeAppState(options, stateSession: session)
         defer { DevLaunch.endSession() }
         XCTAssertTrue(DevLaunch.isActive)
         XCTAssertTrue(state.helperLifecycle is FakeHelperLifecycle)
@@ -320,21 +323,21 @@ final class DevLaunchOptionsTests: XCTestCase {
         }
     }
 
-    /// The composed launch refuses a config alias into the installed app before
-    /// it creates the fake home or seeds anything, and the stand-in is untouched.
-    /// The composition is called directly, so no AppKit launch and no real
-    /// directory is involved.
+    /// A config alias into the installed app is refused by the state root before
+    /// a session exists, so the composed launch never runs: no fake home, no
+    /// resolver, no log, and the stand-in is untouched. The composition is not
+    /// called, so no AppKit launch and no real directory is involved.
     @MainActor
-    func testTheComposedLaunchRefusesAnAliasBeforeAnyWrite() throws {
+    func testTheStateRootRefusesAnAliasBeforeAnyWrite() throws {
         let state = root.appendingPathComponent("composed-alias", isDirectory: true)
         try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
         let standIn = installed.appendingPathComponent("config.json")
         try Data("protected".utf8).write(to: standIn)
         try FileManager.default.createSymbolicLink(at: state.appendingPathComponent("config.json"), withDestinationURL: standIn)
 
-        XCTAssertThrowsError(try DevLaunch.composeAppState(
-            DevLaunchOptions(stateDirectory: state), protectedDirectories: [installed, installedLogs]
-        ))
+        XCTAssertThrowsError(try acquireScratchStateRoot(.isolated(stateDirectory: state))) { error in
+            XCTAssertEqual(error as? ScratchStateRootRefusal, ScratchStateRootRefusal(failure: .refused(.outsideRoot(.config))))
+        }
         XCTAssertEqual(try String(contentsOf: standIn, encoding: .utf8), "protected")
         XCTAssertFalse(FileManager.default.fileExists(atPath: DevLaunchOptions.fakeHome(in: state).path),
                        "no fake home is created by a refused launch")

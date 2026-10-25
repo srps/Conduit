@@ -23,6 +23,8 @@ import RuntimeEvents
 @MainActor
 final class AppStateHarness {
     let stateDirectory: URL
+    /// The scratch root's writer authority, taken before the first seed write and held until `tearDown`.
+    let stateSession: StateRootSession
     let environment: RuntimeEnvironment
     let machine: FakeMachine
     let vpn = FakeVPNStatusObserver()
@@ -69,11 +71,14 @@ final class AppStateHarness {
             at: stateDirectory.appendingPathComponent("home", isDirectory: true),
             withIntermediateDirectories: true
         )
-        environment = .isolated(stateDirectory: stateDirectory)
+        // An established install: the files a previous launch left, written before this process takes the root.
+        let fixture = RuntimeEnvironment.isolated(stateDirectory: stateDirectory)
+        try ProxyConfigPersistence.save(config, in: fixture)
+        try PlatformConfigPersistence.save(platformConfig, in: fixture)
+        try AppPreferencesPersistence.save(AppPreferences(), in: fixture)
+        stateSession = try acquireScratchStateRoot(fixture)
+        environment = stateSession.environment
         machine = FakeMachine(resolverDirectory: stateDirectory.appendingPathComponent("resolver", isDirectory: true))
-        try ProxyConfigPersistence.save(config, in: environment)
-        try PlatformConfigPersistence.save(platformConfig, in: environment)
-        try AppPreferencesPersistence.save(AppPreferences(), in: environment)
     }
 
     var homeDirectory: URL { stateDirectory.appendingPathComponent("home", isDirectory: true) }
@@ -88,7 +93,7 @@ final class AppStateHarness {
         let machine = self.machine
         let hold = self.hold
         let state = AppState(
-            runtimeEnvironment: environment,
+            stateSession: stateSession,
             privilegeClient: HoldingPrivilegeClient(base: machine, hold: hold),
             helperLifecycle: helper,
             credentialStore: secrets,
@@ -180,6 +185,8 @@ final class AppStateHarness {
             }
         }
         appState = nil
+        // The app's work has quiesced above, so the root's authority ends before its files go.
+        releaseScratchStateRoot(stateSession)
         try? FileManager.default.removeItem(at: stateDirectory)
     }
 }

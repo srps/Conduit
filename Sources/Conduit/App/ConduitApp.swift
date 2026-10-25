@@ -8,7 +8,7 @@ import PlatformMac
 @main
 enum ConduitMain {
     @MainActor
-    static func main() {
+    static func main() async {
         // Checked before the workers: they run ahead of app composition and
         // reach the real helper or the Kerberos cache. A dev request, by flag
         // or by bundle, never does, in a release build either.
@@ -25,6 +25,9 @@ enum ConduitMain {
         if let status = KerberosTicketRecoveryWorker.run(arguments: arguments) {
             exit(status)
         }
+        // Takes the state root before SwiftUI builds the app, so a busy or refused
+        // root exits with nothing loaded, migrated or recovered (decision 0028).
+        await PreparedAppLaunch.prepare()
         ConduitApp.main()
     }
 }

@@ -18,6 +18,14 @@ package struct RuntimeEnvironment: Sendable, Equatable {
     /// instance's first line was found in the installed app's log.
     package var logFile: URL
 
+    /// The fixed logical leaves of the four authoritative files, beneath the
+    /// canonical root (decision 0028). The layout checks writer-owned roles
+    /// against these names; no other spelling is a writable slot.
+    package static let configFileName = "config.json"
+    package static let platformConfigFileName = "platform.json"
+    package static let preferencesFileName = "preferences.json"
+    package static let platformStateFileName = "platform-state.json"
+
     package init(
         configDirectory: URL,
         configFile: URL? = nil,
@@ -30,13 +38,13 @@ package struct RuntimeEnvironment: Sendable, Equatable {
         logFile: URL? = nil
     ) {
         self.configDirectory = configDirectory
-        self.configFile = configFile ?? configDirectory.appendingPathComponent("config.json")
+        self.configFile = configFile ?? configDirectory.appendingPathComponent(Self.configFileName)
         self.platformStateFile = platformStateFile
-            ?? configDirectory.appendingPathComponent("platform-state.json")
+            ?? configDirectory.appendingPathComponent(Self.platformStateFileName)
         self.exportDefaultFile = exportDefaultFile
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Conduit-config.json")
-        self.platformConfigFile = platformConfigFile ?? configDirectory.appendingPathComponent("platform.json")
-        self.preferencesFile = preferencesFile ?? configDirectory.appendingPathComponent("preferences.json")
+        self.platformConfigFile = platformConfigFile ?? configDirectory.appendingPathComponent(Self.platformConfigFileName)
+        self.preferencesFile = preferencesFile ?? configDirectory.appendingPathComponent(Self.preferencesFileName)
         self.snapshotFile = snapshotFile ?? configDirectory.appendingPathComponent("snapshot.json")
         self.eventsFile = eventsFile ?? configDirectory.appendingPathComponent("events.ndjson")
         self.logFile = logFile ?? configDirectory.appendingPathComponent("proxy.log")

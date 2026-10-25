@@ -40,6 +40,10 @@ private final class RuntimePrivilegeAuditEventSink: @unchecked Sendable {
 /// SwiftUI.
 @MainActor
 package final class RuntimeHost {
+    /// The root's writer authority (decision 0017). The host holds a reference, so the
+    /// lease stays open while the host runs, whatever its caller drops. Stop does
+    /// not release it; the entry point's own pin does.
+    private let stateSession: StateRootSession
     let environment: RuntimeEnvironment
     let logger: any LogSink
     let eventWriter: RuntimeEventFileWriter
@@ -237,22 +241,21 @@ package final class RuntimeHost {
     private let terminalExit: @MainActor () -> Void
 
     /// - Parameters:
-    ///   - configFilePredatesLaunch: whether the config file existed before
-    ///     `loadedConfiguration` was read. The load writes a migrated or
-    ///     default file back, so only the caller that loaded can know; it is
-    ///     what tells an upgrade from a fresh install to the resolver-file
-    ///     recovery (`DNSManager.recoverLegacyOwnership`). Same read as
-    ///     `AppState.init`.
+    ///   - stateSession: the root's writer authority, taken before the load
+    ///     that produced `loadedConfiguration` (decision 0028). The host keeps
+    ///     it for its lifetime, and its environment is the resolved one. It also
+    ///     carries whether the config file predated this launch, which tells an
+    ///     upgrade from a fresh install to the resolver-file recovery
+    ///     (`DNSManager.recoverLegacyOwnership`).
     ///   - startedAt: the process start that `status()` reports.
     ///   - terminalExit: called once a terminal stop (`stopRuntime(exitAfterStop:
     ///     true)`) has flushed its events. The entry point passes `exit(0)`.
     ///   - networkPathObserver: the path source. `nil` makes the production
     ///     `NetworkMonitor`; a harness passes `FakeNetworkPathObserver`.
     package init(
-        environment: RuntimeEnvironment,
+        stateSession: StateRootSession,
         logger: any LogSink,
         loadedConfiguration: RuntimeConfigurationLoadResult,
-        configFilePredatesLaunch: Bool,
         startedAt: Date,
         terminalExit: @escaping @MainActor () -> Void,
         networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
@@ -282,7 +285,9 @@ package final class RuntimeHost {
         self.networkLocationObserver = networkLocationObserver
         self.networkLocationStoreFactory = networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits
-        self.environment = environment
+        self.stateSession = stateSession
+        self.environment = stateSession.environment
+        let environment = stateSession.environment
         self.logger = logger
         self.config = loadedConfiguration.config
         self.platformConfig = loadedConfiguration.platformConfig
@@ -428,7 +433,7 @@ package final class RuntimeHost {
         let resolverRecovery = dnsManager
         let legacyResolvers = LaunchRecovery.LegacyResolverInput(
             configs: [loadedConfiguration.config],
-            configFilePredatesLaunch: configFilePredatesLaunch,
+            configFilePredatesLaunch: stateSession.configFilePredatesLaunch,
             resolversManaged: loadedConfiguration.platformConfig.manageDNSResolvers
         )
         let eventLog = orchestrator.eventLog
@@ -1437,13 +1442,15 @@ extension RuntimeHost {
     /// the tests. The seams are `init`'s.
     @discardableResult
     package static func recoverWithoutConfiguration(
-        environment: RuntimeEnvironment,
+        stateSession: StateRootSession,
         logger: any LogSink,
         privilegeClient: (any PrivilegeClient)? = nil,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
         dnsResponds: @escaping @Sendable (Int) -> Bool = { SystemDNSManager.dnsResponds(onPort: $0) },
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) }
     ) async -> [RuntimeEvent] {
+        // Only under the root's authority (decision 0028): the journal it restores is the one the session names.
+        let environment = stateSession.environment
         let emitted = RuntimeEventLog(capacity: 2048)
         let writer = RuntimeEventFileWriter(
             fileURL: environment.eventsFile,
