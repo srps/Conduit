@@ -1,6 +1,6 @@
 # Protected snapshot diagnostics: verification note (2026-10-25)
 
-Status: frozen local source checkpoint on `codex/protected-runtime-artifacts`, before full workflow gates or a PR. Not released. The source/test/script/resource fingerprint is `386563164e1b4e9f063d9d4209f27a8fd9896a49d07f1d1e35b36cb6dd073aec`; documentation is excluded. The serving app and helper were not changed.
+Status: frozen local source checkpoint on `codex/protected-runtime-artifacts`, all 39 local workflow checks passed, before hosted PR checks. Not released. The source/test/script/resource fingerprint is `386563164e1b4e9f063d9d4209f27a8fd9896a49d07f1d1e35b36cb6dd073aec`; documentation is excluded. The serving app and helper were not changed.
 
 ## What this covers
 
@@ -36,10 +36,29 @@ The parent reran the same wrapper after adding the shared marker's derived warni
 
 The tests include actual `fcntl(F_GETFD)` verification of `FD_CLOEXEC`, held timer-body cleanup and caller completion, cancellation before/after registration, lifetime release, refused/failed/dropped-output confirmation, cleanup latching through an injected file-effect seam, and real scratch path/identity guards. FakeMachine host tests cover the final-stop/explicit-flush sequence used by the daemon entry point and a deferred older snapshot notification. The real `ConduitDaemon --start-runtime` was never launched.
 
-The parent ran the actual built `pm-proxy` in four owned scratch cases. Direct-path, symlink and hardlink configuration collisions all kept the original bytes, emitted one refusal and exited zero. The normal destination wrote a valid final stopped snapshot (873 bytes in this empty-workload fixture) with no refusal; this size is a measured point, not a maximum. Binary SHA-256 `b97691d3be53e6854decce7cb71821040d61a8351e381fcc9304fc5cdf0a4199` was unchanged through the run. Local results: `/private/tmp/pm-snap-guard-w7a7no5w/result.json`; the earlier initial witness is separate. No VPN, serving app, helper or machine setting was used or changed.
+The parent ran the actual built `pm-proxy` in four owned scratch cases. Direct-path, symlink and hardlink configuration collisions all kept the original bytes, emitted one refusal and exited zero. The normal destination wrote a valid final stopped snapshot (873 bytes in this empty-workload fixture) with no refusal; this size is a measured point, not a maximum. Binary SHA-256 `cafe8674d4aba6f93f1ac9087d887cd1340efb78ab9e2a743d8759b484099ed3` was unchanged through the run. Local results: `/private/tmp/pm-snap-guard-9ry28xss/result.json`; the earlier initial witness is separate. No VPN, serving app, helper or machine setting was used or changed.
 
 The timer uses `Task.sleep(until:clock:)` with the continuous clock. Apple documents that [ContinuousClock progresses through system sleep](https://developer.apple.com/documentation/swift/continuousclock/continuous), while [DispatchTime uptime excludes sleep](https://developer.apple.com/documentation/dispatch/dispatchtime). The former dispatch-timer conversion did not preserve that deadline meaning. No real system-sleep experiment was performed; the machine was never put to sleep for this test.
 
+
+## Full workflow checkpoint
+
+The parent ran all 39 checks corresponding to `.github/workflows/swift.yml` on source commit
+`f6487113b1dc7e437ffc120421a9abb243809107`. All passed. The source fingerprint above
+was identical before and after the run; only documentation changed afterwards.
+
+- Full XCTest: 3,037 tests, two skipped, zero failures.
+- `pm-sim all`: all 97 structured result records passed, including the dedicated protected-snapshot scenario.
+- Import, event, decisions/history and regression checks, notices, packaging, signing identity, signed/unsigned updater,
+  Kerberos-worker, security/redaction, routing/wire, DNS-shutdown and status-stream checks passed.
+- Existing proxy performance gate: wall 10.235 s, maximum RSS 34,799,616 bytes, CPU 105.16%.
+  This is that proxy workload, not the client service, the maximum configuration or a whole-app RAM bound.
+
+Logs: `/private/tmp/conduit-runtime-stage1-20261024/protected-artifact-full-gates/`.
+Independent subscription-backed Claude source review found and prompted fixes for exit-after-ready flushing,
+false drain confirmation, sleep-clock semantics, cleanup accumulation and stale snapshot notification.
+A final scoped static recheck found no further actionable findings. It did not execute tests.
+Hosted Swift/CodeQL and actual PR review results remain separate checks.
 
 ## Not proved
 
