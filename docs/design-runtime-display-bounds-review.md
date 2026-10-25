@@ -1,6 +1,6 @@
 # Runtime display text: owner review
 
-Status: proposed; the owner question is pending. Nothing in this document is implemented or a shipping profile.
+Status: selected by the owner on 2026-10-25 (#186: "Bound display text with explicit notices (Recommended)") and recorded as [decision 0029](decisions/0029-bound-runtime-display-text.md). Implemented locally on the v2 wire (partial): caps, input gate, notices and codec checks. Not implemented: store, client and host adoption, and the v2 probe owner. No shipping frame, retention, queue or deadline profile is selected. The proposal text below is the record of the options; where it says "proposed", the selection above governs.
 
 The ordinary v2 snapshot/row/probe bridge sanitizes display strings but does not cap them.
 A finite frame therefore cannot promise to deliver every otherwise valid view.
@@ -44,6 +44,7 @@ These are measured points, not a maximum. An all-NUL profile demonstrates six en
 The exact measurements, source trace, fixture and exploration limits are in
 [the service checkpoint](runtime-service-engine-checkpoint-2026-10-25.md#text-inventory-no-implementation-owner-decision-needed).
 
-After the owner selects the policy, record the decision, implement through the existing shared helper,
-measure every populated scalar field and notices with actual codec framing, and review the frame/retention profile separately.
+The owner has selected the policy, and it is recorded as [decision 0029](decisions/0029-bound-runtime-display-text.md). It is implemented through the shared helper, and the populated scalar fields and notices are measured with actual codec framing in the checkpoint. The frame and retention profile is still reviewed separately, and no shipping value is selected by this draft.
 Revisit on new display fields, altered redaction/encoding, or measured views beyond the selected envelope.
+
+The completed widened baseline measures 49,376 bytes including its line feed. The owner subsequently selected 64 KiB replies/stream frames in [0030](decisions/0030-ordinary-runtime-reply-frame-cap.md). The remaining shipping profile and actual-host scheduling/latency are still separate gates. [Final verification](verification-runtime-display-2026-10-25.md).

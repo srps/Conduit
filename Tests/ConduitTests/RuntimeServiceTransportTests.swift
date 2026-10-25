@@ -101,8 +101,9 @@ final class RuntimeServiceTransportTests: XCTestCase {
     /// A row that fits the capture bound can still be larger than one caller's reply frame. The caller learns the frame is too small.
     func testARowLargerThanTheCallersFrameIsAStableFrameTooLargeWireError() async throws {
         let harness = try RuntimeServiceHarness()
+        // A 3,000-byte host is cut to the 512-byte diagnostic cap (decision 0029), so the row is about 600 bytes. A 512-byte frame is smaller than it.
         try publishHosts(harness, hosts: [String(repeating: "h", count: 3_000)])
-        let small = try ControlFrameLimits(maxFrameBytes: 2_048)
+        let small = try ControlFrameLimits(maxFrameBytes: 512)
         let client = try makeClient(harness, harness.transport(), frame: small)
         guard case .failure(let error) = await readHosts(client, harness) else {
             return XCTFail("a row larger than the caller's frame is not a page")

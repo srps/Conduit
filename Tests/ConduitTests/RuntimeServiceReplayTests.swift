@@ -266,8 +266,10 @@ final class RuntimeServiceReplayTests: XCTestCase {
     /// The fixture's control-log byte bound. An outcome of `oversizeBytes` is larger than it, so the log skips it instead of retaining it.
     private static let oversizeFixtureBound = 8_192
     private static let oversizeBytes = 9_000
-    /// Each quote and NUL pair encodes to 8 bytes, so this name encodes to about 16.8 KB, far past the fixture bound.
-    private static let oversizeName = String(repeating: "\"\u{0}", count: 2_100)
+    /// The largest probe the display policy admits (decision 0029): a name at its 1,024-byte cap and an endpoint at its 512-byte cap, both NUL,
+    /// which encode to six bytes each. Together they are about 9.2 KB, past the 8 KiB fixture bound, so the outcome is still oversize.
+    private static let oversizeName = String(repeating: "\u{0}", count: 1_024)
+    private static let oversizeEndpoint = String(repeating: "\u{0}", count: 512)
 
     private func logEvent(_ log: inout RuntimeObservationLog) {
         let record = ControlRuntimeEventRecord.known(
@@ -282,7 +284,7 @@ final class RuntimeServiceReplayTests: XCTestCase {
 
     /// A completed probe whose encoded outcome is larger than the fixture's control-log bound.
     private func oversizeOutcome(_ harness: RuntimeServiceHarness) throws -> ControlOperationOutcome {
-        try upstreamOutcome(harness, name: Self.oversizeName, endpoint: "host")
+        try upstreamOutcome(harness, name: Self.oversizeName, endpoint: Self.oversizeEndpoint)
     }
 
     /// The production log, with the replay gap at its own level. Event one, then a skipped outcome at boundary one, then event two.

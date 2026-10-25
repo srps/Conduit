@@ -387,7 +387,7 @@ final class RuntimeClientCodecTests: XCTestCase {
     }
 
     func testAPageWithAnOffsetNearIntMaxIsRefusedNotTrapped() throws {
-        let row = #"{"id":"00000000-0000-0000-0000-000000000001","name":"a","endpoint":"e:1","circuitState":"closed","consecutiveFailures":0}"#
+        let row = #"{"id":"00000000-0000-0000-0000-000000000001","name":"a","endpoint":"e:1","circuitState":"closed","consecutiveFailures":0,"displayNotices":[]}"#
         func page(offset: String, total: String, rows: String) -> Data {
             Data(#"{"version":2,"kind":"response","correlation":"\#(correlationText)","body":{"type":"page","page":{"type":"upstreamHealth","page":{"incarnation":"\#(incarnationText)","revision":1,"offset":\#(offset),"totalCount":\#(total),"rows":\#(rows),"status":{"type":"current"}}}}}"#.utf8)
         }
@@ -731,7 +731,7 @@ final class RuntimeClientCodecTests: XCTestCase {
     /// A page keeps rows only under a status that holds rows. The rowless statuses refuse rows, so no second "no rows" form carries data.
     func testARowlessPageStatusCannotCarryRows() throws {
         let decoder = ControlRuntimeCodec.makeDecoder()
-        let row = #"{"hostname":"a.example","outcome":"active"}"#
+        let row = #"{"hostname":"a.example","outcome":"active","displayNotices":[]}"#
         func page(status: String, total: Int, rows: String) -> Data {
             Data(#"{"incarnation":"\#(incarnationText)","revision":1,"offset":0,"totalCount":\#(total),"rows":\#(rows),"status":\#(status)}"#.utf8)
         }

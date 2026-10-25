@@ -283,6 +283,15 @@ nominal Data lengths alone do not establish RSS, transport capacity or Stop fair
 
 ## Production-adoption checkpoint (2026-10-25)
 
+Update after the display review: 0029 is implemented and verified on the unreleased
+v2 contract, and the owner selected 64 KiB replies/stream frames in
+[0030](decisions/0030-ordinary-runtime-reply-frame-cap.md). The complete widened
+baseline measures 49,376 bytes including LF. The remaining coherent service
+profile, actual-owner scheduling and the integration work below still gate
+production adoption. This does not move the semantic store or introduce a
+parallel writer/client path. See [display verification](verification-runtime-display-2026-10-25.md).
+
+
 Reviewed with official Claude Code through the owner's claude.ai Max subscription,
 against merged startup/log protection (PRs238/239). This checkpoint preserves the
 selected owners; it does not select presentation limits or shipping client defaults.

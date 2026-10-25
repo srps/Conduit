@@ -207,6 +207,7 @@ package struct ControlConnectionRow: ControlCollectionRow {
     package var bytesReceived: ControlCount
     package var tunnel: Bool
     package var authMethod: String?
+    package var displayNotices: [ControlDisplayNotice]
 
     package init(
         id: ControlConnectionID,
@@ -218,7 +219,8 @@ package struct ControlConnectionRow: ControlCollectionRow {
         bytesSent: ControlCount,
         bytesReceived: ControlCount,
         tunnel: Bool,
-        authMethod: String?
+        authMethod: String?,
+        displayNotices: [ControlDisplayNotice] = []
     ) {
         self.id = id
         self.destination = destination
@@ -230,6 +232,7 @@ package struct ControlConnectionRow: ControlCollectionRow {
         self.bytesReceived = bytesReceived
         self.tunnel = tunnel
         self.authMethod = authMethod
+        self.displayNotices = displayNotices
     }
 }
 
@@ -242,6 +245,7 @@ package struct ControlUpstreamRow: ControlCollectionRow {
     package var ewmaLatencyMilliseconds: ControlNonNegativeNumber?
     package var consecutiveFailures: ControlCount
     package var openUntil: ControlTimestamp?
+    package var displayNotices: [ControlDisplayNotice]
 
     package init(
         id: ControlUpstreamID,
@@ -250,7 +254,8 @@ package struct ControlUpstreamRow: ControlCollectionRow {
         circuitState: ControlCircuitState,
         ewmaLatencyMilliseconds: ControlNonNegativeNumber?,
         consecutiveFailures: ControlCount,
-        openUntil: ControlTimestamp?
+        openUntil: ControlTimestamp?,
+        displayNotices: [ControlDisplayNotice] = []
     ) {
         self.id = id
         self.name = name
@@ -259,6 +264,7 @@ package struct ControlUpstreamRow: ControlCollectionRow {
         self.ewmaLatencyMilliseconds = ewmaLatencyMilliseconds
         self.consecutiveFailures = consecutiveFailures
         self.openUntil = openUntil
+        self.displayNotices = displayNotices
     }
 }
 
@@ -272,6 +278,7 @@ package struct ControlTunnelBindingRow: ControlCollectionRow {
     package var remotePort: ControlPort
     package var proxied: Bool
     package var healthy: Bool
+    package var displayNotices: [ControlDisplayNotice]
 
     package init(
         id: ControlTunnelID,
@@ -281,7 +288,8 @@ package struct ControlTunnelBindingRow: ControlCollectionRow {
         remoteHost: String,
         remotePort: ControlPort,
         proxied: Bool,
-        healthy: Bool
+        healthy: Bool,
+        displayNotices: [ControlDisplayNotice] = []
     ) {
         self.id = id
         self.label = label
@@ -291,6 +299,7 @@ package struct ControlTunnelBindingRow: ControlCollectionRow {
         self.remotePort = remotePort
         self.proxied = proxied
         self.healthy = healthy
+        self.displayNotices = displayNotices
     }
 }
 
@@ -305,10 +314,12 @@ package enum ControlTunnelDNSHostOutcome: String, Codable, Sendable, Equatable, 
 package struct ControlTunnelDNSHostRow: ControlCollectionRow {
     package var hostname: String
     package var outcome: ControlTunnelDNSHostOutcome
+    package var displayNotices: [ControlDisplayNotice]
 
-    package init(hostname: String, outcome: ControlTunnelDNSHostOutcome) {
+    package init(hostname: String, outcome: ControlTunnelDNSHostOutcome, displayNotices: [ControlDisplayNotice] = []) {
         self.hostname = hostname
         self.outcome = outcome
+        self.displayNotices = displayNotices
     }
 }
 

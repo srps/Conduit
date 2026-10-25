@@ -1,6 +1,8 @@
 # Runtime service engine: checkpoint (2026-10-25)
 
-Status: **combined local integration, verification pending.** The retained-page/service foundation (5920ae6 plus its evidence) and observation/replay work (d963333) are combined over merged PR234. Earlier counts below identify their separate checkpoints. The combined source needs focused checks, independent review and all-workflow gates. The service is unadopted: no RuntimeHost command owner or AppState client uses it. Display-text policy awaits the owner; no shipping resource values are chosen.
+**Latest status (2026-10-25).** Display bounds and notices (0029) pass all 40 local checks: 3,286 tests, two skips, zero failures; all 100 simulator records and perf pass. Independent Claude review and actual release allocation probes are complete. The owner selected 64 KiB replies/stream frames in [0030](decisions/0030-ordinary-runtime-reply-frame-cap.md); the rest of the shipping profile and actual RuntimeHost/AppState adoption remain open. [Final evidence and exact source provenance](verification-runtime-display-2026-10-25.md).
+
+Earlier status, kept as the record of that checkpoint: combined local integration, verification pending. The retained-page/service foundation (5920ae6 plus its evidence) and observation/replay work (d963333) are combined over merged PR234. Earlier counts below identify their separate checkpoints. The combined source needed focused checks, independent review and all-workflow gates. The display-text policy then awaited the owner.
 
 Branch: `codex/runtime-service-engine`, based on `ff7d859` over merged PR232. Local checkpoint; nothing pushed or installed. Source identity and parent verification are in [the verification note](verification-runtime-service-pages-2026-10-25.md).
 
@@ -12,6 +14,101 @@ Branch: `codex/runtime-service-engine`, based on `ff7d859` over merged PR232. Lo
 - Imports fence, event catalogue (207 names), decisions check, decisions tests, `pm-sim framed-runtime-client` and `pm-sim runtime-service-wire` all pass under `set -e`.
 - **Parent source-variant runs followed this worker checkpoint.** The gate probe detected under-lock release; a restricted-kind scan hit a production invariant; a reversed eviction tie-break produced a three-action model counterexample. All original source bytes were restored. Exact provenance and limitations are in [the verification note](verification-runtime-service-pages-2026-10-25.md). No historical-commit fail-before claim is made.
 - Not run in this slice: the full `swift.yml` workflow, `pm-sim all`, `scripts/perf-gate.sh`, and any review gate. The parent's independent recheck and final review follow.
+
+## Display text bounds (decision 0029, local, 2026-10-25)
+
+Status: implemented locally and verified. All **40 local workflow checks pass** on stable runtime/test source: **3,286 tests, two skips, zero failures; all 100 simulator result records and perf**. Independent subscription-backed Claude review found no remaining semantic blocker after the measured lifetime correction. Two subsequent source/test comment-only corrections passed28 targeted tests; their provenance and the exact full-run fingerprint are in [the final verification note](verification-runtime-display-2026-10-25.md). Production host/client adoption remains open.
+
+### What changed
+
+- **Shared policy.** `ControlDisplayText` is the one redact-then-cut path, behind a 16,384-byte input gate. `ControlDisplayField` is the closed table of 26 displayed fields, each with its owner and cap: 1,024 for the four config-derived names (profile, upstream name, tunnel label, probe name), and 512 for the rest.
+- **Notices and codec.** `displayNotices` is on the snapshot, the four row types and the upstream probe. The codec checks caps and notice structure on every encode and decode, and refuses a malformed value rather than rewriting it. Decode reads the notice array in one bounded pass.
+- **Projection.** `RuntimeSnapshotControlProjection` is the only producer of snapshot and row notices. `RuntimeProbeControlProjection.upstreamProbe` is the single v2 probe mapping, which is unadopted: no owner adapter calls it.
+- **Sizing.** Each notice counts as an element in the frame budget. The exact checks use encoded bytes. For a record, the frame with its notice array minus the frame with `displayNotices` set to `[]` equals the array's encoded bytes less the two bytes of `[]`.
+- **Unchanged.** The v1 probe, known events, stored configuration, stable IDs, enum facts, counts, totals and command inputs. The unknown-event display keeps its 64, 128 and 512-byte limits and gains only the input gate.
+
+### Verification
+
+- The exact focused wrapper `verify-runtime-display.sh` passed on its second run, before the final allocation fix and before the widened-metadata test was added. The first run is archived as `runtime-display-checks-attempt1`.
+- On that run, `swift build` completed and `swift test` with the wrapper's filter executed 357 tests, 0 failures. After the final source fix, 28 targeted tests pass. The final full workflow passed all 40 checks; see the verification note above for the exact source and later comment-only corrections.
+- The first run had 11 failures in three suites, and each was caused by the new policy. Repairs kept the witnesses:
+  - Two hand-written row JSON fixtures lacked `displayNotices`.
+  - The projection fixture used text that the kernel masks. `ActiveConnectionInfo` applies `SensitiveValueSanitizer.observableTarget` on construction, so a long base64-like destination reaches the projection as `<redacted-token>`. The fixture now uses separated text. The first run's log elides one of the suite's three failure lines, so that third failure is not separately identified.
+  - Six replay tests: the replay probe is built directly as a DTO (`upstreamOutcome`), not through the projection, so nothing cut it. Its 4,200-raw-byte name was invalid under the codec's 1,024-byte cap. Encoding refused it, the service settled `internalFailure` instead of an oversize outcome, and that broke the old oversize-outcome witness. Raw oversize values in a direct DTO are refused, never truncated; only the projection cuts. The probe is now the largest the policy admits (name at 1,024 and endpoint at 512, both NUL, about 9.2 KB encoded), still past the 8 KiB control-log bound, so the mechanism is kept and no bound was raised.
+- The wrapper's remaining steps passed under `set -e`: imports fence, event catalogue, decisions check and tests, `pm-sim runtime-display-bounds` (PASS, nine assertions), `framed-runtime-client` and `runtime-service-wire`.
+
+### Maximum-text sizes (actual encoded bytes, 2026-10-25 run; small metadata)
+
+Maximum-text shape: every free-text field is all NUL, one byte past its cap, so each is cut to the cap. Every byte escapes to six. The snapshot has fourteen notices. The baseline is the same snapshot in a baseline frame at high-water zero with a live replay, and the stamp, counts and timestamps are the fixture's small values. This measures the text contribution only. It is not the widest whole frame; that is the widened-metadata measurement below. It is a measured maximum-text sample for this one fixture, not a universal maximum of any text the policy admits: other escape mixes and longer per-field inputs are not enumerated. The projection and the codec are the production code.
+
+| Record | Actual payload bytes | Computed text contribution | Actual minus computed |
+| --- | ---: | ---: | ---: |
+| Snapshot frame, maximum text (14 notices) | 48,735 | 46,108 | 2,627 |
+| Baseline frame, maximum text, small metadata (high-water 0, live) | 48,840 | 46,108 | 2,732 |
+| Connection row | 12,738 | 12,296 | 442 |
+| Upstream row | 9,511 | 9,220 | 291 |
+| Tunnel binding row | 12,614 | 12,294 | 320 |
+| DNS host row | 3,173 | 3,074 | 99 |
+| Upstream probe | 9,450 | 9,220 | 230 |
+
+- The notice array in the maximum-text snapshot is 708 bytes. The snapshot frame minus the same frame without notices equals that array less the two bytes of `[]`, asserted exactly.
+- A published 600-byte DNS host, cut to 512 with a notice, encodes to 613 bytes. A 13-byte host with no notice encodes to 67 bytes.
+- A mixed sample (escapes, multibyte, combining and ZWJ at the cap) encodes to 12,062 bytes. It is a sample, not the worst case.
+- The computed text contribution is six bytes per raw byte at each cap plus two bytes for each field's quotes. It is arithmetic, not a measurement. The actual minus computed column is the structure, which the record adds on top.
+- Frame implication, not a selection: the maximum-text baseline is 48,840 payload bytes. The widened-metadata baseline is 49,376 bytes including its line feed (below). The owner subsequently selected 64 KiB in 0030; remaining profile values are not chosen here.
+
+### Exploration limits (exact)
+
+- All-NUL and one mixed sample only. Other controls and U+2028 are not measured separately.
+- Numeric fields are covered by the widened-metadata test on one worst shape, with integer scalars at their upper bounds and floating-point scalars at one large finite point (below). That is a point in the rules' ranges. It is not an enumeration of every value those rules accept, and it claims nothing about JSON text of other floating-point values.
+- One snapshot shape. Collection rows are measured per row. Page envelopes are not.
+- Not measured here: actual-host Stop/status latency and any deadline. Allocation and two URL-dense timings are in the experiments directory (below). They are single local observations, not percentiles or a time bound.
+- Work per owner turn is counted, not timed. Rows are capped by the caller's row budget (`ControlRowBudget.maxRows`), so the work is at most that many rows times their fields, each at most the 16 KiB input gate. No separate CPU deadline exists in this slice, and no time bound is claimed.
+- The unkeyed count-nil decode path is not exercised by a test. JSON always reports a count, so the early refusal is tested for a known count only. The in-loop guard runs before each element decode, by construction.
+- Redaction is claimed for the credential forms the sanitizer's grammar recognizes: Bearer and Basic tokens, URL userinfo and query, and the listed sensitive header lines. The credential witnesses are fixed strings at fixed offsets around each cut. The seeded Character model covers only the cut, because its pieces contain no redaction pattern. A secret in any other form is not promised redacted; the policy bounds it and does not identify it.
+- The connection destination is masked before the Bridge sees it (`SensitiveValueSanitizer`, applied by `ActiveConnectionInfo`).
+
+### Allocation lifetime of the sanitizer path (measured by the parent; files in the experiments directory)
+
+The parent's isolated release probes are in [`docs/experiments/runtime-display-codec/`](experiments/runtime-display-codec/README.md). The README there is the record. It names each source and results file, the process model and the measured fields. The author did not run these probes.
+
+Before the fix, the probe without an explicit caller pool found transient Foundation lifetime in the display sanitizer. At the 16 KiB input limit, malloc in use was 89,056 B at baseline, 2,816,080 B after the first release, and 27,799,712 B after 11 updates, with whole-process peak RSS at 38.7 MB. Plain and NUL cap-over cases also grew. Inputs above the raw gate stayed flat. A controlled caller-pool comparison stayed flat. This identifies sanitizer and Foundation transient lifetime for callers without a draining run loop. It is not a claim about stored configuration or a leak in the installed app.
+
+The correction is scoped to the one sanitize-then-cut path in `ControlDisplayText.bounded`. The input gate still runs first and outside the scope. The sanitize and the cut run once, in a synchronous `autoreleasepool` on platforms with Objective-C (`#if canImport(ObjectiveC)`), and run directly elsewhere. The returned String keeps its storage through ARC, so the result does not depend on the pool. No extra copy is made on the within-cap path, and no cache, dependency, caller cleanup or host policy was added.
+
+Final-source results, from the experiments directory:
+
+- **Scalar snapshot, 101 unpooled updates** (`ResourceProbe.swift`, `after-results.json`; seven fresh processes, each exiting 0). Every case grows by 16 bytes or less between the first release and the end. At the 16 KiB input limit, live malloc is 320,464 B after the first release and 320,480 B after 100 more. Before the fix, 11 such updates ended at 27,799,712 B. Whole-process peak RSS after 101 releases is 9.4 to 10.5 MB across the seven cases. The sample is the observed curve, not a tolerance.
+- **URL-dense work, three updates per case, two cases** (`URLDenseProbe.swift`, `url-dense-results.json`; 1,820 short URLs, or 1,260 URLs with userinfo, at 16,380 input bytes per field, with all 14 fields). Both cases exit 0 with capped text and 14 notices. Live malloc is 321,024 to 321,040 B across the two later updates. The first complete update takes 39 ms and 42 ms. The next two together take 45 ms and 78 ms. These are single local observations, not percentiles and not a deadline guarantee.
+
+Scope of these figures. The probes cover the scalar snapshot path and the two URL-dense cases only. The row path is not confirmed. They identify no leak in the installed app. They are not a universal memory bound, and they say nothing about caller loops or the daemon's per-turn scheduling. The URL sanitizer can do work per regex match, so the byte cap is not a linear-time claim. Per-turn CPU scheduling, actual-host Stop/status latency and the shipping service profile remain adoption gates.
+
+### Widened-metadata baseline (measured by the parent's targeted run after the final fix)
+
+`testAWidenedMetadataBaselineIsEncodedAtTheWidestScalarsTheRulesAllow` (in `RuntimeDisplayBoundsProjectionTests`) encodes a whole baseline frame, not a text sample. It starts from the same worst-text projection and then widens the numeric scalars, by mutating the already projected DTO, since no second producer exists:
+
+- the stamp's incarnation is `FFFFFFFF-…`, and its presentation, configuration and lifecycle revisions are `Int.max`;
+- the high-water is `Int.max`, and the replay range runs from `Int.max - 1` to `Int.max`, so both ends are present;
+- every count and the collection totals (including the tunnel DNS hosts) are `Int.max`, and each collection revision is `Int.max`;
+- the five bound ports are 65,535;
+- each finite non-negative number and timestamp is the largest finite `Double`, with one lower bound at minus that value, since timestamps accept any finite value;
+- every optional field is present, asserted before the widening.
+
+It checks that the frame round-trips through `decodeFullFrame`, that the frame is the payload plus one line feed, and that the exact frame limit accepts it and one byte less refuses it. It prints each unit explicitly: the baseline frame with its line feed, the bare snapshot JSON without envelope or line feed, the snapshot frame, and an upstream row whose numbers are widened.
+
+It also checks the widened envelope against the reference `RuntimeServiceLimits.measuredBaselineFrameOverhead`, which is read as `baselineFrameOverheadBytes` and defined as the baseline frame with its line feed minus the bare snapshot. The widened cursors have the same 19-digit width as the reference's `maximumPosition` (`Int.max - 1`), and the incarnation and correlation are 36-character UUIDs in both, so the two must be equal. The assertion is that equality.
+
+Measured numbers, from the parent's targeted run of the final candidate (units are JSON bytes):
+
+- The complete baseline frame, including its line feed, is **49,376 bytes**. The frame round-trips, and the exact limit behaves as the test requires.
+- The bare snapshot JSON, with no envelope and no line feed, is **49,073 bytes**.
+- The difference is **303 bytes**, which equals the reference `baselineFrameOverheadBytes` in `RuntimeServiceLimits`. The test asserts that equality.
+
+This is one worst shape with widened numerics. It is not a universal maximum: the rule-admitted values beyond these scalars are not enumerated, and the largest finite `Double` is accepted by the rule and round-trips. That is a statement about the rule, not a bound on any text a `Double` prints as.
+
+### Not done
+
+- Store, client and host adoption; an owner adapter for the v2 probe; known-event bounds and redaction; the v1 probe text; a shipping frame, reply, retention or deadline profile; the `RuntimePresentationAdapter` direct kernel path.
 
 ## M2B observation slice (local, 2026-10-25)
 
@@ -67,7 +164,7 @@ These are samples, not maxima. The projection's text bounds are not exercised, N
 3. The exact `readSnapshot` contract. `ControlRuntimeCall.readSnapshot` has no payload and no expected incarnation, and the request was never given one. The read answers the owner's current snapshot after one capture in its own turn, or `internalFailure`. It never answers `changedIncarnation`, and no wire policy was added. A snapshot that does not fit the caller's frame is `frameTooLarge`.
 4. A snapshot that does not fit a caller's narrower frame ends the stream with `resyncRequired`. The end is explicit and nothing is skipped silently. It is a policy choice for the parent.
 5. Replay, control-log, gap and eviction rules are modelled at the log level (`RuntimeServiceReplayModelTests`, below) and exercised through the core (`RuntimeServiceReplayTests`). The model is written from the design, but in the same work as the production rule, so it is not an independent specification of the protocol. No source mutant of these rules has been run.
-5a. Populated sizing and fake-owner pressure metrics are measured (section M2C, below). Not done: a Bridge-capped text profile, because the Bridge does not cap free text, and any shipping profile.
+5a. Populated sizing and fake-owner pressure metrics are measured (section M2C, below). Not done (historical, before decision 0029, which now caps the text): a Bridge-capped text profile, and any shipping profile.
 6. No source mutant was run against the table, the slot or the alternation rule.
 7. Custody, corrected. The subscription table stores each subscriber's cursors and at most one parked wait, and it holds no snapshot. The latest snapshot is held once, in the slot. The per-subscriber first frame is budgeted in the existing baseline term and is not part of M2B's new state. No per-subscriber snapshot custody is claimed or measured.
 8. The base-53 page-path concerns are not handled here. `captureCurrent` and `pageSource` are unchanged, and the current-proof total invariant after row aging and release, the invariant branch that must not claim over-budget, and the page reply fallback classification are left to the parent's base fix. The new snapshot and open paths classify their own failures as closed faults and typed refusals, not as over-budget or as disconnect.
@@ -123,7 +220,7 @@ Eight free-text fields (profile, active upstream, health summary, proxy error, D
 | plain ASCII, same raw length | 5,698 | 5,819 | 6,001 |
 
 - Escaping adds 3,192 B to the payload on the same raw length.
-- **The Bridge does not cap free text.** It sanitizes text and does not truncate it. So the snapshot bound depends on what the owner puts in those fields, and a shipping bound needs an owner-set text policy. The 8 × 513 B sample is a caller-chosen length, not a bound.
+- **(Historical, as measured before decision 0029; superseded.)** The Bridge did not cap free text. It sanitized text and did not truncate it. So the snapshot bound depends on what the owner puts in those fields, and a shipping bound needs an owner-set text policy. The 8 × 513 B sample is a caller-chosen length, not a bound.
 - The worst baseline equals the populated payload plus the measured 303 B overhead, which agrees with the constructor.
 
 ### Open after M2C
@@ -164,7 +261,9 @@ Verified by the exact wrapper: **309 filtered tests, 0 failures**, and both pm-s
 - The same stream delivers a small probe, and it stays open (`testAnOutcomeThatFitsTheCallersFrameIsDeliveredOnTheSameStream`).
 - The probe name and endpoint are not capped by the codec, which the witness shows. Nothing is measured beyond what the test asserts.
 
-### Text inventory (no implementation; owner decision needed)
+### Text inventory (historical, before decision 0029)
+
+This inventory describes the wire before the owner's selection. Its measurements are historical and are not a current maximum; the current bounds are in [the current section](#display-text-bounds-decision-0029-local-2026-10-25).
 
 Current bounds on the ordinary v2 wire:
 
@@ -215,7 +314,7 @@ Indicator shape, which is a wire decision for the owner: a per-field `truncated`
 
 Triggers to revisit: a new free-text field; a change to `displayText` or `urlText`; a shipping snapshot bound; a shipping frame cap; any measured baseline above the bound.
 
-### Policy follow-up (recommendation; no implementation; owner decision)
+### Policy follow-up (historical recommendation; selected as decision 0029)
 
 - **Units.** The approved configuration bounds are raw UTF-8 byte caps. `DomainResourceMeasure.utf8Bytes` measures `displayText` (1,024: profile, upstream and tunnel names), `urlText` (16,384) and `hostText` (`DomainNameSyntax.maxLength`). None of them bounds the encoded size. A raw 1,024-byte all-NUL name encodes to 6,144 bytes, measured. So a raw cap bounds input and configuration, while the wire retention needs a separate encoded budget.
 - **Upstream endpoint source, traced.** `UpstreamProxy.endpoint` is `displayName`, which is `"\(host):\(port)"`. The host is the configured host, bounded by `hostText`, and the port is numeric. The status endpoint and the probe endpoint both come from it (`ConnectionPool` builds `UpstreamRuntimeStatus.endpoint`, and `RuntimeSnapshotControlProjection.upstreamRow` displays it). It is not a URL, and nothing here claims a 16 KiB bound for it.
@@ -360,7 +459,7 @@ Base: the combined focused suite at **314 tests, 0 failures**, before this slice
 - No source mutant of the lost-boundary rule or the front-door refusal has been run. The red run is the unfixed production source, which is one variant, not a sensitivity sweep.
 - The `quiescenceAccountingMismatch` branch has no witness, by design.
 - The byte-bound witnesses use an 8,192-byte fixture bound. No shipping control-log bound is chosen.
-- The display-text policy is still pending the owner. No text cap or default is implemented.
+- (Historical, at this M2E checkpoint.) The display-text policy was pending the owner. It is now selected as decision [0029](decisions/0029-bound-runtime-display-text.md) and implemented locally; see [the current section](#display-text-bounds-decision-0029-local-2026-10-25). No shipping frame, reply, retention or deadline default is implemented.
 
 ## Not implemented, explicitly
 

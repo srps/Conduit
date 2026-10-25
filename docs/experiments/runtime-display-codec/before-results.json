@@ -1,0 +1,32 @@
+[
+  {
+    "kind": "plain-cap-over",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=0.0001125 peakRSSBytes=6127616 residentBytes=6176768 physicalFootprintBytes=1556816 mallocInUseBytes=88992\nrawBytesPerField=1025 frameBytes=10094 notices=14\nstage=sender-overlap seconds=0.006990542 peakRSSBytes=10043392 residentBytes=10043392 physicalFootprintBytes=3342792 mallocInUseBytes=476528\nstage=wire-only seconds=0.00705975 peakRSSBytes=10043392 residentBytes=10043392 physicalFootprintBytes=3342792 mallocInUseBytes=464944\nstage=decoded-only seconds=0.007934458 peakRSSBytes=10256384 residentBytes=10256384 physicalFootprintBytes=3490248 mallocInUseBytes=494800\nstage=after-first-release seconds=0.008007792 peakRSSBytes=10256384 residentBytes=10256384 physicalFootprintBytes=3490248 mallocInUseBytes=485136\nstage=after-10-released seconds=0.029944583 peakRSSBytes=12386304 residentBytes=12386304 physicalFootprintBytes=5620168 mallocInUseBytes=2159968\nchecksum=11418 iterations=11 fixture=DisplayBoundsFixture single-active=true\n",
+    "stderr": ""
+  },
+  {
+    "kind": "nul-cap-over",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=4.7875e-05 peakRSSBytes=6127616 residentBytes=6176768 physicalFootprintBytes=1556816 mallocInUseBytes=88992\nrawBytesPerField=1025 frameBytes=48494 notices=14\nstage=sender-overlap seconds=0.004701416 peakRSSBytes=10125312 residentBytes=10125312 physicalFootprintBytes=3391920 mallocInUseBytes=542064\nstage=wire-only seconds=0.004740125 peakRSSBytes=10125312 residentBytes=10125312 physicalFootprintBytes=3391920 mallocInUseBytes=530480\nstage=decoded-only seconds=0.005764041 peakRSSBytes=10338304 residentBytes=10338304 physicalFootprintBytes=3539376 mallocInUseBytes=496720\nstage=after-first-release seconds=0.005799875 peakRSSBytes=10338304 residentBytes=10338304 physicalFootprintBytes=3539376 mallocInUseBytes=485136\nstage=after-10-released seconds=0.026703 peakRSSBytes=12615680 residentBytes=12615680 physicalFootprintBytes=5816752 mallocInUseBytes=2159968\nchecksum=11418 iterations=11 fixture=DisplayBoundsFixture single-active=true\n",
+    "stderr": ""
+  },
+  {
+    "kind": "sanitizer-input-limit",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=3.8458e-05 peakRSSBytes=6127616 residentBytes=6176768 physicalFootprintBytes=1573224 mallocInUseBytes=89056\nrawBytesPerField=16384 frameBytes=10094 notices=14\nstage=sender-overlap seconds=0.015450833 peakRSSBytes=12435456 residentBytes=12435456 physicalFootprintBytes=5734856 mallocInUseBytes=2807472\nstage=wire-only seconds=0.015486875 peakRSSBytes=12435456 residentBytes=12435456 physicalFootprintBytes=5734856 mallocInUseBytes=2795888\nstage=decoded-only seconds=0.015840791 peakRSSBytes=12648448 residentBytes=12648448 physicalFootprintBytes=5882312 mallocInUseBytes=2825744\nstage=after-first-release seconds=0.015870041 peakRSSBytes=12648448 residentBytes=12648448 physicalFootprintBytes=5882312 mallocInUseBytes=2816080\nstage=after-10-released seconds=0.139943291 peakRSSBytes=38715392 residentBytes=38715392 physicalFootprintBytes=31965664 mallocInUseBytes=27799712\nchecksum=11418 iterations=11 fixture=DisplayBoundsFixture single-active=true\n",
+    "stderr": ""
+  },
+  {
+    "kind": "omitted-input",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=3.4625e-05 peakRSSBytes=6127616 residentBytes=6176768 physicalFootprintBytes=1573224 mallocInUseBytes=88992\nrawBytesPerField=16385 frameBytes=2512 notices=14\nstage=sender-overlap seconds=0.001706792 peakRSSBytes=8601600 residentBytes=8601600 physicalFootprintBytes=2130304 mallocInUseBytes=141952\nstage=wire-only seconds=0.001782458 peakRSSBytes=8601600 residentBytes=8601600 physicalFootprintBytes=2130304 mallocInUseBytes=121408\nstage=decoded-only seconds=0.002126458 peakRSSBytes=8880128 residentBytes=8880128 physicalFootprintBytes=2326912 mallocInUseBytes=137696\nstage=after-first-release seconds=0.00215175 peakRSSBytes=8880128 residentBytes=8880128 physicalFootprintBytes=2326912 mallocInUseBytes=137632\nstage=after-10-released seconds=0.007524667 peakRSSBytes=9404416 residentBytes=9404416 physicalFootprintBytes=2867608 mallocInUseBytes=137648\nchecksum=253 iterations=11 fixture=DisplayBoundsFixture single-active=true\n",
+    "stderr": ""
+  },
+  {
+    "kind": "double-input-limit",
+    "exit": 0,
+    "stdout": "stage=baseline seconds=3.5292e-05 peakRSSBytes=6127616 residentBytes=6176768 physicalFootprintBytes=1556816 mallocInUseBytes=89056\nrawBytesPerField=32768 frameBytes=2512 notices=14\nstage=sender-overlap seconds=0.001661083 peakRSSBytes=8634368 residentBytes=8634368 physicalFootprintBytes=2146664 mallocInUseBytes=170688\nstage=wire-only seconds=0.001689667 peakRSSBytes=8634368 residentBytes=8634368 physicalFootprintBytes=2146664 mallocInUseBytes=121472\nstage=decoded-only seconds=0.001982333 peakRSSBytes=8912896 residentBytes=8912896 physicalFootprintBytes=2343272 mallocInUseBytes=137760\nstage=after-first-release seconds=0.0020095 peakRSSBytes=8912896 residentBytes=8912896 physicalFootprintBytes=2343272 mallocInUseBytes=137696\nstage=after-10-released seconds=0.008327667 peakRSSBytes=9453568 residentBytes=9453568 physicalFootprintBytes=2916760 mallocInUseBytes=137712\nchecksum=253 iterations=11 fixture=DisplayBoundsFixture single-active=true\n",
+    "stderr": ""
+  }
+]
