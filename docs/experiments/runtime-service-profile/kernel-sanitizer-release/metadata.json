@@ -1,0 +1,8 @@
+{
+  "baseline": "21a6f96c7ead18e4028ec04d57171630e9675b2d",
+  "source_sha256": {
+    "before": "6021f7f77a19f1bbe10fbb46714ce6fc82f4227630e622ba117b0f22c3b4434a",
+    "after": "855eda0ca3acb8f3f5d333a1c1607eb0fc7de8c9273e6cd22fa1ad25b7904fac"
+  },
+  "swift": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx26.0\n"
+}
