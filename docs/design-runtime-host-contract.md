@@ -22,9 +22,20 @@ limits remain design work, with explicit gates below. Authorization is not an
 implementation or real-machine validation claim. [ROADMAP](../ROADMAP.md) remains
 the queue.
 
-## Selected refinements and current evidence (2026-10-24)
+## Selected refinements and current evidence (2026-10-25)
 
-The private payload and canonical writer root are selected in0018/0020. The owner
+The private payload and canonical writer root were selected in 0018/0020. The owner
+refined the root layout to **fixed writable filenames** in
+[0028](decisions/0028-fixed-writable-state-filenames.md), superseding 0020 while
+carrying forward its containment, lease, alias and separate-writer rules. Writable
+app/daemon components use `config.json`, `platform.json`, `preferences.json` and
+`platform-state.json`; diagnostic tools retain arbitrary read-only inputs.
+Unsupported daemon custom names must refuse before migration/recovery with
+move/rename guidance and preserved bytes. No automatic import is selected.
+Fixed names do not replace diagnostic destination or canonical identity checks.
+Naming enforcement and startup adoption remain planned.
+
+The owner
 subsequently selected resource limits at update/startup/import boundaries in
 [0021](decisions/0021-bounded-configuration-at-all-boundaries.md), completed string
 categories and legacy-file compatibility in
@@ -52,10 +63,16 @@ The alternatives and revisit triggers are in the records above.
 PR225 merged the unadopted layout/OS-lease primitives at1bb79b7; no shipping startup
 or persistence writer acquires them yet. PR226 merged diagnostic destination
 guards at e5156b2 after local/hosted checks; #222 is closed. The private codec/bridge
-is local and unadopted. Claude is implementing approved private resource bounds
-and exact persistence as separate reviewable slices using verified claude.ai Max;
-Codex reviews and verifies integration. No async client/store/admission engine,
-AppState adoption, RuntimeActor move or release readiness is claimed.
+is merged and unadopted. Runtime/file bounds and exact persistence merged in
+PRs 227–230; PR231 adds the ordinary framed client. PR232 merges the unadopted
+verified-store core with one shared loader and replacement path. It passed all
+39 local checks and hosted Swift/CodeQL; optional hosted review failures are not
+clean-review evidence. See [the store verification](verification-configuration-store-2026-10-25.md).
+The separate `codex/runtime-service-engine` branch has a partial service foundation
+and bounded wait/work models; observation/pages/coalescing and review corrections
+are in progress with Claude through the verified claude.ai Max subscription.
+Production startup ownership, store/workflow/host adoption, AppState convergence,
+RuntimeActor migration and release readiness remain open.
 
 Release scratch probes distinguish high-water RSS, current footprint and live
 allocator bytes. All-forms128-tunnel fixtures peaked17.3/21.0MB RSS; a separate

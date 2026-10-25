@@ -29,9 +29,14 @@ package protocol ConnectionAuditSink: Sendable {
     func record(_ record: ConnectionAuditRecord)
     var statistics: RecordWriterStatistics { get }
     @discardableResult func flush(timeout: TimeInterval) -> Bool
+    /// Awaits queued records, without blocking the caller, until the absolute `deadline`. A sink that queues
+    /// nothing answers `.drained` explicitly; a sink that cannot drain asynchronously keeps the default, `.unavailable`.
+    func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome
 }
 
 extension ConnectionAuditSink {
     package var statistics: RecordWriterStatistics { .init() }
     @discardableResult package func flush(timeout: TimeInterval = 2) -> Bool { true }
+    /// No evidence of draining is available here, so none is reported. This is not a success.
+    package func drain(until deadline: ContinuousClock.Instant) async -> RecordDrainOutcome { .unavailable }
 }

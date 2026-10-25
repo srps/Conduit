@@ -26,6 +26,8 @@ enum PMSim {
               high-throughput         Single stream, 1ms / 64KB chunks for 5s
               multi-100               100 concurrent bursty streams for 10s
               bounded-writers         Slow storage, bounded queues and append amplification
+              protected-snapshot-artifacts
+                                      Config aliases of snapshot.json keep their bytes; refusal latches once
               diagnostic-destination-guard
                                       Audit and events aliases of the config are refused, bytes kept
               pac-fetch-bounds        Bounded PAC downloads and last-good retention
@@ -210,6 +212,7 @@ enum PMSim {
         "high-throughput",
         "multi-100",
         "bounded-writers",
+        "protected-snapshot-artifacts",
         "diagnostic-destination-guard",
         "pac-fetch-bounds",
         "pac-preview",
@@ -321,6 +324,8 @@ enum PMSim {
             return [try await Scenarios.multiConcurrent(clientCount: 100, durationSeconds: 10, verbose: verbose)]
         case "bounded-writers":
             return [try await BoundedWriterScenarios.slowStorage()]
+        case "protected-snapshot-artifacts":
+            return [try await ProtectedSnapshotScenarios.run()]
         case "diagnostic-destination-guard":
             return [try await DiagnosticDestinationGuardScenarios.run()]
         case "pac-fetch-bounds":

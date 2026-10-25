@@ -1,11 +1,11 @@
 # 0020: Keep runtime persistence within one canonical writer root
 
 - Date: 2026-10-24
-- Decision: accepted (owner, 2026-10-24, #186 canonical writer-root checkpoint)
+- Decision: superseded (owner, 2026-10-24, #186 canonical writer-root checkpoint)
 - Implementation: partial
 - Validation: none
 - Supersedes: none
-- Superseded by: none
+- Superseded by: 0028
 
 ## Context
 

@@ -134,7 +134,13 @@ final class BoundedRecordWriterTests: XCTestCase {
         XCTAssertEqual(sink.records().count, 1)
     }
 
-    func testShutdownPersistsAuditTimeoutBeforeReturning() throws {
+    /// Audit that cannot drain asynchronously. The shared phase must report it as unavailable, not drained.
+    private struct UndrainableAuditSink: ConnectionAuditSink {
+        func record(_ record: ConnectionAuditRecord) {}
+        @discardableResult func flush(timeout: TimeInterval) -> Bool { false }
+    }
+
+    func testShutdownPersistsAuditTimeoutBeforeReturning() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("events.ndjson")
@@ -142,16 +148,22 @@ final class BoundedRecordWriterTests: XCTestCase {
         let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink(),
                                             destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
         events.setSink { writer.record($0) }
-        XCTAssertFalse(writer.flushReportingTimeout(auditFlushed: false, eventLog: events))
+        let report = await DiagnosticFlush.run(
+            phase: DiagnosticFlushPhase(), audit: UndrainableAuditSink(), events: writer,
+            snapshot: makeSnapshotArtifactWriter(fileURL: directory.appendingPathComponent("snapshot.json"),
+                                                 logger: DiscardingLogSink(),
+                                                 destinationGuard: UncheckedRecordFileDestination(), eventLog: events),
+            eventLog: events, logger: DiscardingLogSink())
+        XCTAssertEqual(report.audit, .unavailable)
+        XCTAssertEqual(report.events, .drained)
+        XCTAssertFalse(report.allConfirmed)
+        XCTAssertTrue(writer.flush(timeout: 2))
         let rows = try Data(contentsOf: url).split(separator: 0x0A).map {
             try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0))
         }
-        XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows.first?.event, "observability.flush_timeout")
-        XCTAssertEqual(rows.first?.detail, "auditFlushed=false eventsFlushed=true")
+        XCTAssertEqual(rows.first?.detail, "auditFlushed=false eventsFlushed=true audit=unavailable events=drained")
         XCTAssertEqual(writer.statistics.pendingRecords, 0)
-        XCTAssertTrue(writer.flushReportingTimeout(auditFlushed: true, eventLog: events))
-        XCTAssertEqual(events.totalCount, 1)
     }
 
     func testRecordingLogSinkDropsAtCapacityAndReportsLoss() {

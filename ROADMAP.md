@@ -121,7 +121,8 @@ not a requirement to finish every event or property test before extraction:
    accompanied the local workflow checks. Runtime-file startup/import adoption merged in PR #228 through the
    shared lexical/resource policy. Open gates:
    measured memory/capacity/latency and complete writer coverage under
-   the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md),
+   the canonical root selected in [0020](./docs/decisions/0020-canonical-runtime-writer-root.md)
+   and fixed writable layout in [0028](./docs/decisions/0028-fixed-writable-state-filenames.md),
    listener handoff, and measured bounds and shutdown. Exact legacy duration representability
    ([#224](https://github.com/srps/Conduit/issues/224)) merged in PR #228. The
    [review draft](./docs/design-runtime-store-precision-review.md) records the
@@ -145,6 +146,14 @@ not a requirement to finish every event or property test before extraction:
    sidecar boundary and raw browser-URL check; its complete local workflow passed
    2,897 tests (two skips) and all 94 simulator records. It merged at `2e75d94`
    after hosted Swift and CodeQL passed.
+   [PR #232](https://github.com/srps/Conduit/pull/232) merged the unadopted typed store core at `6535fc8`,
+   after all 39 local checks (3,004 tests, two skips, 96 simulator records) and hosted Swift/CodeQL passed.
+   [#233](https://github.com/srps/Conduit/issues/233) tracks the confirmed snapshot/config collision and
+   remaining log protection; its [focused checkpoint](./docs/design-protected-runtime-artifacts.md)
+   precedes startup writer adoption. The owner selected fixed writable filenames in
+   [0028](./docs/decisions/0028-fixed-writable-state-filenames.md): config/platform/preferences/journal
+   use their fixed logical slots; arbitrary read-only tool inputs remain supported.
+   Custom writable-name refusal and migration guidance remain planned; aliases still require protection.
    The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding
