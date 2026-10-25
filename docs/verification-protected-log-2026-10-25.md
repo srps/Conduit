@@ -79,3 +79,40 @@ Source SHA256: `8e9155453d2e4b332d2b9e6e16914ab6d258e016c752b236743ff30bb513e7b1
 `/private/tmp/conduit-runtime-stage1-20261024/log-protection-checks-red-final/`.
 The wrapper stopped at the expected test failure, so later static/simulator
 checks did not run. Product source was unchanged in this phase.
+
+## Close-cleanup correction (final run)
+
+Product change, all in owned files:
+
+- `ProxyKernel/Support/RotatingLogFile.swift`: a failed close is never retried and retires the writer. Its errno is captured once and held as one pending fact. Each caller publishes its primary result first, then the fact: an explicit `close()` or a rotation's release publishes `log_file_failed` `stage=close` when no streak is latched, then `observability.log_file_cleanup_unconfirmed` `stage=close code=<errno>`; an abandoned open publishes its validation failure, then the fact; a guard refusal at the opened descriptor publishes the one gate refusal, then the fact; a writer released with its descriptor open publishes the fact while an owner of the event log and of the logger still exists; once both are gone, no observer is guaranteed to receive it. The fact is independent of the failure streak, so a close during a streak is reported too.
+- The initializer asserts `maxBytes > 0` and `archives >= 1`. The `max(archives, 1)` normalization is removed. Production and fixtures pass only the defaults or positive values.
+- `pm-sim/ProtectedLogScenarios.swift`: the 15 behavioural checks run in a body function. The owned UUID root is then removed explicitly, and `scratch root removed` is one more assertion (16 in total). Nothing is removed by `defer`. A body failure and a removal failure are both reported.
+- `docs/events.md` has the new catalogue row. The design doc's reporting, close and not-claimed text is rewritten to match the code.
+- Daemon harness: a second `makeHost` throws before anything is built.
+
+Failed build before the correction (archived at `log-protection-checks-phase-b-compile-failure`):
+`Sources/pm-sim/ProtectedLogScenarios.swift:39:97` passed the `CleanupCode` struct where `Int` was expected. Nothing after the build ran. The fix reads `failure.code` in both places, and the final run below is the first to include it.
+
+Final wrapper run: exit 0, with `set -e` kept. It completed as `bx21wzsh2`, and the output contains `PASS: focused log/writer protection checks` and `[exited with code 0]`. After that run the only change was a comment in `RotatingLogFile.swift`'s `deinit` and matching doc text, which now says the close fact is not guaranteed to reach an observer once both the event-log owner and the logger owner are gone. No code changed. The earlier "Focused wrapper run (passed)" section above is historical and is superseded by this one.
+
+- `swift build`: complete.
+- `swift test --filter 'RotatingLogFile|LoggingTests|DiagnosticDestination|DiagnosticWriterLease|AppStateHarness|DaemonRuntimeHost|RecordFileDestination|BoundedRecordWriter'`: **243 tests, 0 failures**. This includes the three close-uncertainty witnesses, which now pass with the cleanup fact asserted, and the DaemonRuntimeHost cases with zero scratch-cleanup errors.
+- `check-kernel-imports.py`: passed (107 Swift files).
+- `check-event-catalogue.py`: passed (218 event names; `docs/events.md` matches the product sources).
+- `check-decisions.py --require-history` and `test-decisions.py`: passed (4 variants, 49 mutations rejected, 5 history changes judged).
+- `pm-sim protected-app-log`: PASS, 16 assertions (the original 15 plus `scratch root removed`).
+- `pm-sim diagnostic-destination-guard`: PASS, 9 checks.
+- `pm-sim protected-snapshot-artifacts`: PASS, 10 assertions.
+
+Logs: `log-protection-checks/` (the live directory for this run; the parent archives it).
+
+Limits, stated exactly:
+
+- The three extra paths that now report cleanup are: an abandoned open whose close fails, a refusal at the opened descriptor whose close fails, and a close during an existing write-failure streak. The healthy explicit-close witness is the only one that existed before, and it still passes.
+- Not bounded: the #47 pending-write queue, `queue.sync` flush and close on the main thread, Settings toggles across their lifetime, and physical disk IO.
+- The pre-open kind check judges only the path it observes. A path swapped after that check, or a device open that blocks, is not bounded. The guard narrows the retarget window and does not close it.
+- The composed audit path is source-reviewed only, through the existing guarded-sink tests. There is no reflected or testing accessor for AppState's private orchestrator.
+- Portability: the file still calls `Darwin.open`, `Darwin.write` and `Darwin.close` under a `#if canImport(Darwin)` import. Linux compilation is not claimed and was not checked.
+- Full `swift.yml` and `pm-sim all` are not run here; the parent runs them.
+- Hosted CI and installed-app behaviour are not verified.
+- The source SHA256 was not recomputed in this phase.

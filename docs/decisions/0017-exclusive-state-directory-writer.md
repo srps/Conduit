@@ -74,9 +74,9 @@ storage; select bounded drain behavior with measured shutdown budgets.
 ## Implementation evidence
 
 Partial: the OS lease primitive, its typed outcomes and a fake exist. The configuration
-store core borrows a held root lease and refuses a root it does not hold, but no app,
-daemon or pm-proxy startup path acquires the lease or constructs that store yet, and no
-journal writer calls the lease. See [the store verification note](../verification-configuration-store-2026-10-25.md). Code: [`StateWriterLease.swift`](../../Sources/PlatformMac/StateWriterLease.swift)
+store core borrows a held root lease and refuses a root it does not hold. App and
+daemon startup now acquire authority through StateRootSession; neither constructs
+the store yet. Read-only tool and complete journal/workflow adoption remain open. See [the store verification note](../verification-configuration-store-2026-10-25.md). Code: [`StateWriterLease.swift`](../../Sources/PlatformMac/StateWriterLease.swift)
 (protocol, opaque lease, typed outcomes), [`StateWriterLeaseOS.swift`](../../Sources/PlatformMac/StateWriterLeaseOS.swift)
 (non-blocking `flock` on a fixed `O_NOFOLLOW` lock file, close-on-exec, no unlink,
 no `LOCK_UN`). Release is terminal: an unconfirmed close is returned to every later caller and never retried, a call during an in-flight close waits for its outcome, and a dropped lease reports an unconfirmed close once. The fake is in [`PlatformFakes.swift`](../../Sources/PlatformMac/PlatformFakes.swift).
@@ -94,6 +94,15 @@ behavior, or real-machine cleanup after a deadline.
 Startup adoption (2026-10-25): `StateRootBootstrap` takes the root's lease before any load, migration, seed, journal restore or host construction, in the app (`PreparedAppLaunch`) and in `ConduitDaemon`. A busy root exits with `config.state_root_busy` before anything under it is read. Before the lease, a missing root and its missing ancestors are created owner-only, outermost first, and an existing directory is never changed; a pure name check runs before that, so a refused name creates nothing. The held lease is carried by a `StateRootSession`, which `AppState`, `RuntimeHost` and the dev composition require. Code: [`StateRootSession.swift`](../../Sources/PlatformMac/StateRootSession.swift). Tests: [`RuntimeStartupOwnershipTests.swift`](../../Tests/ConduitTests/RuntimeStartupOwnershipTests.swift). The configuration store is not constructed; its legacy writers run under the session, which is not the store workflow this decision still requires. Read-only tool inputs, `pm-proxy`, `pm-dns` and `pm-tunnel`, do not take the lease yet.
 
 The verified runtime-file replacement takes a held `StateWriterLease` and refuses a file outside that lease's root before any I/O ([`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift)). The configuration store core is its only caller, and only in the focused checks, and the lease still excludes only cooperating writers. The lease has no held-state query, so the caller proves that it still holds the root. See [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
+
+Diagnostic adoption (local, 2026-10-25): the session exposes its actual lease-file
+URL without exposing the lease object. App log/audit and host events/snapshot/recovery
+guards receive it through the shared inventory. Code: [StateRootSession.swift](../../Sources/PlatformMac/StateRootSession.swift),
+[the shared inventory](../../Sources/ProxyControlBridge/ProxyControlBridgeProtectedDiagnosticResources.swift).
+Actual app-log and host composition witnesses preserve lock bytes/inode and keep a
+second writer busy; audit composition remains source-reviewed plus guarded-sink
+coverage. [Verification and limits](../verification-protected-log-2026-10-25.md).
+This does not establish complete non-owning-tool coverage or production shutdown.
 
 ## Open questions
 
