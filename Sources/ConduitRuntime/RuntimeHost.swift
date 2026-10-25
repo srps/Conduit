@@ -321,13 +321,17 @@ package final class RuntimeHost {
         self.eventWriter = RuntimeEventFileWriter(
             fileURL: environment.eventsFile,
             logger: logger,
-            destinationGuard: diagnosticDestinationGuard(for: .runtimeEvents, in: environment),
+            destinationGuard: diagnosticDestinationGuard(
+                for: .runtimeEvents, in: environment, writerLeaseFile: stateSession.writerLeaseFile
+            ),
             eventLog: diagnosticsEventLog
         )
         self.snapshotWriter = makeSnapshotArtifactWriter(
             fileURL: environment.snapshotFile,
             logger: logger,
-            destinationGuard: diagnosticDestinationGuard(for: .snapshot, in: environment),
+            destinationGuard: diagnosticDestinationGuard(
+                for: .snapshot, in: environment, writerLeaseFile: stateSession.writerLeaseFile
+            ),
             eventLog: diagnosticsEventLog
         )
         self.vpnStatusMonitor = vpnStatusMonitor ?? VPNStatusMonitor(
@@ -1455,7 +1459,9 @@ extension RuntimeHost {
         let writer = RuntimeEventFileWriter(
             fileURL: environment.eventsFile,
             logger: logger,
-            destinationGuard: diagnosticDestinationGuard(for: .runtimeEvents, in: environment),
+            destinationGuard: diagnosticDestinationGuard(
+                for: .runtimeEvents, in: environment, writerLeaseFile: stateSession.writerLeaseFile
+            ),
             eventLog: emitted
         )
         let emit: @Sendable (RuntimeEvent) -> Void = { event in

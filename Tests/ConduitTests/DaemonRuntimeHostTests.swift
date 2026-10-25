@@ -12,6 +12,11 @@ private let testStartedAt = Date(timeIntervalSince1970: 1_700_000_000)
 /// A host test never ends the process. A terminal stop that reaches this hook is a failure.
 private let unexpectedTerminalExit: @MainActor () -> Void = { XCTFail("the runtime host ended the process") }
 
+/// A test asked a harness for a second host while it still owns the first. The request fails before anything is built.
+private enum HarnessHostOwnershipError: Error {
+    case secondHost
+}
+
 /// A synthetic satisfied path, the report `FakeNetworkPathObserver` delivers in place of `NWPathMonitor`.
 private func satisfiedPath() -> NetworkPathState {
     NetworkPathState(
@@ -402,6 +407,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let listings = HeldListings()
         /// Holds one machine call, subprocess or privileged, when armed.
         let hold = HeldCall()
+        /// The one host `makeHost` built, owned until `tearDown` has stopped and flushed it.
+        private var ownedHost: RuntimeHost?
         let secrets = InMemorySecretStore()
         /// The helper status the split-DNS check reads; never the installed helper.
         let helper = FakeHelperLifecycle()
@@ -437,7 +444,16 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         var wifi: FakeMachine.Service { machine.service("Wi-Fi") }
 
+        /// Builds the test's one host and keeps it owned, so `tearDown` stops and flushes it before the root's authority ends.
+        /// A second request throws before anything is built, so the owned host is never overwritten or left unstopped.
         func makeHost() throws -> RuntimeHost {
+            guard ownedHost == nil else { throw HarnessHostOwnershipError.secondHost }
+            let host = try buildHost()
+            ownedHost = host
+            return host
+        }
+
+        private func buildHost() throws -> RuntimeHost {
             let machine = self.machine
             let listings = self.listings
             let hold = self.hold
@@ -473,10 +489,21 @@ final class DaemonRuntimeHostTests: XCTestCase {
             await host.reloadConfiguration()
         }
 
-        func tearDown() {
-            // The test's hosts have finished, so the root's authority ends before its files go.
+        /// Stops and flushes the owned host, then ends the root's authority and removes the directory. The flush joins the
+        /// host's audit, event and snapshot writers before removal, which is what this fixture relies on. It is not a
+        /// general proof that nothing else can write under the root.
+        func tearDown() async {
+            // A test that failed mid-hold leaves the hold armed, and the stop would wait on it. Releasing is harmless when
+            // nothing waits.
+            hold.release()
+            listings.release()
+            if let host = ownedHost {
+                await host.stopRuntime()
+                await host.flushEvents()
+            }
+            ownedHost = nil
             releaseScratchStateRoot(stateSession)
-            try? FileManager.default.removeItem(at: stateDirectory)
+            removeScratch([stateDirectory])
         }
     }
 
@@ -514,7 +541,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
     // The async override runs on the main actor, where `harness` lives.
     override func tearDown() async throws {
-        harness?.tearDown()
+        await harness?.tearDown()
         harness = nil
         try await super.tearDown()
     }
@@ -1106,6 +1133,80 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let written = try String(contentsOf: harness.environment.eventsFile, encoding: .utf8)
         XCTAssertTrue(written.contains("platform.journal_unreadable"), "the event reaches events.ndjson: \(written)")
         XCTAssertEqual(try Data(contentsOf: harness.environment.platformStateFile), newer)
+    }
+
+    /// The broken-config recovery writes its events through the adopted guard. An events alias of the lease is refused
+    /// into the returned events, and the lock keeps its bytes, its inode and its holder.
+    func testRecoveryWithoutConfigurationRefusesAnEventsAliasOfTheWriterLease() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let lease = harness.stateSession.writerLeaseFile
+        let before = try writerLeaseFingerprint(lease)
+        XCTAssertEqual(link(lease.path, harness.environment.eventsFile.path), 0)
+
+        let machine = harness.machine
+        let events = await RuntimeHost.recoverWithoutConfiguration(
+            stateSession: harness.stateSession,
+            logger: DiscardingLogSink(),
+            privilegeClient: machine,
+            commandRunner: { launchPath, arguments in try machine.run(launchPath, arguments) },
+            dnsResponds: FakeDNSProbe().responds(onPort:),
+            networkLocationStoreFactory: { _ in nil }
+        )
+
+        XCTAssertEqual(
+            events.filter { $0.event == RecordFileDestinationGate.eventName }.map(\.detail),
+            ["sink=events reason=protected_identity resource=writer_lease"]
+        )
+        XCTAssertEqual(try writerLeaseFingerprint(lease), before, "the lock keeps its bytes and its inode")
+        assertSecondWriterIsBusy(harness.environment)
+    }
+
+    /// The host's events writer refuses an alias of the lease through its own log. The readiness flush joins every writer
+    /// before the lock is checked, so the refusal and the lock's state are both settled.
+    func testAnEventsAliasOfTheWriterLeaseIsRefusedByTheHostAndTheLeaseKeepsItsAuthority() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let lease = harness.stateSession.writerLeaseFile
+        let before = try writerLeaseFingerprint(lease)
+        XCTAssertEqual(link(lease.path, harness.environment.eventsFile.path), 0)
+
+        let host = try harness.makeHost()
+        await host.markReady(mode: "runtime-host")
+        await host.flushEvents()
+
+        XCTAssertEqual(
+            host.orchestrator.eventLog.events.filter { $0.event == RecordFileDestinationGate.eventName }.map(\.detail),
+            ["sink=events reason=protected_identity resource=writer_lease"]
+        )
+        XCTAssertEqual(try writerLeaseFingerprint(lease), before, "the lock keeps its bytes and its inode")
+        assertSecondWriterIsBusy(harness.environment)
+    }
+
+    /// The host's snapshot writer refuses an alias of the lease the same way. Readiness writes the snapshot, and the flush
+    /// joins that write before the lock is checked.
+    func testASnapshotAliasOfTheWriterLeaseIsRefusedByTheHostAndTheLeaseKeepsItsAuthority() async throws {
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let lease = harness.stateSession.writerLeaseFile
+        let before = try writerLeaseFingerprint(lease)
+        XCTAssertEqual(link(lease.path, harness.environment.snapshotFile.path), 0)
+
+        let host = try harness.makeHost()
+        await host.markReady(mode: "runtime-host")
+        await host.flushEvents()
+
+        XCTAssertEqual(
+            host.orchestrator.eventLog.events.filter { $0.event == RecordFileDestinationGate.eventName }.map(\.detail),
+            ["sink=snapshot reason=protected_identity resource=writer_lease"]
+        )
+        XCTAssertEqual(try writerLeaseFingerprint(lease), before, "the lock keeps its bytes and its inode")
+        assertSecondWriterIsBusy(harness.environment)
     }
 
     /// Readiness never precedes recovery. `daemon.ready` and

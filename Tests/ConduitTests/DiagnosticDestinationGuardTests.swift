@@ -66,6 +66,22 @@ final class DiagnosticDestinationGuardTests: XCTestCase {
         XCTAssertEqual(audit.count, Set(audit).count, "a resource code appears once")
     }
 
+    /// The app log may write its own `log` file and nothing else protected. Every other entry still applies to it.
+    func testAppLogProtectsEverythingButItsOwnLogFile() throws {
+        let environment = RuntimeEnvironment(configDirectory: root)
+        let appLog = protectedDiagnosticResources(for: .appLog, in: environment).map(\.resource)
+
+        XCTAssertEqual(Set(appLog), Set(ProtectedRecordResource.allCases).subtracting([.log, .writerLease]))
+        XCTAssertFalse(appLog.contains(.log))
+
+        let guardForAppLog = diagnosticDestinationGuard(for: .appLog, in: environment)
+        XCTAssertNoThrow(try guardForAppLog.admit(destination: environment.logFile))
+        XCTAssertThrowsError(try guardForAppLog.admit(destination: environment.configFile)) { error in
+            XCTAssertEqual(error as? RecordFileDestinationRefusal,
+                           RecordFileDestinationRefusal(reason: .protectedPath, resource: .config))
+        }
+    }
+
     /// Each entry names the file the host or daemon actually writes, not a look-alike.
     func testProtectedFilesUseTheirProductionNames() {
         let environment = RuntimeEnvironment(configDirectory: root)

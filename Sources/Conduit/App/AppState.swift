@@ -351,7 +351,15 @@ final class AppState: ObservableObject {
         currentVersion: String? = nil
     ) {
         let runtimeEnvironment = stateSession.environment
-        let logStore = AppLogStore()
+        // The one canonical event log for this composition. The app log, the audit sink and the orchestrator all
+        // report into it, so a refused or failed destination is in the same stream as every other event (#222).
+        let refusalEvents = RuntimeEventLog()
+        let logStore = AppLogStore(
+            destinationGuard: diagnosticDestinationGuard(
+                for: .appLog, in: runtimeEnvironment, writerLeaseFile: stateSession.writerLeaseFile
+            ),
+            eventLog: refusalEvents
+        )
         // Read before the load, which writes a migrated file back: a config
         // file that predates this launch is what tells an upgrade from a
         // fresh install, and the resolver-file recovery at launch hangs on it.
@@ -470,12 +478,12 @@ final class AppState: ObservableObject {
         // manager so they can capture `orchestrator.configSnapshotProvider`.
         // Single source of truth for the live config replaces the former
         // AppState `configBox` mirror + `$config` Combine sink.
-        // One event log shared with the audit sink, so a refused audit destination
-        // is reported through the same stream as every other event (#222).
-        let orchestratorEventLog = RuntimeEventLog()
+        // The same event log the app log and audit sink report into, so every refusal is in one stream (#222).
+        let orchestratorEventLog = refusalEvents
         let auditSink = AppState.makeAuditSink(
             for: initialConfig,
             environment: runtimeEnvironment,
+            writerLeaseFile: stateSession.writerLeaseFile,
             logger: logStore,
             eventLog: orchestratorEventLog
         )
@@ -720,6 +728,7 @@ final class AppState: ObservableObject {
     private nonisolated static func makeAuditSink(
         for config: ProxyConfig,
         environment: RuntimeEnvironment,
+        writerLeaseFile: URL,
         logger: any LogSink,
         eventLog: RuntimeEventLog
     ) -> any ConnectionAuditSink {
@@ -737,7 +746,9 @@ final class AppState: ObservableObject {
             fileURL: url,
             maxBytes: config.auditLogMaxBytes,
             logger: logger,
-            destinationGuard: diagnosticDestinationGuard(for: .connectionAudit, in: environment),
+            destinationGuard: diagnosticDestinationGuard(
+                for: .connectionAudit, in: environment, writerLeaseFile: writerLeaseFile
+            ),
             eventLog: eventLog
         )
     }

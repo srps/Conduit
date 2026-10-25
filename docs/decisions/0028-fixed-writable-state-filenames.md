@@ -117,6 +117,13 @@ Does not prove: complete writer adoption (the configuration store and every jour
 functions, under the session, pending the store workflow), installed version handoff, real-machine recovery or
 deployment-storage semantics. A link's target is the identity: a retarget after the last check is not excluded.
 
+The local protected-log slice reuses the shared resource inventory for active and
+archive destinations, before opening or rotation, and protects the session's lease
+URL in adopted guards. [Code](../../Sources/ProxyKernel/Support/RotatingLogFile.swift),
+[composition witnesses](../../Tests/ConduitTests/DiagnosticWriterLeaseProtectionTests.swift),
+and [verification scope](../verification-protected-log-2026-10-25.md). Fixed names
+remain separate from identity checks; this changes no writable-layout decision.
+
 ## Open questions
 
 Revisit only for a demonstrated writable layout/sharing workflow that one

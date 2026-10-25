@@ -51,3 +51,34 @@ Implemented in source, not yet release-validated. Actual scratch pm-proxy alias 
 - **Verification**: see [the protected-snapshot verification note](verification-protected-snapshot-2026-10-25.md).
 - **Remaining synchronous work**: the logger's own 2 s flush still blocks the caller (documented, #47). The app's twin and the `ProxyOrchestrator` termination cleanup are unchanged.
 - **Not proved**: power-loss durability, readback, the whole shutdown bound (#47), log rotation (#233), startup naming or lease adoption, and the owner's real-machine behavior.
+
+## App log checkpoint (issue #233, 2026-10-25)
+
+- **One writer**: the app's rotating log moved to `ProxyKernel/Support/RotatingLogFile.swift`, and the app copy is removed. The concrete `RotatingLogFile` is internal. Callers hold `any RotatingByteWriter` from `rotatingLogFile(...)`. Its physical policy is its own: persistent `O_APPEND`, archives, and oversized lines written whole. `RotatingRecordFile` keeps its separate torn-NDJSON policy.
+- **Sink and inventory**: `RecordFileDiagnosticSink.appLog` (`log`) excludes only the `log` resource. Every other protected resource applies, so a config alias of the log is refused.
+- **Admission**: the guard judges the active path before the directory is created and before the open. It judges the opened descriptor before the first write. Every slot (active and `base.1`…`base.N`) is judged before any close, rename or unlink. Removal is `unlink` only. A directory is never removed.
+- **Unsupported kind**: a path that exists and is not a regular file, directly or through a symbolic link, is refused by kind before it is opened or renamed (`unsupported_kind`). The descriptor is opened `O_NONBLOCK`, so a FIFO cannot block the open. The writable descriptor is `O_CLOEXEC`. An admitted symbolic link to an ordinary file keeps working. The guard stays the only alias policy.
+- **Reporting**: a refusal reuses `RecordFileDestinationGate`, latched once through the store's gate, which is kept across Settings toggles. IO failures and recovery publish `observability.log_file_failed` and `observability.log_file_recovered`, event first, then one derived line. `failing` is set before publication, so the line's own write is not reported again. Detail carries `stage=` and `code=` only, never a path or a config value. A refused destination publishes `config.diagnostic_destination_refused` through the gate, as before.
+- **Composition**: `AppState` hoists one `RuntimeEventLog` above the store, and passes the same log to the orchestrator. `AppLogStore` requires its guard and its event log. It reaches the gate and writer through a private weak forwarder. The file opens on its first write, never in `init`.
+- **Lease URL**: `StateRootSession.writerLeaseFile` is the neutral URL of the existing `writerLock` name. The app's audit guard and the `RuntimeHost` event and snapshot guards pass it. `pm-proxy` passes none, as before.
+- **Close**: a failed close is never retried and retires the writer, which opens no further descriptor. Its code is kept as a pending fact. Each caller publishes its primary result first, then the pending fact once:
+  - an explicit `close()`, or a rotation's release, publishes `log_file_failed` `stage=close` when no streak is latched, then `observability.log_file_cleanup_unconfirmed` `stage=close code=`;
+  - an abandoned open (validation failed, then the close of that descriptor failed) publishes the validation failure, then the cleanup fact;
+  - a guard refusal at the opened descriptor publishes the one gate refusal, then the cleanup fact;
+  - a writer released with its descriptor open publishes the cleanup fact while an owner of the event log and of the logger still exists. Once both are gone, no observer is guaranteed to receive it.
+  The cleanup fact is independent of the failure streak, so a close during a streak is reported too. Retirement is terminal, so the fact is published at most once per writer.
+- **Archive limits**: `maxBytes` must be positive and `archives` at least one. The initializer asserts both, and nothing normalizes them.
+- **Not claimed**: global boundedness of the app's log path. The pending-write queue (#47) is still unbounded, and the flush and close still block the main thread through `queue.sync` (#47). Infinite Settings toggles are not bounded across their lifetime. Physical disk IO is not bounded. The pre-open kind check judges only the path it observes: a path swapped after that check, or a device open that blocks, is not bounded. The guard narrows the retarget window and does not close it. A non-cooperating process that retargets a path between an admit and a write is not excluded.
+- **Verification**: see [the protected-log verification note](verification-protected-log-2026-10-25.md).
+
+
+### Physical-backend alternative considered
+
+A common rotation/open/lifetime policy matrix was considered and rejected for
+this slice. NDJSON retires a torn tail and truncates its single generation per
+batch; the app log preserves archives, persistent append and oversized lines.
+Combining those contracts would expose unsupported combinations and broaden
+the record backend. They share identity policy, resource inventory and refusal
+publication. Revisit a shared physical backend only with a demonstrated common
+contract and parity evidence, rather than combining the policies to reduce a
+class count.

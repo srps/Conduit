@@ -31,13 +31,17 @@ Runtime stage 1 ([#186](https://github.com/srps/Conduit/issues/186), [#180](http
 
 Snapshot destination protection and asynchronous diagnostic drains merged in
 [PR #234](https://github.com/srps/Conduit/pull/234) (`a623088`) after all 39 local
-checks and hosted Swift/CodeQL passed. Rotating app logs remain under #233.
+checks and hosted Swift/CodeQL passed. Rotating app logs remain under #233. Their focused protection slice is implemented locally;
+independent review exposed close-uncertainty reporting and test-lifetime gaps, now
+corrected. All 39 local checks pass (3,258 tests, two skips; 99 simulator records),
+with final scoped review complete. Hosted PR gates remain open; native callback
+verification exposed the separate #237 release blocker.
 The fixed logical writable filenames are selected in
 [0028](./docs/decisions/0028-fixed-writable-state-filenames.md), superseding 0020;
-app/daemon startup lease and naming adoption is implemented on
-`codex/runtime-startup-ownership`, with 387 focused tests, actual built-entry-point refusal probes, isolated native
-startup and all 39 integrated local checks passing (3,233 tests, two skips;
-98 simulator records). Its PR/hosted gates remain open. It creates no store yet: existing legacy writes
+app/daemon startup lease and naming adoption merged in
+[PR #236](https://github.com/srps/Conduit/pull/236) (`fc8e420`), after independent review,
+actual built-entry-point refusal probes, isolated native startup, all 39 local
+checks (3,233 tests, two skips; 98 simulator records) and hosted Swift/CodeQL passed. It creates no store yet: existing legacy writes
 remain behind one required lifetime authority until the coordinated store/workflow
 replacement, avoiding writes that bypass store baselines.
 
@@ -89,6 +93,12 @@ Owner acceptance is a separate lane: #99 needs a real KDC-failure recurrence;
 coverage and key-backup evidence remain. Do not add more happy-path tests merely
 to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
 
+Native startup blocker ([#237](https://github.com/srps/Conduit/issues/237)): the
+lease startup's async GUI entry lets windows open while queued MainActor/dispatch
+callbacks starve. A synchronous/async native AppKit comparison reproduced it.
+The entry handoff is being corrected separately before release; window logs
+alone are not callback verification. The serving 0.5.8 app remains unchanged.
+
 ## Proposed release scope
 
 **0.6 core — typed runtime contracts and one runtime host.** Stages 1–4 below
@@ -120,7 +130,7 @@ not a requirement to finish every event or property test before extraction:
    subscription engine behind the existing framed client; actual RuntimeHost adaptation remains open. v1 control and helper IPC are unchanged. Writer lifetime is selected in
    [0017](./docs/decisions/0017-exclusive-state-directory-writer.md). The OS lease and
    canonical-layout foundation are merged. App/daemon startup acquisition is implemented
-   on the startup branch with all 39 local checks passing; its hosted PR gates, complete writer/store
+   in PR #236 with local and hosted checks passing; complete writer/store
    workflow adoption and installed-app validation remain open. The private configuration shape is selected in
    [0018](./docs/decisions/0018-private-configuration-request.md): one explicitly
    encoded request containing full frozen values, with neutral SecretBytes in
@@ -173,8 +183,8 @@ not a requirement to finish every event or property test before extraction:
    precedes startup writer adoption. The owner selected fixed writable filenames in
    [0028](./docs/decisions/0028-fixed-writable-state-filenames.md): config/platform/preferences/journal
    use their fixed logical slots; arbitrary read-only tool inputs remain supported.
-   Custom writable-name refusal and migration guidance are implemented on the startup branch;
-   alias protection remains part of the shared layout checks. All 39 local checks pass; hosted PR gates remain open.
+   Custom writable-name refusal and migration guidance merged in PR #236;
+   alias protection remains part of the shared layout checks. Complete store/workflow adoption remains open.
    The next store/client
    [API checkpoint](./docs/design-runtime-store-workflow.md) keeps one workflow
    and separates storage from runtime eligibility. The owner selected holding

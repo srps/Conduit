@@ -5,7 +5,7 @@ import ProxyKernel
 
 /// The authoritative files one diagnostic sink must never write, mapped from one runtime environment.
 /// Each writer excludes only its own output (`events` for the events writer, `snapshot` for the snapshot
-/// writer); every other entry, including the config named by `--config`, applies to every sink.
+/// writer, `log` for the app's file log); every other entry, including the config named by `--config`, applies to every sink.
 ///
 /// File names that belong to the wire or the host (`control.sock`, `daemon-ready.json`) are mapped
 /// here, not in `ProxyKernel`, which knows only the resource roles. The set has at most one entry
@@ -39,6 +39,7 @@ package func protectedDiagnosticResources(
     case .connectionAudit: return all
     case .runtimeEvents: return all.filter { $0.resource != .events }
     case .snapshot: return all.filter { $0.resource != .snapshot }
+    case .appLog: return all.filter { $0.resource != .log }
     }
 }
 
