@@ -82,3 +82,5 @@ store/workflow fences, RuntimeActor isolation, duplicate-path deletion, total
 shutdown and the production v2 socket remain gates. The serving Conduit was not
 quit, replaced or installed by this work. Hosted PR checks are recorded after
 they complete; no clean automated-review result is inferred from unavailable bots.
+
+PR: [#240](https://github.com/srps/Conduit/pull/240). Hosted checks are evaluated against the current PR head before merge; an earlier head or skipped third-party review does not supply that evidence.

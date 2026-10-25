@@ -347,11 +347,12 @@ Ordinary edits/enables still require verified eligible input; Stop/Quit remain t
 selected exceptions. Keeping an already-running prior configuration under0025
 is not permission to admit a new Start using an invalidated receipt.
 
-Full framed client adoption is gated by the pending
-[display-text policy](design-runtime-display-bounds-review.md), followed by actual
-measurement and selection of the ordinary-v2 frame/queue/deadline profile. Test
-profiles cannot silently become production defaults. No prep-only interface is
-implemented merely to bypass that gate.
+The [display-text policy](design-runtime-display-bounds-review.md) is now selected
+and implemented, and [0030](decisions/0030-ordinary-runtime-reply-frame-cap.md)
+selects the reply/stream ceiling. Full framed client adoption is still gated by
+the remaining coherent capacity/retention/work/deadline profile and its measured
+behavior. Test profiles cannot silently become production defaults. No prep-only
+interface is implemented merely to bypass that gate.
 
 For the later reload slice, confirmation before discarding a draft implements
 0027's explicit reload/review, with cancel preserving it. Whether reload only
