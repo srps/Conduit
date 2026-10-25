@@ -48,12 +48,6 @@ private struct RuntimeOutcomeEntry {
     let finishedAt: ContinuousClock.Instant
 }
 
-/// The one parked wait a subscriber may hold. Its token names the registration exactly, so a stale cleanup cannot remove a newer one.
-private struct RuntimeParkedWaiter {
-    let token: RuntimeWaiterToken
-    let wake: @Sendable () -> Void
-}
-
 /// The identity of one parked registration. Tokens are unique, so no counter can wrap or collide.
 struct RuntimeWaiterToken: Hashable, Sendable {
     let id: UUID
@@ -75,6 +69,13 @@ enum RuntimeParkResult: Sendable, Equatable {
 enum RuntimeSubscribeResult {
     case opened(subscriber: Int, baseline: ControlRuntimeFrame)
     case refused(ControlRuntimeErrorCode)
+}
+
+/// The answer to a snapshot read. The owner's state is captured in the read's own turn, so the answer is never older than the read.
+enum RuntimeSnapshotRead {
+    case snapshot(ControlRuntimeSnapshot)
+    /// The owner's state could not be offered, so the read failed closed. Nothing stale is answered in its place.
+    case internalFailure
 }
 
 extension ControlRuntimeCollections {
@@ -143,11 +144,13 @@ final class RuntimeServiceCore {
     private var observation: RuntimeObservationLog
     /// The bounded proofs and retained rows of collections. Its eviction is best effort, and it reports each outcome in a page.
     private var collections: RuntimeCollectionLedger
-    private var subscribers: [Int: RuntimeSubscriberCursor] = [:]
-    private var waiters: [Int: RuntimeParkedWaiter] = [:]
-    private var nextSubscriber = 1
+    /// Every open subscriber, its cursors and its one parked wait. The table owns the subscriber limit.
+    private var subscriptions: RuntimeSubscriptionTable
+    /// The one latest safe snapshot, shared by every subscriber and read.
+    private var snapshotSlot: RuntimeSnapshotSlot
 
-    /// `positionSeed` starts the observation position counter, for tests of exhaustion.
+    /// `positionSeed` starts the observation position counter, and `snapshotGenerationSeed` starts the snapshot generation counter.
+    /// Both exist for tests of exhaustion.
     init(
         owner: any ControlCommandOwner,
         limits: RuntimeServiceLimits,
@@ -156,7 +159,8 @@ final class RuntimeServiceCore {
         makeOperationID: @escaping @Sendable () -> ControlOperationID,
         encodeCommand: @escaping @Sendable (ControlRuntimeCommand) throws -> Data = { try RuntimeWireSize.encode($0) },
         measureOutcome: @escaping @Sendable (ControlOperationOutcome, ControlOperationID) throws -> RuntimeOutcomeSizes = RuntimeServiceCore.measureRetained,
-        positionSeed: Int = 0
+        positionSeed: Int = 0,
+        snapshotGenerationSeed: Int = 0
     ) {
         self.encodeCommand = encodeCommand
         self.measureOutcome = measureOutcome
@@ -170,6 +174,12 @@ final class RuntimeServiceCore {
         self.observation = RuntimeObservationLog(limits: limits, positionSeed: positionSeed)
         self.aliasTable = RuntimeAliasTable(limits: limits)
         self.collections = RuntimeCollectionLedger(limits: limits)
+        self.subscriptions = RuntimeSubscriptionTable(limit: limits.subscriberLimit)
+        self.snapshotSlot = RuntimeSnapshotSlot(
+            incarnation: owner.incarnation,
+            byteCapacity: limits.latestSnapshotByteCapacity,
+            generationSeed: snapshotGenerationSeed
+        )
     }
 
     // MARK: - Admission
@@ -280,12 +290,34 @@ final class RuntimeServiceCore {
 
     // MARK: - Observation
 
-    /// Opens one subscription in one owner turn. The baseline captures the published high-water and the subscriber is
-    /// registered in the same turn. Queued ingress is not flushed to make a baseline: it publishes in later bounded turns.
+    /// The owner reports that its safe state changed. It runs in the owner's turn. The state is captured once and offered to the slot,
+    /// and each parked wait is woken after the slot is complete, when the slot replaced its snapshot or can no longer advance.
+    func ownerDidChange() {
+        captureOwnerState()
+    }
+
+    /// The owner's snapshot, captured and offered in this turn. A read answers with the slot after the offer, so it is never older
+    /// than the owner's state at this turn. A refused offer is an internal failure, and nothing stale is answered in its place.
+    func readSnapshot() -> RuntimeSnapshotRead {
+        switch captureOwnerState() {
+        case .unchanged, .replaced:
+            break
+        case .refused:
+            return .internalFailure
+        }
+        guard let snapshot = snapshotSlot.latest else { return .internalFailure }
+        return .snapshot(snapshot)
+    }
+
+    /// Opens one subscription in one owner turn. The owner's state is captured and offered first, so the baseline, the event high-water
+    /// and the registration are one consistent state. Queued ingress is not flushed to make a baseline: it publishes in later bounded turns.
     func openSubscription(_ request: ControlSubscriptionRequest) -> RuntimeSubscribeResult {
-        guard subscribers.count < limits.subscriberLimit else { return .refused(.subscriberLimit) }
-        guard let following = RuntimeCounter.successor(nextSubscriber) else { return .refused(.invalidValue) }
-        guard let snapshot = currentSnapshot(),
+        guard subscriptions.count < limits.subscriberLimit else { return .refused(.subscriberLimit) }
+        if case .refused = captureOwnerState() {
+            // The owner's state could not be offered, so a baseline would name a stale snapshot. The open fails closed.
+            return .refused(.internalFailure)
+        }
+        guard let snapshot = snapshotSlot.latest,
               let plan = replayPlan(for: request),
               let highWater = ControlEventCursor(rawValue: observation.highWater)
         else {
@@ -302,52 +334,87 @@ final class RuntimeServiceCore {
         } catch {
             return .refused(.invalidValue)
         }
-        let subscriber = nextSubscriber
-        nextSubscriber = following
-        subscribers[subscriber] = RuntimeSubscriberCursor(
+        let cursor = RuntimeSubscriberCursor(
             nextEvent: plan.nextEvent,
             replayThrough: plan.replayThrough,
-            nextControl: observation.controlNext
+            nextControl: plan.nextControl,
+            seenSnapshotGeneration: snapshotSlot.generation,
+            lastWasSnapshot: false
         )
-        return .opened(subscriber: subscriber, baseline: .baseline(baseline))
+        switch subscriptions.open(cursor) {
+        case .opened(let subscriber):
+            return .opened(subscriber: subscriber, baseline: .baseline(baseline))
+        case .full:
+            return .refused(.subscriberLimit)
+        case .exhausted:
+            return .refused(.invalidValue)
+        }
     }
 
     /// The frame a subscriber would receive next, and the cursor after it. Nothing is committed: the caller commits
     /// with `commitCursor` only when its gate wins. `nil` means the subscription was removed.
+    ///
+    /// Terminal and resync answers come first. A replay delivers its ordered frames before any snapshot. In live mode, a
+    /// snapshot the subscriber has not seen competes with the ordered log frame: after a snapshot the next ordered frame goes
+    /// first, so neither kind starves the other, and at most one snapshot sits between two ordered frames. A snapshot that
+    /// does not fit the caller's frame ends the stream with a resync, which is explicit, and nothing is skipped silently.
     func peekFrame(
         _ subscriber: Int,
         fits: (ControlRuntimeFrame) -> Bool
     ) throws -> (pull: RuntimePull, after: RuntimeSubscriberCursor)? {
-        guard let cursor = subscribers[subscriber] else { return nil }
-        return try observation.peek(cursor, fits: fits)
+        guard let start = subscriptions.cursor(subscriber) else { return nil }
+        if snapshotSlot.exhausted {
+            return (.end(.resyncRequired), start)
+        }
+        let ordered = try observation.peek(start, fits: fits)
+        if case .end = ordered.pull {
+            return ordered
+        }
+        let snapshotWaiting = start.replayThrough == nil && start.seenSnapshotGeneration < snapshotSlot.generation
+        if snapshotWaiting, let snapshot = snapshotSlot.latest {
+            let snapshotFirst: Bool
+            switch ordered.pull {
+            case .idle: snapshotFirst = true
+            case .frame: snapshotFirst = !start.lastWasSnapshot
+            case .end: snapshotFirst = false
+            }
+            if snapshotFirst {
+                guard fits(.snapshot(snapshot)) else {
+                    return (.end(.resyncRequired), start)
+                }
+                var after = start
+                after.seenSnapshotGeneration = snapshotSlot.generation
+                after.lastWasSnapshot = true
+                return (.frame(.snapshot(snapshot)), after)
+            }
+        }
+        var after = ordered.after
+        if case .frame = ordered.pull {
+            after.lastWasSnapshot = false
+        }
+        return (ordered.pull, after)
     }
 
     /// Commits a cursor that a peek produced, once its frame has been delivered.
     func commitCursor(_ subscriber: Int, _ cursor: RuntimeSubscriberCursor) {
-        if subscribers[subscriber] != nil {
-            subscribers[subscriber] = cursor
-        }
+        subscriptions.commit(subscriber, cursor)
     }
 
     /// Parks the one wait a subscriber may hold. It returns false when that wait is taken or the subscriber is gone, and
     /// the caller reports a busy wait that consumed nothing.
     func parkWaiter(_ subscriber: Int, token: RuntimeWaiterToken, wake: @escaping @Sendable () -> Void) -> RuntimeParkResult {
-        guard subscribers[subscriber] != nil else { return .subscriberGone }
-        guard waiters[subscriber] == nil else { return .alreadyParked }
-        waiters[subscriber] = RuntimeParkedWaiter(token: token, wake: wake)
-        return .parked
+        subscriptions.park(subscriber, RuntimeParkedWaiter(token: token, wake: wake))
     }
 
     /// Removes a parked registration if it is still the one named by `token`. A stale token changes nothing.
     func releaseWaiter(_ subscriber: Int, token: RuntimeWaiterToken) {
-        guard waiters[subscriber]?.token == token else { return }
-        waiters.removeValue(forKey: subscriber)
+        subscriptions.release(subscriber, token: token)
     }
 
-    /// Releases a subscription's slot. The slot returns in this turn, and a parked wait is woken.
+    /// Releases a subscription's slot exactly once. The record leaves the table in this turn. A parked wait is woken after the
+    /// removal, so no wake runs inside the mutation. A second removal changes nothing.
     func removeSubscriber(_ subscriber: Int) {
-        subscribers.removeValue(forKey: subscriber)
-        if let waiter = waiters.removeValue(forKey: subscriber) {
+        if case .removed(let waiter?) = subscriptions.remove(subscriber) {
             waiter.wake()
         }
     }
@@ -440,8 +507,13 @@ final class RuntimeServiceCore {
 
     // MARK: - Introspection for tests and the scenario
 
-    var openSubscriberCount: Int { subscribers.count }
-    var parkedWaiterCount: Int { waiters.count }
+    var openSubscriberCount: Int { subscriptions.count }
+    var parkedWaiterCount: Int { subscriptions.parkedCount }
+    /// The snapshot slot's private generation, and whether it can no longer advance.
+    var snapshotGeneration: Int { snapshotSlot.generation }
+    var isSnapshotSlotExhausted: Bool { snapshotSlot.exhausted }
+    /// The encoded bytes of the held snapshot, measured when it was offered.
+    var retainedSnapshotBytes: Int { snapshotSlot.latestBytes }
     /// Operations whose outcome is not yet settled.
     var pendingOperationCount: Int { operations.values.filter { $0.logical == .pending }.count }
     /// Operations whose physical effect has not yet quiesced, settled or not.
@@ -473,11 +545,25 @@ final class RuntimeServiceCore {
     /// per event. An event that cannot be encoded or is too large becomes a loss marker.
     nonisolated func ingest(_ event: ControlRuntimeEvent) {
         let record = ControlRuntimeEventRecord.known(event)
-        if ingress.enqueue(record, bytes: Self.encodedSize(record)) {
+        // A JSON string encodes to at least its UTF-8 bytes, so the event's own text is a lower bound on its encoded size. An event whose
+        // text already exceeds the event bound is a loss, and it is refused before any encoding, so its text is never encoded in full.
+        let size: Int?
+        if let lowerBound = Self.textLowerBound(event), lowerBound <= limits.maxEventBytes {
+            size = Self.encodedSize(record)
+        } else {
+            size = nil
+        }
+        if ingress.enqueue(record, bytes: size) {
             scheduling.hop { [weak self] in
                 self?.drainTurn()
             }
         }
+    }
+
+    /// The UTF-8 bytes of the event's own text. It is nil when the sum does not fit an `Int`, which the caller treats as oversize.
+    nonisolated static func textLowerBound(_ event: ControlRuntimeEvent) -> Int? {
+        RuntimeCounter.advanced(event.kind.utf8.count, by: event.event.utf8.count)
+            .flatMap { RuntimeCounter.advanced($0, by: event.detail?.utf8.count ?? 0) }
     }
 
     /// One bounded drain turn. It publishes at most the configured items and bytes, and it queues the next turn when the
@@ -501,34 +587,41 @@ final class RuntimeServiceCore {
     private struct ReplayPlan {
         let availability: ControlReplayAvailability
         let nextEvent: Int
+        /// The first control sequence the subscriber reads. A replay reads the outcomes whose boundary is in its range.
+        let nextControl: Int
         let replayThrough: Int?
     }
 
-    /// The baseline's replay answer and the subscriber's first position. A cursor past the live edge is refused.
-    /// An exhausted log answers unavailable, since no later position can be issued.
+    /// The baseline's replay answer and the subscriber's first positions. A cursor past the live edge is refused.
+    /// An exhausted log answers unavailable, since no later position can be issued. A replay whose range may include an
+    /// evicted outcome is unavailable as expired history, never a silent gap.
     private func replayPlan(for request: ControlSubscriptionRequest) -> ReplayPlan? {
         let live = observation.liveStart
+        let liveControl = observation.controlNext
         if observation.exhausted {
-            return ReplayPlan(availability: .unavailable(.observationLoss), nextEvent: live, replayThrough: nil)
+            return ReplayPlan(availability: .unavailable(.observationLoss), nextEvent: live, nextControl: liveControl, replayThrough: nil)
         }
         switch request {
         case .live:
-            return ReplayPlan(availability: .live, nextEvent: live, replayThrough: nil)
+            return ReplayPlan(availability: .live, nextEvent: live, nextControl: liveControl, replayThrough: nil)
         case .resume(let resumeIncarnation, let from):
             guard resumeIncarnation == incarnation else {
-                return ReplayPlan(availability: .unavailable(.changedIncarnation), nextEvent: live, replayThrough: nil)
+                return ReplayPlan(availability: .unavailable(.changedIncarnation), nextEvent: live, nextControl: liveControl, replayThrough: nil)
             }
             // Zero is the bootstrap sentinel: it asks for everything retained, from position one.
             let first = max(from.rawValue, 1)
             guard first <= live else { return nil }
             if first == live {
-                return ReplayPlan(availability: .live, nextEvent: live, replayThrough: nil)
+                return ReplayPlan(availability: .live, nextEvent: live, nextControl: liveControl, replayThrough: nil)
             }
             if observation.crossesLoss(from: first) {
-                return ReplayPlan(availability: .unavailable(.observationLoss), nextEvent: live, replayThrough: nil)
+                return ReplayPlan(availability: .unavailable(.observationLoss), nextEvent: live, nextControl: liveControl, replayThrough: nil)
             }
             if first < observation.firstRetained {
-                return ReplayPlan(availability: .unavailable(.expiredHistory), nextEvent: live, replayThrough: nil)
+                return ReplayPlan(availability: .unavailable(.expiredHistory), nextEvent: live, nextControl: liveControl, replayThrough: nil)
+            }
+            guard let control = observation.controlStart(forEvent: first) else {
+                return ReplayPlan(availability: .unavailable(.expiredHistory), nextEvent: live, nextControl: liveControl, replayThrough: nil)
             }
             guard let fromCursor = ControlEventCursor(rawValue: first),
                   let throughCursor = ControlEventCursor(rawValue: observation.highWater)
@@ -536,6 +629,7 @@ final class RuntimeServiceCore {
             return ReplayPlan(
                 availability: .replay(from: fromCursor, through: throughCursor),
                 nextEvent: first,
+                nextControl: control,
                 replayThrough: observation.highWater
             )
         }
@@ -717,11 +811,43 @@ final class RuntimeServiceCore {
     }
 
     private func wakeWaiters() {
-        guard !waiters.isEmpty else { return }
-        let parked = waiters.values
-        waiters.removeAll()
-        for waiter in parked {
+        // The waits are taken out of the table first, so each wake runs after the table is complete.
+        for waiter in subscriptions.takeParkedWaiters() {
             waiter.wake()
+        }
+    }
+
+    /// Captures the owner's snapshot once and offers it to the slot. A replacement, or an exhausted slot, wakes every parked wait,
+    /// because each subscriber must now deliver or end. A refusal names the owner's broken invariant, and it is delivered as a closed
+    /// fault only after the slot is complete. Nothing in the slot changes on a refusal.
+    @discardableResult
+    private func captureOwnerState() -> RuntimeSnapshotOffer {
+        let snapshot = owner.snapshot()
+        let offer = snapshotSlot.offer(snapshot, encodedBytes: Self.encodedSize(snapshot))
+        switch offer {
+        case .unchanged:
+            break
+        case .replaced:
+            wakeWaiters()
+        case .refused(let refusal):
+            if refusal == .exhausted {
+                wakeWaiters()
+            } else {
+                deliver(Self.fault(for: refusal))
+            }
+        }
+        return offer
+    }
+
+    /// The closed fault a refused offer reports. The exhausted case is an ordinary terminal and reports no fault.
+    private static func fault(for refusal: RuntimeSnapshotRefusal) -> ControlServiceFault? {
+        switch refusal {
+        case .incarnation: .snapshotIncarnationMismatch
+        case .notEncodable: .snapshotNotEncodable
+        case .overBound: .snapshotOverBound
+        case .conflict: .snapshotRevisionConflict
+        case .regressed: .snapshotRevisionRegressed
+        case .exhausted: nil
         }
     }
 

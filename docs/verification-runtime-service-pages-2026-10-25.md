@@ -77,10 +77,25 @@ model, not an RSS bound; object/allocator/encoder overhead and caller-owned valu
 are separate. Idle expired rows may remain physically resident within the byte
 cap until activity, while page reads enforce logical expiry immediately.
 
+## M2B observation slice (2026-10-25, local)
+
+On `codex/runtime-observation-stream`, based on `53a050e`, the exact wrapper
+`verify-runtime-observation.sh` passes with the M2B, M2C and M2D source: 309 filtered tests with 0 failures.
+M2D gives stream pulls their own finite lane, adds a real upstream-probe outcome witness through the framed client, and changes an
+end that does not fit into a bounded disconnect.
+Earlier, at M2C, the run was 305 filtered tests with 0 failures,
+and both `pm-sim` scenarios pass. M2C adds a replay model over the production observation log
+(19,607 exhaustive sequences and 200 seeded walks), replay tests through the core, and fake-owner pressure metrics. The logs are under
+`/private/tmp/conduit-runtime-stage1-20261024/runtime-observation-checks/`. The
+live observation model passes, but no source mutant of the M2B rules has been run,
+so it is not sensitivity evidence. Limits, sizing and the exact gaps are in the
+[service checkpoint](runtime-service-engine-checkpoint-2026-10-25.md), section
+"M2B observation slice".
+
 ## Remaining gates
 
-Independent review of the corrected frozen source, all workflow checks, actual
-production-owner adaptation, observation/coalescing/replay models and a measured
-owner-reviewed shipping profile remain required. The snapshot read's invalid
+Independent review of the frozen source, all workflow checks, actual
+production-owner adaptation, replay and control-log models, source-mutant evidence
+for the M2B rules, and a measured owner-reviewed shipping profile remain required. The snapshot read's invalid
 owner-state classification is deferred to that observation slice. No v2 socket,
 installed-app validation, total shutdown or release-readiness claim follows.

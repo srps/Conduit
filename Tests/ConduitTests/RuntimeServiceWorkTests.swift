@@ -373,7 +373,13 @@ final class RuntimeServiceWorkTests: XCTestCase {
         XCTAssertEqual(log.highWater, RuntimeObservationLog.maximumPosition, "a position past the limit is never issued")
         XCTAssertTrue(log.exhausted, "the log is marked exhausted instead of wrapping")
 
-        let end = try log.peek(RuntimeSubscriberCursor(nextEvent: 1, replayThrough: nil, nextControl: log.controlNext)) { _ in true }
+        let end = try log.peek(RuntimeSubscriberCursor(
+            nextEvent: 1,
+            replayThrough: nil,
+            nextControl: log.controlNext,
+            seenSnapshotGeneration: 0,
+            lastWasSnapshot: false
+        )) { _ in true }
         XCTAssertEqual(end.pull, .end(.resyncRequired), "an exhausted log resyncs every reader")
     }
 
@@ -399,6 +405,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
             janitorBatch: 1,
             ordinaryLaneCapacity: 1,
             readLaneCapacity: 1,
+            streamLaneCapacity: 1,
             stopLaneCapacityPerModule: 1,
             subscriberLimit: 1,
             ringCapacity: 1,
@@ -418,6 +425,8 @@ final class RuntimeServiceWorkTests: XCTestCase {
             collectionRowRevisionsPerKind: 1,
             collectionRetainedByteCapacity: 1,
             collectionRowRetentionAge: .seconds(1),
+            latestSnapshotByteCapacity: 1,
+            subscriberRecordBytes: 1,
             retainedByteCeiling: 1 << 20
         ))
     }
@@ -429,7 +438,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
         let partitions = modules + 1
         let collectionKinds = ControlCollectionKind.allCases.count
         let operations = limits.ordinaryPendingCapacity + RuntimeServiceLimits.stopSlotsPerModule * modules
-        let laneCount = limits.ordinaryLaneCapacity + limits.readLaneCapacity + limits.stopLaneCapacityPerModule * modules
+        let laneCount = limits.ordinaryLaneCapacity + limits.readLaneCapacity + limits.streamLaneCapacity + limits.stopLaneCapacityPerModule * modules
         XCTAssertEqual(limits.laneCount, laneCount)
         XCTAssertEqual(limits.laneRetainedBytes, laneCount * (2 * limits.maxRequestBytes + 2 * limits.maxReplyBytes))
         XCTAssertEqual(limits.firstFrameRetainedBytes, limits.subscriberLimit * limits.maxReplyBytes)
@@ -439,6 +448,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
             + limits.collectionRetainedByteCapacity + collectionKinds * limits.collectionProofCapacityPerKind * limits.collectionProofBytes
             + limits.collectionByteCapacity
             + limits.laneRetainedBytes + limits.firstFrameRetainedBytes
+            + 2 * limits.latestSnapshotByteCapacity + limits.subscriberLimit * limits.subscriberRecordBytes
         XCTAssertEqual(limits.retainedByteBudget, expected)
         XCTAssertLessThanOrEqual(limits.retainedByteBudget, limits.retainedByteCeiling)
     }
@@ -469,11 +479,30 @@ final class RuntimeServiceWorkTests: XCTestCase {
         XCTAssertThrowsError(try RuntimeServiceFixtures.limits(retainedByteCeiling: budget - 1))
     }
 
-    /// A maximal event at its maximal cursor frames to exactly the smallest reply cap that construction accepts. The codec accepts
-    /// that frame at that cap and refuses it at one byte less, and construction refuses the same one-byte-smaller cap. So the
-    /// boundary is exact: the measured overhead is not an over-estimate for a maximal event.
-    func testAMaximalEventFrameFitsTheSmallestAcceptedReplyCapExactly() throws {
+    /// The codec's boundary for one maximal event at its maximal cursor is raw: a frame at its exact size encodes at that cap, and it
+    /// fails one byte below. This is a codec fact, so it is checked without any service profile.
+    func testAMaximalEventFrameHasAnExactRawCodecBoundary() throws {
         let probe = try RuntimeServiceFixtures.limits()
+        let (message, exact) = try maximalEventFrame(probe)
+        XCTAssertNoThrow(try ControlRuntimeCodec.encodeFrame(message, limits: try ControlFrameLimits(maxFrameBytes: exact)))
+        XCTAssertThrowsError(try ControlRuntimeCodec.encodeFrame(message, limits: try ControlFrameLimits(maxFrameBytes: exact - 1)))
+    }
+
+    /// The service's reply cap is the larger of two terms: one maximal event at its exact size, and one baseline that carries the
+    /// largest snapshot bound. The snapshot bound is the largest one the event term allows, so both terms meet at one cap, and each side
+    /// of it is decided by construction. The boundary is measured, so no term is guessed.
+    func testTheServiceReplyCapIsTheExactBoundOfItsLargerTerm() throws {
+        let probe = try RuntimeServiceFixtures.limits()
+        let (_, exact) = try maximalEventFrame(probe)
+        let snapshotBound = exact - probe.baselineFrameOverheadBytes
+        XCTAssertGreaterThan(snapshotBound, 0, "the event cap leaves room for a snapshot")
+        XCTAssertNoThrow(try RuntimeServiceFixtures.limits(replyBytes: exact, snapshotBytes: snapshotBound), "both terms meet at the exact cap")
+        XCTAssertThrowsError(try RuntimeServiceFixtures.limits(replyBytes: exact - 1, snapshotBytes: snapshotBound), "the event term refuses one byte less")
+        XCTAssertThrowsError(try RuntimeServiceFixtures.limits(replyBytes: exact, snapshotBytes: snapshotBound + 1), "the baseline term refuses one byte more")
+    }
+
+    /// A maximal event frame at the largest cursor, and its exact encoded size.
+    private func maximalEventFrame(_ probe: RuntimeServiceLimits) throws -> (ControlRuntimeMessage, Int) {
         let record = try maximalEventRecord(bytes: probe.maxEventBytes)
         let cursor = try XCTUnwrap(ControlEventCursor(rawValue: RuntimeObservationLog.maximumPosition))
         let message = ControlRuntimeMessage(
@@ -482,10 +511,7 @@ final class RuntimeServiceWorkTests: XCTestCase {
         )
         let exact = try ControlRuntimeCodec.encodeFrame(message, limits: try ControlFrameLimits(maxFrameBytes: 1 << 20)).count
         XCTAssertEqual(try RuntimeWireSize.bytes(of: record), probe.maxEventBytes, "the event is maximal")
-        XCTAssertNoThrow(try RuntimeServiceFixtures.limits(replyBytes: exact), "the smallest accepted reply cap carries one maximal event")
-        XCTAssertThrowsError(try RuntimeServiceFixtures.limits(replyBytes: exact - 1), "one byte less cannot carry it")
-        XCTAssertNoThrow(try ControlRuntimeCodec.encodeFrame(message, limits: try ControlFrameLimits(maxFrameBytes: exact)))
-        XCTAssertThrowsError(try ControlRuntimeCodec.encodeFrame(message, limits: try ControlFrameLimits(maxFrameBytes: exact - 1)))
+        return (message, exact)
     }
 
     /// A record whose encoded size is exactly `bytes`. Only the event name varies, and it is plain ASCII, so its JSON size grows by

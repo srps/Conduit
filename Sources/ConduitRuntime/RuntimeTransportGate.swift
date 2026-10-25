@@ -2,12 +2,15 @@
 import ConduitShared
 import Foundation
 
-/// One lane of the in-memory transport. Ordinary commands, reads and each module's stop have separate finite
-/// capacity, so a full ordinary lane never consumes a stop's slot, and a stalled owner fills only the lanes
-/// that carry its traffic.
+/// One lane of the in-memory transport. Ordinary commands, reads, parked stream pulls and each module's stop have separate
+/// finite capacity, so a full ordinary lane never consumes a stop's slot, and parked stream pulls never refuse a status read.
+/// A stalled owner fills only the lanes that carry its traffic.
 enum RuntimeLane: Hashable, Sendable {
     case ordinary
+    /// Lookups, pages, status reads and subscription opens.
     case read
+    /// The next-frame pulls of open subscriptions. Each pull holds one reservation until its wait ends.
+    case stream
     case stop(ControlModule)
 }
 
@@ -60,6 +63,7 @@ final class RuntimeLaneCounter: @unchecked Sendable {
         switch lane {
         case .ordinary: limits.ordinaryLaneCapacity
         case .read: limits.readLaneCapacity
+        case .stream: limits.streamLaneCapacity
         case .stop: limits.stopLaneCapacityPerModule
         }
     }

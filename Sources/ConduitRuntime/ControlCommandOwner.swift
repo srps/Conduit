@@ -42,6 +42,14 @@ enum ControlServiceFault: Sendable, Equatable {
     /// The owner's snapshot now reports a different exact total for a revision that the service holds with its own total. A revision
     /// is immutable, so the owner broke its invariant. The retained rows are not served, not replaced, and not recaptured.
     case revisionTotalChanged
+    /// The owner's snapshot could not be encoded, so nothing is retained. The read or the open is an internal failure.
+    case snapshotNotEncodable
+    /// The owner's snapshot is larger than the slot's declared bound. The projection is bounded, so the owner broke its invariant.
+    case snapshotOverBound
+    /// The owner reported a different body under a presentation revision the service already holds. Nothing is retained.
+    case snapshotRevisionConflict
+    /// The owner reported a presentation revision older than the one the service holds. Nothing is retained.
+    case snapshotRevisionRegressed
 }
 
 /// The one owner of intent and lifecycle, seen from the service. The actual runtime host adopts this

@@ -2,6 +2,8 @@
 import ConduitShared
 import CryptoKit
 import Foundation
+import ProxyControlBridge
+import ProxyKernel
 
 /// Checked counter steps. A counter that cannot advance returns nil, and its owner marks the structure exhausted.
 /// Nothing in the service wraps, saturates into a sentinel, or traps on a counter.
@@ -78,9 +80,11 @@ struct RuntimeServiceLimits: Sendable, Equatable {
     let retentionAge: Duration
     /// Retained records one janitor turn may remove.
     let janitorBatch: Int
-    /// Transport reservations in flight per lane: ordinary commands, reads, and each module's stop.
+    /// Transport reservations in flight per lane: ordinary commands, reads, parked stream pulls, and each module's stop. Each lane is
+    /// explicit and separate, so a full lane of one kind never refuses another kind.
     let ordinaryLaneCapacity: Int
     let readLaneCapacity: Int
+    let streamLaneCapacity: Int
     let stopLaneCapacityPerModule: Int
     /// Concurrently open subscriptions.
     let subscriberLimit: Int
@@ -124,6 +128,21 @@ struct RuntimeServiceLimits: Sendable, Equatable {
     let laneRetainedBytes: Int
     /// Each open subscriber holds one buffered first frame, bounded by `maxReplyBytes`.
     let firstFrameRetainedBytes: Int
+    /// The encoded payload bytes one retained latest snapshot may hold. The owner's snapshot is refused above it, as an invariant
+    /// failure and never as a capacity answer. It is explicit: no shipping value is chosen here.
+    let latestSnapshotByteCapacity: Int
+    /// The bytes a baseline frame adds around its snapshot payload, measured with the codec at the worst cursor and the widest replay
+    /// range. A snapshot frame is smaller than a baseline with the same snapshot, so this one measured bound covers both. The constructor
+    /// requires `latestSnapshotByteCapacity` plus this overhead to fit one reply, so every snapshot the bound admits can open a stream
+    /// at the server's own cap. A caller's narrower cap can still refuse a baseline as `frameTooLarge`.
+    let baselineFrameOverheadBytes: Int
+    /// The in-memory bytes one subscriber record holds, charged per subscriber as a stand-in. It is not encoded data, and the
+    /// caller states it separately. The constructor refuses a value below the measured size of the record.
+    let subscriberRecordBytes: Int
+    /// The latest snapshot and one refresh scratch. One owner turn offers at most one candidate, so both can coexist in that turn.
+    let snapshotRetainedBytes: Int
+    /// Every subscriber's record at the limit, charged at `subscriberRecordBytes` each.
+    let subscriberRecordRetainedBytes: Int
     /// The checked sum of every encoded-byte term above that the configuration can hold at once.
     let retainedByteBudget: Int
     /// The ceiling the owner passes. The budget must not exceed it, and the owner, not the service, chooses it.
@@ -144,6 +163,7 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         janitorBatch: Int,
         ordinaryLaneCapacity: Int,
         readLaneCapacity: Int,
+        streamLaneCapacity: Int,
         stopLaneCapacityPerModule: Int,
         subscriberLimit: Int,
         ringCapacity: Int,
@@ -163,16 +183,18 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         collectionRowRevisionsPerKind: Int,
         collectionRetainedByteCapacity: Int,
         collectionRowRetentionAge: Duration,
+        latestSnapshotByteCapacity: Int,
+        subscriberRecordBytes: Int,
         retainedByteCeiling: Int
     ) throws {
         let counts = [
             aliasCapacityPerPartition, aliasByteCapacityPerPartition, ordinaryPendingCapacity,
-            outcomeCapacity, outcomeByteCapacity, janitorBatch, ordinaryLaneCapacity, readLaneCapacity,
+            outcomeCapacity, outcomeByteCapacity, janitorBatch, ordinaryLaneCapacity, readLaneCapacity, streamLaneCapacity,
             stopLaneCapacityPerModule, subscriberLimit, ringCapacity, ringByteCapacity, maxEventBytes,
             ingressCapacity, ingressByteCapacity, drainItemsPerTurn, drainBytesPerTurn, controlLogCapacity,
             controlLogByteCapacity, replayChunkItems, replayChunkBytes, collectionRowCapacity, collectionByteCapacity,
             collectionProofCapacityPerKind, collectionRowRevisionsPerKind, collectionRetainedByteCapacity,
-            retainedByteCeiling,
+            latestSnapshotByteCapacity, subscriberRecordBytes, retainedByteCeiling,
         ]
         // A frame needs at least one payload byte and its line feed, the smallest frame that can exist.
         guard counts.allSatisfy({ $0 >= 1 }), retentionAge > .zero, collectionRowRetentionAge > .zero,
@@ -209,6 +231,16 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         guard let oneEventFrame = Self.checkedSum([maxEventBytes, eventFrameOverhead]), maxReplyBytes >= oneEventFrame else {
             throw ControlRuntimeWireError.invalidValue
         }
+        // A baseline frame carries one snapshot at the largest snapshot bound, so the bound and the measured baseline envelope fit
+        // `maxReplyBytes`. A subscriber record must hold at least its measured in-memory size, so the per-subscriber charge is never
+        // below what the table really holds.
+        let baselineOverhead = try Self.measuredBaselineFrameOverhead()
+        guard let oneBaselineFrame = Self.checkedSum([latestSnapshotByteCapacity, baselineOverhead]),
+              maxReplyBytes >= oneBaselineFrame,
+              subscriberRecordBytes >= MemoryLayout<RuntimeSubscriberRecord>.size
+        else {
+            throw ControlRuntimeWireError.invalidValue
+        }
         let modules = ControlModule.allCases.count
         let partitions = modules + 1
         let collectionKinds = ControlCollectionKind.allCases.count
@@ -224,15 +256,19 @@ struct RuntimeServiceLimits: Sendable, Equatable {
               let proofTotal = Self.checkedProduct(proofSlots, proofBytes),
               let collectionTotal = Self.checkedSum([collectionRetainedByteCapacity, proofTotal, collectionByteCapacity]),
               let stopLaneTotal = Self.checkedProduct(stopLaneCapacityPerModule, modules),
-              let laneCount = Self.checkedSum([ordinaryLaneCapacity, readLaneCapacity, stopLaneTotal]),
+              let laneCount = Self.checkedSum([ordinaryLaneCapacity, readLaneCapacity, streamLaneCapacity, stopLaneTotal]),
               // Two request-sized and two reply-sized values per reservation: the request frame and the decoded message, the refusal
               // and one produced answer. See `laneRetainedBytes`.
               let perReservation = Self.checkedSum([maxRequestBytes, maxRequestBytes, maxReplyBytes, maxReplyBytes]),
               let laneBytes = Self.checkedProduct(laneCount, perReservation),
               let firstFrameBytes = Self.checkedProduct(subscriberLimit, maxReplyBytes),
+              // The latest snapshot and one refresh scratch, and the record of every subscriber the limit allows.
+              let snapshotBytes = Self.checkedProduct(2, latestSnapshotByteCapacity),
+              let subscriberRecords = Self.checkedProduct(subscriberLimit, subscriberRecordBytes),
               let budget = Self.checkedSum([
                   aliasTotal, operationBytes, outcomeByteCapacity, ringByteCapacity,
                   controlLogByteCapacity, ingressByteCapacity, collectionTotal, laneBytes, firstFrameBytes,
+                  snapshotBytes, subscriberRecords,
               ]),
               budget <= retainedByteCeiling
         else {
@@ -257,6 +293,7 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         self.janitorBatch = janitorBatch
         self.ordinaryLaneCapacity = ordinaryLaneCapacity
         self.readLaneCapacity = readLaneCapacity
+        self.streamLaneCapacity = streamLaneCapacity
         self.stopLaneCapacityPerModule = stopLaneCapacityPerModule
         self.subscriberLimit = subscriberLimit
         self.laneCount = laneCount
@@ -280,6 +317,11 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         self.collectionProofBytes = proofBytes
         self.laneRetainedBytes = laneBytes
         self.firstFrameRetainedBytes = firstFrameBytes
+        self.latestSnapshotByteCapacity = latestSnapshotByteCapacity
+        self.baselineFrameOverheadBytes = baselineOverhead
+        self.subscriberRecordBytes = subscriberRecordBytes
+        self.snapshotRetainedBytes = snapshotBytes
+        self.subscriberRecordRetainedBytes = subscriberRecords
         self.retainedByteBudget = budget
         self.retainedByteCeiling = retainedByteCeiling
     }
@@ -321,6 +363,47 @@ struct RuntimeServiceLimits: Sendable, Equatable {
         let record = try RuntimeWireSize.bytes(of: sample)
         guard frame.count >= record else { throw ControlRuntimeWireError.invalidValue }
         return frame.count - record
+    }
+
+    /// The bytes a baseline frame adds around its snapshot payload, measured with the codec at the worst values the codec writes: the
+    /// largest cursor, which is the high-water and both ends of a replay, and the widest replay range. The snapshot's own bytes are the
+    /// same inside the frame as standalone, so the difference is the frame's metadata. The envelope does not depend on the snapshot's
+    /// content, so one canonical projection measures it. The projection's own failure is an impossible configuration, so it throws.
+    private static func measuredBaselineFrameOverhead() throws -> Int {
+        guard let zero = ControlPresentationRevision(rawValue: 0),
+              let config = ControlConfigRevision(rawValue: 0),
+              let lifecycle = ControlLifecycleRevision(rawValue: 0)
+        else {
+            throw ControlRuntimeWireError.invalidValue
+        }
+        let stamp = ControlRuntimeStamp(
+            incarnation: ControlHostIncarnation(rawValue: UUID()),
+            presentationRevision: zero,
+            configRevision: config,
+            lifecycleRevision: lifecycle
+        )
+        let snapshot = try RuntimeSnapshotControlProjection.snapshot(
+            ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: .notNeeded),
+            stamp: stamp,
+            profileName: "",
+            collectionRevisions: ControlCollectionRevisions()
+        )
+        guard let worst = ControlEventCursor(rawValue: RuntimeObservationLog.maximumPosition) else {
+            throw ControlRuntimeWireError.invalidValue
+        }
+        let baseline = try ControlBaseline(
+            incarnation: snapshot.stamp.incarnation,
+            snapshot: snapshot,
+            highWater: worst,
+            replay: .replay(from: worst, through: worst)
+        )
+        let frame = try ControlRuntimeCodec.encodeFrame(
+            ControlRuntimeMessage(correlation: ControlRequestID(rawValue: UUID()), body: .frame(.baseline(baseline))),
+            limits: try ControlFrameLimits(maxFrameBytes: 1 << 20)
+        )
+        let payload = try RuntimeWireSize.bytes(of: snapshot)
+        guard frame.count >= payload else { throw ControlRuntimeWireError.invalidValue }
+        return frame.count - payload
     }
 
     /// The encoded metadata of one proof: the revision and the total, each at its measured worst. The revision is unbounded
