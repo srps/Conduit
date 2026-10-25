@@ -1,0 +1,4 @@
+case=normal firstBytes=234640 after11Bytes=234640 firstTo11GrowthBytes=0 finalBytes=234640 firstToFinalGrowthBytes=0 batches=101 callsPerBatch=256 outputBytes=26 checksum=6601108122467443200 elapsedNanoseconds=114802625
+case=url firstBytes=240816 after11Bytes=240816 firstTo11GrowthBytes=0 finalBytes=240816 firstToFinalGrowthBytes=0 batches=101 callsPerBatch=256 outputBytes=36 checksum=17664273922534482944 elapsedNanoseconds=168278875
+case=userinfo firstBytes=241872 after11Bytes=241872 firstTo11GrowthBytes=0 finalBytes=241872 firstToFinalGrowthBytes=0 batches=101 callsPerBatch=256 outputBytes=70 checksum=15017467947598998016 elapsedNanoseconds=277949584
+case=header firstBytes=243344 after11Bytes=243344 firstTo11GrowthBytes=0 finalBytes=243344 firstToFinalGrowthBytes=0 batches=101 callsPerBatch=256 outputBytes=25 checksum=13973337780737416448 elapsedNanoseconds=99678583
