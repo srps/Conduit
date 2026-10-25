@@ -48,6 +48,11 @@ jobs:
         python3 scripts/test-decisions.py
     - name: Run tests
       run: DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" xcrun swift test -v
+    - name: App entry sequencing (stand-in modules, child processes)
+      timeout-minutes: 15
+      env:
+        DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+      run: python3 scripts/test-app-entry.py
     - name: Kerberos worker entry points
       env:
         DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer

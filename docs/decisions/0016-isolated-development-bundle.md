@@ -56,7 +56,7 @@ Run required repository checks and preserve the serving process throughout.
 
 [bundle-app.sh](../../bundle-app.sh) implements separate identity, ad-hoc signing
 and early flag refusal. [DevLaunch](../../Sources/Conduit/App/DevLaunch.swift) and
-[ConduitMain](../../Sources/Conduit/App/ConduitApp.swift) select fake composition
+[ConduitMain](../../Sources/Conduit/App/ConduitMain.swift) select fake composition
 and guard worker entry points. [Parser/composition tests](../../Tests/ConduitTests/DevLaunchOptionsTests.swift)
 cover identity, state aliases (including known child files/fake roots), worker
 guards and awaited teardown;

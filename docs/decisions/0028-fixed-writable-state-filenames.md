@@ -124,6 +124,8 @@ URL in adopted guards. [Code](../../Sources/ProxyKernel/Support/RotatingLogFile.
 and [verification scope](../verification-protected-log-2026-10-25.md). Fixed names
 remain separate from identity checks; this changes no writable-layout decision.
 
+The startup handoff correction for [#237](https://github.com/srps/Conduit/issues/237) restores a synchronous GUI entry while keeping actual bootstrap effects on `PlatformWork`, before AppState composition. Real built-entry busy/name/root refusal probes preserve original bytes, and a separate FakeMachine dev launch delivers the background file-log failure and a network-path callback. The prior window-only smoke missed the async-main starvation. See [the scoped startup handoff evidence](../verification-gui-startup-handoff-2026-10-25.md). This does not complete store/workflow adoption, bounded shutdown or installed-version handoff.
+
 ## Open questions
 
 Revisit only for a demonstrated writable layout/sharing workflow that one
