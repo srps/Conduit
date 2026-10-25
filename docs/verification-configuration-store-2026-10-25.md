@@ -107,8 +107,28 @@ The wrapper is `/private/tmp/conduit-runtime-stage1-20261024/verify-configuratio
 | `pm-sim config-file-boundary` | outcome PASS, 13 assertions | passed |
 | `pm-sim config-sidecar-boundary` | outcome PASS, 29 assertions | passed |
 
-Not run by this wrapper: the full `.github/workflows/swift.yml` steps, `pm-sim all`, `scripts/perf-gate.sh` and the remaining `scripts/` checks.
-The parent runs those before any push.
+## Full pre-push verification (parent, exit 0)
+
+All 39 checks corresponding to `.github/workflows/swift.yml` passed on source commit
+`428e0d6590dd8fbd9d957503748cf8573c2f3f1b`. The runner verified an unchanged source fingerprint before and after:
+`100d7a10ce91acb175e7908464837aececb23bd98a5808b24cbc5328a1cbac51`.
+This note is the only subsequent change.
+
+- Full XCTest run: 3,004 tests, 2 skipped, 0 failures.
+- `pm-sim all`: 96 result records, all passed.
+- Import, event, decision/history and their regression checks, third-party notices, packaging, helper-argument,
+  signing-identity and release-identity checks, signed and unsigned updater tests, appcast tests, Kerberos worker
+  checks, security/redaction checks, HTTP wire, routing/bounds, DNS shutdown and status-stream checks all passed.
+- Existing proxy performance gate: wall 10.194 s, maximum RSS 34,553,856 bytes, CPU 89.23%. This measures the
+  existing proxy workload, not the unadopted store or the new client service. It establishes no store memory claim.
+
+Results and per-check logs: `/private/tmp/conduit-runtime-stage1-20261024/configuration-store-full-gates/`.
+An earlier run was interrupted for review fixes and has no final-evidence status; its archive records the interruption.
+
+Independent Claude review identified the legacy-preferences preservation hole and misleading per-component authority
+reasons. Both were fixed before this full run. A final read-only source recheck found no new source defect; its test
+coverage gaps and vacuous race witness were addressed before the full run. These reviews do not establish host adoption,
+real-machine validation or release readiness.
 
 ## Test-harness facts
 
