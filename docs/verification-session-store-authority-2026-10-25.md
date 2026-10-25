@@ -1,7 +1,13 @@
 # Session-owned configuration-store authority: verification
 
 Status: implementation and independent review complete; all 40 local workflow
-checks pass (2026-10-25). Hosted checks will follow publication. This is consumed
+checks pass (2026-10-25). Hosted Swift and CodeQL passed on exact reviewed head
+`b5d580b04c890e5988526be36f085ba7b32e6a67`;
+[PR #242](https://github.com/srps/Conduit/pull/242) merged at
+`47ce2f822e55c214cbe39a582bd028263a958bb1`. Optional automated code/security
+reviews failed to complete and Devin skipped; no actual review submissions or
+inline findings were present. Those services supply no completed-review evidence.
+Runner annotations concern capacity/OS migration. This is consumed
 store preparation under decision 0031, not actual Host/AppState workflow adoption
 or release readiness.
 
@@ -70,7 +76,8 @@ registry or second ownership counter is claimed.
 
 No actual framed host adapter, configuration workflow, private editor reply,
 shipping profile, AppState activation or RuntimeActor move is delivered. The
-explicit reload policy remains proposed in `design-runtime-reload-review.md`.
+explicit reload policy was selected subsequently in decision 0032; its workflow
+implementation is separate from this verified slice.
 No serving app/helper was stopped, replaced or installed over; no VPN was needed.
 Scratch OS tests do not establish installed-app, real auth/PAC, daemon ownership
 or release validation. Decision 0031 keeps those acceptance gates explicit.

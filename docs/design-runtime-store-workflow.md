@@ -357,11 +357,11 @@ behavior. Test profiles cannot silently become production defaults. No prep-only
 interface is implemented merely to bypass that gate.
 
 For the later reload slice, confirmation before discarding a draft implements
-0027's explicit reload/review, with cancel preserving it. Whether reload only
-populates the editor or also admits runtime apply remains an affected-slice review
-item; no behavior is selected here. That question does not reopen the chosen
-conflict/refusal policy or block unrelated work. No new ADR is written by this
-checkpoint, and no production adoption or RuntimeActor migration is claimed.
+0027's explicit reload/review, with cancel preserving it. The owner subsequently
+selected explicit disk reload-and-reconcile in decision 0032. Normal editor reads
+remain in-memory/no-apply, and no client may discard another client's draft.
+Production adoption and RuntimeActor migration remain separate implementation
+work; this checkpoint does not claim either.
 
 
 ## Next workflow contract checkpoint (2026-10-25)
@@ -401,7 +401,7 @@ unimplemented and unselected. Do not silently borrow the request's 8 MiB cap or
 add an envelope allowance to it. Ordinary stamp metadata additions also require
 bounded sizing under 0030 before adoption. The v1 status counters stay unchanged.
 
-Explicit disk reload remains a separate owner policy gate: editor-only versus
-verified reload-and-reconcile. A normal private editor read performs neither disk
+The owner selected explicit disk reload-and-reconcile in
+[0032](decisions/0032-explicit-reload-and-reconcile.md). A normal private editor read performs neither disk
 I/O nor runtime apply. Client-owned dirty drafts cannot be discarded by another
 client's reload event.

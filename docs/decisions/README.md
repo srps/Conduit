@@ -55,3 +55,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0029](0029-bound-runtime-display-text.md) | Bound runtime display text with explicit notices | accepted | partial | none |
 | [0030](0030-ordinary-runtime-reply-frame-cap.md) | Ordinary v2 replies and stream frames capped at 64 KiB | accepted | planned | none |
 | [0031](0031-incremental-runtime-development-single-activation.md) | Incremental runtime development with one AppState activation | accepted | partial | none |
+| [0032](0032-explicit-reload-and-reconcile.md) | Explicit configuration reload adopts and reconciles eligible changes | accepted | planned | none |
