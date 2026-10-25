@@ -28,6 +28,7 @@ enum PMSim {
               bounded-writers         Slow storage, bounded queues and append amplification
               protected-snapshot-artifacts
                                       Config aliases of snapshot.json keep their bytes; refusal latches once
+              protected-app-log       Config aliases of the app log keep their bytes; directories and archives are kept
               diagnostic-destination-guard
                                       Audit and events aliases of the config are refused, bytes kept
               pac-fetch-bounds        Bounded PAC downloads and last-good retention
@@ -213,6 +214,7 @@ enum PMSim {
         "multi-100",
         "bounded-writers",
         "protected-snapshot-artifacts",
+        "protected-app-log",
         "diagnostic-destination-guard",
         "pac-fetch-bounds",
         "pac-preview",
@@ -326,6 +328,8 @@ enum PMSim {
             return [try await BoundedWriterScenarios.slowStorage()]
         case "protected-snapshot-artifacts":
             return [try await ProtectedSnapshotScenarios.run()]
+        case "protected-app-log":
+            return [try await ProtectedLogScenarios.run()]
         case "diagnostic-destination-guard":
             return [try await DiagnosticDestinationGuardScenarios.run()]
         case "pac-fetch-bounds":

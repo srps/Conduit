@@ -187,7 +187,7 @@ final class AppStateHarness {
         appState = nil
         // The app's work has quiesced above, so the root's authority ends before its files go.
         releaseScratchStateRoot(stateSession)
-        try? FileManager.default.removeItem(at: stateDirectory)
+        removeScratch([stateDirectory])
     }
 }
 
@@ -208,6 +208,43 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(isRunning(state))
         XCTAssertFalse(FileManager.default.fileExists(atPath: harness.environment.configFile.path))
     }
+
+    /// The app log's refusal lands in the composition's one event log (the orchestrator's), and the config keeps its bytes.
+    /// The log path is a hardlink to the config, so the refusal is an identity refusal from the adopted guard.
+    func testAnAppLogAliasOfTheConfigIsRefusedThroughTheCompositionEventLog() throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        let config = harness.environment.configFile
+        XCTAssertEqual(link(config.path, harness.environment.logFile.path), 0)
+        let state = harness.launch()
+        let before = try Data(contentsOf: config)
+
+        state.logStore.log(.notice, "composition witness")
+        state.logStore.flushFileLog()
+
+        let refusals = state.eventLog.events.filter { $0.event == RecordFileDestinationGate.eventName }
+        XCTAssertEqual(refusals.map(\.detail), ["sink=log reason=protected_identity resource=config"])
+        XCTAssertEqual(try Data(contentsOf: config), before)
+    }
+
+    /// The app log, adopted by the composition, refuses an alias of the writer lease. The lock keeps its bytes and its
+    /// inode, and its holder keeps the root, so a second writer is busy.
+    func testAnAppLogAliasOfTheWriterLeaseIsRefusedAndTheLeaseKeepsItsAuthority() async throws {
+        harness = try AppStateHarness(config: makeConfig(), platformConfig: PlatformIntegrationConfig())
+        let lease = harness.stateSession.writerLeaseFile
+        let before = try writerLeaseFingerprint(lease)
+        XCTAssertEqual(link(lease.path, harness.environment.logFile.path), 0)
+        let state = harness.launch()
+        await harness.launchRecovery()
+
+        state.logStore.log(.notice, "lease witness")
+        state.logStore.flushFileLog()
+
+        let refusals = state.eventLog.events.filter { $0.event == RecordFileDestinationGate.eventName }
+        XCTAssertEqual(refusals.map(\.detail), ["sink=log reason=protected_identity resource=writer_lease"])
+        XCTAssertEqual(try writerLeaseFingerprint(lease), before, "the lock keeps its bytes and its inode")
+        assertSecondWriterIsBusy(RuntimeEnvironment.isolated(stateDirectory: harness.stateDirectory))
+    }
+
 
     /// #98: the saved password is read once when the proxy comes up, so a
     /// Keychain prompt lands then and not in the middle of a handshake burst.

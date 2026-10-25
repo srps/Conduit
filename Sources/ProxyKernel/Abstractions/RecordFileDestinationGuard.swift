@@ -2,13 +2,15 @@
 import Foundation
 import NIOConcurrencyHelpers
 
-/// The diagnostic writers that write a destination the gate guards: append-only record files and
-/// the whole-file snapshot replacement. The role decides which protected resources a writer may
+/// The diagnostic writers that write a destination the gate guards: append-only record files, the whole-file
+/// snapshot replacement, and the app's file log. The role decides which protected resources a writer may
 /// not touch; a writer may always write its own file.
 package enum RecordFileDiagnosticSink: String, Sendable {
     case connectionAudit = "audit"
     case runtimeEvents = "events"
     case snapshot = "snapshot"
+    /// The app's file log. Its own file is the `log` resource, which this sink may write; every other protected file applies.
+    case appLog = "log"
 }
 
 /// The closed set of authoritative files a diagnostic destination must never write. Each code

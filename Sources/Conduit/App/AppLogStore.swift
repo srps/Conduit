@@ -82,9 +82,19 @@ package final class AppLogStore: ObservableObject, LogSink {
         return min(stderr, buf)
     }
 
-    private var logFile: RotatingLogFile?
+    private var logFile: (any RotatingByteWriter)?
     private let fileLogMaxBytes: Int
     private let fileLogArchives: Int
+    /// The guard every file open and archive rotation is judged by. Required: no unchecked default is built into production.
+    private let destinationGuard: any RecordFileDestinationGuarding
+    /// The composition's one canonical event log, shared with the orchestrator, so a refusal or IO transition is
+    /// reported in the same stream as every other event. The gate and the writer hold it weakly.
+    private let diagnosticEventLog: RuntimeEventLog
+    /// One refusal gate for the store's lifetime, so its latch survives Settings toggles and reopens.
+    private let destinationGate: RecordFileDestinationGate
+    /// The logger the gate and writer report through. It holds the store weakly, so the store-owned gate
+    /// and writer do not keep the store alive.
+    private let fileLogSink: WeakStoreLogSink
 
     /// Where the app writes its log by default. On by default — see
     /// `AppPreferences.fileLoggingEnabled` — because a log that has to be
@@ -92,20 +102,17 @@ package final class AppLogStore: ObservableObject, LogSink {
     /// be predicted. The one real investigation this product has had found
     /// a `proxy.log` seven weeks stale for exactly that reason.
     /// Setting this opens the file for **append**; it never truncates. The
-    /// previous implementation did, on every toggle flip.
+    /// previous implementation did, on every toggle flip. The file opens on
+    /// its first write, never here.
     package var logFileURL: URL? {
         didSet {
             logFile?.close()
             logFile = nil
             guard let url = logFileURL else { return }
-            // The report lands in the ring buffer and stderr — and is offered
-            // to the file too, where it fails again and is swallowed by the
-            // file's own once-per-streak gate. One line, no loop.
-            logFile = RotatingLogFile(
+            logFile = rotatingLogFile(
                 url: url, maxBytes: fileLogMaxBytes, archives: fileLogArchives,
-                onFailure: { [weak self] message in
-                    Task { @MainActor in self?.log(.warning, message, category: .system) }
-                }
+                destinationGuard: destinationGuard, gate: destinationGate,
+                eventLog: diagnosticEventLog, logger: fileLogSink
             )
         }
     }
@@ -124,9 +131,18 @@ package final class AppLogStore: ObservableObject, LogSink {
         logFile?.flush()
     }
 
-    package init(fileLogMaxBytes: Int = 5 << 20, fileLogArchives: Int = 3) {
+    package init(
+        fileLogMaxBytes: Int = 5 << 20, fileLogArchives: Int = 3,
+        destinationGuard: any RecordFileDestinationGuarding, eventLog: RuntimeEventLog
+    ) {
         self.fileLogMaxBytes = fileLogMaxBytes
         self.fileLogArchives = fileLogArchives
+        self.destinationGuard = destinationGuard
+        self.diagnosticEventLog = eventLog
+        let sink = WeakStoreLogSink()
+        self.fileLogSink = sink
+        self.destinationGate = RecordFileDestinationGate(sink: .appLog, eventLog: eventLog, logger: sink)
+        sink.bind(self)
     }
 
     /// `LogSink` protocol primitive. Not called directly — the
@@ -200,6 +216,27 @@ package final class AppLogStore: ObservableObject, LogSink {
 
     package func clearEntries() {
         entries.removeAll()
+    }
+}
+
+/// The logger the store's gate and file writer report through. It forwards to the store while the store lives, and
+/// does nothing after. The store owns the gate, and the gate would otherwise hold the store alive.
+private final class WeakStoreLogSink: LogSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var store: AppLogStore?
+
+    func bind(_ store: AppLogStore) {
+        lock.withLock { self.store = store }
+    }
+
+    private var current: AppLogStore? {
+        lock.withLock { store }
+    }
+
+    var minLevel: LogLevel { current?.minLevel ?? .error }
+
+    func logImpl(_ level: LogLevel, _ message: String, category: LogCategory) {
+        current?.logImpl(level, message, category: category)
     }
 }
 

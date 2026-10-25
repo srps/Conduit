@@ -28,6 +28,10 @@ package final class StateRootSession: Sendable {
     /// It is read under the lease, before a load or migration can write the file,
     /// and it tells an upgrade from a fresh install (`LaunchRecovery`).
     package let configFilePredatesLaunch: Bool
+    /// The writer lease's file, as a neutral URL: a diagnostic guard refuses it as a protected destination, so
+    /// an alias cannot write the lock. Only the URL is exposed. The lease object stays private, and holding
+    /// this URL grants no write authority.
+    package let writerLeaseFile: URL
     private let lease: StateWriterLease
 
     fileprivate init(
@@ -39,6 +43,9 @@ package final class StateRootSession: Sendable {
         self.plan = plan
         self.environment = environment
         self.configFilePredatesLaunch = configFilePredatesLaunch
+        self.writerLeaseFile = URL(
+            fileURLWithPath: plan.root.path + "/" + StateRootReservedName.writerLock.fileName
+        )
         self.lease = lease
     }
 

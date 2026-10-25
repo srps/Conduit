@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
-import NIOConcurrencyHelpers
 import XCTest
 @testable import ProxyKernel
 @testable import Conduit
@@ -11,8 +10,20 @@ final class RotatingLogFileTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("RotatingLogFileTests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        addTeardownBlock { removeScratch([dir]) }
         return dir
+    }
+
+    /// The writer as the app composes it, with the unchecked fixture guard named at the call site.
+    private func openFile(
+        _ url: URL, maxBytes: Int = 5 << 20, archives: Int = 3, events: RuntimeEventLog
+    ) -> any RotatingByteWriter {
+        rotatingLogFile(
+            url: url, maxBytes: maxBytes, archives: archives,
+            destinationGuard: UncheckedRecordFileDestination(),
+            gate: RecordFileDestinationGate(sink: .appLog, eventLog: events, logger: DiscardingLogSink()),
+            eventLog: events, logger: DiscardingLogSink()
+        )
     }
 
     /// The old writer called `createFile(atPath:contents: nil)` on open,
@@ -20,11 +31,12 @@ final class RotatingLogFileTests: XCTestCase {
     /// session's log. Opening twice must keep what the first open wrote.
     func testReopeningAppendsInsteadOfTruncating() throws {
         let url = try tempDir().appendingPathComponent("proxy.log")
-        let first = RotatingLogFile(url: url)
+        let events = RuntimeEventLog()
+        let first = openFile(url, events: events)
         first.write(Data("one\n".utf8))
         first.close()
 
-        let second = RotatingLogFile(url: url)
+        let second = openFile(url, events: events)
         second.write(Data("two\n".utf8))
         second.close()
 
@@ -34,7 +46,8 @@ final class RotatingLogFileTests: XCTestCase {
     func testRollsOverAtMaxBytesAndKeepsTheConfiguredArchives() throws {
         let dir = try tempDir()
         let url = dir.appendingPathComponent("proxy.log")
-        let file = RotatingLogFile(url: url, maxBytes: 12, archives: 2)
+        let events = RuntimeEventLog()
+        let file = openFile(url, maxBytes: 12, archives: 2, events: events)
         // Each line is 6 bytes; two fit exactly, the third rolls. Five lines → the
         // live file holds line 5, .1 holds 3+4, .2 holds 1+2, and nothing
         // older survives.
@@ -53,7 +66,7 @@ final class RotatingLogFileTests: XCTestCase {
     /// file, rather than rotating forever or being dropped.
     func testAnOversizedLineIsWrittenNotDropped() throws {
         let url = try tempDir().appendingPathComponent("proxy.log")
-        let file = RotatingLogFile(url: url, maxBytes: 4, archives: 1)
+        let file = openFile(url, maxBytes: 4, archives: 1, events: RuntimeEventLog())
         file.write(Data("short\n".utf8))
         file.write(Data("much longer line\n".utf8))
         file.close()
@@ -62,7 +75,7 @@ final class RotatingLogFileTests: XCTestCase {
 
     @MainActor func testTheStoreWritesFormattedLinesThroughTheRotatingFile() throws {
         let url = try tempDir().appendingPathComponent("proxy.log")
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minStderrLevel = .error
         store.logFileURL = url
         store.log(.notice, "hello file")
@@ -71,22 +84,20 @@ final class RotatingLogFileTests: XCTestCase {
         XCTAssertTrue(text.contains("[NOTICE] [General] hello file\n"), text)
     }
 
-    /// A file that cannot be written must say so — once — somewhere other
-    /// than the file. Here the parent "directory" is a regular file, so the
-    /// open fails with ENOTDIR regardless of who runs the tests.
+    /// A file that cannot be written must say so — once — and the report must not carry the path. Here the parent
+    /// "directory" is a regular file, so creating the directory fails and the failure is `mkdir`.
     func testAnUnwritableFileReportsOnceNotPerLine() throws {
         let parent = try tempDir().appendingPathComponent("not-a-directory")
         try Data().write(to: parent)
         let url = parent.appendingPathComponent("proxy.log")
-        let reports = NIOLockedValueBox<[String]>([])
-        let file = RotatingLogFile(url: url, onFailure: { message in
-            reports.withLockedValue { $0.append(message) }
-        })
+        let events = RuntimeEventLog()
+        let file = openFile(url, events: events)
         for i in 1...3 { file.write(Data("line\(i)\n".utf8)) }
         file.flush()
-        let got = reports.withLockedValue { $0 }
-        XCTAssertEqual(got.count, 1, "\(got)")
-        XCTAssertTrue(got[0].contains(url.path), got[0])
+        let failures = events.events.filter { $0.event == "observability.log_file_failed" }
+        XCTAssertEqual(failures.count, 1, "\(events.events.map(\.event))")
+        XCTAssertTrue(failures.first?.detail?.hasPrefix("stage=mkdir ") ?? false, failures.first?.detail ?? "none")
+        XCTAssertFalse(failures.first?.detail?.contains(url.path) ?? true, failures.first?.detail ?? "none")
     }
 
     /// The store routes the report into its own ring buffer. That report is
@@ -95,7 +106,7 @@ final class RotatingLogFileTests: XCTestCase {
     @MainActor func testTheStoreSurfacesAFileFailureInTheRingBufferWithoutLooping() async throws {
         let parent = try tempDir().appendingPathComponent("not-a-directory")
         try Data().write(to: parent)
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minStderrLevel = .error
         store.logFileURL = parent.appendingPathComponent("proxy.log")
         for i in 1...3 { store.log(.notice, "line \(i)") }

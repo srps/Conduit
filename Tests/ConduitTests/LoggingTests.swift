@@ -8,7 +8,7 @@ import XCTest
 final class LoggingTests: XCTestCase {
 
     @MainActor func testRingBufferCapturesAllLevels() {
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minStderrLevel = .error
         store.minBufferedLevel = .debug
 
@@ -27,7 +27,7 @@ final class LoggingTests: XCTestCase {
         // trimSlack` (= 2256) before any trim happens. Appending 2100
         // entries puts us inside the slack window — no trim should fire,
         // so all 2100 entries are still present.
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minBufferedLevel = .debug
         for i in 0..<2100 {
             store.log(.info, "entry \(i)")
@@ -44,7 +44,7 @@ final class LoggingTests: XCTestCase {
         // newest 2000 entries — i.e. the first kept entry's index is
         // (2257 - 2000) - 1 = 256 (since entry 0 is the very first append
         // and we drop entries 0…256, keeping 257…2256).
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minBufferedLevel = .debug
         for i in 0..<2257 {
             store.log(.info, "entry \(i)")
@@ -62,7 +62,7 @@ final class LoggingTests: XCTestCase {
         // remain bounded, never holding more than the slack ceiling.
         // This is the actual perf contract — under a 10K burst we never
         // hold > 2256 entries even momentarily.
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minBufferedLevel = .debug
         for i in 0..<2256 {
             store.log(.info, "warmup \(i)")
@@ -83,7 +83,7 @@ final class LoggingTests: XCTestCase {
     }
 
     @MainActor func testExportDiagnosticLog() {
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minBufferedLevel = .debug
         store.log(.info, "alpha", category: .proxy)
         store.log(.warning, "beta", category: .system)
@@ -96,7 +96,7 @@ final class LoggingTests: XCTestCase {
     }
 
     @MainActor func testClearEntries() {
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minBufferedLevel = .debug
         store.log(.info, "will be cleared")
         XCTAssertFalse(store.entries.isEmpty)
@@ -106,17 +106,17 @@ final class LoggingTests: XCTestCase {
     }
 
     @MainActor func testMinStderrLevelDefault() {
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         XCTAssertEqual(store.minStderrLevel, .notice)
     }
 
     @MainActor func testMinBufferedLevelDefault() {
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         XCTAssertEqual(store.minBufferedLevel, .notice)
     }
 
     @MainActor func testBelowBufferedLevelNotBuffered() {
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         store.minBufferedLevel = .warning
         store.log(.debug, "should not appear")
         store.log(.info, "should not appear")
@@ -129,7 +129,7 @@ final class LoggingTests: XCTestCase {
     }
 
     @MainActor func testFileLoggingCreatesFile() async throws {
-        let store = AppLogStore()
+        let store = AppLogStore(destinationGuard: UncheckedRecordFileDestination(), eventLog: RuntimeEventLog())
         // AppLogStore.log filters all outputs (stderr, buffer, file)
         // by `min(stderrLevel, bufferedLevel)`, keeping the file write
         // consistent with the other outputs. The
@@ -138,7 +138,7 @@ final class LoggingTests: XCTestCase {
         let tmpDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("ConduitLogTest-\(UUID().uuidString)")
         let logFile = tmpDir.appendingPathComponent("test.log")
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        defer { removeScratch([tmpDir]) }
 
         store.logFileURL = logFile
         store.log(.info, "file-logged-message")
