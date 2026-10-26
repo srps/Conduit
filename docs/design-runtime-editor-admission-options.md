@@ -1,7 +1,7 @@
 # Interactive editor admission: owner review
 
 Status: decision 1 selected by the owner on 2026-10-26 ([0035](decisions/0035-whole-request-lifecycle-validation.md));
-implementation is planned. Decision 2 remains proposed. This supplements the
+implementation is planned. Decision 2 was selected on 2026-10-26 ([0036](decisions/0036-conditional-dns-activation.md)). This supplements the
 [editor contract](design-runtime-editor-contract-review.md).
 Official subscription-backed Claude Code reviewed the alternatives. The existing app has one local
 client; its behavior alone does not decide races between future app/CLI clients.
@@ -60,11 +60,11 @@ Revisit partial progress when actual multi-client use demonstrates enough benefi
 
 ## Decision 2: preserve proxy-to-DNS dependent startup
 
-Unselected and separate from decision 1. Today proxy Start/Restart may start enabled DNS. Under the
+Selected under 0036, with the alternatives retained below. Today proxy Start/Restart may start enabled DNS. Under the
 approved private API, a DNS save-only slot cannot enable stopped DNS; ordinary proxy Restart has no
 DNS slot. The daemon whole-host CLI facade remains separate.
 
-**Proposed recommendation — explicit conditional activation owned by the host (Claude reviewed).**
+**Selected — explicit conditional activation owned by the host.**
 Preserve the convenience through a separately named, bounded action: bring DNS up only if its current
 host-held intent is already enabled and unfenced. The client explicitly includes this action with proxy
 Start or Restart; it never changes the DNS enable bit or clears a DNS Stop fence. The companion is

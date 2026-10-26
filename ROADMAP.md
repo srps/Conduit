@@ -58,7 +58,8 @@ integration PR. Neither correction creates another app writer.
 
 Before private update/Start adoption, settle the [interactive admission alternatives](./docs/design-runtime-editor-admission-options.md):
 the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-request-lifecycle-validation.md));
-proxy-to-DNS dependent startup remains unselected. Exact revisions and save-only keep their approved meaning.
+host-checked conditional DNS activation is selected ([0036](./docs/decisions/0036-conditional-dns-activation.md)).
+Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
 Stop/status/private-read adapter work remains independent.
 
 Supporting evidence stays with its owning slice:
