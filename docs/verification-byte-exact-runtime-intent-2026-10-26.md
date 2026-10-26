@@ -59,7 +59,25 @@ script/resource/package fingerprint was:
 
     0d0088dfe469445674f39e88b0be18df508bf7bb8cdeca59b6c1602cf955b308
 
-The two review-driven test additions, their specific guard mutations and final hosted CI remain pending. No release-readiness claim follows from the focused passes. Actual-client memory and
+The review follow-up adds two witnesses and a pre-push lag assertion, with a refresh-operation join
+in both routing tests. Focused checks pass 271 tests. The new PAC control first failed because its shared
+fake intentionally leaves DIRECT unparsed; only the new private fake received a DIRECT parser, then
+the control passed. This is a recorded test-fixture correction, not a production failure.
+
+Three additional actual source mutations isolate the host verified-Start view guard, dropping an old PAC
+script on routing, and the reconciler lag predicate. Each failed its intended assertion, exact bytes were
+restored, and restored host/PAC/reconciler tests passed. The [follow-up manifest](experiments/runtime-intent-guards/review-followup.json)
+proves all production files still match the immutable review/full-workflow source. Independent read-only
+review of test delta 2bbd11d returned READY. Two optional cleanups removed an unused DNS fixture and
+corrected an observer-delivery comment; no assertions or production files changed.
+
+The final complete Swift run passed 3,449 tests with zero failures and four documented skips after
+the added tests and cleanup. Decision checks, including the new owner-selected 0035 and mutation/history
+checks, passed. All other workflow checks ran on identical production sources; no repeat of unchanged
+packaging/performance tests is claimed. Exact-head hosted CI and merge disposition belong to the
+integration PR; these local checks do not claim them.
+Coverage limits remain explicit: PAC same-script/racing cache-store checks and the credential in-flight
+keep-read check are not independently mutant-verified. No private hooks were added to inspect those states. No release-readiness claim follows from the focused passes. Actual-client memory and
 Stop/status measurements remain a separate adoption gate. The unconfirmed diagnostic flush is tracked
 with candidate mechanisms and deterministic-witness acceptance in issue47, without a cause or fix claimed. Hostname canonicalization is an unverified
 follow-up hypothesis, and direct system-PAC repointing remains separate issue194 work.

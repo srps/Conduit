@@ -12,3 +12,11 @@ Restore before the next variant. These are evidence artifacts, not a permanent t
 This demonstrates sensitivity at the named guards, not every modified comparison. It does not cover
 real Keychain account normalization, direct system-PAC repointing, hostname canonicalization, all
 concurrent PAC cache stores or the host's verified-start view guard independently.
+
+## Review follow-up
+
+Three further actual mutations at 2bbd11d isolate the host verified-Start view guard, dropping a
+superseded PAC script on routing, and the reconciler lag predicate. Each failed its intended assertion;
+exact bytes were restored and the restored host/PAC/reconciler tests passed. `review-followup.json`
+records their patches and proves all production files match the original reviewed and full-workflow
+source. The later test cleanup only removes an unused fixture value and corrects an observer comment.

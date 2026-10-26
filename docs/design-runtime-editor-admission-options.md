@@ -64,23 +64,32 @@ Unselected and separate from decision 1. Today proxy Start/Restart may start ena
 approved private API, a DNS save-only slot cannot enable stopped DNS; ordinary proxy Restart has no
 DNS slot. The daemon whole-host CLI facade remains separate.
 
-**Proposed recommendation — explicit conditional activation owned by the host (Claude review pending).**
+**Proposed recommendation — explicit conditional activation owned by the host (Claude reviewed).**
 Preserve the convenience through a separately named, bounded action: bring DNS up only if its current
 host-held intent is already enabled and unfenced. The client explicitly includes this action with proxy
-Start or Restart; it never changes the DNS enable bit or clears a DNS Stop fence. It has its own exact
+Start or Restart; it never changes the DNS enable bit or clears a DNS Stop fence. The companion is
+valid only with proxy Start/Restart, not as a general new lifecycle verb. It has its own exact
 DNS lifecycle revision and outcome. This is a contract extension, not a new meaning of save-only.
 
 For private Start, the fixed module plan can express proxy Start plus DNS conditional activation. For
-ordinary Restart, add a narrowly typed companion action to the proxy restart command, using the
-currently verified input rather than submitting or applying editor values. Exact API names remain
+ordinary menu Restart, add a narrowly typed companion action to the proxy restart command. It
+submits no editor values. Its Start phase still verifies required inputs through the sole store/workflow;
+unresolved or mixed inputs hold, with no fallback to last-applied values. Proxy and DNS use the same
+verified pair. Settings Save-and-Restart can explicitly submit the draft through the private path. Exact API names remain
 reviewable implementation details. Both operations use the same workflow authorization and fixed
 module ownership; introduce no generic dependency graph, second writer or UI-side lifecycle authority.
 
-A stale participating revision rejects the whole request under 0035. A later Stop invalidates the
-remaining operation as selected there; completed physical effects stay reported facts. Disabled/fenced
-DNS is a typed no-op. Running DNS needs no activation. A DNS startup failure reports its own result
+A stale participating revision rejects the whole request under 0035. A later Stop invalidates any
+remaining shared write/apply as selected there. When Restart only acts on unchanged verified inputs,
+a DNS Stop cancels the companion; completed physical effects stay reported facts. Disabled/fenced
+DNS is a typed no-op. Running/starting DNS needs no activation. A failed bind leaves its enabled intent
+and fence unchanged and restores its machine DNS surfaces as the app does today. A DNS startup failure reports its own result
 and does not pretend that an already-started proxy was rolled back. Ordinary restart must not silently
 apply unsaved editor values. New fields require frame sizing before adoption.
+
+The behavioral boundary is explicit: activation reads authoritative host intent rather than the editor
+draft bit; ordinary menu Restart sends no unsaved values. Every interactive Start already uses the
+private current-frozen-draft request. This adds no ordinary Start or new launch auto-start behavior.
 
 Example: DNS was enabled on disk but failed to bind. Restart Proxy explicitly requests a conditional
 DNS retry. With unchanged DNS revision and no fence, the host retries it. If the user explicitly stopped

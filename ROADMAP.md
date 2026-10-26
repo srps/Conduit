@@ -52,7 +52,9 @@ Devin's optional full reviews were skipped for expired credits; they are not rev
 The related apply/reconciler equality correction [#246](https://github.com/srps/Conduit/issues/246) is implemented with
 one shared adoption predicate and byte-aware PAC/credential cache comparisons. Its
 [verification checkpoint](./docs/verification-byte-exact-runtime-intent-2026-10-26.md) separates focused tests, actual source
-mutations and still-pending final/hosted checks. Neither correction creates another app writer.
+mutations and local/hosted evidence. All 41 local checks passed on frozen production sources; after
+test-only review additions, the full Swift suite passes 3,449 tests. Hosted disposition belongs to the
+integration PR. Neither correction creates another app writer.
 
 Before private update/Start adoption, settle the [interactive admission alternatives](./docs/design-runtime-editor-admission-options.md):
 the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-request-lifecycle-validation.md));

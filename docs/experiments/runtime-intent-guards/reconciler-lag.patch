@@ -1,0 +1,11 @@
+--- a/Sources/PlatformMac/RuntimeReconciler.swift
++++ b/Sources/PlatformMac/RuntimeReconciler.swift
+@@ -173,7 +173,7 @@
+ 
+     /// Whether the baseline is behind `config`: an action that did not land left it there, so the next save retries that action.
+     package func lags(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) -> Bool {
+-        ConfigDiff(old: lastReconciledConfig, new: config).inputChanged || lastReconciledPlatformConfig != platformConfig
++        lastReconciledConfig != config || lastReconciledPlatformConfig != platformConfig
+     }
+ 
+     /// Whether an action the last save asked for did not land.
