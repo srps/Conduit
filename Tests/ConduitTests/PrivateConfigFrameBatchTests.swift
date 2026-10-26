@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Foundation
 import XCTest
 @testable import ConduitShared
 
@@ -228,25 +229,69 @@ final class PrivateConfigFrameBatchTests: XCTestCase {
     // MARK: - Buffer
 
     /// Bulk and single appends mixed across several growths, ending exactly at the ceiling: the bytes are the ones
-    /// appended, and capacity never passes the ceiling.
+    /// appended, and capacity never passes the ceiling. A twin buffer fed the same bytes one at a time must reach the
+    /// same capacity after every step, so a bulk append keeps the doubling growth: growing only to the bytes needed
+    /// would reallocate on every run and make the copy work quadratic.
     func testBulkAppendMatchesBytewiseAppendAcrossGrowth() {
-        let runs = [0, 1, 9, 4_096, 1, 20_000, 3]
-        let buffer = PrivateFrameBuffer(initialCapacity: 10, ceiling: runs.reduce(0, +) + runs.count)
+        let runs = [0, 1, 9, 4_096, 1, 20_000, 3, Self.budget, Self.budget, 5]
+        let ceiling = runs.reduce(0, +) + runs.count
+        let buffer = PrivateFrameBuffer(initialCapacity: 10, ceiling: ceiling)
+        let twin = PrivateFrameBuffer(initialCapacity: 10, ceiling: ceiling)
         var expected: [UInt8] = []
         for (index, length) in runs.enumerated() {
             let run = Self.body(length, seed: index)
             run.withUnsafeBufferPointer { buffer.append(contentsOf: $0) }
+            for byte in run {
+                twin.append(byte)
+            }
             expected += run
+            XCTAssertEqual(buffer.capacity, twin.capacity, "run \(index)")
             buffer.append(UInt8(index))
+            twin.append(UInt8(index))
             expected.append(UInt8(index))
+            XCTAssertEqual(buffer.capacity, twin.capacity, "run \(index) and its single byte")
             XCTAssertLessThanOrEqual(buffer.capacity, buffer.ceiling, "run \(index)")
             XCTAssertGreaterThanOrEqual(buffer.capacity, buffer.count, "run \(index)")
         }
         XCTAssertEqual(buffer.count, buffer.ceiling)
         XCTAssertEqual(buffer.withBytes { Array($0) }, expected)
+        XCTAssertEqual(twin.withBytes { Array($0) }, expected)
         buffer.release()
         XCTAssertEqual(buffer.count, 0)
         XCTAssertEqual(buffer.capacity, 0)
+    }
+
+    // MARK: - Data
+
+    /// `Data` slices whose indices start past zero, as a socket read might hand them over. Whichever path the reader
+    /// takes for `Data`, every kind reads intact and stops at the frame's end.
+    func testDataSlicesAtNonzeroOffsetsReadEveryKind() throws {
+        let lead = 29
+        for (kind, letter) in Self.kinds {
+            let body = Self.body(40_000, seed: 5)
+            let frame = Self.frame(letter, body)
+            let data = Data(Array(repeating: UInt8(0xFF), count: lead) + frame + Array(repeating: UInt8(0xFF), count: 9))
+            for chunk in [7, Self.budget, data.count] {
+                let label = "\(letter) Data chunk \(chunk)"
+                let reader = PrivateConfigurationFrameReader(expecting: kind)
+                var offset = data.startIndex + lead
+                var delivered: [UInt8]?
+                while offset < data.endIndex, delivered == nil {
+                    let piece = data[offset..<min(offset + chunk, data.endIndex)]
+                    XCTAssertEqual(piece.startIndex, offset, label)
+                    let (step, consumed) = try reader.consume(piece)
+                    XCTAssertLessThanOrEqual(consumed, Self.budget, label)
+                    offset += consumed
+                    if case .frame(let read) = step {
+                        delivered = read.bytes.bytes()
+                    } else {
+                        XCTAssertEqual(consumed, min(piece.count, Self.budget), label)
+                    }
+                }
+                XCTAssertEqual(delivered, body, label)
+                XCTAssertEqual(offset, data.startIndex + lead + frame.count, label)
+            }
+        }
     }
 
     // MARK: - Helpers
