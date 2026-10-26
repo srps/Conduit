@@ -36,7 +36,7 @@ package final class BoundedRecordWriter: @unchecked Sendable {
     private let write: @Sendable ([Data]) throws -> Void
     private let reportFailure: @Sendable (String) -> Void
 
-    /// `onDrainCleanup` is a test seam: it runs when a timed-out async drain's physical cleanup has finished.
+    /// `onDrainCleanup` is a test seam: it runs when the last notify and timer body have ended, after any drain outcome.
     package convenience init(limits: RecordWriterLimits = .init(),
                              write: @escaping @Sendable ([Data]) throws -> Void,
                              reportFailure: @escaping @Sendable (String) -> Void,

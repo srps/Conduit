@@ -308,7 +308,6 @@ final class RecordDrainWaiterTests: XCTestCase {
         bodies.release(0)
         XCTAssertEqual(timerReleased.wait(timeout: .now() + 10), .success, "the held body ended")
         XCTAssertEqual(cleaned.wait(timeout: .now() + 10), .success)
-        // Cleanup blocks run in order on one serial queue, so an earlier, wrong cleanup would already be counted.
         XCTAssertEqual(cleanups.withLockedValue { $0 }, 1, "one idle transition, one cleanup")
 
         group.enter()
@@ -323,13 +322,13 @@ final class RecordDrainWaiterTests: XCTestCase {
     }
 
     /// Two drained waits whose bodies are held fill both slots. Twenty further non-empty waits are refused and create no
-    /// timer. Releasing one body frees one slot, which the next wait takes.
+    /// timer. Releasing one body frees only its own slot; a third held body refills it beside the unreleased second body.
     func testTwoRetiredBodiesRefuseEveryFurtherWaitAndTheRefusalsCreateNoTimer() async {
         let group = DispatchGroup()
         let registered = DispatchSemaphore(value: 0)
         let timerReleased = DispatchSemaphore(value: 0)
         let cleaned = DispatchSemaphore(value: 0)
-        let bodies = IndexedTimerBodies(held: [0, 1])
+        let bodies = IndexedTimerBodies(held: [0, 1, 2])
         let waiter = RecordDrainWaiter(
             group: group, timerSlots: 2, onCleanup: { cleaned.signal() },
             onTimerReleased: { timerReleased.signal() }, onRegistered: { registered.signal() },
@@ -356,12 +355,20 @@ final class RecordDrainWaiterTests: XCTestCase {
         XCTAssertEqual(timerReleased.wait(timeout: .now() + 10), .success)
         let again = Task { await waiter.drain(until: deadline(in: 10)) }
         XCTAssertEqual(registered.wait(timeout: .now() + 10), .success, "the released slot takes the next wait")
+        XCTAssertEqual(bodies.entered.wait(timeout: .now() + 10), .success, "the replacement timer body is held")
         group.leave()
         let againOutcome = await again.value
         XCTAssertEqual(againOutcome, .drained)
-        XCTAssertEqual(timerReleased.wait(timeout: .now() + 10), .success)
+
+        group.enter()
+        let fourth = await waiter.drain(until: deadline(in: 0.05))
+        XCTAssertEqual(fourth, .busy, "the unreleased second body and the replacement fill both slots")
+        XCTAssertEqual(bodies.calls, 3, "releasing one reservation never releases another reservation's slot")
+        group.leave()
 
         bodies.release(1)
+        bodies.release(2)
+        XCTAssertEqual(timerReleased.wait(timeout: .now() + 10), .success)
         XCTAssertEqual(timerReleased.wait(timeout: .now() + 10), .success)
         XCTAssertEqual(cleaned.wait(timeout: .now() + 10), .success)
         XCTAssertEqual(bodies.calls, 3)
