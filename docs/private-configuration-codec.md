@@ -11,19 +11,26 @@ Shared target `ConduitShared`, all `package` access. Nothing is `public`.
 
 - `PrivateURLValue`, `PrivateRuntimeConfiguration`, `PrivatePlatformConfiguration`,
   `PrivateConfigurationRequest`: the values. None is `Codable`. Reflection is redacted.
+- `PrivateBaseline`, `PrivateModuleSlots`, `PrivateModuleIntent`: the update's
+  preconditions (see "Editor preconditions"). Not `Codable`; they hold no value.
+- `PrivateConfigurationFrame.Kind` (`update`, `editorReply`) with its separately named
+  caps `maxRequestFrameBytes` and `maxEditorReplyFrameBytes`.
 - `PrivateConfigurationEncoder.measureBody(_:) throws -> Int`: the body length, from a
   counting pass that writes nothing. It refuses an unrepresentable value and a body past
   the loose bound described under "Frame and limits".
 - `PrivateConfigurationEncoder.encode(_:) throws -> SecretBytes`: one complete frame.
-- `PrivateConfigurationFrameReader` (`final class`, one owner, not `Sendable`):
-  `consume(_:)`, `finish()`, `reset()`, `retainedByteCount`.
-- `PrivateConfigurationDecoder.decode(_:) throws -> PrivateConfigurationRequest`.
+- `PrivateConfigurationFrameReader(expecting:)` (`final class`, one owner, not `Sendable`):
+  `consume(_:)`, `finish()`, `reset()`, `retainedByteCount`. It reads one frame of the kind
+  it expects, and its body carries that kind.
+- `PrivateConfigurationDecoder.decode(_:) throws -> PrivateConfigurationRequest`. It
+  refuses a body of another kind before reading its bytes.
 - `PrivateConfigurationWireError`: fixed text, no input echoed.
 
 Target `ProxyControlBridge`, `package` access:
 
-- `PrivateConfigurationBridge.makeRequest(...) throws`: kernel config and platform to
-  the request. It checks shared resources before mapping, then exact frame size.
+- `PrivateConfigurationBridge.makeRequest(...) throws`: kernel config and platform, plus
+  the caller's baselines and module intents, to the request. It checks shared resources
+  before mapping, then exact frame size.
 - `PrivateConfigurationBridge.makeValues(from:localLaunchAtLogin:) throws`: request to
   kernel values. It takes the exact count first, so a request built in memory is
   bounded too. Mapping does not authorize runtime apply.
@@ -38,8 +45,12 @@ refusals. This correction is not an adopted store or apply engine.
 
 ## Frame and limits
 
-The frame is `PCV1 Q <decimal length>\n<JSON body>\n`. The whole frame, header and
-terminator included, is at most 8,388,608 bytes (`PrivateConfigurationFrame.maxFrameBytes`).
+The frame is `PCV1 <kind> <decimal length>\n<JSON body>\n`, where the kind is `Q` for an
+update and `R` for an editor reply. The whole frame, header and terminator included, is at
+most its kind's cap: 8,388,608 bytes for a request (`maxRequestFrameBytes`, decision 0019)
+and 8,388,608 bytes for an editor reply (`maxEditorReplyFrameBytes`, decision 0034). The
+two are separate constants. Every kind's prefix is seven bytes, so the arithmetic below
+holds for both.
 
 - The exact frame size of a body of `N` bytes whose length has `D` decimal digits is
   `N + D + 9`. `PrivateConfigurationFrame.frameByteCount(bodyCount:)` computes it, and the
@@ -69,17 +80,48 @@ terminator included, is at most 8,388,608 bytes (`PrivateConfigurationFrame.maxF
 
 ## Header grammar
 
-The header is read one byte at a time. Each byte of the fixed prefix `PCV1 Q ` must
-match. The first byte that differs decides the refusal:
+The header is read one byte at a time. Each byte of the expected kind's fixed prefix,
+`PCV1 Q ` or `PCV1 R `, must match. The first byte that differs decides the refusal:
 
 - position 3, the version digit: `unsupportedVersion`;
-- position 5, the kind: `unknownFrameKind`;
+- position 5, the kind: `unexpectedFrameKind`, whether the letter names another known kind
+  or none;
 - any other prefix position: `malformedHeader`.
 
 A line feed inside the prefix is one of those bytes. So `PCV\n` is `unsupportedVersion`
-and `PCV1 \n` is `unknownFrameKind`. A line feed ends the header only after the prefix
-and at least one digit. `ReferenceFrameParser` follows the same rule, and the fixed
-differential cases include both counterexamples and the other prefix positions.
+and `PCV1 \n` is `unexpectedFrameKind`. A line feed ends the header only after the prefix
+and at least one digit. `ReferenceFrameParser` follows the same rule for either letter, and
+the fixed differential cases include both counterexamples, the other prefix positions and
+request frames offered to a reply reader.
+
+## Editor preconditions (2026-10-26)
+
+The update request no longer carries Int revisions. It names, as preconditions the caller
+observed:
+
+- `runtimeBaseline` and `platformBaseline`: each a `PrivateBaseline`, the store namespace
+  (a UUID family separate from the host incarnation), the file as a
+  `ControlConfigWorkflowFile`, and the store's exact `UInt64` version. The initializer
+  refuses a baseline in the other file's slot. A decoded baseline is not authority: only
+  the store mints tokens and decides.
+- `modules`: one `PrivateModuleIntent` per module in fixed `PrivateModuleSlots` (no
+  array): `saveOnly`, `applyWhileRunning(ifLifecycleRevision:)` or
+  `start(ifLifecycleRevision:)`. Stop is not here; it stays ordinary.
+
+On the wire a version is a JSON number spelled as plain decimal digits, at most 20, no
+greater than `UInt64.max` (`.unsignedDecimal`). The scanner refuses a sign, fraction,
+exponent, leading zero or overflow before Foundation reads it, so nothing is rounded or
+narrowed. `lifecycleRevision` is a required nullable member: null for save-only, a
+revision for apply and start; any other pairing is refused. The retired members
+(`expectedConfigRevision`, `expectedPlatformRevision`, `expectedOwnerGeneration`) are
+unknown keys. `PrivateConfigExpectedGeneration` remains only in the store's operation
+context. No production caller built the old request, so nothing deployed reads it.
+
+`PrivateEditorCodecTests` pins the `UInt64` range and refusals, the slot and component
+checks, every intent in every slot, the strict pairings and the retired keys.
+`pm-sim private-config-boundary` round-trips a `UInt64.max` baseline and all three
+intents through every read schedule, and refuses one past the maximum, a swapped slot and
+a save-only revision.
 
 ## Shared resource preflight
 
@@ -99,7 +141,7 @@ The bypass list (`noProxyHosts`) has a canonical JSON width of at most 8,192 byt
 - **No buffer.** The scanner keeps a running sum, and the typed checks use the same counter. The earlier typed check encoded the list with `JSONEncoder`. `ProxyBypassSyntax` now uses the same canonical counter, and tests pin it to the boundary.
 - **Known difference.** For a list past its count, the scanner refuses the first bad item it reads, and the typed check refuses the count first. Both are resource refusals, but they can name different fields. The scanner reads at most 256 items before the count refusal, so the cost stays bounded.
 
-**Token guard (64 bytes).** This is a lexical guard of the token grammar, not a product ceiling. A valid identifier is a canonical UUID of 36 bytes (`UUID(uuidString:)`), and every enumeration raw value the decoder accepts is 16 bytes or less. So no valid token is refused. A longer token is malformed and the scanner refuses it as `malformedBody`, not as `resourceLimitExceeded`. `ConfigurationResourceCanonicalWidthTests` derives those lengths from the decoder's own types.
+**Token guard (64 bytes).** This is a lexical guard of the token grammar, not a product ceiling. A valid identifier is a canonical UUID of 36 bytes (`UUID(uuidString:)`), and every enumeration raw value the decoder accepts in a token place is 17 bytes or less: the widest is the module intent action `applyWhileRunning`. Baseline namespaces are UUIDs, and baseline components are `ControlConfigWorkflowFile` raw values. So no valid token is refused. A longer token is malformed and the scanner refuses it as `malformedBody`, not as `resourceLimitExceeded`. `ConfigurationResourceCanonicalWidthTests` derives those lengths from the decoder's own types, including `ControlConfigWorkflowFile` and `PrivateModuleIntentAction`, and pins the widest.
 
 Evidence in the repository, all headless:
 

@@ -220,7 +220,7 @@ final class PrivateConfigBridgeTests: XCTestCase {
     /// The in-memory entry point takes a request that was never framed, so it counts the request exactly.
     func testMakeValuesRefusesAnOversizeInMemoryRequestBeforeMapping() throws {
         var request = try PrivateConfigSamples.request()
-        request.runtime.profileName = String(repeating: "a", count: PrivateConfigurationFrame.maxFrameBytes)
+        request.runtime.profileName = String(repeating: "a", count: PrivateConfigurationFrame.maxRequestFrameBytes)
         XCTAssertThrowsError(try PrivateConfigurationBridge.makeValues(from: request, localLaunchAtLogin: false)) {
             XCTAssertEqual(
                 $0 as? PrivateConfigurationBridgeError,
@@ -342,9 +342,9 @@ final class PrivateConfigBridgeTests: XCTestCase {
             requestID: ControlRequestID(rawValue: PrivateConfigSamples.uuid(101)),
             incarnation: ControlHostIncarnation(rawValue: PrivateConfigSamples.uuid(102)),
             budget: try ControlWireBudget(5_000),
-            expectedConfigRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 7)),
-            expectedPlatformRevision: try XCTUnwrap(PrivatePlatformRevision(rawValue: 6)),
-            expectedOwnerGeneration: try XCTUnwrap(PrivateConfigExpectedGeneration(rawValue: 5))
+            runtimeBaseline: PrivateConfigSamples.baseline(.runtime, version: 7),
+            platformBaseline: PrivateConfigSamples.baseline(.platform, version: 6),
+            modules: try PrivateConfigSamples.modules()
         )
     }
 
@@ -355,7 +355,7 @@ final class PrivateConfigBridgeTests: XCTestCase {
 
     /// The body of one complete frame, read through the real reader.
     private func readFrameBody(_ frame: [UInt8]) throws -> PrivateConfigurationFrameBody {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         guard case .frame(let body) = try reader.consume(frame).step else {
             throw Failure(message: "the frame did not complete")
         }
@@ -371,7 +371,7 @@ final class PrivateConfigBridgeTests: XCTestCase {
 
     /// Feeds one frame to the reader one byte at a time and returns its body.
     private func readOneByteAtATime(_ bytes: [UInt8]) throws -> PrivateConfigurationFrameBody {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         for (offset, byte) in bytes.enumerated() {
             let (step, consumed) = try reader.consume([byte])
             XCTAssertEqual(consumed, 1)

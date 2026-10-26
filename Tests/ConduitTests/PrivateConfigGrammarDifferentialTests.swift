@@ -216,7 +216,7 @@ final class PrivateConfigGrammarDifferentialTests: XCTestCase {
     }
 
     private func decode(_ body: [UInt8]) throws -> PrivateConfigurationRequest {
-        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(bytes: SecretBytes(body)))
+        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(body)))
     }
 
     /// The scanner's refusal, or nil when the body decodes.

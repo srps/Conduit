@@ -2,32 +2,68 @@
 import Darwin
 import Foundation
 
-// The private frame (decision 0019). One frame is a fixed ASCII header, exactly one
+// The private frame (decisions 0019 and 0034). One frame is a fixed ASCII header, exactly one
 // JSON body of the declared length, and a line feed:
 //
-//     PCV1 Q <decimal body length>\n<JSON body>\n
+//     PCV1 <kind> <decimal body length>\n<JSON body>\n
 //
 // The header names the version, the kind and the body length before any body
-// byte is read. The reader refuses an unsupported version, an unknown kind or an
-// oversize length while it is still in the header, with zero body bytes buffered.
-// The v2 line framer cannot do that, because it finds frames by line feed and has
-// no declared length, so this is a separate format. It does not change v2.
+// byte is read. A reader expects one kind. It refuses an unsupported version, any
+// other kind or an oversize length while it is still in the header, with zero body
+// bytes buffered. The v2 line framer cannot do that, because it finds frames by line
+// feed and has no declared length, so this is a separate format. It does not change v2.
 //
-// Cap: the whole frame, header and terminator included, is at most
-// `PrivateConfigurationFrame.maxFrameBytes` (8,388,608 bytes).
+// Cap: the whole frame, header and terminator included, is at most its kind's cap:
+// `maxRequestFrameBytes` for a request (decision 0019) and `maxEditorReplyFrameBytes`
+// for an editor reply (decision 0034). Both are 8,388,608 bytes, and each is named
+// separately so that neither silently follows the other.
 
 /// Constants of the private frame. Nothing here is a per-field limit.
 package enum PrivateConfigurationFrame {
-    /// The cap on one complete frame: header, body and terminator (decision 0019).
-    package static let maxFrameBytes = 8_388_608
+    /// What one frame carries. The header names it with one ASCII letter, and each kind has its own cap.
+    package enum Kind: Sendable, Equatable, CaseIterable {
+        /// `Q`: one configuration update from a client.
+        case update
+        /// `R`: one answer from the host to an editor request.
+        case editorReply
 
-    /// The fixed header prefix, `PCV1 Q `. Its version digit is `1`, and `Q` is the request kind.
-    static let requestPrefix: [UInt8] = Array("PCV1 Q ".utf8)
-    /// Position of the kind tag inside `requestPrefix`.
+        /// The letter the header carries at `kindPosition`.
+        var tag: UInt8 {
+            switch self {
+            case .update: UInt8(ascii: "Q")
+            case .editorReply: UInt8(ascii: "R")
+            }
+        }
+
+        /// The cap on one complete frame of this kind: header, body and terminator.
+        package var maxFrameBytes: Int {
+            switch self {
+            case .update: PrivateConfigurationFrame.maxRequestFrameBytes
+            case .editorReply: PrivateConfigurationFrame.maxEditorReplyFrameBytes
+            }
+        }
+
+        /// The fixed header prefix, `PCV1 <tag> `. Its version digit is `1`.
+        var prefix: [UInt8] {
+            Array("PCV1 ".utf8) + [tag, UInt8(ascii: " ")]
+        }
+
+        /// The longest decimal body length that fits this kind's cap. For an eight MiB cap that is seven
+        /// digits, so the header is at most 14 bytes before its line feed.
+        var maxLengthDigits: Int {
+            PrivateConfigurationFrame.decimalDigits(maxFrameBytes)
+        }
+    }
+
+    /// The cap on one complete request frame: header, body and terminator (decision 0019).
+    package static let maxRequestFrameBytes = 8_388_608
+    /// The cap on one complete editor reply frame: header, body and terminator (decision 0034).
+    package static let maxEditorReplyFrameBytes = 8_388_608
+
+    /// Bytes of every kind's fixed prefix, `PCV1 <tag> `.
+    static let prefixLength = 7
+    /// Position of the kind tag inside the prefix.
     static let kindPosition = 5
-    /// The longest decimal body length that fits the cap, which is seven digits. The header
-    /// is therefore at most 14 bytes before its line feed.
-    static let maxLengthDigits = 7
 
     /// Input bytes one `consume` call examines. A call returns early at a frame boundary.
     package static let maxInputBytesPerConsume = 16_384
@@ -36,16 +72,23 @@ package enum PrivateConfigurationFrame {
 
     /// The exact size of one complete frame around a body of `bodyCount` bytes: the fixed prefix,
     /// the decimal length, the header's line feed, the body and the terminator. The length is
-    /// written in decimal, so its digit count follows the body count. The reader and the decoder
-    /// both check the cap with this function, so neither depends on the other to have done so.
+    /// written in decimal, so its digit count follows the body count. Every kind's prefix has the
+    /// same length, so the size does not depend on the kind; the cap it is checked against does.
+    /// The reader and the decoder both check the cap with this function, so neither depends on the
+    /// other to have done so.
     package static func frameByteCount(bodyCount: Int) -> Int {
+        prefixLength + decimalDigits(bodyCount) + 1 + bodyCount + 1
+    }
+
+    /// The number of decimal digits of a non-negative value.
+    static func decimalDigits(_ value: Int) -> Int {
         var digits = 1
-        var rest = bodyCount / 10
+        var rest = value / 10
         while rest > 0 {
             digits += 1
             rest /= 10
         }
-        return requestPrefix.count + digits + 1 + bodyCount + 1
+        return digits
     }
 }
 
@@ -56,8 +99,9 @@ package enum PrivateConfigurationWireError: Error, Sendable, Equatable, CustomSt
     case frameTooLarge
     /// The header names a version this build does not speak.
     case unsupportedVersion
-    /// The header names a kind this build does not define.
-    case unknownFrameKind
+    /// The header names a kind other than the one the reader expects, or a kind this build does not define.
+    /// A body handed to a decoder of another kind is refused the same way.
+    case unexpectedFrameKind
     /// The header does not follow the grammar.
     case malformedHeader
     /// The body is not one valid configuration request.
@@ -75,7 +119,7 @@ package enum PrivateConfigurationWireError: Error, Sendable, Equatable, CustomSt
         switch self {
         case .frameTooLarge: "private configuration frame exceeds its size cap"
         case .unsupportedVersion: "private configuration frame version is not supported"
-        case .unknownFrameKind: "private configuration frame kind is not known"
+        case .unexpectedFrameKind: "private configuration frame kind is not the one expected"
         case .malformedHeader: "private configuration frame header is malformed"
         case .malformedBody: "private configuration body is malformed"
         case .invalidValue: "private configuration value is not representable"
@@ -85,18 +129,21 @@ package enum PrivateConfigurationWireError: Error, Sendable, Equatable, CustomSt
     }
 }
 
-/// The body bytes of one complete frame. They are JSON and contain the URL plaintext,
-/// so the type is not `Codable` and its reflection is redacted.
+/// The body bytes of one complete frame, with the kind its header named. They are JSON and
+/// contain the URL plaintext, so the type is not `Codable` and its reflection is redacted. A
+/// decoder refuses a body of another kind, so a request body cannot be read as a reply.
 package struct PrivateConfigurationFrameBody: Sendable, CustomStringConvertible,
     CustomDebugStringConvertible, CustomReflectable
 {
+    package let kind: PrivateConfigurationFrame.Kind
     package let bytes: SecretBytes
 
-    package init(bytes: SecretBytes) {
+    package init(kind: PrivateConfigurationFrame.Kind, bytes: SecretBytes) {
+        self.kind = kind
         self.bytes = bytes
     }
 
-    package var description: String { "PrivateConfigurationFrameBody(<redacted, \(bytes.count) bytes>)" }
+    package var description: String { "PrivateConfigurationFrameBody(\(kind), <redacted, \(bytes.count) bytes>)" }
     package var debugDescription: String { description }
     package var customMirror: Mirror { Mirror(self, children: [("description", description)], displayStyle: .struct) }
 }
@@ -189,7 +236,9 @@ final class PrivateFrameBuffer {
     }
 }
 
-/// Reads exactly one private frame from a byte stream, a few bytes at a time.
+/// Reads exactly one private frame of one expected kind from a byte stream, a few bytes at a time.
+/// The kind fixes the header prefix and the cap, so a frame of any other kind is refused at its kind
+/// byte, before its length is read.
 ///
 /// Ownership: one owner at a time. The reader is a `final class` with mutable state and no
 /// `Sendable` claim. Hand it to another task only after the owner has stopped using it. A
@@ -221,6 +270,13 @@ package final class PrivateConfigurationFrameReader {
         case failed(PrivateConfigurationWireError)
     }
 
+    /// The one kind this reader accepts.
+    package let kind: PrivateConfigurationFrame.Kind
+    /// The kind's fixed header prefix and cap, taken once.
+    private let prefix: [UInt8]
+    private let maxFrameBytes: Int
+    private let maxLengthDigits: Int
+
     private var phase: Phase = .header
     /// Header bytes accepted so far, before the line feed.
     private var headerPosition = 0
@@ -229,7 +285,12 @@ package final class PrivateConfigurationFrameReader {
     private var bodyRemaining = 0
     private var body: PrivateFrameBuffer?
 
-    package init() {}
+    package init(expecting kind: PrivateConfigurationFrame.Kind) {
+        self.kind = kind
+        self.prefix = kind.prefix
+        self.maxFrameBytes = kind.maxFrameBytes
+        self.maxLengthDigits = kind.maxLengthDigits
+    }
 
     /// Body bytes this reader currently holds. Zero until the header is accepted.
     package var retainedByteCount: Int {
@@ -302,9 +363,7 @@ package final class PrivateConfigurationFrameReader {
             // A line feed ends the header only once the fixed prefix is complete. Inside the prefix it
             // is an ordinary mismatch, so `PCV\n` and `PCV1 \n` are classified by position like every
             // other bad prefix byte.
-            if byte == PrivateConfigurationFrame.lineFeed,
-               headerPosition >= PrivateConfigurationFrame.requestPrefix.count
-            {
+            if byte == PrivateConfigurationFrame.lineFeed, headerPosition >= prefix.count {
                 try finishHeader()
             } else {
                 try acceptHeaderByte(byte)
@@ -321,7 +380,7 @@ package final class PrivateConfigurationFrameReader {
             guard byte == PrivateConfigurationFrame.lineFeed, let body else {
                 throw PrivateConfigurationWireError.malformedBody
             }
-            let frame = PrivateConfigurationFrameBody(bytes: body.makeSecretBytes())
+            let frame = PrivateConfigurationFrameBody(kind: kind, bytes: body.makeSecretBytes())
             body.release()
             self.body = nil
             phase = .complete
@@ -335,7 +394,6 @@ package final class PrivateConfigurationFrameReader {
     /// refused at its own byte, not after the line feed. The length digits are checked for
     /// the cap as they arrive.
     private func acceptHeaderByte(_ byte: UInt8) throws {
-        let prefix = PrivateConfigurationFrame.requestPrefix
         if headerPosition < prefix.count {
             // A mismatch is classified by the first byte that differs. Every earlier byte
             // matched, because the position only advances on a match.
@@ -345,8 +403,8 @@ package final class PrivateConfigurationFrameReader {
                     // `PCV` matched and the version digit is not `1`.
                     throw PrivateConfigurationWireError.unsupportedVersion
                 case PrivateConfigurationFrame.kindPosition:
-                    // `PCV1 ` matched and the kind is not `Q`.
-                    throw PrivateConfigurationWireError.unknownFrameKind
+                    // `PCV1 ` matched and the kind is not the one this reader expects.
+                    throw PrivateConfigurationWireError.unexpectedFrameKind
                 default:
                     throw PrivateConfigurationWireError.malformedHeader
                 }
@@ -354,22 +412,23 @@ package final class PrivateConfigurationFrameReader {
             headerPosition += 1
             return
         }
-        // The length: decimal digits only, no leading zero, at most seven digits, and no
-        // value above the cap. The check runs per digit, so an oversize length fails here.
+        // The length: decimal digits only, no leading zero, no more digits than the kind's cap
+        // has, and no value above the cap. The check runs per digit, so an oversize length fails here.
         guard byte >= UInt8(ascii: "0"), byte <= UInt8(ascii: "9") else {
             throw PrivateConfigurationWireError.malformedHeader
         }
         guard lengthDigits > 0 || byte != UInt8(ascii: "0") else {
             throw PrivateConfigurationWireError.malformedHeader
         }
-        guard lengthDigits < PrivateConfigurationFrame.maxLengthDigits else {
+        guard lengthDigits < maxLengthDigits else {
             throw PrivateConfigurationWireError.frameTooLarge
         }
-        // At most seven digits before this step, so the value stays below 10^7 and cannot overflow.
+        // At most the cap's digit count before this step, so the value stays below ten times the cap
+        // and cannot overflow.
         lengthValue = lengthValue * 10 + Int(byte - UInt8(ascii: "0"))
         lengthDigits += 1
         headerPosition += 1
-        guard lengthValue <= PrivateConfigurationFrame.maxFrameBytes else {
+        guard lengthValue <= maxFrameBytes else {
             throw PrivateConfigurationWireError.frameTooLarge
         }
     }
@@ -377,14 +436,12 @@ package final class PrivateConfigurationFrameReader {
     /// Accepts the header's line feed. It checks the length against the cap, using the exact
     /// header size that this length produces, before any body byte is read.
     private func finishHeader() throws {
-        guard headerPosition == PrivateConfigurationFrame.requestPrefix.count + lengthDigits,
-              lengthDigits > 0, lengthValue > 0
-        else {
+        guard headerPosition == prefix.count + lengthDigits, lengthDigits > 0, lengthValue > 0 else {
             throw PrivateConfigurationWireError.malformedHeader
         }
         // The exact frame size, header and terminator included. `lengthDigits` is the digit count of
         // `lengthValue`, because a leading zero was refused above.
-        guard PrivateConfigurationFrame.frameByteCount(bodyCount: lengthValue) <= PrivateConfigurationFrame.maxFrameBytes else {
+        guard PrivateConfigurationFrame.frameByteCount(bodyCount: lengthValue) <= maxFrameBytes else {
             throw PrivateConfigurationWireError.frameTooLarge
         }
         bodyRemaining = lengthValue

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-// The private encoder writes the request body by hand, with no generic `JSONValue` tree
-// and no `JSONEncoder`. It runs the same writer twice:
+// The private encoder writes each body by hand, with no generic `JSONValue` tree
+// and no `JSONEncoder`. Every frame kind runs the same writer twice:
 //
 //   1. a counting pass that writes into a sink that only counts. It stops as soon as the
 //      body alone cannot fit the cap, so an oversize value is refused before any buffer
@@ -16,11 +16,20 @@ import Foundation
 // here: the wire does not range-check it, because an out-of-range port is an editable
 // draft that the save stages and the runtime eligibility gate holds, not a format error.
 
-/// Bytes of the smallest possible frame around a body: `PCV1 Q 1\n`, the body, and `\n`.
+/// Bytes of the smallest possible frame around a body: `PCV1 <kind> 1\n`, the body, and `\n`.
 private let minimumFrameOverhead = 10
 
+/// A value the encoder writes as the whole body of one frame of its kind. Each conformer is one root of the
+/// schema, and its writer emits exactly the members of that root's table.
+protocol PrivateFrameRoot {
+    static var frameKind: PrivateConfigurationFrame.Kind { get }
+    /// The first approved resource ceiling the value crosses, or nil. It runs before the writer walks the value.
+    func resourceViolation() -> DomainResourceViolation?
+    func writeBody<Sink: PrivateFrameSink>(to emitter: PrivateJSONEmitter<Sink>) throws
+}
+
 /// Receives the body bytes one at a time. Counting and emission are two implementations.
-private protocol PrivateFrameSink {
+protocol PrivateFrameSink {
     mutating func put(_ byte: UInt8) throws
 }
 
@@ -56,7 +65,7 @@ private struct PrivateBufferSink: PrivateFrameSink {
 
 /// Writes JSON structure and values through a sink. A class, so the nested-object
 /// bookkeeping of separators is shared between the helpers that call each other.
-private final class PrivateJSONEmitter<Sink: PrivateFrameSink> {
+final class PrivateJSONEmitter<Sink: PrivateFrameSink> {
     var sink: Sink
     /// Whether the next member of the open object needs a comma before it.
     private var needsSeparator = false
@@ -214,6 +223,14 @@ private final class PrivateJSONEmitter<Sink: PrivateFrameSink> {
 
 // MARK: - Schema
 
+extension PrivateConfigurationRequest: PrivateFrameRoot {
+    static var frameKind: PrivateConfigurationFrame.Kind { .update }
+
+    func writeBody<Sink: PrivateFrameSink>(to emitter: PrivateJSONEmitter<Sink>) throws {
+        try emitter.writeRequest(self)
+    }
+}
+
 extension PrivateJSONEmitter {
     /// The whole request body. Keys are fixed ASCII names, and every value comes from a typed field.
     func writeRequest(_ request: PrivateConfigurationRequest) throws {
@@ -221,11 +238,46 @@ extension PrivateJSONEmitter {
             try member("requestID") { try writeUUID(request.requestID.rawValue) }
             try member("incarnation") { try writeUUID(request.incarnation.rawValue) }
             try member("budgetMilliseconds") { try writeInt(request.budget.rawValue) }
-            try member("expectedConfigRevision") { try writeInt(request.expectedConfigRevision.rawValue) }
-            try member("expectedPlatformRevision") { try writeInt(request.expectedPlatformRevision.rawValue) }
-            try member("expectedOwnerGeneration") { try writeInt(request.expectedOwnerGeneration.rawValue) }
+            try member("runtimeBaseline") { try writeBaseline(request.runtimeBaseline) }
+            try member("platformBaseline") { try writeBaseline(request.platformBaseline) }
+            try member("modules") { try writeModuleIntents(request.modules) }
             try member("runtime") { try writeRuntime(request.runtime) }
             try member("platform") { try writePlatform(request.platform) }
+        }
+    }
+
+    /// The version is written as the exact decimal of the store's `UInt64`, never narrowed.
+    func writeBaseline(_ value: PrivateBaseline) throws {
+        try object {
+            try member("namespace") { try writeUUID(value.namespace.rawValue) }
+            try member("component") { try writeString(value.component.rawValue) }
+            try member("version") { try ascii(String(value.version)) }
+        }
+    }
+
+    private func writeModuleIntents(_ value: PrivateModuleSlots<PrivateModuleIntent>) throws {
+        try object {
+            try member("proxy") { try writeModuleIntent(value.proxy) }
+            try member("dns") { try writeModuleIntent(value.dns) }
+            try member("tunnels") { try writeModuleIntent(value.tunnels) }
+        }
+    }
+
+    private func writeModuleIntent(_ value: PrivateModuleIntent) throws {
+        let (action, revision): (PrivateModuleIntentAction, ControlLifecycleRevision?) = switch value {
+        case .saveOnly: (.saveOnly, nil)
+        case .applyWhileRunning(let revision): (.applyWhileRunning, revision)
+        case .start(let revision): (.start, revision)
+        }
+        try object {
+            try member("action") { try writeString(action.rawValue) }
+            try member("lifecycleRevision") {
+                if let revision {
+                    try writeInt(revision.rawValue)
+                } else {
+                    try keyword("null")
+                }
+            }
         }
     }
 
@@ -386,34 +438,42 @@ extension PrivateJSONEmitter {
 
 // MARK: - Entry point
 
-/// Encodes one request as one complete private frame: header, body and line feed.
+/// Encodes one value as one complete private frame of its kind: header, body and line feed.
 package enum PrivateConfigurationEncoder {
-    /// The most body bytes one frame can carry: the cap less the smallest header and terminator.
-    private static let bodyLimit = PrivateConfigurationFrame.maxFrameBytes - minimumFrameOverhead
-
-    /// Returns the exact body length of `request`, without building a frame or any buffer. The approved
-    /// resource ceilings run first, so an overlimit value is refused before the writer walks it, and a
-    /// raw DTO that bypasses the bridge is covered too. The same writer then runs with a counting sink, so
-    /// the count is exact, and the pass stops at the first byte past the body limit. It also refuses an
-    /// unrepresentable value, exactly as `encode` does.
+    /// Returns the exact body length of `request`, without building a frame or any buffer.
     package static func measureBody(_ request: PrivateConfigurationRequest) throws -> Int {
-        if let violation = request.resourceViolation() {
+        try measure(request)
+    }
+
+    /// Returns the request's update frame as redacted bytes.
+    package static func encode(_ request: PrivateConfigurationRequest) throws -> SecretBytes {
+        try frame(request)
+    }
+
+    /// The counting pass of every kind. The approved resource ceilings run first, so an overlimit value is
+    /// refused before the writer walks it, and a raw DTO that bypasses the bridge is covered too. The same
+    /// writer then runs with a counting sink, so the count is exact, and the pass stops at the first byte past
+    /// the kind's body limit: its cap less the smallest header and terminator. It also refuses an
+    /// unrepresentable value, exactly as `frame` does.
+    static func measure<Root: PrivateFrameRoot>(_ root: Root) throws -> Int {
+        if let violation = root.resourceViolation() {
             throw PrivateConfigurationWireError.resourceLimitExceeded(violation)
         }
+        let bodyLimit = Root.frameKind.maxFrameBytes - minimumFrameOverhead
         let counting = PrivateJSONEmitter(sink: PrivateCountingSink(limit: bodyLimit))
-        try counting.writeRequest(request)
+        try root.writeBody(to: counting)
         return counting.sink.count
     }
 
-    /// Returns the frame as redacted bytes. The frame is at most `maxFrameBytes`, header and
-    /// terminator included, and it is never truncated. An oversize request throws
-    /// `frameTooLarge` before any frame buffer is allocated.
-    package static func encode(_ request: PrivateConfigurationRequest) throws -> SecretBytes {
-        let bodyCount = try measureBody(request)
+    /// The emission pass of every kind. The frame is at most its kind's cap, header and terminator included,
+    /// and it is never truncated. An oversize value throws `frameTooLarge` before any frame buffer is allocated.
+    static func frame<Root: PrivateFrameRoot>(_ root: Root) throws -> SecretBytes {
+        let kind = Root.frameKind
+        let bodyCount = try measure(root)
 
-        let header = Array("PCV1 Q \(bodyCount)\n".utf8)
+        let header = kind.prefix + Array(String(bodyCount).utf8) + [PrivateConfigurationFrame.lineFeed]
         let total = header.count + bodyCount + 1
-        guard total <= PrivateConfigurationFrame.maxFrameBytes else {
+        guard total <= kind.maxFrameBytes else {
             throw PrivateConfigurationWireError.frameTooLarge
         }
 
@@ -422,7 +482,7 @@ package enum PrivateConfigurationEncoder {
             buffer.append(byte)
         }
         let emitting = PrivateJSONEmitter(sink: PrivateBufferSink(buffer: buffer))
-        try emitting.writeRequest(request)
+        try root.writeBody(to: emitting)
         guard buffer.count == header.count + bodyCount else {
             throw PrivateConfigurationWireError.invalidValue
         }

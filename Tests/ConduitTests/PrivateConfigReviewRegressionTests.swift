@@ -6,17 +6,17 @@ import XCTest
 /// Regression witnesses for the codec review. They pin the decoder's own cap check, which does
 /// not depend on the reader having run first, and its boundary with the reader.
 final class PrivateConfigReviewRegressionTests: XCTestCase {
-    private let cap = PrivateConfigurationFrame.maxFrameBytes
+    private let cap = PrivateConfigurationFrame.maxRequestFrameBytes
 
     func testDirectDecoderRejectsABodyWhoseCompleteFrameCannotFitTheCap() throws {
         let request = try PrivateConfigSamples.request()
         let frame = try PrivateConfigurationEncoder.encode(request).bytes()
         let start = try XCTUnwrap(frame.firstIndex(of: 0x0A)) + 1
         var body = Array(frame[start..<(frame.count - 1)])
-        let oversizedBodyCount = PrivateConfigurationFrame.maxFrameBytes - 15
+        let oversizedBodyCount = PrivateConfigurationFrame.maxRequestFrameBytes - 15
         body.append(contentsOf: repeatElement(UInt8(0x20), count: oversizedBodyCount - body.count))
         XCTAssertThrowsError(try PrivateConfigurationDecoder.decode(
-            PrivateConfigurationFrameBody(bytes: SecretBytes(body)))) {
+            PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(body)))) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .frameTooLarge)
         }
     }
@@ -24,7 +24,7 @@ final class PrivateConfigReviewRegressionTests: XCTestCase {
     /// The cap comes before the scan. The body is not JSON at all, so a scan-first decoder would
     /// answer `malformedBody`. The answer here must be `frameTooLarge`.
     func testDirectDecoderRefusesAnOversizeBodyBeforeScanningIt() {
-        let body = PrivateConfigurationFrameBody(bytes: SecretBytes(Array(repeating: UInt8(ascii: "x"), count: cap)))
+        let body = PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(Array(repeating: UInt8(ascii: "x"), count: cap)))
         XCTAssertThrowsError(try PrivateConfigurationDecoder.decode(body)) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .frameTooLarge)
         }
@@ -37,7 +37,7 @@ final class PrivateConfigReviewRegressionTests: XCTestCase {
         let request = try PrivateConfigSamples.request()
         let body = try paddedBody(for: request, count: cap - 16)
         XCTAssertEqual(
-            try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(bytes: SecretBytes(body))),
+            try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(body))),
             request
         )
 
@@ -54,7 +54,7 @@ final class PrivateConfigReviewRegressionTests: XCTestCase {
         let bodies: [[UInt8]] = [[], Array(repeating: UInt8(ascii: " "), count: 16)]
         for body in bodies {
             XCTAssertThrowsError(try PrivateConfigurationDecoder.decode(
-                PrivateConfigurationFrameBody(bytes: SecretBytes(body)))) {
+                PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(body)))) {
                 XCTAssertEqual($0 as? PrivateConfigurationWireError, .malformedBody)
             }
         }
@@ -74,7 +74,7 @@ final class PrivateConfigReviewRegressionTests: XCTestCase {
 
     /// Feeds `bytes` to a fresh reader in its own call budget and returns the one frame it completes.
     private func readOneFrame(_ bytes: [UInt8]) throws -> PrivateConfigurationFrameBody? {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         var offset = 0
         while offset < bytes.count {
             let (step, consumed) = try reader.consume(bytes[offset...])

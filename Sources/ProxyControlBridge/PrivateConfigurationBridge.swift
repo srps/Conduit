@@ -27,29 +27,30 @@ package enum PrivateConfigurationBridgeError: Error, Sendable, Equatable {
 }
 
 package enum PrivateConfigurationBridge {
-    /// Builds the request for one update. Its `launchAtLogin` is not carried; the local login item
-    /// is app-owned.
+    /// Builds the request for one update. Its `launchAtLogin` is not carried; the host keeps the
+    /// stored value. The baselines and intents are the caller's observed preconditions, carried as
+    /// they are: a baseline in the wrong slot is the request's own `invalidValue`.
     package static func makeRequest(
         config: ProxyConfig,
         platform: PlatformIntegrationConfig,
         requestID: ControlRequestID,
         incarnation: ControlHostIncarnation,
         budget: ControlWireBudget,
-        expectedConfigRevision: ControlConfigRevision,
-        expectedPlatformRevision: PrivatePlatformRevision,
-        expectedOwnerGeneration: PrivateConfigExpectedGeneration
+        runtimeBaseline: PrivateBaseline,
+        platformBaseline: PrivateBaseline,
+        modules: PrivateModuleSlots<PrivateModuleIntent>
     ) throws -> PrivateConfigurationRequest {
         // The approved ceilings run before any value is mapped.
         if let violation = config.resourceViolation() {
             throw PrivateConfigurationBridgeError.resourceLimit(violation)
         }
-        let request = PrivateConfigurationRequest(
+        let request = try PrivateConfigurationRequest(
             requestID: requestID,
             incarnation: incarnation,
             budget: budget,
-            expectedConfigRevision: expectedConfigRevision,
-            expectedPlatformRevision: expectedPlatformRevision,
-            expectedOwnerGeneration: expectedOwnerGeneration,
+            runtimeBaseline: runtimeBaseline,
+            platformBaseline: platformBaseline,
+            modules: modules,
             runtime: runtimeValues(config),
             platform: platformValues(platform)
         )

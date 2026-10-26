@@ -254,12 +254,12 @@ final class ConfigSaveGateTests: XCTestCase {
             requestID: ControlRequestID(rawValue: UUID()),
             incarnation: ControlHostIncarnation(rawValue: UUID()),
             budget: try ControlWireBudget(5_000),
-            expectedConfigRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 7)),
-            expectedPlatformRevision: try XCTUnwrap(PrivatePlatformRevision(rawValue: 6)),
-            expectedOwnerGeneration: try XCTUnwrap(PrivateConfigExpectedGeneration(rawValue: 5))
+            runtimeBaseline: PrivateConfigSamples.baseline(.runtime, version: 7),
+            platformBaseline: PrivateConfigSamples.baseline(.platform, version: 6),
+            modules: try PrivateConfigSamples.modules()
         )
         let frame = try PrivateConfigurationEncoder.encode(request).bytes()
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         guard case .frame(let body) = try reader.consume(frame).step else {
             throw PrivateConfigurationWireError.malformedBody
         }

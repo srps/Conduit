@@ -178,13 +178,19 @@ final class ConfigurationResourceCanonicalWidthTests: XCTestCase {
     // MARK: - Token guard derivation
 
     /// The token guard is a lexical bound, so it must sit above every valid token. A canonical UUID is 36 bytes, and
-    /// every enumeration raw value the decoder accepts is shorter.
+    /// every enumeration raw value the decoder accepts in a token place is shorter. The list names every enumeration the
+    /// update decoder reads from a token: the value mirrors, the baseline component and the module intent action. The
+    /// widest is pinned so the implementation notes state the actual bound.
     func testTokenGuardIsDerivedFromTheTokenGrammarNotAProductCeiling() {
         XCTAssertEqual(UUID().uuidString.utf8.count, 36)
         let enumerationRaws = PrivateAuthenticationMode.allCases.map { $0.rawValue }
             + PrivateTunnelPreset.allCases.map { $0.rawValue }
             + PrivateSystemProxyMode.allCases.map { $0.rawValue }
-        XCTAssertLessThanOrEqual(enumerationRaws.map { $0.utf8.count }.max() ?? 0, DomainResourceLimits.token)
+            + ControlConfigWorkflowFile.allCases.map { $0.rawValue }
+            + PrivateModuleIntentAction.allCases.map { $0.rawValue }
+        let widest = enumerationRaws.map { $0.utf8.count }.max() ?? 0
+        XCTAssertEqual(widest, "applyWhileRunning".utf8.count, "update the token guard paragraph in the codec notes")
+        XCTAssertLessThanOrEqual(widest, DomainResourceLimits.token)
         XCTAssertLessThanOrEqual(36, DomainResourceLimits.token)
     }
 
@@ -232,7 +238,7 @@ final class ConfigurationResourceCanonicalWidthTests: XCTestCase {
     }
 
     private func decodeText(_ text: String) throws -> PrivateConfigurationRequest {
-        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(bytes: SecretBytes(Array(text.utf8))))
+        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(Array(text.utf8))))
     }
 
     /// The wire error a body is refused with, or nil when it decodes.

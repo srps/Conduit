@@ -73,7 +73,12 @@ final class PrivateConfigResourceReviewTests: XCTestCase {
             for (index, value) in actual.enumerated() {
                 try compare(element, to: value, path: path + "[\(index)]")
             }
-        case .string, .nullableString, .bool, .number:
+        case .nullable(let inner):
+            // A null member has no table below it. A present one is compared as its wrapped shape.
+            if !(value is NSNull) {
+                try compare(inner, to: value, path: path)
+            }
+        case .string, .bool, .number, .unsignedDecimal:
             break // Existing encoded round-trip tests pin primitive value semantics.
         }
     }
@@ -108,7 +113,7 @@ final class PrivateConfigResourceReviewTests: XCTestCase {
         file: StaticString = #filePath, line: UInt = #line
     ) {
         XCTAssertThrowsError(try PrivateConfigurationDecoder.decode(
-            PrivateConfigurationFrameBody(bytes: SecretBytes(bytes))), file: file, line: line) {
+            PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(bytes))), file: file, line: line) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError,
                            .resourceLimitExceeded(DomainResourceViolation(field, limit)), file: file, line: line)
         }

@@ -15,23 +15,39 @@ import Foundation
 
 // MARK: - Decoding
 
-/// Decodes one checked frame body into a request. The result carries no `Codable` path, so a
+/// Decodes one checked frame body into its value. The result carries no `Codable` path, so a
 /// decoded value cannot be encoded by accident.
 package enum PrivateConfigurationDecoder {
+    /// Decodes one update body into a request.
     package static func decode(_ body: PrivateConfigurationFrameBody) throws -> PrivateConfigurationRequest {
-        try body.bytes.withUnsafeBytes { bytes in
+        try decode(body, as: .update, root: PrivateConfigurationSchema.request, WireRequest.self).request
+    }
+
+    /// The one decode path of every kind: the kind, the kind's cap, the scan against the kind's root table, then
+    /// Foundation into the kind's mirror.
+    static func decode<Root: Decodable>(
+        _ body: PrivateConfigurationFrameBody,
+        as kind: PrivateConfigurationFrame.Kind,
+        root: PrivateObjectShape,
+        _ mirror: Root.Type
+    ) throws -> Root {
+        // A body of another kind is refused before its bytes are looked at, so a request is never read as a reply.
+        guard body.kind == kind else {
+            throw PrivateConfigurationWireError.unexpectedFrameKind
+        }
+        return try body.bytes.withUnsafeBytes { bytes in
             // The cap is checked here as well as in the reader. A body held in memory, such as one built
             // by a caller, never passed the reader's header check. This runs before the scanner, before
             // the `Data` copy and before any allocation, and it counts the whole frame, not the body alone.
-            guard PrivateConfigurationFrame.frameByteCount(bodyCount: bytes.count) <= PrivateConfigurationFrame.maxFrameBytes else {
+            guard PrivateConfigurationFrame.frameByteCount(bodyCount: bytes.count) <= kind.maxFrameBytes else {
                 throw PrivateConfigurationWireError.frameTooLarge
             }
-            try PrivateJSONScanner.validate(bytes)
+            try PrivateJSONScanner.validate(bytes, root: root)
             // A temporary `Data` copy of the checked bytes. The codec is the only place that
             // makes one, and 0018 §3 records it.
             let data = Data(bytes)
             do {
-                return try JSONDecoder().decode(WireRequest.self, from: data).request
+                return try JSONDecoder().decode(Root.self, from: data)
             } catch {
                 // Deliberate: every decode failure, including a `WireValue` refusal such as a non-finite
                 // or non-UUID value, or a number that is not an `Int`, is reported as one fixed `malformedBody`. The error names no field, so a caller learns
@@ -116,22 +132,84 @@ private struct WireRequest: Decodable {
     let request: PrivateConfigurationRequest
 
     private enum Keys: String, CodingKey {
-        case requestID, incarnation, budgetMilliseconds, expectedConfigRevision
-        case expectedPlatformRevision, expectedOwnerGeneration, runtime, platform
+        case requestID, incarnation, budgetMilliseconds, runtimeBaseline, platformBaseline, modules, runtime, platform
     }
 
     init(from decoder: any Decoder) throws {
         let c = try decoder.strictContainer(Keys.self)
-        request = PrivateConfigurationRequest(
+        // The initializer refuses a baseline whose component is not its slot's.
+        request = try PrivateConfigurationRequest(
             requestID: ControlRequestID(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .requestID))),
             incarnation: ControlHostIncarnation(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .incarnation))),
             budget: try WireValue.budget(c.decode(Int.self, forKey: .budgetMilliseconds)),
-            expectedConfigRevision: try WireValue.ordinal(c.decode(Int.self, forKey: .expectedConfigRevision)),
-            expectedPlatformRevision: try WireValue.ordinal(c.decode(Int.self, forKey: .expectedPlatformRevision)),
-            expectedOwnerGeneration: try WireValue.ordinal(c.decode(Int.self, forKey: .expectedOwnerGeneration)),
+            runtimeBaseline: try c.decode(WireBaseline.self, forKey: .runtimeBaseline).value,
+            platformBaseline: try c.decode(WireBaseline.self, forKey: .platformBaseline).value,
+            modules: try c.decode(WireModuleIntents.self, forKey: .modules).value,
             runtime: try c.decode(WireRuntime.self, forKey: .runtime).value,
             platform: try c.decode(WirePlatform.self, forKey: .platform).value
         )
+    }
+}
+
+/// One exact baseline. The scanner has already refused any version lexeme that is not a plain decimal within `UInt64`,
+/// so Foundation reads the digits it was given.
+private struct WireBaseline: Decodable {
+    let value: PrivateBaseline
+
+    private enum Keys: String, CodingKey {
+        case namespace, component, version
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.strictContainer(Keys.self)
+        value = PrivateBaseline(
+            namespace: PrivateBaselineNamespace(rawValue: try WireValue.uuid(c.decode(String.self, forKey: .namespace))),
+            component: try WireValue.enumValue(c.decode(String.self, forKey: .component), ControlConfigWorkflowFile.self),
+            version: try c.decode(UInt64.self, forKey: .version)
+        )
+    }
+}
+
+private struct WireModuleIntents: Decodable {
+    let value: PrivateModuleSlots<PrivateModuleIntent>
+
+    private enum Keys: String, CodingKey {
+        case proxy, dns, tunnels
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.strictContainer(Keys.self)
+        value = PrivateModuleSlots(
+            proxy: try c.decode(WireModuleIntent.self, forKey: .proxy).value,
+            dns: try c.decode(WireModuleIntent.self, forKey: .dns).value,
+            tunnels: try c.decode(WireModuleIntent.self, forKey: .tunnels).value
+        )
+    }
+}
+
+private struct WireModuleIntent: Decodable {
+    let value: PrivateModuleIntent
+
+    private enum Keys: String, CodingKey {
+        case action, lifecycleRevision
+    }
+
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.strictContainer(Keys.self)
+        // `lifecycleRevision` is nullable, not optional: an absent key is refused. A save-only intent carries null, and
+        // the other two carry a revision. Any other pairing is refused, never defaulted.
+        let action = try WireValue.enumValue(c.decode(String.self, forKey: .action), PrivateModuleIntentAction.self)
+        let revision = try c.decode(Int?.self, forKey: .lifecycleRevision)
+        switch (action, revision) {
+        case (.saveOnly, nil):
+            value = .saveOnly
+        case (.applyWhileRunning, let raw?):
+            value = .applyWhileRunning(ifLifecycleRevision: try WireValue.ordinal(raw))
+        case (.start, let raw?):
+            value = .start(ifLifecycleRevision: try WireValue.ordinal(raw))
+        case (.saveOnly, .some), (.applyWhileRunning, nil), (.start, nil):
+            throw PrivateConfigurationWireError.invalidValue
+        }
     }
 }
 

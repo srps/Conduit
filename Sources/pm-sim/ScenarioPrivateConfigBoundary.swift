@@ -33,21 +33,21 @@ enum PrivateConfigBoundaryScenario {
 
         // The cap is the whole frame. The frame is at most the cap. A raw body one byte past it is refused by the
         // decoder before any value is scanned. An approved ceiling refuses a name one byte over its limit first.
-        let withinCap = frame.count <= PrivateConfigurationFrame.maxFrameBytes
+        let withinCap = frame.count <= PrivateConfigurationFrame.maxRequestFrameBytes
         let overCeiling = try sampleRequest(pacURL: "https://pac.example.test/p.pac", profileName: String(repeating: "a", count: 1_025))
         let refusesOversize = refusal(of: { try PrivateConfigurationEncoder.encode(overCeiling) })
             == .resourceLimitExceeded(DomainResourceViolation(.profileName, 1_024))
         let headerEnd = (bytes.firstIndex(of: 0x0A) ?? 0) + 1
         let frameBody = Array(bytes[headerEnd..<(bytes.count - 1)])
-        let padded = frameBody + Array(repeating: UInt8(ascii: " "), count: PrivateConfigurationFrame.maxFrameBytes - 15 - frameBody.count)
+        let padded = frameBody + Array(repeating: UInt8(ascii: " "), count: PrivateConfigurationFrame.maxRequestFrameBytes - 15 - frameBody.count)
         let capPlusOneRefused = refusal(of: {
-            try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(bytes: SecretBytes(padded)))
+            try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(padded)))
         }) == .frameTooLarge
 
         // The header refusals happen before a body is read, and they leave nothing buffered.
-        let versionReader = PrivateConfigurationFrameReader()
+        let versionReader = PrivateConfigurationFrameReader(expecting: .update)
         let versionRefused = refusal(of: { try versionReader.consume(Array("PCV2 Q 5\n".utf8)) }) == .unsupportedVersion
-        let lengthReader = PrivateConfigurationFrameReader()
+        let lengthReader = PrivateConfigurationFrameReader(expecting: .update)
         let lengthRefused = refusal(of: { try lengthReader.consume(Array("PCV1 Q 8388593\n".utf8)) }) == .frameTooLarge
         let nothingBuffered = lengthReader.retainedByteCount == 0
 
@@ -56,11 +56,31 @@ enum PrivateConfigBoundaryScenario {
             .replacingOccurrences(of: "\"strictMode\":true", with: "\"strictMode\":true,\"strictMode\":false")
         let duplicateFrame = Array("PCV1 Q \(duplicate.utf8.count)\n".utf8) + Array(duplicate.utf8) + [0x0A]
         let duplicateRefused = refusal(of: {
-            let reader = PrivateConfigurationFrameReader()
+            let reader = PrivateConfigurationFrameReader(expecting: .update)
             guard case .frame(let body) = try reader.consume(duplicateFrame).step else {
                 throw Failure(message: "the duplicate-key reference frame did not complete")
             }
             _ = try PrivateConfigurationDecoder.decode(body)
+        }) == .malformedBody
+
+        // The preconditions are exact. The sample's runtime baseline is `UInt64.max`, and every schedule above decoded it
+        // and all three module intents unchanged. One past the maximum, a platform baseline in the runtime slot, and a
+        // save-only intent that names a revision are each refused, never narrowed, swapped or defaulted.
+        let bodyText = String(decoding: frameBody, as: UTF8.self)
+        let maxBaselineKept = request.runtimeBaseline.version == UInt64.max
+            && bodyText.contains("\"version\":18446744073709551615")
+        let overMaxRefused = refusal(of: {
+            try decodeText(bodyText.replacingOccurrences(
+                of: "\"version\":18446744073709551615", with: "\"version\":18446744073709551616"))
+        }) == .malformedBody
+        let swappedRefused = refusal(of: {
+            try decodeText(bodyText.replacingOccurrences(
+                of: "\"component\":\"platform\"", with: "\"component\":\"runtime\""))
+        }) == .malformedBody
+        let saveOnlyRevisionRefused = refusal(of: {
+            try decodeText(bodyText.replacingOccurrences(
+                of: "\"action\":\"saveOnly\",\"lifecycleRevision\":null",
+                with: "\"action\":\"saveOnly\",\"lifecycleRevision\":1"))
         }) == .malformedBody
 
         // The actual bridge: the kernel's stored values map to the request, the frame carries them,
@@ -129,6 +149,10 @@ enum PrivateConfigBoundaryScenario {
             .init("an unsupported version is refused in the header", versionRefused),
             .init("an oversize declared length is refused with no body byte buffered", lengthRefused && nothingBuffered),
             .init("a duplicate key is refused by the decoder", duplicateRefused),
+            .init("a UInt64.max baseline version round-trips exactly", maxBaselineKept),
+            .init("a baseline version one past UInt64.max is refused", overMaxRefused),
+            .init("a baseline in the other file's slot is refused", swappedRefused),
+            .init("a save-only intent that names a lifecycle revision is refused", saveOnlyRevisionRefused),
             .init("the bridge maps the fixture config and platform through the frame and back unchanged", bridgeRoundTrip),
             .init("the bridge refuses an oversize name by its ceiling before mapping", bridgeRefusesOversize),
             .init("a semantic draft with a URL token maps through the frame and is classified by field code, never by its token", semanticDraftMapped && tokenAbsent),
@@ -146,13 +170,13 @@ enum PrivateConfigBoundaryScenario {
             clientsClosedEarly: 0, totalBytes: frame.count, durationSeconds: Date().timeIntervalSince(started),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
             assertions: checks,
-            notes: ["PASS: private request frame round-trips at every read schedule, the bridge maps the fixture config through the frame, keeps URL tokens out of reflection, refuses oversize, unsupported and duplicate-key input, and maps semantic drafts with their eligibility classification (pure mapping, not a physical apply proof)"]
+            notes: ["PASS: private request frame round-trips at every read schedule with exact UInt64 baselines and per-module intents, the bridge maps the fixture config through the frame, keeps URL tokens out of reflection, refuses oversize, unsupported and duplicate-key input, and maps semantic drafts with their eligibility classification (pure mapping, not a physical apply proof)"]
         )
     }
 
     /// Feeds `bytes` to a fresh reader in pieces of `chunk` and decodes the frame it yields.
     private static func decodeFrame(_ bytes: [UInt8], chunk: Int) throws -> PrivateConfigurationRequest {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         var offset = 0
         while offset < bytes.count {
             let end = min(offset + chunk, bytes.count)
@@ -166,6 +190,11 @@ enum PrivateConfigBoundaryScenario {
             }
         }
         throw Failure(message: "the input ended inside the frame")
+    }
+
+    /// Decodes a raw update body through the production decoder, with no reader or encoder involved.
+    private static func decodeText(_ text: String) throws -> PrivateConfigurationRequest {
+        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(Array(text.utf8))))
     }
 
     /// The bridge's request for `config`, carried through the frame and decoded, then mapped back to values.
@@ -203,21 +232,36 @@ enum PrivateConfigBoundaryScenario {
         config: ProxyConfig,
         platform: PlatformIntegrationConfig
     ) throws -> PrivateConfigurationRequest {
-        guard let configRevision = ControlConfigRevision(rawValue: 7),
-              let platformRevision = PrivatePlatformRevision(rawValue: 6),
-              let generation = PrivateConfigExpectedGeneration(rawValue: 5)
-        else {
-            throw Failure(message: "bridge revisions are not representable")
-        }
+        let preconditions = try samplePreconditions()
         return try PrivateConfigurationBridge.makeRequest(
             config: config,
             platform: platform,
             requestID: ControlRequestID(rawValue: uuid(101)),
             incarnation: ControlHostIncarnation(rawValue: uuid(102)),
             budget: try ControlWireBudget(5_000),
-            expectedConfigRevision: configRevision,
-            expectedPlatformRevision: platformRevision,
-            expectedOwnerGeneration: generation
+            runtimeBaseline: preconditions.runtime,
+            platformBaseline: preconditions.platform,
+            modules: preconditions.modules
+        )
+    }
+
+    /// The preconditions every sample carries: exact baselines in one store namespace, the runtime one at the widest
+    /// version, and one module of each intent. Internal, not private: `ConfigResourceBoundsScenario` uses them too.
+    static func samplePreconditions() throws -> (
+        runtime: PrivateBaseline, platform: PrivateBaseline, modules: PrivateModuleSlots<PrivateModuleIntent>
+    ) {
+        guard let started = ControlLifecycleRevision(rawValue: 9), let running = ControlLifecycleRevision(rawValue: 7) else {
+            throw Failure(message: "sample lifecycle revisions are not representable")
+        }
+        let namespace = PrivateBaselineNamespace(rawValue: uuid(3))
+        return (
+            PrivateBaseline(namespace: namespace, component: .runtime, version: .max),
+            PrivateBaseline(namespace: namespace, component: .platform, version: 3),
+            PrivateModuleSlots(
+                proxy: .start(ifLifecycleRevision: started),
+                dns: .applyWhileRunning(ifLifecycleRevision: running),
+                tunnels: .saveOnly
+            )
         )
     }
 
@@ -226,19 +270,14 @@ enum PrivateConfigBoundaryScenario {
         pacURL: String,
         profileName: String = "sim-profile"
     ) throws -> PrivateConfigurationRequest {
-        guard let config = ControlConfigRevision(rawValue: 4),
-              let platform = PrivatePlatformRevision(rawValue: 3),
-              let generation = PrivateConfigExpectedGeneration(rawValue: 9)
-        else {
-            throw Failure(message: "sample revisions are not representable")
-        }
-        return PrivateConfigurationRequest(
+        let preconditions = try samplePreconditions()
+        return try PrivateConfigurationRequest(
             requestID: ControlRequestID(rawValue: uuid(1)),
             incarnation: ControlHostIncarnation(rawValue: uuid(2)),
             budget: try ControlWireBudget(5_000),
-            expectedConfigRevision: config,
-            expectedPlatformRevision: platform,
-            expectedOwnerGeneration: generation,
+            runtimeBaseline: preconditions.runtime,
+            platformBaseline: preconditions.platform,
+            modules: preconditions.modules,
             runtime: PrivateRuntimeConfiguration(
                 profileName: profileName,
                 proxy: PrivateProxySettings(
