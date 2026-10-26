@@ -17,12 +17,13 @@ LOCATION = 'Sources/PlatformMac/LocationSettingsRecovery.swift'
 MENU_BAR = 'Sources/Conduit/App/MenuBarPresentation.swift'
 APP = 'Sources/Conduit/App/AppState.swift'
 TYPED = 'Sources/RuntimeEvents/LifecycleEvents.swift'
+CONFIG_WORKFLOW = 'Sources/RuntimeEvents/ConfigurationWorkflowEvents.swift'
 PAYLOAD = 'Sources/RuntimeEvents/RuntimeEventPayload.swift'
 WIRE = 'Sources/ConduitShared/ControlRuntimeEventTyped.swift'
 KERNEL = 'Sources/ProxyKernel/Models/RuntimeEvent.swift'
 UPDATES = 'Sources/PlatformMac/AppUpdates.swift'
 EVENTS = 'docs/events.md'
-MUTATED = (PRODUCT, PM_SIM, LOCATION, MENU_BAR, APP, TYPED, PAYLOAD, WIRE, KERNEL, UPDATES, EVENTS)  # restored after each case
+MUTATED = (PRODUCT, PM_SIM, LOCATION, MENU_BAR, APP, TYPED, CONFIG_WORKFLOW, PAYLOAD, WIRE, KERNEL, UPDATES, EVENTS)  # restored after each case
 
 
 def append(path, text):
@@ -157,6 +158,16 @@ rejected = [
      replace(TYPED, 'case terminationDrainExpired = "lifecycle.termination_drain_expired"',
              'case terminationDrainExpired = "lifecycle.termination_drain_expired"\n    case brandNew = "lifecycle.brand_new"'),
      'LifecycleEventName lists'),
+    ('config.workflow name emitted through the legacy envelope',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .config, event: "config.workflow.observed", detail: "x")'),
+     '`config.workflow.observed` is a typed name'),
+    ('unpinned config.workflow name in the closed namespace',
+     append(PRODUCT, 'let probe = RuntimeEvent(kind: .config, event: "config.workflow.future", detail: "x")'),
+     '`config.workflow.future` is in the closed config.workflow namespace'),
+    ('config.workflow inventory widened without a typed case',
+     replace(CONFIG_WORKFLOW, 'case superseded = "config.workflow.superseded"',
+             'case superseded = "config.workflow.superseded"\n    case brandNew = "config.workflow.brand_new"'),
+     'ConfigurationWorkflowEventName lists'),
     ('legacy envelope stops refusing typed names',
      replace(KERNEL, '!RuntimeEventPayload.requiresTypedPayload(event)', 'true'),
      'no longer refuses the lifecycle namespace'),
@@ -176,7 +187,7 @@ rejected = [
      append(PAYLOAD, 'extension RuntimeEventPayload { static let legacyLifecycleNames: Set<String> = ["lifecycle.future"] }'),
      'legacyLifecycleNames reintroduces'),
     ('namespace gate narrowed to the typed names',
-     replace(PAYLOAD, 'name.hasPrefix(namespacePrefix)', 'typedNames.contains(name)'),
+     replace(PAYLOAD, 'name.hasPrefix(lifecyclePrefix)', 'typedNames.contains(name)'),
      'requiresTypedPayload no longer closes'),
     ('version_changed case dropped from the typed inventory',
      replace(TYPED, 'case versionChanged = "lifecycle.version_changed"\n', ''),

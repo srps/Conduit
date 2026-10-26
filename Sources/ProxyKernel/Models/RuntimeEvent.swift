@@ -31,12 +31,12 @@ package struct RuntimeEvent: Codable, Sendable {
     package let typed: RuntimeEventPayload?
 
     /// The legacy envelope, for unmigrated families. Every name in the closed
-    /// `lifecycle.` namespace traps here: those are emitted through
+    /// `lifecycle.` and `config.workflow.` namespaces traps here: those are emitted through
     /// `init(payload:)` only, so no untyped record can carry one.
     package init(kind: RuntimeEventKind, event: String, detail: String? = nil) {
         precondition(
             !RuntimeEventPayload.requiresTypedPayload(event),
-            "\(event) is in the closed lifecycle namespace; emit it through RuntimeEvent(payload:)"
+            "\(event) is in a closed typed namespace; emit it through RuntimeEvent(payload:)"
         )
         self.timestamp = .now
         self.kind = kind
@@ -58,6 +58,7 @@ package struct RuntimeEvent: Codable, Sendable {
     private static func kind(of payload: RuntimeEventPayload) -> RuntimeEventKind {
         switch payload {
         case .lifecycle: .lifecycle
+        case .configWorkflow: .config
         }
     }
 

@@ -41,15 +41,17 @@ final class RuntimeEventTypedTests: XCTestCase {
         }
     }
 
-    func testTheTypedInventoryIsTheFourLifecycleNames() {
+    func testTheTypedInventoryIsTheFourLifecycleNamesAndTheConfigWorkflowFour() {
         XCTAssertEqual(
             RuntimeEventPayload.typedNames,
             Set([
                 "lifecycle.superseded", "lifecycle.coalesced", "lifecycle.termination_drain_expired",
                 "lifecycle.version_changed",
+                "config.workflow.observed", "config.workflow.committed", "config.workflow.held", "config.workflow.superseded",
             ])
         )
         XCTAssertEqual(LifecycleEventName.allCases.count, 4)
+        XCTAssertEqual(ConfigurationWorkflowEventName.allCases.count, 4)
     }
 
     /// The namespace is closed with no untyped exception. The legacy envelope traps on a name

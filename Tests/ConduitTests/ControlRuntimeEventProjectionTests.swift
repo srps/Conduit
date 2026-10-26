@@ -159,10 +159,8 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
         }
     }
 
-    /// The package vocabulary is read from the metadata the coding uses. Every family, type and name a value
-    /// writes is one of the sets, and the event names are the domain's four.
+    /// Lifecycle names and types retain their wire spelling, and encoded records traverse the classifier as known events.
     func testTheKnownVocabularyIsWhatTheWireWrites() throws {
-        XCTAssertEqual(ControlTypedRuntimeEvent.knownFamilies, ["lifecycle"])
         XCTAssertEqual(
             ControlLifecycleEvent.knownWireTypes,
             ["superseded", "coalesced", "termination_drain_expired", "version_changed"]
@@ -178,7 +176,9 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
             XCTAssertTrue(ControlLifecycleEvent.knownEventNames.contains(value.name), value.name)
             let written = try JSONSerialization.jsonObject(with: JSONEncoder().encode(ControlTypedRuntimeEvent.lifecycle(value)))
             let object = try XCTUnwrap(written as? [String: Any])
-            XCTAssertTrue(ControlTypedRuntimeEvent.knownFamilies.contains(try XCTUnwrap(object["family"] as? String)))
+            let record = ControlRuntimeEvent(timestamp: Date(timeIntervalSince1970: 0), kind: "lifecycle", event: value.name,
+                                             detail: value.detail, typed: .lifecycle(value))
+            XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeEventRecord.self, from: JSONEncoder().encode(record)), .known(record))
             let lifecycle = try XCTUnwrap(object["lifecycle"] as? [String: Any])
             XCTAssertTrue(ControlLifecycleEvent.knownWireTypes.contains(try XCTUnwrap(lifecycle["type"] as? String)))
         }

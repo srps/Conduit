@@ -12,11 +12,13 @@ import Foundation
 /// outer fields to agree with them on both decode and encode.
 package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
     case lifecycle(ControlLifecycleEvent)
+    case configWorkflow(ControlConfigWorkflowEvent)
 
     /// The `kind` the outer record must carry for this family.
     package var kind: String {
         switch self {
         case .lifecycle: "lifecycle"
+        case .configWorkflow: "config"
         }
     }
 
@@ -24,6 +26,7 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
     package var name: String {
         switch self {
         case .lifecycle(let event): event.name
+        case .configWorkflow(let event): event.name
         }
     }
 
@@ -31,21 +34,19 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
     package var detail: String {
         switch self {
         case .lifecycle(let event): event.detail
+        case .configWorkflow(let event): event.detail
         }
     }
 
     private enum CodingKeys: String, CodingKey {
-        case family, lifecycle
+        case family, lifecycle, configWorkflow
     }
 
-    /// The family spellings this build decodes and writes. `knownFamilies` exports them.
-    private enum Family: String, CaseIterable {
+    /// Shared by the codec and record classifier so a new family requires both to handle it.
+    enum Family: String {
         case lifecycle
+        case configWorkflow = "config_workflow"
     }
-
-    /// Every family spelling this build knows, for the record classifier. Derived from the same metadata
-    /// the coding uses, so the set cannot drift from what decoding accepts.
-    package static let knownFamilies: Set<String> = Set(Family.allCases.map(\.rawValue))
 
     package init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -53,6 +54,8 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
         switch Family(rawValue: family) {
         case .lifecycle?:
             self = .lifecycle(try container.decode(ControlLifecycleEvent.self, forKey: .lifecycle))
+        case .configWorkflow?:
+            self = .configWorkflow(try container.decode(ControlConfigWorkflowEvent.self, forKey: .configWorkflow))
         case nil:
             throw DecodingError.dataCorruptedError(
                 forKey: .family, in: container, debugDescription: "an unknown typed event family"
@@ -66,6 +69,9 @@ package enum ControlTypedRuntimeEvent: Codable, Sendable, Equatable {
         case .lifecycle(let event):
             try container.encode(Family.lifecycle.rawValue, forKey: .family)
             try container.encode(event, forKey: .lifecycle)
+        case .configWorkflow(let event):
+            try container.encode(Family.configWorkflow.rawValue, forKey: .family)
+            try container.encode(event, forKey: .configWorkflow)
         }
     }
 }
