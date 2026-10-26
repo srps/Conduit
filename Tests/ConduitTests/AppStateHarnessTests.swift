@@ -769,6 +769,23 @@ final class AppStateHarnessTests: XCTestCase {
         )
     }
 
+    /// #246, the twin of the host's reload witness: a Settings save that only respells the PAC URL (see `Respelled`) writes the new
+    /// bytes, and the reconciler pushes them to the runtime rather than skipping the save as already applied.
+    func testASaveThatOnlyRespellsThePACURLReachesTheRuntime() async throws {
+        let composed = "https://pac.example.test/\(Respelled.composed).pac"
+        let decomposed = "https://pac.example.test/\(Respelled.decomposed).pac"
+        let appState = try launch(configure: { $0.pacURL = composed })
+
+        appState.config.pacURL = decomposed
+        appState.saveConfig()
+        await appState.reconciler.drain()
+
+        assertSameUTF8(try ProxyConfigPersistence.load(in: harness.environment).pacURL, decomposed, "the save wrote the new bytes")
+        assertSameUTF8(appState.reconciler.lastReconciledConfig.pacURL, decomposed, "the runtime baseline holds them")
+        XCTAssertTrue(appState.eventLog.events.contains { $0.event == "config.routing_changed" },
+                      "\(appState.eventLog.events.map(\.event))")
+    }
+
     /// The import gate refuses a newer file before the editor is assigned: the editor keeps its config and the source keeps
     /// its bytes. A current file then reaches the editor through the same `importConfiguration` path.
     func testAnImportOfANewerFileLeavesTheEditorUnchanged() throws {

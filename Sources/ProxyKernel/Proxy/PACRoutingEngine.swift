@@ -206,10 +206,11 @@ package final class PACRoutingEngine: @unchecked Sendable {
 
         let decision: RefreshDecision = lock.withLock {
             if let runningRefresh { return .alreadyRunning(runningRefresh) }
-            let needsRefresh = force || jsEvaluator == nil || cachedPACURL != config.pacURL || refreshExpired(at: lastRefreshAt)
+            let needsRefresh = force || jsEvaluator == nil || !ExactText.same(cachedPACURL, config.pacURL)
+                || refreshExpired(at: lastRefreshAt)
             guard needsRefresh else { return .fresh }
             // Per attempted URL, so a URL that never loaded still backs off.
-            let urlChanged = lastAttemptedPACURL != config.pacURL
+            let urlChanged = !ExactText.same(lastAttemptedPACURL, config.pacURL)
             if honorBackoff, !urlChanged, let remaining = backoffRemainingLocked(now: Date()) {
                 return .backingOff(remaining: remaining, failures: consecutiveFailures)
             }
@@ -269,7 +270,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
                     operation.finish(.success(()))
                     return
                 }
-                if current.pacURL != url {
+                if !ExactText.same(current.pacURL, url) {
                     url = current.pacURL
                     lock.withLock {
                         lastAttemptedPACURL = url
@@ -283,7 +284,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
                 let installedAt = now()
                 let installed = lock.withLock { () -> (installed: Bool, after: PACRouteInvalidationReason?, sameScript: Bool) in
                     guard routeGeneration == generation else { return (false, nil, false) }
-                    let sameScript = jsEvaluator != nil && cachedPACURL == url && loadedScript == script
+                    let sameScript = jsEvaluator != nil && ExactText.same(cachedPACURL, url) && loadedScript == script
                     cachedPACURL = url
                     jsEvaluator = newEvaluator
                     loadedScript = script
@@ -773,15 +774,16 @@ package final class PACRoutingEngine: @unchecked Sendable {
         let shouldKickOff = lock.withLock {
             // A superseded PAC must not keep routing while its replacement
             // loads; routes fall back to the non-PAC behaviour until then.
-            if jsEvaluator != nil, cachedPACURL != config.pacURL {
+            let configured = ExactText.same(cachedPACURL, config.pacURL)
+            if jsEvaluator != nil, !configured {
                 jsEvaluator = nil
                 routeCache.removeAll()
                 routeCacheOrder.removeAll()
             }
             guard runningRefresh == nil else { return false }
-            let needsRefresh = jsEvaluator == nil || cachedPACURL != config.pacURL || refreshExpired(at: lastRefreshAt)
+            let needsRefresh = jsEvaluator == nil || !configured || refreshExpired(at: lastRefreshAt)
             guard needsRefresh else { return false }
-            return lastAttemptedPACURL != config.pacURL || backoffRemainingLocked(now: Date()) == nil
+            return !ExactText.same(lastAttemptedPACURL, config.pacURL) || backoffRemainingLocked(now: Date()) == nil
         }
 
         guard shouldKickOff else { return }
@@ -835,7 +837,7 @@ package final class PACRoutingEngine: @unchecked Sendable {
     ) -> StoreOutcome {
         let now = self.now()
         return lock.withLock {
-            guard cachedPACURL == pacURL, jsEvaluator != nil, routeGeneration == generation else { return .superseded }
+            guard ExactText.same(cachedPACURL, pacURL), jsEvaluator != nil, routeGeneration == generation else { return .superseded }
             guard scriptVersion == version else { return .scriptReplaced }
             routeCache[key] = RouteCacheEntry(
                 chain: chain,

@@ -690,7 +690,7 @@ package final class ProxyOrchestrator {
         let oldConfig = explicitOld ?? config
         let diff = ConfigDiff(old: oldConfig, new: newConfig)
         guard diff.hasChanges else {
-            guard oldConfig != newConfig else { return }
+            guard diff.inputChanged else { return }
             emitEvent(.config, "config.metadata_changed")
             config = newConfig
             onConfigChange?(config)
