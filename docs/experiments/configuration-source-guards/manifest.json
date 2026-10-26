@@ -1,0 +1,122 @@
+{
+  "head": "0090a6b74300abb911aeb6b82b5dc5ec89e085c8",
+  "mutations": [
+    {
+      "before_sha256": "ac8d47f48241bacac647b87b4d966b8b5bc215a4d74c632c7980b0fecae56597",
+      "detectedByAssertion": true,
+      "exit": 1,
+      "mutant_sha256": "cde0be45a52de1625643d67fb746b5c6593a9f3cd9a3ff9eebea53131a36a88b",
+      "name": "source-before-create",
+      "patch": "mutations/source-before-create.patch",
+      "path": "Sources/ConduitRuntime/ConfigurationStore.swift",
+      "reconstructedPatchMatchesExecutedHash": true,
+      "requiredWitness": "testABoundedModelOverRuntimeAndPlatformMatchesTheStoreForReplayableSeeds",
+      "requiredWitnessFailed": true,
+      "testFilter": "ConfigurationStoreTests.testABoundedModelOverRuntimeAndPlatformMatchesTheStoreForReplayableSeeds|ConfigurationStoreTests.testABoundedModelOverPreferencesMatchesTheStoreForReplayableSeeds"
+    },
+    {
+      "before_sha256": "ac8d47f48241bacac647b87b4d966b8b5bc215a4d74c632c7980b0fecae56597",
+      "detectedByAssertion": true,
+      "exit": 1,
+      "mutant_sha256": "f9129e34163dd723bf3890e9e10b7c3d2b3ae58ac0b5c651a0fee4b5903c5579",
+      "name": "source-token-freshness",
+      "patch": "mutations/source-token-freshness.patch",
+      "path": "Sources/ConduitRuntime/ConfigurationStore.swift",
+      "reconstructedPatchMatchesExecutedHash": true,
+      "requiredWitness": "testAReloadThatRespellsAMissingSidecarsLegacyURLRetiresItsToken",
+      "requiredWitnessFailed": true,
+      "testFilter": "ConfigurationStoreSourceTests.testAReloadThatChangesAMissingPreferencesSidecarsLegacyValueRetiresItsToken|ConfigurationStoreSourceTests.testAReloadThatRespellsAMissingSidecarsLegacyURLRetiresItsToken"
+    },
+    {
+      "before_sha256": "ac8d47f48241bacac647b87b4d966b8b5bc215a4d74c632c7980b0fecae56597",
+      "detectedByAssertion": true,
+      "exit": 1,
+      "mutant_sha256": "672807d84e7b1afcad4e33e5441d599b4c0aa1a74e4717a4d5fb5aa7f30c5342",
+      "name": "source-move-after-write",
+      "patch": "mutations/source-move-after-write.patch",
+      "path": "Sources/ConduitRuntime/ConfigurationStore.swift",
+      "reconstructedPatchMatchesExecutedHash": true,
+      "requiredWitness": "testTheStoresOwnRuntimeWriteMovesTheSourceAndTheFirstSidecarWriteClearsIt",
+      "requiredWitnessFailed": true,
+      "testFilter": "ConfigurationStoreSourceTests.testTheStoresOwnRuntimeWriteMovesTheSourceAndTheFirstSidecarWriteClearsIt"
+    },
+    {
+      "before_sha256": "6ff40088a66abeb0b10204cc308648b19cf7a72b5855d99492d687b947624f11",
+      "detectedByAssertion": true,
+      "exit": 1,
+      "mutant_sha256": "f878ac6419ee22866615bbd68fce7d44fad1e8a84841db94dd01359fb9c134fc",
+      "name": "canonical-byte-equality",
+      "patch": "mutations/canonical-byte-equality.patch",
+      "path": "Sources/ConduitRuntime/ConfigurationStoreIO.swift",
+      "reconstructedPatchMatchesExecutedHash": true,
+      "requiredWitness": "testARuntimeSaveOfAByteDistinctPACURLHandsOverThePersistedBytes",
+      "requiredWitnessFailed": true,
+      "testFilter": "ConfigurationStoreSourceTests.testAPreferencesSaveOfAByteDistinctEquivalentURLWritesTheRequestedBytes|ConfigurationStoreSourceTests.testARuntimeSaveOfAByteDistinctPACURLHandsOverThePersistedBytes"
+    },
+    {
+      "before_sha256": "6ff40088a66abeb0b10204cc308648b19cf7a72b5855d99492d687b947624f11",
+      "detectedByAssertion": true,
+      "exit": 1,
+      "mutant_sha256": "286e363a746c2102e0e55ed96a5e8c1260f91aedd6fea9ea0854e634b471bf9f",
+      "name": "repair-current-unrepresentable",
+      "patch": "mutations/repair-current-unrepresentable.patch",
+      "path": "Sources/ConduitRuntime/ConfigurationStoreIO.swift",
+      "reconstructedPatchMatchesExecutedHash": true,
+      "requiredWitness": "testAnUnrepresentableLoadedRuntimeValueIsRepairedByAValidCandidate",
+      "requiredWitnessFailed": true,
+      "testFilter": "ConfigurationStoreSourceTests.testAnUnrepresentableLoadedRuntimeValueIsRepairedByAValidCandidate"
+    }
+  ],
+  "restoredExit": 0,
+  "restored_sha256": {
+    "Sources/ConduitRuntime/ConfigurationStore.swift": "ac8d47f48241bacac647b87b4d966b8b5bc215a4d74c632c7980b0fecae56597",
+    "Sources/ConduitRuntime/ConfigurationStoreIO.swift": "6ff40088a66abeb0b10204cc308648b19cf7a72b5855d99492d687b947624f11"
+  },
+  "sourceProof": {
+    "files": {
+      "Sources/ConduitRuntime/ConfigurationStore.swift": {
+        "review": "ac8d47f48241bacac647b87b4d966b8b5bc215a4d74c632c7980b0fecae56597",
+        "workflow": "ac8d47f48241bacac647b87b4d966b8b5bc215a4d74c632c7980b0fecae56597",
+        "working": "ac8d47f48241bacac647b87b4d966b8b5bc215a4d74c632c7980b0fecae56597"
+      },
+      "Sources/ConduitRuntime/ConfigurationStoreIO.swift": {
+        "review": "6ff40088a66abeb0b10204cc308648b19cf7a72b5855d99492d687b947624f11",
+        "workflow": "6ff40088a66abeb0b10204cc308648b19cf7a72b5855d99492d687b947624f11",
+        "working": "6ff40088a66abeb0b10204cc308648b19cf7a72b5855d99492d687b947624f11"
+      },
+      "Sources/ConduitRuntime/ConfigurationStoreTypes.swift": {
+        "review": "bfee88b2a33c9cd9f122efc1f779a0d18917f2a8a39fa15fec40177a6155bd46",
+        "workflow": "bfee88b2a33c9cd9f122efc1f779a0d18917f2a8a39fa15fec40177a6155bd46",
+        "working": "bfee88b2a33c9cd9f122efc1f779a0d18917f2a8a39fa15fec40177a6155bd46"
+      },
+      "Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift": {
+        "review": "61e4a173e990a75484d627f68dc3c6ef7d8324f7d74c22d08da904684d8a3cad",
+        "workflow": "61e4a173e990a75484d627f68dc3c6ef7d8324f7d74c22d08da904684d8a3cad",
+        "working": "61e4a173e990a75484d627f68dc3c6ef7d8324f7d74c22d08da904684d8a3cad"
+      },
+      "Sources/ConduitShared/ControlConfigWorkflowEvent.swift": {
+        "review": "c1dcbdb63ced778afcec89aa6e55f09bde7bedd8d23db59c172c863947b887d4",
+        "workflow": "c1dcbdb63ced778afcec89aa6e55f09bde7bedd8d23db59c172c863947b887d4",
+        "working": "c1dcbdb63ced778afcec89aa6e55f09bde7bedd8d23db59c172c863947b887d4"
+      },
+      "Sources/ProxyControlBridge/RuntimeEventControlProjection.swift": {
+        "review": "72e2736d78618791680a48dc66fd221f663d56c488e1c78421d4c23df01337c8",
+        "workflow": "72e2736d78618791680a48dc66fd221f663d56c488e1c78421d4c23df01337c8",
+        "working": "72e2736d78618791680a48dc66fd221f663d56c488e1c78421d4c23df01337c8"
+      },
+      "Sources/RuntimeEvents/ConfigurationWorkflowEvents.swift": {
+        "review": "ca611536af85fd7dcfdbdb5c2b3c8e525b32db19636f52b625af150afac3bfef",
+        "workflow": "ca611536af85fd7dcfdbdb5c2b3c8e525b32db19636f52b625af150afac3bfef",
+        "working": "ca611536af85fd7dcfdbdb5c2b3c8e525b32db19636f52b625af150afac3bfef"
+      },
+      "Sources/pm-sim/RuntimeHostEffectsScenarios.swift": {
+        "review": "a57c616d1233b16f7045618668e24e574a2bfd967eebf6dd153402a1f83d89a1",
+        "workflow": "a57c616d1233b16f7045618668e24e574a2bfd967eebf6dd153402a1f83d89a1",
+        "working": "a57c616d1233b16f7045618668e24e574a2bfd967eebf6dd153402a1f83d89a1"
+      }
+    },
+    "reviewHead": "0090a6b74300abb911aeb6b82b5dc5ec89e085c8",
+    "workflowHead": "3f6b80fa7aad2e974cef78ceeaf07677340ed3cd",
+    "workingSourcesClean": true
+  }
+}

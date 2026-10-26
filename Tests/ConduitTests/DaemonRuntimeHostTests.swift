@@ -1393,6 +1393,80 @@ final class DaemonRuntimeHostTests: XCTestCase {
         )
     }
 
+    /// The platform sidecar is missing, so its values come from the runtime file. An editor outside the host adds a legacy platform value to
+    /// that file after the open. The Start's first platform write checks the runtime bytes it was opened with, holds, and creates no sidecar
+    /// over the edited value. The runtime write is held behind it, both files are latched until a reload, and no machine effect runs.
+    func testAStartAfterAnExternalRuntimeEditBesideAMissingPlatformSidecarHoldsWithoutCreatingIt() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-host-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
+
+        var config = GenericDefaults.shared.makeConfig()
+        config.dnsForwarderEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        try ProxyConfigPersistence.save(config, in: environment)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: environment.platformConfigFile.path), "the platform sidecar starts missing")
+        let machine = FakeMachine(resolverDirectory: directory.appendingPathComponent("resolver"))
+        let host = try await RuntimeHost.open(
+            stateSession: session, logger: DiscardingLogSink(),
+            startupAllowsMissing: true,
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: hostEffects(loopbackPortProbe: FakeLoopbackPortProbe(), pacEvaluator: FakePacEvaluator(),
+                privilege: { _ in RuntimePrivilegeAdapters(client: machine, helperStatus: nil) },
+                credentials: InMemorySecretStore(), commandRunner: { path, arguments in try machine.run(path, arguments) },
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil }, vpnStatus: FakeVPNStatusObserver(),
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: directory.appendingPathComponent("home"), resolverDirectory: machine.resolverDirectory.path
+            )
+        )
+
+        // The outside editor adds a legacy platform value to the owned scratch runtime file.
+        let saved = try Data(contentsOf: environment.configFile)
+        guard var object = try JSONSerialization.jsonObject(with: saved) as? [String: Any] else { return XCTFail("the runtime file is an object") }
+        object["manageSystemProxy"] = true
+        let edited = try JSONSerialization.data(withJSONObject: object)
+        try edited.write(to: environment.configFile)
+
+        func startDecisions() async -> [ConfigurationWorkflowEvent] {
+            let before = host.orchestrator.eventLog.events.count
+            do {
+                try await host.startRuntime()
+                XCTFail("the start must hold")
+            } catch let refusal as RuntimeConfigurationWorkflow.StartRefusal {
+                XCTAssertEqual(refusal, .held)
+            } catch {
+                XCTFail("unexpected start error: \(error)")
+            }
+            return host.orchestrator.eventLog.events.dropFirst(before).compactMap { event -> ConfigurationWorkflowEvent? in
+                guard case .configWorkflow(let decision) = event.typed else { return nil }
+                return decision
+            }
+        }
+
+        let first = await startDecisions()
+        XCTAssertEqual(first.filter { if case .committed = $0 { true } else { false } }, [
+            .committed(ConfigurationWorkflowCommitted(file: .runtime, write: .notAttempted(.heldBehindPlatform))),
+            .committed(ConfigurationWorkflowCommitted(file: .platform, write: .notAttempted(.sourceChanged))),
+        ])
+        XCTAssertTrue(first.contains(.held(ConfigurationWorkflowHeld(phase: .start, input: .platform, reason: .commitFailed))), "\(first)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: environment.platformConfigFile.path), "no platform sidecar is created")
+        XCTAssertEqual(try Data(contentsOf: environment.configFile), edited, "the edited runtime file is kept")
+        XCTAssertFalse(machine.service("Wi-Fi").webProxy.enabled, "a held start applies no system proxy")
+
+        // Both files latched: the next start is refused for each with no baseline, before any I/O, until a reload.
+        let second = await startDecisions()
+        XCTAssertEqual(second.filter { if case .committed = $0 { true } else { false } }, [
+            .committed(ConfigurationWorkflowCommitted(file: .runtime, write: .notAttempted(.noBaseline))),
+            .committed(ConfigurationWorkflowCommitted(file: .platform, write: .notAttempted(.noBaseline))),
+        ])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: environment.platformConfigFile.path))
+        await host.flushEvents()
+    }
+
     // MARK: - Ownership guards, twins of the `AppState` scenarios
 
     /// A host over a `FakeMachine`, the way `AppStateHarness` builds the app:

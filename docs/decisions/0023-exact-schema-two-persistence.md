@@ -172,6 +172,12 @@ tested through a probe, because probes are reached only through proxy requests.
 
 Parent review accepted the kernel-owned duration inventory and the thin existing save gate; the sole asynchronous store/workflow remains planned.
 
+The store's canonical-comparison correction also protects exact text intent: Unicode-equivalent Swift
+strings can have different persisted URL/text bytes. Current and candidate values use the existing stagers
+on the store worker, preserving known repair values without reusing equality authority. The
+[verification checkpoint](../verification-configuration-source-2026-10-26.md) records source mutations,
+independent review and full local checks. Apply-side equality remains separate #246 work.
+
 ## Open questions
 
 Revisit schema3 for a demonstrated need for sub-millisecond probes, fractional-

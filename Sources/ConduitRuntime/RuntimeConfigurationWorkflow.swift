@@ -437,6 +437,8 @@ final class RuntimeConfigurationWorkflow {
         case .heldBehindPlatform: .heldBehindPlatform
         case .heldBehindRuntime: .heldBehindRuntime
         case .preservationHeld: .preservationHeld
+        case .sourceChanged: .sourceChanged
+        case .sourceUnreadable: .sourceUnreadable
         case .versionExhausted: .versionExhausted
         case .superseded: .superseded
         }

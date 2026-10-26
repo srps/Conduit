@@ -112,6 +112,12 @@ Store core, not adopted (2026-10-25): [`ConfigurationStore.swift`](../../Sources
 Physical verification primitive, consumed by the store core (2026-10-25): [`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift)
 classifies a component replacement as verified persisted, verified not persisted, unknown or not started, from an expected-baseline pre-read, the write's own result and bounded read-back. The outcome carries no bytes. It takes no intent generation and mints no receipt; the store owns component baselines/receipts, while the actual workflow owns intent and apply. Evidence and limits are in [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
 
+The store now compares canonical staged values rather than synthesized String equality before issuing
+an unchanged receipt. This prevents handing the host candidate URL/text bytes that differ from the
+verified file. The [source-authority checkpoint](../verification-configuration-source-2026-10-26.md)
+records the exact evidence and limits. It does not establish the still-open apply/reconciler fix (#246)
+or AppState convergence.
+
 ## Open questions
 
 Classify secret-free committed fields and coupled components before their client

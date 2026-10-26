@@ -1,0 +1,11 @@
+--- a/Sources/ConduitRuntime/ConfigurationStoreIO.swift
++++ b/Sources/ConduitRuntime/ConfigurationStoreIO.swift
+@@ -167,7 +167,7 @@
+         guard let current else { return .success(.different) }
+         switch canonicalBytes(current, stage: stage) {
+         case .bytes(let bytes):
+-            return .success(bytes == candidate ? .same : .different)
++            return .success(String(decoding: bytes, as: UTF8.self) == String(decoding: candidate, as: UTF8.self) ? .same : .different)
+         case .refused(.unexpected(let code)):
+             return .failure(UnexpectedStagingCode(code: code))
+         case .refused(let refusal):

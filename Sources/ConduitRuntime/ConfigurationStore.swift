@@ -43,10 +43,21 @@ private struct ConfigurationPreservationCheck: Sendable {
     let present: Bool
 }
 
+/// The runtime file bytes a missing sidecar takes its values from (decisions 0023 and 0026). The sidecar's first write checks them in the
+/// same physical step, immediately before its replacement, so it never shadows legacy values the store did not adopt.
+private struct ConfigurationSourceCheck: Sendable {
+    let file: StateRootFile
+    let baseline: ConfigurationFileBaseline
+}
+
 /// What one physical step returned. A held step replaced nothing. A replacement carries its outcome, and the baseline of the verified
 /// bytes. The hash of those bytes is computed on `PlatformWork`.
 private enum ConfigurationWriteAttempt: Sendable {
     case held(ConfigurationPreservationHold)
+    /// The source check of a missing sidecar did not verify, so nothing was replaced.
+    case sourceChanged
+    case sourceUnreadable(ConfigurationFileError)
+    case sourceRefused(ConfigurationFileReplacementRefusal)
     /// The workflow's claim was revoked before the replacement, so no write was made.
     case revoked
     case replaced(ConfigurationFileReplacementOutcome, verifiedBaseline: ConfigurationFileBaseline?)
@@ -82,6 +93,10 @@ final class ConfigurationStore {
         /// The legacy components whose values the runtime file carries, so a rewrite of it would drop them (the runtime record only). It
         /// is recomputed on each reload, and a verified canonical runtime write clears it.
         var carriedLegacy: Set<ConfigurationComponent> = []
+        /// The runtime file baseline a missing sidecar takes its values from, from the same observation even when no legacy key is present,
+        /// because the defaults depend on those bytes too. A present sidecar and the runtime record have none. The store's own verified runtime
+        /// write moves it, and the sidecar's first verified write clears it.
+        var source: ConfigurationFileBaseline?
     }
 
     private let incarnation = UUID()
@@ -121,8 +136,10 @@ final class ConfigurationStore {
         defer { isBusy = false }
         let currentPlan = session.plan
         let access = self.access
+        // The current values go to the worker by copy, so the missing-sidecar comparison runs there.
+        let previous = values
         let observed = await work.run {
-            ConfigurationStoreIO.observeAndDecode(plan: currentPlan, access: access, allowMissing: allowMissing)
+            ConfigurationStoreIO.observeAndDecode(plan: currentPlan, access: access, allowMissing: allowMissing, previous: previous)
         }
         return .admitted(ConfigurationLoadReport(context: context, outcome: adopt(observed)))
     }
@@ -195,7 +212,8 @@ final class ConfigurationStore {
             return .admitted(PreferencesCommitResult(context: context, preferences: .notAttempted(reason)))
         }
         let source = session.plan.preferences.path
-        switch await work.run({ ConfigurationStoreIO.stagePreferences(preferences, source: source) }) {
+        let current = values?.preferences
+        switch await work.run({ ConfigurationStoreIO.stagePreferences(preferences, current: current, source: source) }) {
         case .refused(let reason):
             return .admitted(PreferencesCommitResult(context: context, preferences: .notAttempted(.stagingRefused(reason))))
         case .ready(let staged):
@@ -203,7 +221,7 @@ final class ConfigurationStore {
                 staged.bytes,
                 component: .preferences,
                 baseline: baseline,
-                sameValue: values?.preferences == staged.value,
+                sameValue: staged.comparison == .same,
                 preservation: nil,
                 context: context,
                 claim: claim
@@ -249,8 +267,9 @@ final class ConfigurationStore {
         claim: ConfigurationWriteClaim
     ) async -> RuntimePlatformCommitResult {
         let platformSource = session.plan.platformConfig.path
+        let current = (runtime: values?.runtime, platform: values?.platform)
         let staged = await work.run {
-            ConfigurationStoreIO.stageRuntimeAndPlatform(runtime, platform, platformSource: platformSource)
+            ConfigurationStoreIO.stageRuntimeAndPlatform(runtime, platform, current: current, platformSource: platformSource)
         }
         let pair: ConfigurationStagedRuntimeAndPlatform
         switch staged {
@@ -267,7 +286,7 @@ final class ConfigurationStore {
             pair.platform.bytes,
             component: .platform,
             baseline: platformBaseline,
-            sameValue: values?.platform == pair.platform.value,
+            sameValue: pair.platform.comparison == .same,
             preservation: nil,
             context: context,
             claim: claim
@@ -277,7 +296,8 @@ final class ConfigurationStore {
         }
         values?.platform = pair.platform.value
         // The guard runs only when the runtime file would be rewritten. A verified unchanged runtime file drops nothing, so it stays independent.
-        let sameRuntime = values?.runtime == pair.runtime.value
+        // Decided by canonical bytes on the worker when the pair was staged. The platform commit above changes no runtime value.
+        let sameRuntime = pair.runtime.comparison == .same
         let rewritesRuntime = !(sameRuntime && records[.runtime].present)
         var preservation: ConfigurationPreservationCheck?
         if rewritesRuntime, records[.runtime].carriedLegacy.contains(.preferences) {
@@ -322,8 +342,9 @@ final class ConfigurationStore {
     }
 
     /// Verifies a present component whose verified value already is the candidate, without writing it, and saves every other candidate.
-    /// The comparison is of parsed values through the existing equality, so formatting and unknown fields never force a rewrite
-    /// (decision 0018). The bytes are then verified against the baseline.
+    /// `sameValue` is the worker's canonical comparison of the current value and the candidate, so formatting and unknown fields on disk
+    /// never force a rewrite (decision 0018), and a byte-distinct candidate that `==` would call equal is written. The raw bytes are then
+    /// verified against the baseline.
     private func commit(
         _ bytes: Data,
         component: ConfigurationComponent,
@@ -341,7 +362,9 @@ final class ConfigurationStore {
 
     /// One conditional replacement of one file, and the store's bookkeeping for its result. Every physical step runs on `PlatformWork`.
     /// A preservation check runs first, in the same `PlatformWork` step and immediately before the replacement, so the sidecar is verified
-    /// at the moment the runtime bytes are replaced. The check is a read only: it never writes the sidecar.
+    /// at the moment the runtime bytes are replaced. The check is a read only: it never writes the sidecar. A missing sidecar's first write
+    /// checks its runtime source the same way, so a runtime file edited since the store established it is not shadowed. Neither check is a
+    /// multi-file atomic claim (decision 0027): a change after the check and before the replacement is not excluded.
     private func write(
         _ bytes: Data,
         component: ConfigurationComponent,
@@ -354,7 +377,20 @@ final class ConfigurationStore {
         guard Self.canAdvance(records[component].version) else { return .notAttempted(.versionExhausted) }
         let session = self.session
         let access = self.access
+        let source = sourceCheck(for: component)
         let attempt = await work.run { () -> ConfigurationWriteAttempt in
+            if let source {
+                switch VerifiedConfigurationFileReplacement.verifyUnchanged(source.file, expecting: source.baseline, access: access) {
+                case .unchanged:
+                    break
+                case .changed:
+                    return .sourceChanged
+                case .refused(let refusal):
+                    return .sourceRefused(refusal)
+                case .notVerified(let error):
+                    return .sourceUnreadable(error)
+                }
+            }
             if let preservation {
                 switch VerifiedConfigurationFileReplacement.verifyUnchanged(preservation.file, expecting: preservation.baseline, access: access) {
                 case .unchanged where preservation.present:
@@ -386,6 +422,15 @@ final class ConfigurationStore {
                 latch(preservation.component)
             }
             return .notAttempted(.preservationHeld(hold))
+        case .sourceChanged:
+            // The runtime bytes differ from the ones the store established, so both files latch, as an observed conflict does.
+            latch(component)
+            latch(.runtime)
+            return .notAttempted(.sourceChanged)
+        case .sourceUnreadable(let error):
+            return .notAttempted(.sourceUnreadable(error))
+        case .sourceRefused(let refusal):
+            return .notAttempted(.refused(refusal))
         case .revoked:
             // Nothing was written, so no baseline changes and nothing latches. The next admission decides the file's fate.
             return .notAttempted(.superseded)
@@ -408,6 +453,14 @@ final class ConfigurationStore {
             records[component].baseline = verified
             records[component].present = true
             records[component].carriedLegacy = []
+            records[component].source = nil
+            // A sidecar still missing takes its values from the new runtime bytes. They hold no legacy keys, and a carried legacy value
+            // needed its sidecar verified first, so the sidecar's effective value is unchanged and its version stays.
+            if component == .runtime {
+                for sidecar in [ConfigurationComponent.platform, .preferences] where !records[sidecar].present {
+                    records[sidecar].source = verified
+                }
+            }
             // The version advances here, after the claim and the canAdvance check above. The busy slot keeps every other operation from changing it in between.
             records[component].version += 1
             return .persisted(receipt(component, context: context), reportedWriteError: reported)
@@ -474,6 +527,15 @@ final class ConfigurationStore {
         }
     }
 
+    /// The source check a write of this component needs: only a missing sidecar has one.
+    private func sourceCheck(for component: ConfigurationComponent) -> ConfigurationSourceCheck? {
+        guard component != .runtime, !records[component].present else { return nil }
+        guard let source = records[component].source else {
+            preconditionFailure("an authorized missing sidecar carries the runtime baseline it was observed with")
+        }
+        return ConfigurationSourceCheck(file: session.configurationFile(for: .runtime), baseline: source)
+    }
+
     private func verification(_ component: ConfigurationComponent, baseline: ConfigurationFileBaseline) async -> ConfigurationFileVerification {
         let file = session.configurationFile(for: component)
         let access = self.access
@@ -492,11 +554,17 @@ final class ConfigurationStore {
             latchAll()
             return .refused(refusal)
         case .success(let frozen):
-            for component in ConfigurationComponent.allCases
-            where records[component].baseline != observed.baselines[component] && !Self.canAdvance(records[component].version) {
+            // A missing sidecar's value comes from the runtime file, so a change of that value is a change of the sidecar, though its own
+            // absence is the same. The worker decided it by canonical bytes. A runtime edit that leaves the value's bytes as they were keeps
+            // the sidecar's token.
+            func advances(_ component: ConfigurationComponent) -> Bool {
+                records[component].baseline != observed.baselines[component] || observed.valueMoved[component]
+            }
+            for component in ConfigurationComponent.allCases where advances(component) && !Self.canAdvance(records[component].version) {
                 latchAll()
                 return .refused(.versionExhausted(component))
             }
+            let advancing = ConfigurationComponent.allCases.filter(advances)
             values = ConfigurationValues(
                 runtime: frozen.runtime.config,
                 platform: frozen.platform.config,
@@ -521,13 +589,15 @@ final class ConfigurationStore {
             )
             for component in ConfigurationComponent.allCases {
                 let baseline = observed.baselines[component]
-                // The version changes only when the observed identity differs from the baseline in force, so a reload of unlatched, unchanged
-                // bytes keeps its tokens. A latch clears the baseline, so a reload after a latch always takes a newer version.
-                if records[component].baseline != baseline {
+                // The version changes only when the observed identity differs from the baseline in force, or a missing sidecar's value moved,
+                // so a reload of unlatched, unchanged bytes keeps its tokens. A latch clears the baseline, so a reload after a latch always takes
+                // a newer version.
+                if advancing.contains(component) {
                     records[component].version += 1
                 }
                 records[component].baseline = baseline
                 records[component].present = loaded[component].present
+                records[component].source = component == .runtime || loaded[component].present ? nil : observed.baselines.runtime
             }
             // Recomputed from this observation only, so a rewrite that dropped the values is seen as absent on the next reload.
             records[.runtime].carriedLegacy = frozen.runtimeCarriesLegacy

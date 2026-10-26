@@ -13,15 +13,18 @@ import XCTest
 /// the physical calls, the typed results, the stored bytes and the apply eligibility from the declared trace alone.
 ///
 /// Boundary points, in order: `beforeOperation` (before the operation starts or its capture), `queued` (the first PlatformWork job is queued
-/// behind a blocker), and for each physical file call n, `entry(n)` and `exit(n)`. A write job's claim check sits between the last point before
-/// its first call and that call, so an admission there revokes the job; an admission after its first call does not (decision 0015).
+/// behind a blocker), and for each physical file call n, `entry(n)` and `exit(n)`. A write job's claim check sits immediately before its
+/// replacement's first call, so an admission there revokes the job; an admission after that call does not (decision 0015). An absent
+/// sidecar's job reads its runtime source first, so an admission at that read's points still revokes it.
 ///
 /// Explored alphabet: 4 prepare scenarios and 3 reload scenarios; 4 write faults per write job; up to 2 newer intents at one point each,
 /// BFS-ordered by depth, with the full fault product only at depths 0 and 1 (depth 2 uses the fault-free case), plus a fixed-seed walk of up
 /// to 4 intents. Every run ends with a second Start that resumes from the state the first run left, so unknown latches are checked as
 /// holding apply. Coverage counts are asserted, so a silently shrunk exploration fails.
 ///
-/// Scope: store I/O and returned apply eligibility. Not modeled: the real host's apply, launch recovery, legacy sidecar preservation, and the preferences commit. The reference does not reuse production transition code.
+/// Scope: store I/O and returned apply eligibility, including the absent sidecar's source read. Not modeled: the real host's apply, launch
+/// recovery, legacy sidecar preservation, a changed source (covered by `ConfigurationStoreSourceTests` and the store models), and the
+/// preferences commit. The reference does not reuse production transition code.
 @MainActor
 final class ConfigurationWorkflowModelTests: XCTestCase {
     // MARK: - Trace vocabulary
@@ -147,7 +150,9 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
     }
 
     /// One file's step. A canonical present file is verified by a read, without a claim. An absent file, or a file the scenario makes absent,
-    /// is written: its claim is checked before its first call, and its read-back classifies the fault.
+    /// is written: its claim is checked before its first call, and its read-back classifies the fault. An absent sidecar's job first reads
+    /// the runtime file it takes its values from, so its claim is checked after that read. No trace edits the runtime file before the
+    /// sidecar's write, so the read always matches.
     private func runFile(
         _ file: ConfigurationComponent,
         fault: Fault,
@@ -160,6 +165,9 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         if !absent {
             walk.call(file, write: false, into: &calls)
             return .unchanged
+        }
+        if file != .runtime {
+            walk.call(.runtime, write: false, into: &calls)
         }
         guard walk.isCurrent else { return .notAttempted(.superseded) }
         walk.call(file, write: false, into: &calls)
@@ -866,7 +874,8 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
     /// The matrix is fixed, not sampled. `matrixTraces` is the breadth-first count of the declared alphabet: 4 prepare scenarios and 3 reload
     /// scenarios, the fault domains of `faultPairs`, depth at most 2 (1 for a pair with a write fault), and the points each walk reaches. Any
     /// change to those domains must change this count on purpose. `frontierBudget` bounds one frontier, and `seededWalks` is the seeded tail.
-    private static let matrixTraces = 1_339
+    /// It was 1,339 before an absent sidecar's job gained its runtime source read, whose two points the walks now reach.
+    private static let matrixTraces = 1_459
     private static let frontierBudget = 2_000
     private static let seededWalks = 150
     private static let seed: UInt64 = 0x5EED

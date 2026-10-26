@@ -198,6 +198,8 @@ extension ControlConfigWorkflowNotAttemptedCause {
         case .heldBehindPlatform: self = .heldBehindPlatform
         case .heldBehindRuntime: self = .heldBehindRuntime
         case .preservationHeld: self = .preservationHeld
+        case .sourceChanged: self = .sourceChanged
+        case .sourceUnreadable: self = .sourceUnreadable
         case .versionExhausted: self = .versionExhausted
         case .superseded: self = .superseded
         }

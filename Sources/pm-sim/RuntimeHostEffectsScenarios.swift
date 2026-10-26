@@ -97,13 +97,20 @@ enum RuntimeHostEffectsScenario {
                 assertions += lifecycle.assertions
                 notes += lifecycle.notes
             }
+            // The source host runs over the same root only after the lifecycle host has shut down, with its own shutdown.
+            var source = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced {
+                source = await exerciseSourceChanged(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += source.assertions
+                notes += source.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced {
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
-                unconfirmedHost = lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
+                unconfirmedHost = source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
             }
@@ -342,6 +349,103 @@ enum RuntimeHostEffectsScenario {
             let flush = await host.flushEvents()
             quiesced = settled == .settled && flush.allConfirmed
             assertions.append(.init("the lifecycle error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// A Start beside a missing platform sidecar, after an outside editor added a legacy platform value to the owned runtime file, through
+    /// the actual host over the run's fakes. The platform's first write checks the runtime bytes the host opened with, so it holds and
+    /// creates no sidecar over the edited value. The runtime write is held behind it, and the next Start finds both files latched.
+    @MainActor
+    private static func exerciseSourceChanged(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let machine = fakes.machine
+        var config = GenericDefaults.shared.makeConfig()
+        config.dnsForwarderEnabled = false
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        let host: RuntimeHost
+        // The earlier hosts' events share the owned file, so only the events after this count are this host's.
+        let earlier: Int
+        do {
+            earlier = try configurationEvents(in: environment.eventsFile).count
+            try ProxyConfigPersistence.save(config, in: environment)
+            try FileManager.default.removeItem(at: environment.platformConfigFile)
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home)
+            )
+        } catch {
+            notes.append("source host did not open: \(error.localizedDescription)")
+            check("the source host opened beside a missing platform sidecar", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+
+        var quiesced = false
+        do {
+            // The outside editor adds a legacy platform value to the owned scratch runtime file after the open.
+            let saved = try Data(contentsOf: environment.configFile)
+            guard var object = try JSONSerialization.jsonObject(with: saved) as? [String: Any] else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            object["manageSystemProxy"] = true
+            let edited = try JSONSerialization.data(withJSONObject: object)
+            try edited.write(to: environment.configFile)
+
+            // The refusal's type is internal to the host; the typed events below name why each start held.
+            var started = 0
+            for _ in 0..<2 {
+                do {
+                    try await host.startRuntime()
+                    started += 1
+                } catch {
+                    notes.append("source start refused: \(error.localizedDescription)")
+                }
+            }
+            check("both starts are refused", started == 0)
+            check("no platform sidecar is created over the edited runtime file",
+                  !FileManager.default.fileExists(atPath: environment.platformConfigFile.path))
+            check("the edited runtime file is kept", (try? Data(contentsOf: environment.configFile)) == edited)
+            check("a held start applies no system proxy", machine.service("Wi-Fi").webProxy.enabled == false)
+
+            await host.stopRuntime()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            check("the source host settles before its root is released", settled == .settled)
+            let flush = await host.flushEvents()
+            check("the source host's observability flush is confirmed", flush.allConfirmed)
+            quiesced = settled == .settled && flush.allConfirmed
+
+            let typed = Array(try configurationEvents(in: environment.eventsFile).dropFirst(earlier))
+            check("the platform's first write is held for its changed source",
+                  typed.contains(.configWorkflow(.committed(ConfigurationWorkflowCommitted(file: .platform, write: .notAttempted(.sourceChanged))))))
+            check("the runtime write is held behind the platform",
+                  typed.contains(.configWorkflow(.committed(ConfigurationWorkflowCommitted(file: .runtime, write: .notAttempted(.heldBehindPlatform))))))
+            check("the start holds on the platform commit",
+                  typed.contains(.configWorkflow(.held(ConfigurationWorkflowHeld(phase: .start, input: .platform, reason: .commitFailed)))))
+            check("the next start finds the platform latched",
+                  typed.contains(.configWorkflow(.committed(ConfigurationWorkflowCommitted(file: .platform, write: .notAttempted(.noBaseline))))))
+            check("the next start finds the runtime latched",
+                  typed.contains(.configWorkflow(.committed(ConfigurationWorkflowCommitted(file: .runtime, write: .notAttempted(.noBaseline))))))
+        } catch {
+            // The error path joins the host's work before anything is released: stop, settle, then flush, then judge.
+            notes.append("source exercise error: \(error.localizedDescription)")
+            await host.stopRuntime()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            quiesced = settled == .settled && flush.allConfirmed
+            assertions.append(.init("the source error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }

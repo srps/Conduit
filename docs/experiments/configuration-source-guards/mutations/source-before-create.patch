@@ -1,0 +1,11 @@
+--- a/Sources/ConduitRuntime/ConfigurationStore.swift
++++ b/Sources/ConduitRuntime/ConfigurationStore.swift
+@@ -377,7 +377,7 @@
+         guard Self.canAdvance(records[component].version) else { return .notAttempted(.versionExhausted) }
+         let session = self.session
+         let access = self.access
+-        let source = sourceCheck(for: component)
++        let source: ConfigurationSourceCheck? = nil
+         let attempt = await work.run { () -> ConfigurationWriteAttempt in
+             if let source {
+                 switch VerifiedConfigurationFileReplacement.verifyUnchanged(source.file, expecting: source.baseline, access: access) {

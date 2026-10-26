@@ -1,0 +1,12 @@
+--- a/Sources/ConduitRuntime/ConfigurationStore.swift
++++ b/Sources/ConduitRuntime/ConfigurationStore.swift
+@@ -458,7 +458,8 @@
+             // needed its sidecar verified first, so the sidecar's effective value is unchanged and its version stays.
+             if component == .runtime {
+                 for sidecar in [ConfigurationComponent.platform, .preferences] where !records[sidecar].present {
+-                    records[sidecar].source = verified
++                    _ = sidecar
++                    _ = verified
+                 }
+             }
+             // The version advances here, after the claim and the canAdvance check above. The busy slot keeps every other operation from changing it in between.

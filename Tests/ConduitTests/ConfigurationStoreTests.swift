@@ -901,27 +901,39 @@ final class ConfigurationStoreTests: XCTestCase {
     // MARK: - Unknown fields
 
     /// A valid runtime file with an unknown top-level field is accepted on read (decision 0022). An external edit that adds one changes the
-    /// bytes, so an ordinary save conflicts and latches the baseline until a reload. The file is kept as it was edited.
+    /// bytes, so an ordinary save conflicts and latches the baseline until a reload. The file is kept as it was edited. With the platform
+    /// sidecar present, the runtime write's own pre-read reports the conflict. With it missing, the platform's first write checks the same
+    /// runtime bytes as its source and holds first, so the runtime write is held behind it. Both latch the runtime file until a reload.
     func testAValidUnknownFieldEditToTheRuntimeFileConflictsAndLatchesUntilAReload() async throws {
-        let fixture = try Fixture(runtime: try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()))
-        defer { fixture.close() }
-        guard await adoptedLoad(fixture) != nil else { return }
-        let tokenBefore = fixture.store.baselineToken(for: .runtime)
-        let edited = try runtimeFile(adding: ["futureField": "accepted-and-skipped"])
-        fixture.access.externalEdit(.replace(edited), at: fixture.plan.config.path)
+        let platformCases: [(platform: Data?, runtime: ConfigurationWriteOutcome, platformOutcome: String)] = [
+            (try PlatformConfigPersistence.stagedData(for: PlatformIntegrationConfig()), .conflict, "unchanged"),
+            (nil, .notAttempted(.heldBehindPlatform), "notAttempted(sourceChanged)"),
+        ]
+        for row in platformCases {
+            let fixture = try Fixture(
+                runtime: try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()),
+                platform: row.platform
+            )
+            defer { fixture.close() }
+            guard await adoptedLoad(fixture) != nil else { return }
+            let tokenBefore = fixture.store.baselineToken(for: .runtime)
+            let edited = try runtimeFile(adding: ["futureField": "accepted-and-skipped"])
+            fixture.access.externalEdit(.replace(edited), at: fixture.plan.config.path)
 
-        let tokens = ConfigurationSlots(runtime: tokenBefore, platform: fixture.store.baselineToken(for: .platform), preferences: nil)
-        let admission = await fixture.store.commitRuntimeAndPlatform(
-            GenericDefaults.shared.makeConfig(), PlatformIntegrationConfig(), expecting: tokens, context: Self.context
-        )
-        guard case .admitted(let result) = admission else { return XCTFail("the commit was not admitted") }
-        XCTAssertEqual(describe(result.runtime), "conflict")
-        XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.config.path), edited, "the edited file is kept")
-        XCTAssertNil(fixture.store.baselineToken(for: .runtime), "the conflict latches the runtime baseline")
+            let tokens = ConfigurationSlots(runtime: tokenBefore, platform: fixture.store.baselineToken(for: .platform), preferences: nil)
+            let admission = await fixture.store.commitRuntimeAndPlatform(
+                GenericDefaults.shared.makeConfig(), PlatformIntegrationConfig(), expecting: tokens, context: Self.context
+            )
+            guard case .admitted(let result) = admission else { return XCTFail("the commit was not admitted") }
+            XCTAssertEqual(result.runtime, row.runtime)
+            XCTAssertEqual(describe(result.platform), row.platformOutcome)
+            XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.config.path), edited, "the edited file is kept")
+            XCTAssertNil(fixture.store.baselineToken(for: .runtime), "the changed runtime bytes latch the runtime baseline")
 
-        guard let reloaded = await adoptedLoad(fixture) else { return }
-        XCTAssertEqual(reloaded.runtime, ConfigurationComponentLoad(present: true, migrationPending: false))
-        XCTAssertNotEqual(fixture.store.baselineToken(for: .runtime), tokenBefore, "a reload issues a newer baseline")
+            guard let reloaded = await adoptedLoad(fixture) else { return }
+            XCTAssertEqual(reloaded.runtime, ConfigurationComponentLoad(present: true, migrationPending: false))
+            XCTAssertNotEqual(fixture.store.baselineToken(for: .runtime), tokenBefore, "a reload issues a newer baseline")
+        }
     }
 
     // MARK: - Bounded model over runtime and platform
@@ -929,9 +941,9 @@ final class ConfigurationStoreTests: XCTestCase {
     /// A bounded model of the runtime and platform files through the coupled commit, verification, reload and saved tokens. The model holds
     /// each file's external variant, the baseline the store last adopted, the latch, the version, and the parsed value it last adopted or
     /// wrote. Variants: the runtime defaults, the renamed runtime, and the defaults with trailing whitespace; the platform defaults and the
-    /// defaults with trailing whitespace. Each step is a model decision, and each store result must match it. The trace of each seed is part
-    /// of the failure label, so a counterexample replays. It has no read or write faults, which the focused tests above cover. It is not
-    /// source mutation testing, and it does not explore interleavings.
+    /// defaults with trailing whitespace. A missing platform sidecar takes the runtime variant the last adopted reload saw as its source, and
+    /// its first write is held when the runtime bytes differ from it. Each step is a model decision, and each store result must match it. The trace of each seed is part
+    /// of the failure label, so a counterexample replays. It has no read or write faults, which the focused tests above cover. It does not explore interleavings.
     func testABoundedModelOverRuntimeAndPlatformMatchesTheStoreForReplayableSeeds() async throws {
         let defaults = GenericDefaults.shared.makeConfig()
         var renamed = defaults
@@ -964,6 +976,9 @@ final class ConfigurationStoreTests: XCTestCase {
             var modelValue = [0, 0]
             var adopted = false
             var savedVersion: [Int?] = [nil, nil]
+            // The runtime variant (nil is missing) a missing platform sidecar takes its values from: the one the last adopted reload saw.
+            // It is read only while the adopted platform is missing, and the platform's first write checks it before anything else.
+            var platformSource: Int?
             var tokens = ConfigurationSlots<ConfigurationBaselineToken?>(runtime: nil, platform: nil, preferences: nil)
             var trace: [String] = []
 
@@ -989,7 +1004,8 @@ final class ConfigurationStoreTests: XCTestCase {
             // conflict. Then a runtime rename, a verification that latches it, and a fresh-token commit reach heldBehindRuntime. The random
             // steps follow. Those outcomes are therefore reached on every seed, not only by chance.
             // The reload re-adopts the platform file that the conflict latched, so the runtime probe below leaves the platform authorized.
-            var pending: [Int] = [1, 2, 4, 6, 3, 1, 7, 4, 3]
+            // The source probe (op 8) follows, so `sourceChanged` is reached on every seed too.
+            var pending: [Int] = [1, 2, 4, 6, 3, 1, 7, 4, 3, 8]
             var forceFresh = true
             var executedSteps = 0
             for step in 0..<stepsPerSeed {
@@ -1030,6 +1046,7 @@ final class ConfigurationStoreTests: XCTestCase {
                         }
                         modelValue = [external[0].map { runtimeVariantValue[$0] } ?? 0, 0]
                         adopted = true
+                        platformSource = external[0]
                     }
                     if case .adopted = report.outcome {
                         XCTAssertFalse(refused, label)
@@ -1059,8 +1076,14 @@ final class ConfigurationStoreTests: XCTestCase {
                         expectRuntime = authorityRefusal(0) ?? "notAttempted(heldBehindPlatform)"
                         expectPlatform = authorityRefusal(1) ?? "notAttempted(heldBehindRuntime)"
                     } else {
-                        // The platform file first: a changed identity conflicts, a present file is verified, and a missing file is written.
-                        if external[1] != baseline[1] {
+                        // The platform file first. A missing one checks its runtime source before its own pre-read, so changed runtime
+                        // bytes hold it and latch both files. Then a changed identity conflicts, a present file is verified, and a missing
+                        // file is written.
+                        if baseline[1] == nil && external[0] != platformSource {
+                            latched = [true, true]
+                            expectPlatform = "notAttempted(sourceChanged)"
+                            expectRuntime = "notAttempted(heldBehindPlatform)"
+                        } else if external[1] != baseline[1] {
                             latched[1] = true
                             expectPlatform = "conflict"
                             expectRuntime = "notAttempted(heldBehindPlatform)"
@@ -1121,6 +1144,17 @@ final class ConfigurationStoreTests: XCTestCase {
                     trace.append("runtime identity renamed")
                     forceFresh = true
 
+                case 8:
+                    // A source probe: the runtime file is restored and the platform sidecar removed, a reload adopts the missing sidecar
+                    // with the restored runtime bytes as its source, the runtime is renamed outside the store, and a fresh-token commit
+                    // reaches the platform's source check (`sourceChanged`).
+                    trace.append("source probe")
+                    external = [0, nil]
+                    fixture.access.externalEdit(.replace(runtimeFiles[0]), at: fixture.plan.config.path)
+                    fixture.access.externalEdit(.remove, at: fixture.plan.platformConfig.path)
+                    pending = [1, 7, 3]
+                    forceFresh = true
+
                 default:
                     trace.append("verify")
                     var expected = ConfigurationSlots<String?>(runtime: nil, platform: nil, preferences: nil)
@@ -1150,6 +1184,7 @@ final class ConfigurationStoreTests: XCTestCase {
         let required: Set<String> = [
             "persisted", "unchanged", "unchangedAbsent", "changed", "conflict", "notAttempted(noAuthoritativeBaseline)",
             "notAttempted(baselineMismatch)", "notAttempted(heldBehindPlatform)", "notAttempted(heldBehindRuntime)",
+            "notAttempted(sourceChanged)",
         ]
         XCTAssertTrue(covered.isSuperset(of: required), "the seeds did not reach every outcome class; missing \(required.subtracting(covered).sorted())")
     }
@@ -1172,14 +1207,22 @@ final class ConfigurationStoreTests: XCTestCase {
 
     /// A bounded model of the preferences file. It tracks the external bytes, the baseline the store last adopted, whether an observed
     /// change has latched that baseline, and the store's file version. It decides each result from those alone, following decisions 0027
-    /// and 0021. It is a model of the rules, not the store's code. Each segment starts a new store on the same external bytes and runs four
-    /// operations, so the fake's 16-call log is not exceeded. The trace covers three seeds. It is not source mutation testing, and it does not
-    /// explore interleavings.
+    /// and 0021. It also tracks the runtime file the missing sidecar takes its values from: its variant on disk (the defaults, the defaults
+    /// with a legacy `showMenuBarIcon: false`, or missing), and the variant the store last adopted as the sidecar's source. A reload that
+    /// changes the missing sidecar's effective value takes a newer version, and a first write is held when the runtime variant on disk is
+    /// not the source. It is a model of the rules, not the store's code. Each segment starts a new store on the same external bytes and runs
+    /// five operations, and each step clears the fake's 16-call log. Interleavings are covered separately.
     func testABoundedModelOverPreferencesMatchesTheStoreForReplayableSeeds() async throws {
-        let defaultRuntime = try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig())
+        // The runtime variants: the defaults, and the defaults carrying a legacy preference value that differs from the default.
+        let runtimeVariants = [
+            try ProxyConfigPersistence.stagedFileData(for: GenericDefaults.shared.makeConfig()),
+            try runtimeFile(adding: ["showMenuBarIcon": false]),
+        ]
         // Every outcome class the preferences model can reach, across all seeds. The seeds must reach each one, or the run proves less.
         var reached = Set<String>()
         var refusedLoads = 0
+        // Reloads where only the missing sidecar's value moved: its absence is the same, and its version still advances.
+        var valueMovedReloads = 0
         for seed in [UInt64(1), 7, 42, 99, 123, 256, 1024, 2026] {
             var source = ReplaySource(seed: seed)
             let variants = [try preferenceBytes(showMenuBarIcon: true), try preferenceBytes(showMenuBarIcon: false)]
@@ -1194,11 +1237,23 @@ final class ConfigurationStoreTests: XCTestCase {
                 var latched = false
                 var modelBaseline: Data?
                 var modelVersion: UInt64 = 0
-                // Whether the runtime file is present. A segment starts with the runtime file the fixture seeded, and a step may remove it.
-                var runtimePresent = fixture.seededRuntime != nil
+                // The runtime variant on disk (nil is missing). A segment starts with the runtime file the fixture seeded: the defaults
+                // beside a sidecar, and none beside a missing one.
+                var runtimeVariant: Int? = fixture.seededRuntime != nil ? 0 : nil
+                // The runtime variant the store last adopted as the missing sidecar's source, and the showMenuBarIcon it last adopted.
+                var modelSource: Int?
+                var adoptedShows = true
+                /// The showMenuBarIcon a load adopts: the sidecar's own value, or the runtime file's legacy value when the sidecar is missing.
+                func loadedShows() -> Bool {
+                    external == nil ? runtimeVariant != 1 : externalShows != false
+                }
                 func adoptModel() {
-                    if !adopted || latched || modelBaseline != external { modelVersion += 1 }
+                    let valueMoved = external == nil && adoptedShows != loadedShows()
+                    if !adopted || latched || modelBaseline != external || valueMoved { modelVersion += 1 }
+                    if adopted, !latched, modelBaseline == external, valueMoved { valueMovedReloads += 1 }
                     modelBaseline = external
+                    modelSource = runtimeVariant
+                    adoptedShows = loadedShows()
                     adopted = true
                     latched = false
                 }
@@ -1207,13 +1262,40 @@ final class ConfigurationStoreTests: XCTestCase {
                 // A token saved at the start of a segment. It goes stale once the version moves, and it is never valid in another segment.
                 let savedToken = fixture.store.baselineToken(for: .preferences)
 
-                for step in 0..<4 {
+                for step in 0..<5 {
                     let label = "seed \(seed), segment \(segment), step \(step), trace \(trace.joined(separator: " ; "))"
                     // Each step has its own call log, so one step's calls never count against the fake's 16-call budget.
                     fixture.access.clearObservations()
                     let token = fixture.store.baselineToken(for: .preferences)
                     let tokenValid = adopted && !latched && token?.version == modelVersion
-                    switch source.next(4) {
+                    // Each seed opens with the value probe, so a reload where only the missing sidecar's value moved is reached on every seed.
+                    switch segment == 0 && step == 0 ? 5 : source.next(5) {
+                    case 5:
+                        // The value probe: the sidecar is removed and the runtime restored to the defaults, a reload adopts the missing
+                        // sidecar, the runtime gains the legacy value outside the store, and a second reload adopts that value.
+                        trace.append("value probe")
+                        external = nil
+                        externalShows = nil
+                        fixture.access.externalEdit(.remove, at: fixture.plan.preferences.path)
+                        for variant in [0, 1] {
+                            runtimeVariant = variant
+                            fixture.access.externalEdit(.replace(runtimeVariants[variant]), at: fixture.plan.config.path)
+                            guard await adoptedLoad(fixture) != nil else { return XCTFail("the probe reload was not adopted, \(label)") }
+                            adoptModel()
+                        }
+                        XCTAssertEqual(fixture.store.values?.preferences.showMenuBarIcon, false, label)
+                        XCTAssertEqual(fixture.store.baselineToken(for: .preferences)?.version, modelVersion, label)
+                    case 4:
+                        // A runtime edit with no reload: the defaults, the legacy value, or removal. Beside a missing sidecar it changes the
+                        // source the next first write checks, and the next reload's value.
+                        let choice = source.next(3)
+                        runtimeVariant = choice < 2 ? choice : nil
+                        if let runtimeVariant {
+                            fixture.access.externalEdit(.replace(runtimeVariants[runtimeVariant]), at: fixture.plan.config.path)
+                        } else {
+                            fixture.access.externalEdit(.remove, at: fixture.plan.config.path)
+                        }
+                        trace.append("edit runtime \(runtimeVariant.map { $0 == 1 ? "legacy" : "defaults" } ?? "missing")")
                     case 0:
                         // An external edit: removal, a value, the other value, or the same value with trailing whitespace.
                         switch source.next(4) {
@@ -1237,14 +1319,14 @@ final class ConfigurationStoreTests: XCTestCase {
                         // component until a later load succeeds. A missing sidecar beside a present runtime file adopts the defaults with no
                         // warning (the witness below). The model removes or restores the runtime file itself, so the refusal is reached.
                         if source.next(3) == 0 {
-                            runtimePresent = false
+                            runtimeVariant = nil
                             fixture.access.externalEdit(.remove, at: fixture.plan.config.path)
-                        } else if !runtimePresent {
-                            runtimePresent = true
-                            fixture.access.externalEdit(.replace(defaultRuntime), at: fixture.plan.config.path)
+                        } else if runtimeVariant == nil {
+                            runtimeVariant = 0
+                            fixture.access.externalEdit(.replace(runtimeVariants[0]), at: fixture.plan.config.path)
                         }
-                        let refused = !runtimePresent && external != nil
-                        trace.append("reload runtime \(runtimePresent ? "present" : "missing")")
+                        let refused = runtimeVariant == nil && external != nil
+                        trace.append("reload runtime \(runtimeVariant == nil ? "missing" : "present")")
                         guard case .admitted(let report) = await fixture.store.load(context: Self.context) else {
                             return XCTFail("the reload was not admitted, \(label)")
                         }
@@ -1269,6 +1351,10 @@ final class ConfigurationStoreTests: XCTestCase {
                             expected = "notAttempted(noAuthoritativeBaseline)"
                         } else if !presentedValid {
                             expected = "notAttempted(baselineMismatch)"
+                        } else if modelBaseline == nil && runtimeVariant != modelSource {
+                            // The adopted sidecar is missing, so its first write checks the runtime source before its own pre-read.
+                            expected = "notAttempted(sourceChanged)"
+                            latched = true
                         } else if external != modelBaseline {
                             expected = "conflict"
                             latched = true
@@ -1280,6 +1366,7 @@ final class ConfigurationStoreTests: XCTestCase {
                             modelBaseline = staged
                             external = staged
                             externalShows = proposed.showMenuBarIcon
+                            adoptedShows = proposed.showMenuBarIcon
                             modelVersion += 1
                         }
                         trace.append("commit prefs \(proposed.showMenuBarIcon ? "shows" : "other") \(presented == token ? "current" : "saved")")
@@ -1315,9 +1402,10 @@ final class ConfigurationStoreTests: XCTestCase {
         // runtime-missing case, which the store refuses at its own boundary (decision 0023).
         let required: Set<String> = [
             "persisted", "unchanged", "unchangedAbsent", "changed", "conflict",
-            "notAttempted(noAuthoritativeBaseline)", "notAttempted(baselineMismatch)",
+            "notAttempted(noAuthoritativeBaseline)", "notAttempted(baselineMismatch)", "notAttempted(sourceChanged)",
         ]
         XCTAssertTrue(reached.isSuperset(of: required), "the seeds did not reach every outcome class; missing \(required.subtracting(reached).sorted())")
         XCTAssertGreaterThan(refusedLoads, 0, "the seeds reached the refused load")
+        XCTAssertGreaterThan(valueMovedReloads, 0, "the seeds reached a reload where only the missing sidecar's value moved")
     }
 }
