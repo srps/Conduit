@@ -104,13 +104,19 @@ enum RuntimeHostEffectsScenario {
                 assertions += source.assertions
                 notes += source.notes
             }
+            var respelling = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced {
+                respelling = await exerciseRespelledPACReload(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += respelling.assertions
+                notes += respelling.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced {
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
-                unconfirmedHost = source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
+                unconfirmedHost = respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
             }
@@ -349,6 +355,81 @@ enum RuntimeHostEffectsScenario {
             let flush = await host.flushEvents()
             quiesced = settled == .settled && flush.allConfirmed
             assertions.append(.init("the lifecycle error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// An external edit that only respells the PAC URL (#246), reloaded into a running actual host. Precomposed `é` and `e` with a
+    /// combining accent differ in UTF-8 only; the user's bytes are the intent (decisions 0023, 0027), so the reload must fetch the PAC
+    /// from the new bytes rather than keep the script from the old ones. The check is the URL bytes the PAC fake was asked for.
+    @MainActor
+    private static func exerciseRespelledPACReload(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let pac = LastFetchPAC()
+        let composed = "http://pac.example.test/caf\u{E9}.pac"
+        let decomposed = "http://pac.example.test/cafe\u{301}.pac"
+        check("the fixture's two spellings differ in UTF-8", !composed.utf8.elementsEqual(decomposed.utf8))
+        var config = GenericDefaults.shared.makeConfig()
+        config.dnsForwarderEnabled = false
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = true
+        config.pacURL = composed
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        let host: RuntimeHost
+        do {
+            let reserved = try HeldLoopbackListener()
+            config.localPort = reserved.port
+            reserved.release()
+            try ProxyConfigPersistence.save(config, in: environment)
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home, pac: pac)
+            )
+        } catch {
+            notes.append("respelling host did not open: \(error.localizedDescription)")
+            check("the respelling host opened over the saved configuration", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+
+        var quiesced = false
+        do {
+            try await host.startRuntime()
+            check("the start fetches the PAC from the saved bytes",
+                  pac.fetchCount == 1 && pac.lastFetchedUTF8 == Array(composed.utf8))
+
+            var respelled = config
+            respelled.pacURL = decomposed
+            try ProxyConfigPersistence.save(respelled, in: environment)
+            await host.reloadConfiguration()
+            notes.append("PAC fetches after the respelling reload: \(pac.fetchCount)")
+            check("a reload that only respells the PAC URL fetches it again", pac.fetchCount == 2)
+            check("the reload's fetch uses the respelled bytes", pac.lastFetchedUTF8 == Array(decomposed.utf8))
+
+            await host.stopRuntime()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            check("the respelling host settles before its root is released", settled == .settled)
+            let flush = await host.flushEvents()
+            check("the respelling host's observability flush is confirmed", flush.allConfirmed)
+            quiesced = settled == .settled && flush.allConfirmed
+        } catch {
+            // The error path joins the host's work before anything is released: stop, settle, then flush, then judge.
+            notes.append("respelling exercise error: \(error.localizedDescription)")
+            await host.stopRuntime()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            quiesced = settled == .settled && flush.allConfirmed
+            assertions.append(.init("the respelling error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }
@@ -739,6 +820,34 @@ private final class HeldLoopbackListener {
 
     deinit {
         if descriptor >= 0 { Darwin.close(descriptor) }
+    }
+}
+
+/// Keeps only the count and latest URL of the PAC fetches made by the respelling scenario.
+private final class LastFetchPAC: PacEvaluator, @unchecked Sendable {
+    private struct DirectOnly: PacScriptEvaluating {
+        func resolveProxyChain(for url: URL) throws -> [String] { ["DIRECT"] }
+    }
+
+    private let lock = NSLock()
+    private var count = 0
+    private var last: [UInt8]?
+
+    var fetchCount: Int { lock.withLock { count } }
+    var lastFetchedUTF8: [UInt8]? { lock.withLock { last } }
+
+    func fetchPAC(from urlString: String) async throws -> String {
+        lock.withLock {
+            count += 1
+            last = Array(urlString.utf8)
+        }
+        return #"function FindProxyForURL(url, host) { return "DIRECT"; }"#
+    }
+
+    func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating { DirectOnly() }
+
+    func routeChain(for entries: [String]) -> PACChain {
+        PACChain.classify(entries) { _ in nil }
     }
 }
 

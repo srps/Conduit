@@ -1,0 +1,55 @@
+{
+  "head": "2bbd11db2dcf584bd6efd9c5615a60cf05d375a2",
+  "mutations": [
+    {
+      "name": "host-verified-start-adoption",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testAStartAfterAFenceHeldReloadThatOnlyRespellsThePACURLAdoptsTheNewBytes",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "e0252ad6647f1c7cbed89c85e46d99d3f52e649cab46f8be72808a0c587c6892",
+      "source_path": "Sources/ConduitRuntime/RuntimeHost.swift",
+      "patch": "host-verified-start-adoption.patch",
+      "patch_sha256": "588dabbdc6575119c958ef8b7ab2050c9a3a5455f74a5b5e01c5a3b3b4c8e6e1"
+    },
+    {
+      "name": "pac-routing-superseded-script",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testARoutingDecisionAfterTheURLIsRespelledStopsRoutingByTheOldScriptAndFetchesTheNewBytes",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "ba103da5c8db0d64ff23a02d742d379cdedac13869cff4661952c81d9a2d0541",
+      "source_path": "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift",
+      "patch": "pac-routing-superseded-script.patch",
+      "patch_sha256": "76050750afb42894cfec1c2e9da971430285d04ece3d6ecb1ab882f6b2bafc26"
+    },
+    {
+      "name": "reconciler-lag",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testASaveThatOnlyRespellsTheInputPushesTheNewBytes",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "2c3cb3bbeae726a093d1e0b7d8b2bbd87e4baff19516052b3e195430dbf82a78",
+      "source_path": "Sources/PlatformMac/RuntimeReconciler.swift",
+      "patch": "reconciler-lag.patch",
+      "patch_sha256": "b8dd98d06443bb1cd733148f82d20321c4d272b39e12f58473f66e80ddd10972"
+    }
+  ],
+  "restoredExit": 0,
+  "restored_sha256": {
+    "Sources/ConduitRuntime/RuntimeHost.swift": "f0f4e023652a56989a8e671de8cd71205a296ea7c8c81d01716b23ce81f8a496",
+    "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift": "b961a8f7d3049290448cc02c2abc7335a7c295c1f23e20a646c1a3fa9be77578",
+    "Sources/PlatformMac/RuntimeReconciler.swift": "e59bdca2d0b2b4abe07927ef7b342094b1a27345c955c8f7aa03b597bf56540f"
+  },
+  "production_identity": {
+    "Sources/ConduitRuntime/RuntimeHost.swift": "f0f4e023652a56989a8e671de8cd71205a296ea7c8c81d01716b23ce81f8a496",
+    "Sources/PlatformMac/CredentialManager.swift": "42f97e4fee615c1b9617ce17a9894a576ebb9237f27e2f1749ed956d3ce0e093",
+    "Sources/PlatformMac/RuntimeReconciler.swift": "e59bdca2d0b2b4abe07927ef7b342094b1a27345c955c8f7aa03b597bf56540f",
+    "Sources/ProxyKernel/Models/ConfigDiff.swift": "0e69615ab3a144d68e5698bc183ac690668207841bec19506071f08d534fd29d",
+    "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift": "b961a8f7d3049290448cc02c2abc7335a7c295c1f23e20a646c1a3fa9be77578",
+    "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift": "5f4db6955948c63b7df1afab05376017ec8c3b921cd29c4c3659af51fac927ac",
+    "Sources/ProxyKernel/Support/ExactText.swift": "1aaf97011690ee5a651accef22bb9aba499e3cb02f34775e70f994564c4c4c8e",
+    "Sources/pm-sim/RuntimeHostEffectsScenarios.swift": "d1a2ce6c5098580aac29e9c8407c0f66dd5d3a36c1838eaca6990e7304895541"
+  },
+  "test_cleanup_head": "4bac0f3d740bbd4cf4c3b3383ceb409bebd4b9c1"
+}

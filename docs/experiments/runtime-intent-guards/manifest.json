@@ -1,0 +1,111 @@
+{
+  "head": "fda80f7eca3c3d1f9bf442dca4946bc4d7be88cd",
+  "mutations": [
+    {
+      "name": "common-byte-comparison",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testARespellingAloneChangesTheSectionThatSendsIt",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "b428a44bef525f869a2d9d35cf77e37e3001963f79c7e7f87953930a9fb9f575",
+      "source_path": "Sources/ProxyKernel/Support/ExactText.swift",
+      "patch": "common-byte-comparison.patch",
+      "patch_sha256": "71854303958d194af09e868655bea764b6cef5ae6884e733c6e0290d2072f561"
+    },
+    {
+      "name": "orchestrator-adoption",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testTheOrchestratorTakesARespelledProfileName",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "ee429ddeb809476780841425ce59791c903e20def54df8eb894b80da26707856",
+      "source_path": "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift",
+      "patch": "orchestrator-adoption.patch",
+      "patch_sha256": "d702d6da6f35e148615ee28859d7aab773a0e7093dc0fe249925f0a5166c6dda"
+    },
+    {
+      "name": "reconciler-effect",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testASaveThatOnlyRespellsTheInputPushesTheNewBytes",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "e119b65546792e72b6cf23f9e4372024b522d8bb99d18c4ecb0283033313656d",
+      "source_path": "Sources/PlatformMac/RuntimeReconciler.swift",
+      "patch": "reconciler-effect.patch",
+      "patch_sha256": "789f01369c8aad5ed57890c0a9e8141fbb8b363ea77ece3461dd764b1ccc1f7b"
+    },
+    {
+      "name": "pac-freshness",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testARefreshAfterTheURLIsRespelledFetchesTheNewBytes",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "26e38b38ae94c9cd7d649cee27a251a3d862854e1b1b732800c7336115527f70",
+      "source_path": "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift",
+      "patch": "pac-freshness.patch",
+      "patch_sha256": "11f8a6a8af7ac6d7c07f1d4664d5b4d846dc911d0d85cc662d511b17f9d829fb"
+    },
+    {
+      "name": "pac-inflight-url",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testARespellingDuringTheFetchIsFetchedBeforeTheRefreshEnds",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "9e2898a8d72e9151a93d4c7919ce006d9ef2325de20bfeb47e936908d0f9de66",
+      "source_path": "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift",
+      "patch": "pac-inflight-url.patch",
+      "patch_sha256": "c9793bf19aaf099352e0cc463c24084ac9a59ec7331e872ad4be8d34749910b6"
+    },
+    {
+      "name": "pac-failed-url-backoff",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testARespellingAfterAFailedFetchIsFetchedDespiteTheBackoff",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "82ed9d9536355416c0d1cb0ce2e29d5e7137cb3412faa0bacba191d5a7c73af0",
+      "source_path": "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift",
+      "patch": "pac-failed-url-backoff.patch",
+      "patch_sha256": "f1428cf13290d5c63a6ceb48f3bee01300a392c172357cd917b61df3ff9dc5de"
+    },
+    {
+      "name": "pac-background-backoff",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testARoutingDecisionAfterAFailedFetchStartsAFetchOfTheRespelledURL",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "49372447d649145ccd5133b089e6b1f1678c37688d080170466b6677d94556fb",
+      "source_path": "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift",
+      "patch": "pac-background-backoff.patch",
+      "patch_sha256": "f84fb0d1ef0c80e271024bfacf8a74c46888a001d18ddf86335424756032bd2d"
+    },
+    {
+      "name": "credential-cache-account",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "requiredWitness": "testARespelledIdentityReadsItsOwnAccount",
+      "requiredWitnessFailed": true,
+      "mutant_sha256": "6a885abee9a889bbee6c167e19e76b5763a0e574c4685977c2eba5001e55f212",
+      "source_path": "Sources/PlatformMac/CredentialManager.swift",
+      "patch": "credential-cache-account.patch",
+      "patch_sha256": "6fb24809a68d34c2a234ad24c8ef0586e582ae7ae07093460d244121601cda12"
+    }
+  ],
+  "restoredExit": 0,
+  "restored_sha256": {
+    "Sources/ProxyKernel/Support/ExactText.swift": "1aaf97011690ee5a651accef22bb9aba499e3cb02f34775e70f994564c4c4c8e",
+    "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift": "5f4db6955948c63b7df1afab05376017ec8c3b921cd29c4c3659af51fac927ac",
+    "Sources/PlatformMac/RuntimeReconciler.swift": "e59bdca2d0b2b4abe07927ef7b342094b1a27345c955c8f7aa03b597bf56540f",
+    "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift": "b961a8f7d3049290448cc02c2abc7335a7c295c1f23e20a646c1a3fa9be77578",
+    "Sources/PlatformMac/CredentialManager.swift": "42f97e4fee615c1b9617ce17a9894a576ebb9237f27e2f1749ed956d3ce0e093"
+  },
+  "reviewed_production_sha256": {
+    "Sources/ConduitRuntime/RuntimeHost.swift": "f0f4e023652a56989a8e671de8cd71205a296ea7c8c81d01716b23ce81f8a496",
+    "Sources/PlatformMac/CredentialManager.swift": "42f97e4fee615c1b9617ce17a9894a576ebb9237f27e2f1749ed956d3ce0e093",
+    "Sources/PlatformMac/RuntimeReconciler.swift": "e59bdca2d0b2b4abe07927ef7b342094b1a27345c955c8f7aa03b597bf56540f",
+    "Sources/ProxyKernel/Models/ConfigDiff.swift": "0e69615ab3a144d68e5698bc183ac690668207841bec19506071f08d534fd29d",
+    "Sources/ProxyKernel/Proxy/PACRoutingEngine.swift": "b961a8f7d3049290448cc02c2abc7335a7c295c1f23e20a646c1a3fa9be77578",
+    "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift": "5f4db6955948c63b7df1afab05376017ec8c3b921cd29c4c3659af51fac927ac",
+    "Sources/ProxyKernel/Support/ExactText.swift": "1aaf97011690ee5a651accef22bb9aba499e3cb02f34775e70f994564c4c4c8e",
+    "Sources/pm-sim/RuntimeHostEffectsScenarios.swift": "d1a2ce6c5098580aac29e9c8407c0f66dd5d3a36c1838eaca6990e7304895541"
+  }
+}

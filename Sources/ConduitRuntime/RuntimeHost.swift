@@ -1062,7 +1062,7 @@ package final class RuntimeHost {
         guard configGeneration == reloads else { return true }
         // Only `adoptHostView` writes the view, and a reload bumps the generation checked above, so the view is still what this Start
         // found. A Start counts only when it changes the accepted pair: one after a held reload, or after an external edit with none.
-        if config != verified.runtime || platformConfig != verified.platform {
+        if ConfigDiff(old: config, new: verified.runtime).inputChanged || platformConfig != verified.platform {
             adoptHostView(runtime: verified.runtime, platform: verified.platform)
         }
         return true

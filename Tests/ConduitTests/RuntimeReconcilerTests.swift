@@ -123,6 +123,24 @@ final class RuntimeReconcilerTests: XCTestCase {
         XCTAssertTrue(condition(), "timed out waiting until \(what)", file: file, line: line)
     }
 
+    /// #246: a save that only respells a URL (see `Respelled`) is runtime input the baseline does not hold. It queues a pass that pushes
+    /// the new bytes, and the baseline moves to them.
+    func testASaveThatOnlyRespellsTheInputPushesTheNewBytes() async {
+        var old = baseConfig
+        old.pacURL = "https://pac.example.test/\(Respelled.composed).pac"
+        reconciler = RuntimeReconciler(config: old, platformConfig: proxyOn, host: host)
+        var respelled = old
+        respelled.pacURL = "https://pac.example.test/\(Respelled.decomposed).pac"
+        XCTAssertTrue(reconciler.lags(config: respelled, platformConfig: proxyOn), "the baseline holds the old bytes")
+
+        reconciler.reconcile(config: respelled, platformConfig: proxyOn)
+        await reconciler.drain()
+
+        XCTAssertTrue(host.calls.contains(.applyConfigChange(port: respelled.localPort)), "the respelled input is pushed: \(host.calls)")
+        assertSameUTF8(reconciler.lastReconciledConfig.pacURL, respelled.pacURL, "the baseline holds the pushed bytes")
+        XCTAssertFalse(reconciler.lags(config: respelled, platformConfig: proxyOn))
+    }
+
     func testASaveThatChangesNothingQueuesNoPass() async {
         reconciler.reconcile(config: baseConfig, platformConfig: proxyOn)
 

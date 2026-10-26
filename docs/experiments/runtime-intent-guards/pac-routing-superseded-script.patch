@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
++++ b/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
+@@ -774,7 +774,7 @@
+         let shouldKickOff = lock.withLock {
+             // A superseded PAC must not keep routing while its replacement
+             // loads; routes fall back to the non-PAC behaviour until then.
+-            let configured = ExactText.same(cachedPACURL, config.pacURL)
++            let configured = cachedPACURL == config.pacURL
+             if jsEvaluator != nil, !configured {
+                 jsEvaluator = nil
+                 routeCache.removeAll()

@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
++++ b/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
+@@ -783,7 +783,7 @@
+             guard runningRefresh == nil else { return false }
+             let needsRefresh = jsEvaluator == nil || !configured || refreshExpired(at: lastRefreshAt)
+             guard needsRefresh else { return false }
+-            return !ExactText.same(lastAttemptedPACURL, config.pacURL) || backoffRemainingLocked(now: Date()) == nil
++            return lastAttemptedPACURL != config.pacURL || backoffRemainingLocked(now: Date()) == nil
+         }
+ 
+         guard shouldKickOff else { return }

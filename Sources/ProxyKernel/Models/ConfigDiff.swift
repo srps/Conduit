@@ -44,17 +44,28 @@ package struct ConfigDiff: Sendable {
             || dnsChanged || tunnelsChanged || healthChanged || loggingChanged
     }
 
+    /// Whether the runtime must take `new`: a section change, any other `!=` edit (metadata), or a respelling of the profile name,
+    /// which keys the Keychain account (#246). The one guard the orchestrator, the reconciler and the host apply with, so none of them
+    /// keeps bytes another has moved past. A respelling that only display text carries is not runtime input.
+    package var inputChanged: Bool { hasChanges || metadataChanged }
+    private let metadataChanged: Bool
+
     package init(old: ProxyConfig, new: ProxyConfig) {
         proxyChanged = old.proxy != new.proxy
+        // The section's `==` is canonical equivalence; the fields whose bytes are sent are compared byte for byte too (#246). The
+        // NTLM identity is encoded into the messages, and domain and username key the Keychain account.
         authChanged = old.auth != new.auth
+            || !ExactText.same(old.auth.username, new.auth.username)
+            || !ExactText.same(old.auth.domain, new.auth.domain)
+            || !ExactText.same(old.auth.workstation, new.auth.workstation)
         upstreamsChanged = old.upstreams != new.upstreams
         var oldRouting = old.routing
         oldRouting.pacUsableRouteLimit = new.routing.pacUsableRouteLimit
-        routingChanged = oldRouting != new.routing
+        routingChanged = oldRouting != new.routing || !ExactText.same(old.routing.pacURL, new.routing.pacURL)
         pacRouteLimitChanged = old.routing.pacUsableRouteLimit != new.routing.pacUsableRouteLimit
-        dnsChanged = old.dns != new.dns
+        dnsChanged = old.dns != new.dns || !ExactText.same(old.dns.dohProviders, new.dns.dohProviders)
         tunnelsChanged = old.tunnels != new.tunnels
-        healthChanged = old.health != new.health
+        healthChanged = old.health != new.health || !ExactText.same(old.health.checkURL, new.health.checkURL)
         loggingChanged = old.logging != new.logging
         proxyListenerChanged = old.proxy.host != new.proxy.host
             || old.proxy.port != new.proxy.port
@@ -68,5 +79,6 @@ package struct ConfigDiff: Sendable {
         localPACChanged = routingChanged
             || old.proxy.strictMode != new.proxy.strictMode
             || old.enabledUpstreams.isEmpty != new.enabledUpstreams.isEmpty
+        metadataChanged = old != new || !ExactText.same(old.profileName, new.profileName)
     }
 }

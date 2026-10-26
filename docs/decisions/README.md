@@ -58,3 +58,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0032](0032-explicit-reload-and-reconcile.md) | Explicit configuration reload adopts and reconciles eligible changes | accepted | partial | none |
 | [0033](0033-headless-real-host-simulation.md) | Headless real-host simulation with explicit effect injection | accepted | implemented | none |
 | [0034](0034-private-editor-reply-frame-cap.md) | Complete private editor replies capped at eight MiB | accepted | partial | none |
+| [0035](0035-whole-request-lifecycle-validation.md) | Validate combined editor lifecycle intent as one request | accepted | planned | none |

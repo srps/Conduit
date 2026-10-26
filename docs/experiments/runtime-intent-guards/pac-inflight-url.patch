@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
++++ b/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
+@@ -270,7 +270,7 @@
+                     operation.finish(.success(()))
+                     return
+                 }
+-                if !ExactText.same(current.pacURL, url) {
++                if current.pacURL != url {
+                     url = current.pacURL
+                     lock.withLock {
+                         lastAttemptedPACURL = url

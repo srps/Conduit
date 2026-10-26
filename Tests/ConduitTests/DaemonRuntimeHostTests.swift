@@ -1043,6 +1043,61 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await quiesce(host)
     }
 
+    /// #246: an external edit that only respells the PAC URL (see `Respelled`), then a reload. The reload adopts the new bytes into the
+    /// host view, and the reconciler, the orchestrator and the PAC fetch must take the same bytes, not keep the old spelling.
+    func testAReloadThatOnlyRespellsThePACURLAppliesAndFetchesTheNewBytes() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pm-daemon-respelled-pac-\(UUID().uuidString)", isDirectory: true)
+        defer { removeScratch([directory]) }
+        let session = try acquireScratchStateRoot(.isolated(stateDirectory: directory))
+        defer { releaseScratchStateRoot(session) }
+        let environment = session.environment
+        let composed = "https://pac.example.test/\(Respelled.composed).pac"
+        let decomposed = "https://pac.example.test/\(Respelled.decomposed).pac"
+        Respelled.assertRespelling(composed, decomposed)
+        var config = GenericDefaults.shared.makeConfig()
+        config.pacRoutingEnabled = true
+        config.pacURL = composed
+        try ProxyConfigPersistence.save(config, in: environment)
+        try PlatformConfigPersistence.save(PlatformIntegrationConfig(), in: environment)
+
+        let pac = LastFetchPACEvaluator()
+        let host = try await RuntimeHost.open(
+            stateSession: session, logger: DiscardingLogSink(),
+            startupAllowsMissing: true,
+            startedAt: testStartedAt, terminalExit: unexpectedTerminalExit,
+            effects: makeHostEffects(loopbackPortProbe: FakeLoopbackPortProbe(),
+                privilege: { _ in RuntimePrivilegeAdapters(client: RecordingPrivilegeClient(), helperStatus: nil) },
+                credentials: InMemorySecretStore(),
+                gss: .injected { UnscriptedGSSProvider() },
+                pacEvaluator: pac,
+                commandRunner: Self.offMachine,
+                networkPath: FakeNetworkPathObserver(), networkLocation: FakeNetworkLocationObserver(),
+                networkLocationStoreFactory: { _ in nil },
+                vpnStatusMonitor: { _, _ in FakeVPNStatusObserver() },
+                dnsResponds: FakeDNSProbe().responds(onPort:),
+                homeDirectory: environment.configDirectory.appendingPathComponent("home"),
+                resolverDirectory: try scratchResolverDirectory(environment)
+            )
+        )
+        await host.awaitLaunchRecovery()
+        await host.orchestrator.refreshPACRouting(force: true)
+        XCTAssertEqual(pac.lastFetchedUTF8, Array(composed.utf8))
+
+        config.pacURL = decomposed
+        try ProxyConfigPersistence.save(config, in: environment)
+        await host.reloadConfiguration()
+
+        assertSameUTF8(host.config.pacURL, decomposed, "the reload adopted the persisted bytes into the host view")
+        assertSameUTF8(host.orchestrator.config.pacURL, decomposed, "the reconciler pushed them to the orchestrator")
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "config.routing_changed" },
+                      "\(host.orchestrator.eventLog.events.map(\.event))")
+        XCTAssertEqual(pac.fetchCount, 2, "the respelled URL is fetched")
+        XCTAssertEqual(pac.lastFetchedUTF8, Array(decomposed.utf8))
+        // The stopped effects join before the flush, or a late writer recreates files in the scratch directory.
+        await quiesce(host)
+    }
+
     func testCredentialsComeFromTheInjectedStore() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("daemon-credential-store-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -1593,6 +1648,12 @@ final class DaemonRuntimeHostTests: XCTestCase {
             report.audit == .drained && (report.events == .drained || report.eventsRetry == .drained)
         }
 
+        /// A writer's counters, numeric only, for the unconfirmed-shutdown failure.
+        private static func describe(_ statistics: RecordWriterStatistics) -> String {
+            "pending=\(statistics.pendingRecords) pendingBytes=\(statistics.pendingBytes) written=\(statistics.writtenRecords) "
+                + "dropped=\(statistics.droppedRecords) failed=\(statistics.failedRecords) flushTimeouts=\(statistics.flushTimeouts)"
+        }
+
         /// The snapshot write is physically complete, and any unconfirmed-result marker is covered by a later events drain.
         /// `.current` is a successful replacement with no marker. `.refused`, `.writeFailed` and `.noSubmission` come after
         /// the writer's group drained, or before any submission, so no write is in flight. The marker is then covered only
@@ -1626,7 +1687,10 @@ final class DaemonRuntimeHostTests: XCTestCase {
                 guard settled == .settled, flushed else {
                     // Unknown: keep the host, the session and the root claimed, and fail the owning test.
                     XCTFail("the harness's shutdown is unconfirmed (settle \(settled), flush confirmed \(flushed), "
-                        + "snapshot \(report.snapshot)): its host and root are kept")
+                        + "audit \(report.audit), events \(report.events), eventsRetry \(String(describing: report.eventsRetry)), "
+                        + "snapshot \(report.snapshot), snapshotEvent \(report.snapshotEvent), "
+                        + "audit statistics \(Self.describe(report.auditStatistics)), "
+                        + "events statistics \(Self.describe(report.eventsStatistics))): its host and root are kept")
                     DaemonHarness.retainedUnconfirmed = self
                     return
                 }
@@ -2111,6 +2175,45 @@ final class DaemonRuntimeHostTests: XCTestCase {
         try await host.startRuntime()
         await host.credentialWarmup?.value
         XCTAssertEqual(harness.secrets.loads, 1)
+        await host.stopRuntime()
+    }
+
+    /// #246, the Start's own adoption: an external edit that only respells the PAC URL (see `Respelled`), and a reload the Stop fence
+    /// holds. The store has the new bytes, the host view keeps the old ones, and the next Start commits the store's pair and adopts it.
+    func testAStartAfterAFenceHeldReloadThatOnlyRespellsThePACURLAdoptsTheNewBytes() async throws {
+        let composed = "https://pac.example.test/\(Respelled.composed).pac"
+        let decomposed = "https://pac.example.test/\(Respelled.decomposed).pac"
+        Respelled.assertRespelling(composed, decomposed)
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = false
+        config.pacURL = composed
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let host = try await harness.makeHost()
+
+        try await host.startRuntime()
+        XCTAssertEqual(host.configGeneration, 0, "a Start that keeps the accepted pair counts nothing")
+        await host.stopRuntime()
+
+        config.pacURL = decomposed
+        try ProxyConfigPersistence.save(config, in: harness.environment)
+        await host.reloadConfiguration()
+        let decisions = host.orchestrator.eventLog.events.compactMap { event -> ConfigurationWorkflowEvent? in
+            guard case .configWorkflow(let decision) = event.typed else { return nil }
+            return decision
+        }
+        XCTAssertEqual(decisions.last, .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .stopFenced)))
+        assertSameUTF8(host.config.pacURL, composed, "the fence held the reload, so the host view keeps the old bytes")
+        XCTAssertEqual(host.configGeneration, 0)
+        assertSameUTF8(host.orchestrator.config.pacURL, composed, "a held reload pushes nothing")
+
+        try await host.startRuntime()
+        // Join the observer deliveries queued by Start before checking the accepted view.
+        await host.deliveries.drain()
+        assertSameUTF8(host.config.pacURL, decomposed, "the Start adopted the committed bytes into the host view")
+        XCTAssertEqual(host.status().configGeneration, 1)
+        assertSameUTF8(host.orchestrator.config.pacURL, decomposed, "the Start pushed them to the orchestrator")
         await host.stopRuntime()
     }
 

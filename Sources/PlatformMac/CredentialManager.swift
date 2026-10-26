@@ -204,7 +204,8 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
         cacheCondition.lock()
         defer { cacheCondition.unlock() }
         while true {
-            if let entry = cacheEntry, entry.account == account, isCurrent(entry.result, loadedAt: entry.at) {
+            // By bytes (#246): an account key whose bytes changed never reuses the entry read for the earlier key.
+            if let entry = cacheEntry, ExactText.same(entry.account, account), isCurrent(entry.result, loadedAt: entry.at) {
                 return try entry.result.get()
             }
             if readInFlight == nil {
@@ -274,7 +275,7 @@ package final class CredentialManager: CredentialProvider, @unchecked Sendable {
     /// prompt. A handshake can start it between the listeners coming up and
     /// `warmCache`; dropping its answer would raise the prompt a second time.
     private func invalidateKeepingCurrentReadLocked(account: String) {
-        if readInFlight == account, readInFlightGeneration == cacheGeneration {
+        if let readInFlight, ExactText.same(readInFlight, account), readInFlightGeneration == cacheGeneration {
             cacheEntry = nil
         } else {
             invalidateLocked()

@@ -176,7 +176,9 @@ The store's canonical-comparison correction also protects exact text intent: Uni
 strings can have different persisted URL/text bytes. Current and candidate values use the existing stagers
 on the store worker, preserving known repair values without reusing equality authority. The
 [verification checkpoint](../verification-configuration-source-2026-10-26.md) records source mutations,
-independent review and full local checks. Apply-side equality remains separate #246 work.
+independent review and full local checks. The separate [apply-side correction (#246)](../verification-byte-exact-runtime-intent-2026-10-26.md)
+keeps the runtime adoption predicate and PAC/credential cache identity sensitive to the bytes they consume;
+its own evidence and remaining checks do not imply AppState convergence.
 
 ## Open questions
 

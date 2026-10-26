@@ -173,7 +173,7 @@ package final class RuntimeReconciler {
 
     /// Whether the baseline is behind `config`: an action that did not land left it there, so the next save retries that action.
     package func lags(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) -> Bool {
-        lastReconciledConfig != config || lastReconciledPlatformConfig != platformConfig
+        ConfigDiff(old: lastReconciledConfig, new: config).inputChanged || lastReconciledPlatformConfig != platformConfig
     }
 
     /// Whether an action the last save asked for did not land.
@@ -257,7 +257,7 @@ package final class RuntimeReconciler {
         let old = lastReconciledConfig
         let oldPlatform = lastReconciledPlatformConfig
         let newPlatform = request.platformConfig
-        if old != request.config {
+        if ConfigDiff(old: old, new: request.config).inputChanged {
             let target = request.config
             var application = RuntimeConfigApplication.notHeld
             await runEffect { application = await host.applyConfigChange(target, from: old) }

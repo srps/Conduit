@@ -115,8 +115,10 @@ classifies a component replacement as verified persisted, verified not persisted
 The store now compares canonical staged values rather than synthesized String equality before issuing
 an unchanged receipt. This prevents handing the host candidate URL/text bytes that differ from the
 verified file. The [source-authority checkpoint](../verification-configuration-source-2026-10-26.md)
-records the exact evidence and limits. It does not establish the still-open apply/reconciler fix (#246)
-or AppState convergence.
+records the exact evidence and limits. The separate apply/reconciler correction (#246) uses one
+byte-aware adoption predicate across the host, reconciler and orchestrator, with byte-aware PAC
+and credential caches. Its [verification checkpoint](../verification-byte-exact-runtime-intent-2026-10-26.md)
+records failing witnesses, executed mutations and remaining checks. Neither establishes AppState convergence.
 
 ## Open questions
 

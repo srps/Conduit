@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
++++ b/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
+@@ -206,7 +206,7 @@
+ 
+         let decision: RefreshDecision = lock.withLock {
+             if let runningRefresh { return .alreadyRunning(runningRefresh) }
+-            let needsRefresh = force || jsEvaluator == nil || !ExactText.same(cachedPACURL, config.pacURL)
++            let needsRefresh = force || jsEvaluator == nil || cachedPACURL != config.pacURL
+                 || refreshExpired(at: lastRefreshAt)
+             guard needsRefresh else { return .fresh }
+             // Per attempted URL, so a URL that never loaded still backs off.
