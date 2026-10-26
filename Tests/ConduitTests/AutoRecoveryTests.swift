@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import NIOConcurrencyHelpers
+import NIOPosix
 import XCTest
 @testable import ProxyKernel
 
@@ -272,31 +273,47 @@ private final class MockRecoverableService: RecoverableProxyService {
     var onCloseStalled: () -> Void = {}
     var onRecycleListener: () -> Void = {}
 
-    func closeStalledConnections() async throws -> Int {
+    func closeStalledConnections(expecting stamp: ListenerStamp) async throws -> Int {
         closeStalledCallCount += 1
         onCloseStalled()
         if !closeStalledShouldSucceed { throw TestError.simulated }
         return closeStalledClosedCount
     }
 
-    func reauthenticate() async throws {
+    func reauthenticate(expecting stamp: ListenerStamp) async throws {
         reauthenticateCallCount += 1
         if !reauthenticateShouldSucceed { throw TestError.simulated }
     }
 
-    func switchToNextUpstream() async throws -> String? {
+    func switchToNextUpstream(expecting stamp: ListenerStamp) async throws -> String? {
         switchUpstreamCallCount += 1
         if !switchUpstreamShouldSucceed { throw TestError.simulated }
         return "proxy-b.example.test:8080"
     }
 
-    func recycleListener() async throws {
+    /// A server that is never started, so its stamp never moves. The mock answers with it, and its ladder is always current.
+    private static let idleServer = LocalProxyServer(
+        logger: DiscardingLogSink(),
+        configProvider: { ProxyConfig.testFixture() },
+        directModeProvider: { (false, .none) },
+        authenticatorProvider: { _ in throw TestError.simulated },
+        directConnectDetector: DirectConnectDetector(group: MultiThreadedEventLoopGroup.singleton, logger: DiscardingLogSink()),
+        pacRoutingEngine: nil,
+        onConnectionOpened: { _ in },
+        onConnectionClosed: { _ in },
+        onRequestCompleted: { _, _ in }
+    )
+
+    let listenerStamp = MockRecoverableService.idleServer.listenerStamp
+
+    func recycleListener(expecting stamp: ListenerStamp) async throws -> ListenerStamp {
         recycleListenerCallCount += 1
         onRecycleListener()
         if !recycleListenerShouldSucceed { throw TestError.simulated }
+        return stamp
     }
 
-    func performHealthCheck() async -> HealthCheckResult {
+    func performHealthCheck(expecting stamp: ListenerStamp) async throws -> HealthCheckResult {
         healthCheckCallCount += 1
         if healthResults.isEmpty {
             return .unhealthy(summary: "still unhealthy")

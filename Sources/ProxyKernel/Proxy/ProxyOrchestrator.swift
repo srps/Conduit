@@ -522,12 +522,15 @@ package final class ProxyOrchestrator {
         }
     }
 
-    private func reconcileLocalPACServer(reason: String) async throws {
+    /// Reconciles the PAC listener for `epoch`, the lifecycle admission it runs under. It runs inside a bind step, so nothing else binds
+    /// while it works. Each suspension is followed by an epoch check, so a stop or newer start that arrived meanwhile publishes nothing here.
+    private func reconcileLocalPACServer(reason: String, epoch: Int) async throws {
         let currentConfig = config
         guard currentConfig.localPACEnabled else {
             if localPACServer.isRunning {
                 emitEvent(.routing, "local_pac.stopping", detail: "reason=\(reason)")
                 await localPACServer.stop()
+                try ensureStartCurrent(epoch)
                 emitEvent(.routing, "local_pac.stopped", detail: "reason=\(reason)")
                 mutateSnapshot {
                     $0.bindings.localPACHost = nil
@@ -545,6 +548,7 @@ package final class ProxyOrchestrator {
             if localPACServer.isRunning {
                 emitEvent(.routing, "local_pac.restarting", detail: "reason=\(reason)")
                 await localPACServer.stop()
+                try ensureStartCurrent(epoch)
             } else {
                 emitEvent(.routing, "local_pac.starting", detail: "reason=\(reason)")
             }
@@ -561,6 +565,9 @@ package final class ProxyOrchestrator {
             }
         }
 
+        // A bind that finished after a stop was admitted still published. That stop's teardown waits for this effect and then closes it,
+        // unless a newer start overtook the stop first, in which case that start reuses or restarts the listener.
+        try ensureStartCurrent(epoch)
         mutateSnapshot {
             $0.bindings.localPACHost = self.localPACServer.listeningHost
             $0.bindings.localPACPort = self.localPACServer.listeningPort
@@ -697,7 +704,9 @@ package final class ProxyOrchestrator {
             logStore.log(.notice, "Config reload: logging updated.", category: .general)
         }
 
-        if diff.healthChanged && isProxyActive {
+        // Live, like the listener branches below: a stop in flight has already ended the loop, and the next start runs it with the new
+        // interval.
+        if diff.healthChanged && isProxyLive {
             emitEvent(.config, "config.health_restart")
             healthChecker.stop()
             startHealthLoop()
@@ -789,7 +798,9 @@ package final class ProxyOrchestrator {
             }
         }
 
-        if diff.proxyChanged && isProxyActive {
+        // Live, not merely active: a stop in flight still reads active until its teardown ends, and a restart admitted then would start
+        // the proxy again after that stop. The next start binds the new listener config instead.
+        if diff.proxyChanged && isProxyLive {
             if diff.proxyListenerChanged {
                 emitEvent(.config, "config.proxy_restart")
                 logStore.log(.notice, "Config reload: proxy listener config changed, restarting proxy (preserving in-flight tunnels).", category: .proxy)
@@ -798,9 +809,17 @@ package final class ProxyOrchestrator {
                 // to keep current HTTPS streams alive — those tunnels are byte-relays
                 // tied to channels held by client/upstream pipelines, independent of
                 // the new listener identity. See docs/design-vpn-flap-resilience.md.
+                // The stop takes the next epoch before it suspends. A start or stop admitted during its teardown owns the listeners after
+                // it, so the restart starts only while that epoch is still the latest.
+                let restartEpoch = lifecycleEpoch + 1
                 await stopProxy(scope: .allButDedicated)
                 do {
+                    try ensureStartCurrent(restartEpoch)
                     try await startProxy()
+                } catch is CancellationError {
+                    // The epoch checks throw this alone: a start or stop admitted during the restart owns the listener now. Not a failure.
+                    emitEvent(.config, "config.proxy_restart_superseded", detail: "reason=lifecycle")
+                    logStore.log(.info, "Config reload: proxy restart superseded by a start or stop.", category: .proxy)
                 } catch {
                     // startProxy() already logs the underlying error and marks the snapshot as
                     // .failed with proxyError, but the restart context is lost at that call site.
@@ -820,35 +839,49 @@ package final class ProxyOrchestrator {
             }
         }
 
-        // Re-checked via `isProxyActive` rather than a captured flag: a failed restart
-        // above will have put the proxy in `.failed` / `.stopped`, in which case probing
-        // upstreams and overwriting `upstreamStatuses` is wasted work that also races the
-        // just-cleared snapshot from `stopProxy()`.
-        if diff.upstreamsChanged && isProxyActive {
+        // Re-checked via `isProxyLive` rather than a captured flag: a failed restart
+        // above will have put the proxy in `.failed` / `.stopped`, and a stop in flight
+        // still reads active until its teardown ends. Probing then would publish over the
+        // snapshot that stop clears. The probe runs under this reload's lifecycle, so a
+        // start or stop admitted while it is out drops its result.
+        if diff.upstreamsChanged && isProxyLive {
             emitEvent(.config, "config.upstreams_refresh")
-            _ = await refreshConnectivityMode()
-            refreshUpstreamStatuses()
+            if await refreshConnectivityMode(lifecycle: lifecycleEpoch) != nil {
+                refreshUpstreamStatuses()
+            }
             logStore.log(.notice, "Config reload: upstream list updated.", category: .proxy)
         } else if diff.upstreamsChanged {
-            emitEvent(.config, "config.upstreams_deferred", detail: "state=\(snapshot.runtimeStatus.state.rawValue)")
+            let state = snapshot.runtimeStatus.state.rawValue + (isStopInFlight ? " stop_in_flight=true" : "")
+            emitEvent(.config, "config.upstreams_deferred", detail: "state=\(state)")
             logStore.log(
                 .notice,
-                "Config reload: upstream list changed, but proxy is not active (state=\(snapshot.runtimeStatus.state.rawValue)) — deferring connectivity refresh until next start.",
+                "Config reload: upstream list changed, but proxy is not active (state=\(state)) — deferring connectivity refresh until next start.",
                 category: .proxy
             )
         }
 
         // One reconciliation point for all browser PAC dependencies. Listener
         // replacement already rebuilt the endpoint with its actual bound port.
-        // A stopped/failed host defers policy installation to the next start.
-        if diff.localPACChanged, !diff.proxyListenerChanged, isProxyActive {
+        // A stopped/failed host defers policy installation to the next start, and so does one with a stop in flight: a refresh admitted
+        // then would take that stop's epoch, wait behind its teardown and bind the PAC listener after it.
+        if diff.localPACChanged, !diff.proxyListenerChanged, isProxyLive {
             let event = oldConfig.proxy.strictMode != newConfig.proxy.strictMode && newConfig.localPACEnabled
                 ? "config.strict_mode_pac_refresh" : "config.local_pac_refresh"
             emitEvent(.config, event, detail: "reason=config_reload")
             do {
-                try await reconcileLocalPACServer(reason: "config_reload")
+                // The PAC restart is a listener step like a start's, so it waits behind any teardown in flight and is superseded by a
+                // lifecycle operation admitted after this reload began.
+                let epoch = lifecycleEpoch
+                try await runPhysicalEffect(epoch: epoch) {
+                    try self.ensureStartCurrent(epoch)
+                    try await self.reconcileLocalPACServer(reason: "config_reload", epoch: epoch)
+                }
+            } catch is CancellationError {
+                // The epoch checks throw this alone: a start or stop admitted during the refresh owns the PAC listener now. Not a failure.
+                emitEvent(.config, "config.local_pac_refresh_superseded", detail: "reason=lifecycle")
+                logStore.log(.info, "Config reload: local PAC update superseded by a start or stop.", category: .pac)
             } catch {
-                // The lifecycle method emits local_pac.failed before throwing.
+                // A bind failure, which `reconcileLocalPACServer` reported as local_pac.failed before it threw.
                 logStore.log(.warning, "Config reload: local PAC update failed — \(error.displayDescription).", category: .pac)
             }
         }
@@ -1296,8 +1329,73 @@ package final class ProxyOrchestrator {
         }
     }
 
+    /// Each start takes the next epoch, and each stop supersedes it. A start awaits PAC and probe work before its listener step, so a stop can
+    /// run in that window. A start checks its epoch after every suspension and before every physical step, and throws `CancellationError`
+    /// once superseded, so it binds and publishes nothing the superseding owner did not expect.
+    private var lifecycleEpoch = 0
+    /// Stops whose teardown has not finished. A start admitted while one runs is not an identical start to join: it runs after that stop.
+    private var stopsInFlight = 0
+    /// Whether a stop's teardown is still running. A start admitted now runs after it, so a caller that would otherwise treat the running
+    /// snapshot as "already up" must admit the start instead.
+    package var isStopInFlight: Bool { stopsInFlight > 0 }
+    /// Whether the runtime is up with no stop in flight. A stop ends the monitors when it is admitted, but publishes `stopped` only when its
+    /// teardown ends, so until then the snapshot still reads active. A continuation that resumes in between must not start a monitor or
+    /// report the runtime running: a health loop started then outlives the stop, and its next ladder would cold-start the listener.
+    private var isProxyLive: Bool { stopsInFlight == 0 && isProxyActive }
+    /// The one physical effect running now: a listener bind, or a teardown. Only `runPhysicalEffect` creates it, once it owns the slot, and the
+    /// effect clears the slot itself before it completes, so a waiter never awaits a finished handle.
+    private var activePhysical: Task<Void, Error>?
+
+    private func ensureStartCurrent(_ epoch: Int) throws {
+        guard epoch == lifecycleEpoch else { throw CancellationError() }
+    }
+
+    /// Runs `body` as the physical effect for `epoch`. It first waits for the active effect, if any, to end. Then, with no suspension between
+    /// the check and the claim, it runs `body` only if `epoch` is still the latest. Returns `false`, having run nothing, when a newer
+    /// lifecycle operation was admitted meanwhile: that operation now owns the listeners. An effect that has claimed the slot runs to its end.
+    @discardableResult
+    private func runPhysicalEffect(epoch: Int, _ body: @escaping @MainActor () async throws -> Void) async throws -> Bool {
+        while let active = activePhysical {
+            _ = await active.result
+        }
+        guard epoch == lifecycleEpoch else { return false }
+        let effect = Task<Void, Error> { @MainActor in
+            defer { self.activePhysical = nil }
+            try await body()
+        }
+        activePhysical = effect
+        try await effect.value
+        return true
+    }
+
+    /// Closes the listeners as the teardown for `epoch`. Returns `false` when a newer operation superseded it before it claimed the slot: the
+    /// listeners and the snapshot then belong to that operation, and this one leaves both alone. A teardown that claimed the slot closes
+    /// what it owns, so nothing it owns is left open.
+    @discardableResult
+    private func runTeardown(epoch: Int, scope: CloseScope) async -> Bool {
+        do {
+            return try await runPhysicalEffect(epoch: epoch) { await self.tearDownListeners(scope: scope) }
+        } catch {
+            // Unreachable today: the teardown body does not throw, and a lost claim returns `false` rather than throwing. The shared
+            // effect runner throws for a bind's body, so the handler stays, and it would mean the claimed effect ran to its end.
+            logStore.log(.error, "Listener teardown failed: \(error.localizedDescription)", category: .proxy)
+            return true
+        }
+    }
+
+    /// Closes both listeners. Only ever run as the body of a teardown effect, so nothing binds while it closes.
+    private func tearDownListeners(scope: CloseScope) async {
+        await localPACServer.stop()
+        await localProxyServer.stop(scope: scope)
+    }
+
     package func startProxy() async throws {
-        guard snapshot.runtimeStatus.state != .starting, snapshot.runtimeStatus.state != .running else { return }
+        // An equivalent start in flight or running answers for itself. A stop still in flight is different: it tears down what this start
+        // would have joined, so this start runs after it instead of returning as though the listeners were still up.
+        let state = snapshot.runtimeStatus.state
+        guard (state != .starting && state != .running) || stopsInFlight > 0 else { return }
+        lifecycleEpoch += 1
+        let epoch = lifecycleEpoch
         emitEvent(.lifecycle, "proxy.starting")
 
         mutateSnapshot {
@@ -1310,12 +1408,21 @@ package final class ProxyOrchestrator {
             // is not up yet, so that report reacts to nothing and this probe
             // is still the one that decides routing. Probe again under it.
             var summary = await refreshConnectivityModeForStart()
+            try ensureStartCurrent(epoch)
             var decidedUnder = routingGeneration
             applyDeferredDisconnectRouting()
             await refreshPACRouting(force: true)
+            try ensureStartCurrent(epoch)
 
-            try await localProxyServer.start()
-            try await reconcileLocalPACServer(reason: "proxy_start")
+            // The listeners bind as one effect, after any effect still running. Each part checks the epoch before it acts, so a stop admitted in
+            // between leaves this start nothing to publish. A start superseded before it claims the slot falls to the `ensureStartCurrent` below.
+            try await runPhysicalEffect(epoch: epoch) {
+                try self.ensureStartCurrent(epoch)
+                try await self.localProxyServer.start()
+                try self.ensureStartCurrent(epoch)
+                try await self.reconcileLocalPACServer(reason: "proxy_start", epoch: epoch)
+            }
+            try ensureStartCurrent(epoch)
             // A VPN report during those awaits found the listener not yet
             // running and reacted to nothing, yet made the verdict above
             // stale; a disconnect also left its routing phase here. Decide
@@ -1339,11 +1446,14 @@ package final class ProxyOrchestrator {
                 rederived += 1
                 emitEvent(.routing, "connectivity.startup_rederived", detail: "attempt=\(rederived) vpn=\(snapshot.vpnState.eventLabel)")
                 summary = await refreshConnectivityModeForStart()
+                try ensureStartCurrent(epoch)
                 decidedUnder = routingGeneration
                 applyDeferredDisconnectRouting()
                 await refreshPACRouting(force: true)
+                try ensureStartCurrent(epoch)
             }
 
+            try ensureStartCurrent(epoch)
             let directCause = snapshot.directModeCause
             mutateSnapshot {
                 $0.bindings.proxyHost = self.localProxyServer.listeningHost
@@ -1370,8 +1480,12 @@ package final class ProxyOrchestrator {
                 await refreshPACRouting(force: true)
             }
         } catch {
-            await localPACServer.stop()
-            await localProxyServer.stop(scope: .all)
+            // A superseded start owns nothing: the newer operation that superseded it owns the listeners, and its own teardown or start closes
+            // or reuses what this one left. Closing here would close what that owner published.
+            try ensureStartCurrent(epoch)
+            await runTeardown(epoch: epoch, scope: .all)
+            // A start or stop admitted during the teardown owns the snapshot now; this failure must not publish over it.
+            try ensureStartCurrent(epoch)
             mutateSnapshot {
                 $0.runtimeStatus.state = .failed
                 $0.proxyError = error.localizedDescription
@@ -1394,15 +1508,23 @@ package final class ProxyOrchestrator {
     /// from config-driven restart paths so in-flight HTTPS streams established through
     /// the old listener can outlive the listener swap. See `docs/design-vpn-flap-resilience.md`.
     package func stopProxy(scope: CloseScope = .all) async {
+        // Supersedes a start still awaiting its PAC, probe or bind work, which then stops at its next check.
+        lifecycleEpoch += 1
+        let epoch = lifecycleEpoch
+        stopsInFlight += 1
+        defer { stopsInFlight -= 1 }
         emitEvent(.lifecycle, "proxy.stopping")
         healthChecker.stop()
         stopDirectModeReprobeTimer()
-        await localPACServer.stop()
-        await localProxyServer.stop(scope: scope)
+        // Superseded before its teardown ran: the newer operation owns the listeners and the snapshot, so this stop has nothing left to publish.
+        guard await runTeardown(epoch: epoch, scope: scope) else { return }
+        // A start or stop admitted during the teardown owns the state now: a start's `starting` is already published, and writing `stopped`
+        // over it would be stale. The connections and counters below describe what this teardown closed, so they are reset either way.
+        let superseded = lifecycleEpoch != epoch
         // Phase 4 telemetry: clear the per-flap-recovery state machine so the
         // next start-cycle doesn't compute a duration against a flap that
         // started before the listener went down.
-        flapStartedAt = nil
+        if !superseded { flapStartedAt = nil }
         mutateSnapshot {
             // `ActiveConnectionStore` rebuilds its index map from the
             // filtered array — the rebuild is rare (only on stop/scope-flush
@@ -1436,9 +1558,11 @@ package final class ProxyOrchestrator {
             $0.lastAuthOutcome = nil
             $0.lastAuthOutcomeAt = nil
             $0.lastAuthFallbackReason = nil
-            $0.runtimeStatus.state = .stopped
+            if !superseded {
+                $0.runtimeStatus.state = .stopped
+                $0.runtimeStatus.lastHealthSummary = "Stopped"
+            }
             $0.runtimeStatus.activeUpstream = nil
-            $0.runtimeStatus.lastHealthSummary = "Stopped"
             $0.proxyError = nil
             $0.bindings.proxyHost = nil
             $0.bindings.proxyPort = nil
@@ -2108,24 +2232,29 @@ package final class ProxyOrchestrator {
                 return
             }
             let cause = snapshot.directModeCause
-            mutateSnapshot {
-                if cause.routesClientTrafficDirectly {
-                    $0.runtimeStatus.lastHealthSummary = cause.healthSummary
-                    $0.runtimeStatus.activeUpstream = "DIRECT"
-                    // This verdict owns the status: a recovery ladder this
-                    // disconnect superseded may have set `.degraded` from
-                    // the cause before it (#155).
-                    $0.runtimeStatus.state = .running
-                } else {
-                    $0.runtimeStatus.lastHealthSummary = summary.bestReachableUpstream.map {
-                        "Healthy via \($0.endpoint)"
-                    } ?? $0.runtimeStatus.lastHealthSummary
-                    $0.runtimeStatus.activeUpstream = summary.bestReachableUpstream?.endpoint ?? $0.runtimeStatus.activeUpstream
-                    $0.runtimeStatus.state = .running
+            // A stop admitted during the probe owns the status and the monitors. The sweep below is this transition's own and still runs,
+            // but a stopped runtime is not marked running, nor its health loop started again.
+            let stillActive = isProxyLive
+            if stillActive {
+                mutateSnapshot {
+                    if cause.routesClientTrafficDirectly {
+                        $0.runtimeStatus.lastHealthSummary = cause.healthSummary
+                        $0.runtimeStatus.activeUpstream = "DIRECT"
+                        // This verdict owns the status: a recovery ladder this
+                        // disconnect superseded may have set `.degraded` from
+                        // the cause before it (#155).
+                        $0.runtimeStatus.state = .running
+                    } else {
+                        $0.runtimeStatus.lastHealthSummary = summary.bestReachableUpstream.map {
+                            "Healthy via \($0.endpoint)"
+                        } ?? $0.runtimeStatus.lastHealthSummary
+                        $0.runtimeStatus.activeUpstream = summary.bestReachableUpstream?.endpoint ?? $0.runtimeStatus.activeUpstream
+                        $0.runtimeStatus.state = .running
+                    }
                 }
             }
             migrateUpstreamChannelsAfterVPNDisconnect(reason: reason, routesDirect: cause.routesClientTrafficDirectly, superseded: false)
-            reconcileConnectivityMonitors(for: cause)
+            if stillActive { reconcileConnectivityMonitors(for: cause) }
             await pacRefreshed
             // A newer VPN report during the PAC refresh reports its own outcome.
             guard generation == routingGeneration else { return }
@@ -2434,7 +2563,7 @@ package final class ProxyOrchestrator {
     }
 
     private func startHealthLoop() {
-        guard snapshot.directModeCause.runsUpstreamHealthLoop else { return }
+        guard isProxyLive, snapshot.directModeCause.runsUpstreamHealthLoop else { return }
         // `HealthChecker.start` fires a check immediately. A loop that is
         // already running keeps its adaptive schedule; restarting it from a
         // failed-recovery path is what turned one failure into a ladder
@@ -2543,15 +2672,19 @@ package final class ProxyOrchestrator {
             break
         }
 
+        // The ladder is admitted under this routing generation, lifecycle and listener stamp, all read in this turn. A VPN transition, a stop
+        // or a start moves one of them, and the ladder then ends before its next step and publishes nothing.
         let generation = routingGeneration
+        let lifecycle = lifecycleEpoch
+        let stamp = localProxyServer.listenerStamp
+        mutateSnapshot { $0.runtimeStatus.state = .recovering }
         Task { @MainActor in
-            self.mutateSnapshot { $0.runtimeStatus.state = .recovering }
-            let recovered = await self.autoRecovery.recover(trigger: result.failure) {
-                self.routingGeneration == generation
+            let recovered = await self.autoRecovery.recover(trigger: result.failure, since: stamp) {
+                self.routingGeneration == generation && self.lifecycleEpoch == lifecycle
             }
-            guard generation == self.routingGeneration else {
-                // A VPN transition ran during the ladder and owns routing;
-                // its failure evidence is stale, so no cooldown either.
+            guard generation == self.routingGeneration, lifecycle == self.lifecycleEpoch else {
+                // A VPN transition, stop or start ran during the ladder and owns the state now; its failure evidence is stale, so no cooldown
+                // either. The state write only lands on `.recovering`, so a stopped or restarted runtime keeps its own state.
                 self.recoveryGate.end(recovered: true)
                 let cause = self.snapshot.directModeCause
                 self.mutateSnapshot {
@@ -2573,7 +2706,9 @@ package final class ProxyOrchestrator {
                 }
                 self.onEvent?(.proxyRecovered(activeUpstream: self.snapshot.runtimeStatus.activeUpstream))
             } else {
-                guard let connSummary = await self.refreshConnectivityMode() else {
+                guard let connSummary = await self.refreshConnectivityMode(lifecycle: lifecycle) else {
+                    // A stop or start during the probe owns the state and the monitors: the ladder leaves both to it.
+                    guard lifecycle == self.lifecycleEpoch else { return }
                     // A VPN report during the probe owns routing now; leave
                     // `.recovering` for the state its routing implies. The
                     // cooldown was earned on the old network: a failure on
@@ -2659,7 +2794,13 @@ package final class ProxyOrchestrator {
     /// and the caller leaves status, monitors and events to the newer owner.
     /// A result a later-started probe already overtook is dropped too, and
     /// the caller gets that probe's committed summary instead.
-    private func refreshConnectivityMode() async -> UpstreamProbeSummary? {
+    ///
+    /// `lifecycle`, when given, is the lifecycle a health continuation was
+    /// admitted under. A stop or start admitted during the probe owns the
+    /// status and the monitors, so the result is dropped the same way
+    /// (`by=lifecycle`) and the caller marks nothing running and starts no
+    /// monitor for a runtime that has since stopped.
+    private func refreshConnectivityMode(lifecycle: Int? = nil) async -> UpstreamProbeSummary? {
         let generation = routingGeneration
         probeSerial &+= 1
         let serial = probeSerial
@@ -2673,6 +2814,10 @@ package final class ProxyOrchestrator {
         }
         guard generation == routingGeneration else {
             reportSupersededProbe(by: "transition", probedUnder: probedUnder, summary: summary)
+            return nil
+        }
+        if let lifecycle, lifecycle != lifecycleEpoch {
+            reportSupersededProbe(by: "lifecycle", probedUnder: probedUnder, summary: summary)
             return nil
         }
         if let newer = committedProbe, newer.serial > serial {
@@ -2751,6 +2896,7 @@ package final class ProxyOrchestrator {
 
     private func startDirectModeReprobeTimer() {
         stopDirectModeReprobeTimer()
+        guard isProxyLive else { return }
         let interval = reprobeInterval(snapshot.directModeCause)
         let scheduled = RuntimeEvent(kind: .health, event: "connectivity.reprobe_scheduled",
             detail: "cause=\(snapshot.directModeCause.rawValue) interval_seconds=\(Int(interval))")
@@ -2766,13 +2912,14 @@ package final class ProxyOrchestrator {
                 self?.stopDirectModeReprobeTimer()
                 return
             }
+            let lifecycle = self.lifecycleEpoch
             Task { @MainActor in
                 let started = RuntimeEvent(kind: .health, event: "connectivity.reprobe_started",
                     detail: "cause=\(self.snapshot.directModeCause.rawValue)")
                 self.eventLog.append(started)
                 self.logStore.log(.debug, "Connectivity retry started: \(started.detail ?? "")", category: .network)
-                // nil: a VPN report during the probe owns routing now.
-                guard let summary = await self.refreshConnectivityMode() else { return }
+                // nil: a VPN report, or a stop or start, during the probe owns routing or the runtime now.
+                guard let summary = await self.refreshConnectivityMode(lifecycle: lifecycle) else { return }
                 let completed = RuntimeEvent(kind: .health, event: "connectivity.reprobe_completed",
                     detail: "reachable=\(summary.hasReachableUpstream) cause=\(self.snapshot.directModeCause.rawValue)")
                 self.eventLog.append(completed)
@@ -2840,6 +2987,7 @@ package final class ProxyOrchestrator {
         guard recentFailureTimestamps.count >= Self.errorRateThreshold,
               !errorRateReprobeScheduled,
               !suppressForExpectedDirect,
+              stopsInFlight == 0,
               snapshot.runtimeStatus.state != .stopped,
               snapshot.runtimeStatus.state != .starting else { return }
 
@@ -2851,10 +2999,11 @@ package final class ProxyOrchestrator {
         emitEvent(.health, "error_rate.alarm", detail: "failures=\(failureCount) windowSeconds=\(Int(Self.errorRateWindow))")
         logStore.log(.warning, "High error rate (\(failureCount) failures in \(Int(Self.errorRateWindow))s) — triggering upstream re-probe.", category: .network)
 
+        let lifecycle = lifecycleEpoch
         Task { @MainActor in
             defer { self.errorRateReprobeScheduled = false }
-            // nil: a VPN report during the probe owns routing now.
-            guard let summary = await self.refreshConnectivityMode() else { return }
+            // nil: a VPN report, or a stop or start, during the probe owns routing or the runtime now.
+            guard let summary = await self.refreshConnectivityMode(lifecycle: lifecycle) else { return }
             if self.snapshot.directModeCause.isDirect {
                 let cause = self.snapshot.directModeCause
                 self.mutateSnapshot {
