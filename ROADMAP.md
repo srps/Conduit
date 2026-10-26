@@ -42,21 +42,18 @@ read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
 mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
 [0034](./docs/decisions/0034-private-editor-reply-frame-cap.md) selects complete private editor replies at 8 MiB. [Actual-codec sizing and allocation-lifetime measurements](./docs/experiments/private-editor-codec/README.md) cover the headless codec; real-adapter Stop/status responsiveness remains an adoption gate. Service-profile defaults remain unselected and must not inherit experimental values.
 
-Latest merged verified slice: [PR247](https://github.com/srps/Conduit/pull/247) protects missing-sidecar source authority
-and compares canonical persisted values by bytes. Exact-head Swift/CodeQL and all 41 local checks passed:
-3,432 tests, zero failures, four documented skips, all 103 simulator records and perf. Independent subscription-backed
-Claude review, replayable source mutations and the [verification record](./docs/verification-configuration-source-2026-10-26.md)
-state the scope and limits. The private editor codec remains merged in [PR245](https://github.com/srps/Conduit/pull/245).
-Devin's optional full reviews were skipped for expired credits; they are not review evidence.
+Latest merged verified slice: [PR248](https://github.com/srps/Conduit/pull/248), resolving byte-distinct
+runtime intent through one shared adoption predicate and byte-aware PAC/credential cache comparisons.
+All required local workflow checks and exact-head hosted Swift/CodeQL passed. The final full Swift suite
+passed 3,449 tests with four documented skips; all 103 simulator records and perf passed. Eleven actual
+guard mutations have [replay patches and source identity](./docs/experiments/runtime-intent-guards/README.md).
+Independent subscription-backed Claude reviews and the
+[verification record](./docs/verification-byte-exact-runtime-intent-2026-10-26.md) distinguish the two local
+checkpoints and unproven diagnostic-flush cause (#47). Devin's optional review was skipped for expired
+credits and is not approval evidence. PR247's source-authority correction and PR245's private codec are
+also merged. These changes do not activate AppState or create another writer.
 
-The related apply/reconciler equality correction [#246](https://github.com/srps/Conduit/issues/246) is implemented with
-one shared adoption predicate and byte-aware PAC/credential cache comparisons. Its
-[verification checkpoint](./docs/verification-byte-exact-runtime-intent-2026-10-26.md) separates focused tests, actual source
-mutations and local/hosted evidence. All 41 local checks passed on frozen production sources; after
-test-only review additions, the full Swift suite passes 3,449 tests. Hosted disposition belongs to the
-integration PR. Neither correction creates another app writer.
-
-Before private update/Start adoption, settle the [interactive admission alternatives](./docs/design-runtime-editor-admission-options.md):
+Interactive policies are selected in the [reviewed admission alternatives](./docs/design-runtime-editor-admission-options.md):
 the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-request-lifecycle-validation.md));
 host-checked conditional DNS activation is selected ([0036](./docs/decisions/0036-conditional-dns-activation.md)).
 Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
