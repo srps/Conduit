@@ -52,6 +52,38 @@ final class PrivateConfigResourceReviewTests: XCTestCase {
         try compare(.object(PrivateConfigurationSchema.request), to: object, path: "request")
     }
 
+    /// The read and reply roots against the encoder's actual output. The observation subtree is compared table by table.
+    /// The admission table names the union of the members `ControlAdmission`'s own encoding writes across its variants.
+    func testReadAndReplyTablesMatchTheActualEncoderKeySets() throws {
+        let read = PrivateEditorReadRequest(
+            requestID: ControlRequestID(rawValue: PrivateConfigSamples.uuid(5)),
+            incarnation: ControlHostIncarnation(rawValue: PrivateConfigSamples.uuid(2)),
+            budget: try ControlWireBudget(5_000)
+        )
+        try compare(.object(PrivateConfigurationSchema.readRequest), to: jsonBody(PrivateConfigurationEncoder.encode(read)), path: "read")
+
+        let observation = try PrivateEditorMaximumFixture.reply(distinct: false)
+        let replyObject = try XCTUnwrap(jsonBody(PrivateConfigurationEncoder.encode(observation)) as? [String: Any])
+        let rootNames = PrivateConfigurationSchema.editorReply.members.map { String(decoding: $0.name, as: UTF8.self) }
+        XCTAssertEqual(Set(replyObject.keys), Set(rootNames))
+        try compare(.object(PrivateConfigurationSchema.observation), to: XCTUnwrap(replyObject["observation"]), path: "observation")
+
+        let operation = ControlOperationID(rawValue: PrivateConfigSamples.uuid(70))
+        var admissionKeys = Set<String>()
+        for admission in [ControlAdmission.accepted(operation), .joined(operation), .rejected(.queueFull)] {
+            let reply = PrivateEditorReply(requestID: read.requestID, hostIncarnation: read.incarnation, answer: .admission(admission))
+            let object = try XCTUnwrap(jsonBody(PrivateConfigurationEncoder.encode(reply)) as? [String: Any])
+            admissionKeys.formUnion(try XCTUnwrap(object["admission"] as? [String: Any]).keys)
+        }
+        XCTAssertEqual(admissionKeys, Set(PrivateConfigurationSchema.admission.members.map { String(decoding: $0.name, as: UTF8.self) }))
+    }
+
+    private func jsonBody(_ frame: SecretBytes) throws -> Any {
+        let bytes = frame.bytes()
+        let start = try XCTUnwrap(bytes.firstIndex(of: 0x0A)) + 1
+        return try JSONSerialization.jsonObject(with: Data(bytes[start..<(bytes.count - 1)]))
+    }
+
     /// Compare independently materialized encoder JSON with every object table the
     /// scanner traverses. A newly encoded or omitted member cannot silently drift.
     private func compare(_ shape: PrivateValueShape, to value: Any, path: String) throws {
@@ -73,7 +105,12 @@ final class PrivateConfigResourceReviewTests: XCTestCase {
             for (index, value) in actual.enumerated() {
                 try compare(element, to: value, path: path + "[\(index)]")
             }
-        case .string, .nullableString, .bool, .number:
+        case .nullable(let inner):
+            // A null member has no table below it. A present one is compared as its wrapped shape.
+            if !(value is NSNull) {
+                try compare(inner, to: value, path: path)
+            }
+        case .string, .bool, .number, .unsignedDecimal:
             break // Existing encoded round-trip tests pin primitive value semantics.
         }
     }
@@ -108,7 +145,7 @@ final class PrivateConfigResourceReviewTests: XCTestCase {
         file: StaticString = #filePath, line: UInt = #line
     ) {
         XCTAssertThrowsError(try PrivateConfigurationDecoder.decode(
-            PrivateConfigurationFrameBody(bytes: SecretBytes(bytes))), file: file, line: line) {
+            PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(bytes))), file: file, line: line) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError,
                            .resourceLimitExceeded(DomainResourceViolation(field, limit)), file: file, line: line)
         }

@@ -94,6 +94,15 @@ final class PrivateConfigBridgeTests: XCTestCase {
         )
     }
 
+    /// The private preferences object names exactly the keys the stored preferences encode, so a new preference cannot
+    /// be dropped from, or defaulted by, the private observation without this test failing.
+    func testPrivatePreferencesNameEveryStoredPreference() {
+        XCTAssertEqual(
+            Set(PrivateConfigurationSchema.preferences.members.map { String(decoding: $0.name, as: UTF8.self) }),
+            Set(AppPreferences.CodingKeys.allCases.map(\.stringValue))
+        )
+    }
+
     // MARK: - Mapping and round trip
 
     func testFullMappingRoundTripPreservesEveryValueThroughTheFrame() throws {
@@ -220,7 +229,7 @@ final class PrivateConfigBridgeTests: XCTestCase {
     /// The in-memory entry point takes a request that was never framed, so it counts the request exactly.
     func testMakeValuesRefusesAnOversizeInMemoryRequestBeforeMapping() throws {
         var request = try PrivateConfigSamples.request()
-        request.runtime.profileName = String(repeating: "a", count: PrivateConfigurationFrame.maxFrameBytes)
+        request.runtime.profileName = String(repeating: "a", count: PrivateConfigurationFrame.maxRequestFrameBytes)
         XCTAssertThrowsError(try PrivateConfigurationBridge.makeValues(from: request, localLaunchAtLogin: false)) {
             XCTAssertEqual(
                 $0 as? PrivateConfigurationBridgeError,
@@ -330,6 +339,107 @@ final class PrivateConfigBridgeTests: XCTestCase {
         }
     }
 
+    // MARK: - Observation
+
+    /// The kernel values map into an observation, cross the real reply frame inside a correlated envelope, and map back
+    /// unchanged. `launchAtLogin` is the stored platform value in both directions; it is never defaulted.
+    func testObservationMapsBothWaysThroughTheReplyWithTheStoredLaunchAtLogin() throws {
+        let config = richConfig()
+        let preferences = richPreferences()
+        for launchAtLogin in [true, false] {
+            let platform = richPlatform(launchAtLogin: launchAtLogin)
+            let observation = try makeObservation(config: config, platform: platform, preferences: preferences)
+            XCTAssertEqual(observation.launchAtLogin, launchAtLogin)
+            let reply = PrivateEditorReply(
+                requestID: ControlRequestID(rawValue: uuid(103)),
+                hostIncarnation: ControlHostIncarnation(rawValue: uuid(102)),
+                answer: .observation(observation)
+            )
+            let frame = try PrivateConfigurationEncoder.encode(reply).bytes()
+            let decoded = try PrivateConfigurationDecoder.decodeReply(readFrameBody(frame, kind: .editorReply))
+            guard case .observation(let received) = decoded.answer else {
+                throw Failure(message: "the reply did not carry the observation")
+            }
+            let restored = try PrivateConfigurationBridge.makeValues(from: received)
+            XCTAssertEqual(restored.config, config)
+            XCTAssertEqual(restored.platform, platform)
+            XCTAssertEqual(restored.preferences, preferences)
+        }
+    }
+
+    /// The approved ceilings run before any value is mapped, in both directions, and a refusal names no value.
+    func testObservationRefusesAnOverlimitValueBeforeMapping() throws {
+        var preferences = richPreferences()
+        preferences.preferredBrowserTestURL = "https://" + String(repeating: "a", count: 16_377)
+        XCTAssertThrowsError(try makeObservation(config: richConfig(), platform: richPlatform(launchAtLogin: false), preferences: preferences)) {
+            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .resourceLimit(DomainResourceViolation(.browserTestURL, 16_384)))
+        }
+        var config = richConfig()
+        config.profileName = String(repeating: "a", count: 9_000_000)
+        XCTAssertThrowsError(try makeObservation(config: config, platform: richPlatform(launchAtLogin: false), preferences: richPreferences())) {
+            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .resourceLimit(DomainResourceViolation(.profileName, 1_024)))
+        }
+
+        var observation = try makeObservation(config: richConfig(), platform: richPlatform(launchAtLogin: false), preferences: richPreferences())
+        observation.preferences.preferredBrowserTestURL = PrivateURLValue(preferences.preferredBrowserTestURL)
+        XCTAssertThrowsError(try PrivateConfigurationBridge.makeValues(from: observation)) {
+            XCTAssertEqual($0 as? PrivateConfigurationBridgeError, .resourceLimit(DomainResourceViolation(.browserTestURL, 16_384)))
+        }
+    }
+
+    /// An in-memory observation runs the same format preflight as a request: a non-finite number is the codec's
+    /// `invalidValue` in both directions, never mapped. A start-blocking repair draft is format-valid, so it maps both
+    /// ways and keeps its classification.
+    func testObservationFormatPreflightRefusesNonFiniteAndKeepsRepairDrafts() throws {
+        var nonFinite = richConfig()
+        nonFinite.health.checkInterval = .infinity
+        XCTAssertThrowsError(try makeObservation(config: nonFinite, platform: richPlatform(launchAtLogin: false), preferences: richPreferences())) {
+            XCTAssertEqual($0 as? PrivateConfigurationWireError, .invalidValue)
+        }
+        var observation = try makeObservation(config: richConfig(), platform: richPlatform(launchAtLogin: false), preferences: richPreferences())
+        observation.runtime.health.connectionCheckTimeoutSeconds = .nan
+        XCTAssertThrowsError(try PrivateConfigurationBridge.makeValues(from: observation)) {
+            XCTAssertEqual($0 as? PrivateConfigurationWireError, .invalidValue)
+        }
+
+        var repair = richConfig()
+        repair.proxy.maxConnections = 0
+        let restored = try PrivateConfigurationBridge.makeValues(
+            from: makeObservation(config: repair, platform: richPlatform(launchAtLogin: false), preferences: richPreferences())
+        )
+        XCTAssertEqual(restored.config, repair)
+        XCTAssertEqual(restored.config.startBlockingProblems.map(\.check), ["invalid_limit field=proxy.maxConnections"])
+    }
+
+    private func makeObservation(
+        config: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        preferences: AppPreferences
+    ) throws -> PrivateEditorObservation {
+        let module = PrivateModuleState(lifecycleRevision: try PrivateConfigSamples.lifecycleRevision(3), enabled: true, fenced: false)
+        return try PrivateConfigurationBridge.makeObservation(
+            config: config,
+            platform: platform,
+            preferences: preferences,
+            terminal: false,
+            components: PrivateComponentSlots(
+                runtime: .verified(PrivateConfigSamples.baseline(.runtime, version: 7)),
+                platform: .verified(PrivateConfigSamples.baseline(.platform, version: 6)),
+                preferences: .retained(.writeUnknown)
+            ),
+            modules: PrivateModuleSlots(proxy: module, dns: module, tunnels: module)
+        )
+    }
+
+    /// Every preference differs from its default.
+    private func richPreferences() -> AppPreferences {
+        AppPreferences(
+            showMenuBarIcon: false, floatingWindowEnabled: true, globalShortcutEnabled: true,
+            preferredBrowserTestURL: "https://browser.example.test/?token=PREF-SECRET-1",
+            fileLoggingEnabled: false, automaticUpdateChecks: true
+        )
+    }
+
     // MARK: - Helpers
 
     private func makeRequest(
@@ -342,9 +452,9 @@ final class PrivateConfigBridgeTests: XCTestCase {
             requestID: ControlRequestID(rawValue: PrivateConfigSamples.uuid(101)),
             incarnation: ControlHostIncarnation(rawValue: PrivateConfigSamples.uuid(102)),
             budget: try ControlWireBudget(5_000),
-            expectedConfigRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 7)),
-            expectedPlatformRevision: try XCTUnwrap(PrivatePlatformRevision(rawValue: 6)),
-            expectedOwnerGeneration: try XCTUnwrap(PrivateConfigExpectedGeneration(rawValue: 5))
+            runtimeBaseline: PrivateConfigSamples.baseline(.runtime, version: 7),
+            platformBaseline: PrivateConfigSamples.baseline(.platform, version: 6),
+            modules: try PrivateConfigSamples.modules()
         )
     }
 
@@ -354,8 +464,11 @@ final class PrivateConfigBridgeTests: XCTestCase {
     }
 
     /// The body of one complete frame, read through the real reader.
-    private func readFrameBody(_ frame: [UInt8]) throws -> PrivateConfigurationFrameBody {
-        let reader = PrivateConfigurationFrameReader()
+    private func readFrameBody(
+        _ frame: [UInt8],
+        kind: PrivateConfigurationFrame.Kind = .update
+    ) throws -> PrivateConfigurationFrameBody {
+        let reader = PrivateConfigurationFrameReader(expecting: kind)
         guard case .frame(let body) = try reader.consume(frame).step else {
             throw Failure(message: "the frame did not complete")
         }
@@ -371,7 +484,7 @@ final class PrivateConfigBridgeTests: XCTestCase {
 
     /// Feeds one frame to the reader one byte at a time and returns its body.
     private func readOneByteAtATime(_ bytes: [UInt8]) throws -> PrivateConfigurationFrameBody {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         for (offset, byte) in bytes.enumerated() {
             let (step, consumed) = try reader.consume([byte])
             XCTAssertEqual(consumed, 1)

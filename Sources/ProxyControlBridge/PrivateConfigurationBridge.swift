@@ -27,29 +27,30 @@ package enum PrivateConfigurationBridgeError: Error, Sendable, Equatable {
 }
 
 package enum PrivateConfigurationBridge {
-    /// Builds the request for one update. Its `launchAtLogin` is not carried; the local login item
-    /// is app-owned.
+    /// Builds the request for one update. Its `launchAtLogin` is not carried; the host keeps the
+    /// stored value. The baselines and intents are the caller's observed preconditions, carried as
+    /// they are: a baseline in the wrong slot is the request's own `invalidValue`.
     package static func makeRequest(
         config: ProxyConfig,
         platform: PlatformIntegrationConfig,
         requestID: ControlRequestID,
         incarnation: ControlHostIncarnation,
         budget: ControlWireBudget,
-        expectedConfigRevision: ControlConfigRevision,
-        expectedPlatformRevision: PrivatePlatformRevision,
-        expectedOwnerGeneration: PrivateConfigExpectedGeneration
+        runtimeBaseline: PrivateBaseline,
+        platformBaseline: PrivateBaseline,
+        modules: PrivateModuleSlots<PrivateModuleIntent>
     ) throws -> PrivateConfigurationRequest {
         // The approved ceilings run before any value is mapped.
         if let violation = config.resourceViolation() {
             throw PrivateConfigurationBridgeError.resourceLimit(violation)
         }
-        let request = PrivateConfigurationRequest(
+        let request = try PrivateConfigurationRequest(
             requestID: requestID,
             incarnation: incarnation,
             budget: budget,
-            expectedConfigRevision: expectedConfigRevision,
-            expectedPlatformRevision: expectedPlatformRevision,
-            expectedOwnerGeneration: expectedOwnerGeneration,
+            runtimeBaseline: runtimeBaseline,
+            platformBaseline: platformBaseline,
+            modules: modules,
             runtime: runtimeValues(config),
             platform: platformValues(platform)
         )
@@ -72,6 +73,65 @@ package enum PrivateConfigurationBridge {
         // and copies nothing, and it refuses an unrepresentable value the same way the encoder does.
         try requireFrame(request)
         return (proxyConfig(request.runtime), platformConfig(request.platform, launchAtLogin: localLaunchAtLogin))
+    }
+
+    /// Builds the observation the host answers a read with, from the values, baselines and lifecycle state it captured in
+    /// one owner turn. `launchAtLogin` comes from the stored platform value. The approved ceilings run before any value is
+    /// mapped, and the mapped observation then passes the codec's format preflight (`requireObservation`). There is no
+    /// frame here: the caller puts the observation in a reply with the real request ID and host incarnation, and the reply
+    /// encoder owns the complete frame's exact count and the reply cap.
+    package static func makeObservation(
+        config: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        preferences: AppPreferences,
+        terminal: Bool,
+        components: PrivateComponentSlots<PrivateComponentState>,
+        modules: PrivateModuleSlots<PrivateModuleState>
+    ) throws -> PrivateEditorObservation {
+        if let violation = config.resourceViolation()
+            ?? DomainResourceCheck.text(preferences.preferredBrowserTestURL, .browserTestURL)
+        {
+            throw PrivateConfigurationBridgeError.resourceLimit(violation)
+        }
+        let observation = try PrivateEditorObservation(
+            terminal: terminal,
+            runtime: runtimeValues(config),
+            platform: platformValues(platform),
+            preferences: preferencesValues(preferences),
+            launchAtLogin: platform.launchAtLogin,
+            components: components,
+            modules: modules
+        )
+        try requireObservation(observation)
+        return observation
+    }
+
+    /// Rebuilds the values an observation carries, with the stored `launchAtLogin`. A decoded observation was framed and
+    /// scanned; one built in memory was not, so the format preflight runs first, as `makeValues(from:)` does for a
+    /// request. Like that path, this checks format, not eligibility: a start-blocking repair draft maps unchanged.
+    package static func makeValues(
+        from observation: PrivateEditorObservation
+    ) throws -> (config: ProxyConfig, platform: PlatformIntegrationConfig, preferences: AppPreferences) {
+        try requireObservation(observation)
+        return (
+            proxyConfig(observation.runtime),
+            platformConfig(observation.platform, launchAtLogin: observation.launchAtLogin),
+            appPreferences(observation.preferences)
+        )
+    }
+
+    /// The codec's format preflight of an observation, with errors mapped as `requireFrame` maps them: a ceiling is
+    /// `resourceLimit`, an observation past the reply body limit is `tooLarge`, and an unrepresentable value stays the
+    /// codec's `invalidValue`. It counts the observation alone, with no envelope; the complete reply's cap is the reply
+    /// encoder's check.
+    private static func requireObservation(_ observation: PrivateEditorObservation) throws {
+        do {
+            _ = try PrivateConfigurationEncoder.measureObservation(observation)
+        } catch PrivateConfigurationWireError.frameTooLarge {
+            throw PrivateConfigurationBridgeError.tooLarge
+        } catch PrivateConfigurationWireError.resourceLimitExceeded(let violation) {
+            throw PrivateConfigurationBridgeError.resourceLimit(violation)
+        }
     }
 
     /// The codec's exact count of a mapped request. It also runs the approved ceilings on the request, so a
@@ -188,6 +248,17 @@ package enum PrivateConfigurationBridge {
         )
     }
 
+    private static func preferencesValues(_ preferences: AppPreferences) -> PrivatePreferences {
+        PrivatePreferences(
+            showMenuBarIcon: preferences.showMenuBarIcon,
+            floatingWindowEnabled: preferences.floatingWindowEnabled,
+            globalShortcutEnabled: preferences.globalShortcutEnabled,
+            preferredBrowserTestURL: PrivateURLValue(preferences.preferredBrowserTestURL),
+            fileLoggingEnabled: preferences.fileLoggingEnabled,
+            automaticUpdateChecks: preferences.automaticUpdateChecks
+        )
+    }
+
     // MARK: - Values to kernel
 
     private static func proxyConfig(_ runtime: PrivateRuntimeConfiguration) -> ProxyConfig {
@@ -289,6 +360,17 @@ package enum PrivateConfigurationBridge {
             manageSystemDNS: platform.manageSystemDNS,
             systemProxyMode: kernelSystemProxyMode(platform.systemProxyMode),
             launchAtLogin: launchAtLogin
+        )
+    }
+
+    private static func appPreferences(_ preferences: PrivatePreferences) -> AppPreferences {
+        AppPreferences(
+            showMenuBarIcon: preferences.showMenuBarIcon,
+            floatingWindowEnabled: preferences.floatingWindowEnabled,
+            globalShortcutEnabled: preferences.globalShortcutEnabled,
+            preferredBrowserTestURL: preferences.preferredBrowserTestURL.text,
+            fileLoggingEnabled: preferences.fileLoggingEnabled,
+            automaticUpdateChecks: preferences.automaticUpdateChecks
         )
     }
 

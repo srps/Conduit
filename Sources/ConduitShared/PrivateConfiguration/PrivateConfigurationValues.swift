@@ -11,18 +11,14 @@ import Foundation
 // The mapping to and from `ProxyConfig` lives in `ProxyControlBridge`, not here,
 // so this target keeps no kernel dependency.
 
-/// The expected owner generation of a configuration write: a precondition the
-/// caller observed. It is never a generation the caller allocates. The writer
-/// assigns the real generation when it captures the intent, before it awaits.
+/// The workflow intent generation a store operation context echoes. It never
+/// crosses the private wire: an update names exact store baselines and one
+/// lifecycle revision per module instead.
 package enum PrivateConfigIntentDomain: ControlIdentityDomain {}
-/// The platform revision: the generation of machine-effect values. It is a
-/// separate family from the configuration revision and never shares its numbers.
-package enum PrivatePlatformRevisionDomain: ControlIdentityDomain {}
 package enum PrivateDNSEntryDomain: ControlIdentityDomain {}
 package enum PrivateInterceptRuleDomain: ControlIdentityDomain {}
 
 package typealias PrivateConfigExpectedGeneration = ControlOrdinal<PrivateConfigIntentDomain>
-package typealias PrivatePlatformRevision = ControlOrdinal<PrivatePlatformRevisionDomain>
 package typealias PrivateDNSEntryID = ControlIdentifier<PrivateDNSEntryDomain>
 package typealias PrivateInterceptRuleID = ControlIdentifier<PrivateInterceptRuleDomain>
 
@@ -414,47 +410,54 @@ package struct PrivatePlatformConfiguration: Sendable, Equatable, CustomStringCo
 
 // MARK: - Request
 
-/// One configuration update, as one request (decision 0018).
+/// One runtime and platform update, as one request (decisions 0018 and 0025). It carries
+/// the full frozen values of both files, never a patch.
 ///
-/// The revisions are preconditions. `expectedConfigRevision` and `expectedPlatformRevision`
-/// name the revisions the caller last observed. `expectedOwnerGeneration` names the
-/// writer generation the caller expects. None of them allocates or supplies a receipt:
-/// the store assigns the new revisions and the writer assigns the real generation.
-/// Lifecycle preconditions never use the presentation revision, which advances on
-/// counter traffic.
+/// The baselines and intents are preconditions the caller observed. `runtimeBaseline` and
+/// `platformBaseline` name the exact store baselines of the two files. `modules` names, per
+/// module, whether the update only saves, applies while running, or explicitly starts, and
+/// the lifecycle revision that applies or starts under. None of them allocates or supplies a
+/// receipt: the store assigns new versions, and only the host's answer to this `requestID`
+/// reports them. Lifecycle preconditions never use the presentation revision, which advances
+/// on counter traffic. `launchAtLogin` is not carried: the host keeps the stored value.
 package struct PrivateConfigurationRequest: Sendable, Equatable, CustomStringConvertible,
     CustomDebugStringConvertible, CustomReflectable
 {
     package var requestID: ControlRequestID
     package var incarnation: ControlHostIncarnation
     package var budget: ControlWireBudget
-    package var expectedConfigRevision: ControlConfigRevision
-    package var expectedPlatformRevision: PrivatePlatformRevision
-    package var expectedOwnerGeneration: PrivateConfigExpectedGeneration
+    /// Always a runtime baseline: the initializer refuses another component.
+    package private(set) var runtimeBaseline: PrivateBaseline
+    /// Always a platform baseline: the initializer refuses another component.
+    package private(set) var platformBaseline: PrivateBaseline
+    package var modules: PrivateModuleSlots<PrivateModuleIntent>
     package var runtime: PrivateRuntimeConfiguration
     package var platform: PrivatePlatformConfiguration
 
+    /// Throws `invalidValue` when a baseline names another file than its slot.
     package init(
         requestID: ControlRequestID, incarnation: ControlHostIncarnation, budget: ControlWireBudget,
-        expectedConfigRevision: ControlConfigRevision, expectedPlatformRevision: PrivatePlatformRevision,
-        expectedOwnerGeneration: PrivateConfigExpectedGeneration,
+        runtimeBaseline: PrivateBaseline, platformBaseline: PrivateBaseline,
+        modules: PrivateModuleSlots<PrivateModuleIntent>,
         runtime: PrivateRuntimeConfiguration, platform: PrivatePlatformConfiguration
-    ) {
+    ) throws {
+        guard runtimeBaseline.component == .runtime, platformBaseline.component == .platform else {
+            throw PrivateConfigurationWireError.invalidValue
+        }
         self.requestID = requestID
         self.incarnation = incarnation
         self.budget = budget
-        self.expectedConfigRevision = expectedConfigRevision
-        self.expectedPlatformRevision = expectedPlatformRevision
-        self.expectedOwnerGeneration = expectedOwnerGeneration
+        self.runtimeBaseline = runtimeBaseline
+        self.platformBaseline = platformBaseline
+        self.modules = modules
         self.runtime = runtime
         self.platform = platform
     }
 
-    /// Identifiers and revisions only. The values never appear in a description.
+    /// Identifiers, baselines and intents only. The values never appear in a description.
     package var description: String {
-        "PrivateConfigurationRequest(requestID: \(requestID), "
-            + "expectedConfigRevision: \(expectedConfigRevision.rawValue), "
-            + "expectedPlatformRevision: \(expectedPlatformRevision.rawValue), <redacted values>)"
+        "PrivateConfigurationRequest(requestID: \(requestID), runtimeBaseline: \(runtimeBaseline), "
+            + "platformBaseline: \(platformBaseline), modules: \(modules), <redacted values>)"
     }
     package var debugDescription: String { description }
     package var customMirror: Mirror { Mirror(self, children: [("description", description)], displayStyle: .struct) }

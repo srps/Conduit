@@ -327,9 +327,9 @@ final class ConfigurationResourceLimitsTests: XCTestCase {
             requestID: ControlRequestID(rawValue: PrivateConfigSamples.uuid(101)),
             incarnation: ControlHostIncarnation(rawValue: PrivateConfigSamples.uuid(102)),
             budget: try ControlWireBudget(5_000),
-            expectedConfigRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 7)),
-            expectedPlatformRevision: try XCTUnwrap(PrivatePlatformRevision(rawValue: 6)),
-            expectedOwnerGeneration: try XCTUnwrap(PrivateConfigExpectedGeneration(rawValue: 5))
+            runtimeBaseline: PrivateConfigSamples.baseline(.runtime, version: 7),
+            platformBaseline: PrivateConfigSamples.baseline(.platform, version: 6),
+            modules: try PrivateConfigSamples.modules()
         )
     }
 
@@ -386,7 +386,7 @@ final class ConfigurationResourceLimitsTests: XCTestCase {
     }
 
     private func decodeText(_ text: String) throws -> PrivateConfigurationRequest {
-        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(bytes: SecretBytes(Array(text.utf8))))
+        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(Array(text.utf8))))
     }
 
     /// The wire error a body is refused with, or nil when it decodes.

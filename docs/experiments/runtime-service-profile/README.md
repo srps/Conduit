@@ -82,10 +82,10 @@ and `retainedByteBudget` 31,942,548 B, which is 1,611,884 B under the ceiling.
 - **Run 1 (failed, preserved).** The filtered run reported one failure: the ninth subscription returned a stream without throwing at open. The
   test expected a refusal, and its assertion was wrong. Its logs are archived as `runtime-profile-checks-attempt1`, and the failing output is
   in `results/stdout-excerpt-run1.txt`.
-- **Run 2 (current, exit 0).** The exact wrapper passed end to end: build; 15 filtered tests executed, 0 failures (Evidence 5, Projection 6,
+- **Run 2 (exit 0, superseded by pass 7).** The exact wrapper passed end to end: build; 15 filtered tests executed, 0 failures (Evidence 5, Projection 6,
   Pressure 4); import check, event catalogue check (218 names) and decision check PASS; `pm-sim` service and display scenarios completed.
   Output is in `results/stdout-excerpt-run2.txt`.
-- Nothing is committed or pushed. The work is uncommitted in this worktree (branch `codex/runtime-profile-measurements`, based on 1d3a129).
+- These results describe the measurement checkpoint based on `1d3a129`; the experiment and service foundations are now merged. The candidate remains test-only. See [the current roadmap](../../../ROADMAP.md) for integration and shipping status.
 
 ## Repairs between run 1 and run 2
 

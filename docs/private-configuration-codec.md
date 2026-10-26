@@ -11,19 +11,26 @@ Shared target `ConduitShared`, all `package` access. Nothing is `public`.
 
 - `PrivateURLValue`, `PrivateRuntimeConfiguration`, `PrivatePlatformConfiguration`,
   `PrivateConfigurationRequest`: the values. None is `Codable`. Reflection is redacted.
+- `PrivateBaseline`, `PrivateModuleSlots`, `PrivateModuleIntent`: the update's
+  preconditions (see "Editor preconditions"). Not `Codable`; they hold no value.
+- `PrivateConfigurationFrame.Kind` (`update`, `editorReply`) with its separately named
+  caps `maxRequestFrameBytes` and `maxEditorReplyFrameBytes`.
 - `PrivateConfigurationEncoder.measureBody(_:) throws -> Int`: the body length, from a
   counting pass that writes nothing. It refuses an unrepresentable value and a body past
   the loose bound described under "Frame and limits".
 - `PrivateConfigurationEncoder.encode(_:) throws -> SecretBytes`: one complete frame.
-- `PrivateConfigurationFrameReader` (`final class`, one owner, not `Sendable`):
-  `consume(_:)`, `finish()`, `reset()`, `retainedByteCount`.
-- `PrivateConfigurationDecoder.decode(_:) throws -> PrivateConfigurationRequest`.
+- `PrivateConfigurationFrameReader(expecting:)` (`final class`, one owner, not `Sendable`):
+  `consume(_:)`, `finish()`, `reset()`, `retainedByteCount`. It reads one frame of the kind
+  it expects, and its body carries that kind.
+- `PrivateConfigurationDecoder.decode(_:) throws -> PrivateConfigurationRequest`. It
+  refuses a body of another kind before reading its bytes.
 - `PrivateConfigurationWireError`: fixed text, no input echoed.
 
 Target `ProxyControlBridge`, `package` access:
 
-- `PrivateConfigurationBridge.makeRequest(...) throws`: kernel config and platform to
-  the request. It checks shared resources before mapping, then exact frame size.
+- `PrivateConfigurationBridge.makeRequest(...) throws`: kernel config and platform, plus
+  the caller's baselines and module intents, to the request. It checks shared resources
+  before mapping, then exact frame size.
 - `PrivateConfigurationBridge.makeValues(from:localLaunchAtLogin:) throws`: request to
   kernel values. It takes the exact count first, so a request built in memory is
   bounded too. Mapping does not authorize runtime apply.
@@ -38,8 +45,12 @@ refusals. This correction is not an adopted store or apply engine.
 
 ## Frame and limits
 
-The frame is `PCV1 Q <decimal length>\n<JSON body>\n`. The whole frame, header and
-terminator included, is at most 8,388,608 bytes (`PrivateConfigurationFrame.maxFrameBytes`).
+The frame is `PCV1 <kind> <decimal length>\n<JSON body>\n`, where the kind is `Q` for an
+update and `R` for an editor reply. The whole frame, header and terminator included, is at
+most its kind's cap: 8,388,608 bytes for a request (`maxRequestFrameBytes`, decision 0019)
+and 8,388,608 bytes for an editor reply (`maxEditorReplyFrameBytes`, decision 0034). The
+two are separate constants. Every kind's prefix is seven bytes, so the arithmetic below
+holds for both.
 
 - The exact frame size of a body of `N` bytes whose length has `D` decimal digits is
   `N + D + 9`. `PrivateConfigurationFrame.frameByteCount(bodyCount:)` computes it, and the
@@ -69,17 +80,128 @@ terminator included, is at most 8,388,608 bytes (`PrivateConfigurationFrame.maxF
 
 ## Header grammar
 
-The header is read one byte at a time. Each byte of the fixed prefix `PCV1 Q ` must
-match. The first byte that differs decides the refusal:
+The header is read one byte at a time. Each byte of the expected kind's fixed prefix,
+`PCV1 Q ` or `PCV1 R `, must match. The first byte that differs decides the refusal:
 
 - position 3, the version digit: `unsupportedVersion`;
-- position 5, the kind: `unknownFrameKind`;
+- position 5, the kind: `unexpectedFrameKind`, whether the letter names another known kind
+  or none;
 - any other prefix position: `malformedHeader`.
 
 A line feed inside the prefix is one of those bytes. So `PCV\n` is `unsupportedVersion`
-and `PCV1 \n` is `unknownFrameKind`. A line feed ends the header only after the prefix
-and at least one digit. `ReferenceFrameParser` follows the same rule, and the fixed
-differential cases include both counterexamples and the other prefix positions.
+and `PCV1 \n` is `unexpectedFrameKind`. A line feed ends the header only after the prefix
+and at least one digit. `ReferenceFrameParser` follows the same rule for either letter, and
+the fixed differential cases include both counterexamples, the other prefix positions and
+request frames offered to a reply reader.
+
+## Editor preconditions (2026-10-26)
+
+The update request no longer carries Int revisions. It names, as preconditions the caller
+observed:
+
+- `runtimeBaseline` and `platformBaseline`: each a `PrivateBaseline`, the store namespace
+  (a UUID family separate from the host incarnation), the file as a
+  `ControlConfigWorkflowFile`, and the store's exact `UInt64` version. The initializer
+  refuses a baseline in the other file's slot. A decoded baseline is not authority: only
+  the store mints tokens and decides.
+- `modules`: one `PrivateModuleIntent` per module in fixed `PrivateModuleSlots` (no
+  array): `saveOnly`, `applyWhileRunning(ifLifecycleRevision:)` or
+  `start(ifLifecycleRevision:)`. Stop is not here; it stays ordinary.
+
+On the wire a version is a JSON number spelled as plain decimal digits, at most 20, no
+greater than `UInt64.max` (`.unsignedDecimal`). The scanner refuses a sign, fraction,
+exponent, leading zero or overflow before Foundation reads it, so nothing is rounded or
+narrowed. `lifecycleRevision` is a required nullable member: null for save-only, a
+revision for apply and start; any other pairing is refused. The retired members
+(`expectedConfigRevision`, `expectedPlatformRevision`, `expectedOwnerGeneration`) are
+unknown keys. `PrivateConfigExpectedGeneration` remains only in the store's operation
+context. No production caller built the old request, so nothing deployed reads it.
+
+`PrivateEditorCodecTests` pins the `UInt64` range and refusals, the slot and component
+checks, every intent in every slot, the strict pairings and the retired keys.
+`pm-sim private-config-boundary` round-trips a `UInt64.max` baseline and all three
+intents through every read schedule, and refuses one past the maximum, a swapped slot and
+a save-only revision.
+
+## Editor read and replies (2026-10-26)
+
+Decision 0034 caps one editor reply at 8,388,608 bytes. This slice adds a read (`G`) and a
+correlated reply (`R`) to the same frame grammar, writer, scanner and decoder:
+
+- `PrivateEditorReadRequest`: `requestID`, `incarnation`, `budgetMilliseconds`.
+- `PrivateEditorReply`: `requestID` (the request it answers), `hostIncarnation` (the
+  incarnation that answered) and exactly one answer. On the wire, `admission`,
+  `observation` and `refusal` are all required and nullable, and exactly one is not null.
+  - `admission(ControlAdmission)` answers an update: accepted, joined or rejected. It is
+    never settlement, so a lost admission is recovered through the ordinary request and
+    operation lookups, by request ID.
+  - `observation(PrivateEditorObservation)` answers a read.
+  - `refused(ControlRejectionCode)` answers a read that was not served.
+- `admission(answering:)` and `answer(answering:)` match a reply to the request a client
+  sent: same request ID; an answer of the right kind; and the same incarnation, except a
+  `changedIncarnation` rejection or refusal. A client drops any other reply.
+- The observation holds the terminal flag, one full set of runtime, platform and
+  preference values, the stored `launchAtLogin`, one `PrivateComponentState` per file
+  (`verified(baseline)`, `absent(baseline)`, `retained(reason)`, with the baseline's
+  component checked against its slot), and one `PrivateModuleState` per module
+  (lifecycle revision, enabled, fenced). There is no whole-host generation. A client
+  never retokenizes a dirty draft from an observation.
+- `ControlAdmission` keeps its own `Codable` encoding: the writer embeds the bytes its
+  `JSONEncoder` writes with sorted keys, and the decoder reads it through its own
+  `Decodable`, then requires the member set its own encoding writes for that variant.
+  No other type takes this path; private values have no `Encodable` conformance.
+- The bridge has one field mapping in each direction. `makeObservation` runs the approved
+  ceilings, maps with the same runtime and platform walks as the request plus one
+  preferences mapping, then runs the format preflight. `makeValues(from:)` for an
+  observation runs the same preflight, then maps back with the stored `launchAtLogin`.
+  The preflight is `PrivateConfigurationEncoder.measureObservation`: the ceilings, then
+  the reply's own observation writer through a counting sink, so a non-finite number is
+  `invalidValue` exactly as in the reply and the request bridge, with no second field
+  walk. It counts the observation alone and invents no request ID or incarnation: the
+  host puts the observation in a reply with the real envelope, and only the reply encoder
+  counts the complete frame against the reply cap. Format, not eligibility: a
+  start-blocking repair draft maps both ways and keeps its classification.
+
+**Maximum observation.** `Tests/ConduitTests/Fixtures/PrivateEditorMaximumFixture.swift`
+imports only `ConduitShared` (no XCTest, no `@testable`), so a Release probe can compile it
+with `-package-name conduit`. Every approved count and UTF-8 ceiling comes from
+`DomainResourceField`; every text byte is a six-byte escape; the bypass list sits exactly on
+its canonical aggregate; numbers take their widest spelling and baselines are `UInt64.max`.
+It is a wire-width maximum, not a storability claim. Its reply body counts **7,487,859
+bytes** (frame 7,487,875), under the 8,388,608-byte cap by 900,733 bytes, in the
+debug counting pass, which is deterministic. `PrivateEditorReplyCodecTests` pins it, and
+round-trips the full reply through the reader and decoder. Release lifetimes, host and
+client coexistence and Stop/status latency are not measured here.
+
+**Receipt deferred.** No causal receipt type exists yet. The merge of current explicit
+lifecycle intent into whole-configuration saves (decision 0015) is not implemented, and
+today only `dns.forwarderEnabled` is lifecycle-owned in the stored values, so the committed
+intent a client must rebase from is not defined. Before live adoption, the workflow cut
+must define a bounded receipt that:
+
+- names the original update's request ID, separate from the correlation of the reply or
+  lookup that carries it, and is kept only when it matches the expected incarnation and
+  request;
+- carries one outcome per written file through `ControlConfigWorkflowWrite` and its
+  existing serialization, with the new baseline only for persisted or unchanged;
+- carries the actually committed lifecycle intent, or an equivalent, so a client rebases
+  its canonical enable values causally and never marks an older draft clean blindly;
+- carries one result per module, where a failure names a `ControlFailureCode`;
+- keeps a busy store distinct from a persistence failure, beside the operation's own
+  admission.
+
+Its transport (ordinary operation lookup or a private answer) and how a baseline is coded
+there are chosen with that cut. Until then a client has no way to advance a draft's
+baselines after an update, so this codec is not adoptable alone.
+
+Evidence: `PrivateEditorReplyCodecTests` (reads, every admission and refusal, admission
+bytes against its own encoding, strict answer presence and variant members, every
+component and module state, slot checks, a start-blocking draft returned unchanged, both
+matchers, reply exact cap and one over, the maximum fixture's bounds and size, redaction),
+`PrivateConfigBridgeTests` (observation both ways with the stored `launchAtLogin`, refusals),
+`PrivateConfigResourceReviewTests` (read and reply tables against encoder output) and
+`pm-sim private-editor-codec`. Headless codec evidence does not prove an owner turn,
+fences, store admission, the private lane or client draft behavior.
 
 ## Shared resource preflight
 
@@ -99,7 +221,7 @@ The bypass list (`noProxyHosts`) has a canonical JSON width of at most 8,192 byt
 - **No buffer.** The scanner keeps a running sum, and the typed checks use the same counter. The earlier typed check encoded the list with `JSONEncoder`. `ProxyBypassSyntax` now uses the same canonical counter, and tests pin it to the boundary.
 - **Known difference.** For a list past its count, the scanner refuses the first bad item it reads, and the typed check refuses the count first. Both are resource refusals, but they can name different fields. The scanner reads at most 256 items before the count refusal, so the cost stays bounded.
 
-**Token guard (64 bytes).** This is a lexical guard of the token grammar, not a product ceiling. A valid identifier is a canonical UUID of 36 bytes (`UUID(uuidString:)`), and every enumeration raw value the decoder accepts is 16 bytes or less. So no valid token is refused. A longer token is malformed and the scanner refuses it as `malformedBody`, not as `resourceLimitExceeded`. `ConfigurationResourceCanonicalWidthTests` derives those lengths from the decoder's own types.
+**Token guard (64 bytes).** This is a lexical guard of the token grammar, not a product ceiling. A valid identifier is a canonical UUID of 36 bytes (`UUID(uuidString:)`), and every enumeration raw value the private decoders accept in a token place is 20 bytes or less: the widest is the retained reason `changedSinceBaseline`. Baseline namespaces and admission operations are UUIDs; baseline components, intent actions, component states, retained reasons, rejection codes and admission types are closed raw values. So no valid token is refused. A longer token is malformed and the scanner refuses it as `malformedBody`, not as `resourceLimitExceeded`. `ConfigurationResourceCanonicalWidthTests` derives those lengths from the decoder's own types, including every enumeration the read, update and reply decoders accept, and pins the widest.
 
 Evidence in the repository, all headless:
 

@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The schema of one private request body (decision 0021). The scanner walks the body against these
-// tables before Foundation decodes anything: every key must be named here, every array carries its
-// approved count, and every string carries the decoded-UTF-8 ceiling of its place. The names match the
-// `Keys` of the wire mirrors in `PrivateConfigurationDecoder.swift`, and a test pins that they agree.
-// The tables are built once. Nothing about a key is allocated while the scanner matches it.
+// The schema of the private bodies (decision 0021). Each frame kind has one root table, and the scanner
+// walks a body against it before Foundation decodes anything: every key must be named here, every array
+// carries its approved count, and every string carries the decoded-UTF-8 ceiling of its place. The names
+// match the `Keys` of the wire mirrors in `PrivateConfigurationDecoder.swift`, and a test pins that they
+// agree. The tables are built once. Nothing about a key is allocated while the scanner matches it.
 
 /// The shape of one JSON value position.
 indirect enum PrivateValueShape: Sendable {
     /// A non-null string under the ceiling of its field.
     case string(DomainResourceField)
-    /// A string or `null`, under the ceiling of its field.
-    case nullableString(DomainResourceField)
+    /// `null`, or one value of the wrapped shape. The member is still required: an absent key is refused.
+    case nullable(PrivateValueShape)
     /// `true` or `false`.
     case bool
     /// Any JSON number. Foundation decides whether it is an integer or a finite double.
     case number
+    /// An exact `UInt64` spelled as plain decimal digits: no sign, fraction or exponent, no leading zero, at most 20
+    /// digits and no more than `UInt64.max`. The scanner refuses any other spelling, so no Foundation number rule can
+    /// round, widen or narrow it.
+    case unsignedDecimal
     case object(PrivateObjectShape)
     /// An array of at most the field's approved count, each element of the given shape.
     case array(DomainResourceField, PrivateValueShape)
@@ -61,8 +65,8 @@ struct PrivateObjectShape: Sendable {
     }
 }
 
-/// The schema of the private request. The root object is the request, and each nested object is named
-/// by the wire mirror that decodes it.
+/// The schema of the private bodies. `request`, `readRequest` and `editorReply` are the roots of the three frame
+/// kinds, and each nested object is named by the wire mirror that decodes it.
 enum PrivateConfigurationSchema {
     private static let tokenValue = PrivateValueShape.string(.token)
     private static let numberValue = PrivateValueShape.number
@@ -72,11 +76,101 @@ enum PrivateConfigurationSchema {
         ("requestID", tokenValue),
         ("incarnation", tokenValue),
         ("budgetMilliseconds", numberValue),
-        ("expectedConfigRevision", numberValue),
-        ("expectedPlatformRevision", numberValue),
-        ("expectedOwnerGeneration", numberValue),
+        ("runtimeBaseline", .object(baseline)),
+        ("platformBaseline", .object(baseline)),
+        ("modules", .object(moduleIntents)),
         ("runtime", .object(runtime)),
         ("platform", .object(platform)),
+    ])
+
+    /// The read request: identity and budget only.
+    static let readRequest = PrivateObjectShape([
+        ("requestID", tokenValue),
+        ("incarnation", tokenValue),
+        ("budgetMilliseconds", numberValue),
+    ])
+
+    /// The editor reply. All three answers are required members, and exactly one is not null; the decoder refuses any
+    /// other combination.
+    static let editorReply = PrivateObjectShape([
+        ("requestID", tokenValue),
+        ("hostIncarnation", tokenValue),
+        ("admission", .nullable(.object(admission))),
+        ("observation", .nullable(.object(observation))),
+        ("refusal", .nullable(tokenValue)),
+    ])
+
+    /// The members `ControlAdmission`'s own `Codable` writes. Which of them a variant carries is that type's rule: the
+    /// decoder compares the member set with the one its own encoding writes, so this table only names the keys.
+    static let admission = PrivateObjectShape([
+        ("type", tokenValue),
+        ("operation", tokenValue),
+        ("rejection", tokenValue),
+    ])
+
+    static let observation = PrivateObjectShape([
+        ("terminal", boolValue),
+        ("runtime", .object(runtime)),
+        ("platform", .object(platform)),
+        ("preferences", .object(preferences)),
+        ("launchAtLogin", boolValue),
+        ("components", .object(componentStates)),
+        ("modules", .object(moduleStates)),
+    ])
+
+    static let preferences = PrivateObjectShape([
+        ("showMenuBarIcon", boolValue),
+        ("floatingWindowEnabled", boolValue),
+        ("globalShortcutEnabled", boolValue),
+        ("preferredBrowserTestURL", .string(.browserTestURL)),
+        ("fileLoggingEnabled", boolValue),
+        ("automaticUpdateChecks", boolValue),
+    ])
+
+    static let componentStates = PrivateObjectShape([
+        ("runtime", .object(componentState)),
+        ("platform", .object(componentState)),
+        ("preferences", .object(componentState)),
+    ])
+
+    /// `state` is a `PrivateComponentStateKind` raw value. `baseline` is present for verified and absent and null for
+    /// retained; `reason`, a `PrivateRetainedReason` raw value, is the reverse. The decoder refuses any other pairing.
+    static let componentState = PrivateObjectShape([
+        ("state", tokenValue),
+        ("baseline", .nullable(.object(baseline))),
+        ("reason", .nullable(tokenValue)),
+    ])
+
+    static let moduleStates = PrivateObjectShape([
+        ("proxy", .object(moduleState)),
+        ("dns", .object(moduleState)),
+        ("tunnels", .object(moduleState)),
+    ])
+
+    static let moduleState = PrivateObjectShape([
+        ("lifecycleRevision", numberValue),
+        ("enabled", boolValue),
+        ("fenced", boolValue),
+    ])
+
+    /// One exact store baseline. `component` is a `ControlConfigWorkflowFile` raw value.
+    static let baseline = PrivateObjectShape([
+        ("namespace", tokenValue),
+        ("component", tokenValue),
+        ("version", .unsignedDecimal),
+    ])
+
+    static let moduleIntents = PrivateObjectShape([
+        ("proxy", .object(moduleIntent)),
+        ("dns", .object(moduleIntent)),
+        ("tunnels", .object(moduleIntent)),
+    ])
+
+    /// `action` is a `PrivateModuleIntentAction` raw value. `lifecycleRevision` is null for a save-only intent and a
+    /// revision for the others; the decoder refuses any other pairing.
+    static let moduleIntent = PrivateObjectShape([
+        ("action", tokenValue),
+        ("lifecycleRevision", .nullable(numberValue)),
     ])
 
     static let runtime = PrivateObjectShape([
@@ -174,7 +268,7 @@ enum PrivateConfigurationSchema {
         ("enabled", boolValue),
         ("proxied", boolValue),
         ("label", .string(.tunnelLabel)),
-        ("preset", .nullableString(.token)),
+        ("preset", .nullable(tokenValue)),
     ])
 
     static let health = PrivateObjectShape([
@@ -196,7 +290,7 @@ enum PrivateConfigurationSchema {
         ("verbose", boolValue),
         ("auditLogEnabled", boolValue),
         ("auditLogMaxBytes", numberValue),
-        ("auditLogPath", .nullableString(.auditLogPath)),
+        ("auditLogPath", .nullable(.string(.auditLogPath))),
     ])
 
     static let platform = PrivateObjectShape([
@@ -206,4 +300,18 @@ enum PrivateConfigurationSchema {
         ("manageSystemDNS", boolValue),
         ("systemProxyMode", tokenValue),
     ])
+}
+
+/// The wire spelling of a `PrivateModuleIntent` case. The encoder and the decoder share it, so neither spells it alone.
+enum PrivateModuleIntentAction: String, CaseIterable {
+    case saveOnly
+    case applyWhileRunning
+    case start
+}
+
+/// The wire spelling of a `PrivateComponentState` case.
+enum PrivateComponentStateKind: String, CaseIterable {
+    case verified
+    case absent
+    case retained
 }

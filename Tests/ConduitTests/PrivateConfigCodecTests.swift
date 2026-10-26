@@ -71,7 +71,7 @@ final class PrivateConfigCodecTests: XCTestCase {
     /// `cap - 16` makes the frame exactly `cap`: the header `PCV1 Q ` plus seven digits and a line feed
     /// (15 bytes), the body, and the terminator. One more body byte is one more frame byte.
     func testExactCapAcceptedAndCapPlusOneRefused() throws {
-        let cap = PrivateConfigurationFrame.maxFrameBytes
+        let cap = PrivateConfigurationFrame.maxRequestFrameBytes
         let request = try PrivateConfigSamples.request()
         let body = try Self.paddedBody(of: request, count: cap - 16)
         let exact = Array("PCV1 Q \(body.count)\n".utf8) + body + [0x0A]
@@ -81,11 +81,11 @@ final class PrivateConfigCodecTests: XCTestCase {
 
         let overflowBody = body + [UInt8(ascii: " ")]
         let overflow = Array("PCV1 Q \(overflowBody.count)\n".utf8) + overflowBody + [0x0A]
-        XCTAssertThrowsError(try PrivateConfigurationFrameReader().consume(overflow)) {
+        XCTAssertThrowsError(try PrivateConfigurationFrameReader(expecting: .update).consume(overflow)) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .frameTooLarge)
         }
         XCTAssertThrowsError(try PrivateConfigurationDecoder.decode(
-            PrivateConfigurationFrameBody(bytes: SecretBytes(overflowBody)))) {
+            PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(overflowBody)))) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .frameTooLarge)
         }
     }
@@ -101,7 +101,7 @@ final class PrivateConfigCodecTests: XCTestCase {
     }
 
     func testReaderRefusesOversizeLengthBeforeAnyBodyByte() throws {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         // 8,388,593 bytes of body is one more than the cap allows with a seven-digit length.
         let header = Array("PCV1 Q 8388593\n".utf8)
         XCTAssertThrowsError(try reader.consume(header)) {
@@ -111,7 +111,7 @@ final class PrivateConfigCodecTests: XCTestCase {
     }
 
     func testLengthDigitsAreRefusedAsSoonAsTheyExceedTheCap() throws {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         // 9,999,999 is above the cap, so the refusal comes at its last digit and needs no line feed.
         XCTAssertThrowsError(try reader.consume(Array("PCV1 Q 9999999".utf8))) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .frameTooLarge)
@@ -122,7 +122,7 @@ final class PrivateConfigCodecTests: XCTestCase {
 
     func testUnsupportedVersionAndKindAreRefusedInTheHeader() throws {
         try assertHeaderRefusal("PCV2 Q 5\n", .unsupportedVersion)
-        try assertHeaderRefusal("PCV1 X 5\n", .unknownFrameKind)
+        try assertHeaderRefusal("PCV1 X 5\n", .unexpectedFrameKind)
         try assertHeaderRefusal("PCX1 Q 5\n", .malformedHeader)
         try assertHeaderRefusal("PCV1 Q 0\n", .malformedHeader)
         try assertHeaderRefusal("PCV1 Q 05\n", .malformedHeader)
@@ -130,13 +130,13 @@ final class PrivateConfigCodecTests: XCTestCase {
         try assertHeaderRefusal("PCV1 Q 5x\n", .malformedHeader)
         // A line feed inside the prefix is classified by the first byte that differs, not as a header end.
         try assertHeaderRefusal("PCV\n", .unsupportedVersion)
-        try assertHeaderRefusal("PCV1 \n", .unknownFrameKind)
+        try assertHeaderRefusal("PCV1 \n", .unexpectedFrameKind)
         try assertHeaderRefusal("PC\n", .malformedHeader)
         try assertHeaderRefusal("\n", .malformedHeader)
     }
 
     func testFailureIsStickyAndReleasesBufferedBody() throws {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         let partial = Array("PCV1 Q 40\n".utf8) + Array(repeating: UInt8(ascii: "a"), count: 10)
         _ = try reader.consume(partial)
         XCTAssertEqual(reader.retainedByteCount, 10)
@@ -151,7 +151,7 @@ final class PrivateConfigCodecTests: XCTestCase {
     }
 
     func testTruncatedFrameIsRefusedAtEndOfInput() throws {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         _ = try reader.consume(Array("PCV1 Q 3\n{\"a".utf8))
         XCTAssertThrowsError(try reader.finish()) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .malformedBody)
@@ -160,7 +160,7 @@ final class PrivateConfigCodecTests: XCTestCase {
 
     func testReaderStopsAtTheFrameAndLeavesLaterBytes() throws {
         let frame = Array("PCV1 Q 2\n{}\n".utf8)
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         let input = frame + Array("LATER".utf8)
         let (step, consumed) = try reader.consume(input)
         XCTAssertEqual(consumed, frame.count)
@@ -173,7 +173,7 @@ final class PrivateConfigCodecTests: XCTestCase {
     }
 
     func testOneCallExaminesAtMostTheInputBudget() throws {
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         let input = Array("PCV1 Q 1000000\n".utf8) + Array(repeating: UInt8(ascii: " "), count: 100_000)
         let (step, consumed) = try reader.consume(input)
         guard case .needsInput = step else {
@@ -185,7 +185,7 @@ final class PrivateConfigCodecTests: XCTestCase {
     /// A reset returns a reader to its first state, after a frame, after a failure and mid-body.
     func testResetReusesTheReaderAfterAFrameAndAfterAFailure() throws {
         let frame = Array("PCV1 Q 2\n{}\n".utf8)
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         _ = try reader.consume(frame)
         XCTAssertThrowsError(try reader.consume([0x41])) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, .invalidState)
@@ -211,6 +211,92 @@ final class PrivateConfigCodecTests: XCTestCase {
         let (again, _) = try reader.consume(frame)
         guard case .frame = again else {
             throw Failure(message: "expected a frame after a failure and reset")
+        }
+    }
+
+    // MARK: - Frame kinds
+
+    /// Each kind has its own separately named cap (decisions 0019 and 0034). Both are eight MiB today, and the reply
+    /// cap is its own constant, not a reference to the request cap.
+    func testEachKindHasItsOwnNamedCap() {
+        XCTAssertEqual(PrivateConfigurationFrame.maxRequestFrameBytes, 8_388_608)
+        XCTAssertEqual(PrivateConfigurationFrame.maxEditorReplyFrameBytes, 8_388_608)
+        XCTAssertEqual(PrivateConfigurationFrame.Kind.update.maxFrameBytes, PrivateConfigurationFrame.maxRequestFrameBytes)
+        XCTAssertEqual(
+            PrivateConfigurationFrame.Kind.editorReply.maxFrameBytes,
+            PrivateConfigurationFrame.maxEditorReplyFrameBytes
+        )
+    }
+
+    /// A reader accepts only the kind it expects. Another known kind is refused at its kind byte, with nothing
+    /// buffered, and a completed frame carries the kind its header named.
+    func testReaderRefusesAKindItDoesNotExpectAtTheKindByte() throws {
+        try assertHeaderRefusal("PCV1 R 2\n{}\n", .unexpectedFrameKind)
+        try assertHeaderRefusal("PCV1 Q 2\n{}\n", .unexpectedFrameKind, kind: .editorReply)
+        try assertHeaderRefusal("PCV1 X 2\n{}\n", .unexpectedFrameKind, kind: .editorReply)
+
+        let reply = try readFrame(Array("PCV1 R 2\n{}\n".utf8), chunkSize: 1, kind: .editorReply)
+        XCTAssertEqual(reply.kind, .editorReply)
+        let update = try readFrame(Array("PCV1 Q 2\n{}\n".utf8), chunkSize: 1)
+        XCTAssertEqual(update.kind, .update)
+    }
+
+    /// The reply cap is enforced exactly as the request cap: a frame of exactly the cap completes, and a declared
+    /// length one byte past it is refused in the header with no body byte buffered.
+    func testEditorReplyExactCapAcceptedAndCapPlusOneRefusedInTheHeader() throws {
+        let cap = PrivateConfigurationFrame.maxEditorReplyFrameBytes
+        let body = Array("{}".utf8) + Array(repeating: UInt8(ascii: " "), count: cap - 16 - 2)
+        let exact = Array("PCV1 R \(body.count)\n".utf8) + body + [0x0A]
+        XCTAssertEqual(exact.count, cap)
+        let read = try readFrame(exact, chunkSize: 16_384, kind: .editorReply)
+        XCTAssertEqual(read.kind, .editorReply)
+        XCTAssertEqual(read.bytes.count, body.count)
+
+        let reader = PrivateConfigurationFrameReader(expecting: .editorReply)
+        XCTAssertThrowsError(try reader.consume(Array("PCV1 R \(body.count + 1)\n".utf8))) {
+            XCTAssertEqual($0 as? PrivateConfigurationWireError, .frameTooLarge)
+        }
+        XCTAssertEqual(reader.retainedByteCount, 0)
+    }
+
+    /// A decoder refuses a body of another kind before it looks at the bytes. Even an oversize body that is not JSON
+    /// is refused for its kind, not for its size or its grammar.
+    func testRequestDecoderRefusesABodyOfAnotherKindBeforeItsBytes() {
+        let cap = PrivateConfigurationFrame.maxEditorReplyFrameBytes
+        for bytes in [Array("{}".utf8), Array(repeating: UInt8(ascii: "x"), count: cap)] {
+            let body = PrivateConfigurationFrameBody(kind: .editorReply, bytes: SecretBytes(bytes))
+            XCTAssertThrowsError(try PrivateConfigurationDecoder.decode(body)) {
+                XCTAssertEqual($0 as? PrivateConfigurationWireError, .unexpectedFrameKind)
+            }
+        }
+    }
+
+    /// The reply kind against the independent reference: the fixed cases with the reply letter, and request frames
+    /// offered to a reply reader.
+    func testReplyReaderAgreesWithReferenceParserOnFixedCases() {
+        let cases = [
+            "PCV1 R 2\n{}\n", "PCV1 R 2\n{}\nLATER", "PCV1 R 2\n{}X", "PCV1 R 0\n", "PCV1 R 05\n",
+            "PCV1 R 8388593\n", "PCV1 R 8388592\n", "PCV1 R 9999999", "PCV1 R 12345678\n",
+            "PCV1 Q 2\n{}\n", "PCV1 X 5\n", "PCV2 R 5\n", "PCV1 \n", "PCV1 R\n",
+        ]
+        for text in cases {
+            assertReaderAgreesWithReference(Array(text.utf8), label: text, kind: .editorReply)
+        }
+    }
+
+    /// The read kind against the independent reference: the fixed cases with the read letter, request and reply frames
+    /// offered to a read reader, and a read frame offered to the other two readers.
+    func testReadReaderAgreesWithReferenceParserOnFixedCases() {
+        let cases = [
+            "PCV1 G 2\n{}\n", "PCV1 G 2\n{}\nLATER", "PCV1 G 2\n{}X", "PCV1 G 2\n{}", "PCV1 G 0\n", "PCV1 G 05\n",
+            "PCV1 G 8388593\n", "PCV1 G 8388592\n", "PCV1 G 9999999", "PCV1 G 12345678\n",
+            "PCV1 Q 2\n{}\n", "PCV1 R 2\n{}\n", "PCV1 X 5\n", "PCV2 G 5\n", "PCV1 \n", "PCV1 G\n", "PCV1 G \n",
+        ]
+        for text in cases {
+            assertReaderAgreesWithReference(Array(text.utf8), label: text, kind: .read)
+        }
+        for kind in [PrivateConfigurationFrame.Kind.update, .editorReply] {
+            assertReaderAgreesWithReference(Array("PCV1 G 2\n{}\n".utf8), label: "G to \(kind)", kind: kind)
         }
     }
 
@@ -371,15 +457,19 @@ final class PrivateConfigCodecTests: XCTestCase {
 
     func testFrameBodyDoesNotPrintItsBytes() throws {
         let frame = try PrivateConfigurationEncoder.encode(PrivateConfigSamples.request())
-        let body = PrivateConfigurationFrameBody(bytes: frame)
+        let body = PrivateConfigurationFrameBody(kind: .update, bytes: frame)
         XCTAssertFalse(String(describing: body).contains("PCV1"))
         XCTAssertFalse(String(reflecting: body).contains("{"))
     }
 
     // MARK: - Helpers
 
-    private func assertHeaderRefusal(_ header: String, _ expected: PrivateConfigurationWireError) throws {
-        let reader = PrivateConfigurationFrameReader()
+    private func assertHeaderRefusal(
+        _ header: String,
+        _ expected: PrivateConfigurationWireError,
+        kind: PrivateConfigurationFrame.Kind = .update
+    ) throws {
+        let reader = PrivateConfigurationFrameReader(expecting: kind)
         XCTAssertThrowsError(try reader.consume(Array(header.utf8)), header) {
             XCTAssertEqual($0 as? PrivateConfigurationWireError, expected, header)
         }
@@ -393,7 +483,7 @@ final class PrivateConfigCodecTests: XCTestCase {
 
     private func assertBodyRefusal(bytes body: [UInt8]) throws {
         let framed = Array("PCV1 Q \(body.count)\n".utf8) + body + [0x0A]
-        let reader = PrivateConfigurationFrameReader()
+        let reader = PrivateConfigurationFrameReader(expecting: .update)
         let (step, _) = try reader.consume(framed)
         guard case .frame(let frameBody) = step else {
             throw Failure(message: "the reference frame did not complete")
@@ -409,15 +499,18 @@ final class PrivateConfigCodecTests: XCTestCase {
         _ input: [UInt8],
         label: String,
         chunks: [Int]? = nil,
+        kind: PrivateConfigurationFrame.Kind = .update,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        let expected = endOfStreamOutcome(ReferenceFrameParser.parse(input))
+        let expected = endOfStreamOutcome(ReferenceFrameParser.parse(input, kind: ReferenceFrameParser.letter(kind)))
         for chunk in chunks ?? [1, 3, 7, 16, 4_096, 16_384, max(input.count, 1)] {
-            XCTAssertEqual(
-                runReader(input, chunk: chunk), expected,
-                "\(label), chunk \(chunk)", file: file, line: line
-            )
+            for contiguous in [true, false] {
+                XCTAssertEqual(
+                    runReader(input, chunk: chunk, kind: kind, contiguous: contiguous), expected,
+                    "\(label), chunk \(chunk), contiguous \(contiguous)", file: file, line: line
+                )
+            }
         }
     }
 
@@ -426,14 +519,19 @@ final class PrivateConfigCodecTests: XCTestCase {
         outcome == .open ? .refused(.malformedBody) : outcome
     }
 
-    /// What the production reader says about `input` read in pieces of `chunk`, including `finish`.
-    private func runReader(_ input: [UInt8], chunk: Int) -> FrameOutcome {
-        let reader = PrivateConfigurationFrameReader()
+    /// What the production reader says about `input` read in pieces of `chunk`, including `finish`. A noncontiguous
+    /// run hands each piece over as a collection without contiguous storage, so the reader takes its byte-at-a-time path.
+    private func runReader(
+        _ input: [UInt8], chunk: Int, kind: PrivateConfigurationFrame.Kind, contiguous: Bool
+    ) -> FrameOutcome {
+        let reader = PrivateConfigurationFrameReader(expecting: kind)
         var offset = 0
         while offset < input.count {
             let end = min(offset + chunk, input.count)
             do {
-                let (step, consumed) = try reader.consume(input[offset..<end])
+                let piece = input[offset..<end]
+                let (step, consumed) = try contiguous
+                    ? reader.consume(piece) : reader.consume(NoncontiguousBytes(piece))
                 offset += consumed
                 if case .frame(let body) = step {
                     return .frame(body: body.bytes.bytes(), consumed: offset)
@@ -503,8 +601,12 @@ final class PrivateConfigCodecTests: XCTestCase {
     }
 
     /// Reads one frame from `bytes` in pieces of `chunkSize`, and returns its body.
-    private func readFrame(_ bytes: [UInt8], chunkSize: Int) throws -> PrivateConfigurationFrameBody {
-        let reader = PrivateConfigurationFrameReader()
+    private func readFrame(
+        _ bytes: [UInt8],
+        chunkSize: Int,
+        kind: PrivateConfigurationFrame.Kind = .update
+    ) throws -> PrivateConfigurationFrameBody {
+        let reader = PrivateConfigurationFrameReader(expecting: kind)
         var offset = 0
         while offset < bytes.count {
             let end = min(offset + chunkSize, bytes.count)
@@ -529,21 +631,31 @@ enum FrameOutcome: Equatable {
     case open
 }
 
-/// An independent reference for the frame grammar of decision 0019. It reads the whole byte string
-/// at once, from the header description, and uses none of the codec's constants or helpers. The cap
+/// An independent reference for the frame grammar of decisions 0019 and 0034. It reads the whole byte
+/// string at once, from the header description, and uses none of the codec's constants or helpers. The
+/// expected kind is its header letter, and the cap, the same eight MiB for the request and the reply,
 /// is written out here as a literal. The reader's 16 KiB read budget is not modelled, because it
 /// changes when bytes are read and never what they mean.
 enum ReferenceFrameParser {
-    static func parse(_ input: [UInt8]) -> FrameOutcome {
+    /// The header letter of each kind, written out here rather than taken from the codec's prefix.
+    static func letter(_ kind: PrivateConfigurationFrame.Kind) -> Character {
+        switch kind {
+        case .update: "Q"
+        case .read: "G"
+        case .editorReply: "R"
+        }
+    }
+
+    static func parse(_ input: [UInt8], kind: Character = "Q") -> FrameOutcome {
         let cap = 8_388_608
-        let prefix = Array("PCV1 Q ".utf8)
+        let prefix = Array("PCV1 \(kind) ".utf8)
         var index = 0
         for expected in prefix {
             guard index < input.count else { return .open }
             guard input[index] == expected else {
                 switch index {
                 case 3: return .refused(.unsupportedVersion)
-                case 5: return .refused(.unknownFrameKind)
+                case 5: return .refused(.unexpectedFrameKind)
                 default: return .refused(.malformedHeader)
                 }
             }
@@ -600,17 +712,37 @@ enum PrivateConfigSamples {
         UUID(uuidString: String(format: "00000000-0000-4000-8000-%012d", number))!
     }
 
+    /// The store incarnation every sample baseline names.
+    static let storeNamespace = PrivateBaselineNamespace(rawValue: uuid(3))
+
+    static func baseline(_ component: ControlConfigWorkflowFile, version: UInt64) -> PrivateBaseline {
+        PrivateBaseline(namespace: storeNamespace, component: component, version: version)
+    }
+
+    static func lifecycleRevision(_ value: Int) throws -> ControlLifecycleRevision {
+        try XCTUnwrap(ControlLifecycleRevision(rawValue: value))
+    }
+
+    /// One module of each intent, so every sample exercises all three.
+    static func modules() throws -> PrivateModuleSlots<PrivateModuleIntent> {
+        PrivateModuleSlots(
+            proxy: .start(ifLifecycleRevision: try lifecycleRevision(9)),
+            dns: .applyWhileRunning(ifLifecycleRevision: try lifecycleRevision(7)),
+            tunnels: .saveOnly
+        )
+    }
+
     static func request(
         profileName: String = "sample",
         pacURL: String = "https://pac.example.test/p.pac?token=PAC-TOKEN-7"
     ) throws -> PrivateConfigurationRequest {
-        PrivateConfigurationRequest(
+        try PrivateConfigurationRequest(
             requestID: ControlRequestID(rawValue: uuid(1)),
             incarnation: ControlHostIncarnation(rawValue: uuid(2)),
             budget: try ControlWireBudget(5_000),
-            expectedConfigRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 4)),
-            expectedPlatformRevision: try XCTUnwrap(PrivatePlatformRevision(rawValue: 3)),
-            expectedOwnerGeneration: try XCTUnwrap(PrivateConfigExpectedGeneration(rawValue: 9)),
+            runtimeBaseline: baseline(.runtime, version: 4),
+            platformBaseline: baseline(.platform, version: 3),
+            modules: try modules(),
             runtime: runtime(profileName: profileName, pacURL: pacURL),
             platform: PrivatePlatformConfiguration(
                 manageSystemProxy: true, manageEnvironmentVariables: false, manageDNSResolvers: false,

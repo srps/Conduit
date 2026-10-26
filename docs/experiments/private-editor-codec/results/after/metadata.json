@@ -1,0 +1,110 @@
+{
+  "compileCommand": [
+    "xcrun",
+    "swiftc",
+    "-O",
+    "-parse-as-library",
+    "-module-name",
+    "EditorCodecProbe",
+    "-module-cache-path",
+    "<scratch>/modules",
+    "-target",
+    "arm64-apple-macosx26.0",
+    "-package-name",
+    "conduit",
+    "-I",
+    "<repo>/.build/out/Products/Release",
+    "<repo>/docs/experiments/private-editor-codec/Probe.swift",
+    "<repo>/Tests/ConduitTests/Fixtures/PrivateEditorMaximumFixture.swift",
+    "<repo>/.build/out/Products/Release/ConduitShared.o",
+    "-o",
+    "<scratch>/probe"
+  ],
+  "compileSeconds": 9.426,
+  "conduitSharedSourceCount": 50,
+  "conduitSharedSourcesSha256": "82330e425ad0b188ebde61fbd3f9821f63c530808591a103b84e8843d264c9e0",
+  "crossChecks": {
+    "oneFrameSizeAcrossModes": true,
+    "oneReaderCallCountAcrossModes": true
+  },
+  "head": "51c07e9e9a400736919c8008bb5bd8a4b7c2058a",
+  "modes": {
+    "repeat-distinct": {
+      "consumeCalls": [
+        458
+      ],
+      "exit": 0,
+      "failedChecks": 0,
+      "frameBytes": [
+        7487875
+      ],
+      "lifetimeEndPeakRSSBytes": 46022656,
+      "lifetimeEndPhysicalFootprintPeakBytes": 40075648,
+      "log": "repeat-distinct.ndjson",
+      "seconds": 11.32
+    },
+    "wide-distinct": {
+      "consumeCalls": [
+        458
+      ],
+      "exit": 0,
+      "failedChecks": 0,
+      "frameBytes": [
+        7487875
+      ],
+      "lifetimeEndPeakRSSBytes": 41402368,
+      "lifetimeEndPhysicalFootprintPeakBytes": 35422592,
+      "log": "wide-distinct.ndjson",
+      "seconds": 6.459
+    },
+    "wide-shared": {
+      "consumeCalls": [
+        458
+      ],
+      "exit": 0,
+      "failedChecks": 0,
+      "frameBytes": [
+        7487875
+      ],
+      "lifetimeEndPeakRSSBytes": 41287680,
+      "lifetimeEndPhysicalFootprintPeakBytes": 35307904,
+      "log": "wide-shared.ndjson",
+      "seconds": 7.071
+    }
+  },
+  "moduleSha256": {
+    "arm64-apple-macos.swiftmodule": "c1694ec5401eab56c3a3e0a1092bcbbd9243066cc741d30b151a4af2be3d72c9"
+  },
+  "objectSha256": "aeed02060efc213f77694fc1823fbd95f56811bb89b492bfa426a53ab6aa55e7",
+  "os": {
+    "macOS": "26.7.1",
+    "machine": "arm64"
+  },
+  "output": "editor-reply-afterBatch-mem1jzf9",
+  "probe": {
+    "probe": {
+      "path": "docs/experiments/private-editor-codec/Probe.swift",
+      "sha256": "68996832bae60129b758e3218c00a2d47b872793d6595c9009b0b84fbdfee328"
+    },
+    "runner": {
+      "path": "docs/experiments/private-editor-codec/run.py",
+      "sha256": "3d28b37d3826c6d5eefddd01fe6bda5c887a09b919c0a26c463c86335e618745"
+    }
+  },
+  "problems": [],
+  "productStatus": [],
+  "releaseProducts": ".build/release",
+  "sources": {
+    "Sources/ConduitShared/Grammar/JSONByteCursor.swift": "af1a44248ddf37c77fcb4c64340548963d1f7f7465ab8aabccb64d455f3afa1d",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift": "39774f9db0a4d618b6fb2082eaa55c689607390c3c350c8fc6ba38543d2f86fb",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationEncoder.swift": "6633162c19fba71e8a69d06f3216b42b3737223104b9abe53d13ade13314d14d",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationFrame.swift": "0225e36b22b2efff8ee9482f6491b0155e48b008b37f00c417e4c1a26559f64c",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateEditorReply.swift": "bfd750446ebbd5f56dc29ac50bb75d3b3782ed343ed80f12ea4bc010c0872eb6",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateJSONScanner.swift": "0cb9c73b90be9dad79659d5f5b309eaf4ee5f2b655a08a06fbe8fafc58c11f8f",
+    "Sources/ConduitShared/SecretBytes.swift": "e1ccd5c05249cd5f7d4db3e9ef58b53f9d8cc808ad20837ce23348f1bfa1fdca",
+    "Tests/ConduitTests/Fixtures/PrivateEditorMaximumFixture.swift": "e90e48bff6fcb9626769eb01a07131b96f9e1053d73fe7b248ca10e9d486485b"
+  },
+  "sourcesNewerThanObject": [],
+  "sourcesNewerThanObjectDifferFromHead": [],
+  "toolchain": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx26.0\nswift-driver version: 1.168.6"
+}

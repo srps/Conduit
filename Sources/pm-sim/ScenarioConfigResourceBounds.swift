@@ -145,21 +145,16 @@ enum ConfigResourceBoundsScenario {
         config: ProxyConfig,
         platform: PlatformIntegrationConfig
     ) throws -> PrivateConfigurationRequest {
-        guard let configRevision = ControlConfigRevision(rawValue: 7),
-              let platformRevision = PrivatePlatformRevision(rawValue: 6),
-              let generation = PrivateConfigExpectedGeneration(rawValue: 5)
-        else {
-            throw Failure(message: "bridge revisions are not representable")
-        }
+        let preconditions = try PrivateConfigBoundaryScenario.samplePreconditions()
         return try PrivateConfigurationBridge.makeRequest(
             config: config,
             platform: platform,
             requestID: ControlRequestID(rawValue: PrivateConfigBoundaryScenario.uuid(101)),
             incarnation: ControlHostIncarnation(rawValue: PrivateConfigBoundaryScenario.uuid(102)),
             budget: try ControlWireBudget(5_000),
-            expectedConfigRevision: configRevision,
-            expectedPlatformRevision: platformRevision,
-            expectedOwnerGeneration: generation
+            runtimeBaseline: preconditions.runtime,
+            platformBaseline: preconditions.platform,
+            modules: preconditions.modules
         )
     }
 
@@ -189,7 +184,7 @@ enum ConfigResourceBoundsScenario {
 
     /// Decodes a raw body through the production decoder, as a frame body with no encoder involved.
     private static func decodeBody(_ text: String) throws -> PrivateConfigurationRequest {
-        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(bytes: SecretBytes(Array(text.utf8))))
+        try PrivateConfigurationDecoder.decode(PrivateConfigurationFrameBody(kind: .update, bytes: SecretBytes(Array(text.utf8))))
     }
 
     private static func finish(started: Date, checks: [ScenarioAssertion]) -> ScenarioResult {

@@ -1,0 +1,113 @@
+{
+  "compileCommand": [
+    "xcrun",
+    "swiftc",
+    "-O",
+    "-parse-as-library",
+    "-module-name",
+    "EditorCodecProbe",
+    "-module-cache-path",
+    "<scratch>/modules",
+    "-target",
+    "arm64-apple-macosx26.0",
+    "-package-name",
+    "conduit",
+    "-I",
+    "<repo>/.build/out/Products/Release",
+    "<repo>/docs/experiments/private-editor-codec/Probe.swift",
+    "<repo>/Tests/ConduitTests/Fixtures/PrivateEditorMaximumFixture.swift",
+    "<repo>/.build/out/Products/Release/ConduitShared.o",
+    "-o",
+    "<scratch>/probe"
+  ],
+  "compileSeconds": 5.506,
+  "conduitSharedSourceCount": 50,
+  "conduitSharedSourcesSha256": "b0ec1334281750c3a3ce2ecc35b5170b8b4d90cc15968f26e49ee3acb4f9f435",
+  "crossChecks": {
+    "oneFrameSizeAcrossModes": true,
+    "oneReaderCallCountAcrossModes": true
+  },
+  "head": "521bf66eef22e0a4e08f56dd61b5e6a02116ce21",
+  "modes": {
+    "repeat-distinct": {
+      "consumeCalls": [
+        458
+      ],
+      "exit": 0,
+      "failedChecks": 0,
+      "frameBytes": [
+        7487875
+      ],
+      "lifetimeEndPeakRSSBytes": 45252608,
+      "lifetimeEndPhysicalFootprintPeakBytes": 39993728,
+      "log": "repeat-distinct.ndjson",
+      "seconds": 31.633
+    },
+    "wide-distinct": {
+      "consumeCalls": [
+        458
+      ],
+      "exit": 0,
+      "failedChecks": 0,
+      "frameBytes": [
+        7487875
+      ],
+      "lifetimeEndPeakRSSBytes": 40992768,
+      "lifetimeEndPhysicalFootprintPeakBytes": 35307928,
+      "log": "wide-distinct.ndjson",
+      "seconds": 7.395
+    },
+    "wide-shared": {
+      "consumeCalls": [
+        458
+      ],
+      "exit": 0,
+      "failedChecks": 0,
+      "frameBytes": [
+        7487875
+      ],
+      "lifetimeEndPeakRSSBytes": 41205760,
+      "lifetimeEndPhysicalFootprintPeakBytes": 35225984,
+      "log": "wide-shared.ndjson",
+      "seconds": 7.14
+    }
+  },
+  "moduleSha256": {
+    "arm64-apple-macos.swiftmodule": "44a4e33b205402f5005b9b538af580acc72b4348f51a40e9ddfb905b825c77bd"
+  },
+  "objectSha256": "5a20874621ce823ca772c4c59bfa18d82db006c132efd525c424729aa0e8c391",
+  "os": {
+    "macOS": "26.7.1",
+    "machine": "arm64"
+  },
+  "output": "editor-reply-beforeBatch-ghl6a5qi",
+  "probe": {
+    "probe": {
+      "path": "docs/experiments/private-editor-codec/Probe.swift",
+      "sha256": "68996832bae60129b758e3218c00a2d47b872793d6595c9009b0b84fbdfee328"
+    },
+    "runner": {
+      "path": "docs/experiments/private-editor-codec/run.py",
+      "sha256": "3d28b37d3826c6d5eefddd01fe6bda5c887a09b919c0a26c463c86335e618745"
+    }
+  },
+  "problems": [],
+  "productStatus": [],
+  "releaseProducts": ".build/release",
+  "sources": {
+    "Sources/ConduitShared/Grammar/JSONByteCursor.swift": "af1a44248ddf37c77fcb4c64340548963d1f7f7465ab8aabccb64d455f3afa1d",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift": "39774f9db0a4d618b6fb2082eaa55c689607390c3c350c8fc6ba38543d2f86fb",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationEncoder.swift": "6633162c19fba71e8a69d06f3216b42b3737223104b9abe53d13ade13314d14d",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationFrame.swift": "7214b515f0a5b428cb8a99cb41eec543310bf2e8d5ba55716078e6e1e8d7c262",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateEditorReply.swift": "bfd750446ebbd5f56dc29ac50bb75d3b3782ed343ed80f12ea4bc010c0872eb6",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateJSONScanner.swift": "0cb9c73b90be9dad79659d5f5b309eaf4ee5f2b655a08a06fbe8fafc58c11f8f",
+    "Sources/ConduitShared/SecretBytes.swift": "e1ccd5c05249cd5f7d4db3e9ef58b53f9d8cc808ad20837ce23348f1bfa1fdca",
+    "Tests/ConduitTests/Fixtures/PrivateEditorMaximumFixture.swift": "e90e48bff6fcb9626769eb01a07131b96f9e1053d73fe7b248ca10e9d486485b"
+  },
+  "sourcesNewerThanObject": [
+    "Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift",
+    "Sources/ConduitShared/PrivateConfiguration/PrivateJSONScanner.swift"
+  ],
+  "sourcesNewerThanObjectDifferFromHead": [],
+  "toolchain": "Apple Swift version 6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1)\nTarget: arm64-apple-macosx26.0\nswift-driver version: 1.168.6"
+}

@@ -2,8 +2,8 @@
 
 // MARK: - Scanner
 
-/// A bounded, schema-directed check over the private body (decisions 0018 and 0021). It walks the body against
-/// `PrivateConfigurationSchema`, so every key must be named there, each duplicate is refused (even one spelled with
+/// A bounded, schema-directed check over a private body (decisions 0018 and 0021). It walks the body against the
+/// root table of its frame kind in `PrivateConfigurationSchema`, so every key must be named there, each duplicate is refused (even one spelled with
 /// escapes), each approved array is refused at its count before its elements are read, and each string is refused at
 /// the first byte past its ceiling. A bypass list is also refused once its canonical JSON width passes 8,192 bytes,
 /// which is charged as each item closes, so no later byte is read.
@@ -15,8 +15,8 @@
 /// keeps no copy of the text and allocates nothing per key: names are matched from the fixed tables as their bytes
 /// arrive.
 struct PrivateJSONScanner {
-    /// The schema nests six levels deep at most: root, runtime, dns, entries, entry and servers.
-    /// Eight is a stack bound, not a size limit.
+    /// The schema nests seven levels deep at most: the reply root, observation, runtime, dns, entries, entry and
+    /// servers. Eight is a stack bound, not a size limit.
     static let maxDepth = 8
 
     private var cursor: JSONByteCursor
@@ -25,11 +25,12 @@ struct PrivateJSONScanner {
         self.cursor = cursor
     }
 
-    static func validate(_ bytes: UnsafeBufferPointer<UInt8>) throws {
+    /// Walks one body against `root`, the root table of the body's frame kind.
+    static func validate(_ bytes: UnsafeBufferPointer<UInt8>, root: PrivateObjectShape) throws {
         var scanner = PrivateJSONScanner(cursor: JSONByteCursor(bytes))
         do {
             scanner.cursor.skipWhitespace()
-            try scanner.scanValue(.object(PrivateConfigurationSchema.request), depth: 0)
+            try scanner.scanValue(.object(root), depth: 0)
             try scanner.cursor.expectEnd()
         } catch is JSONByteCursor.Fault {
             // Every lexical refusal is the same wire refusal. The fault names no byte, and the wire names no field.
@@ -48,16 +49,21 @@ struct PrivateJSONScanner {
             try scanObject(object, depth: depth)
         case (.array(let field, let element), UInt8(ascii: "[")):
             try scanArray(field, element, depth: depth)
-        case (.string(let field), UInt8(ascii: "\"")), (.nullableString(let field), UInt8(ascii: "\"")):
+        case (.string(let field), UInt8(ascii: "\"")):
             try scanString(field)
-        case (.nullableString, UInt8(ascii: "n")):
+        case (.nullable, UInt8(ascii: "n")):
             try cursor.scanLiteral("null")
+        case (.nullable(let inner), _):
+            // Not a nesting level: the wrapped value sits in the same position.
+            try scanValue(inner, depth: depth)
         case (.bool, UInt8(ascii: "t")):
             try cursor.scanLiteral("true")
         case (.bool, UInt8(ascii: "f")):
             try cursor.scanLiteral("false")
         case (.number, UInt8(ascii: "-")), (.number, UInt8(ascii: "0")...UInt8(ascii: "9")):
             try cursor.scanNumber()
+        case (.unsignedDecimal, UInt8(ascii: "0")...UInt8(ascii: "9")):
+            try scanUnsignedDecimal()
         default:
             throw PrivateConfigurationWireError.malformedBody
         }
@@ -157,6 +163,26 @@ struct PrivateJSONScanner {
                 throw PrivateConfigurationWireError.malformedBody
             }
             return
+        }
+    }
+
+    /// `UInt64.max` in decimal: the widest unsigned lexeme, and the one a 20-digit lexeme is compared with.
+    private static let maxUnsignedDecimal = Array(String(UInt64.max).utf8)
+
+    /// Scans one exact `UInt64`. The cursor consumes one JSON number lexeme. That lexeme must then be digits only, so a
+    /// fraction or an exponent is refused, and no wider than `UInt64.max`. Two digit strings of equal length compare as
+    /// numbers byte by byte. A leading zero is not refused here: the cursor ends a number after an initial `0`, so in
+    /// `01` the lexeme is `0`, and the enclosing object's grammar refuses the `1` that follows where it expects `,` or `}`.
+    private mutating func scanUnsignedDecimal() throws {
+        let start = cursor.position
+        try cursor.scanNumber()
+        let lexeme = cursor.span(from: start)
+        let limit = Self.maxUnsignedDecimal
+        guard lexeme.count <= limit.count,
+              lexeme.allSatisfy({ $0 >= UInt8(ascii: "0") && $0 <= UInt8(ascii: "9") }),
+              lexeme.count < limit.count || !limit.lexicographicallyPrecedes(lexeme)
+        else {
+            throw PrivateConfigurationWireError.malformedBody
         }
     }
 
