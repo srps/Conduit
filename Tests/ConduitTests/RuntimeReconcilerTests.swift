@@ -131,6 +131,7 @@ final class RuntimeReconcilerTests: XCTestCase {
         reconciler = RuntimeReconciler(config: old, platformConfig: proxyOn, host: host)
         var respelled = old
         respelled.pacURL = "https://pac.example.test/\(Respelled.decomposed).pac"
+        XCTAssertTrue(reconciler.lags(config: respelled, platformConfig: proxyOn), "the baseline holds the old bytes")
 
         reconciler.reconcile(config: respelled, platformConfig: proxyOn)
         await reconciler.drain()

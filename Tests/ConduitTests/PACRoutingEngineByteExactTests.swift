@@ -88,6 +88,40 @@ final class PACRoutingEngineByteExactTests: XCTestCase {
 
         XCTAssertEqual(pac.base.fetchCount, 2, "the decision starts a fetch of the respelled URL despite the backoff")
         XCTAssertEqual(pac.base.lastFetchedUTF8, Array(Self.pacURL(Respelled.decomposed).utf8))
+        // Joins the refresh the decision started; once it has ended, the respelled script is fresh and nothing is fetched.
+        try await engine.refresh(honorBackoff: true)
+        XCTAssertEqual(pac.base.fetchCount, 2, "joining fetches nothing more")
+    }
+
+    /// A script loaded from the old bytes stops routing at the first decision after the respelling, before its replacement loads, and
+    /// that decision starts the fetch of the new bytes. The replacement fails here, and the old script does not come back.
+    func testARoutingDecisionAfterTheURLIsRespelledStopsRoutingByTheOldScriptAndFetchesTheNewBytes() async throws {
+        Respelled.assertRespelling(Self.pacURL(Respelled.composed), Self.pacURL(Respelled.decomposed))
+        let url = NIOLockedValueBox(Self.pacURL(Respelled.composed))
+        let pac = AnsweringFirstFetchOnly()
+        let engine = makeEngine(url: url, pac: pac)
+        try await engine.refresh()
+        XCTAssertEqual(engine.routeChain(for: "https://example.test/", host: "example.test"), [.direct])
+        XCTAssertEqual(engine.routeChain(for: "https://example.test/", host: "example.test"), [.direct])
+        XCTAssertEqual(pac.base.fetchCount, 1, "control: the loaded script is fresh, so a decision fetches nothing")
+
+        url.withLockedValue { $0 = Self.pacURL(Respelled.decomposed) }
+        XCTAssertEqual(engine.routeChain(for: "https://example.test/", host: "example.test"), [],
+                       "the script from the old bytes no longer routes")
+        for _ in 0..<500 where pac.base.fetchCount < 2 {
+            try await Task.sleep(for: .milliseconds(2))
+        }
+        XCTAssertEqual(pac.base.fetchCount, 2, "the decision starts a fetch of the respelled URL")
+        XCTAssertEqual(pac.base.lastFetchedUTF8, Array(Self.pacURL(Respelled.decomposed).utf8))
+
+        // Joins the refresh the decision started, which fails as the fake does; once it has ended, the same bytes back off.
+        do {
+            try await engine.refresh(honorBackoff: true)
+        } catch is UnreachablePAC {}
+        XCTAssertEqual(pac.base.fetchCount, 2, "joining fetches nothing more")
+        XCTAssertEqual(engine.routeChain(for: "https://example.test/", host: "example.test"), [],
+                       "the old script does not come back when its replacement fails")
+        XCTAssertEqual(pac.base.fetchCount, 2, "the failed bytes back off")
     }
 }
 
@@ -109,6 +143,26 @@ private final class FailingFirstFetch: PacEvaluator, @unchecked Sendable {
 
     func routeChain(for entries: [String]) -> PACChain {
         base.routeChain(for: entries)
+    }
+}
+
+/// Answers the first fetch and fails every later one, as a PAC server that goes away after the first load. Its chain parses the
+/// script's `DIRECT`, so a decision by the loaded script is a visible route.
+private final class AnsweringFirstFetchOnly: PacEvaluator, @unchecked Sendable {
+    let base = LastFetchPACEvaluator()
+
+    func fetchPAC(from urlString: String) async throws -> String {
+        let script = try await base.fetchPAC(from: urlString)
+        guard base.fetchCount == 1 else { throw UnreachablePAC() }
+        return script
+    }
+
+    func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating {
+        try base.makeEvaluator(pacScript: pacScript)
+    }
+
+    func routeChain(for entries: [String]) -> PACChain {
+        PACChain.classify(entries) { $0 == "DIRECT" ? .direct : nil }
     }
 }
 

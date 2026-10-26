@@ -2178,6 +2178,46 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await host.stopRuntime()
     }
 
+    /// #246, the Start's own adoption: an external edit that only respells the PAC URL (see `Respelled`), and a reload the Stop fence
+    /// holds. The store has the new bytes, the host view keeps the old ones, and the next Start commits the store's pair and adopts it.
+    func testAStartAfterAFenceHeldReloadThatOnlyRespellsThePACURLAdoptsTheNewBytes() async throws {
+        let composed = "https://pac.example.test/\(Respelled.composed).pac"
+        let decomposed = "https://pac.example.test/\(Respelled.decomposed).pac"
+        Respelled.assertRespelling(composed, decomposed)
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderPort = 0
+        config.dnsForwarderEnabled = false
+        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
+        config.pacURL = composed
+        harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        let host = try await harness.makeHost()
+
+        try await host.startRuntime()
+        XCTAssertEqual(host.configGeneration, 0, "a Start that keeps the accepted pair counts nothing")
+        await host.stopRuntime()
+
+        config.pacURL = decomposed
+        try ProxyConfigPersistence.save(config, in: harness.environment)
+        await host.reloadConfiguration()
+        let decisions = host.orchestrator.eventLog.events.compactMap { event -> ConfigurationWorkflowEvent? in
+            guard case .configWorkflow(let decision) = event.typed else { return nil }
+            return decision
+        }
+        XCTAssertEqual(decisions.last, .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .stopFenced)))
+        assertSameUTF8(host.config.pacURL, composed, "the fence held the reload, so the host view keeps the old bytes")
+        XCTAssertEqual(host.configGeneration, 0)
+        assertSameUTF8(host.orchestrator.config.pacURL, composed, "a held reload pushes nothing")
+
+        try await host.startRuntime()
+        // The kernel's echo of the pushed config is delivered later; it must not have moved the view, so join it before reading.
+        await host.deliveries.drain()
+        assertSameUTF8(host.config.pacURL, decomposed, "the Start adopted the committed bytes into the host view")
+        XCTAssertEqual(host.status().configGeneration, 1)
+        assertSameUTF8(host.orchestrator.config.pacURL, decomposed, "the Start pushed them to the orchestrator")
+        await host.stopRuntime()
+    }
+
     /// The `AppState` scenario of the same name, against its twin. This
     /// used to be a strict expected failure listing what the daemon lacked:
     /// a journal behind its resolver manager, a reconcile pass on a flag
