@@ -434,32 +434,6 @@ enum RuntimeHostEffectsScenario {
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }
 
-    /// The typed payloads in the owned events file, decoded through the canonical decoder (decision 0033). A line that does not decode
-    /// is an error, not a skipped record, so the caller reports it.
-    private static func configurationEvents(in file: URL) throws -> [RuntimeEventPayload] {
-        let text = try String(contentsOf: file, encoding: .utf8)
-        let decoder = CanonicalJSON.decoder()
-        return try text.split(separator: "\n").compactMap { line in
-            try decoder.decode(RuntimeEvent.self, from: Data(line.utf8)).typed
-        }
-    }
-
-    /// The fakes one run names. Kept by the caller so the checks read what each one saw.
-    private struct Fakes {
-        let machine: FakeMachine
-        let probe: FakeListenerPortHolderProbe
-        let loopback: FakeLoopbackPortProbe
-        let pac: FakePacEvaluator
-        let gss: RefusingGSSProvider
-        let helper: FakeHelperLifecycle
-        let secrets: InMemorySecretStore
-        let dns: FakeDNSProbe
-    }
-
-    /// What one exercise established. `quiesced` means `stopRuntime` returned and `flushEvents` reported all
-    /// writers confirmed, on the success path and on the error path alike. That is the diagnostic confirmation the
-    /// host exposes; it does not prove that every task the host started has ended. `pinnedHost` is set only when
-    /// the shutdown is unconfirmed, and then it is the actual host, not a stand-in.
     /// A Start beside a missing platform sidecar, after an outside editor added a legacy platform value to the owned runtime file, through
     /// the actual host over the run's fakes. The platform's first write checks the runtime bytes the host opened with, so it holds and
     /// creates no sidecar over the edited value. The runtime write is held behind it, and the next Start finds both files latched.
@@ -849,8 +823,7 @@ private final class HeldLoopbackListener {
     }
 }
 
-/// The Kerberos token source a simulator scenario injects. It refuses each token and counts the attempts, so a
-/// handshake the scenario did not plan is visible.
+/// Keeps only the count and latest URL of the PAC fetches made by the respelling scenario.
 private final class LastFetchPAC: PacEvaluator, @unchecked Sendable {
     private struct DirectOnly: PacScriptEvaluating {
         func resolveProxyChain(for url: URL) throws -> [String] { ["DIRECT"] }
