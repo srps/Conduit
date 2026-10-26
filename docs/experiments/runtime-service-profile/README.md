@@ -29,6 +29,20 @@ and v1 are unchanged. The display policy (decision 0029) is measured through the
 - `kernel-sanitizer-release/`: the parent's standalone Release probe of the direct sanitizer before and after the change. Its README gives
   the method and limits. It is linked here and is not part of this experiment's code or claims.
 
+## Running resource diagnostics
+
+The two log-only process-memory probes are opt-in. They measure Debug XCTest
+process observations and assert no memory budget; ordinary tests retain all
+projection, count/byte/frame bounds and pressure assertions.
+
+```sh
+CONDUIT_RUNTIME_RESOURCE_PROBES=1 DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer" \
+  xcrun swift test --filter 'RuntimeServiceProfileProjectionTests.testProjectionOnARetainedKernelIsSampledWithoutACallerPool|RuntimeServiceProfileProjectionTests.testFreshKernelConstructionAloneIsSampledForComparison'
+```
+
+Historical results below describe their original explicit runs. They are not
+installed-app memory measurements or shipping profile selections.
+
 ## Candidate values (as passed to `RuntimeServiceLimits`)
 
 | Bound | Value | Bound | Value |

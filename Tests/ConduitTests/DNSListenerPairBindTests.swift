@@ -85,13 +85,17 @@ final class DNSListenerPairBindTests: XCTestCase {
         XCTAssertEqual(udpPort, tcpPort)
         XCTAssertNotEqual(udpPort, taken)
 
+        // The squatter takes only the first port. Another process may hold the TCP twin of a later pick too, so a start that bound the
+        // pair may have retried more than once, but never on its last attempt, which gives up instead.
         let seen = events.withLockedValue { $0 }
-        XCTAssertEqual(seen.map(\.event), ["dns.listener_port_retry"])
-        XCTAssertEqual(seen.first?.kind, .health)
-        XCTAssertEqual(
-            seen.first?.detail,
-            "port=\(taken) attempt=1 of=\(LocalDNSForwarder.ephemeralPairAttempts) reason=tcp_port_in_use"
-        )
+        let attempts = LocalDNSForwarder.ephemeralPairAttempts
+        XCTAssertTrue((1..<attempts).contains(seen.count), "\(seen.map(\.event))")
+        XCTAssertEqual(seen.first?.detail, "port=\(taken) attempt=1 of=\(attempts) reason=tcp_port_in_use")
+        for (index, event) in seen.enumerated() {
+            XCTAssertEqual(event.event, "dns.listener_port_retry")
+            XCTAssertEqual(event.kind, .health)
+            XCTAssertTrue(event.detail?.hasSuffix(" attempt=\(index + 1) of=\(attempts) reason=tcp_port_in_use") == true, "\(event.detail ?? "")")
+        }
     }
 
     /// The UDP socket of an abandoned attempt must be closed, not left bound

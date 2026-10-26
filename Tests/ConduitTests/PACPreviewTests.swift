@@ -4,6 +4,7 @@ import XCTest
 @testable import Conduit
 @testable import PlatformMac
 @testable import ProxyKernel
+@testable import ProxyPAC
 
 @MainActor
 final class PACPreviewTests: XCTestCase {
@@ -54,7 +55,7 @@ final class PACPreviewTests: XCTestCase {
     }
 
     func testPreviewShowsChainAndCapturesTargetWithOneOperationInFlight() async throws {
-        let state = try launch()
+        let state = try launch(realPAC: true)
         try setScript("function FindProxyForURL(url, host) { return host == 'preview.test' ? 'PROXY proxy.test:8080; DIRECT' : 'DIRECT'; }", on: state)
         state.appPreferences.preferredBrowserTestURL = " https://preview.test/path "
         state.refreshPACResolutionPreview()
@@ -69,7 +70,7 @@ final class PACPreviewTests: XCTestCase {
     }
 
     func testInvalidScriptShowsFailureAndReleasesPreviewSlot() async throws {
-        let state = try launch()
+        let state = try launch(realPAC: true)
         try setScript("function FindProxyForURL( {", on: state)
         state.appPreferences.preferredBrowserTestURL = "https://preview.test/"
         state.refreshPACResolutionPreview()
@@ -86,11 +87,17 @@ final class PACPreviewTests: XCTestCase {
         XCTAssertEqual(state.pacPreviewMessage, "https://preview.test/: DIRECT")
     }
 
-    private func launch() throws -> AppState {
+    /// `realPAC` swaps the harness's refusing fake for the production CFNetwork
+    /// evaluator, which the runtime and the preview share. Its scenarios only
+    /// point `pacURL` at a script in the scratch directory, so nothing is fetched
+    /// from the network.
+    private func launch(realPAC: Bool = false) throws -> AppState {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
+        config.pacURL = ""
         let harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig())
+        if realPAC { harness.pacEvaluator = CFPACEvaluator() }
         self.harness = harness
         return harness.launch()
     }

@@ -227,6 +227,14 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
         return try RuntimeServiceProfileKernels.pack(captured.rows, limits: try frame(limits)).pages
     }
 
+    /// The two resource probes below assert nothing and only print samples, so they run on demand, not in every suite run.
+    private func requireResourceProbesOptIn() throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["CONDUIT_RUNTIME_RESOURCE_PROBES"] == "1",
+            "log-only resource probe; set CONDUIT_RUNTIME_RESOURCE_PROBES=1 to run it"
+        )
+    }
+
     private func printSample(_ sample: RuntimeServiceProfileResourceSample, pages: Int, scope: String) {
         print(
             "RUNTIME-SERVICE-PROFILE resource scope=\(scope) stage=\(sample.stage) peakRSSBytes=\(sample.peakRSSBytes)"
@@ -239,6 +247,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
     /// packing over it. Eleven iterations are sampled. The run extends to 101 only if the first eleven stay under the log-only gate above. The
     /// samples are written to the log, and no assertion depends on them.
     func testProjectionOnARetainedKernelIsSampledWithoutACallerPool() throws {
+        try requireResourceProbesOptIn()
         let limits = try candidate()
         let retained = RuntimeServiceProfileKernels.typical(connections: 1_000)
         var samples = [try RuntimeServiceProfileResource.sample("projection-before-first")]
@@ -270,6 +279,7 @@ final class RuntimeServiceProfileProjectionTests: XCTestCase {
     /// The comparison probe: the same 1,000-connection kernel is built and released on each iteration, and nothing is projected. Its growth
     /// separates construction from projection. Eleven iterations only, and the samples are written to the log.
     func testFreshKernelConstructionAloneIsSampledForComparison() throws {
+        try requireResourceProbesOptIn()
         var samples = [try RuntimeServiceProfileResource.sample("construction-before-first")]
         for iteration in 1...11 {
             withExtendedLifetime(RuntimeServiceProfileKernels.typical(connections: 1_000)) {}
