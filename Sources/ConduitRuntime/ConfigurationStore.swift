@@ -151,6 +151,15 @@ final class ConfigurationStore {
         return .admitted(ConfigurationLoadReport(context: context, outcome: adopt(observed)))
     }
 
+    /// Whether a verified pair's receipts still name the baselines in force: no reload observed a change, no write moved either file and
+    /// no latch cleared a baseline since that commit. A reload of unchanged bytes keeps the versions, so it replaces nothing (decision 0037).
+    func stillHolds(_ input: VerifiedRuntimePlatformInput) -> Bool {
+        [input.runtimeReceipt, input.platformReceipt].allSatisfy { receipt in
+            receipt.storeIncarnation == incarnation && records[receipt.component].baseline != nil
+                && records[receipt.component].version == receipt.version
+        }
+    }
+
     /// Whether the store's current observation found the component's file. An absent file is uncommitted, and it is not a verified
     /// persistence fact.
     func isPresent(_ component: ConfigurationComponent) -> Bool {
@@ -173,31 +182,62 @@ final class ConfigurationStore {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
+        return .admitted(await commitHeldRuntimeAndPlatform(runtime, platform, expecting: expected, context: context, claim: claim))
+    }
+
+    /// The saved-input form of the coupled commit (decision 0037). It takes the store's one slot first and then, in that same synchronous
+    /// turn, hands `capture` the current values; the candidate it returns is committed against the baselines those values came from. A
+    /// busy slot calls nothing. A nil candidate declines the commit and writes nothing; the slot is released either way.
+    func commitCapturedRuntimeAndPlatform(
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim,
+        capture: (ConfigurationValues) -> (runtime: ProxyConfig, platform: PlatformIntegrationConfig)?
+    ) async -> ConfigurationStoreAdmission<RuntimePlatformCommitResult?> {
+        guard !isBusy else { return .busy }
+        isBusy = true
+        defer { isBusy = false }
+        guard let current = values, let candidate = capture(current) else { return .admitted(nil) }
+        let expected = ConfigurationSlots(
+            runtime: baselineToken(for: .runtime),
+            platform: baselineToken(for: .platform),
+            preferences: nil
+        )
+        return .admitted(await commitHeldRuntimeAndPlatform(
+            candidate.runtime, candidate.platform, expecting: expected, context: context, claim: claim
+        ))
+    }
+
+    /// The coupled commit under a slot its caller already took.
+    private func commitHeldRuntimeAndPlatform(
+        _ runtime: ProxyConfig,
+        _ platform: PlatformIntegrationConfig,
+        expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>,
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim
+    ) async -> RuntimePlatformCommitResult {
         // Each component's authority is decided on its own. A refused file keeps its own reason. A file that is authorized is held
         // behind the other one, and it reports that hold, not the other file's reason.
         switch (authority(expected.runtime, for: .runtime), authority(expected.platform, for: .platform)) {
         case (.success(let runtimeBaseline), .success(let platformBaseline)):
-            return .admitted(await commitCoupled(
-                runtime, platform, runtimeBaseline, platformBaseline, context: context, claim: claim
-            ))
+            return await commitCoupled(runtime, platform, runtimeBaseline, platformBaseline, context: context, claim: claim)
         case (.failure(let runtimeReason), .failure(let platformReason)):
-            return .admitted(RuntimePlatformCommitResult(
+            return RuntimePlatformCommitResult(
                 context: context,
                 runtime: .notAttempted(runtimeReason),
                 platform: .notAttempted(platformReason)
-            ))
+            )
         case (.failure(let runtimeReason), .success):
-            return .admitted(RuntimePlatformCommitResult(
+            return RuntimePlatformCommitResult(
                 context: context,
                 runtime: .notAttempted(runtimeReason),
                 platform: .notAttempted(.heldBehindRuntime)
-            ))
+            )
         case (.success, .failure(let platformReason)):
-            return .admitted(RuntimePlatformCommitResult(
+            return RuntimePlatformCommitResult(
                 context: context,
                 runtime: .notAttempted(.heldBehindPlatform),
                 platform: .notAttempted(platformReason)
-            ))
+            )
         }
     }
 

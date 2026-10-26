@@ -216,6 +216,9 @@ extension ControlConfigWorkflowHoldReason {
         case .heldBehind: self = .heldBehind
         case .intentExhausted: self = .intentExhausted
         case .terminating: self = .terminating
+        case .inputReplaced: self = .inputReplaced
+        case .stopSaveOwed: self = .stopSaveOwed
+        case .storeBusy: self = .storeBusy
         }
     }
 }

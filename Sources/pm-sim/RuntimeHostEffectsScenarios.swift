@@ -306,15 +306,15 @@ enum RuntimeHostEffectsScenario {
 
             await host.stopRuntime()
             fetch.release()
-            var overtaken: String?
+            var overtaken: RuntimeStartRefusal?
             do {
                 try await start.value
             } catch {
-                overtaken = error.localizedDescription
+                overtaken = error as? RuntimeStartRefusal
+                notes.append("overtaken start: \(error.localizedDescription)")
             }
-            notes.append("overtaken start: \(overtaken ?? "returned")")
             let stopped = host.status()
-            check("the overtaken start reports no failure of its own", overtaken == nil)
+            check("the overtaken start reports its typed supersession, not success", overtaken == .superseded)
             check("the stop stands once the overtaken start is released", stopped.state == "stopped")
             check("the overtaken start leaves no listener", stopped.bindings.proxyPort == nil)
             check("the overtaken start applies no system proxy", machine.service("Wi-Fi").webProxy.enabled == false)

@@ -2,7 +2,7 @@
 
 - Date: 2026-10-26
 - Decision: accepted (owner, 2026-10-26, #186)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -68,9 +68,24 @@ Start must not report success or leave new activation permission behind.
 
 ## Implementation evidence
 
-None yet. The unmerged admission-pinned prototype is not this decision's
-implementation. Module lifecycle/client integration and final AppState activation
-remain incomplete; no release-readiness or real-machine validation follows.
+The saved process facade now uses
+[`commitCapturedRuntimeAndPlatform`](../../Sources/ConduitRuntime/ConfigurationStore.swift)
+to take the sole store slot before the workflow captures values.
+[`RuntimeConfigurationWorkflow`](../../Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift)
+returns a prepared pair whose receipts must remain current;
+[`RuntimeHost`](../../Sources/ConduitRuntime/RuntimeHost.swift) holds remaining
+effects when it is replaced and reports a typed refusal. The admission pin and
+late-follow path are removed.
+
+[`ConfigurationCaptureModelTests`](../../Tests/ConduitTests/ConfigurationCaptureModelTests.swift)
+drives the actual workflow/store through 93 bounded histories and 165 transitions,
+including six changed-then-restored cases. Focused workflow/host tests and the
+actual-host simulator passed at the local checkpoint. Full-workflow verification,
+independent review and source-guard checks remain due.
+
+Does not prove: module lifecycle/client integration, scoped cleanup, final
+AppState activation, release readiness or real-machine behavior. These remain
+incomplete at this checkpoint.
 
 ## Open questions
 

@@ -52,9 +52,18 @@ enum RuntimeLifecycleRefusal: Error, Equatable, Sendable {
     case invalid
 }
 
+/// When a ticket's group bound its saved input (decision 0037). A queued group carries no configuration value. Its preparation captures the
+/// store's current pair once, when it obtains the store's capacity, and merges DNS's local intent into it then.
+enum RuntimeInputBinding: Equatable, Sendable {
+    case queued
+    /// The `dnsForwarderEnabled` the group's shared write stages, fixed at the capture. A change of the staged value after it, a reload's
+    /// newer observation or a newer DNS intent, makes the group stale: its remaining work holds and is never rebound.
+    case captured(dnsStaged: Bool)
+}
+
 /// What one admission gave its caller: the group's counter value, the actions it requested and the DNS dependency it was admitted on.
 /// The companion lives here, with its caller, never in DNS's own slot, so it changes no DNS control. A newer DNS admission, or a change of
-/// the staged `dnsForwarderEnabled`, makes a group that has not been authorized stale (decision 0035).
+/// the staged `dnsForwarderEnabled` after the capture, makes a group that has not been authorized stale (decisions 0035 and 0037).
 struct RuntimeLifecycleTicket: Equatable, Sendable {
     let group: Int
     let actions: PrivateModuleSlots<RuntimeModuleAction>
@@ -63,10 +72,16 @@ struct RuntimeLifecycleTicket: Equatable, Sendable {
     /// The latest DNS Start or session Stop admission once this one was made. Unlike `dnsRevision`, another member ending the group does
     /// not move it, so it orders only DNS's own configured intent against this group's write.
     let dnsIntentRevision: Int
-    /// The `dnsForwarderEnabled` the group's shared write stages, as of its admission.
-    let dnsStaged: Bool
+    /// Queued until `RuntimeModuleIntents.capture`; only that sets it.
+    fileprivate(set) var binding = RuntimeInputBinding.queued
 
     var requestsCompanion: Bool { actions.dns == .conditionalActivation }
+
+    /// The staged `dnsForwarderEnabled` of a captured group, or nil while it is queued.
+    var dnsStaged: Bool? {
+        if case .captured(let staged) = binding { return staged }
+        return nil
+    }
 }
 
 /// An explicit Start that is pending or authorized. `prior` is the module's permission and fence before it, which a held or failed Start
@@ -201,9 +216,20 @@ struct RuntimeModuleIntents: Equatable, Sendable {
             group: group,
             actions: request.actions,
             dnsRevision: modules.dns.revision,
-            dnsIntentRevision: intentRevision,
-            dnsStaged: stagedDNSForwarderEnabled
+            dnsIntentRevision: intentRevision
         ))
+    }
+
+    /// Binds a queued ticket's saved input, in the turn its preparation obtained the store's capacity (decision 0037). The store's adopted
+    /// `dnsForwarderEnabled` is observed first, as a reload's would be, then DNS's local intent is merged into what the write stages.
+    /// Returns the captured ticket, or nil when the group no longer stands; an observation adopted here is kept either way.
+    mutating func capture(_ ticket: RuntimeLifecycleTicket, observedDNS: Bool) -> RuntimeLifecycleTicket? {
+        precondition(ticket.binding == .queued, "a group captures its saved input once")
+        observeDurableDNS(observedDNS)
+        guard isPending(ticket) else { return nil }
+        var captured = ticket
+        captured.binding = .captured(dnsStaged: stagedDNSForwarderEnabled)
+        return captured
     }
 
     /// Admits a Stop of `stopped` in one turn: each is fenced and loses its permission at once, before any await. A `session` Stop of DNS
@@ -259,10 +285,12 @@ struct RuntimeModuleIntents: Equatable, Sendable {
 
     // MARK: - Start lifecycle
 
-    /// Whether a ticket's shared prepare still stands: its members are still pending, no terminal stop latched, the staged
-    /// `dnsForwarderEnabled` is the one it was admitted on, and, for a group with a companion, no newer DNS admission came.
+    /// Whether a ticket's shared prepare still stands: its members are still pending, no terminal stop latched, a captured group still
+    /// stages the `dnsForwarderEnabled` it captured, and, for a group with a companion, no newer DNS admission came. A queued group has
+    /// bound no value, so no observation before its capture makes it stale.
     func isPending(_ ticket: RuntimeLifecycleTicket) -> Bool {
-        !terminal && !members(of: ticket.group).isEmpty && stagedDNSForwarderEnabled == ticket.dnsStaged
+        !terminal && !members(of: ticket.group).isEmpty
+            && (ticket.dnsStaged.map { $0 == stagedDNSForwarderEnabled } ?? true)
             && (!ticket.requestsCompanion || modules.dns.revision == ticket.dnsRevision)
     }
 
@@ -357,7 +385,8 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     /// A reload's adopted `forwarderEnabled`. It is a durable fact, not a permission: it becomes the configured intent, can lower DNS's
     /// permission and never raises it, and the fence stays (decisions 0027 and 0032). A pending Start, an authorized one, or a Stop's disable
     /// save still owed keeps DNS's own intent; that save is owed until its write verifies. A facade's pending configured Start is no DNS
-    /// intent, so the fact is adopted under it, and a group that staged the older value is no longer pending (decision 0035).
+    /// intent, so the fact is adopted under it: before its capture it becomes the captured value, and after it the group no longer stands
+    /// (decisions 0035 and 0037).
     mutating func observeDurableDNS(_ enabled: Bool) {
         let dns = modules.dns
         let configuredOnly = if case .start(let start) = dns.pending { start.configured } else { false }

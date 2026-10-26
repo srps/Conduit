@@ -142,11 +142,11 @@ final class RuntimeModuleIntentTests: XCTestCase {
         ]
         for (label, end) in unrelated {
             var intents = RuntimeModuleIntents(dnsEnabled: false)
-            let group = try admitted(&intents, request(proxy: .start, dns: .start, tunnels: .start))
-            XCTAssertTrue(group.dnsStaged, label)
+            let group = try captured(&intents, admitted(&intents, request(proxy: .start, dns: .start, tunnels: .start)))
+            XCTAssertEqual(group.dnsStaged, true, label)
             try end(&intents)
             XCTAssertFalse(intents.isPending(group), "\(label) ends the whole group")
-            intents.recordVerifiedDNSWrite(group.dnsStaged, for: group)
+            intents.recordVerifiedDNSWrite(try XCTUnwrap(group.dnsStaged), for: group)
             intents.retire(group)
             XCTAssertTrue(intents.stagedDNSForwarderEnabled, "\(label): no newer DNS intent, so the saved enable is kept")
             XCTAssertFalse(intents.modules.dns.enabled, "\(label): and it grants no permission")
@@ -341,6 +341,16 @@ final class RuntimeModuleIntentTests: XCTestCase {
         try admitted(&intents, request(proxy: .start, dns: .configuredStart, tunnels: .start))
     }
 
+    /// The preparation's capture, observing `observedDNS` or, by default, the configured value the store adopted.
+    private func captured(
+        _ intents: inout RuntimeModuleIntents,
+        _ ticket: RuntimeLifecycleTicket,
+        observedDNS: Bool? = nil
+    ) throws -> RuntimeLifecycleTicket {
+        let observed = observedDNS ?? intents.dnsConfigured
+        return try XCTUnwrap(intents.capture(ticket, observedDNS: observed), "the group still stands at its capture")
+    }
+
     /// The legacy facade (decision 0036 keeps it): a whole Stop fences every module and persists no disable; the next facade Start clears
     /// every fence only once authorized, and grants DNS exactly its configured intent without staging an enable.
     func testTheFacadeStopThenStartKeepsTheConfiguredDNSIntent() throws {
@@ -351,7 +361,9 @@ final class RuntimeModuleIntentTests: XCTestCase {
             XCTAssertNil(intents.modules.dns.pending, "\(configured): a facade Stop reserves no disable save")
             XCTAssertEqual(intents.stagedDNSForwarderEnabled, configured, "and keeps the configured intent")
 
-            let start = try facade(&intents)
+            let queued = try facade(&intents)
+            XCTAssertNil(queued.dnsStaged, "a queued facade carries no configuration value")
+            let start = try captured(&intents, queued)
             XCTAssertEqual(start.dnsStaged, configured, "\(configured): the facade stages the configured value, never a forced enable")
             XCTAssertTrue(intents.allFenced, "the fences hold until the verified pair is adopted")
             XCTAssertEqual(intents.authorize(start), [.proxy, .dns, .tunnels])
@@ -379,25 +391,59 @@ final class RuntimeModuleIntentTests: XCTestCase {
         XCTAssertTrue(intents.stopSaveIsCurrent(revision: saved), "a companion has no DNS slot and keeps the save")
 
         intents.finishStopSave(revision: saved)
-        let start = try facade(&intents)
-        XCTAssertFalse(start.dnsStaged, "the facade stages the saved disable")
+        let start = try captured(&intents, facade(&intents))
+        XCTAssertEqual(start.dnsStaged, false, "the facade stages the saved disable")
         XCTAssertEqual(intents.authorize(start), [.proxy, .dns, .tunnels])
         XCTAssertFalse(intents.modules.dns.fenced, "the facade clears DNS's fence")
         XCTAssertFalse(intents.modules.dns.enabled, "and grants its configured false")
     }
 
-    /// The facade's configured Start is no DNS configuration intent: a late verified fact of an older group still lands, and when it
-    /// changes what the pending facade staged, that facade is held rather than re-staged (decision 0035).
+    /// The facade's configured Start is no DNS configuration intent: a late verified fact of an older group still lands. Before the facade's
+    /// capture the fact is what it captures; after it, the facade is held rather than re-staged (decisions 0035 and 0037).
     func testTheFacadeDoesNotSuppressALateSavedFact() throws {
+        var queued = RuntimeModuleIntents(dnsEnabled: false)
+        let earlier = try admitted(&queued, request(dns: .start))
+        let waiting = try facade(&queued)
+        XCTAssertFalse(queued.isPending(earlier), "the facade replaced the explicit Start's pending slot")
+        queued.recordVerifiedDNSWrite(true, for: earlier)
+        XCTAssertTrue(queued.isPending(waiting), "a queued facade bound no value, so the fact does not end it")
+        XCTAssertEqual(try captured(&queued, waiting).dnsStaged, true, "its capture uses the saved fact")
+
         var intents = RuntimeModuleIntents(dnsEnabled: false)
         let explicit = try admitted(&intents, request(dns: .start))
-        let start = try facade(&intents)
-        XCTAssertFalse(intents.isPending(explicit), "the facade replaced the explicit Start's pending slot")
+        let start = try captured(&intents, facade(&intents))
         intents.recordVerifiedDNSWrite(true, for: explicit)
         XCTAssertTrue(intents.stagedDNSForwarderEnabled, "the explicit Start's verified enable is the saved fact")
-        XCTAssertFalse(intents.isPending(start), "the facade staged false, so it is held, not re-staged")
+        XCTAssertFalse(intents.isPending(start), "the facade captured false, so it is held, not re-staged")
         intents.retire(start)
         XCTAssertTrue(intents.allFenced == false && !intents.modules.dns.enabled, "the held facade grants nothing")
+    }
+
+    /// A reload's newer observation before the capture is the value the facade captures; one after it holds the facade, which is never
+    /// rebound (decision 0037). An explicit DNS Start keeps its own enable whatever the observation says.
+    func testAFacadeCapturesTheObservationAtPreparationNotAdmission() throws {
+        var before = RuntimeModuleIntents(dnsEnabled: false)
+        let queued = try facade(&before)
+        before.observeDurableDNS(true)
+        XCTAssertTrue(before.isPending(queued), "an observation before the capture does not end a queued facade")
+        let start = try captured(&before, queued, observedDNS: true)
+        XCTAssertEqual(start.dnsStaged, true, "the capture uses the newer observation")
+        XCTAssertEqual(before.authorize(start), [.proxy, .dns, .tunnels])
+        XCTAssertTrue(before.modules.dns.enabled, "and grants the configured value it captured")
+
+        var after = RuntimeModuleIntents(dnsEnabled: false)
+        let bound = try captured(&after, facade(&after))
+        after.observeDurableDNS(true)
+        XCTAssertTrue(after.stagedDNSForwarderEnabled, "the newer observation is still adopted as the fact")
+        XCTAssertFalse(after.isPending(bound), "and it holds the captured facade")
+        XCTAssertEqual(after.authorize(bound), [], "which is never authorized on the replaced input")
+        XCTAssertFalse(after.holdsGroup(bound))
+
+        var explicit = RuntimeModuleIntents(dnsEnabled: false)
+        let enable = try captured(&explicit, admitted(&explicit, request(dns: .start)), observedDNS: false)
+        XCTAssertEqual(enable.dnsStaged, true, "an explicit DNS Start stages its enable over the observed false")
+        explicit.observeDurableDNS(false)
+        XCTAssertTrue(explicit.isPending(enable), "and its pending intent keeps the observation from changing what it staged")
     }
 
     /// A fence governs runtime permission, not whether a verified file observation is a fact. With no pending Start, authorized Start or
@@ -410,8 +456,8 @@ final class RuntimeModuleIntentTests: XCTestCase {
         XCTAssertTrue(facadeStopped.stagedDNSForwarderEnabled, "the facade-stopped DNS adopts the verified observation")
         XCTAssertTrue(facadeStopped.modules.dns.fenced, "and keeps its fence")
         XCTAssertFalse(facadeStopped.modules.dns.enabled, "and gains no permission")
-        let start = try facade(&facadeStopped)
-        XCTAssertTrue(start.dnsStaged, "the facade stages the adopted value, not the old one")
+        let start = try captured(&facadeStopped, facade(&facadeStopped))
+        XCTAssertEqual(start.dnsStaged, true, "the facade stages the adopted value, not the old one")
         XCTAssertEqual(facadeStopped.authorize(start), [.proxy, .dns, .tunnels])
         XCTAssertFalse(facadeStopped.modules.dns.fenced)
         XCTAssertTrue(facadeStopped.modules.dns.enabled, "a fresh facade Start grants the configured true")

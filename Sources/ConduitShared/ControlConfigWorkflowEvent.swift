@@ -107,6 +107,9 @@ package enum ControlConfigWorkflowHoldReason: String, Codable, Sendable, Equatab
     case heldBehind = "held_behind"
     case intentExhausted = "intent_exhausted"
     case terminating
+    case inputReplaced = "input_replaced"
+    case stopSaveOwed = "stop_save_owed"
+    case storeBusy = "store_busy"
 }
 
 package enum ControlConfigWorkflowEvent: Codable, Sendable, Equatable {
@@ -154,6 +157,9 @@ package enum ControlConfigWorkflowEvent: Codable, Sendable, Equatable {
         case .startBlocking: input == .runtime
         case .uncommitted: phase == .reload && input == .unit
         case .terminating: phase == .start && input == .unit
+        case .inputReplaced: phase == .start && input == .unit
+        case .stopSaveOwed: phase == .start && input == .unit
+        case .storeBusy: phase == .start && input == .unit
         }
     }
 

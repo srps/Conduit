@@ -108,6 +108,13 @@ package enum ConfigurationWorkflowHoldReason: String, Codable, Sendable, Equatab
     case intentExhausted = "intent_exhausted"
     /// A terminal stop has latched, so no Start is admitted again in this process (the quit policy).
     case terminating
+    /// A newer observation or intent replaced the saved input this Start captured at preparation, so its remaining effects hold. It is not
+    /// rebound or retried (decision 0037).
+    case inputReplaced = "input_replaced"
+    /// DNS still owes a session Stop's disable save, which a facade Start may not displace, so the whole Start was refused at admission.
+    case stopSaveOwed = "stop_save_owed"
+    /// Another operation held the store's one slot when this Start's preparation began, so it captured no input and wrote nothing.
+    case storeBusy = "store_busy"
 }
 
 /// `config.workflow.observed`: an open or a reload observed the inputs, and the store adopted or refused the observation.
@@ -153,6 +160,9 @@ package struct ConfigurationWorkflowHeld: Equatable, Sendable {
         case .startBlocking: input == .runtime
         case .uncommitted: phase == .reload && input == .unit
         case .terminating: phase == .start && input == .unit
+        case .inputReplaced: phase == .start && input == .unit
+        case .stopSaveOwed: phase == .start && input == .unit
+        case .storeBusy: phase == .start && input == .unit
         }
     }
 

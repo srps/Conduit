@@ -56,8 +56,10 @@ host-checked conditional DNS activation is selected ([0036](./docs/decisions/003
 Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
 Stop/status/private-read adapter work remains independent.
 Preparation-time capture is selected in [0037](./docs/decisions/0037-saved-command-preparation-capture.md).
-Replace the admission-pinned prototype, complete actual shared module/client
-ownership, then activate AppState once and delete its old runtime/save paths.
+The local saved-command checkpoint replaces the admission pin and passes focused
+workflow/host coverage plus an independent 93-history capture model. Complete actual
+shared module/client ownership, then activate AppState once and delete its old
+runtime/save paths. Full verification and review remain due for this checkpoint.
 Use one store/load pipeline; no compatibility mode matrix or rebind loop.
 
 Supporting evidence stays with its owning slice:

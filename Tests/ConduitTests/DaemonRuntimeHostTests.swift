@@ -2547,7 +2547,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
 
         await host.stopRuntime()
         fetch.release()
-        try await start.value
+        await assertSuperseded(start, "the stop overtook the start")
 
         XCTAssertNotEqual(host.orchestrator.snapshot.runtimeStatus.state, .running, "a stopped host runs no listener")
         XCTAssertNil(host.orchestrator.snapshot.bindings.proxyPort, "no listener stayed bound after the stop")
@@ -2588,7 +2588,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         try await newer.value
         let listenerPort = host.orchestrator.snapshot.bindings.proxyPort
         XCTAssertNotNil(listenerPort, "the newer start binds a listener")
-        try await older.value
+        await assertSuperseded(older, "the stop and the newer start overtook the older start")
 
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running, "the released stale start does not overwrite the newer one")
         XCTAssertEqual(host.orchestrator.snapshot.bindings.proxyPort, listenerPort, "the stale start neither binds nor closes the newer listener")
@@ -2628,6 +2628,21 @@ final class DaemonRuntimeHostTests: XCTestCase {
         return try await harness.makeHost()
     }
 
+    /// A Start a Stop, a newer Start or a replaced input overtook reports the typed refusal, never success.
+    private func assertSuperseded(
+        _ start: Task<Void, Error>,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            try await start.value
+            XCTFail("\(message): the overtaken start reported success", file: file, line: line)
+        } catch {
+            XCTAssertEqual(error as? RuntimeConfigurationWorkflow.StartRefusal, .superseded, message, file: file, line: line)
+        }
+    }
+
     /// Waits, bounded, until the host has admitted exactly `count` start or stop calls that have not yet returned.
     private func waitForPendingAdmissions(_ host: RuntimeHost, _ count: Int) async throws {
         for _ in 0..<5_000 where host.pendingAdmissions != count {
@@ -2648,7 +2663,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.lifecycleGeneration, 0, "neither call has reached the lane while recovery is held")
 
         harness.hold.release()
-        try await start.value
+        await assertSuperseded(start, "the stop admitted during recovery overtook the start")
         await stop.value
 
         XCTAssertNotEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
@@ -2753,7 +2768,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(whileWaiting, .runtimeActive, "a queued pass and a running start are not a settled host")
 
         harness.hold.release()
-        try await start.value
+        // The reload replaced the platform file the start captured, so the start holds the rest of its work (decision 0037).
+        await assertSuperseded(start, "the reload replaced the start's captured input")
         try await reload.value
         await host.stopRuntime()
         let afterStop = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
@@ -2932,7 +2948,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         }
         XCTAssertEqual(host.lifecycleGeneration, 2, "the stop has begun")
         harness.hold.release()
-        try await start.value
+        await assertSuperseded(start, "the stop overtook the applying start")
         await stop.value
 
         XCTAssertFalse(harness.wifi.routesThroughAProxy, "the stop's clear landed after the start's apply")
@@ -2955,10 +2971,11 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertNotEqual(host.orchestrator.snapshot.vpnState, .connected)
     }
 
-    /// Twin of `AppStateHarnessTests.testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt`:
-    /// a reload's pass waits for the start's platform work, and the machine
-    /// ends as the reloaded config says.
-    func testAReloadWhileTheStartAppliesIsReconciledAfterIt() async throws {
+    /// Was the twin of `AppStateHarnessTests.testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt`, which keeps the legacy
+    /// behavior until AppState activates the shared owner. Decision 0037 changes it here: a reload that replaces the start's captured
+    /// pair while the start applies holds the rest of the start, which ends as failed and clears what it applied. It is not rebound to the
+    /// reloaded input, and the reload's own pass, admitted under the ended start, applies nothing.
+    func testAReloadReplacingTheInputWhileTheStartAppliesHoldsTheRestOfTheStart() async throws {
         let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
         await host.awaitLaunchRecovery()
         harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
@@ -2979,13 +2996,18 @@ final class DaemonRuntimeHostTests: XCTestCase {
         }
         XCTAssertEqual(host.passesWaitingForLifecycle, 1, "the reload's pass waits for the start's platform work")
         harness.hold.release()
-        try await start.value
+        await assertSuperseded(start, "the reload replaced the start's captured input")
         try await reload.value
 
-        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
-        XCTAssertTrue(harness.wifi.routesThroughAProxy)
-        XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"], "the environment follows the reloaded switch")
-        XCTAssertTrue(harness.journal.knowsSurfaceIsIdle(.launchdEnvironment))
+        XCTAssertNotEqual(host.orchestrator.snapshot.runtimeStatus.state, .running, "the held start left no runtime running")
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "and cleared the proxy it applied")
+        XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"])
+        XCTAssertTrue(
+            host.orchestrator.eventLog.events.compactMap(\.typed).contains(.configWorkflow(.held(ConfigurationWorkflowHeld(
+                phase: .start, input: .unit, reason: .inputReplaced
+            )))),
+            "the start reports the replaced input"
+        )
         await host.stopRuntime()
     }
 

@@ -555,29 +555,37 @@ package final class RuntimeHost {
         // checks this same admission again, so it cannot clear a newer Stop.
         pendingAdmissions += 1
         defer { pendingAdmissions -= 1 }
-        guard let ticket = workflow.admitStart() else {
-            emitConfigurationEvents([.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .intentExhausted))])
-            throw RuntimeConfigurationWorkflow.StartRefusal.intentExhausted
+        let ticket: RuntimeConfigurationWorkflow.StartTicket
+        switch workflow.admitStart() {
+        case .success(let admitted):
+            ticket = admitted
+        case .failure(let refusal):
+            emitConfigurationEvents(workflow.admissionEvents(refusal))
+            throw refusal
         }
         // Any admission makes a pending settle stale, whether or not it has reached the lane yet.
         stoppedEffectsJoin?.finish(.superseded)
         await awaitLaunchRecovery()
         let preparation = await workflow.prepareStart(ticket)
         emitConfigurationEvents(preparation.events)
+        let prepared: RuntimeConfigurationWorkflow.PreparedStart
         switch preparation.preparation {
         case .superseded:
             workflow.retire(ticket)
-            return
+            throw RuntimeConfigurationWorkflow.StartRefusal.superseded
         case .held:
             workflow.retire(ticket)
             throw RuntimeConfigurationWorkflow.StartRefusal.held
-        case .ready(let verified):
-            // A `true` answer authorized the admission, with no suspension since its last check.
-            guard await pushVerifiedInput(verified, ticket: ticket) else {
-                workflow.retire(ticket)
-                emitConfigurationEvents(workflow.supersession(of: ticket))
-                return
-            }
+        case .ready(let ready):
+            prepared = ready
+        }
+        // A `true` answer authorized the admission, with no suspension since its last check.
+        guard await pushVerifiedInput(prepared) else {
+            // The cause is read before the retire, which empties the group it inspects.
+            let events = workflow.supersession(of: prepared.ticket)
+            workflow.retire(prepared.ticket)
+            emitConfigurationEvents(events)
+            throw RuntimeConfigurationWorkflow.StartRefusal.superseded
         }
         logNonBlockingConfigProblems()
         guard let token = await admit(.start, .runtimeStart) else {
@@ -595,7 +603,7 @@ package final class RuntimeHost {
             // A start that a stop or a newer start superseded has nothing to revert: that owner cleaned up, and reverting here would undo its work.
             guard !token.isSuperseded else {
                 _ = isCurrent(token, .runtimeStart)
-                return
+                throw RuntimeConfigurationWorkflow.StartRefusal.superseded
             }
             // Restore owned surfaces after bind failure: a dead PAC/proxy endpoint or resolver can break networking after this process exits.
             logger.log(
@@ -612,7 +620,7 @@ package final class RuntimeHost {
         }
         // A stop issued while the listeners came up has already queued its
         // clears; applying now would put the surfaces back after them.
-        guard isCurrent(token, .runtimeStart) else { return }
+        try await continueStart(token, prepared)
 
         // The runtime input is the one the push just reported held. The platform flags are this start's verified intent.
         let config = heldRuntimeConfig
@@ -692,7 +700,7 @@ package final class RuntimeHost {
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
         // rest of a start for a runtime that is down.
-        guard isCurrent(token, .runtimeStart) else { return }
+        try await continueStart(token, prepared)
         // A VPN transition handled while the apply was out reconciled the
         // entry files then, possibly before the apply wrote them from the
         // gate it was queued with. Twin of the check in `AppState.startProxy`.
@@ -708,7 +716,7 @@ package final class RuntimeHost {
 
         if config.dnsForwarderEnabled {
             await orchestrator.startDNS()
-            guard isCurrent(token, .runtimeStart) else { return }
+            try await continueStart(token, prepared)
             let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
             let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
@@ -741,7 +749,7 @@ package final class RuntimeHost {
                     }
                 }
             }
-            guard isCurrent(token, .runtimeStart) else { return }
+            try await continueStart(token, prepared)
             if platform.manageSystemDNS, forwarderRunning {
                 // Whether or not `apply` succeeded — see `AppState.startDNS`.
                 startDNSHealthTimer(forwarderPort: forwarderPort)
@@ -750,7 +758,7 @@ package final class RuntimeHost {
 
         if config.tunnelDefinitions.contains(where: \.enabled) {
             await orchestrator.startTunnels()
-            guard isCurrent(token, .runtimeStart) else { return }
+            try await continueStart(token, prepared)
         }
 
         startLocationObserver()
@@ -1067,31 +1075,41 @@ package final class RuntimeHost {
         }
     }
 
-    /// Converges the verified pair through the reconciler under this Start's admission, then updates the host view.
-    /// A newer eligible reload owns the view if it completes during the wait; superseded input cannot start listeners.
-    private func pushVerifiedInput(_ verified: VerifiedRuntimePlatformInput, ticket: RuntimeConfigurationWorkflow.StartTicket) async -> Bool {
-        guard workflow.isCurrent(ticket) else { return false }
+    /// Whether an authorized Start's remaining effects may run after a suspension; it throws when they may not. A Stop or a newer Start
+    /// owns the surfaces then, so nothing is reverted here. A newer observation or write that replaced the prepared pair holds the rest
+    /// (decision 0037): the Start ends as failed, which restores each member's prior permission and fence, and its own teardown clears what
+    /// it applied, so it neither continues from the newer input nor leaves a new permission behind. It is not retried.
+    private func continueStart(_ token: LifecycleLane.Token, _ prepared: RuntimeConfigurationWorkflow.PreparedStart) async throws {
+        guard isCurrent(token, .runtimeStart) else { throw RuntimeConfigurationWorkflow.StartRefusal.superseded }
+        guard workflow.holdsInput(prepared) else {
+            emitConfigurationEvents([.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .inputReplaced))])
+            workflow.endFailedStart(prepared.ticket)
+            await runStopCleanup(token: token, operation: .runtimeStart, terminal: false)
+            throw RuntimeConfigurationWorkflow.StartRefusal.superseded
+        }
+    }
+
+    /// Converges the prepared pair through the reconciler under this Start's admission, then updates the host view. A newer observation
+    /// or write that replaced the captured pair while the push waited holds the Start; it is not rebound to that input (decision 0037).
+    private func pushVerifiedInput(_ prepared: RuntimeConfigurationWorkflow.PreparedStart) async -> Bool {
+        guard workflow.isCurrent(prepared) else { return false }
         // Through the reconciler, so the orchestrator push is one serialized pass that carries this Start's admission. The reconciler's
         // baseline moves only to what a push reports as held, so an abandoned push leaves the baseline honest.
-        let reloads = configGeneration
+        let verified = prepared.input
         reconciler.reconcile(config: verified.runtime, platformConfig: verified.platform, isCurrent: { [workflow] in
-            workflow.isCurrent(ticket)
+            workflow.isCurrent(prepared)
         })
         await reconciler.drain()
-        guard workflow.isCurrent(ticket) else { return false }
-        // A reload that applied while this push waited replaced its request with a newer verified input, and set the host view itself. That
-        // input is the one to start, so this Start leaves it in place.
-        // Only `adoptHostView` writes the view, and a reload bumps the generation checked below, so the view is still what this Start
-        // found. A Start counts only when it changes the accepted pair, which is after a held reload: the reload verified the observation
-        // the store adopted, and this explicit Start committed it. An external edit with no reload is never adopted here: its baseline
-        // conflict holds the Start (decision 0027). A reload that applied while this push waited set the view itself, and that newer
-        // verified input is the one to start.
-        if configGeneration == reloads,
-           ConfigDiff(old: config, new: verified.runtime).inputChanged || platformConfig != verified.platform {
+        guard workflow.isCurrent(prepared) else { return false }
+        // The store still holds the pair this Start captured, so a reload since then observed the same bytes. A Start counts only when it
+        // changes the accepted pair, which is after a held reload: the reload verified the observation the store adopted, and this
+        // explicit Start committed it. An external edit with no reload is never adopted here: its baseline conflict holds the Start
+        // (decision 0027).
+        if ConfigDiff(old: config, new: verified.runtime).inputChanged || platformConfig != verified.platform {
             adoptHostView(runtime: verified.runtime, platform: verified.platform)
         }
         // The pair is adopted with no suspension since the check above, so the members' fences clear now (decision 0035).
-        return workflow.authorize(ticket)
+        return workflow.authorize(prepared)
     }
 
     /// The one writer of the accepted host view after `open`: the runtime and platform inputs status reports, the VPN monitor's

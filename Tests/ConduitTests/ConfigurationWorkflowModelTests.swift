@@ -460,13 +460,14 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         return false
     }
 
-    /// A newer Start admitted while its slot is busy must hold as `commitFailed` with no I/O. Its ticket is the admission the trace declared.
+    /// A newer Start admitted while its slot is busy must hold as `storeBusy` with no capture and no I/O (decision 0037). Its ticket is
+    /// the admission the trace declared.
     private func busyRefusal(_ h: Harness, _ ticket: RuntimeConfigurationWorkflow.StartTicket) async -> String? {
         let before = h.files.inner.observations.count
         let outcome = await h.workflow.prepareStart(ticket)
-        let held = ConfigurationWorkflowEvent.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .commitFailed))
+        let held = ConfigurationWorkflowEvent.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .storeBusy))
         guard case .held = outcome.preparation, outcome.events == [held], h.files.inner.observations.count == before else {
-            return "a newer Start while the slot is busy must hold as commit_failed without I/O"
+            return "a newer Start while the slot is busy must hold as store_busy without I/O"
         }
         counts["busy.refused", default: 0] += 1
         return nil
@@ -521,7 +522,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
             }
             for start in flags {
                 if start {
-                    guard let ticket = h.workflow.admitStart() else {
+                    guard case .success(let ticket) = h.workflow.admitStart() else {
                         problem = "a newer Start was not admitted"
                         break
                     }
@@ -595,8 +596,8 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         if observed != expected.preparation {
             return "\(label): preparation \(observed) but the reference expects \(expected.preparation)"
         }
-        if case .ready(let verified) = outcome.preparation,
-           verified.runtime != opened.config || verified.platform != opened.platformConfig {
+        if case .ready(let prepared) = outcome.preparation,
+           prepared.input.runtime != opened.config || prepared.input.platform != opened.platformConfig {
             return "\(label): the apply input is not the verified staged pair"
         }
         var expectedCommitted: [ConfigurationWorkflowEvent] = []
@@ -649,7 +650,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         }
         h.files.beginOperation()
         h.files.inner.scheduleWrites([script(trace.platformFault), script(trace.runtimeFault)])
-        guard let ticket = h.workflow.admitStart() else { return "\(label): the first Start was not admitted" }
+        guard case .success(let ticket) = h.workflow.admitStart() else { return "\(label): the first Start was not admitted" }
         for admission in trace.admissions where admission.point == .beforeOperation {
             if admission.start {
                 _ = h.workflow.admitStart()
@@ -671,7 +672,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
         // The resumed Start runs from the state the first left. A latched file holds it without I/O.
         h.files.beginOperation()
         h.files.inner.scheduleWrites([])
-        guard let resume = h.workflow.admitStart() else { return "\(label): the resumed Start was not admitted" }
+        guard case .success(let resume) = h.workflow.admitStart() else { return "\(label): the resumed Start was not admitted" }
         let expectedResume = walkPrepare(trace.scenario, faults: (.none, .none), from: expected.state, admissions: [])
         let resumed = await workflow.prepareStart(resume)
         if let problem = comparePrepare("resumed Start", resumed, opened, expected: expectedResume, calls: observedCalls(h), h) {

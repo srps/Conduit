@@ -42,7 +42,8 @@ It requires no file-schema change, parallel loader, registry or compatibility mo
 
 ## Implementation and acceptance
 
-Replace the unmerged admission-pinned prototype. Complete shared module ownership,
+The local saved-command checkpoint replaces the admission-pinned prototype.
+Complete shared module ownership,
 then activate AppState once and delete its replaced runtime/save paths (0031).
 The implementation must exercise reloads before and after capture through the
 actual workflow/host, capacity refusal, required sidecars/defaults, external-file

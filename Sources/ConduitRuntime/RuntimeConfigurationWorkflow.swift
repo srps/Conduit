@@ -6,6 +6,46 @@ import PlatformMac
 import ProxyKernel
 import RuntimeEvents
 
+/// Why the host's `startRuntime` facade did not start, its typed thrown outcome. The typed `config.workflow` event carries the reason; the
+/// entry point logs this error's description, as it logs a failed start. No case carries a configuration value.
+package enum RuntimeStartRefusal: LocalizedError, Equatable, Sendable {
+    /// The required inputs did not verify, or the runtime input blocks a start. Nothing was started.
+    case held
+    /// The workflow's intent generation is at its maximum, so this Start was not admitted.
+    case intentExhausted
+    /// A terminal stop has latched, so no Start runs in this process.
+    case terminated
+    /// This Start joined an identical Start in flight, and that Start ended without leaving the runtime running. This call does not
+    /// claim a start that did not happen.
+    case notRunning
+    /// DNS still owes a session Stop's disable save, which this Start may not displace. Nothing was admitted.
+    case stopSaveOwed
+    /// A newer Start or Stop was admitted, or the saved input this Start captured was replaced, before its effects. Completed saves
+    /// stay reported; the remaining work did not run and is not retried.
+    case superseded
+
+    package var errorDescription: String? {
+        switch self {
+        case .held: "the configuration inputs did not verify or block a start, so nothing was started"
+        case .intentExhausted: "the intent generation is at its maximum, so the start was not admitted"
+        case .terminated: "a terminal stop has latched, so no start runs in this process"
+        case .notRunning: "the identical start this call joined ended without leaving the runtime running"
+        case .stopSaveOwed: "DNS still owes a stop's disable save, so the start was not admitted"
+        case .superseded: "a newer start, stop or configuration observation replaced this start before it ran"
+        }
+    }
+
+    /// The hold reason of a refusal made at admission, which the host reports as the typed event.
+    var admissionReason: ConfigurationWorkflowHoldReason? {
+        switch self {
+        case .intentExhausted: .intentExhausted
+        case .terminated: .terminating
+        case .stopSaveOwed: .stopSaveOwed
+        case .held, .notRunning, .superseded: nil
+        }
+    }
+}
+
 /// The one configuration owner of one `RuntimeHost` (decisions 0015, 0025, 0027, 0031 and 0032). It holds the sole
 /// `ConfigurationStore` privately. It owns the intent generation, the synchronous Start and Stop admissions and the session Stop fence.
 /// The store has no intent counter of its own, and nothing else in the host writes configuration.
@@ -23,11 +63,19 @@ import RuntimeEvents
 @MainActor
 final class RuntimeConfigurationWorkflow {
     /// One admitted facade Start: the group the module intents gave it. It is current while that group is the latest admission and still
-    /// holds a member.
+    /// holds a member. It carries no configuration value until its preparation captures one (decision 0037).
     struct StartTicket: Equatable, Sendable {
-        let lifecycle: RuntimeLifecycleTicket
+        fileprivate(set) var lifecycle: RuntimeLifecycleTicket
 
         var generation: Int { lifecycle.group }
+    }
+
+    /// A Start whose preparation captured the store's saved pair once and verified it through the required commit (decision 0037). The
+    /// effects that follow use this pair only. It is current while its group stands and the store's baselines are still the ones its
+    /// receipts name, so a newer observation or write of either file holds the remaining work instead of rebinding it.
+    struct PreparedStart: Equatable, Sendable {
+        let ticket: StartTicket
+        let input: VerifiedRuntimePlatformInput
     }
 
     /// What `open` observed. `values` is the store's adopted observation, read before any baseline or reconciler exists.
@@ -40,28 +88,7 @@ final class RuntimeConfigurationWorkflow {
         var appPreferences: AppPreferences { values.preferences }
     }
 
-    /// Why `startRuntime` did not start. The typed `config.workflow` event carries the reason; the entry point logs this error's
-    /// description, as it logs a failed start.
-    enum StartRefusal: LocalizedError, Equatable, Sendable {
-        /// The required inputs did not verify, or the runtime input blocks a start. Nothing was started.
-        case held
-        /// The workflow's intent generation is at its maximum, so this Start was not admitted.
-        case intentExhausted
-        /// A terminal stop has latched, so no Start runs in this process.
-        case terminated
-        /// This Start joined an identical Start in flight, and that Start ended without leaving the runtime running. This call does not
-        /// claim a start that did not happen.
-        case notRunning
-
-        var errorDescription: String? {
-            switch self {
-            case .held: "the configuration inputs did not verify or block a start, so nothing was started"
-            case .intentExhausted: "the intent generation is at its maximum, so the start was not admitted"
-            case .terminated: "a terminal stop has latched, so no start runs in this process"
-            case .notRunning: "the identical start this call joined ended without leaving the runtime running"
-            }
-        }
-    }
+    typealias StartRefusal = RuntimeStartRefusal
 
     /// `open` refused the startup inputs. The daemon reports `event` and exits, as it does for a failed load.
     struct OpenRefusal: Error {
@@ -69,11 +96,11 @@ final class RuntimeConfigurationWorkflow {
     }
 
     enum StartPreparation {
-        /// The required inputs verified as one exact pair, and the admission still stands.
-        case ready(VerifiedRuntimePlatformInput)
+        /// The captured inputs verified as one exact pair, and the admission still stands.
+        case ready(PreparedStart)
         /// The required inputs did not verify, or the runtime input blocks a start. The prior applied configuration keeps running.
         case held
-        /// A newer Start or Stop was admitted, so this Start stops without applying anything.
+        /// A newer Start or Stop was admitted, or the captured input was replaced, so this Start stops without applying anything.
         case superseded
     }
 
@@ -159,14 +186,29 @@ final class RuntimeConfigurationWorkflow {
     // MARK: - Start and Stop admission
 
     /// Admits the whole-host facade Start: proxy and tunnels Starts and DNS's configured Start, as one group. Synchronous, before any
-    /// suspension. The fences stay until `authorize`, after the verified pair is adopted. Returns `nil` when the request is refused, and
-    /// a refusal changes nothing.
-    func admitStart() -> StartTicket? {
+    /// suspension. The fences stay until `authorize`, after the verified pair is adopted. A refusal changes nothing, and it comes with its
+    /// typed `config.workflow.held` event.
+    func admitStart() -> Result<StartTicket, StartRefusal> {
         let facade = RuntimeLifecycleRequest(actions: PrivateModuleSlots(proxy: .start, dns: .configuredStart, tunnels: .start))
-        return intent.withLockedValue { state in
-            guard case .success(let ticket) = state.admit(facade) else { return nil }
-            return StartTicket(lifecycle: ticket)
+        let admission = intent.withLockedValue { $0.admit(facade) }
+        switch admission {
+        case .success(let ticket):
+            return .success(StartTicket(lifecycle: ticket))
+        case .failure(.terminated):
+            return .failure(.terminated)
+        case .failure(.exhausted):
+            return .failure(.intentExhausted)
+        case .failure(.busy):
+            return .failure(.stopSaveOwed)
+        case .failure(.stale), .failure(.invalid):
+            preconditionFailure("the facade request names no observed revision and is a valid composition")
         }
+    }
+
+    /// The typed event for a Start refused at admission.
+    func admissionEvents(_ refusal: StartRefusal) -> [ConfigurationWorkflowEvent] {
+        guard let reason = refusal.admissionReason else { return [] }
+        return [held(.start, .unit, reason)]
     }
 
     /// Admits a whole-host Stop. Synchronous, and it fences every module at once, before any save or recovery is awaited. The legacy
@@ -178,9 +220,10 @@ final class RuntimeConfigurationWorkflow {
     }
 
     /// Authorizes a Start whose verified pair the host has adopted: its members gain the permission the facade grants and lose their
-    /// fences. Returns false when the ticket no longer stands.
-    func authorize(_ ticket: StartTicket) -> Bool {
-        intent.withLockedValue { !$0.authorize(ticket.lifecycle).isEmpty }
+    /// fences. Returns false when the prepared Start no longer stands.
+    func authorize(_ prepared: PreparedStart) -> Bool {
+        guard store.stillHolds(prepared.input) else { return false }
+        return intent.withLockedValue { !$0.authorize(prepared.ticket.lifecycle).isEmpty }
     }
 
     /// Settles a Start's effect. A failure restores each member's prior permission and fence and advances the counter, so a reload or a
@@ -210,9 +253,16 @@ final class RuntimeConfigurationWorkflow {
         intent.withLockedValue { $0.terminal }
     }
 
-    /// The typed event for a Start that stopped after it was admitted: a newer generation, or a Stop fence at the maximum.
+    /// The typed event for a Start that stopped after it was admitted, with its closed cause: a newer generation, a terminal stop, a Stop at
+    /// the maximum that ended the group, or a replacement of the input its members still wait on.
     func supersession(of ticket: StartTicket) -> [ConfigurationWorkflowEvent] {
-        staleEvents(.start, generation: ticket.generation, current: generation)
+        let current = generation
+        if ConfigurationWorkflowSuperseded.isValid(phase: .start, generation: ticket.generation, current: current) {
+            return [.superseded(ConfigurationWorkflowSuperseded(phase: .start, generation: ticket.generation, current: current))]
+        }
+        if isTerminal { return [held(.start, .unit, .terminating)] }
+        let waiting = intent.withLockedValue { !$0.members(of: ticket.generation).isEmpty }
+        return [held(.start, .unit, waiting ? .inputReplaced : .stopFenced)]
     }
 
     /// The typed event for a Start refused after a terminal stop latched.
@@ -231,6 +281,17 @@ final class RuntimeConfigurationWorkflow {
         intent.withLockedValue { $0.holdsGroup(ticket.lifecycle) }
     }
 
+    /// Whether a prepared Start still stands: its group does, and no observation or write has replaced the pair it captured (decision 0037).
+    func isCurrent(_ prepared: PreparedStart) -> Bool {
+        isCurrent(prepared.ticket) && holdsInput(prepared)
+    }
+
+    /// Whether the store still holds the pair a prepared Start captured. After authorization the host's lane token orders the Start
+    /// against newer admissions, and this alone says whether its remaining effects may use the pair.
+    func holdsInput(_ prepared: PreparedStart) -> Bool {
+        store.stillHolds(prepared.input)
+    }
+
     /// The claim the store checks before each replacement this Start makes. It holds only while the admission stands.
     func writeClaim(for ticket: StartTicket) -> ConfigurationWriteClaim {
         let intent = self.intent
@@ -242,64 +303,79 @@ final class RuntimeConfigurationWorkflow {
 
     // MARK: - Start preparation
 
-    /// Prepares a Start after launch recovery. It checks the admission first, refuses a runtime input that blocks a start without any I/O,
-    /// and commits the required inputs through the store. Absent defaults are persisted here, before the Start. A present file that
-    /// verifies is verified without a rewrite. The admission is checked again after the commit, and the exact pair is returned only when
-    /// both required receipts verified.
+    /// Prepares a saved-input Start after launch recovery (decision 0037). The store takes its one slot and, in that same turn, the capture
+    /// reads the store's current pair, observes its DNS bit and merges DNS's local intent; the commit then runs against the baselines that
+    /// pair came from. A busy store captures nothing and holds the Start. A runtime input that blocks a start holds without any write.
+    /// Absent defaults are persisted here, before the Start, and a present file that verifies is verified without a rewrite. The admission is
+    /// checked again after the commit, and the prepared pair is returned only when both receipts verified.
     func prepareStart(_ ticket: StartTicket) async -> StartOutcome {
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
         guard isCurrent(ticket) else {
-            return StartOutcome(preparation: .superseded, events: staleEvents(.start, generation: ticket.generation, current: generation))
+            return StartOutcome(preparation: .superseded, events: supersession(of: ticket))
         }
-        guard var values = store.values else {
-            return StartOutcome(preparation: .held, events: [held(.start, .unit, .commitFailed)])
+        enum Capture { case pending, ended, blocking, captured(RuntimeLifecycleTicket) }
+        var capture = Capture.pending
+        // The claim reads the captured binding, so a change of the staged DNS value after the capture revokes the write.
+        let binding = NIOLockedValueBox(ticket.lifecycle)
+        let intent = self.intent
+        let claim = ConfigurationWriteClaim {
+            let lifecycle = binding.withLockedValue { $0 }
+            return intent.withLockedValue { $0.holdsGroup(lifecycle) }
         }
-        // The store's adopted DNS bit is a durable fact, observed here too, so a reload that adopted it before its own resumption cannot
-        // be written over. When it changes what this group staged, the admission no longer stands and nothing is written (decision 0035).
-        let adoptedDNS = values.runtime.dnsForwarderEnabled
-        intent.withLockedValue { $0.observeDurableDNS(adoptedDNS) }
-        guard isCurrent(ticket) else {
-            return StartOutcome(preparation: .superseded, events: staleEvents(.start, generation: ticket.generation, current: generation))
+        let admission = await store.commitCapturedRuntimeAndPlatform(context: context(generation: ticket.generation), claim: claim) { values in
+            // The store's adopted DNS bit is a durable fact, observed first, so a reload that adopted it before this point supplies the
+            // value and is never written over.
+            guard let lifecycle = intent.withLockedValue({ $0.capture(ticket.lifecycle, observedDNS: values.runtime.dnsForwarderEnabled) }),
+                  let staged = lifecycle.dnsStaged else {
+                capture = .ended
+                return nil
+            }
+            var runtime = values.runtime
+            runtime.dnsForwarderEnabled = staged
+            guard !runtime.validate().contains(where: \.blocksProxyStart) else {
+                capture = .blocking
+                return nil
+            }
+            capture = .captured(lifecycle)
+            binding.withLockedValue { $0 = lifecycle }
+            return (runtime, values.platform)
         }
-        // The write carries the DNS intent the group was admitted on. For the facade that is the adopted value just checked; only a
-        // local DNS Start or Stop intent differs from the file.
-        values.runtime.dnsForwarderEnabled = ticket.lifecycle.dnsStaged
-        if values.runtime.validate().contains(where: \.blocksProxyStart) {
+        guard case .admitted(let committed) = admission else {
+            return StartOutcome(preparation: .held, events: [held(.start, .unit, .storeBusy)])
+        }
+        let lifecycle: RuntimeLifecycleTicket
+        switch capture {
+        case .captured(let value):
+            lifecycle = value
+        case .ended:
+            return StartOutcome(preparation: .superseded, events: supersession(of: ticket))
+        case .blocking:
             return StartOutcome(preparation: .held, events: [held(.start, .runtime, .startBlocking)])
-        }
-        let expected = ConfigurationSlots(
-            runtime: store.baselineToken(for: .runtime),
-            platform: store.baselineToken(for: .platform),
-            preferences: nil
-        )
-        let admission = await store.commitRuntimeAndPlatform(
-            values.runtime,
-            values.platform,
-            expecting: expected,
-            context: context(generation: ticket.generation),
-            claim: writeClaim(for: ticket)
-        )
-        // A busy slot means no required commit verified, so the Start holds as a failed commit.
-        guard case .admitted(let result) = admission else {
+        case .pending:
+            // The store has no adopted values, so nothing was captured or written.
             return StartOutcome(preparation: .held, events: [held(.start, .unit, .commitFailed)])
         }
+        guard let result = committed, let staged = lifecycle.dnsStaged else {
+            preconditionFailure("a captured candidate is committed with its staged DNS value")
+        }
+        var captured = ticket
+        captured.lifecycle = lifecycle
         var events = [
-            committed(.runtime, result.runtime),
-            committed(.platform, result.platform),
+            self.committed(.runtime, result.runtime),
+            self.committed(.platform, result.platform),
         ]
         // A verified runtime file is a saved fact before any check below can end the Start (decision 0015).
         if result.runtime.isVerified {
-            let staged = values.runtime.dnsForwarderEnabled
-            intent.withLockedValue { $0.recordVerifiedDNSWrite(staged, for: ticket.lifecycle) }
+            intent.withLockedValue { $0.recordVerifiedDNSWrite(staged, for: lifecycle) }
         }
         // The admission is checked again after the commit's suspension. A committed file keeps its persistence even if the Start stops.
-        guard isCurrent(ticket) else {
-            events += staleEvents(.start, generation: ticket.generation, current: generation)
+        guard isCurrent(captured) else {
+            events += supersession(of: captured)
             return StartOutcome(preparation: .superseded, events: events)
         }
         if let verified = result.verifiedInput {
-            return StartOutcome(preparation: .ready(verified), events: events)
+            return StartOutcome(preparation: .ready(PreparedStart(ticket: captured, input: verified)), events: events)
         }
         if result.platform.isVerified {
             events.append(held(.start, .runtime, .commitFailed))
