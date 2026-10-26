@@ -1,0 +1,32 @@
+{
+  "probe_sha256": "ac930e8e761e74d5be65689b0cb0c791d947439deb9469b63fa6cc9b7203e19a",
+  "checks": [
+    {
+      "kind": "small",
+      "exit": 0,
+      "seconds": 0.9908,
+      "log": "results/small.ndjson"
+    },
+    {
+      "kind": "string-maximum",
+      "exit": 0,
+      "seconds": 3.4247,
+      "log": "results/string-maximum.ndjson"
+    },
+    {
+      "kind": "unique-maximum",
+      "exit": 0,
+      "seconds": 3.2709,
+      "log": "results/unique-maximum.ndjson"
+    },
+    {
+      "kind": "repeat",
+      "exit": 0,
+      "seconds": 29.9494,
+      "log": "results/repeat.ndjson"
+    }
+  ],
+  "productCommit": "7e7dccca3d32f28a0d593d5b2ccd4b4d0161d967",
+  "swift": "Apple Swift6.4 (swiftlang-6.4.0.34.1 clang-2100.3.34.1), arm64-apple-macosx26.0",
+  "replyCodecMeasured": false
+}
