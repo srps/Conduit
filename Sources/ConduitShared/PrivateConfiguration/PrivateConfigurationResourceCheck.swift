@@ -13,6 +13,21 @@ extension PrivateConfigurationRequest {
     }
 }
 
+extension PrivatePreferences {
+    /// The first approved ceiling the preferences cross, or nil. Only the browser URL is bounded, by its byte count.
+    package func resourceViolation() -> DomainResourceViolation? {
+        DomainResourceCheck.utf8(preferredBrowserTestURL.byteCount, .browserTestURL)
+    }
+}
+
+extension PrivateEditorObservation {
+    /// The first approved ceiling the observation's values cross, or nil: the runtime first, in wire order, then the
+    /// preferences.
+    package func resourceViolation() -> DomainResourceViolation? {
+        runtime.resourceViolation() ?? preferences.resourceViolation()
+    }
+}
+
 extension PrivateRuntimeConfiguration {
     /// The first approved ceiling this runtime crosses, or nil. The order follows the wire order of the members.
     package func resourceViolation() -> DomainResourceViolation? {

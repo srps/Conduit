@@ -45,6 +45,26 @@ final class PrivateEditorCodecTests: XCTestCase {
         }
     }
 
+    /// The scanner alone decides the version's range, before Foundation reads anything. Foundation also refuses an
+    /// overflow, so an end-to-end decode cannot show which layer refused; this drives the scanner directly on the baseline
+    /// table.
+    func testScannerAloneRefusesAVersionPastUInt64Max() throws {
+        func scan(_ version: String) throws {
+            let text = "{\"namespace\":\"n\",\"component\":\"runtime\",\"version\":\(version)}"
+            var bytes = Array(text.utf8)
+            try bytes.withUnsafeMutableBufferPointer { buffer in
+                try PrivateJSONScanner.validate(UnsafeBufferPointer(buffer), root: PrivateConfigurationSchema.baseline)
+            }
+        }
+        XCTAssertNoThrow(try scan("18446744073709551615"))
+        XCTAssertNoThrow(try scan("0"))
+        for version in ["18446744073709551616", "99999999999999999999"] {
+            XCTAssertThrowsError(try scan(version), version) {
+                XCTAssertEqual($0 as? PrivateConfigurationWireError, .malformedBody, version)
+            }
+        }
+    }
+
     /// Each baseline slot holds its own file. The initializer refuses a swap with `invalidValue`, and the decoder refuses
     /// the same swap, an unknown component and a namespace that is not a UUID.
     func testBaselineSlotsComponentsAndNamespacesAreChecked() throws {
@@ -111,6 +131,8 @@ final class PrivateEditorCodecTests: XCTestCase {
         }
         let mutations: [(String, String)] = [
             (saveOnly, "\"proxy\":{\"action\":\"saveOnly\",\"lifecycleRevision\":1}"),
+            // The nullable member is required even where its value would be null: a missing key is never read as null.
+            (saveOnly, "\"proxy\":{\"action\":\"saveOnly\"}"),
             (apply, "\"dns\":{\"action\":\"applyWhileRunning\",\"lifecycleRevision\":null}"),
             (start, "\"tunnels\":{\"action\":\"start\",\"lifecycleRevision\":null}"),
             (start, "\"tunnels\":{\"action\":\"stop\",\"lifecycleRevision\":9}"),

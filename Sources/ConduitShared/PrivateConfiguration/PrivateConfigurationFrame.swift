@@ -7,6 +7,8 @@ import Foundation
 //
 //     PCV1 <kind> <decimal body length>\n<JSON body>\n
 //
+// The kind is `Q` for an update, `G` for a read and `R` for an editor reply.
+//
 // The header names the version, the kind and the body length before any body
 // byte is read. A reader expects one kind. It refuses an unsupported version, any
 // other kind or an oversize length while it is still in the header, with zero body
@@ -24,6 +26,8 @@ package enum PrivateConfigurationFrame {
     package enum Kind: Sendable, Equatable, CaseIterable {
         /// `Q`: one configuration update from a client.
         case update
+        /// `G`: one read of the editor observation from a client.
+        case read
         /// `R`: one answer from the host to an editor request.
         case editorReply
 
@@ -31,14 +35,15 @@ package enum PrivateConfigurationFrame {
         var tag: UInt8 {
             switch self {
             case .update: UInt8(ascii: "Q")
+            case .read: UInt8(ascii: "G")
             case .editorReply: UInt8(ascii: "R")
             }
         }
 
-        /// The cap on one complete frame of this kind: header, body and terminator.
+        /// The cap on one complete frame of this kind: header, body and terminator. Both requests share the request cap.
         package var maxFrameBytes: Int {
             switch self {
-            case .update: PrivateConfigurationFrame.maxRequestFrameBytes
+            case .update, .read: PrivateConfigurationFrame.maxRequestFrameBytes
             case .editorReply: PrivateConfigurationFrame.maxEditorReplyFrameBytes
             }
         }

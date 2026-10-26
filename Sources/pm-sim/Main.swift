@@ -93,6 +93,7 @@ enum PMSim {
               dns-ephemeral-pair-rebind  DNS: a taken TCP twin moves the port-0 UDP+TCP pair to a fresh port
               observable-target-redaction  Query/fragment privacy across observations
               private-config-boundary  Private configuration frame: cap, read schedules, redaction and refusals
+              private-editor-codec  Private editor read and reply: correlation, admission, observation, reply cap and kinds
               config-resource-bounds  Approved configuration ceilings: exact and one-over, scanner order, encoder refusal
               config-file-boundary  Runtime configuration file: cap, first-key, strict filter, legacy fallback, import and writer gates
               config-sidecar-boundary  Platform and preferences files: 128 KiB cap, raw URL limit, strict grammar, wrong-kind refusal, staged migration (0026)
@@ -280,6 +281,7 @@ enum PMSim {
         "dns-ephemeral-pair-rebind",
         "observable-target-redaction",
         "private-config-boundary",
+        "private-editor-codec",
         "config-resource-bounds",
         "config-file-boundary",
         "config-sidecar-boundary",
@@ -463,6 +465,8 @@ enum PMSim {
             return [try await ObservableTargetScenarios.redaction()]
         case "private-config-boundary":
             return [try PrivateConfigBoundaryScenario.run()]
+        case "private-editor-codec":
+            return [try PrivateEditorCodecScenario.run()]
         case "config-resource-bounds":
             return [try ConfigResourceBoundsScenario.run()]
         case "config-file-boundary":

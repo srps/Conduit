@@ -15,8 +15,8 @@
 /// keeps no copy of the text and allocates nothing per key: names are matched from the fixed tables as their bytes
 /// arrive.
 struct PrivateJSONScanner {
-    /// The schema nests six levels deep at most: root, runtime, dns, entries, entry and servers.
-    /// Eight is a stack bound, not a size limit.
+    /// The schema nests seven levels deep at most: the reply root, observation, runtime, dns, entries, entry and
+    /// servers. Eight is a stack bound, not a size limit.
     static let maxDepth = 8
 
     private var cursor: JSONByteCursor

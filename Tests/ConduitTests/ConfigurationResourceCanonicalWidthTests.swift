@@ -179,8 +179,9 @@ final class ConfigurationResourceCanonicalWidthTests: XCTestCase {
 
     /// The token guard is a lexical bound, so it must sit above every valid token. A canonical UUID is 36 bytes, and
     /// every enumeration raw value the decoder accepts in a token place is shorter. The list names every enumeration the
-    /// update decoder reads from a token: the value mirrors, the baseline component and the module intent action. The
-    /// widest is pinned so the implementation notes state the actual bound.
+    /// private decoders read from a token: the value mirrors, the baseline component, the module intent action, the
+    /// component state and its retained reason, the rejection code and the admission type. The widest is pinned so the
+    /// implementation notes state the actual bound.
     func testTokenGuardIsDerivedFromTheTokenGrammarNotAProductCeiling() {
         XCTAssertEqual(UUID().uuidString.utf8.count, 36)
         let enumerationRaws = PrivateAuthenticationMode.allCases.map { $0.rawValue }
@@ -188,8 +189,12 @@ final class ConfigurationResourceCanonicalWidthTests: XCTestCase {
             + PrivateSystemProxyMode.allCases.map { $0.rawValue }
             + ControlConfigWorkflowFile.allCases.map { $0.rawValue }
             + PrivateModuleIntentAction.allCases.map { $0.rawValue }
+            + PrivateComponentStateKind.allCases.map { $0.rawValue }
+            + PrivateRetainedReason.allCases.map { $0.rawValue }
+            + ControlRejectionCode.allCases.map { $0.rawValue }
+            + ["accepted", "joined", "rejected"]
         let widest = enumerationRaws.map { $0.utf8.count }.max() ?? 0
-        XCTAssertEqual(widest, "applyWhileRunning".utf8.count, "update the token guard paragraph in the codec notes")
+        XCTAssertEqual(widest, "changedSinceBaseline".utf8.count, "update the token guard paragraph in the codec notes")
         XCTAssertLessThanOrEqual(widest, DomainResourceLimits.token)
         XCTAssertLessThanOrEqual(36, DomainResourceLimits.token)
     }

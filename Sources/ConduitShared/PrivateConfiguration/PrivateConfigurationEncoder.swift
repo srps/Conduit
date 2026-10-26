@@ -165,6 +165,13 @@ final class PrivateJSONEmitter<Sink: PrivateFrameSink> {
         }
     }
 
+    /// Writes bytes that are already one complete JSON value. Only `PrivateSafeControlJSON` supplies them.
+    func embedded(_ bytes: [UInt8]) throws {
+        for byte in bytes {
+            try sink.put(byte)
+        }
+    }
+
     func writeUUID(_ identifier: UUID) throws {
         try writeString(identifier.uuidString)
     }
@@ -231,7 +238,145 @@ extension PrivateConfigurationRequest: PrivateFrameRoot {
     }
 }
 
+extension PrivateEditorReadRequest: PrivateFrameRoot {
+    static var frameKind: PrivateConfigurationFrame.Kind { .read }
+
+    /// A read carries no value, so no resource ceiling applies.
+    func resourceViolation() -> DomainResourceViolation? { nil }
+
+    func writeBody<Sink: PrivateFrameSink>(to emitter: PrivateJSONEmitter<Sink>) throws {
+        try emitter.writeReadRequest(self)
+    }
+}
+
+extension PrivateEditorReply: PrivateFrameRoot {
+    static var frameKind: PrivateConfigurationFrame.Kind { .editorReply }
+
+    func resourceViolation() -> DomainResourceViolation? {
+        guard case .observation(let observation) = answer else { return nil }
+        return observation.resourceViolation()
+    }
+
+    func writeBody<Sink: PrivateFrameSink>(to emitter: PrivateJSONEmitter<Sink>) throws {
+        try emitter.writeReply(self)
+    }
+}
+
+/// The bytes of the safe control values a private reply carries, written by their own `Codable`. Sorted keys make the
+/// bytes the same on the counting and the emitting pass. Only these closed, secret-free control types pass here; a
+/// private value has no `Encodable` path at all.
+enum PrivateSafeControlJSON {
+    static func bytes(_ admission: ControlAdmission) throws -> [UInt8] {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        do {
+            return Array(try encoder.encode(admission))
+        } catch {
+            throw PrivateConfigurationWireError.invalidValue
+        }
+    }
+}
+
 extension PrivateJSONEmitter {
+    func writeReadRequest(_ request: PrivateEditorReadRequest) throws {
+        try object {
+            try member("requestID") { try writeUUID(request.requestID.rawValue) }
+            try member("incarnation") { try writeUUID(request.incarnation.rawValue) }
+            try member("budgetMilliseconds") { try writeInt(request.budget.rawValue) }
+        }
+    }
+
+    /// Every answer member is written, and all but the one answer are null.
+    func writeReply(_ reply: PrivateEditorReply) throws {
+        try object {
+            try member("requestID") { try writeUUID(reply.requestID.rawValue) }
+            try member("hostIncarnation") { try writeUUID(reply.hostIncarnation.rawValue) }
+            try member("admission") {
+                if case .admission(let admission) = reply.answer {
+                    try embedded(PrivateSafeControlJSON.bytes(admission))
+                } else {
+                    try keyword("null")
+                }
+            }
+            try member("observation") {
+                if case .observation(let observation) = reply.answer {
+                    try writeObservation(observation)
+                } else {
+                    try keyword("null")
+                }
+            }
+            try member("refusal") {
+                if case .refused(let code) = reply.answer {
+                    try writeString(code.rawValue)
+                } else {
+                    try keyword("null")
+                }
+            }
+        }
+    }
+
+    func writeObservation(_ value: PrivateEditorObservation) throws {
+        try object {
+            try member("terminal") { try writeBool(value.terminal) }
+            try member("runtime") { try writeRuntime(value.runtime) }
+            try member("platform") { try writePlatform(value.platform) }
+            try member("preferences") { try writePreferences(value.preferences) }
+            try member("launchAtLogin") { try writeBool(value.launchAtLogin) }
+            try member("components") {
+                try object {
+                    try member("runtime") { try writeComponentState(value.components.runtime) }
+                    try member("platform") { try writeComponentState(value.components.platform) }
+                    try member("preferences") { try writeComponentState(value.components.preferences) }
+                }
+            }
+            try member("modules") {
+                try object {
+                    try member("proxy") { try writeModuleState(value.modules.proxy) }
+                    try member("dns") { try writeModuleState(value.modules.dns) }
+                    try member("tunnels") { try writeModuleState(value.modules.tunnels) }
+                }
+            }
+        }
+    }
+
+    private func writePreferences(_ value: PrivatePreferences) throws {
+        try object {
+            try member("showMenuBarIcon") { try writeBool(value.showMenuBarIcon) }
+            try member("floatingWindowEnabled") { try writeBool(value.floatingWindowEnabled) }
+            try member("globalShortcutEnabled") { try writeBool(value.globalShortcutEnabled) }
+            try member("preferredBrowserTestURL") { try writeURL(value.preferredBrowserTestURL) }
+            try member("fileLoggingEnabled") { try writeBool(value.fileLoggingEnabled) }
+            try member("automaticUpdateChecks") { try writeBool(value.automaticUpdateChecks) }
+        }
+    }
+
+    private func writeComponentState(_ value: PrivateComponentState) throws {
+        let (kind, baseline, reason): (PrivateComponentStateKind, PrivateBaseline?, PrivateRetainedReason?) = switch value {
+        case .verified(let baseline): (.verified, baseline, nil)
+        case .absent(let baseline): (.absent, baseline, nil)
+        case .retained(let reason): (.retained, nil, reason)
+        }
+        try object {
+            try member("state") { try writeString(kind.rawValue) }
+            try member("baseline") {
+                if let baseline {
+                    try writeBaseline(baseline)
+                } else {
+                    try keyword("null")
+                }
+            }
+            try member("reason") { try writeOptionalString(reason?.rawValue) }
+        }
+    }
+
+    private func writeModuleState(_ value: PrivateModuleState) throws {
+        try object {
+            try member("lifecycleRevision") { try writeInt(value.lifecycleRevision.rawValue) }
+            try member("enabled") { try writeBool(value.enabled) }
+            try member("fenced") { try writeBool(value.fenced) }
+        }
+    }
+
     /// The whole request body. Keys are fixed ASCII names, and every value comes from a typed field.
     func writeRequest(_ request: PrivateConfigurationRequest) throws {
         try object {
@@ -448,6 +593,36 @@ package enum PrivateConfigurationEncoder {
     /// Returns the request's update frame as redacted bytes.
     package static func encode(_ request: PrivateConfigurationRequest) throws -> SecretBytes {
         try frame(request)
+    }
+
+    /// Returns the read frame.
+    package static func encode(_ request: PrivateEditorReadRequest) throws -> SecretBytes {
+        try frame(request)
+    }
+
+    /// Returns the exact body length of `reply`, without building a frame or any buffer.
+    package static func measureBody(_ reply: PrivateEditorReply) throws -> Int {
+        try measure(reply)
+    }
+
+    /// Checks one observation as the reply would carry it, without an envelope: the approved ceilings, then the same
+    /// observation writer through a counting sink, so an unrepresentable value (a non-finite number) is refused exactly
+    /// as the reply encoder refuses it. It returns the observation's own byte count and builds no buffer. It is a format
+    /// preflight, not the reply cap: only `encode(_: PrivateEditorReply)`, with the real request ID and incarnation,
+    /// counts and checks the complete frame.
+    package static func measureObservation(_ observation: PrivateEditorObservation) throws -> Int {
+        if let violation = observation.resourceViolation() {
+            throw PrivateConfigurationWireError.resourceLimitExceeded(violation)
+        }
+        let bodyLimit = PrivateConfigurationFrame.Kind.editorReply.maxFrameBytes - minimumFrameOverhead
+        let counting = PrivateJSONEmitter(sink: PrivateCountingSink(limit: bodyLimit))
+        try counting.writeObservation(observation)
+        return counting.sink.count
+    }
+
+    /// Returns the editor reply frame. The reply cap is checked on the exact count before any buffer exists.
+    package static func encode(_ reply: PrivateEditorReply) throws -> SecretBytes {
+        try frame(reply)
     }
 
     /// The counting pass of every kind. The approved resource ceilings run first, so an overlimit value is

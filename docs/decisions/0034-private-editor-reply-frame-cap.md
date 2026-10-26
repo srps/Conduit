@@ -2,7 +2,7 @@
 
 - Date: 2026-10-26
 - Decision: accepted (owner, 2026-10-26, #186: selected “8 MiB private replies (Recommended)”)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -86,9 +86,34 @@ requires the real host/client adapter and is not established by a mirror.
 
 ## Implementation evidence
 
-None yet. The [experiment](../experiments/private-editor-reply/README.md) supports
+The headless codec enforces the separate cap in
+[`PrivateConfigurationFrame.swift`](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationFrame.swift),
+[`PrivateConfigurationEncoder.swift`](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationEncoder.swift)
+and [`PrivateConfigurationDecoder.swift`](../../Sources/ConduitShared/PrivateConfiguration/PrivateConfigurationDecoder.swift).
+Read requests and correlated admission/observation/refusal replies use the same frame,
+writer and scanner. Private observations hold one value set, exact baselines and
+bounded module state; no live host or second writer is exposed.
+
+[`PrivateEditorReplyCodecTests.swift`](../../Tests/ConduitTests/PrivateEditorReplyCodecTests.swift)
+checks the reply cap, strict variants, correlation, resource preflight, redaction
+and the widest-string fixture's measured 7,487,875-byte frame. That fixture uses
+widest observed scalar spellings, not a proof of every finite Double spelling.
+[`PrivateEditorCodecTests.swift`](../../Tests/ConduitTests/PrivateEditorCodecTests.swift)
+checks exact UInt64 preconditions and the scanner's own overflow refusal.
+[`ScenarioPrivateEditorCodec.swift`](../../Sources/pm-sim/ScenarioPrivateEditorCodec.swift)
+exercises the actual codec with synthetic values and no machine effects.
+
+Focused verification: 157 tests, event/decision checks and both private codec
+scenarios passed. The initial size-calibration assertion was replaced with its
+measured value; it was not a runtime defect. Full workflow, independent reply
+review, Release lifetime/copy measurements and actual-host service adoption are
+still due. Causal save receipts remain with the workflow that implements canonical
+intent merging; admission is kept separate from settlement.
+
+The [historical experiment](../experiments/private-editor-reply/README.md) supports
 the ceiling choice and records its source hash, commands and independent rerun.
-It does not implement the private reply API or enforce a production profile.
+It does not establish the actual reply codec's allocation costs or a production
+service profile.
 
 Does not prove: actual reply size or allocation bounds, host/client transfer
 fairness, complete sole-writer coverage, AppState convergence, installed-app
