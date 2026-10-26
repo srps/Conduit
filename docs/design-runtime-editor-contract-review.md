@@ -220,10 +220,11 @@ not a substitute for the selected per-module interactive contract.
 
 ## Decisions and design gates
 
-- **Private editor reply ceiling:** unselected; owner question. The request cap stays 8 MiB, and ordinary reply/stream
+- **Private editor reply ceiling:** selected by the owner on 2026-10-26 in
+  [0034](decisions/0034-private-editor-reply-frame-cap.md). The request cap stays 8 MiB, and ordinary reply/stream
   frames stay 64 KiB.
 
-  Proposal: a provisional, separately named private reply frame cap of 8,388,608 B, equal to the request cap. Evidence
+  The separately named private reply frame cap is 8,388,608 B, equal to the request cap. Evidence
   from the [reply sizing experiment](experiments/private-editor-reply/README.md):
 
   - The actual request frame for the maximum storable shape is 7,382,956 B, and the conservative request bound is
@@ -245,7 +246,7 @@ not a substitute for the selected per-module interactive contract.
       conservative, not a demonstrated shape.
 
   The estimate comes from a mirror, not a reply codec. The request-path memory figures are not reply or whole-host
-  figures. A prototype codec is not needed before the owner question. The dominant bytes come from the production writer
+  figures. The dominant bytes come from the production writer
   and are measured. The mirror's metadata allowance uses 2.8% of the headroom.
 
   Adoption requires the actual reply codec to show, for the maximum observation:

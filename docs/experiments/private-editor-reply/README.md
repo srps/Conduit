@@ -1,10 +1,11 @@
 # Private editor reply sizing: request-codec evidence and a mirror estimate, 2026-10-26
 
-This experiment informs the unselected private editor reply ceiling in
-[the editor contract review](../../design-runtime-editor-contract-review.md). It is a synthetic, single-process probe
+This experiment informed the eight-MiB private reply ceiling selected in
+[decision 0034](../../decisions/0034-private-editor-reply-frame-cap.md) and the
+[editor contract review](../../design-runtime-editor-contract-review.md). It is a synthetic, single-process probe
 that links the actual release objects of product commit `7e7dccc` (Swift 6.4, arm64 macOS, `-O` probe). No app, helper,
 store, socket, user configuration or machine setting is involved, and the serving Conduit was unchanged. It is not product
-code, not a selected limit, and **not the future reply codec**. No production reply writer or decoder exists, so nothing
+code, not itself a limit implementation, and **not the future reply codec**. At this measurement checkpoint no production reply writer or decoder existed, so nothing
 here measures reply encoding, reply decoding or their lifetimes.
 
 Two kinds of number appear below, and they must not be mixed:

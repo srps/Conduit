@@ -57,3 +57,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0031](0031-incremental-runtime-development-single-activation.md) | Incremental runtime development with one AppState activation | accepted | partial | none |
 | [0032](0032-explicit-reload-and-reconcile.md) | Explicit configuration reload adopts and reconciles eligible changes | accepted | partial | none |
 | [0033](0033-headless-real-host-simulation.md) | Headless real-host simulation with explicit effect injection | accepted | implemented | none |
+| [0034](0034-private-editor-reply-frame-cap.md) | Complete private editor replies capped at eight MiB | accepted | planned | none |
