@@ -143,8 +143,9 @@ final class ConfigurationStorePreservationTests: XCTestCase {
         XCTAssertEqual(held.runtime, .notAttempted(.preservationHeld(.sidecarAbsent)))
         XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.config.path), runtimeBytes, "the runtime bytes are preserved")
         XCTAssertEqual(writes(fixture, at: fixture.plan.config.path), 0)
-        // The platform file's replacement, then the sidecar check, which is the last call: no runtime call follows it.
-        XCTAssertEqual(phaseShape(fixture), ["read platform", "write platform", "read platform", "read preferences"])
+        // The missing platform sidecar's source check, its replacement, then the preferences check, which is the last call: no runtime
+        // replacement follows it.
+        XCTAssertEqual(phaseShape(fixture), ["read runtime", "read platform", "write platform", "read platform", "read preferences"])
         fixture.access.clearObservations()
 
         // The migration path is the explicit preferences save, through the same writer, with the store's current token.
@@ -152,7 +153,8 @@ final class ConfigurationStorePreservationTests: XCTestCase {
             legacy!, expecting: fixture.store.baselineToken(for: .preferences), context: Self.context
         ) else { return XCTFail("the preferences save was not admitted") }
         XCTAssertTrue(isPersisted(saved.preferences))
-        XCTAssertEqual(phaseShape(fixture), ["read preferences", "write preferences", "read preferences"])
+        // The missing sidecar's first write checks its runtime source first, and the runtime bytes are still the loaded ones.
+        XCTAssertEqual(phaseShape(fixture), ["read runtime", "read preferences", "write preferences", "read preferences"])
         fixture.access.clearObservations()
 
         // Phase: the retry. The platform is verified, the sidecar is verified in the same step, and only then the runtime file is replaced.
@@ -408,7 +410,10 @@ final class ConfigurationStorePreservationTests: XCTestCase {
             XCTAssertTrue(isPersisted(result.runtime), "the sidecar verifies as current, so the rewrite proceeds: \(extra)")
             XCTAssertEqual(
                 phaseShape(fixture),
-                ["read platform", "write platform", "read platform", "read preferences", "read runtime", "write runtime", "read runtime"],
+                [
+                    "read runtime", "read platform", "write platform", "read platform",
+                    "read preferences", "read runtime", "write runtime", "read runtime",
+                ],
                 "the sidecar is verified immediately before the runtime replacement: \(extra)"
             )
             fixture.access.clearObservations()
@@ -488,6 +493,8 @@ final class ConfigurationStorePreservationTests: XCTestCase {
         guard let held = await commit(fixture, renamedConfig(), PlatformIntegrationConfig()) else { return }
         XCTAssertEqual(held.runtime, .notAttempted(.preservationHeld(.sidecarAbsent)), "the key is present, though it equals the default")
         XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.config.path), runtimeBytes)
+        // Each phase clears the fake's 16-call log, because the missing sidecars' source reads lengthen the trace.
+        fixture.access.clearObservations()
 
         guard case .admitted(let saved) = await fixture.store.commitPreferences(
             fixture.store.values!.preferences, expecting: fixture.store.baselineToken(for: .preferences), context: Self.context

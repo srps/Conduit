@@ -63,6 +63,10 @@ package enum ConfigurationWorkflowNotAttemptedCause: String, Codable, Sendable, 
     case heldBehindPlatform = "held_behind_platform"
     case heldBehindRuntime = "held_behind_runtime"
     case preservationHeld = "preservation_held"
+    /// A missing sidecar's first write was held because the runtime file it takes its values from changed since the store established it.
+    case sourceChanged = "source_changed"
+    /// A missing sidecar's first write was held because the runtime file it takes its values from could not be read.
+    case sourceUnreadable = "source_unreadable"
     case versionExhausted = "version_exhausted"
     /// A newer intent was admitted before the replacement started, so the workflow's claim refused it.
     case superseded

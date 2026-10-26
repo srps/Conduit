@@ -90,6 +90,12 @@ enum ConfigurationNotAttemptedReason: Error, Equatable, Sendable {
     /// The runtime rewrite was held to keep legacy preference values that the runtime file carries. The reason names the sidecar's state,
     /// and the runtime bytes are preserved. A platform write that already verified is not undone.
     case preservationHeld(ConfigurationPreservationHold)
+    /// A missing sidecar's first write was held because the runtime file it takes its values from no longer holds the bytes the store
+    /// established. Writing it would shadow values the store never adopted. The sidecar and the runtime file are latched until a reload.
+    case sourceChanged
+    /// The runtime file a missing sidecar takes its values from could not be read, so its source is not established. Nothing is latched,
+    /// and the same check may succeed later.
+    case sourceUnreadable(ConfigurationFileError)
     /// The component's file version is at its maximum, so a verified write could not name a newer version. The write is refused before
     /// any I/O. Verification and latching still work, and only a new store incarnation recovers.
     case versionExhausted
@@ -98,8 +104,8 @@ enum ConfigurationNotAttemptedReason: Error, Equatable, Sendable {
     case superseded
 }
 
-/// The workflow's permission for one physical replacement. The store checks it on `PlatformWork`, after the preservation read and
-/// immediately before the replacement starts. The check reads the workflow's own intent state under a short lock, and no lock is
+/// The workflow's permission for one physical replacement. The store checks it on `PlatformWork`, after the source or preservation read
+/// and immediately before the replacement starts. The check reads the workflow's own intent state under a short lock, and no lock is
 /// held across I/O. Once a replacement has started, its read-back and its persistence facts are reported whatever the claim says.
 struct ConfigurationWriteClaim: Sendable {
     let isCurrent: @Sendable () -> Bool

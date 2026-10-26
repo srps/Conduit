@@ -22,6 +22,8 @@ final class ConfigurationWorkflowEventTests: XCTestCase {
         .committed(ConfigurationWorkflowCommitted(file: .platform, write: .conflict)),
         .committed(ConfigurationWorkflowCommitted(file: .runtime, write: .notAttempted(.superseded))),
         .committed(ConfigurationWorkflowCommitted(file: .runtime, write: .notAttempted(.heldBehindPlatform))),
+        .committed(ConfigurationWorkflowCommitted(file: .platform, write: .notAttempted(.sourceChanged))),
+        .committed(ConfigurationWorkflowCommitted(file: .preferences, write: .notAttempted(.sourceUnreadable))),
         .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .stopFenced)),
         .held(ConfigurationWorkflowHeld(phase: .start, input: .runtime, reason: .heldBehind)),
         .held(ConfigurationWorkflowHeld(phase: .start, input: .platform, reason: .commitFailed)),
@@ -112,6 +114,21 @@ final class ConfigurationWorkflowEventTests: XCTestCase {
                 ConfigurationWorkflowCommitted(file: .platform, write: .unknown(.readbackMissing, reportedError: true))
             ).detail,
             "file=platform outcome=unknown cause=readback_missing reported_error=true"
+        )
+        XCTAssertEqual(
+            ConfigurationWorkflowEvent.committed(ConfigurationWorkflowCommitted(file: .platform, write: .notAttempted(.sourceChanged))).detail,
+            "file=platform outcome=not_attempted cause=source_changed"
+        )
+    }
+
+    /// Every not-attempted cause keeps its own spelling through the bridge, so no cause is collapsed into another on the wire.
+    func testEveryNotAttemptedCauseKeepsItsSpellingOnTheWire() {
+        for cause in ConfigurationWorkflowNotAttemptedCause.allCases {
+            XCTAssertEqual(ControlConfigWorkflowNotAttemptedCause(cause).rawValue, cause.rawValue)
+        }
+        XCTAssertEqual(
+            Set(ConfigurationWorkflowNotAttemptedCause.allCases.map(\.rawValue)),
+            Set(ControlConfigWorkflowNotAttemptedCause.allCases.map(\.rawValue))
         )
     }
 

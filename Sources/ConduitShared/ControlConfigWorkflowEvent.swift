@@ -50,6 +50,8 @@ package enum ControlConfigWorkflowNotAttemptedCause: String, Codable, Sendable, 
     case heldBehindPlatform = "held_behind_platform"
     case heldBehindRuntime = "held_behind_runtime"
     case preservationHeld = "preservation_held"
+    case sourceChanged = "source_changed"
+    case sourceUnreadable = "source_unreadable"
     case versionExhausted = "version_exhausted"
     case superseded
 }
