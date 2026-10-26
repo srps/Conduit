@@ -42,17 +42,21 @@ read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
 mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
 [0034](./docs/decisions/0034-private-editor-reply-frame-cap.md) selects complete private editor replies at 8 MiB. [Actual-codec sizing and allocation-lifetime measurements](./docs/experiments/private-editor-codec/README.md) cover the headless codec; real-adapter Stop/status responsiveness remains an adoption gate. Service-profile defaults remain unselected and must not inherit experimental values.
 
-Latest verified slice: the private editor codec in [PR245](https://github.com/srps/Conduit/pull/245), merged after
-exact-head hosted Swift and CodeQL checks passed. All 40 required local workflow checks plus the targeted DNS scenario
-passed on unchanged source: 3,412 tests with zero failures and four documented skips, all 103 simulator records and perf.
-Independent subscription-backed Claude reviews and the
-[verification record](./docs/verification-private-editor-codec-2026-10-26.md) state the scope, earlier failures and limits.
-Devin's optional full review was skipped for expired credits; it is not review evidence.
+Latest merged verified slice: [PR247](https://github.com/srps/Conduit/pull/247) protects missing-sidecar source authority
+and compares canonical persisted values by bytes. Exact-head Swift/CodeQL and all 41 local checks passed:
+3,432 tests, zero failures, four documented skips, all 103 simulator records and perf. Independent subscription-backed
+Claude review, replayable source mutations and the [verification record](./docs/verification-configuration-source-2026-10-26.md)
+state the scope and limits. The private editor codec remains merged in [PR245](https://github.com/srps/Conduit/pull/245).
+Devin's optional full reviews were skipped for expired credits; they are not review evidence.
 
-Client adoption also requires the store's missing-sidecar source authority and canonical persisted-value comparison;
-the [verification checkpoint](./docs/verification-configuration-source-2026-10-26.md) records that correction and its limits.
-The related apply/reconciler equality risk is tracked in [#246](https://github.com/srps/Conduit/issues/246) and must be
-reproduced and resolved before the private apply path ships. Neither correction creates another app writer.
+The related apply/reconciler equality correction [#246](https://github.com/srps/Conduit/issues/246) is implemented with
+one shared adoption predicate and byte-aware PAC/credential cache comparisons. Its
+[verification checkpoint](./docs/verification-byte-exact-runtime-intent-2026-10-26.md) separates focused tests, actual source
+mutations and still-pending final/hosted checks. Neither correction creates another app writer.
+
+Before private update/Start adoption, settle the [interactive admission alternatives](./docs/design-runtime-editor-admission-options.md):
+one stale lifecycle slot in a combined request, then proxy-to-DNS dependent startup. These are unselected proposals,
+not amendments to the approved exact-revision/save-only contract. Stop/status/private-read adapter work remains independent.
 
 Supporting evidence stays with its owning slice:
 [client/service](./docs/runtime-client-stage1-inventory.md),

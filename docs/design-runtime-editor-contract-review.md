@@ -249,6 +249,10 @@ acceptance remain separate work; none is proved by this proposal.
 
 ## Interactive admission still to implement
 
+The [interactive admission alternatives](design-runtime-editor-admission-options.md) identify two
+unselected multi-client/dependent-start policies. Keep the approved exact-revision and save-only
+meanings; settle those choices before implementing private update/Start.
+
 Put host-owned store operations in generation order within bounded ordinary
 admission. A Start waiting behind an in-flight operation rechecks its ticket and
 fences before acting; newer Start/Stop supersedes it. Refuse capacity before

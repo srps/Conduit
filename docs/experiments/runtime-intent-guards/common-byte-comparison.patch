@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Support/ExactText.swift
++++ b/Sources/ProxyKernel/Support/ExactText.swift
+@@ -6,7 +6,7 @@
+ /// account) is compared here, never normalized.
+ package enum ExactText {
+     package static func same(_ a: String, _ b: String) -> Bool {
+-        a.utf8.elementsEqual(b.utf8)
++        a == b
+     }
+ 
+     package static func same(_ a: [String], _ b: [String]) -> Bool {

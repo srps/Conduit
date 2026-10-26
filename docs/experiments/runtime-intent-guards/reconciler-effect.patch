@@ -1,0 +1,11 @@
+--- a/Sources/PlatformMac/RuntimeReconciler.swift
++++ b/Sources/PlatformMac/RuntimeReconciler.swift
+@@ -257,7 +257,7 @@
+         let old = lastReconciledConfig
+         let oldPlatform = lastReconciledPlatformConfig
+         let newPlatform = request.platformConfig
+-        if ConfigDiff(old: old, new: request.config).inputChanged {
++        if old != request.config {
+             let target = request.config
+             var application = RuntimeConfigApplication.notHeld
+             await runEffect { application = await host.applyConfigChange(target, from: old) }

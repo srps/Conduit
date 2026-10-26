@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
++++ b/Sources/ProxyKernel/Proxy/PACRoutingEngine.swift
+@@ -210,7 +210,7 @@
+                 || refreshExpired(at: lastRefreshAt)
+             guard needsRefresh else { return .fresh }
+             // Per attempted URL, so a URL that never loaded still backs off.
+-            let urlChanged = !ExactText.same(lastAttemptedPACURL, config.pacURL)
++            let urlChanged = lastAttemptedPACURL != config.pacURL
+             if honorBackoff, !urlChanged, let remaining = backoffRemainingLocked(now: Date()) {
+                 return .backingOff(remaining: remaining, failures: consecutiveFailures)
+             }

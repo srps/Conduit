@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift
++++ b/Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift
+@@ -690,7 +690,7 @@
+         let oldConfig = explicitOld ?? config
+         let diff = ConfigDiff(old: oldConfig, new: newConfig)
+         guard diff.hasChanges else {
+-            guard diff.inputChanged else { return }
++            guard oldConfig != newConfig else { return }
+             emitEvent(.config, "config.metadata_changed")
+             config = newConfig
+             onConfigChange?(config)
