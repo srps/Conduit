@@ -135,9 +135,14 @@ before-and-after comparison; no allocation trace isolated it.
 
 ## Reproduction
 
+This is a historical probe against `7e7dccca3d32f28a0d593d5b2ccd4b4d0161d967`, whose private request API predates the
+exact-baseline editor contract. Use a checkout with that product source and build its Release products. The runner's
+`--repo` selects that checkout; it refuses changed product sources before compiling rather than retaining obsolete
+production API just for the experiment. Run the script from the checkout containing this experiment:
+
 ```sh
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift build -c release
-python3 docs/experiments/private-editor-reply/run.py "$(mktemp -d /tmp/private-editor-reply-XXXX)"
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift build -c release --package-path /path/to/baseline-checkout
+python3 docs/experiments/private-editor-reply/run.py "$(mktemp -d /tmp/private-editor-reply-XXXX)" --repo /path/to/baseline-checkout
 ```
 
 `run.py` expects the SwiftPM release layout (`.build/release`) and the generated NIO module maps, as the display codec

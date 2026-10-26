@@ -14,6 +14,7 @@ import platform
 import subprocess
 import tempfile
 
+BASE_COMMIT = '7e7dccca3d32f28a0d593d5b2ccd4b4d0161d967'
 MODES = ['small', 'string-maximum', 'unique-maximum', 'repeat']
 OBJECTS = [
     'CNIOOpenBSD.o', 'RuntimeEvents.o', 'CNIOLinux.o', 'InternalCollectionsUtilities.o', 'CNIOFreeBSD.o',
@@ -25,8 +26,15 @@ OBJECTS = [
 
 parser = argparse.ArgumentParser()
 parser.add_argument('output', type=Path, help='a new directory for the compile log and the NDJSON results')
+parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parents[3],
+                    help='checkout with the historical product sources at ' + BASE_COMMIT)
 args = parser.parse_args()
-root = Path(__file__).resolve().parents[3]
+root = args.repo.resolve()
+comparison = subprocess.run(['git', 'diff', '--quiet', BASE_COMMIT, '--', 'Sources', 'Package.swift', 'Package.resolved'],
+                            cwd=root, check=False)
+if comparison.returncode != 0:
+    parser.error('This historical probe needs the product sources at ' + BASE_COMMIT
+                 + '; use --repo with that checkout and build its Release products first.')
 source = Path(__file__).resolve().parent / 'Probe.swift'
 output = args.output.resolve()
 output.mkdir(parents=True, exist_ok=True)
@@ -63,7 +71,7 @@ with tempfile.TemporaryDirectory(prefix='conduit-private-editor-') as scratch_na
                                     stderr=subprocess.STDOUT, timeout=300)
         checks.append(dict(kind=mode, exit=result.returncode, log=mode + '.ndjson'))
         print(json.dumps(checks[-1]), flush=True)
-    metadata = dict(probe_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), checks=checks, replyCodecMeasured=False)
+    metadata = dict(productCommit=BASE_COMMIT, probe_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), checks=checks, replyCodecMeasured=False)
     (output / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
     if any(check['exit'] for check in checks):
         raise SystemExit('A mode failed or was inconclusive (exit 3); inspect its NDJSON summary record.')
