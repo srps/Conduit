@@ -1002,16 +1002,17 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(harness.journal.hasRecords(for: .resolverFile))
     }
 
-    /// Quit while a start's apply is out. The apply goes one manager after
-    /// another, and the managers' locks order one operation, not the
-    /// sequence, so a quit that cleared in between could clear a surface the
-    /// apply then wrote. Termination waits for the platform queue before its
-    /// first clear.
     /// A settings change reconciled while a start's platform block is still
     /// out. The block acts on the flags it read when it began; a pass that
     /// cleared the environment in the middle of it had the block publish the
     /// variables again afterwards, with the switch off. The pass waits for
     /// the start and runs after it.
+    ///
+    /// The lanes count every caller waiting on them, and observer work, such
+    /// as the launch preflight finding the helper or a network path report,
+    /// waits for the start too, so the count only says something is waiting.
+    /// The order is read off the machine: once the pass has run, the start's
+    /// system proxy step, the one held here, has landed.
     func testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
         await harness.launchRecovery()
@@ -1025,15 +1026,22 @@ final class AppStateHarnessTests: XCTestCase {
 
         appState.platformConfig.manageEnvironmentVariables = false
         appState.saveConfig()
-        // Either the pass is waiting for the start, or it has run.
+        // What the machine held when the pass had run. Awaited after the release, on every path.
+        let pass = Task { @MainActor in
+            await appState.reconciler.drain()
+            return self.wifi.routesThroughAProxy
+        }
+        // Either something is waiting for the start, or the pass has run.
         await harness.settle("the pass is waiting for the start, or done") {
             appState.passesWaitingForLifecycle > 0 || !appState.reconciler.hasPassInFlight
         }
-        XCTAssertEqual(appState.passesWaitingForLifecycle, 1, "the pass waits for the start's platform work")
+        XCTAssertTrue(appState.reconciler.hasPassInFlight, "the pass waits for the start's platform work")
         harness.hold.release()
+        let startHadAppliedTheSystemProxy = await pass.value
         try await start.value
         await appState.reconciler.drain()
 
+        XCTAssertTrue(startHadAppliedTheSystemProxy, "the pass ran after the start's platform work, not beside it")
         XCTAssertTrue(isRunning(appState))
         XCTAssertTrue(wifi.routesThroughAProxy, "the system proxy switch is still on")
         XCTAssertNil(machine.launchdEnvironment["HTTP_PROXY"], "the environment follows the switch the user turned off")

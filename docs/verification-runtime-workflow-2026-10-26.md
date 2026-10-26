@@ -68,14 +68,16 @@ passed, as did the performance gate. The source fingerprint covers 703 relevant
 source/test/script/resource/package files:
 
 ```text
-d62853a12507ee2cd606943eb3365574354972490769325f970f7931bb118880
+8b0ced770b309b97618d49ae6e9ee1d236c3cdf4bc96bfe8bda48bf601defbd3
 ```
 
 The independent whole-core and final delta reviews were READY at the prior
-`acfee020…5451` fingerprint. The only subsequent source difference was
-PACPreviewTests: its two owned-file JavaScript tests now explicitly select the
-real CF evaluator while the general harness/dev composition keeps its fake.
-Codex reviewed that fixture change; all five preview tests and the full suite
+`acfee020…5451` fingerprint. Subsequent source changes were limited to two test fixtures.
+PACPreviewTests explicitly selects the real CF evaluator for its two owned-file
+JavaScript tests while the general harness/dev composition keeps its fake.
+AppStateHarnessTests reads machine state after the reconcile drains instead of
+requiring exactly one global lifecycle waiter. Codex reviewed both changes;
+all five preview tests, 22 targeted ordering/reconciler tests and the full suite
 passed. Exact-head hosted checks and review disposition are recorded on the
 integration PR and [#186](https://github.com/srps/Conduit/issues/186).
 
@@ -86,6 +88,18 @@ Guard-mutation runs also recorded an isolated diagnostic flush timeout and an
 import-test directory cleanup refusal that did not reproduce in the final run.
 The extra legitimate DNS retry exposed and corrected an overly strict test/sim
 cardinality assertion; production DNS behavior did not change.
+
+The first hosted Swift run on `31dcd4c` failed one assertion in
+`testASettingsChangeWhileTheStartAppliesIsReconciledAfterIt`: the global lane
+waiter count was two, rather than one. A helper-availability preflight can park
+its independent system-proxy drift pass behind the same held Start. The test
+now captures the machine's proxy state when reconciliation drains, retaining
+its environment, journal and shell-block assertions. No production behavior
+changed. Temporarily bypassing the reconciler's lifecycle wait made 22 tests
+report seven failures, including five assertions in this target. The parent
+verified restoration against the committed reconciler bytes (SHA-256
+`4c6cab761e7e6a22494680fcf6fa030da405391d125c8a5c948506059af4ef03`)
+before the final stable 41-check rerun.
 
 ## Cleanup
 
