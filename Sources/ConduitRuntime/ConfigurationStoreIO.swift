@@ -208,7 +208,8 @@ enum ConfigurationStoreIO {
     }
 
     /// The runtime candidate. The kernel's exact round-trip already decoded the bytes, so the value is taken from it and never decoded again.
-    private static func stageRuntime(_ config: ProxyConfig, current: ProxyConfig?) -> ConfigurationStaged<ConfigurationStagedFile<ProxyConfig>> {
+    /// The coupled stage and the DNS lifecycle commit both use it.
+    static func stageRuntime(_ config: ProxyConfig, current: ProxyConfig?) -> ConfigurationStaged<ConfigurationStagedFile<ProxyConfig>> {
         let file: ProxyConfigPersistence.StagedFile
         do {
             file = try ProxyConfigPersistence.stagedFile(for: config)
