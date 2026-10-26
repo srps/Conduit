@@ -1437,7 +1437,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         do {
             try await host.startRuntime()
             XCTFail("start should be refused on a config the kernel rejects")
-        } catch let refusal as RuntimeConfigurationWorkflow.StartRefusal {
+        } catch let refusal as RuntimeStartRefusal {
             XCTAssertEqual(refusal, .held)
         }
 
@@ -1491,7 +1491,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             do {
                 try await host.startRuntime()
                 XCTFail("the start must hold")
-            } catch let refusal as RuntimeConfigurationWorkflow.StartRefusal {
+            } catch let refusal as RuntimeStartRefusal {
                 XCTAssertEqual(refusal, .held)
             } catch {
                 XCTFail("unexpected start error: \(error)")
@@ -1845,7 +1845,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         do {
             try await host.startRuntime()
             XCTFail("no Start runs after the process quit")
-        } catch let refusal as RuntimeConfigurationWorkflow.StartRefusal {
+        } catch let refusal as RuntimeStartRefusal {
             XCTAssertEqual(refusal, .terminated)
         }
         // Observer deliveries from earlier changes are joined first, so the final state is the one compared.
@@ -2639,7 +2639,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             try await start.value
             XCTFail("\(message): the overtaken start reported success", file: file, line: line)
         } catch {
-            XCTAssertEqual(error as? RuntimeConfigurationWorkflow.StartRefusal, .superseded, message, file: file, line: line)
+            XCTAssertEqual(error as? RuntimeStartRefusal, .superseded, message, file: file, line: line)
         }
     }
 
@@ -2708,7 +2708,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         do {
             try await host.startRuntime()
             XCTFail("a start while the terminal stop is held must be refused")
-        } catch let refusal as RuntimeConfigurationWorkflow.StartRefusal {
+        } catch let refusal as RuntimeStartRefusal {
             XCTAssertEqual(refusal, .terminated)
         }
         XCTAssertEqual(host.pendingAdmissions, 1, "the refused start admitted nothing")
@@ -3074,7 +3074,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         do {
             try await host.startRuntime()
             XCTFail("a Start after a terminal stop must be refused")
-        } catch let refusal as RuntimeConfigurationWorkflow.StartRefusal {
+        } catch let refusal as RuntimeStartRefusal {
             XCTAssertEqual(refusal, .terminated)
         }
         XCTAssertTrue(

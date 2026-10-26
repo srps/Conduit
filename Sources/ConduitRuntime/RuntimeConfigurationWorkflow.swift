@@ -88,8 +88,6 @@ final class RuntimeConfigurationWorkflow {
         var appPreferences: AppPreferences { values.preferences }
     }
 
-    typealias StartRefusal = RuntimeStartRefusal
-
     /// `open` refused the startup inputs. The daemon reports `event` and exits, as it does for a failed load.
     struct OpenRefusal: Error {
         let event: ConfigurationWorkflowEvent
@@ -188,7 +186,7 @@ final class RuntimeConfigurationWorkflow {
     /// Admits the whole-host facade Start: proxy and tunnels Starts and DNS's configured Start, as one group. Synchronous, before any
     /// suspension. The fences stay until `authorize`, after the verified pair is adopted. A refusal changes nothing, and it comes with its
     /// typed `config.workflow.held` event.
-    func admitStart() -> Result<StartTicket, StartRefusal> {
+    func admitStart() -> Result<StartTicket, RuntimeStartRefusal> {
         let facade = RuntimeLifecycleRequest(actions: PrivateModuleSlots(proxy: .start, dns: .configuredStart, tunnels: .start))
         let admission = intent.withLockedValue { $0.admit(facade) }
         switch admission {
@@ -206,7 +204,7 @@ final class RuntimeConfigurationWorkflow {
     }
 
     /// The typed event for a Start refused at admission.
-    func admissionEvents(_ refusal: StartRefusal) -> [ConfigurationWorkflowEvent] {
+    func admissionEvents(_ refusal: RuntimeStartRefusal) -> [ConfigurationWorkflowEvent] {
         guard let reason = refusal.admissionReason else { return [] }
         return [held(.start, .unit, reason)]
     }
@@ -216,7 +214,50 @@ final class RuntimeConfigurationWorkflow {
     /// refuses every older Start and claim. A terminal stop is the process quit, which also latches.
     @discardableResult
     func admitStop(terminal: Bool = false) -> Int {
-        intent.withLockedValue { $0.stop(Set(ControlModule.allCases), reason: terminal ? .processQuit : .facade) }
+        admitStop(Set(ControlModule.allCases), reason: terminal ? .processQuit : .facade)
+    }
+
+    /// Admits a Stop of `modules` in one turn, before any await and whether or not the store's slot is free: each is fenced and loses its
+    /// permission at once. A session Stop of DNS also owes its disable save, in DNS's one pending slot; `saveOwedDNSStop` persists it.
+    @discardableResult
+    func admitStop(_ modules: Set<ControlModule>, reason: RuntimeStopReason) -> Int {
+        intent.withLockedValue { $0.stop(modules, reason: reason) }
+    }
+
+    /// What `saveOwedDNSStop` did with DNS's owed disable.
+    enum DNSStopSave: Equatable {
+        /// No disable save is owed.
+        case notOwed
+        /// The disable verified, and the obligation ended.
+        case saved
+        /// The obligation stays owed: the store's slot was taken, or the write did not verify. Nothing retries it; the next explicit Stop,
+        /// save or reload attempt is the next chance.
+        case owed
+    }
+
+    /// Persists the disable a session DNS Stop owes, through the store's runtime-only lifecycle commit (decision 0015): the canonical
+    /// stager, the legacy-preservation checks and the runtime baseline guard all apply, and no platform file is touched. The write is claimed
+    /// only while that Stop's save is still the one owed, and the obligation ends only once the write verifies. It never retries.
+    func saveOwedDNSStop() async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent]) {
+        let owed = intent.withLockedValue { state -> Int? in
+            if case .stopSave(let revision) = state.modules.dns.pending { return revision }
+            return nil
+        }
+        guard let revision = owed else { return (.notOwed, []) }
+        operationsInFlight += 1
+        defer { operationsInFlight -= 1 }
+        let intent = self.intent
+        let admission = await store.commitDNSLifecycle(
+            enabled: false,
+            expecting: store.baselineToken(for: .runtime),
+            context: context(generation: revision),
+            claim: ConfigurationWriteClaim { intent.withLockedValue { $0.stopSaveIsCurrent(revision: revision) } }
+        )
+        guard case .admitted(let result) = admission else { return (.owed, []) }
+        let events = [committed(.runtime, result.runtime)]
+        guard result.runtime.isVerified else { return (.owed, events) }
+        intent.withLockedValue { $0.finishStopSave(revision: revision) }
+        return (.saved, events)
     }
 
     /// Authorizes a Start whose verified pair the host has adopted: its members gain the permission the facade grants and lose their

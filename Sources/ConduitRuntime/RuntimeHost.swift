@@ -549,7 +549,7 @@ package final class RuntimeHost {
     package func startRuntime() async throws {
         guard !workflow.isTerminal else {
             emitConfigurationEvents(workflow.terminalRefusal())
-            throw RuntimeConfigurationWorkflow.StartRefusal.terminated
+            throw RuntimeStartRefusal.terminated
         }
         // Admitted before recovery is awaited, so a Stop during recovery is never queued behind it (decision 0015). Preparation below
         // checks this same admission again, so it cannot clear a newer Stop.
@@ -572,10 +572,10 @@ package final class RuntimeHost {
         switch preparation.preparation {
         case .superseded:
             workflow.retire(ticket)
-            throw RuntimeConfigurationWorkflow.StartRefusal.superseded
+            throw RuntimeStartRefusal.superseded
         case .held:
             workflow.retire(ticket)
-            throw RuntimeConfigurationWorkflow.StartRefusal.held
+            throw RuntimeStartRefusal.held
         case .ready(let ready):
             prepared = ready
         }
@@ -585,12 +585,12 @@ package final class RuntimeHost {
             let events = workflow.supersession(of: prepared.ticket)
             workflow.retire(prepared.ticket)
             emitConfigurationEvents(events)
-            throw RuntimeConfigurationWorkflow.StartRefusal.superseded
+            throw RuntimeStartRefusal.superseded
         }
         logNonBlockingConfigProblems()
         guard let token = await admit(.start, .runtimeStart) else {
             // The identical start this call joined has ended. Report what it left: a joined start that failed or was stopped is not success.
-            guard runtimeStarted else { throw RuntimeConfigurationWorkflow.StartRefusal.notRunning }
+            guard runtimeStarted else { throw RuntimeStartRefusal.notRunning }
             return
         }
         defer { runtimeLane.end(token) }
@@ -603,7 +603,7 @@ package final class RuntimeHost {
             // A start that a stop or a newer start superseded has nothing to revert: that owner cleaned up, and reverting here would undo its work.
             guard !token.isSuperseded else {
                 _ = isCurrent(token, .runtimeStart)
-                throw RuntimeConfigurationWorkflow.StartRefusal.superseded
+                throw RuntimeStartRefusal.superseded
             }
             // Restore owned surfaces after bind failure: a dead PAC/proxy endpoint or resolver can break networking after this process exits.
             logger.log(
@@ -1080,12 +1080,12 @@ package final class RuntimeHost {
     /// (decision 0037): the Start ends as failed, which restores each member's prior permission and fence, and its own teardown clears what
     /// it applied, so it neither continues from the newer input nor leaves a new permission behind. It is not retried.
     private func continueStart(_ token: LifecycleLane.Token, _ prepared: RuntimeConfigurationWorkflow.PreparedStart) async throws {
-        guard isCurrent(token, .runtimeStart) else { throw RuntimeConfigurationWorkflow.StartRefusal.superseded }
+        guard isCurrent(token, .runtimeStart) else { throw RuntimeStartRefusal.superseded }
         guard workflow.holdsInput(prepared) else {
             emitConfigurationEvents([.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .inputReplaced))])
             workflow.endFailedStart(prepared.ticket)
             await runStopCleanup(token: token, operation: .runtimeStart, terminal: false)
-            throw RuntimeConfigurationWorkflow.StartRefusal.superseded
+            throw RuntimeStartRefusal.superseded
         }
     }
 

@@ -308,6 +308,62 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         XCTAssertTrue(workflow.authorize(ready))
     }
 
+    /// A session DNS Stop fences at once and owes its disable. A facade Start is refused whole while it is owed. The save goes through the
+    /// runtime-only lifecycle commit and ends the obligation only once verified; the next facade Start then captures the saved false.
+    func testASessionDNSStopOwesItsDisableUntilTheRuntimeOnlySaveVerifies() async throws {
+        let (session, directory) = try scratchSession()
+        defer {
+            releaseScratchStateRoot(session)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let workflow = workflow(session)
+        _ = try await workflow.open()
+        _ = try externalEdit(session, dnsForwarderEnabled: true, profileName: "DNS on")
+        _ = await workflow.reload(capturedAt: workflow.generation)
+        let none = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(none.save, .notOwed)
+
+        let stop = workflow.admitStop([.dns], reason: .session)
+        XCTAssertEqual(workflow.generation, stop)
+        XCTAssertEqual(workflow.admitStart(), .failure(.stopSaveOwed), "the facade may not displace the owed save")
+        XCTAssertEqual(workflow.generation, stop, "and its refusal changes nothing")
+
+        let saved = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(saved.save, .saved)
+        XCTAssertEqual(saved.events, [.committed(ConfigurationWorkflowCommitted(file: .runtime, write: .persisted(reportedError: false)))])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: session.environment.platformConfigFile.path), "no sidecar is written")
+        let after = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(after.save, .notOwed, "the verified save ended the obligation")
+
+        let ticket = try workflow.admitStart().get()
+        guard case .ready(let ready) = await workflow.prepareStart(ticket).preparation else {
+            return XCTFail("the facade Start prepares once the save verified")
+        }
+        XCTAssertFalse(ready.input.runtime.dnsForwarderEnabled, "it captures the saved disable")
+        XCTAssertEqual(ready.input.runtime.profileName, "DNS on", "and keeps the rest of the runtime file")
+    }
+
+    /// A runtime file changed outside the store since its baseline conflicts: the disable is not written over it and stays owed.
+    func testAnOwedDNSDisableIsNotWrittenOverAChangedFile() async throws {
+        let (session, directory) = try scratchSession()
+        defer {
+            releaseScratchStateRoot(session)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let workflow = workflow(session)
+        _ = try await workflow.open()
+        _ = try externalEdit(session, dnsForwarderEnabled: true, profileName: "DNS on")
+        _ = await workflow.reload(capturedAt: workflow.generation)
+        workflow.admitStop([.dns], reason: .session)
+        let external = try externalEdit(session, dnsForwarderEnabled: true, profileName: "Edited elsewhere")
+
+        let attempt = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(attempt.save, .owed)
+        XCTAssertEqual(attempt.events, [.committed(ConfigurationWorkflowCommitted(file: .runtime, write: .conflict))])
+        XCTAssertEqual(try Data(contentsOf: session.environment.configFile), external, "the changed file is kept")
+        XCTAssertEqual(workflow.admitStart(), .failure(.stopSaveOwed), "the disable is still owed")
+    }
+
     private func externalEdit(_ session: StateRootSession, dnsForwarderEnabled: Bool, profileName: String) throws -> Data {
         var edited = GenericDefaults.shared.makeConfig()
         edited.dnsForwarderEnabled = dnsForwarderEnabled
