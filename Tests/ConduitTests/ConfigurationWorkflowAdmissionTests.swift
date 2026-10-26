@@ -44,15 +44,14 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
     // MARK: - Bounded model
 
-    /// The reference: a generation that advances on each Start and each Stop, a fence that a Start clears and a Stop sets, and a
-    /// ticket that is current only while its generation is the latest and no fence is in force.
+    /// The reference: a generation that advances on each Start and each Stop, a fence that a Stop sets and only an authorized Start
+    /// clears (decision 0035), so no admission alone clears it, and a ticket that is current only while its generation is the latest.
     private struct Oracle {
         var generation = 0
         var fenced = false
 
         mutating func start() {
             generation += 1
-            fenced = false
         }
 
         mutating func stop() {
@@ -61,7 +60,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         }
 
         func isCurrent(_ ticketGeneration: Int) -> Bool {
-            ticketGeneration == generation && !fenced
+            ticketGeneration == generation
         }
     }
 
@@ -212,6 +211,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         XCTAssertEqual(last.generation, Int.max)
         XCTAssertNil(failed.admitStart(), "no generation is left for another Start")
         XCTAssertTrue(failed.isCurrent(last), "a refused Start changes neither the generation nor the fence")
+        XCTAssertTrue(failed.authorize(last), "the host fails a Start only after authorizing it")
         failed.endFailedStart(last)
         XCTAssertEqual(failed.generation, Int.max)
         XCTAssertTrue(failed.stopFenced, "ending a failed Start at the maximum fences in place of advancing")
@@ -231,6 +231,39 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         let reload = await stopped.reload(capturedAt: stopped.generation)
         XCTAssertNil(reload.applied)
         XCTAssertEqual(reload.events.last, .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .stopFenced)))
+    }
+
+    /// Review prototype B: pin a facade's input at admission and supersede when a later reload changes it. Saved-command binding is
+    /// unselected; see docs/design-saved-runtime-input-binding.md. Every option must preserve the observed file bytes; the superseded
+    /// expectation below belongs only to this prototype.
+    func testAFacadeStartNeverWritesOverAReloadObservedDNSValue() async throws {
+        let (session, directory) = try scratchSession()
+        defer {
+            releaseScratchStateRoot(session)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let workflow = workflow(session)
+        _ = try await workflow.open()
+        let first = try XCTUnwrap(workflow.admitStart())
+        guard case .ready = await workflow.prepareStart(first).preparation else { return XCTFail("the defaults commit verifies") }
+        XCTAssertTrue(workflow.authorize(first))
+        workflow.finishStart(first, succeeded: true)
+
+        let facade = try XCTUnwrap(workflow.admitStart())
+        XCTAssertFalse(facade.lifecycle.dnsStaged, "admitted on the committed DNS off")
+        var edited = GenericDefaults.shared.makeConfig()
+        edited.dnsForwarderEnabled = true
+        let external = try ProxyConfigPersistence.stagedFileData(for: edited)
+        try external.write(to: session.environment.configFile)
+        let reload = await workflow.reload(capturedAt: workflow.generation)
+        XCTAssertEqual(reload.applied?.runtime.dnsForwarderEnabled, true, "the reload adopted the verified DNS on")
+
+        let prepared = await workflow.prepareStart(facade)
+        XCTAssertEqual(prepared.preparation.isSuperseded, true, "the changed DNS fact ends the facade's admission")
+        XCTAssertEqual(try Data(contentsOf: session.environment.configFile), external, "the observed file is not written over")
+        XCTAssertFalse(workflow.isCurrent(facade))
+        let next = try XCTUnwrap(workflow.admitStart())
+        XCTAssertTrue(next.lifecycle.dnsStaged, "a fresh facade Start stages the observed DNS on")
     }
 
     /// A Start whose preparation resumes after a newer Stop stops without preparing anything, and says why.

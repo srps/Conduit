@@ -200,7 +200,8 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
     }
 
     /// The admissions applied in order, with the generation and fence they produce. A claim is current while the ticket is the latest and no
-    /// Stop fence is in force.
+    /// Stop fence is in force. A Stop sets the fence; a Start admission leaves it, since only an authorized Start clears it (decision 0035)
+    /// and these walks authorize none.
     private struct Walker {
         private let admissions: [Admission]
         private var next = 0
@@ -221,7 +222,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
             points.append(point)
             while next < admissions.count, admissions[next].point == point {
                 generation += 1
-                fenced = !admissions[next].start
+                if !admissions[next].start { fenced = true }
                 next += 1
             }
         }

@@ -8,6 +8,18 @@ enum RuntimeModuleAction: Equatable, Sendable {
     case none
     case start
     case conditionalActivation
+    /// The legacy whole-host facade's DNS Start (decision 0036 keeps that facade's behavior). It is a member like `start` and clears DNS's
+    /// fence once authorized, but it stages and grants only DNS's configured intent and is no new DNS configuration intent. It is never on
+    /// a wire.
+    case configuredStart
+}
+
+/// Why modules stop. Only a `session` Stop of DNS persists a disable. A `facade` Stop, the legacy whole-host stop, fences every module and
+/// keeps DNS's configured intent. `processQuit` does the same and latches, so nothing starts again in this process.
+enum RuntimeStopReason: Equatable, Sendable {
+    case session
+    case facade
+    case processQuit
 }
 
 /// One lifecycle request: an action per module, and the revision each actionable slot was observed at. A nil revision is the host's own
@@ -33,6 +45,9 @@ enum RuntimeLifecycleRefusal: Error, Equatable, Sendable {
     case exhausted
     /// The whole request is stale: this module's revision moved since the caller observed it (decision 0035).
     case stale(ControlModule)
+    /// This module's one pending slot holds a disable save that the request's configured Start may not displace. It is retried once the
+    /// save settles.
+    case busy(ControlModule)
     /// The request asks nothing, or pairs a conditional activation with anything but DNS beside a proxy Start (decision 0036).
     case invalid
 }
@@ -45,6 +60,9 @@ struct RuntimeLifecycleTicket: Equatable, Sendable {
     let actions: PrivateModuleSlots<RuntimeModuleAction>
     /// DNS's revision once this admission was made.
     let dnsRevision: Int
+    /// The latest DNS Start or session Stop admission once this one was made. Unlike `dnsRevision`, another member ending the group does
+    /// not move it, so it orders only DNS's own configured intent against this group's write.
+    let dnsIntentRevision: Int
     /// The `dnsForwarderEnabled` the group's shared write stages, as of its admission.
     let dnsStaged: Bool
 
@@ -57,6 +75,8 @@ struct RuntimeModuleStart: Equatable, Sendable {
     let group: Int
     let priorEnabled: Bool
     let priorFenced: Bool
+    /// Admitted as `configuredStart`: it stages and grants DNS's configured intent rather than an enable.
+    var configured = false
 }
 
 /// The one fixed pending slot of a module. A newer admission on the module replaces it, so the bound is the three modules.
@@ -91,6 +111,9 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     /// DNS's configured `forwarderEnabled`, separate from its runtime permission: the store's adopted value, a session Stop's disable, or
     /// an explicit DNS Start's verified write. A companion activation reads it; it is never a permission by itself.
     private(set) var dnsConfigured: Bool
+    /// The counter value of the latest explicit DNS Start or session DNS Stop: the only admissions that change `dnsConfigured`'s intent.
+    /// `nil` after a DNS Stop at the maximum, which takes no newer value: no ticket holds it, and no admission follows it.
+    private(set) var dnsIntentRevision: Int? = 0
 
     /// - Parameter dnsEnabled: the adopted startup value. At launch it is both DNS's configured intent and its session permission.
     init(counter: Int = 0, dnsEnabled: Bool) {
@@ -110,17 +133,18 @@ struct RuntimeModuleIntents: Equatable, Sendable {
 
     /// The `dnsForwarderEnabled` every runtime write stages: true for a pending explicit DNS Start, so its file holds the enable before its
     /// runtime activation; otherwise the configured intent. A companion projects the configured intent and enables nothing, and a Stop's save
-    /// projects the false its admission set. The permission and the fence stay as they were until `authorize`.
+    /// projects the false its admission set. A facade's `configuredStart` projects the configured intent too. The permission and the fence
+    /// stay as they were until `authorize`.
     var stagedDNSForwarderEnabled: Bool {
-        if case .start = modules.dns.pending { return true }
+        if case .start(let start) = modules.dns.pending, !start.configured { return true }
         return dnsConfigured
     }
 
-    /// Records a verified runtime write's `dnsForwarderEnabled`, staged while DNS's revision was `revision`. It is a saved fact, kept whatever
-    /// the Start's activation does later (decision 0015). A newer DNS admission since the staging wins, so a late write of an older value
-    /// cannot overturn a Stop's disable.
+    /// Records a verified runtime write's `dnsForwarderEnabled`, staged by `ticket`'s group. It is a saved fact, kept whatever the Start's
+    /// activation does later and whichever member ended the group (decision 0015). Only a newer DNS Start or Stop since the staging wins, so
+    /// a late write of an older value cannot overturn a Stop's disable.
     mutating func recordVerifiedDNSWrite(_ enabled: Bool, for ticket: RuntimeLifecycleTicket) {
-        guard modules.dns.revision == ticket.dnsRevision else { return }
+        guard dnsIntentRevision == ticket.dnsIntentRevision else { return }
         dnsConfigured = enabled
     }
 
@@ -134,48 +158,69 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         for module in actionable where request.actions[module] == .conditionalActivation {
             guard module == .dns, request.actions.proxy == .start else { return .failure(.invalid) }
         }
+        for module in actionable where request.actions[module] == .configuredStart {
+            guard module == .dns else { return .failure(.invalid) }
+        }
         guard !terminal else { return .failure(.terminated) }
-        guard counter < Int.max else { return .failure(.exhausted) }
+        guard counter < Int.max, let dnsIntent = dnsIntentRevision else { return .failure(.exhausted) }
         for module in actionable {
             if let expected = request.expectedRevisions[module], expected != modules[module].revision {
                 return .failure(.stale(module))
+            }
+            // A configured Start is no DNS intent, so it may not displace the disable save a session Stop still owes from DNS's one slot.
+            if request.actions[module] == .configuredStart, modules[module].pending.isStopSave {
+                return .failure(.busy(module))
             }
         }
         counter += 1
         let group = counter
         // Only an explicit Start changes a module's control. The companion is recorded in the ticket, and DNS's slot, save and revision stay.
-        for module in actionable where request.actions[module] == .start {
+        for module in actionable where request.actions[module] == .start || request.actions[module] == .configuredStart {
             supersede(module, at: group)
             var intent = modules[module]
-            // A Start that replaces an authorized one not yet settled inherits its prior, so the chain never confirms an unproven start.
-            let prior = intent.authorized
+            // A Start that replaces an authorized one not yet settled inherits its prior and takes the module from it at once: the
+            // unproven permission is withdrawn, and the old Start's late settlement no longer matches, so the chain never confirms it.
+            if let replaced = intent.authorized {
+                intent.authorized = nil
+                intent.enabled = replaced.priorEnabled
+                intent.fenced = replaced.priorFenced
+            }
             intent.pending = .start(RuntimeModuleStart(
                 group: group,
-                priorEnabled: prior?.priorEnabled ?? intent.enabled,
-                priorFenced: prior?.priorFenced ?? intent.fenced
+                priorEnabled: intent.enabled,
+                priorFenced: intent.fenced,
+                configured: request.actions[module] == .configuredStart
             ))
             intent.startedGroup = nil
             intent.revision = group
             modules[module] = intent
         }
+        let intentRevision = request.actions.dns == .start ? group : dnsIntent
+        dnsIntentRevision = intentRevision
         return .success(RuntimeLifecycleTicket(
             group: group,
             actions: request.actions,
             dnsRevision: modules.dns.revision,
+            dnsIntentRevision: intentRevision,
             dnsStaged: stagedDNSForwarderEnabled
         ))
     }
 
-    /// Admits a Stop of `stopped` in one turn: each is fenced and loses its permission at once, before any await. A session Stop of DNS also
-    /// sets its durable intent false and reserves its save. A terminal stop latches, persists no disable, and keeps a DNS save an earlier
-    /// session Stop reserved, since that obligation predates it. At the maximum the counter cannot advance, and the fence holds anyway.
+    /// Admits a Stop of `stopped` in one turn: each is fenced and loses its permission at once, before any await. A `session` Stop of DNS
+    /// also sets its durable intent false and reserves its save. A `facade` Stop persists no disable and keeps a DNS save an earlier session
+    /// Stop reserved, since that obligation predates it; `processQuit` does the same and latches. At the maximum the counter cannot advance,
+    /// and the fence holds anyway.
     @discardableResult
-    mutating func stop(_ stopped: Set<ControlModule>, terminal latch: Bool) -> Int {
-        if counter < Int.max { counter += 1 }
+    mutating func stop(_ stopped: Set<ControlModule>, reason: RuntimeStopReason) -> Int {
+        let advanced = counter < Int.max
+        if advanced { counter += 1 }
         let revision = counter
-        if latch { terminal = true }
+        if reason == .processQuit { terminal = true }
+        // Once Quit has latched, every Stop is terminal for persistence: a late session Stop still fences, but it neither reserves a new
+        // disable save nor drops one owed from before Quit (decision 0015).
+        let persistsDNSStop = reason == .session && !terminal
         for module in ControlModule.allCases where stopped.contains(module) {
-            let keepsSave = latch && module == .dns && modules.dns.pending.isStopSave
+            let keepsSave = !persistsDNSStop && module == .dns && modules.dns.pending.isStopSave
             if !keepsSave { supersede(module, at: revision) }
             var intent = modules[module]
             intent.enabled = false
@@ -183,8 +228,9 @@ struct RuntimeModuleIntents: Equatable, Sendable {
             intent.authorized = nil
             intent.startedGroup = nil
             intent.revision = revision
-            if module == .dns, !latch {
+            if module == .dns, persistsDNSStop {
                 dnsConfigured = false
+                dnsIntentRevision = advanced ? revision : nil
                 intent.pending = .stopSave(revision: revision)
             }
             modules[module] = intent
@@ -239,10 +285,21 @@ struct RuntimeModuleIntents: Equatable, Sendable {
             modules[module].pending = nil
             modules[module].authorized = start
             modules[module].startedGroup = ticket.group
-            modules[module].enabled = true
+            // A facade's configured Start clears the fence like any Start, but grants only the configured intent.
+            modules[module].enabled = start.configured ? dnsConfigured : true
             modules[module].fenced = false
         }
         return members
+    }
+
+    /// Whether `ticket`'s group is still the latest admission and still holds a member, pending, authorized or started. Any newer Start
+    /// or Stop, a Stop at the maximum included, or a failed settle ends it.
+    func holdsGroup(_ ticket: RuntimeLifecycleTicket) -> Bool {
+        guard !terminal, counter == ticket.group else { return false }
+        if isPending(ticket) { return true }
+        return ControlModule.allCases.contains {
+            modules[$0].authorized?.group == ticket.group || modules[$0].startedGroup == ticket.group
+        }
     }
 
     /// Ends a held or stale ticket before authorization: its members keep the permission and fence they had. Nothing ran, so the counter
@@ -290,18 +347,21 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         modules.dns.pending == .stopSave(revision: revision)
     }
 
+    /// Ends the Stop's disable save once its write verified. A failed or unverified write leaves it owed.
     mutating func finishStopSave(revision: Int) {
         if stopSaveIsCurrent(revision: revision) { modules.dns.pending = nil }
     }
 
     // MARK: - Observation
 
-    /// A reload's adopted `forwarderEnabled`. It is a durable observation, not a permission: it can lower DNS's permission and never raise
-    /// it. A fenced DNS, or one with an explicit Start in flight, keeps its own intent.
+    /// A reload's adopted `forwarderEnabled`. It is a durable fact, not a permission: it becomes the configured intent, can lower DNS's
+    /// permission and never raises it, and the fence stays (decisions 0027 and 0032). A pending Start, an authorized one, or a Stop's disable
+    /// save still owed keeps DNS's own intent; that save is owed until its write verifies. A facade's pending configured Start is no DNS
+    /// intent, so the fact is adopted under it, and a group that staged the older value is no longer pending (decision 0035).
     mutating func observeDurableDNS(_ enabled: Bool) {
         let dns = modules.dns
-        guard !dns.fenced, dns.authorized == nil else { return }
-        guard dns.pending == nil else { return }
+        let configuredOnly = if case .start(let start) = dns.pending { start.configured } else { false }
+        guard dns.pending == nil || configuredOnly, dns.authorized == nil else { return }
         dnsConfigured = enabled
         modules.dns.enabled = dns.enabled && enabled
     }

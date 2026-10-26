@@ -58,6 +58,10 @@ the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-
 host-checked conditional DNS activation is selected ([0036](./docs/decisions/0036-conditional-dns-activation.md)).
 Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
 Stop/status/private-read adapter work remains independent.
+The new [saved-command input-binding review](./docs/design-saved-runtime-input-binding.md)
+needs an owner choice: when a value-free Start/Restart selects its saved pair.
+Private frozen editor requests remain selected; the current local saved-command
+prototype is unmerged and does not select its behavior.
 
 Supporting evidence stays with its owning slice:
 [client/service](./docs/runtime-client-stage1-inventory.md),

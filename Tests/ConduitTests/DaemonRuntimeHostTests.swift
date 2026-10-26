@@ -1824,21 +1824,30 @@ final class DaemonRuntimeHostTests: XCTestCase {
     }
 
     /// The `ConduitDaemon --exit-after-ready --start-runtime` sequence, run through the FakeMachine harness rather
-    /// than the executable. The non-terminal stop only submits the stopped state, so the explicit flush at the
-    /// process boundary must be what confirms it: the readiness flush happened before the stop.
+    /// than the executable. It is the process quit: the shutdown latches, never calls the terminal exit, and its own
+    /// flush confirms the stopped state, since the readiness flush happened before the stop.
     func testExitAfterReadySequenceConfirmsTheStoppedStateInTheFile() async throws {
         var config = GenericDefaults.shared.makeConfig()
         config.localPort = 0
         config.dnsForwarderPort = 0
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
         let snapshotFile = harness.environment.snapshotFile
+        var exits = 0
+        harness.terminalExit = { exits += 1 }
         let host = try await harness.makeHost()
         await host.awaitLaunchRecovery()
 
         try await host.startRuntime()
         await host.markReady(mode: "runtime-started")
         await host.flushEvents()
-        await host.stopRuntime()
+        await host.shutdown()
+        XCTAssertEqual(exits, 0, "the shutdown returns and never exits")
+        do {
+            try await host.startRuntime()
+            XCTFail("no Start runs after the process quit")
+        } catch let refusal as RuntimeConfigurationWorkflow.StartRefusal {
+            XCTAssertEqual(refusal, .terminated)
+        }
         // Observer deliveries from earlier changes are joined first, so the final state is the one compared.
         await host.deliveries.drain()
         await host.flushEvents()

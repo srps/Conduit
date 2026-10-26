@@ -566,12 +566,15 @@ package final class RuntimeHost {
         emitConfigurationEvents(preparation.events)
         switch preparation.preparation {
         case .superseded:
+            workflow.retire(ticket)
             return
         case .held:
+            workflow.retire(ticket)
             throw RuntimeConfigurationWorkflow.StartRefusal.held
         case .ready(let verified):
-            // A `true` answer checked the admission last, with no suspension since.
+            // A `true` answer authorized the admission, with no suspension since its last check.
             guard await pushVerifiedInput(verified, ticket: ticket) else {
+                workflow.retire(ticket)
                 emitConfigurationEvents(workflow.supersession(of: ticket))
                 return
             }
@@ -753,6 +756,7 @@ package final class RuntimeHost {
         startLocationObserver()
         networkPathObserver.start()
         vpnStatusMonitor.start()
+        workflow.finishStart(ticket, succeeded: true)
         runtimeStarted = true
         logger.log(.notice, "Daemon runtime started.", category: .general)
         // Submitted, not awaited: a diagnostic write never holds the lifecycle lane. Readiness and the terminal
@@ -779,22 +783,40 @@ package final class RuntimeHost {
     /// teardown, except, again, the one on the way to `exit`, which must reach
     /// it: it supersedes the one in flight, which then stops at its next step.
     package func stopRuntime(exitAfterStop: Bool = false) async {
-        // The fence, and for a terminal stop the latch, is established at admission, before recovery is awaited (decision 0015).
+        if exitAfterStop {
+            await shutdown()
+            terminalExit()
+            return
+        }
+        // The fence is established at admission, before recovery is awaited (decision 0015). The legacy facade Stop persists no DNS disable.
         pendingAdmissions += 1
         defer { pendingAdmissions -= 1 }
-        let stop = workflow.admitStop(terminal: exitAfterStop)
+        let stop = workflow.admitStop()
         stoppedEffectsJoin?.finish(.superseded)
         await awaitLaunchRecovery()
-        // A newer Start or Stop admitted during recovery owns the surfaces now, so this Stop does nothing more. A terminal stop always
-        // finishes. The check runs before the lane is taken, so no suspension separates it from the admission.
-        guard exitAfterStop || workflow.isLatest(stop) else { return }
-        guard let token = await admit(.stop, .runtimeStop, coalescing: !exitAfterStop) else { return }
+        // A newer Start or Stop admitted during recovery owns the surfaces now, so this Stop does nothing more. The check runs before the
+        // lane is taken, so no suspension separates it from the admission.
+        guard workflow.isLatest(stop) else { return }
+        guard let token = await admit(.stop, .runtimeStop, coalescing: true) else { return }
         defer { runtimeLane.end(token) }
-        await runStopCleanup(token: token, operation: .runtimeStop, terminal: exitAfterStop)
-        if exitAfterStop {
-            await flushEvents()
-            terminalExit()
+        await runStopCleanup(token: token, operation: .runtimeStop, terminal: false)
+    }
+
+    /// The process quit, and the one terminal teardown: it latches at admission, so no Start runs again in this process, persists no DNS
+    /// disable (the saved launch intent stays), always finishes its cleanup, and confirms the diagnostic flush. It returns and never exits;
+    /// a caller that ends the process calls `terminalExit` after it, as `stopRuntime(exitAfterStop: true)` does.
+    package func shutdown() async {
+        pendingAdmissions += 1
+        defer { pendingAdmissions -= 1 }
+        workflow.admitStop(terminal: true)
+        stoppedEffectsJoin?.finish(.superseded)
+        await awaitLaunchRecovery()
+        // It supersedes a stop in flight rather than joining it, so its own cleanup reaches the end.
+        if let token = await admit(.stop, .runtimeStop, coalescing: false) {
+            await runStopCleanup(token: token, operation: .runtimeStop, terminal: true)
+            runtimeLane.end(token)
         }
+        await flushEvents()
     }
 
     /// The one physical teardown, run under `token` by whichever stop or failed start holds the lane. It waits only for effects already in
@@ -1059,13 +1081,17 @@ package final class RuntimeHost {
         guard workflow.isCurrent(ticket) else { return false }
         // A reload that applied while this push waited replaced its request with a newer verified input, and set the host view itself. That
         // input is the one to start, so this Start leaves it in place.
-        guard configGeneration == reloads else { return true }
-        // Only `adoptHostView` writes the view, and a reload bumps the generation checked above, so the view is still what this Start
-        // found. A Start counts only when it changes the accepted pair: one after a held reload, or after an external edit with none.
-        if ConfigDiff(old: config, new: verified.runtime).inputChanged || platformConfig != verified.platform {
+        // Only `adoptHostView` writes the view, and a reload bumps the generation checked below, so the view is still what this Start
+        // found. A Start counts only when it changes the accepted pair, which is after a held reload: the reload verified the observation
+        // the store adopted, and this explicit Start committed it. An external edit with no reload is never adopted here: its baseline
+        // conflict holds the Start (decision 0027). A reload that applied while this push waited set the view itself, and that newer
+        // verified input is the one to start.
+        if configGeneration == reloads,
+           ConfigDiff(old: config, new: verified.runtime).inputChanged || platformConfig != verified.platform {
             adoptHostView(runtime: verified.runtime, platform: verified.platform)
         }
-        return true
+        // The pair is adopted with no suspension since the check above, so the members' fences clear now (decision 0035).
+        return workflow.authorize(ticket)
     }
 
     /// The one writer of the accepted host view after `open`: the runtime and platform inputs status reports, the VPN monitor's
