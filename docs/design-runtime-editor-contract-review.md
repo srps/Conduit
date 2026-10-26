@@ -1,9 +1,10 @@
 # Private editor and client integration: next-cut review
 
-Status: proposal for review, 2026-10-26. No new owner decision or implementation
-is implied. The shared-host workflow slice is verified separately; AppState
-still owns its runtime and writers. Accepted decisions 0014/0015/0018/0025/0027/
-0031/0032 govern this proposal. The production daemon socket remains later work.
+Status: headless contract implemented; host/client/draft integration remains under
+review, 2026-10-26. The owner selected the private reply ceiling in 0034. The shared-host
+workflow and private codec have separate verification; AppState still owns its runtime
+and writers. Accepted decisions 0014/0015/0018/0025/0027/0031/0032/0034 govern the work.
+No production daemon socket or AppState activation is implied.
 
 ## One owner, one client path
 
@@ -68,11 +69,12 @@ Stop fence must not implicitly re-enable a module. Map the interactive per-modul
 commands to the already selected per-module intent/fence policy; the current
 whole-host process-start facade is not the final interactive API.
 
-## Candidate private editor shapes
+## Headless private editor contract
 
-These names are candidates for review, not an API. They live beside the request DTOs in
-`ConduitShared/PrivateConfiguration`. They are non-`Codable`, and only the private codec reads or writes them. Kernel mapping
-stays in `ProxyControlBridge`.
+The values live beside the request DTOs in `ConduitShared/PrivateConfiguration`. Private values remain non-`Codable`,
+with explicit private encoding/decoding and redacted reflection. Kernel mapping stays in `ProxyControlBridge`.
+The codec and matchers are implemented; a real host memory provider, framed client methods and writer adoption remain
+integration work. DTO construction alone does not establish an owner turn or persistence authority.
 
 **Baseline.** `PrivateBaseline` holds a store namespace UUID, a component (runtime, platform or preferences) and a
 `UInt64` version. It is the wire form of `ConfigurationBaselineToken`, which only the store mints (its initializer is
@@ -83,7 +85,7 @@ A version is a decimal lexeme of at most 20 bytes. A codec test pins a `UInt64.m
 
 **Observation (private read).** It is captured from memory in one owner turn, with no disk I/O:
 
-- `hostIncarnation`, the owner generation and the terminal flag.
+- The terminal flag. The host incarnation belongs to the correlated reply envelope; no unused whole-host owner generation is added.
 - The existing `PrivateRuntimeConfiguration` and `PrivatePlatformConfiguration`, a new `PrivatePreferences` whose browser
   URL is a `PrivateURLValue`, and the stored `launchAtLogin` as read-only administrative state.
 - One state per component:
@@ -106,7 +108,7 @@ A version is a decimal lexeme of at most 20 bytes. A codec test pins a `UInt64.m
 - Three module intents (module, `ControlLifecycleRevision`, enabled, fenced), from the selected per-module intent. The
   current whole-host generation does not substitute for it.
 
-**Runtime/platform update.** The existing `PrivateConfigurationRequest`, revised:
+**Runtime/platform update.** The headless `PrivateConfigurationRequest` now carries:
 
 - Two exact baselines replace the Int `expectedConfigRevision` and `expectedPlatformRevision`.
 - Explicit per-module lifecycle intent replaces the whole-host `expectedOwnerGeneration`. Each module's intent names its
@@ -126,12 +128,26 @@ A version is a decimal lexeme of at most 20 bytes. A codec test pins a `UInt64.m
 - The platform values still exclude `launchAtLogin`. The host fills that value from the store's current platform value,
   under the same platform baseline, so an old draft cannot restore it.
 
-**Preferences update and launch-at-login administration.** Two separate small private requests, each under its own single
+**Preferences update and launch-at-login administration (not implemented).** Two small private operations will use their own single
 baseline: preferences, or platform for the administrative flag. Neither carries lifecycle intent or applies anything.
 The administrative operation needs a platform-only store commit. Today's coupled commit holds an authorized platform write
 behind a latched runtime file (`heldBehindRuntime`).
 
-**Causal receipt.** It carries:
+Before exposing either independent sidecar operation, verify legacy fallback dependencies. A missing sidecar can take
+its values from the runtime file: after another client's reload changes those values, the sidecar can still be absent.
+The current store advances a component version only when that file's observed baseline identity changes. Prove that an
+older preference/platform draft cannot retain a matching token after its fallback values changed, and that creating a
+sidecar cannot shadow externally edited legacy values without checking the backing source. This is a store/model
+integration gate under the selected conflict policy, not permission for another writer or a snapshot registry.
+
+**Causal receipt (deferred until workflow integration).** Admission and settlement are separate. An update currently
+receives `ControlAdmission` in its correlated private reply; no codec-only success is a saved or applied outcome.
+
+The final receipt must come from the workflow that merges current lifecycle intent into a save. Today DNS lifecycle owns
+`dns.forwarderEnabled`; proxy and tunnels have no equivalent persisted global enable bit, and tunnel-definition enabled
+flags remain user settings. Do not invent new persisted flags or let a receipt mark an older draft clean after saving
+different canonical values. Before the affected integration, specify actual committed lifecycle values and how the client
+rebases them while retaining edits made after submission. The receipt obligations are:
 
 - `requestID`, client-minted and the one causal key. The client maps it to its submitted draft locally, so no separate
   draft identity crosses the wire.
@@ -140,17 +156,28 @@ behind a latched runtime file (`heldBehindRuntime`).
   (`noBaseline`, `baselineMismatch`, `stagingRefused`, `preReadFailed`, `replacementRefused`, `heldBehindPlatform`,
   `heldBehindRuntime`, `preservationHeld`, `versionExhausted`, `superseded` and the unknown read-back reasons). It names
   the new baseline only for `persisted` or `unchanged`.
-- The apply or start outcome, per module.
+- The actual committed lifecycle values needed for causal draft rebasing, and an apply/start outcome per module; failures carry a closed `ControlFailureCode`.
 
 A busy store slot is a capacity outcome, distinct from a persistence failure. The receipt is secret-free, so ordinary
 request and operation lookup can carry the same metadata after a lost reply, without retaining any private body. Only this
 receipt advances the matching draft's baselines.
 
-**Codec reuse.** The codec stays one header grammar, with a reply kind byte beside `Q` and a separately named reply cap.
+**Read and reply.** `G` carries `PrivateEditorReadRequest`. `R` carries `PrivateEditorReply` with request correlation,
+host incarnation and one answer: update admission, read observation or read refusal. Matchers refuse an unrelated request,
+an unpaired answer, or an unexpected incarnation; only an explicit changed-incarnation refusal may name a different one.
+No save receipt or mutation retry is hidden inside an observation read.
+
+**Codec reuse.** One header grammar serves `Q`, `G` and `R`, with separate request and reply cap names.
 The reader takes the expected kind and its cap, and it still refuses an oversize declared length before any body byte. The
 same two-pass emitter writes replies, with `writeRuntime` and `writePlatform` unchanged, so oversize refusal still precedes
 allocation. The same table-driven scanner, with new root tables and the existing wire mirrors, decodes them. There is no
-generic JSON value tree, no second parser and no `Codable` on private values.
+generic JSON value tree, no second parser and no `Codable` on private values. Tiny secret-free `ControlAdmission` records reuse
+their own sorted-key `Codable`; the private decoder verifies the exact member set against that canonical encoding, rather
+than duplicating variant rules. This generic encoding path cannot receive private values.
+
+The bridge retains one field mapping in each direction. Its observation preflight reuses `writeObservation` with a counting
+sink to reject non-finite numbers and resource violations. That counts only the embedded value; the actual correlated reply
+encoder owns the full eight-MiB frame check. No dummy request or envelope identity is constructed for validation.
 
 **Migration obligations, not owner policy and not shipped defects:**
 
@@ -159,9 +186,8 @@ generic JSON value tree, no second parser and no `Codable` on private values.
 - Propagate the client's actual `requestID` into the store context on the new client path.
   `RuntimeConfigurationWorkflow.context(generation:)` mints a request ID per store call. That is correct for today's
   process-start facade, which has no client request.
-- Replace the request's incompatible revision fields before integration. The unadopted request carries Int-based
-  `expectedConfigRevision` and `expectedPlatformRevision`, which cannot represent an exact store baseline (namespace,
-  component and `UInt64` version). No production converter narrows store versions to Int today.
+- The headless request now carries exact component baselines. Integrate it by comparing those values inside the sole
+  store; do not convert the namespace/version authority into an Int ordinal or mint a token in the bridge.
 
 ## Private channel concurrency
 
@@ -170,15 +196,16 @@ reserved. Implement that as its own transport lane, with capacity one and its ow
 the ordinary lanes' two-request-plus-two-reply charge and the per-module Stop lanes stay unchanged.
 
 An owner turn only captures copy-on-write values, tokens and intents, or admits. Encoding, reading and decoding run off the
-main actor and off `PlatformWork`, so neither the owner nor helper and Stop cleanup effects queue behind a codec pass. In
-the request probe, reading one 7.38 MB frame took about 0.94 s and the two encode passes about 0.22 s. The first
-correction to measure is a batched body copy inside the existing reader, rather than a new `SecretBytes` API. Actual-host
-Stop/status latency during transfer and store staging is service-profile work.
+main actor and off `PlatformWork`, so neither the owner nor helper and Stop cleanup effects queue behind a codec pass. The
+[actual reply experiment](experiments/private-editor-codec/README.md) measures the implemented batched body copy: for a
+7,487,875-byte frame, repeat read median fell from 925.7 ms to 0.86 ms with unchanged bytes, budgets and round trips. It
+shows no established memory change. Encoding remains the largest codec step. Actual-host Stop/status latency during
+transfer and store staging is service-profile work; the 16 KiB input budget does not bound growth/completion-copy work.
 
 ## Before the AppState switch
 
-1. Select the affected limits below from measurements; finalize the concrete
-   private observation/update/reply values with codec and compatibility fixtures.
+1. Select the production service profile below from actual-adapter measurements. The private observation/update/reply
+   codec and fixtures are implemented separately; settlement receipts remain with workflow integration.
 2. Connect the actual host to the existing service/client, implement private
    editor operations and consolidate administrative/preference saves in the sole
    store. Inventory every AppState presentation/preflight read and command.
@@ -224,36 +251,18 @@ not a substitute for the selected per-module interactive contract.
   [0034](decisions/0034-private-editor-reply-frame-cap.md). The request cap stays 8 MiB, and ordinary reply/stream
   frames stay 64 KiB.
 
-  The separately named private reply frame cap is 8,388,608 B, equal to the request cap. Evidence
-  from the [reply sizing experiment](experiments/private-editor-reply/README.md):
+  The cap includes the complete header, envelope and terminator. The [actual-codec experiment](experiments/private-editor-codec/README.md)
+  records a 7,487,875 B widest-string/count observation frame and a conservative numeric allowance of 7,499,714 B,
+  leaving 888,894 B. The allowance is fixture-specific, not a universal bound on future fields or schema branches.
+  New bounded fields require renewed sizing checks.
 
-  - The actual request frame for the maximum storable shape is 7,382,956 B, and the conservative request bound is
-    7,400,547 B.
-  - The estimated reply bound is 7,523,543 B, with 865,065 B (10.3%) of headroom. It adds the widest preferences and a
-    lexeme-charged allowance for the executed mirror's metadata: three component states, three module intents and one
-    receipt.
-  - That bound covers the executed mirror, not the finished API. The mirror's receipt has one aggregate apply outcome and
-    reason, plus a draft identity. The candidate receipt above has an apply or start outcome per module, and no draft
-    identity on the wire. Those per-module result members, and any other bounded member the final shape adds, consume the
-    865,065 B headroom. The actual codec must measure them.
-  - Alternatives:
-    - 4 MiB is below the actual demonstrated loadable shape, a 7,382,956 B request-shaped body before any reply metadata,
-      so it would refuse a configuration the store can load.
-    - 8 MiB fits the conservative bound.
-    - 16 MiB has no measured need and increases the worst-case reply reservation. The 8 MiB request terms of the custody
-      charge are unchanged.
-    - A cap between the demonstrated frame and the bound is not shown to make anything unobservable. The bound is
-      conservative, not a demonstrated shape.
+  Release lifetime checks held owner values and a separate client draft throughout encode/read/decode. Batching body
+  copies reduced the measured repeat read median from 925.7 ms to 0.86 ms with no established memory change. Neither
+  measurement proves real-host Stop/status responsiveness, which remains an adoption gate.
 
-  The estimate comes from a mirror, not a reply codec. The request-path memory figures are not reply or whole-host
-  figures. The dominant bytes come from the production writer
-  and are measured. The mirror's metadata allowance uses 2.8% of the headroom.
-
-  Adoption requires the actual reply codec to show, for the maximum observation:
-
-  - its measured size, with exact-limit and one-over refusal before allocation;
-  - release lifetimes with host-retained and client-held values in one process;
-  - Stop/status latency during transfer.
+  The [decision](decisions/0034-private-editor-reply-frame-cap.md) preserves the smaller/split/larger alternatives and
+  the [historical mirror](experiments/private-editor-reply/README.md) that informed the owner choice. The actual codec
+  measurements supersede that mirror for the implemented observation shape; settlement receipts remain a separate shape.
 - **Production service profile:** remaining queue, retained outcome/replay,
   subscriber, per-turn work, deadline and shutdown values are unselected. The
   existing coherent candidate is test-only; validate the actual host adapter
@@ -264,7 +273,7 @@ not a substitute for the selected per-module interactive contract.
   justifies silently introducing independent effect groups or blocking an
   otherwise behavior-preserving host migration.
 
-The candidate shapes above are review input; final type names and the field inventory land with the codec and its
-compatibility fixtures. Implementations
+The implemented headless shapes and their fixtures precede host adoption. Receipt, preference/admin operation and
+client-draft integration details remain review input. Implementations
 must use the selected module boundaries and private channel, with no registry,
 parallel writer, public test hook or new dependency.

@@ -69,8 +69,8 @@ from codec-only evidence.
 
 One reply remains a coherent observation and exercises the future daemon boundary
 through the same codec in memory. The ceiling is encoded bytes, not running-app
-RAM. Current request-codec process peaks are roughly 41–45 MB for the pathological
-maximum fixture; they do not measure reply decoding, coexistence with a live host
+RAM. The actual reply-codec process peaks are roughly 41–46 MB for the pathological
+maximum fixture, with owner values and a separate client draft held throughout. They do not measure a live host
 or physical apply. Preserve explicit admission-unknown and dirty-draft semantics
 when integrating this channel.
 
@@ -103,11 +103,13 @@ checks exact UInt64 preconditions and the scanner's own overflow refusal.
 [`ScenarioPrivateEditorCodec.swift`](../../Sources/pm-sim/ScenarioPrivateEditorCodec.swift)
 exercises the actual codec with synthetic values and no machine effects.
 
-Focused verification: 157 tests, event/decision checks and both private codec
-scenarios passed. The initial size-calibration assertion was replaced with its
-measured value; it was not a runtime defect. Full workflow, independent reply
-review, Release lifetime/copy measurements and actual-host service adoption are
-still due. Causal save receipts remain with the workflow that implements canonical
+Focused verification: 167 tests, event/decision checks and both private codec
+scenarios passed. Independent subscription-backed reviews returned READY, and four executed guard
+mutations failed their intended assertions before byte-exact restoration and passing checks. The
+[actual Release experiment](../experiments/private-editor-codec/README.md) measures reply sizing,
+owner/draft lifetimes and batched reading. Its conservative numeric allowance is 7,499,714 bytes.
+The [verification checkpoint](../verification-private-editor-codec-2026-10-26.md) records scope and limits.
+Full workflow and actual-host service adoption remain due. Causal save receipts remain with the workflow that implements canonical
 intent merging; admission is kept separate from settlement.
 
 The [historical experiment](../experiments/private-editor-reply/README.md) supports
@@ -115,8 +117,8 @@ the ceiling choice and records its source hash, commands and independent rerun.
 It does not establish the actual reply codec's allocation costs or a production
 service profile.
 
-Does not prove: actual reply size or allocation bounds, host/client transfer
-fairness, complete sole-writer coverage, AppState convergence, installed-app
+Does not prove: universal allocation bounds, host/client transfer fairness,
+complete sole-writer coverage, AppState convergence, installed-app
 behavior or release readiness.
 
 ## Open questions

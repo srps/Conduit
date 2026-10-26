@@ -33,14 +33,14 @@ the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history.
 | Contracts and mechanisms | Typed lifecycle values, framed RuntimeClient, bounded admission/observation/replay service, verified-store core and bounded file readers are merged. | Consume them through the real host/client path; broader event families migrate with their owners. |
 | Ownership and isolation seams | App/daemon startup takes root authority before migration/recovery; fixed writable names, diagnostic protection and explicit fake/production effects are implemented. PR243 adds actual-host pm-sim coverage. | The store/workflow now consumes that authority; interactive client adoption remains. |
 | Shared runtime convergence | The host consumes the sole store/workflow, with typed configuration decisions, an independent model and actual-host lifecycle witnesses. | Verify DNS→tunnels→proxy parity, then switch AppState once and delete replaced runtime/save paths (0031). |
-| Client, isolation and release | Display bounds, the 64 KiB ordinary reply/stream ceiling and the 8 MiB private editor reply ceiling (0034) are selected. | Implement and measure the private editor/client path; select the remaining production profile, move the whole control cluster to RuntimeActor, and validate the release. |
+| Client, isolation and release | Display bounds, the 64 KiB ordinary reply/stream ceiling and the 8 MiB private editor reply ceiling (0034) are selected. The headless private editor codec has sizing/lifetime evidence; live host/client adoption remains. | Integrate and measure the private editor/client path; select the remaining production profile, move the whole control cluster to RuntimeActor, and validate the release. |
 
 Current checkpoint: the shared host consumes the sole
 ConfigurationStore/RuntimeConfigurationWorkflow. Next is the actual service/client
 adapter and [private editor contract](./docs/design-runtime-editor-contract-review.md). [0032](./docs/decisions/0032-explicit-reload-and-reconcile.md) selects
 read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
 mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
-[0034](./docs/decisions/0034-private-editor-reply-frame-cap.md) selects complete private editor replies at 8 MiB; actual-codec sizing, allocation lifetimes and real-adapter Stop/status responsiveness remain adoption gates. Service-profile defaults remain unselected and must not inherit experimental values.
+[0034](./docs/decisions/0034-private-editor-reply-frame-cap.md) selects complete private editor replies at 8 MiB. [Actual-codec sizing and allocation-lifetime measurements](./docs/experiments/private-editor-codec/README.md) cover the headless codec; real-adapter Stop/status responsiveness remains an adoption gate. Service-profile defaults remain unselected and must not inherit experimental values.
 
 Latest verified slice: shared-host workflow adoption after
 [PR243](https://github.com/srps/Conduit/pull/243). All 40 required local workflow
