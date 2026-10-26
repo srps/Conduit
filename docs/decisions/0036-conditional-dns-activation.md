@@ -69,8 +69,8 @@ host intent instead of the editor's DNS bit. Partial physical outcomes remain vi
 
 Exercise real workflow/host/client adapters over explicit fakes: enabled DNS stopped/running/starting,
 disabled or fenced DNS; stale proxy/DNS revisions before admission; Stop at each suspension; failed
-DNS bind and machine restoration; failed proxy Start; verified-input holds; no automatic retry or fence
-clear. Assert both entries use one primitive and one verified pair. Extend independent bounded models,
+DNS bind and machine restoration; failed proxy Start; verified-input holds. Assert both entries use one primitive and one verified pair. Do not automatically replay a held explicit
+Start or clear a fence; conditional activation does not revoke prior enabled intent on failure. Extend independent bounded models,
 execute meaningful guard mutations and add actual-host pm-sim coverage. Renew request/reply sizing.
 
 ## Implementation evidence
