@@ -60,3 +60,4 @@ Each record carries three statuses, because merged does not mean it works:
 | [0034](0034-private-editor-reply-frame-cap.md) | Complete private editor replies capped at eight MiB | accepted | partial | none |
 | [0035](0035-whole-request-lifecycle-validation.md) | Validate combined editor lifecycle intent as one request | accepted | planned | none |
 | [0036](0036-conditional-dns-activation.md) | Explicit host-checked conditional DNS activation | accepted | planned | none |
+| [0037](0037-saved-command-preparation-capture.md) | Capture saved command input once at preparation | accepted | planned | none |

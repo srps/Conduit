@@ -42,26 +42,23 @@ read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
 mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
 [0034](./docs/decisions/0034-private-editor-reply-frame-cap.md) selects complete private editor replies at 8 MiB. [Actual-codec sizing and allocation-lifetime measurements](./docs/experiments/private-editor-codec/README.md) cover the headless codec; real-adapter Stop/status responsiveness remains an adoption gate. Service-profile defaults remain unselected and must not inherit experimental values.
 
-Latest merged verified slice: [PR248](https://github.com/srps/Conduit/pull/248), resolving byte-distinct
-runtime intent through one shared adoption predicate and byte-aware PAC/credential cache comparisons.
-All required local workflow checks and exact-head hosted Swift/CodeQL passed. The final full Swift suite
-passed 3,449 tests with four documented skips; all 103 simulator records and perf passed. Eleven actual
-guard mutations have [replay patches and source identity](./docs/experiments/runtime-intent-guards/README.md).
-Independent subscription-backed Claude reviews and the
-[verification record](./docs/verification-byte-exact-runtime-intent-2026-10-26.md) distinguish the two local
-checkpoints and unproven diagnostic-flush cause (#47). Devin's optional review was skipped for expired
-credits and is not approval evidence. PR247's source-authority correction and PR245's private codec are
-also merged. These changes do not activate AppState or create another writer.
+Latest merged verified slice: [PR249](https://github.com/srps/Conduit/pull/249),
+fixing final diagnostic marker confirmation beside a retired timer. All41local
+workflow checks and exact-head hosted Swift/CodeQL passed: 3,459 tests (four skips),
+103 simulator records and perf. Three actual guard mutations and independent
+subscription-backed reviews are recorded in the [verification](./docs/verification-diagnostic-marker-drain-2026-10-26.md).
+PR248's byte-aware adoption/cache correction and11replayable guards, PR247's source
+authority correction and PR245's private codec are also merged.
 
 Interactive policies are selected in the [reviewed admission alternatives](./docs/design-runtime-editor-admission-options.md):
 the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-request-lifecycle-validation.md));
 host-checked conditional DNS activation is selected ([0036](./docs/decisions/0036-conditional-dns-activation.md)).
 Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
 Stop/status/private-read adapter work remains independent.
-The new [saved-command input-binding review](./docs/design-saved-runtime-input-binding.md)
-needs an owner choice: when a value-free Start/Restart selects its saved pair.
-Private frozen editor requests remain selected; the current local saved-command
-prototype is unmerged and does not select its behavior.
+Preparation-time capture is selected in [0037](./docs/decisions/0037-saved-command-preparation-capture.md).
+Replace the admission-pinned prototype, complete actual shared module/client
+ownership, then activate AppState once and delete its old runtime/save paths.
+Use one store/load pipeline; no compatibility mode matrix or rebind loop.
 
 Supporting evidence stays with its owning slice:
 [client/service](./docs/runtime-client-stage1-inventory.md),

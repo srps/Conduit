@@ -1,11 +1,14 @@
 # Saved-command input binding: owner review
 
-Status: unselected. Claude Code reviewed this through the owner's claude.ai Max
-subscription on 2026-10-26. No new ADR or implementation of option A is authorized
-by this draft. The current local integration contains an explicitly unselected
-option-B prototype; it is not merged or activated in AppState.
+Status: option A selected by the owner on2026-10-26, recorded in
+[0037](decisions/0037-saved-command-preparation-capture.md) and issue186.
+Claude Code reviewed the alternatives through the owner's claude.ai Max subscription.
+Replace the unmerged option-B prototype; do not keep a compatibility mode.
+The owner directed finishing the shared owner and deleting replaced paths, with
+one cohesive configuration store/load implementation and only material architecture
+questions. The comparison below records the alternatives, not runtime modes.
 
-## The missing choice
+## Scope of the choice
 
 Private editor Start submits its frozen values and exact baselines. That is
 selected in 0035 and remains unchanged. A menu Restart or the daemon's whole-host
@@ -63,11 +66,11 @@ primitive. A prepared operation carries its lifecycle ticket, verified pair and
 its validity token. Values stay off ordinary frames; the private request remains
 one complete request. This is not authority for a second save path, independent
 module config baselines, generic mode flags, automatic replay or new shipping
-profile defaults. API names remain implementation details after the owner chooses.
+profile defaults. API names are implementation details under the selected rule.
 
 The prototype's test `testAFacadeStartNeverWritesOverAReloadObservedDNSValue`
 currently expects option B's supersession before preparation. Its no-overwrite
-assertion applies to all choices. Its held expectation is not an owner decision.
+assertion applies to all choices. Its admission-pinned expectation must be replaced by preparation-time capture.
 A superseded legacy `startRuntime` must also stop appearing as successful merely
 because it returned Void: provide a typed refusal/outcome and derived event under
 all choices. Three host lanes, DNS bind/Stop ordering, the actual service adapter
