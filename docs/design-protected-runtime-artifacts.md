@@ -1,6 +1,6 @@
 # Protected runtime artifacts: implementation checkpoint
 
-Status: agreed implementation API, reviewed with Claude Code through the owner’s claude.ai Max subscription. Partly implemented: the snapshot writer, the shared drain waiter and the diagnostic phase are in source (see the checkpoint at the end); log rotation and startup adoption are not. This applies the existing diagnostic-protection policy in decisions 0020/0028 and issue [233](https://github.com/srps/Conduit/issues/233); the owner has separately selected fixed writable filenames in 0028; no snapshot-size policy is selected here.
+Status: agreed implementation API, reviewed with Claude Code through the owner’s claude.ai Max subscription. Snapshot/record/log protection and startup authority are implemented. The dated checkpoints below retain their original scope; the 2026-10-26 diagnostic-waiter correction and its verification status are recorded separately below. This applies the existing diagnostic-protection policy in decisions 0020/0028 and issue [233](https://github.com/srps/Conduit/issues/233); the owner has separately selected fixed writable filenames in 0028; no snapshot-size policy is selected here.
 
 ## Confirmed failure
 
@@ -31,6 +31,12 @@ Use deterministic held-worker tests for coalescing, one scheduled drain, refusal
 Rotating logs are a separate focused follow-up: protect the active file and every rotation source/destination plus the opened descriptor, attach the canonical event log before opening, and stop retrying a latched refusal. Updater metadata and legacy DNS import remain administrative/recovery owners; they are not relabeled as diagnostics.
 
 Startup lease adoption follows protection: acquire off the owner before migration/recovery, use resolved authoritative paths everywhere, retain one authority at the executable boundary until actual process exit, and refuse busy before constructing a host. Store adoption must replace the legacy migration writer directly using the shared frozen loader and verified commits, rather than add a second observation/write path. Pending migration rewrites need an explicit internal fact; AppState receives a client through staged shared-host composition and never gains a concrete store API.
+
+## Diagnostic waiter correction (2026-10-26)
+
+The one-timer policy described in the historical checkpoint can refuse the phase's extra marker wait after its first wait already drained: the cancelled timer body may still own its slot. Deterministic early/late `DiagnosticFlush` witnesses reproduce this mechanism. The correction keeps one logical caller and one outstanding notify, with a fixed maximum of two live timer bodies for the events writer only. Other writers retain one. Timeout/cancel notify custody still refuses overlapping waits. Reservation identity prevents an old timer from settling or removing a newer one; cleanup joins all physical parts.
+
+The phase deadline, per-writer cap, ordering, single extra wait and fail-closed authority retention remain unchanged. Saturation by timer bodies from earlier calls can still report busy. See the [current verification note](verification-diagnostic-marker-drain-2026-10-26.md) for implementation/acceptance status and alternatives; no total-shutdown claim follows.
 
 ## Implementation checkpoint (2026-10-25)
 

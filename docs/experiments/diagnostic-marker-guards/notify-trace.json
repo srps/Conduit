@@ -1,0 +1,25 @@
+{
+  "mutation": "ignore-notify-custody",
+  "temporary_instrumentation": true,
+  "outcomes": [
+    {
+      "history": [
+        "timedOut"
+      ],
+      "actual": "timedOut",
+      "expected": "busy"
+    },
+    {
+      "history": [
+        "drainedHeld",
+        "timedOut"
+      ],
+      "actual": "timedOut",
+      "expected": "busy"
+    }
+  ],
+  "reported_XCTest_diagnostics": 1,
+  "restored_tests": 28,
+  "restored_failures": 0,
+  "all_workflow_source_fingerprint_preserved": "c1c0d2488157f4c59425e65b4eb4cf64bd01c1b016f0d73ac05bb8b3534af484"
+}

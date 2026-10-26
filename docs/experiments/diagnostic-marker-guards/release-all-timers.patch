@@ -1,0 +1,13 @@
+--- a/Sources/ProxyKernel/Support/RecordDrainWaiter.swift
++++ b/Sources/ProxyKernel/Support/RecordDrainWaiter.swift
+@@ -185,9 +185,7 @@
+         /// A timer body ended. Its slot is released; another wait's timer or the notify may still be held.
+         private func timerReleased(_ pending: Pending) {
+             let quiescent = state.withLockedValue { s -> Bool in
+-                if let index = s.liveTimers.firstIndex(where: { $0 === pending }) {
+-                    s.liveTimers.remove(at: index)
+-                }
++                s.liveTimers.removeAll()
+                 pending.timer = nil
+                 return s.liveTimers.isEmpty && s.notifyOwner == nil
+             }

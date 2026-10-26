@@ -36,16 +36,33 @@ package final class BoundedRecordWriter: @unchecked Sendable {
     private let write: @Sendable ([Data]) throws -> Void
     private let reportFailure: @Sendable (String) -> Void
 
-    /// `onDrainCleanup` is a test seam: it runs when a timed-out async drain's physical cleanup has finished.
-    package init(limits: RecordWriterLimits = .init(),
-                 write: @escaping @Sendable ([Data]) throws -> Void,
-                 reportFailure: @escaping @Sendable (String) -> Void,
-                 onDrainCleanup: (@Sendable () -> Void)? = nil) {
+    /// `onDrainCleanup` is a test seam: it runs when the last notify and timer body have ended, after any drain outcome.
+    package convenience init(limits: RecordWriterLimits = .init(),
+                             write: @escaping @Sendable ([Data]) throws -> Void,
+                             reportFailure: @escaping @Sendable (String) -> Void,
+                             onDrainCleanup: (@Sendable () -> Void)? = nil) {
+        self.init(limits: limits, write: write, reportFailure: reportFailure, onDrainCleanup: onDrainCleanup,
+                  drainTimerSlots: 1, drainSleep: nil)
+    }
+
+    /// `drainTimerSlots` bounds the drain's timer bodies (see `RecordDrainWaiter`). Test seam, internal so only
+    /// `@testable` tests reach it: `drainSleep` replaces the drain timer's sleep when set.
+    init(limits: RecordWriterLimits,
+         write: @escaping @Sendable ([Data]) throws -> Void,
+         reportFailure: @escaping @Sendable (String) -> Void,
+         onDrainCleanup: (@Sendable () -> Void)?,
+         drainTimerSlots: Int,
+         drainSleep: (@Sendable (ContinuousClock.Instant) async throws -> Void)?) {
         precondition(limits.maxPendingRecords > 0 && limits.maxPendingBytes > 0)
         precondition(limits.maxBatchRecords > 0 && limits.maxBatchBytes > 0)
         let group = DispatchGroup()
         drained = group
-        waiter = RecordDrainWaiter(group: group, onCleanup: onDrainCleanup)
+        if let drainSleep {
+            waiter = RecordDrainWaiter(group: group, timerSlots: drainTimerSlots, onCleanup: onDrainCleanup,
+                                       sleep: drainSleep)
+        } else {
+            waiter = RecordDrainWaiter(group: group, timerSlots: drainTimerSlots, onCleanup: onDrainCleanup)
+        }
         self.limits = limits
         self.write = write
         self.reportFailure = reportFailure

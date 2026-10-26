@@ -5,17 +5,24 @@ import NIOConcurrencyHelpers
 import XCTest
 @testable import ProxyKernel
 
-/// Holds the first physical attempt inside the destination guard, on the writer's drain queue, so a test
-/// decides when the physical work proceeds. The hold is bounded: a test that never releases it fails
-/// instead of hanging.
+/// Holds the next `holds` physical attempts inside the destination guard, on the writer's drain queue, so a test
+/// decides when the physical work proceeds. Each held attempt signals `entered` and waits for one `release()`. The hold
+/// is bounded: a test that never releases it fails instead of hanging.
 final class HeldDestinationGuard: RecordFileDestinationGuarding, @unchecked Sendable {
     let entered = DispatchSemaphore(value: 0)
     private let released = DispatchSemaphore(value: 0)
-    private let holds = NIOLockedValueBox(1)
+    private let holds: NIOLockedValueBox<Int>
     private let admittedOnMain = NIOLockedValueBox<Bool?>(nil)
+
+    init(holds: Int = 1) {
+        self.holds = NIOLockedValueBox(holds)
+    }
 
     /// Whether the first admission ran on the main thread. Nil until an attempt reaches the guard.
     var admittedOnMainThread: Bool? { admittedOnMain.withLockedValue { $0 } }
+
+    /// Holds the next `count` attempts, after earlier attempts passed unheld.
+    func arm(_ count: Int) { holds.withLockedValue { $0 += count } }
 
     func admit(destination: URL) throws {
         admittedOnMain.withLockedValue { if $0 == nil { $0 = Thread.isMainThread } }
@@ -32,6 +39,82 @@ final class HeldDestinationGuard: RecordFileDestinationGuarding, @unchecked Send
     func admit(openedDescriptor descriptor: Int32, destination: URL) throws {}
 
     func release() { released.signal() }
+}
+
+/// A timer body that holds its first call until the test releases it, ignoring cancellation. Later calls signal
+/// `joinLaterStart()`, then sleep until their deadline on the continuous clock, so cancellation ends them.
+final class HeldTimerBody: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    /// One signal per call after the held one: each is a later reservation's timer.
+    private let laterStarted = DispatchSemaphore(value: 0)
+    private let released = DispatchSemaphore(value: 0)
+    private let holdNext = NIOLockedValueBox(true)
+
+    func sleep(until deadline: ContinuousClock.Instant) async throws {
+        let hold = holdNext.withLockedValue { value -> Bool in
+            let current = value
+            value = false
+            return current
+        }
+        if hold {
+            entered.signal()
+            holdUntilReleased()
+            return
+        }
+        laterStarted.signal()
+        try await Task.sleep(until: deadline, clock: .continuous)
+    }
+
+    /// A synchronous function is where the blocking wait belongs: the compiler rejects it inside the async `sleep`.
+    private func holdUntilReleased() {
+        _ = released.wait(timeout: .now() + 10)
+    }
+
+    /// Waits, bounded, for the next timer after the held one to start.
+    func joinLaterStart() -> DispatchTimeoutResult {
+        laterStarted.wait(timeout: .now() + 10)
+    }
+
+    func release() {
+        released.signal()
+    }
+}
+
+/// Timer bodies numbered by call, from zero. A call in `held` signals `entered`, ignores cancellation, and returns normally
+/// only when the test releases that call; it then reaches the waiter's expiry path as a late timer. Every other call
+/// sleeps until its deadline on the continuous clock, so cancellation ends it. `calls` counts every timer created.
+final class IndexedTimerBodies: @unchecked Sendable {
+    let entered = DispatchSemaphore(value: 0)
+    private let gates: [Int: DispatchSemaphore]
+    private let count = NIOLockedValueBox(0)
+
+    init(held: Set<Int>) {
+        gates = Dictionary(uniqueKeysWithValues: held.map { ($0, DispatchSemaphore(value: 0)) })
+    }
+
+    var calls: Int { count.withLockedValue { $0 } }
+
+    func sleep(until deadline: ContinuousClock.Instant) async throws {
+        let index = count.withLockedValue { value -> Int in
+            defer { value += 1 }
+            return value
+        }
+        guard let gate = gates[index] else {
+            try await Task.sleep(until: deadline, clock: .continuous)
+            return
+        }
+        entered.signal()
+        hold(gate)
+    }
+
+    /// A synchronous function is where the blocking wait belongs: the compiler rejects it inside the async `sleep`.
+    private func hold(_ gate: DispatchSemaphore) {
+        _ = gate.wait(timeout: .now() + 10)
+    }
+
+    func release(_ index: Int) {
+        gates[index]?.signal()
+    }
 }
 
 /// A snapshot that differs from its neighbours by one field, so a test can tell generations apart.

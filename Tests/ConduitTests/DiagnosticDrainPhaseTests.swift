@@ -241,6 +241,143 @@ final class DiagnosticDrainPhaseTests: XCTestCase {
         XCTAssertFalse(report.allConfirmed)
     }
 
+    /// What one phase reported when its first events wait's timer body was held, and whether a later events timer started.
+    private struct HeldTimerRun {
+        let report: DiagnosticFlushReport
+        let elapsed: Duration
+        let laterTimer: DispatchTimeoutResult
+    }
+
+    /// The first events wait drains while its timer body is held, so the caller resolves and the cancelled body outlives
+    /// it. The phase's one further events wait then meets the marker's held write. Writes from before the phase are
+    /// settled first, so the two held writes are the fixture event's and the marker's. `audit` and `snapshotURL` decide
+    /// whether that further wait is the early retry or the late confirmation.
+    private func runWithTheFirstEventsTimerHeld(audit: any ConnectionAuditSink, snapshotURL: URL, directory: URL,
+                                                settledSnapshot: SnapshotFlushOutcome) async -> HeldTimerRun {
+        let events = RuntimeEventLog(capacity: 32)
+        let writes = HeldDestinationGuard(holds: 0)
+        let timer = HeldTimerBody()
+        let eventsWriter = RuntimeEventFileWriter(fileURL: directory.appendingPathComponent("events.ndjson"),
+                                                  logger: DiscardingLogSink(), destinationGuard: writes, eventLog: events,
+                                                  drainSleep: { try await timer.sleep(until: $0) })
+        events.setSink { eventsWriter.record($0) }
+        let snapshots = makeSnapshotArtifactWriter(fileURL: snapshotURL, logger: DiscardingLogSink(),
+                                                   destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
+        snapshots.submit(snapshotValue(1))
+        let settled = await snapshots.drain(until: deadline(in: 10))
+        XCTAssertEqual(settled, settledSnapshot)
+        XCTAssertTrue(eventsWriter.flush(timeout: 10), "the writes from before the phase are settled")
+
+        writes.arm(2)
+        events.append(RuntimeEvent(kind: .health, event: "fixture.held-write"))
+        XCTAssertEqual(writes.entered.wait(timeout: .now() + 10), .success, "the fixture event's write is held")
+        // The phase's own duration, measured where it returns, not when the test collects it.
+        let flush = Task {
+            let started = ContinuousClock.now
+            let report = await DiagnosticFlush.run(phase: DiagnosticFlushPhase(), audit: audit, events: eventsWriter,
+                                                   snapshot: snapshots, eventLog: events, logger: DiscardingLogSink())
+            return (report, started.duration(to: .now))
+        }
+        XCTAssertEqual(timer.entered.wait(timeout: .now() + 10), .success,
+                       "the first events wait registered, and its timer body is held")
+        writes.release()
+        XCTAssertEqual(writes.entered.wait(timeout: .now() + 10), .success, "the marker's write is held")
+        let laterTimer = timer.joinLaterStart()
+        writes.release()
+        let (report, elapsed) = await flush.value
+        timer.release()
+        return HeldTimerRun(report: report, elapsed: elapsed, laterTimer: laterTimer)
+    }
+
+    /// The late confirmation is spent while the first events wait's cancelled timer body is still held. It still
+    /// registers, waits for the marker inside the phase's one deadline, and confirms it.
+    func testDiagnosticFlushLateConfirmationIsNotRefusedByTheFirstEventsWaitsHeldTimerBody() async throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let blocker = directory.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let run = await runWithTheFirstEventsTimerHeld(
+            audit: DiscardingConnectionAuditSink(), snapshotURL: blocker.appendingPathComponent("snapshot.json"),
+            directory: directory, settledSnapshot: .writeFailed)
+        XCTAssertEqual(run.laterTimer, .success, "the late confirmation registered its own timer beside the held one")
+        XCTAssertEqual(run.report.audit, .drained)
+        XCTAssertEqual(run.report.events, .drained)
+        XCTAssertEqual(run.report.snapshot, .writeFailed)
+        XCTAssertEqual(run.report.eventsRetry, .drained, "the late confirmation waited for the marker")
+        XCTAssertEqual(run.report.snapshotEvent, .confirmed)
+        XCTAssertEqual(run.report.eventsStatistics.pendingRecords, 0)
+        XCTAssertEqual(run.report.eventsStatistics.flushTimeouts, 0)
+        XCTAssertTrue(DiagnosticFlush.lossless(run.report.eventsStatistics))
+        XCTAssertLessThan(run.elapsed, DiagnosticFlushPhase.defaultBudget)
+        // The file is read only once the wait claims the marker drained; otherwise the read races the released write.
+        guard run.report.eventsRetry == .drained else { return }
+        XCTAssertTrue(try persistedEvents(in: directory).contains("observability.snapshot_flush_unconfirmed"))
+    }
+
+    /// The early retry is spent while the first events wait's cancelled timer body is still held. It still registers,
+    /// waits for the timeout marker, and is the phase's only further events wait.
+    func testDiagnosticFlushEarlyRetryIsNotRefusedByTheFirstEventsWaitsHeldTimerBody() async throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let run = await runWithTheFirstEventsTimerHeld(
+            audit: UndrainableAuditSink(), snapshotURL: directory.appendingPathComponent("snapshot.json"),
+            directory: directory, settledSnapshot: .current)
+        XCTAssertEqual(run.laterTimer, .success, "the early retry registered its own timer beside the held one")
+        XCTAssertEqual(run.report.audit, .unavailable)
+        XCTAssertEqual(run.report.events, .drained)
+        XCTAssertEqual(run.report.eventsRetry, .drained, "the early retry waited for the marker")
+        XCTAssertEqual(run.report.snapshot, .current)
+        XCTAssertEqual(run.report.snapshotEvent, .notNeeded)
+        XCTAssertFalse(run.report.allConfirmed)
+        XCTAssertEqual(run.report.eventsStatistics.pendingRecords, 0)
+        XCTAssertEqual(run.report.eventsStatistics.flushTimeouts, 0)
+        XCTAssertTrue(DiagnosticFlush.lossless(run.report.eventsStatistics))
+        XCTAssertLessThan(run.elapsed, DiagnosticFlushPhase.defaultBudget)
+        guard run.report.eventsRetry == .drained else { return }
+        let markers = try persistedEvents(in: directory).split(separator: "\n")
+            .filter { $0.contains("observability.flush_timeout") }
+        XCTAssertEqual(markers.count, 1, "one marker, persisted by the one retry")
+    }
+
+    /// The events writer's two timer slots count retired bodies across calls. Two drained calls whose bodies are held
+    /// leave a third non-empty wait busy, and that refusal creates no timer.
+    func testDiagnosticFlushEventsWriterHoldsAtMostTwoTimerBodiesAcrossCalls() async throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let events = RuntimeEventLog(capacity: 32)
+        let writes = HeldDestinationGuard(holds: 0)
+        let bodies = IndexedTimerBodies(held: [0, 1])
+        let eventsWriter = RuntimeEventFileWriter(fileURL: directory.appendingPathComponent("events.ndjson"),
+                                                  logger: DiscardingLogSink(), destinationGuard: writes, eventLog: events,
+                                                  drainSleep: { try await bodies.sleep(until: $0) })
+        events.setSink { eventsWriter.record($0) }
+
+        for call in 0..<2 {
+            writes.arm(1)
+            events.append(RuntimeEvent(kind: .health, event: "fixture.call-\(call)"))
+            XCTAssertEqual(writes.entered.wait(timeout: .now() + 10), .success)
+            let wait = Task { await eventsWriter.drain(until: deadline(in: 10)) }
+            XCTAssertEqual(bodies.entered.wait(timeout: .now() + 10), .success, "call \(call) registered; its body is held")
+            writes.release()
+            let outcome = await wait.value
+            XCTAssertEqual(outcome, .drained)
+        }
+
+        writes.arm(1)
+        events.append(RuntimeEvent(kind: .health, event: "fixture.call-2"))
+        XCTAssertEqual(writes.entered.wait(timeout: .now() + 10), .success)
+        let third = await eventsWriter.drain(until: deadline(in: 10))
+        XCTAssertEqual(third, .busy, "both slots hold retired bodies from earlier calls")
+        XCTAssertEqual(bodies.calls, 2, "the refused wait created no timer")
+
+        writes.release()
+        bodies.release(0)
+        bodies.release(1)
+        XCTAssertTrue(eventsWriter.flush(timeout: 10))
+        XCTAssertTrue(DiagnosticFlush.lossless(eventsWriter.statistics))
+        XCTAssertEqual(eventsWriter.statistics.flushTimeouts, 0)
+    }
+
     func testUndrainableAuditIsReportedUnavailableNotDrained() async {
         let events = RuntimeEventLog(capacity: 16)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
