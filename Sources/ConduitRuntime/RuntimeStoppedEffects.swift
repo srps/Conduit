@@ -11,10 +11,15 @@ package enum StoppedEffectsSettlement: Equatable, Sendable {
     case deadlineExpired
     /// A start is running, or a lifecycle operation is in flight, so nothing was joined.
     case runtimeActive
-    /// A newer start or stop was admitted while the join was pending, so this result is stale.
+    /// A newer start, stop or applied reload was admitted while the join was pending, so this result is stale.
     case superseded
     /// Another settle's join is still in flight on this host. Nothing was allocated.
     case busy
+    /// A configuration operation is in flight: a store read, a required commit, or a reload. A started replacement finishes its
+    /// read-back inside that operation, so the root is not released while it runs. Fail-closed: the caller keeps the host and retries.
+    case configurationPending
+    /// A reconcile pass is queued or running. It may still call the orchestrator or a surface, so the root is not released yet.
+    case reconcilePending
 }
 
 /// The one settle a host has in flight (capacity one), confined to the host's main actor.
@@ -24,17 +29,19 @@ package enum StoppedEffectsSettlement: Equatable, Sendable {
 /// later calls. The join is not this object's: the host runs it, and frees the slot when it ends.
 @MainActor
 final class StoppedEffectsJoin {
-    /// The lifecycle generation and the config generation the settle observed. Either one moving means the host is no
-    /// longer the one that was stopped, so the result is stale. Both are read-only here.
+    /// The lifecycle, config and intent generations the settle observed. Any one moving means the host is no longer the one that was stopped,
+    /// so the result is stale. All are read-only here.
     let lifecycleGeneration: Int
     let configGeneration: Int
+    let intentGeneration: Int
     private var waiter: CheckedContinuation<StoppedEffectsSettlement, Never>?
     private var result: StoppedEffectsSettlement?
     private var timer: Task<Void, Never>?
 
-    init(lifecycleGeneration: Int, configGeneration: Int) {
+    init(lifecycleGeneration: Int, configGeneration: Int, intentGeneration: Int) {
         self.lifecycleGeneration = lifecycleGeneration
         self.configGeneration = configGeneration
+        self.intentGeneration = intentGeneration
     }
 
     /// Arms the caller's deadline. The deadline ends only the caller's wait, not the join.

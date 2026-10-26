@@ -9,7 +9,7 @@ import XCTest
 /// apply open so a test can land a second save while the first pass is
 /// suspended — the window every rule in `RuntimeReconciler` is about.
 @MainActor
-private final class RecordingHost: RuntimeReconcilerHost {
+final class RecordingHost: RuntimeReconcilerHost {
     enum Call: Equatable {
         case applyConfigChange(port: Int)
         case reapply(platform: PlatformIntegrationConfig)
@@ -24,20 +24,40 @@ private final class RecordingHost: RuntimeReconcilerHost {
     var holdNextApply = false
     private var held: CheckedContinuation<Void, Never>?
     var isHolding: Bool { held != nil }
+    /// Holds every lifecycle wait open until `releaseLifecycle()`, as a start or stop in flight does.
+    var holdLifecycle = false
+    private var lifecycle: [CheckedContinuation<Void, Never>] = []
+    var isWaitingForLifecycle: Bool { !lifecycle.isEmpty }
+    /// What the next push holds in place of the requested input, as an adjusting host (the app's DNS flag) does.
+    var heldOverride: ProxyConfig?
+    /// Makes every push report that it held nothing.
+    var refuseApply = false
+    /// The surface re-applies, each with the diff it was given.
+    private(set) var reapplied: [(old: ProxyConfig, new: ProxyConfig)] = []
 
     var performed: [PlatformIntegrationReconciler.Action] {
         calls.compactMap { if case .perform(let action, _) = $0 { action } else { nil } }
     }
 
-    /// No lifecycle here; the hosts' harness scenarios cover the wait.
-    func awaitLifecycleIdle() async {}
+    func awaitLifecycleIdle() async {
+        guard holdLifecycle else { return }
+        await withCheckedContinuation { lifecycle.append($0) }
+    }
 
-    func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
+    func releaseLifecycle() {
+        holdLifecycle = false
+        for waiter in lifecycle { waiter.resume() }
+        lifecycle = []
+    }
+
+    func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async -> RuntimeConfigApplication {
         calls.append(.applyConfigChange(port: new.localPort))
         if holdNextApply {
             holdNextApply = false
             await withCheckedContinuation { held = $0 }
         }
+        if refuseApply { return .notHeld }
+        return .held(heldOverride ?? new)
     }
 
     func resume() {
@@ -49,6 +69,7 @@ private final class RecordingHost: RuntimeReconcilerHost {
 
     func reapplyConfigDrivenSurfaces(for pass: RuntimeReconciler.Pass) async {
         calls.append(.reapply(platform: pass.platform))
+        reapplied.append((old: pass.old, new: pass.new))
     }
 
     func recordPlatformDecision(_ action: PlatformIntegrationReconciler.Action) {
@@ -135,8 +156,8 @@ final class RuntimeReconcilerTests: XCTestCase {
         await reconciler.drain()
     }
 
-    /// A failed action rewinds the baseline but not the request, so a
-    /// retry reaches the save's own target, not a later edit.
+    /// A failed action records nothing, so the baseline stays behind the
+    /// request and a retry reaches the save's own target, not a later edit.
     func testARetryRunsTheLastRequestAgain() async {
         host.failing = [.clearSystemProxy]
         reconciler.reconcile(config: baseConfig, platformConfig: proxyOff)
@@ -255,9 +276,8 @@ final class RuntimeReconcilerTests: XCTestCase {
         XCTAssertFalse(reconciler.hasPassInFlight, "nothing left to retry")
     }
 
-    /// The rewind must not undo a later save. A's clear fails after B has
-    /// already moved the flag back on; rewinding would mark "on" as
-    /// unreconciled and make the next save clear a surface B just applied.
+    /// A's clear fails after B has moved the flag back on. The machine still has the system proxy on, which is what B asks for, so B has
+    /// nothing to apply, and A's failed clear is not retried against the save that now owns the flag.
     func testAFailedActionIsNotRewoundWhenALaterSaveMovedTheFlag() async {
         host.failing = [.clearSystemProxy]
         let editedConfig = edited(port: 18081)
@@ -269,12 +289,13 @@ final class RuntimeReconcilerTests: XCTestCase {
         host.resume()
         await reconciler.drain()
 
-        XCTAssertEqual(host.performed, [.clearSystemProxy, .applySystemProxy])
-        XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOn, "B owns the flag now")
+        XCTAssertEqual(host.performed, [.clearSystemProxy], "B has nothing to do: the machine still holds the proxy on")
+        XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOn, "the failed clear left the flag where the machine is")
+        XCTAssertFalse(reconciler.requestLags, "the request matches what the machine holds")
 
         reconciler.reconcile(config: edited(port: 18082), platformConfig: proxyOn)
         await reconciler.drain()
-        XCTAssertEqual(host.performed, [.clearSystemProxy, .applySystemProxy], "no phantom retry of A's clear")
+        XCTAssertEqual(host.performed, [.clearSystemProxy], "no phantom retry of A's clear")
     }
 
     /// An apply needs its runtime up; with it down, the start path applies
@@ -290,4 +311,196 @@ final class RuntimeReconcilerTests: XCTestCase {
         XCTAssertEqual(host.performed, [])
         XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOn, "reconciled: the start path owns it from here")
     }
+
+    /// The admission is a single authority. A retry runs under the admission its request was recorded with, so a fence
+    /// that lapses before the retry stops it, and one that stands again lets it run.
+    func testARetryRunsUnderTheAdmissionItsRequestWasRecordedWith() async {
+        let admission = AdmissionBox()
+        host.failing = [.clearSystemProxy]
+        reconciler.reconcile(config: baseConfig, platformConfig: proxyOff, isCurrent: { admission.stands })
+        await reconciler.drain()
+        XCTAssertTrue(reconciler.requestLags)
+
+        admission.stands = false
+        reconciler.retryRequest()
+        await reconciler.drain()
+        XCTAssertEqual(host.performed, [.clearSystemProxy], "a retry under a lapsed admission runs nothing")
+
+        admission.stands = true
+        host.failing = []
+        reconciler.retryRequest()
+        await reconciler.drain()
+        XCTAssertEqual(host.performed, [.clearSystemProxy, .clearSystemProxy])
+        XCTAssertFalse(reconciler.requestLags)
+    }
+
+    /// An admission that lapses while the pass's push is out stops the pass at its next step (decision 0032). The push already out lands,
+    /// so the runtime baseline is the input it held, with no rewind. No platform action runs after it, so the flag it skipped is not
+    /// recorded as reconciled, and the request still names the work. The same request under a standing admission then runs the action.
+    func testAPassWhoseAdmissionLapsesDuringItsPushRunsNoActionAndRecordsNoFlag() async {
+        let admission = AdmissionBox()
+        let changed = edited(port: 18081)
+        host.holdNextApply = true
+        reconciler.reconcile(config: changed, platformConfig: proxyOff, isCurrent: { admission.stands })
+        await settle("the pass's push is suspended") { self.host.isHolding }
+        admission.stands = false
+        host.resume()
+        await reconciler.drain()
+
+        XCTAssertEqual(host.calls, [.applyConfigChange(port: 18081)], "only the push that was already out ran")
+        XCTAssertEqual(reconciler.lastReconciledConfig, changed, "the push held, so the runtime baseline is its input")
+        XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOn, "the skipped flag is not recorded as reconciled")
+        XCTAssertTrue(reconciler.requestLags, "the request still names the skipped work")
+
+        reconciler.reconcile(config: changed, platformConfig: proxyOff)
+        await reconciler.drain()
+        XCTAssertEqual(host.performed, [.clearSystemProxy], "a standing admission runs the action the lapsed pass skipped")
+        XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOff)
+        XCTAssertFalse(reconciler.requestLags)
+    }
+
+    /// A request whose admission lapsed before it was recorded changes nothing: no request, no login item, no pass.
+    func testALapsedAdmissionRecordsNothingAndRunsNoLaunchAction() async {
+        let admission = AdmissionBox()
+        admission.stands = false
+        var platform = proxyOn
+        platform.launchAtLogin = true
+
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: platform, isCurrent: { admission.stands })
+        await reconciler.drain()
+
+        XCTAssertEqual(host.calls, [], "no decision, no action, no push")
+        XCTAssertEqual(reconciler.requestedConfig, baseConfig)
+        XCTAssertEqual(reconciler.requestedPlatformConfig, proxyOn)
+        XCTAssertFalse(reconciler.hasPassInFlight)
+    }
+
+    /// An older pass waiting on the lifecycle is superseded by a newer request: it never pushes the config it was given, and the newer
+    /// request is the one that runs, diffing from what the machine holds.
+    func testAnOlderWaitingPassIsSupersededByANewerRequest() async {
+        host.holdLifecycle = true
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: proxyOn)
+        await settle("the older pass waits for the lifecycle") { self.host.isWaitingForLifecycle }
+
+        reconciler.reconcile(config: edited(port: 18082), platformConfig: proxyOff)
+        host.releaseLifecycle()
+        await reconciler.drain()
+
+        XCTAssertEqual(host.calls.filter { if case .applyConfigChange = $0 { true } else { false } }, [.applyConfigChange(port: 18082)])
+        XCTAssertEqual(host.performed, [.clearSystemProxy])
+        XCTAssertEqual(reconciler.lastReconciledConfig, edited(port: 18082))
+        XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOff)
+    }
+
+    /// A Start that overtakes a waiting reload pass must not see its config as already applied. The baseline never moved to the reload's
+    /// input, so the Start's request still diffs against what the machine holds.
+    func testARequestOvertakingAWaitingPassDiffsFromTheHeldBaseline() async {
+        host.holdLifecycle = true
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: proxyOn)
+        await settle("the reload's pass waits for the lifecycle") { self.host.isWaitingForLifecycle }
+        XCTAssertEqual(reconciler.lastReconciledConfig, baseConfig, "queued, not applied: no baseline moved yet")
+
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: proxyOn)
+        host.releaseLifecycle()
+        await reconciler.drain()
+
+        XCTAssertEqual(host.calls.filter { if case .applyConfigChange = $0 { true } else { false } }, [.applyConfigChange(port: 18081)],
+                       "the start's request still runs the push")
+        XCTAssertEqual(reconciler.lastReconciledConfig, edited(port: 18081))
+    }
+
+    /// Partial Y, then back to X while the machine still holds Y. The push of Y landed and its surface re-apply never ran, so the baseline
+    /// is Y. A request for X therefore pushes X: a diff against X would skip work the orchestrator still needs.
+    func testReturningToTheOriginalConfigPushesItWhileTheMachineStillHoldsThePartialOne() async {
+        let admission = AdmissionBox()
+        host.holdNextApply = true
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: proxyOn, isCurrent: { admission.stands })
+        await settle("the push of Y is suspended") { self.host.isHolding }
+        admission.stands = false
+        host.resume()
+        await reconciler.drain()
+        XCTAssertEqual(reconciler.lastReconciledConfig, edited(port: 18081), "the push of Y held, so the baseline is Y")
+
+        reconciler.reconcile(config: baseConfig, platformConfig: proxyOn)
+        await reconciler.drain()
+
+        XCTAssertEqual(
+            host.calls.filter { if case .applyConfigChange = $0 { true } else { false } },
+            [.applyConfigChange(port: 18081), .applyConfigChange(port: baseConfig.localPort)]
+        )
+        XCTAssertEqual(reconciler.lastReconciledConfig, baseConfig)
+    }
+
+    /// A push that held nothing leaves the runtime baseline where it was and runs no surface, so the next request diffs the change again. The
+    /// flag still settles: it needs no runtime input, and it is what the machine is asked to hold.
+    func testAPushThatHeldNothingLeavesTheBaselineAndRunsNoSurface() async {
+        host.refuseApply = true
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: proxyOff)
+        await reconciler.drain()
+
+        XCTAssertEqual(host.calls, [.applyConfigChange(port: 18081), .decision(.clearSystemProxy), .perform(.clearSystemProxy, platform: proxyOff)])
+        XCTAssertEqual(reconciler.lastReconciledConfig, baseConfig)
+        XCTAssertEqual(reconciler.lastReconciledPlatformConfig, proxyOff)
+        XCTAssertTrue(reconciler.requestLags, "the runtime half still lags the request")
+        XCTAssertTrue(host.reapplied.isEmpty)
+    }
+
+    /// The pass acts on the input the runtime holds, which is what the app's DNS flag adjusts, rather than on the request.
+    func testTheSurfacesFollowTheHeldInputNotTheRequest() async {
+        host.heldOverride = edited(port: 18090)
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: proxyOn)
+        await reconciler.drain()
+
+        XCTAssertEqual(reconciler.lastReconciledConfig, edited(port: 18090))
+        XCTAssertEqual(host.reapplied.map { $0.new.localPort }, [18090])
+        XCTAssertEqual(host.reapplied.map { $0.old.localPort }, [baseConfig.localPort])
+    }
+
+    /// A Stop can revoke a pass between its push and its surface re-apply. The next pass with the same input has no runtime change, yet the
+    /// re-apply it owes still runs, with the diff from the config before the push. A changed port and a changed bypass list both owe it.
+    func testAStopRevokedSurfaceReapplyIsOwedToTheNextPassWithTheSameInput() async {
+        var bypass = baseConfig
+        bypass.noProxyHosts.append("bypass.example")
+        for (name, changed) in [("port", edited(port: 18081)), ("bypass", bypass)] {
+            host = RecordingHost()
+            reconciler = RuntimeReconciler(config: baseConfig, platformConfig: proxyOn, host: host)
+            let admission = AdmissionBox()
+            host.holdNextApply = true
+            reconciler.reconcile(config: changed, platformConfig: proxyOn, isCurrent: { admission.stands })
+            await settle("the push is suspended (\(name))") { self.host.isHolding }
+            admission.stands = false
+            host.resume()
+            await reconciler.drain()
+            XCTAssertTrue(host.reapplied.isEmpty, "the revoked pass re-applied nothing (\(name))")
+
+            reconciler.reconcile(config: changed, platformConfig: proxyOn)
+            await reconciler.drain()
+
+            XCTAssertEqual(host.reapplied.count, 1, "the owed re-apply ran once (\(name))")
+            XCTAssertEqual(host.reapplied.first?.new, changed, "with the input the push held (\(name))")
+            XCTAssertEqual(host.reapplied.first?.old, baseConfig, "diffed from before the push (\(name))")
+        }
+    }
+
+    /// A refused push leaves the runtime change owed to the next request, which pushes it and applies its surfaces once with its own diff.
+    func testARefusedPushIsRetriedByTheNextRequestWithItsOwnDiff() async {
+        host.refuseApply = true
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: proxyOff)
+        await reconciler.drain()
+        XCTAssertEqual(host.performed, [.clearSystemProxy], "the flag settles behind a push that held nothing")
+        XCTAssertTrue(host.reapplied.isEmpty)
+        host.refuseApply = false
+
+        reconciler.reconcile(config: edited(port: 18081), platformConfig: proxyOff)
+        await reconciler.drain()
+
+        XCTAssertEqual(host.reapplied.count, 1)
+        XCTAssertEqual(host.reapplied.first?.old, baseConfig)
+        XCTAssertEqual(host.performed, [.clearSystemProxy], "no second clear: the flag already holds")
+    }
+}
+
+/// An admission a test can lapse between two steps of one pass.
+private final class AdmissionBox {
+    var stands = true
 }

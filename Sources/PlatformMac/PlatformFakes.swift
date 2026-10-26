@@ -735,6 +735,33 @@ package struct UnplannedFakeEffect: Error, Equatable, CustomStringConvertible {
     }
 }
 
+/// Answers "is a listener serving this loopback port?" from a fixed set, so a host or simulator never connects to the machine's own ports.
+/// It counts the questions and keeps the last port asked, so a test sees that a stale-listener check ran and what it asked.
+package final class FakeLoopbackPortProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let served: Set<Int>
+    private var count = 0
+    private var last: Int?
+
+    package init(served: Set<Int> = []) {
+        self.served = served
+    }
+
+    /// How many questions were asked.
+    package var askCount: Int { lock.withLock { count } }
+
+    /// The port of the most recent question.
+    package var lastAsked: Int? { lock.withLock { last } }
+
+    package func isServed(port: Int) -> Bool {
+        lock.withLock {
+            count += 1
+            last = port
+        }
+        return served.contains(port)
+    }
+}
+
 /// Names no holder for a port. It counts the lookups and keeps the last one, so a host or simulator never runs the
 /// platform's process lookup, and a test sees how often a bind failure asked.
 package final class FakeListenerPortHolderProbe: ListenerPortHolderProbing, @unchecked Sendable {
@@ -778,6 +805,60 @@ package final class FakePacEvaluator: PacEvaluator, @unchecked Sendable {
     package func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating {
         throw UnplannedFakeEffect(effect: "PAC evaluation")
     }
+
+    package func routeChain(for entries: [String]) -> PACChain {
+        PACChain.classify(entries) { _ in nil }
+    }
+}
+
+/// A PAC evaluator whose first fetch is held until `release()`. A start awaits that fetch before its listener binds, so a scenario can
+/// admit a stop in that window. Every later fetch, and a first fetch that arrives after the release, returns at once. Each fetch answers
+/// a DIRECT-only script, evaluated without a PAC engine, so nothing reaches the network. At most one fetch waits.
+///
+/// The PAC engine coalesces refreshes, so a second start joins the held fetch: a caller never awaits it before the release. A caller
+/// releases on every path, its failure paths included, before it awaits the tasks it owns.
+package final class HeldPACFetch: PacEvaluator, @unchecked Sendable {
+    private struct DirectOnly: PacScriptEvaluating {
+        func resolveProxyChain(for url: URL) throws -> [String] { ["DIRECT"] }
+    }
+
+    private let lock = NSLock()
+    private var reached = false
+    private var released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    package init() {}
+
+    /// Whether the first fetch has arrived.
+    package var isHeld: Bool { lock.withLock { reached } }
+
+    /// Lets the held fetch, and every later one, through. Idempotent.
+    package func release() {
+        let resumed = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            released = true
+            defer { waiter = nil }
+            return waiter
+        }
+        resumed?.resume()
+    }
+
+    package func fetchPAC(from urlString: String) async throws -> String {
+        await withCheckedContinuation { continuation in
+            let proceed = lock.withLock { () -> Bool in
+                if reached || released {
+                    reached = true
+                    return true
+                }
+                reached = true
+                waiter = continuation
+                return false
+            }
+            if proceed { continuation.resume() }
+        }
+        return "function FindProxyForURL(url, host) { return \"DIRECT\"; }"
+    }
+
+    package func makeEvaluator(pacScript: String) throws -> any PacScriptEvaluating { DirectOnly() }
 
     package func routeChain(for entries: [String]) -> PACChain {
         PACChain.classify(entries) { _ in nil }

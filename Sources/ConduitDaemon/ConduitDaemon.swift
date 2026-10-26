@@ -103,14 +103,28 @@ enum ConduitDaemon {
             logger.log(.notice, "Configuration files migrated to the current schema.", category: .system)
         }
 
-        let host = RuntimeHost(
-            stateSession: session,
-            logger: logger,
-            loadedConfiguration: loaded,
-            startedAt: startedAt,
-            terminalExit: { exit(0) },
-            effects: effects
-        )
+        // The host observes the files through its own configuration owner, after the startup migration above (decision 0032). Its open
+        // is the only construction path, so a refused input never reaches a second, unverified load.
+        let host: RuntimeHost
+        do {
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: logger,
+                startupAllowsMissing: !args.contains("--config"),
+                startedAt: startedAt,
+                terminalExit: { exit(0) },
+                effects: effects
+            )
+        } catch let refusal as RuntimeOpenRefusal {
+            logger.log(.error, refusal.event.detail ?? refusal.event.event, category: .system)
+            await RuntimeHost.recoverWithoutConfiguration(stateSession: session, logger: logger, effects: effects)
+            logger.flush()
+            exit(1)
+        } catch {
+            logger.log(.error, "Runtime host did not open: \(error.localizedDescription)", category: .system)
+            logger.flush()
+            exit(1)
+        }
 
         if args.contains("--start-runtime") {
             do {

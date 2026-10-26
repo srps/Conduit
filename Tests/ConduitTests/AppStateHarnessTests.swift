@@ -61,6 +61,9 @@ final class AppStateHarness {
     var splitDNSHelperCheckInterval: Duration = .seconds(3600)
     /// Holds one machine call, subprocess or privileged, when armed.
     let hold = HeldCall()
+    /// Fetches no PAC from the network: the fake refuses and counts every fetch. A scenario that plans PAC work injects its own before
+    /// `launch()`.
+    var pacEvaluator: any PacEvaluator = FakePacEvaluator()
     private(set) var appState: AppState?
 
     init(config: ProxyConfig, platformConfig: PlatformIntegrationConfig) throws {
@@ -118,6 +121,7 @@ final class AppStateHarness {
             resolverDirectory: machine.resolverDirectory.path,
             loginItemManager: loginItems.manager,
             vpnStatusMonitor: vpn,
+            pacEvaluator: pacEvaluator,
             networkLocationObserver: locationObserver,
             networkLocationStoreFactory: { [locationStore] _ in locationStore },
             networkLocationLimits: locationLimits,
@@ -897,6 +901,73 @@ final class AppStateHarnessTests: XCTestCase {
         )
     }
 
+    /// A start held on its PAC fetch, before its listener binds, and a stop
+    /// issued then. Released, the overtaken start binds nothing, applies
+    /// nothing and reports no failure of its own, and the next start comes
+    /// up rather than finding a stale `running` and doing nothing. Twin of
+    /// `DaemonRuntimeHostTests.testAStopAdmittedBeforeTheBindLeavesNoListenerRunning`.
+    func testAStopIssuedBeforeTheBindLeavesNoListenerAndTheNextStartComesUp() async throws {
+        let appState = try await launchHoldingTheFirstPACFetch()
+        let fetch = try XCTUnwrap(harness.pacEvaluator as? HeldPACFetch)
+
+        let start = Task { try await appState.startProxy() }
+        await harness.settle("the start is held before its bind") { fetch.isHeld }
+        await appState.stopProxy()
+        fetch.release()
+        try await start.value
+
+        XCTAssertEqual(appState.runtimeSnapshot.runtimeStatus.state, .stopped, "the stop stands")
+        XCTAssertNil(appState.runtimeSnapshot.bindings.proxyPort, "the overtaken start left no listener")
+        XCTAssertFalse(wifi.routesThroughAProxy, "the overtaken start applied no system proxy")
+
+        try await appState.startProxy()
+        XCTAssertNotNil(appState.runtimeSnapshot.bindings.proxyPort, "the next start binds")
+        XCTAssertTrue(wifi.routesThroughAProxy, "the next start applies the system proxy")
+    }
+
+    /// A stop, then a newer start, while the first start is held before its
+    /// bind. The newer start joins the PAC refresh the older one holds, so
+    /// both are released together. The older start is superseded: it must
+    /// not revert the surfaces or stop the listener the newer start owns.
+    /// Twin of `DaemonRuntimeHostTests.testAStaleStartReleasedAfterANewerStartLeavesTheNewerListenerRunning`.
+    func testAStaleStartReleasedWithANewerStartLeavesTheNewerListenerRunning() async throws {
+        let appState = try await launchHoldingTheFirstPACFetch()
+        let fetch = try XCTUnwrap(harness.pacEvaluator as? HeldPACFetch)
+
+        let older = Task { try await appState.startProxy() }
+        await harness.settle("the older start is held before its bind") { fetch.isHeld }
+        await appState.stopProxy()
+        // Admitted before the gate opens: the kernel publishes `starting` at admission. Every task is awaited after the release.
+        let newer = Task { try await appState.startProxy() }
+        await harness.settle("the newer start is admitted behind the held refresh") {
+            appState.runtimeSnapshot.runtimeStatus.state == .starting
+        }
+
+        fetch.release()
+        try await older.value
+        try await newer.value
+        await appState.reconciler.drain()
+
+        let port = try XCTUnwrap(appState.runtimeSnapshot.bindings.proxyPort, "the newer start binds a listener")
+        XCTAssertNotEqual(appState.runtimeSnapshot.runtimeStatus.state, .stopped, "the stale start did not stop the newer runtime")
+        XCTAssertTrue(wifi.routesThroughAProxy, "the stale start did not revert the newer start's surfaces")
+        await appState.stopProxy()
+        XCTAssertNil(appState.runtimeSnapshot.bindings.proxyPort, "a final stop closes the listener on \(port)")
+        XCTAssertFalse(wifi.routesThroughAProxy)
+    }
+
+    /// A harness whose first PAC fetch is held, so a start can be overtaken before its listener binds.
+    private func launchHoldingTheFirstPACFetch() async throws -> AppState {
+        var config = makeConfig()
+        config.pacRoutingEnabled = true
+        config.pacURL = "http://pac.example.test/held.pac"
+        harness = try AppStateHarness(config: config, platformConfig: PlatformIntegrationConfig(manageSystemProxy: true))
+        harness.pacEvaluator = HeldPACFetch()
+        let appState = harness.launch()
+        await harness.launchRecovery()
+        return appState
+    }
+
     /// A VPN drop handled while the start's apply is out reconciles the
     /// entry files before the apply has written them, and the apply then
     /// writes them for the tunnel as it was when it was queued. The start
@@ -1116,9 +1187,10 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertFalse(appState.reconciler.lags(config: appState.config, platformConfig: appState.platformConfig))
     }
 
-    /// The section closes while the pass is still out: the baseline has
-    /// already moved, so nothing is unsaved or lagging yet. The clear then
-    /// fails and rewinds. The close still gets its retry, once the pass drains.
+    /// The section closes while the pass is still queued: the baseline has not
+    /// moved, so the flag still lags the request. The clear then fails and
+    /// leaves its flag where the machine is. The close still gets its retry,
+    /// once the pass drains.
     func testLeavingASectionDuringAPassRetriesWhenItFails() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         try await appState.startProxy()
@@ -1129,7 +1201,10 @@ final class AppStateHarnessTests: XCTestCase {
         appState.platformConfig.manageSystemProxy = false
         appState.saveConfig()
         XCTAssertTrue(appState.reconciler.hasPassInFlight)
-        XCTAssertFalse(appState.reconciler.lags(config: appState.config, platformConfig: appState.platformConfig))
+        XCTAssertTrue(
+            appState.reconciler.lags(config: appState.config, platformConfig: appState.platformConfig),
+            "queued, not yet held: the baseline still names the flag the machine holds"
+        )
         appState.flushPendingSave()
         await appState.reconciler.drain()
         await appState.awaitSectionCloseRetry()
@@ -1138,9 +1213,9 @@ final class AppStateHarnessTests: XCTestCase {
         XCTAssertEqual(decisions() - before, 2, "the pass, then the close's retry after it drained")
     }
 
-    /// As above, but a newer edit is waiting when the section closes: the
-    /// pass that flush starts began from the advanced baseline and cannot
-    /// retry A's failed clear, so the post-drain check must still run.
+    /// As above, but a newer edit is waiting when the section closes: the pass
+    /// that flush starts diffs from the baseline the first pass left, so it
+    /// cannot retry A's failed clear, and the post-drain check must still run.
     func testLeavingASectionWithANewerEditDuringAPassStillRetries() async throws {
         let appState = try launch(platform: PlatformIntegrationConfig(manageSystemProxy: true))
         try await appState.startProxy()

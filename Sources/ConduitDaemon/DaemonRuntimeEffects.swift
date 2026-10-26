@@ -8,8 +8,8 @@ import ConduitRuntime
 
 extension RuntimeHostEffects {
     /// The production adapters, selected here at the daemon's entry boundary (decision 0033). The helper, the
-    /// login Keychain, system Kerberos, the live network observers, CFNetwork PAC, the `libproc` port-holder probe
-    /// and the `networksetup` and `launchctl` runner are the real ones; the resolver directory is `/etc/resolver`.
+    /// login Keychain, system Kerberos, the live network observers, CFNetwork PAC, the `libproc` port-holder probe,
+    /// the loopback listener probe, and the `networksetup` and `launchctl` runner are the real ones; the resolver directory is `/etc/resolver`.
     ///
     /// Built after the state root is taken (and after the help and worker early exits), and used for both the host
     /// and the config-less recovery, so the two paths share one selection. `RuntimeHost` never names these
@@ -27,6 +27,7 @@ extension RuntimeHostEffects {
             gss: .system,
             pacEvaluator: CFPACEvaluator(),
             portHolderProbe: PortHolderProbe(),
+            loopbackPortProbe: { LoopbackPortProbe.isServed(port: $0) },
             commandRunner: CommandRunner.host,
             dnsResponds: { SystemDNSManager.dnsResponds(onPort: $0) },
             networkPath: NetworkMonitor(debounceInterval: NetworkMonitor.defaultDebounceInterval),
@@ -36,7 +37,9 @@ extension RuntimeHostEffects {
                 VPNStatusMonitor(graceSecondsProvider: graceSeconds, minVisibleSecondsProvider: minVisibleSeconds)
             },
             homeDirectory: homeDirectory,
-            resolverDirectory: "/etc/resolver"
+            resolverDirectory: "/etc/resolver",
+            // The configuration files' byte access, the OS adapter over the resolved state root (decision 0033).
+            stateFiles: StateFileAccess.operatingSystem()
         )
     }
 }

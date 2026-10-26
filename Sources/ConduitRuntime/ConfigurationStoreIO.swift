@@ -35,7 +35,7 @@ struct ConfigurationLoadObservation: Sendable {
 enum ConfigurationStoreIO {
     /// Reads the three files once, checks the journal's presence through the access seam, and decodes the observation with the frozen
     /// loader. Nothing is written. Each file's baseline comes from the bytes that were decoded.
-    static func observeAndDecode(plan: StateRootPlan, access: any StateFileAccessing) -> ConfigurationLoadObservation {
+    static func observeAndDecode(plan: StateRootPlan, access: any StateFileAccessing, allowMissing: Bool) -> ConfigurationLoadObservation {
         let runtime = ConfigurationFileObservation(source: plan.config.path, read: observe(plan.config, access: access))
         let platform = ConfigurationFileObservation(source: plan.platformConfig.path, read: observe(plan.platformConfig, access: access))
         let preferences = ConfigurationFileObservation(source: plan.preferences.path, read: observe(plan.preferences, access: access))
@@ -60,7 +60,7 @@ enum ConfigurationStoreIO {
                 journalPresent: journalPresent
             )
             do {
-                let frozen = try ConfigurationFrozenLoader.decode(observation, allowMissing: true)
+                let frozen = try ConfigurationFrozenLoader.decode(observation, allowMissing: allowMissing)
                 return ConfigurationLoadObservation(outcome: .success(frozen), baselines: baselines)
             } catch {
                 return ConfigurationLoadObservation(outcome: .failure(loadRefusal(for: error)), baselines: baselines)

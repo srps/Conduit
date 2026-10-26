@@ -67,6 +67,9 @@ package struct RuntimeHostEffects {
     package let pacEvaluator: any PacEvaluator
     /// Names the process holding a port that failed to bind (`libproc` in production).
     package let portHolderProbe: any ListenerPortHolderProbing
+    /// Whether a listener serves a loopback port. The system proxy's stale-listener check asks it at launch recovery and before a restore;
+    /// production connects to the real port (`LoopbackPortProbe`), and a test or simulator answers from its own fake.
+    package let loopbackPortProbe: @Sendable (Int) -> Bool
     /// The subprocess runner behind the `networksetup` and `launchctl` managers.
     package let commandRunner: @Sendable (String, [String]) throws -> CommandResult
     /// Whether a resolver answers on a local port: the system DNS liveness check.
@@ -80,6 +83,9 @@ package struct RuntimeHostEffects {
     package let homeDirectory: URL
     /// The resolver directory. Production is `/etc/resolver`; a simulator passes a scratch directory.
     package let resolverDirectory: String
+    /// The configuration files' byte access, behind the store that reads and replaces them (decision 0033). Production is the OS
+    /// adapter; a test or simulator passes the in-memory fake or the OS adapter over an owned scratch root.
+    package let stateFiles: any StateFileAccessing
 
     /// Every field is mandatory. The memberwise initializer would be internal, so the explicit one exposes it to
     /// `ConduitDaemon` and `pm-sim`, and names each adapter with no default.
@@ -90,6 +96,7 @@ package struct RuntimeHostEffects {
         gss: RuntimeGSSSource,
         pacEvaluator: any PacEvaluator,
         portHolderProbe: any ListenerPortHolderProbing,
+        loopbackPortProbe: @escaping @Sendable (Int) -> Bool,
         commandRunner: @escaping @Sendable (String, [String]) throws -> CommandResult,
         dnsResponds: @escaping @Sendable (Int) -> Bool,
         networkPath: any NetworkPathObserving,
@@ -97,7 +104,8 @@ package struct RuntimeHostEffects {
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)?,
         vpnStatusMonitor: @escaping RuntimeVPNStatusMonitorFactory,
         homeDirectory: URL,
-        resolverDirectory: String
+        resolverDirectory: String,
+        stateFiles: any StateFileAccessing
     ) {
         self.privilege = privilege
         self.credentials = credentials
@@ -105,6 +113,7 @@ package struct RuntimeHostEffects {
         self.gss = gss
         self.pacEvaluator = pacEvaluator
         self.portHolderProbe = portHolderProbe
+        self.loopbackPortProbe = loopbackPortProbe
         self.commandRunner = commandRunner
         self.dnsResponds = dnsResponds
         self.networkPath = networkPath
@@ -113,5 +122,6 @@ package struct RuntimeHostEffects {
         self.vpnStatusMonitor = vpnStatusMonitor
         self.homeDirectory = homeDirectory
         self.resolverDirectory = resolverDirectory
+        self.stateFiles = stateFiles
     }
 }
