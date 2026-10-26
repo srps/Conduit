@@ -943,8 +943,7 @@ final class ConfigurationStoreTests: XCTestCase {
     /// wrote. Variants: the runtime defaults, the renamed runtime, and the defaults with trailing whitespace; the platform defaults and the
     /// defaults with trailing whitespace. A missing platform sidecar takes the runtime variant the last adopted reload saw as its source, and
     /// its first write is held when the runtime bytes differ from it. Each step is a model decision, and each store result must match it. The trace of each seed is part
-    /// of the failure label, so a counterexample replays. It has no read or write faults, which the focused tests above cover. It is not
-    /// source mutation testing, and it does not explore interleavings.
+    /// of the failure label, so a counterexample replays. It has no read or write faults, which the focused tests above cover. It does not explore interleavings.
     func testABoundedModelOverRuntimeAndPlatformMatchesTheStoreForReplayableSeeds() async throws {
         let defaults = GenericDefaults.shared.makeConfig()
         var renamed = defaults
@@ -1212,7 +1211,7 @@ final class ConfigurationStoreTests: XCTestCase {
     /// with a legacy `showMenuBarIcon: false`, or missing), and the variant the store last adopted as the sidecar's source. A reload that
     /// changes the missing sidecar's effective value takes a newer version, and a first write is held when the runtime variant on disk is
     /// not the source. It is a model of the rules, not the store's code. Each segment starts a new store on the same external bytes and runs
-    /// five operations, and each step clears the fake's 16-call log. It is not source mutation testing, and it does not explore interleavings.
+    /// five operations, and each step clears the fake's 16-call log. Interleavings are covered separately.
     func testABoundedModelOverPreferencesMatchesTheStoreForReplayableSeeds() async throws {
         // The runtime variants: the defaults, and the defaults carrying a legacy preference value that differs from the default.
         let runtimeVariants = [
