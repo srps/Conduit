@@ -3,6 +3,10 @@ import Foundation
 
 package final class RuntimeEventFileWriter: @unchecked Sendable {
     package static let defaultMaxBytes = 1_048_576
+    /// `DiagnosticFlush` spends a first events wait and at most one further one. A first wait that drained can leave its
+    /// cancelled timer body running, so the further wait takes the second slot instead of being refused. Two retired
+    /// bodies, from this phase or an earlier call, still make a third wait `busy`.
+    static let drainTimerSlots = 2
 
     private let writer: BoundedRecordWriter
     private let maxBytes: Int
@@ -11,9 +15,18 @@ package final class RuntimeEventFileWriter: @unchecked Sendable {
 
     /// `eventLog` receives the refusal event. When it is this writer's own log, that event
     /// reaches the latched gate and is counted as a drop (#222).
-    package init(fileURL: URL, maxBytes: Int = RuntimeEventFileWriter.defaultMaxBytes,
-                 logger: any LogSink, limits: RecordWriterLimits = .init(),
-                 destinationGuard: any RecordFileDestinationGuarding, eventLog: RuntimeEventLog) {
+    package convenience init(fileURL: URL, maxBytes: Int = RuntimeEventFileWriter.defaultMaxBytes,
+                             logger: any LogSink, limits: RecordWriterLimits = .init(),
+                             destinationGuard: any RecordFileDestinationGuarding, eventLog: RuntimeEventLog) {
+        self.init(fileURL: fileURL, maxBytes: maxBytes, logger: logger, limits: limits,
+                  destinationGuard: destinationGuard, eventLog: eventLog, drainSleep: nil)
+    }
+
+    /// Test seam, internal so only `@testable` tests reach it: `drainSleep` replaces the drain timer's sleep when set.
+    init(fileURL: URL, maxBytes: Int = RuntimeEventFileWriter.defaultMaxBytes,
+         logger: any LogSink, limits: RecordWriterLimits = .init(),
+         destinationGuard: any RecordFileDestinationGuarding, eventLog: RuntimeEventLog,
+         drainSleep: (@Sendable (ContinuousClock.Instant) async throws -> Void)?) {
         precondition(maxBytes > 0)
         self.maxBytes = maxBytes
         self.logger = logger
@@ -24,7 +37,7 @@ package final class RuntimeEventFileWriter: @unchecked Sendable {
             reportFailure: { message in
                 guard !gate.isRefused else { return }
                 logger.log(.warning, "Failed to write events.ndjson: \(message)", category: .general)
-            })
+            }, onDrainCleanup: nil, drainTimerSlots: Self.drainTimerSlots, drainSleep: drainSleep)
     }
 
     package var statistics: RecordWriterStatistics { writer.statistics }

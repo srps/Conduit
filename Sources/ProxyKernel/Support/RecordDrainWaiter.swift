@@ -17,10 +17,15 @@ package enum RecordDrainOutcome: String, Sendable, Equatable {
 
 /// Awaits one `DispatchGroup` without blocking the caller.
 ///
-/// One reservation is physically outstanding at a time. It has two parts: the group's `notify`, and one detached
-/// `Task` that sleeps until the absolute deadline. The reservation is released only when both have acknowledged: the
-/// notify by firing, the task by its body ending. A caller that times out or is cancelled returns at once, but the
-/// reservation stays held until both parts quiesce, so a wait made meanwhile is `.busy`.
+/// Each wait makes a reservation with two parts: the group's `notify`, and one detached `Task` that sleeps until the
+/// absolute deadline. A part is released only when it acknowledges: the notify by firing, the task by its body ending.
+/// A caller that drains, times out or is cancelled returns at once, but its parts stay held until they quiesce.
+///
+/// One caller waits at a time, and at most one notify is outstanding, whatever the timer slots. A wait made while
+/// either is held is `.busy`, so a timed-out or cancelled wait, whose notify stays registered, refuses the next one.
+/// `timerSlots` bounds the timer bodies that may run at once, retired ones included, across every call. With the
+/// default of one, a drained caller's cancelled timer body also refuses the next wait until it ends. A second slot lets
+/// one new wait register beside that retired body; when every slot is held, the wait is `.busy`.
 ///
 /// The timer is a `Task` and not a `DispatchSourceTimer` because a dispatch timer runs on uptime, which excludes sleep,
 /// while `ContinuousClock` advances across sleep. The sleep seam is injected so tests can simulate expiry and cancel
@@ -29,19 +34,23 @@ package enum RecordDrainOutcome: String, Sendable, Equatable {
 /// The waiter holds its core strongly. Every callback holds the core weakly, so no callback keeps the caller's waiter
 /// alive. Continuations and the cleanup seam run outside the state lock.
 package final class RecordDrainWaiter: @unchecked Sendable {
+    /// The most timer slots a waiter may be given: a first wait, and one further wait beside its retired timer body.
+    package static let maxTimerSlots = 2
+
     private let core: Core
 
-    /// `onCleanup` runs once both parts are released; it is delivered as its own block on the serial queue, after the
-    /// callbacks that released the last part have returned. `onTimerReleased` runs when the timer's body ends.
-    /// `onRegistered` runs once a wait's reservation exists. `sleep` defaults to a sleep until the deadline on the
-    /// continuous clock.
-    package init(group: DispatchGroup, onCleanup: (@Sendable () -> Void)? = nil,
+    /// `timerSlots` is between one and `maxTimerSlots`. `onCleanup` runs each time the last held part is released; it
+    /// is delivered as its own block on the serial queue, after the callbacks that released that part have returned.
+    /// `onTimerReleased` runs when a timer's body ends. `onRegistered` runs once a wait's reservation exists. `sleep`
+    /// defaults to a sleep until the deadline on the continuous clock.
+    package init(group: DispatchGroup, timerSlots: Int = 1, onCleanup: (@Sendable () -> Void)? = nil,
                  onTimerReleased: (@Sendable () -> Void)? = nil,
                  onRegistered: (@Sendable () -> Void)? = nil,
                  sleep: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void = { deadline in
                      try await Task.sleep(until: deadline, clock: .continuous)
                  }) {
-        core = Core(group: group, onCleanup: onCleanup, onTimerReleased: onTimerReleased,
+        precondition((1...Self.maxTimerSlots).contains(timerSlots))
+        core = Core(group: group, timerSlots: timerSlots, onCleanup: onCleanup, onTimerReleased: onTimerReleased,
                     onRegistered: onRegistered, sleep: sleep)
     }
 
@@ -52,33 +61,42 @@ package final class RecordDrainWaiter: @unchecked Sendable {
     }
 
     private final class Core: @unchecked Sendable {
-        /// One caller's wait. Settled exactly once, by whichever of notify, expiry or cancellation takes it first.
+        /// One caller's wait, and the identity of its reservation. Settled exactly once, by whichever of notify, expiry or
+        /// cancellation takes it first. Its fields are read and written under the state lock.
         final class Pending: @unchecked Sendable {
             var continuation: CheckedContinuation<RecordDrainOutcome, Never>?
             var cancelRequested = false
+            /// This wait's timer, from registration until its body ends.
+            var timer: Task<Void, Never>?
         }
 
         struct State {
-            /// The group's notify is registered and has not fired.
-            var notifyOutstanding = false
-            /// The timer task exists and its body has not ended.
-            var timerOutstanding = false
-            var timer: Task<Void, Never>?
+            /// The wait whose group notify is registered and has not fired. At most one, whatever the timer slots.
+            var notifyOwner: Pending?
+            /// The waits whose timer body has not ended, at most `timerSlots`. Only a wait's own timer removes it.
+            var liveTimers: [Pending] = []
+            /// The one caller waiting now.
             var current: Pending?
         }
 
         private static let resolutionQueue = DispatchQueue(label: "conduit.record-drain-waiter", qos: .utility)
 
         private let group: DispatchGroup
-        private let state = NIOLockedValueBox(State())
+        private let timerSlots: Int
+        private let state: NIOLockedValueBox<State>
         private let onCleanup: (@Sendable () -> Void)?
         private let onTimerReleased: (@Sendable () -> Void)?
         private let onRegistered: (@Sendable () -> Void)?
         private let sleep: @Sendable (ContinuousClock.Instant) async throws -> Void
 
-        init(group: DispatchGroup, onCleanup: (@Sendable () -> Void)?, onTimerReleased: (@Sendable () -> Void)?,
-             onRegistered: (@Sendable () -> Void)?, sleep: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void) {
+        init(group: DispatchGroup, timerSlots: Int, onCleanup: (@Sendable () -> Void)?,
+             onTimerReleased: (@Sendable () -> Void)?, onRegistered: (@Sendable () -> Void)?,
+             sleep: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void) {
             self.group = group
+            self.timerSlots = timerSlots
+            var initial = State()
+            initial.liveTimers.reserveCapacity(timerSlots)
+            state = NIOLockedValueBox(initial)
             self.onCleanup = onCleanup
             self.onTimerReleased = onTimerReleased
             self.onRegistered = onRegistered
@@ -92,23 +110,24 @@ package final class RecordDrainWaiter: @unchecked Sendable {
                 await withCheckedContinuation { (continuation: CheckedContinuation<RecordDrainOutcome, Never>) in
                     let immediate = state.withLockedValue { s -> RecordDrainOutcome? in
                         if pending.cancelRequested { return .cancelled }
-                        if s.notifyOutstanding || s.timerOutstanding { return .busy }
+                        if s.current != nil || s.notifyOwner != nil || s.liveTimers.count >= timerSlots { return .busy }
                         let remaining = ContinuousClock.now.duration(to: deadline)
                         guard remaining > .zero else { return .skippedBudget }
                         pending.continuation = continuation
                         s.current = pending
-                        s.notifyOutstanding = true
-                        s.timerOutstanding = true
+                        s.notifyOwner = pending
                         // Both calls only schedule work; neither runs a callback while the lock is held.
                         group.notify(queue: Self.resolutionQueue) { [weak self] in self?.finishedGroup() }
                         let sleepUntil = sleep
-                        // The one timer for this reservation. Its body ends the timer part, however it ends.
-                        s.timer = Task.detached(priority: .utility) { [weak self, weak pending] in
-                            defer { self?.timerReleased() }
-                            // A cancelled sleep means the caller was already settled by the cancel path.
+                        // This reservation's timer. Its body ends its own timer part, however it ends. It holds its
+                        // wait so the release removes exactly that wait's entry; the wait drops the task once it has.
+                        pending.timer = Task.detached(priority: .utility) { [weak self, pending] in
+                            defer { self?.timerReleased(pending) }
+                            // A cancelled sleep means the caller was already settled by the notify or cancel path.
                             do { try await sleepUntil(deadline) } catch { return }
                             self?.timedOut(pending)
                         }
+                        s.liveTimers.append(pending)
                         return nil
                     }
                     if let immediate {
@@ -128,47 +147,56 @@ package final class RecordDrainWaiter: @unchecked Sendable {
             group.wait(timeout: .now()) == .success
         }
 
-        /// The group emptied: the notify is spent. The caller drained, and the reservation ends once the timer body has ended.
+        /// The group emptied: the notify is spent. Its owner drained if it is still the caller waiting, and its reservation
+        /// ends once its timer body has ended.
         private func finishedGroup() {
             let detached = state.withLockedValue { s -> (CheckedContinuation<RecordDrainOutcome, Never>?, Task<Void, Never>?, Bool) in
-                s.notifyOutstanding = false
-                let continuation = s.current?.continuation
-                s.current?.continuation = nil
-                s.current = nil
-                return (continuation, s.timer, !s.timerOutstanding)
+                guard let owner = s.notifyOwner else { return (nil, nil, false) }
+                s.notifyOwner = nil
+                var continuation: CheckedContinuation<RecordDrainOutcome, Never>?
+                if s.current === owner {
+                    s.current = nil
+                    continuation = owner.continuation
+                    owner.continuation = nil
+                }
+                return (continuation, owner.timer, s.liveTimers.isEmpty)
             }
-            // The caller resolves now. Only the physical timer part stays reserved, until its body ends. The timer is
-            // cancelled here, but a held body may outlive that cancel, and the next non-empty wait is busy until it ends.
+            // The caller resolves now. Only its timer part stays reserved, until its body ends. The timer is cancelled
+            // here, but a held body may outlive that cancel and keeps its slot until it ends.
             detached.1?.cancel()
             detached.0?.resume(returning: .drained)
             if detached.2 { deliverCleanup() }
         }
 
         /// The deadline passed. The group has not drained, so the notify stays registered and the reservation stays held.
-        private func timedOut(_ pending: Pending?) {
+        /// A timer whose wait was already settled settles nothing.
+        private func timedOut(_ pending: Pending) {
             let detached = state.withLockedValue { s -> (CheckedContinuation<RecordDrainOutcome, Never>?, Task<Void, Never>?) in
-                guard let pending, s.current === pending else { return (nil, nil) }
+                guard s.current === pending else { return (nil, nil) }
                 s.current = nil
                 let continuation = pending.continuation
                 pending.continuation = nil
-                return (continuation, s.timer)
+                return (continuation, pending.timer)
             }
             detached.1?.cancel()
             detached.0?.resume(returning: .timedOut)
         }
 
-        /// The timer body ended. Its part of the reservation is released; the notify's may still be held.
-        private func timerReleased() {
+        /// A timer body ended. Its slot is released; another wait's timer or the notify may still be held.
+        private func timerReleased(_ pending: Pending) {
             let quiescent = state.withLockedValue { s -> Bool in
-                s.timerOutstanding = false
-                s.timer = nil
-                return !s.notifyOutstanding
+                if let index = s.liveTimers.firstIndex(where: { $0 === pending }) {
+                    s.liveTimers.remove(at: index)
+                }
+                pending.timer = nil
+                return s.liveTimers.isEmpty && s.notifyOwner == nil
             }
             onTimerReleased?()
             if quiescent { deliverCleanup() }
         }
 
-        /// The caller's task was cancelled. The writer's work continues, the timer is cancelled, and the notify stays held.
+        /// The caller's task was cancelled. The writer's work continues, the wait's own timer is cancelled, and the notify
+        /// stays held.
         private func cancel(_ pending: Pending) {
             let detached = state.withLockedValue { s -> (CheckedContinuation<RecordDrainOutcome, Never>?, Task<Void, Never>?) in
                 pending.cancelRequested = true
@@ -176,7 +204,7 @@ package final class RecordDrainWaiter: @unchecked Sendable {
                 s.current = nil
                 let continuation = pending.continuation
                 pending.continuation = nil
-                return (continuation, s.timer)
+                return (continuation, pending.timer)
             }
             detached.1?.cancel()
             detached.0?.resume(returning: .cancelled)

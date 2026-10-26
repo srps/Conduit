@@ -46,14 +46,60 @@ enum BoundedWriterScenarios {
             throw Failure(message: "Storage capacity failed to recover after unblocking")
         }
         try await shutdownTimeoutPersistence()
+        let confirmationNote = try await lateSnapshotConfirmation()
         let appendNote = try appendAmplification()
         return ScenarioResult(
             name: "bounded-writers", clientCount: 0, clientsOpened: 0, clientsWithFirstByte: 0,
             clientsClosedEarly: 0, totalBytes: 1024, durationSeconds: Date().timeIntervalSince(start),
             aggregateMBps: 0, minBytes: 0, maxBytes: 0, medianBytes: 0, earliestClose: nil, latestClose: nil,
-            assertions: [.init("storage bounds, loss reporting, recovery and append amplification", true)],
+            assertions: [.init("storage bounds, loss reporting, recovery, late confirmation and append amplification", true)],
             notes: ["PASS: stalled storage retains at most 16 records/1024 bytes including in-flight writes",
-                    "PASS: 9985 drops and flush deadline reported; event loop responsive; capacity recovered", appendNote])
+                    "PASS: 9985 drops and flush deadline reported; event loop responsive; capacity recovered",
+                    confirmationNote, appendNote])
+    }
+
+    /// The production writers on the real clock: a fresh events writer with a queued event, and a snapshot whose write
+    /// fails. The phase's first events wait drains, and its one further wait must confirm the snapshot's marker inside the
+    /// phase's own deadline, with no recorded loss. This guards the composition; the held-timer ordering that once left
+    /// that wait busy is reproduced deterministically only by the unit tests.
+    private static func lateSnapshotConfirmation() async throws -> String {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("conduit-confirm-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let blocker = directory.appendingPathComponent("blocker")
+        try Data("not a directory".utf8).write(to: blocker)
+        let url = directory.appendingPathComponent("events.ndjson")
+        let events = RuntimeEventLog(capacity: 32)
+        let writer = RuntimeEventFileWriter(fileURL: url, logger: DiscardingLogSink(),
+                                            destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
+        events.setSink { writer.record($0) }
+        let snapshots = makeSnapshotArtifactWriter(
+            fileURL: blocker.appendingPathComponent("snapshot.json"), logger: DiscardingLogSink(),
+            destinationGuard: UncheckedRecordFileDestination(), eventLog: events)
+        snapshots.submit(ProxyOrchestratorSnapshot())
+        events.append(RuntimeEvent(kind: .health, event: "fixture.before-phase"))
+        let started = ContinuousClock.now
+        let report = await DiagnosticFlush.run(phase: DiagnosticFlushPhase(), audit: DiscardingConnectionAuditSink(),
+                                               events: writer, snapshot: snapshots, eventLog: events,
+                                               logger: DiscardingLogSink())
+        let elapsed = started.duration(to: .now)
+        let statistics = report.eventsStatistics
+        guard report.events == .drained, report.snapshot == .writeFailed, report.eventsRetry == .drained,
+              report.snapshotEvent == .confirmed, elapsed < DiagnosticFlushPhase.defaultBudget,
+              statistics.pendingRecords == 0, statistics.droppedRecords == 0, statistics.failedRecords == 0,
+              statistics.flushTimeouts == 0 else {
+            throw Failure(message: "The late snapshot confirmation was not confirmed inside the phase: events=\(report.events.rawValue) "
+                + "snapshot=\(report.snapshot.rawValue) eventsRetry=\(report.eventsRetry?.rawValue ?? "none") "
+                + "snapshotEvent=\(report.snapshotEvent.rawValue) pending=\(statistics.pendingRecords) "
+                + "dropped=\(statistics.droppedRecords) failed=\(statistics.failedRecords) flushTimeouts=\(statistics.flushTimeouts)")
+        }
+        let rows = try Data(contentsOf: url).split(separator: 0x0A).map {
+            try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: Data($0))
+        }
+        guard rows.contains(where: { $0.event == "observability.snapshot_flush_unconfirmed" && $0.detail == "outcome=write_failed" }) else {
+            throw Failure(message: "The confirmed snapshot marker is not in events.ndjson")
+        }
+        return "PASS: late snapshot marker confirmed by the one further events wait in \(elapsed) with zero loss; marker persisted"
     }
 
     private static func storageStarted(_ signal: DispatchSemaphore) -> Bool {
