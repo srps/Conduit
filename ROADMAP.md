@@ -42,14 +42,16 @@ read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
 mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
 [0034](./docs/decisions/0034-private-editor-reply-frame-cap.md) selects complete private editor replies at 8 MiB. [Actual-codec sizing and allocation-lifetime measurements](./docs/experiments/private-editor-codec/README.md) cover the headless codec; real-adapter Stop/status responsiveness remains an adoption gate. Service-profile defaults remain unselected and must not inherit experimental values.
 
-Latest verified slice: shared-host workflow adoption after
-[PR243](https://github.com/srps/Conduit/pull/243). All 40 required local workflow
-checks plus the targeted DNS scenario pass on stable source: 3,372 tests with
-four skips, all 102 simulator records and perf. Independent subscription-backed
-Claude reviews and the [verification record](./docs/verification-runtime-workflow-2026-10-26.md)
-state the scope, earlier failures and remaining limits. Hosted exact-head checks
-and actual review disposition belong to the integration PR; failed/skipped
-optional bots do not provide clean-review evidence.
+Latest verified slice: the private editor codec in [PR245](https://github.com/srps/Conduit/pull/245), merged after
+exact-head hosted Swift and CodeQL checks passed. All 40 required local workflow checks plus the targeted DNS scenario
+passed on unchanged source: 3,412 tests with zero failures and four documented skips, all 103 simulator records and perf.
+Independent subscription-backed Claude reviews and the
+[verification record](./docs/verification-private-editor-codec-2026-10-26.md) state the scope, earlier failures and limits.
+Devin's optional full review was skipped for expired credits; it is not review evidence.
+
+The next store correction addresses missing-sidecar source freshness and exact persisted-value comparison.
+The related apply/reconciler equality risk is tracked in [#246](https://github.com/srps/Conduit/issues/246) and must be
+reproduced and resolved before the private apply path ships. Neither correction creates another app writer.
 
 Supporting evidence stays with its owning slice:
 [client/service](./docs/runtime-client-stage1-inventory.md),

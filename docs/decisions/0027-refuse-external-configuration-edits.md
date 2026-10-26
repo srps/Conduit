@@ -107,8 +107,11 @@ and deletion relative to a verified absent or present baseline also conflict. A 
 pre-read authorizes no write (`preReadFailed`). The replacement itself is
 [`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift),
 which runs the pre-read against an opaque baseline and then the existing write and read-back
-classifier. Parsed-value equality, with unknown fields and formatting ignored, decides
-only verify-without-rewrite, never whether a file counts as changed.
+classifier. The next store correction replaces synthesized value equality with canonical persisted-value comparison
+on the store worker: Unicode-equivalent strings can otherwise hide different URL/configuration bytes. The canonical
+comparison controls verify-without-rewrite; raw observed bytes still decide whether a file changed. Source-dependent
+missing-sidecar tokens and first-creation checks are being verified with that correction; no completed validation is
+claimed here.
 
 Evidence is separate by kind, and each kind covers only what it names:
 
@@ -138,9 +141,8 @@ Counts, seeds and limits are in [the verification note](../verification-configur
 Does not prove: a nonparticipating editor racing after the check (the check is not
 compare-and-swap), including a sidecar changed between the preservation check and the
 runtime replacement, power-loss durability, cross-process exclusion, the Stop, Quit or
-incarnation fences, or the mixed-apply hold of 0025. No app, daemon or `pm-proxy` path
-constructs the store yet, so no live configuration save is protected by it. Owner
-validation is none.
+incarnation fences, or the mixed-apply hold of 0025. The daemon now consumes this store through the shared workflow (PR244); AppState and `pm-proxy` do not.
+The private client and app writer convergence remain open. Owner validation is none.
 
 ## Open questions
 

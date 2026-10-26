@@ -140,6 +140,19 @@ older preference/platform draft cannot retain a matching token after its fallbac
 sidecar cannot shadow externally edited legacy values without checking the backing source. This is a store/model
 integration gate under the selected conflict policy, not permission for another writer or a snapshot registry.
 
+Persistence equivalence belongs in the store's existing codec path. Swift string equality can alias different UTF-8
+spellings of URLs and other saved text, so it cannot prove that the requested persisted intent is unchanged. Compare
+canonical encodings of the current and candidate values on the store worker, reusing the existing stagers. Capture old
+values for reload comparison in the same worker step, and return fixed change facts to the owner. Raw observed-file
+baselines still decide conflicts; formatting and unknown fields remain preserved on a no-op. Do not add a second field
+inventory, parser, retained hash history or domain API migration for this correction. Known unrepresentable repair values
+cannot authorize equality reuse; a valid repair can still be written. Unexpected staging failures stay typed and visible.
+Measure the extra staging work and temporary allocations through the actual adapter.
+
+The apply/reconciler uses of configuration equality need separate production witnesses and a cohesive fix before private
+apply is exposed ([#246](https://github.com/srps/Conduit/issues/246)). The store correction alone does not establish that
+a byte-distinct URL change reaches the active runtime.
+
 **Causal receipt (deferred until workflow integration).** Admission and settlement are separate. An update currently
 receives `ControlAdmission` in its correlated private reply; no codec-only success is a saved or applied outcome.
 
@@ -194,6 +207,19 @@ encoder owns the full eight-MiB frame check. No dummy request or envelope identi
 Decision 0021 already selects one global active private body/decode, refusing a busy peer before another body is
 reserved. Implement that as its own transport lane, with capacity one and its own custody term. The ordinary 64 KiB caps,
 the ordinary lanes' two-request-plus-two-reply charge and the per-module Stop lanes stay unchanged.
+
+Reserve private capacity before the client maps or encodes a large body, and keep the reservation through reply
+decoding and physical cleanup. A scoped exchange or single-use producer/consumer serves that requirement; an API that
+accepts an already encoded eight-MiB frame reserves too late. The gate belongs to the host/service composition and is
+shared across all its in-memory transports and connections, rather than minted by each transport initializer. No global
+singleton or registry is implied. Completed frozen inputs that a write still owns remain separately bounded active
+operation state until quiescence, as 0018 requires.
+
+A pre-decode refusal cannot invent a correlated R reply: the private header has no request ID. An in-memory refusal before
+encoding/sending is not-sent busy. After any bytes may have left a network client, a missing correlated answer leaves an
+update's admission unknown or aborts a read; request lookup does not promise that an absent record means refusal.
+The production socket's busy signaling remains for its own reviewed adapter. This adds no handshake or public/private
+configuration halves.
 
 An owner turn only captures copy-on-write values, tokens and intents, or admits. Encoding, reading and decoding run off the
 main actor and off `PlatformWork`, so neither the owner nor helper and Stop cleanup effects queue behind a codec pass. The
