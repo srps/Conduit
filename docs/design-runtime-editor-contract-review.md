@@ -249,9 +249,10 @@ acceptance remain separate work; none is proved by this proposal.
 
 ## Interactive admission still to implement
 
-The [interactive admission alternatives](design-runtime-editor-admission-options.md) identify two
-unselected multi-client/dependent-start policies. Keep the approved exact-revision and save-only
-meanings; settle those choices before implementing private update/Start.
+The owner selected whole-request lifecycle validation in [0035](decisions/0035-whole-request-lifecycle-validation.md).
+The [reviewed alternatives](design-runtime-editor-admission-options.md) retain the rationale and the
+separate, still-unselected dependent DNS startup choice. Keep exact revisions and save-only meanings;
+settle that remaining choice before implementing the affected private update/Start path.
 
 Put host-owned store operations in generation order within bounded ordinary
 admission. A Start waiting behind an in-flight operation rechecks its ticket and

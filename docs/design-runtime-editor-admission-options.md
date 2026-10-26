@@ -1,7 +1,8 @@
 # Interactive editor admission: owner review
 
-Status: proposed, not selected or implemented. This supplements the
-[editor contract](design-runtime-editor-contract-review.md); it changes no accepted record.
+Status: decision 1 selected by the owner on 2026-10-26 ([0035](decisions/0035-whole-request-lifecycle-validation.md));
+implementation is planned. Decision 2 remains proposed. This supplements the
+[editor contract](design-runtime-editor-contract-review.md).
 Official subscription-backed Claude Code reviewed the alternatives. The existing app has one local
 client; its behavior alone does not decide races between future app/CLI clients.
 
@@ -11,7 +12,7 @@ A frozen private request carries one runtime/platform input and three explicit m
 For example, it asks to start the proxy and apply DNS settings at observed DNS revision 7. Before
 admission, another client stops DNS, advancing its revision to 8. The file baselines are still current.
 
-**A — validate the request as one unit (Codex and Claude recommendation).** Reserve
+**A — validate the request as one unit (selected).** Reserve
 capacity and check every actionable Start/apply-while-running revision in the owner admission turn.
 If any is stale, reject the request before persistence or intent changes. Keep the client's draft and
 show the stale lifecycle result. A new observation does not authorize silently replaying a Start;
@@ -61,9 +62,41 @@ Revisit partial progress when actual multi-client use demonstrates enough benefi
 
 Unselected and separate from decision 1. Today proxy Start/Restart may start enabled DNS. Under the
 approved private API, a DNS save-only slot cannot enable stopped DNS; ordinary proxy Restart has no
-DNS slot. Options are explicit companion DNS Start, a separately named host dependent-activation
-operation, or removing that coupling. Preserve the approved meanings while comparing compatibility,
-Stop races and failure reporting. The daemon whole-host CLI facade remains separate.
+DNS slot. The daemon whole-host CLI facade remains separate.
+
+**Proposed recommendation — explicit conditional activation owned by the host (Claude review pending).**
+Preserve the convenience through a separately named, bounded action: bring DNS up only if its current
+host-held intent is already enabled and unfenced. The client explicitly includes this action with proxy
+Start or Restart; it never changes the DNS enable bit or clears a DNS Stop fence. It has its own exact
+DNS lifecycle revision and outcome. This is a contract extension, not a new meaning of save-only.
+
+For private Start, the fixed module plan can express proxy Start plus DNS conditional activation. For
+ordinary Restart, add a narrowly typed companion action to the proxy restart command, using the
+currently verified input rather than submitting or applying editor values. Exact API names remain
+reviewable implementation details. Both operations use the same workflow authorization and fixed
+module ownership; introduce no generic dependency graph, second writer or UI-side lifecycle authority.
+
+A stale participating revision rejects the whole request under 0035. A later Stop invalidates the
+remaining operation as selected there; completed physical effects stay reported facts. Disabled/fenced
+DNS is a typed no-op. Running DNS needs no activation. A DNS startup failure reports its own result
+and does not pretend that an already-started proxy was rolled back. Ordinary restart must not silently
+apply unsaved editor values. New fields require frame sizing before adoption.
+
+Example: DNS was enabled on disk but failed to bind. Restart Proxy explicitly requests a conditional
+DNS retry. With unchanged DNS revision and no fence, the host retries it. If the user explicitly stopped
+DNS, the action leaves it stopped. If that Stop changed the revision after the client observation, the
+whole request is stale; the client preserves the draft and does not replay Start automatically.
+
+**Alternative — explicit client-composed DNS Start.** The client adds a normal DNS Start when its
+observation says enabled, unfenced and stopped. The host still validates revisions. This reuses the
+private Start case, but Restart needs either a separate private operation, with a separate outcome and
+possible intervening controls, or a new companion command anyway. Keep the live host authoritative;
+never infer permission from a stale UI mirror.
+
+**Alternative — independent module controls.** Proxy Start/Restart never starts DNS. This is the
+smallest contract but changes today's cold-start and failed-DNS retry behavior; users must start DNS
+separately despite its saved enabled intent. Revisit coupling if an actual product need changes; do not
+add general workflow/dependency machinery for this single existing convenience.
 
 ## Work that does not depend on these selections
 

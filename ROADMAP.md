@@ -55,8 +55,9 @@ one shared adoption predicate and byte-aware PAC/credential cache comparisons. I
 mutations and still-pending final/hosted checks. Neither correction creates another app writer.
 
 Before private update/Start adoption, settle the [interactive admission alternatives](./docs/design-runtime-editor-admission-options.md):
-one stale lifecycle slot in a combined request, then proxy-to-DNS dependent startup. These are unselected proposals,
-not amendments to the approved exact-revision/save-only contract. Stop/status/private-read adapter work remains independent.
+the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-request-lifecycle-validation.md));
+proxy-to-DNS dependent startup remains unselected. Exact revisions and save-only keep their approved meaning.
+Stop/status/private-read adapter work remains independent.
 
 Supporting evidence stays with its owning slice:
 [client/service](./docs/runtime-client-stage1-inventory.md),
