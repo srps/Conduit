@@ -187,9 +187,16 @@ final class AppStateHarness {
                 appState.runtimeSnapshot.runtimeStatus.state == .stopped
                     && appState.runtimeSnapshot.dnsRunState == .stopped
             }
+            // Termination cleanup does not join launch recovery, which logs
+            // from off the main actor; join it here. Clearing the log URL
+            // closes the writer after draining its queued appends, and a
+            // main-actor log hop that lands later has no file to recreate.
+            await appState.awaitLaunchRecovery()
+            appState.logStore.logFileURL = nil
         }
         appState = nil
-        // The app's work has quiesced above, so the root's authority ends before its files go.
+        // Runtime, DNS, launch recovery and the file log have stopped above,
+        // so the root's authority ends before its files go.
         releaseScratchStateRoot(stateSession)
         removeScratch([stateDirectory])
     }
