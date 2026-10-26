@@ -2188,7 +2188,6 @@ final class DaemonRuntimeHostTests: XCTestCase {
         config.localPort = 0
         config.dnsForwarderPort = 0
         config.dnsForwarderEnabled = false
-        config.dnsEntries = [DomainDNSEntry(domain: "corp.example", servers: ["10.0.0.53"])]
         config.pacURL = composed
         harness = try DaemonHarness(config: config, platformConfig: PlatformIntegrationConfig())
         let host = try await harness.makeHost()
@@ -2210,7 +2209,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         assertSameUTF8(host.orchestrator.config.pacURL, composed, "a held reload pushes nothing")
 
         try await host.startRuntime()
-        // The kernel's echo of the pushed config is delivered later; it must not have moved the view, so join it before reading.
+        // Join the observer deliveries queued by Start before checking the accepted view.
         await host.deliveries.drain()
         assertSameUTF8(host.config.pacURL, decomposed, "the Start adopted the committed bytes into the host view")
         XCTAssertEqual(host.status().configGeneration, 1)
