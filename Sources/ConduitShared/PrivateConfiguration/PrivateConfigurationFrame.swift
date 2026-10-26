@@ -204,6 +204,26 @@ final class PrivateFrameBuffer {
         count += 1
     }
 
+    /// Appends a run of bytes with one copy. The caller keeps `count + bytes.count` within `ceiling`. Capacity grows
+    /// by the same doubling as `append(_:)`, taken in one step, so the total copy work stays linear in the bytes stored.
+    func append(contentsOf bytes: UnsafeBufferPointer<UInt8>) {
+        guard let source = bytes.baseAddress, !bytes.isEmpty else {
+            return
+        }
+        precondition(bytes.count <= ceiling - count, "frame buffer appended past its ceiling")
+        let needed = count + bytes.count
+        if needed > capacity {
+            var target = capacity
+            while target < needed {
+                target = min(max(target * 2, 4_096), ceiling)
+            }
+            grow(to: target)
+        }
+        // The slots are uninitialized memory, so they are initialized, not assigned.
+        (base! + count).initialize(from: source, count: bytes.count)
+        count = needed
+    }
+
     /// Scoped read access to the bytes held. The pointer must not escape `body`.
     func withBytes<Result>(_ body: (UnsafeBufferPointer<UInt8>) throws -> Result) rethrows -> Result {
         guard let base else {
@@ -249,9 +269,13 @@ final class PrivateFrameBuffer {
 /// `Sendable` claim. Hand it to another task only after the owner has stopped using it. A
 /// value copy would not be safe, because a copy would share the body buffer it holds.
 ///
-/// Work: a `consume` call examines at most `maxInputBytesPerConsume` input bytes and returns how
-/// many it used. It stops at the end of a frame, so later bytes are left to the caller. That bound
-/// counts input examined, not all work. Two things in one call are not bounded by the 16 KiB:
+/// Work: a `consume` call examines at most `maxInputBytesPerConsume` input bytes, header and terminator
+/// included, and returns how many it used. It stops at the end of a frame, so later bytes are left to the
+/// caller. Header and terminator bytes are checked one at a time. Body bytes are copied in runs: when the
+/// input has contiguous storage, each run is one bulk copy, bounded by the body still due and by what is
+/// left of the call's budget; other collections are read one byte at a time. Both paths examine the same
+/// bytes and reach the same result. That bound counts input examined, not all work. Two things in one call
+/// are not bounded by the 16 KiB:
 ///   - growing the body buffer copies the bytes it already holds (at most the frame cap);
 ///   - the call that completes a frame copies the whole body into `SecretBytes` and scrubs
 ///     the buffer (at most the frame cap).
@@ -316,16 +340,53 @@ package final class PrivateConfigurationFrameReader {
         case .header, .body, .terminator:
             break
         }
+        do {
+            if let result = try input.withContiguousStorageIfAvailable({ try consumeContiguous($0) }) {
+                return result
+            }
+            return try consumeEach(input)
+        } catch {
+            fail(with: error)
+            throw (error as? PrivateConfigurationWireError) ?? .malformedBody
+        }
+    }
+
+    /// The contiguous path. Body bytes go into the buffer in runs, each bounded by the body still due and by the
+    /// call's remaining budget; header and terminator bytes go through `accept` one at a time.
+    private func consumeContiguous(
+        _ input: UnsafeBufferPointer<UInt8>
+    ) throws -> (step: PrivateConfigurationFrameStep, consumed: Int) {
+        let limit = min(input.count, PrivateConfigurationFrame.maxInputBytesPerConsume)
         var consumed = 0
-        for byte in input.prefix(PrivateConfigurationFrame.maxInputBytesPerConsume) {
-            consumed += 1
-            do {
+        while consumed < limit {
+            if case .body = phase, let body {
+                let run = min(bodyRemaining, limit - consumed)
+                body.append(contentsOf: UnsafeBufferPointer(rebasing: input[consumed..<(consumed + run)]))
+                consumed += run
+                bodyRemaining -= run
+                if bodyRemaining == 0 {
+                    phase = .terminator
+                }
+            } else {
+                let byte = input[consumed]
+                consumed += 1
                 if let frame = try accept(byte) {
                     return (.frame(frame), consumed)
                 }
-            } catch {
-                fail(with: error)
-                throw (error as? PrivateConfigurationWireError) ?? .malformedBody
+            }
+        }
+        return (.needsInput, consumed)
+    }
+
+    /// The path for a collection without contiguous storage: every byte goes through `accept`.
+    private func consumeEach<Chunk: Collection>(
+        _ input: Chunk
+    ) throws -> (step: PrivateConfigurationFrameStep, consumed: Int) where Chunk.Element == UInt8 {
+        var consumed = 0
+        for byte in input.prefix(PrivateConfigurationFrame.maxInputBytesPerConsume) {
+            consumed += 1
+            if let frame = try accept(byte) {
+                return (.frame(frame), consumed)
             }
         }
         return (.needsInput, consumed)

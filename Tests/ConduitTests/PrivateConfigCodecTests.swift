@@ -284,6 +284,22 @@ final class PrivateConfigCodecTests: XCTestCase {
         }
     }
 
+    /// The read kind against the independent reference: the fixed cases with the read letter, request and reply frames
+    /// offered to a read reader, and a read frame offered to the other two readers.
+    func testReadReaderAgreesWithReferenceParserOnFixedCases() {
+        let cases = [
+            "PCV1 G 2\n{}\n", "PCV1 G 2\n{}\nLATER", "PCV1 G 2\n{}X", "PCV1 G 2\n{}", "PCV1 G 0\n", "PCV1 G 05\n",
+            "PCV1 G 8388593\n", "PCV1 G 8388592\n", "PCV1 G 9999999", "PCV1 G 12345678\n",
+            "PCV1 Q 2\n{}\n", "PCV1 R 2\n{}\n", "PCV1 X 5\n", "PCV2 G 5\n", "PCV1 \n", "PCV1 G\n", "PCV1 G \n",
+        ]
+        for text in cases {
+            assertReaderAgreesWithReference(Array(text.utf8), label: text, kind: .read)
+        }
+        for kind in [PrivateConfigurationFrame.Kind.update, .editorReply] {
+            assertReaderAgreesWithReference(Array("PCV1 G 2\n{}\n".utf8), label: "G to \(kind)", kind: kind)
+        }
+    }
+
     // MARK: - Differential check against the reference parser
 
     /// Fixed counterexamples: each one names a refusal or a boundary the grammar fixes. A line feed
@@ -487,13 +503,14 @@ final class PrivateConfigCodecTests: XCTestCase {
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        let letter: Character = kind == .update ? "Q" : "R"
-        let expected = endOfStreamOutcome(ReferenceFrameParser.parse(input, kind: letter))
+        let expected = endOfStreamOutcome(ReferenceFrameParser.parse(input, kind: ReferenceFrameParser.letter(kind)))
         for chunk in chunks ?? [1, 3, 7, 16, 4_096, 16_384, max(input.count, 1)] {
-            XCTAssertEqual(
-                runReader(input, chunk: chunk, kind: kind), expected,
-                "\(label), chunk \(chunk)", file: file, line: line
-            )
+            for contiguous in [true, false] {
+                XCTAssertEqual(
+                    runReader(input, chunk: chunk, kind: kind, contiguous: contiguous), expected,
+                    "\(label), chunk \(chunk), contiguous \(contiguous)", file: file, line: line
+                )
+            }
         }
     }
 
@@ -502,14 +519,19 @@ final class PrivateConfigCodecTests: XCTestCase {
         outcome == .open ? .refused(.malformedBody) : outcome
     }
 
-    /// What the production reader says about `input` read in pieces of `chunk`, including `finish`.
-    private func runReader(_ input: [UInt8], chunk: Int, kind: PrivateConfigurationFrame.Kind) -> FrameOutcome {
+    /// What the production reader says about `input` read in pieces of `chunk`, including `finish`. A noncontiguous
+    /// run hands each piece over as a collection without contiguous storage, so the reader takes its byte-at-a-time path.
+    private func runReader(
+        _ input: [UInt8], chunk: Int, kind: PrivateConfigurationFrame.Kind, contiguous: Bool
+    ) -> FrameOutcome {
         let reader = PrivateConfigurationFrameReader(expecting: kind)
         var offset = 0
         while offset < input.count {
             let end = min(offset + chunk, input.count)
             do {
-                let (step, consumed) = try reader.consume(input[offset..<end])
+                let piece = input[offset..<end]
+                let (step, consumed) = try contiguous
+                    ? reader.consume(piece) : reader.consume(NoncontiguousBytes(piece))
                 offset += consumed
                 if case .frame(let body) = step {
                     return .frame(body: body.bytes.bytes(), consumed: offset)
@@ -615,6 +637,15 @@ enum FrameOutcome: Equatable {
 /// is written out here as a literal. The reader's 16 KiB read budget is not modelled, because it
 /// changes when bytes are read and never what they mean.
 enum ReferenceFrameParser {
+    /// The header letter of each kind, written out here rather than taken from the codec's prefix.
+    static func letter(_ kind: PrivateConfigurationFrame.Kind) -> Character {
+        switch kind {
+        case .update: "Q"
+        case .read: "G"
+        case .editorReply: "R"
+        }
+    }
+
     static func parse(_ input: [UInt8], kind: Character = "Q") -> FrameOutcome {
         let cap = 8_388_608
         let prefix = Array("PCV1 \(kind) ".utf8)

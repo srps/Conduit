@@ -94,6 +94,15 @@ final class PrivateConfigBridgeTests: XCTestCase {
         )
     }
 
+    /// The private preferences object names exactly the keys the stored preferences encode, so a new preference cannot
+    /// be dropped from, or defaulted by, the private observation without this test failing.
+    func testPrivatePreferencesNameEveryStoredPreference() {
+        XCTAssertEqual(
+            Set(PrivateConfigurationSchema.preferences.members.map { String(decoding: $0.name, as: UTF8.self) }),
+            Set(AppPreferences.CodingKeys.allCases.map(\.stringValue))
+        )
+    }
+
     // MARK: - Mapping and round trip
 
     func testFullMappingRoundTripPreservesEveryValueThroughTheFrame() throws {
