@@ -1,7 +1,7 @@
 # Conduit Roadmap
 
 The execution queue and sole tracker of product-work status. Reviewed against the
-checkout and open issues on 2026-10-25. Conduit remains a macOS-native Swift corporate proxy manager;
+checkout and open issues on 2026-10-26. Conduit remains a macOS-native Swift corporate proxy manager;
 no rewrite or cross-platform port is planned.
 
 Implementation rationale, dependencies, and acceptance criteria live in
@@ -20,7 +20,7 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
-## Immediate priorities (2026-10-25)
+## Immediate priorities (2026-10-26)
 
 The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/186),
 [#180](https://github.com/srps/Conduit/issues/180),
@@ -31,22 +31,25 @@ the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history.
 | Stage | Current state | Remaining work |
 | --- | --- | --- |
 | Contracts and mechanisms | Typed lifecycle values, framed RuntimeClient, bounded admission/observation/replay service, verified-store core and bounded file readers are merged. | Consume them through the real host/client path; broader event families migrate with their owners. |
-| Ownership and isolation seams | App/daemon startup takes root authority before migration/recovery; fixed writable names, diagnostic protection and explicit fake/production effects are implemented. PR243 adds actual-host pm-sim coverage. | Complete store/workflow adoption and logical/physical shutdown accounting. |
-| Shared runtime convergence | Actual store/workflow integration is in progress, with typed configuration decisions and an independent model. | Verify DNS→tunnels→proxy parity, then switch AppState once and delete replaced runtime/save paths (0031). |
+| Ownership and isolation seams | App/daemon startup takes root authority before migration/recovery; fixed writable names, diagnostic protection and explicit fake/production effects are implemented. PR243 adds actual-host pm-sim coverage. | The store/workflow now consumes that authority; interactive client adoption remains. |
+| Shared runtime convergence | The host consumes the sole store/workflow, with typed configuration decisions, an independent model and actual-host lifecycle witnesses. | Verify DNS→tunnels→proxy parity, then switch AppState once and delete replaced runtime/save paths (0031). |
 | Client, isolation and release | Display bounds and the 64 KiB ordinary reply/stream ceiling are selected. | Select the remaining measured production profile and private editor reply ceiling; integrate the client, move the whole control cluster to RuntimeActor, and validate the release. |
 
-Next: consume the sole ConfigurationStore/RuntimeConfigurationWorkflow in the
-shared host. [0032](./docs/decisions/0032-explicit-reload-and-reconcile.md) selects
+Current checkpoint: the shared host consumes the sole
+ConfigurationStore/RuntimeConfigurationWorkflow. Next is the actual service/client
+adapter and [private editor contract](./docs/design-runtime-editor-contract-review.md). [0032](./docs/decisions/0032-explicit-reload-and-reconcile.md) selects
 read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
 mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
 Private editor replies and service defaults must not inherit experimental limits.
 
-Latest completed slice: [PR243](https://github.com/srps/Conduit/pull/243), merged at
-`8014437`, implements [0033](./docs/decisions/0033-headless-real-host-simulation.md).
-All 40 local checks pass on stable source (3,320 tests, two skips; all 102 simulator
-records and perf), with independent subscription-backed Claude review and exact-head
-hosted Swift/CodeQL passing. Optional automated reviews failed/skipped and provide
-no clean-review evidence. See [verification and limits](./docs/verification-runtime-host-effects-2026-10-25.md).
+Latest verified slice: shared-host workflow adoption after
+[PR243](https://github.com/srps/Conduit/pull/243). All 40 required local workflow
+checks plus the targeted DNS scenario pass on stable source: 3,372 tests with
+four skips, all 102 simulator records and perf. Independent subscription-backed
+Claude reviews and the [verification record](./docs/verification-runtime-workflow-2026-10-26.md)
+state the scope, earlier failures and remaining limits. Hosted exact-head checks
+and actual review disposition belong to the integration PR; failed/skipped
+optional bots do not provide clean-review evidence.
 
 Supporting evidence stays with its owning slice:
 [client/service](./docs/runtime-client-stage1-inventory.md),
@@ -99,12 +102,6 @@ Owner acceptance is a separate lane: #99 needs a real KDC-failure recurrence;
 #111's normal 0.5.3→0.5.4 preflight/install passed, but negative paths, platform
 coverage and key-backup evidence remain. Do not add more happy-path tests merely
 to declare these acceptance items closed. See `docs/validation-0.5.3.md`.
-
-Native startup blocker ([#237](https://github.com/srps/Conduit/issues/237)): the
-lease startup's async GUI entry lets windows open while queued MainActor/dispatch
-callbacks starve. A synchronous/async native AppKit comparison reproduced it.
-The entry handoff is being corrected separately before release; window logs
-alone are not callback verification. The serving 0.5.8 app remains unchanged.
 
 ## Proposed release scope
 

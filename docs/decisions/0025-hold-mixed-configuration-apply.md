@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Decision: accepted (owner, 2026-10-24, #186 mixed-apply granularity checkpoint)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -89,8 +89,18 @@ real-machine cleanup or power-loss durability.
 
 ## Implementation evidence
 
-None yet. The current app still has the earlier mixed-save behavior. The shared
-store/client workflow and its apply gate remain planned.
+[ConfigurationStore](../../Sources/ConduitRuntime/ConfigurationStore.swift) returns
+an exact staged runtime/platform pair only when both required receipts verify.
+[RuntimeConfigurationWorkflow](../../Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift)
+uses that pair for Start and holds incomplete, invalid or fenced reload input.
+[Workflow phase tests](../../Tests/ConduitTests/ConfigurationWorkflowPhaseTests.swift)
+and the [independent model](../../Tests/ConduitTests/ConfigurationWorkflowModelTests.swift)
+cover partial persistence, revoked later writes and eligibility holds. This is
+shared-host adoption; the app retains its earlier mixed-save behavior until the
+one final activation. Ordinary private client updates and AppState adoption remain open.
+
+Does not prove: installed-app behavior, atomic multi-file persistence, real-machine
+cleanup or release readiness.
 
 ## Open questions
 

@@ -2,10 +2,11 @@
 
 Status: selected by the owner, 2026-10-25: **reload and reconcile eligible changes**.
 Decision [0032](decisions/0032-explicit-reload-and-reconcile.md) records the choice;
-implementation remains planned. This review preserves the alternatives and observed
-current paths. The session/store capability slice merged independently in PR #242.
+headless host/workflow implementation is partial. Private editor/client integration
+and AppState activation remain open. This review preserves the alternatives and
+paths observed at selection. The session/store capability slice merged independently in PR #242.
 
-## Decision to settle
+## Selected policy
 
 Recommend **explicit reload and reconcile**: observe and verify disk inputs
 through the sole store, adopt that observation and its matching baselines, then
@@ -18,7 +19,7 @@ Both retain save-before-apply, mixed-input hold and Stop/Quit policies.
 | **Reload and reconcile (recommended)** | One deliberate action adopts disk changes and applies eligible effects. Matches the existing host method's intent and pm-proxy's familiar reload behavior. | The action may change listeners/routing/platform effects; label it explicitly. Supported repair drafts remain editable; permitted absent inputs stay uncommitted and held from apply. |
 | **Reload for review only** | Provides an inspection step before runtime effects. | Requires a separate apply action and clear durable-versus-running presentation. The future shared-host reload command would have different behavior from its existing tested method. |
 
-## Observed current paths
+## Paths observed at selection
 
 `RuntimeHost.reloadConfiguration` reads through `loadAllMigrating`, rejects
 start-blocking values and reconciles/drains effects. `loadAllMigrating` can write

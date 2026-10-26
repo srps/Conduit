@@ -2,8 +2,10 @@
 
 Status: **activation sequence selected by the owner**, 2026-10-25, recorded in
 [0031](decisions/0031-incremental-runtime-development-single-activation.md).
-Implementation is partial: the consumed session/store capability is implemented;
-actual host/workflow adoption and the final activation remain planned. PRs #240/#241 are merged; reply/stream frames are
+Implementation is partial: the consumed session/store capability is merged;
+the headless host/workflow now consumes the store and selected reload policy,
+with its [verification checkpoint](verification-runtime-workflow-2026-10-26.md).
+The client/AppState activation remains open. PRs #240/#241 are merged; reply/stream frames are
 selected at 64 KiB in 0030. The measured candidate profile remains test-only;
 actual-host scheduling and selection of its remaining values are still open. Claude Code
 and Codex source-review findings are recorded below; Claude used the owner's
@@ -121,9 +123,9 @@ approved final spelling:
 The implementation/API review must verify startup migration completes before
 store baselines are adopted, initial editor/host values come from the same
 observation, private read/edit observation supplies the preconditions, and all
-new snapshot/AppliedState metadata stays bounded within 0030. None of this
-selects reload-as-editor-only versus reload-and-apply; that remains a later
-explicit decision before that path changes.
+new snapshot/AppliedState metadata stays bounded within 0030. Explicit disk reload now selects reload-and-reconcile in
+[0032](decisions/0032-explicit-reload-and-reconcile.md); normal private editor reads
+remain in-memory observations without apply.
 
 ## Required verification before activation
 

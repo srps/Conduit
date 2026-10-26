@@ -140,6 +140,14 @@ implemented as historically recorded in 0013: the shared
 [`ConfigurationStore`](../../Sources/ConduitRuntime/ConfigurationStore.swift).
 They are prerequisites, not evidence that AppState has adopted one authority.
 
+The next [workflow integration checkpoint](../verification-runtime-workflow-2026-10-26.md)
+consumes the store in production startup, and in a reload facade exercised only
+by tests and pm-sim,
+with exact verified inputs, typed decisions and independent model/actual-host
+coverage. The service/client and AppState have not adopted that owner yet; the
+[next client review](../design-runtime-editor-contract-review.md) records those
+remaining integration obligations and limits.
+
 Does not prove: actual app/client/store integration, RuntimeActor isolation,
 production daemon ownership, real-session auth/PAC or release readiness.
 
@@ -149,8 +157,8 @@ Complete the workflow freshness/private-editor observation API, preserving
 client-observed prior component preconditions separately from runtime views and
 intent fences, including a measured private editor-reply budget. Select the
 remaining coherent profile from measurements before
-the affected adoption. Reload-as-editor-only
-versus reload-and-apply remains a later explicit policy choice. Revisit the
+the affected adoption. [0032](0032-explicit-reload-and-reconcile.md) selects
+read-only reload-and-reconcile of eligible inputs; that policy is resolved. Revisit the
 activation sequence if a demonstrated delivery/compatibility need outweighs the
 cost of temporary capabilities; return the concrete ownership/deletion plan for
 owner review before changing this sequence. Subsystem actors or broad module

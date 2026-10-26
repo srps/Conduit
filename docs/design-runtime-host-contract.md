@@ -1,7 +1,7 @@
 # Shared runtime contracts and host: owner review draft
 
 Date: 2026-10-24. Status: **selected architecture; staged implementation authorized**.
-Implementation status: the stage-1 foundation (typed lifecycle events, control value types and codec, the `RuntimeClient` protocol) is merged and unreleased. `ConduitRuntime` holds the mechanically extracted RuntimeHost. PR #235 supplies the unadopted bounded service behind the framed client; actual RuntimeHost adaptation, AppState adoption and the production v2 socket remain pending. See the [stage-1 inventory](./runtime-client-stage1-inventory.md).
+Implementation status: merged foundations include the typed lifecycle family, framed RuntimeClient/service, verified store and session authority. The current shared-host workflow slice consumes that store; the service/client adapter and AppState activation remain open. See [ROADMAP](../ROADMAP.md) for current execution status, the [workflow verification](verification-runtime-workflow-2026-10-26.md) for this slice, and the [next private editor review](design-runtime-editor-contract-review.md) for the next affected APIs.
 
 Prepared by Codex with Claude Code architecture and persistence-policy review,
 using the owner's `claude.ai` Max subscription. The owner selected the module and
@@ -840,11 +840,11 @@ for their affected slices, not blockers to independent work:
 | Choice | Recommendation or remaining owner choice | Consequence |
 | --- | --- | --- |
 | Config payload and domain bounds — selected; adoption evidence open | One private explicit request with full frozen values; neutral SecretBytes in ConduitShared; sole injected store app-owned now and daemon-owned later ([0018](decisions/0018-private-configuration-request.md)) | Save, runtime admission and apply remain distinct;0021/0022 select frame/domain/startup limits and legacy compatibility, with actual admission/copy/latency evidence still due; no snapshot registry |
-| Writer lifetime at relaunch/update — selected | Exclusive OS-backed state-directory writer lease; busy hosts refuse runtime startup and reconciliation; keep authority until write quiescence or exit ([0017](./decisions/0017-exclusive-state-directory-writer.md)) | No snapshot registry or new generation schema selected; legacy releases still require old-process-exit handoff; implementation/upgrade validation remain due |
-| Persistence precision — selected | Keep schema2 and refuse inexact saves; fix safe whole-unit conversions ([0023](decisions/0023-exact-schema-two-persistence.md)) | Implementation/read-back/physical-writer evidence remains due; no schema3 migration or silent normalization |
+| Writer lifetime at relaunch/update — selected | Exclusive OS-backed state-directory writer lease; busy hosts refuse runtime startup and reconciliation; keep authority until write quiescence or exit ([0017](./decisions/0017-exclusive-state-directory-writer.md)) | Authority mechanisms are implemented; no snapshot registry or new generation schema. Legacy releases still require old-process-exit handoff and separate upgrade validation |
+| Persistence precision — selected | Keep schema2 and refuse inexact saves; fix safe whole-unit conversions ([0023](decisions/0023-exact-schema-two-persistence.md)) | Exact staging/read-back mechanisms are implemented; client adoption and real-machine acceptance remain separate. No schema3 migration or silent normalization |
 | Listener handoff on failed platform repoint | Prefer bind-new, verify-ready, repoint, then retire-old, with bounded old-listener retention on repoint failure; review feasibility and retirement budget | Otherwise explicitly report the service interruption/mismatched endpoint; saving intent alone does not prevent it |
 | Follow-up release scope | Keep full control-owner isolation in the 0.6 core; decide the bounded #194 applied-state slice, with full scheduler/leases separately scoped | Selected module/isolation shape does not silently expand the remaining release scope |
-| Resource and shutdown limits | Size frame/page/queue/retention bounds and a total shutdown budget including helper calls and manager locks | Provisional numbers above are review inputs, not validated shipping defaults |
+| Resource and shutdown limits | Ordinary reply/stream frames are selected at 64 KiB; private editor replies and remaining service/shutdown budgets need measured selection, including helper calls and manager locks | Provisional numbers above are review inputs, not validated shipping defaults |
 
 Concrete limit values and the full command/field inventory require stage-1 sizing
 and compatibility fixtures before those APIs are considered settled. The stage-1

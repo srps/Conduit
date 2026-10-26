@@ -369,7 +369,8 @@ work; this checkpoint does not claim either.
 ## Next workflow contract checkpoint (2026-10-25)
 
 The session/store capability is implemented and focused verification passes.
-Actual host/workflow/client adoption remains open. The editor contract below is
+The headless host/workflow slice now consumes the store; actual client/AppState
+adoption remains open. The editor contract below is
 an API refinement for review, not an implemented private read protocol or a
 selected reply budget.
 
@@ -414,8 +415,9 @@ client's reload event.
 Claude and Codex reviewed this shape against the actual host/store/daemon source.
 Decision 0032 selects reload-and-reconcile. The owner selected the scoped simulator dependency and explicit effect injection
 in [0033](decisions/0033-headless-real-host-simulation.md). PR243 implements the
-effect boundary and actual-host scenario. The workflow responsibilities below
-remain the next cut, rather than a claim that its implementation has passed.
+effect boundary and actual-host scenario. The next headless slice consumes the
+workflow responsibilities below; client/editor integration and AppState activation
+remain open. Full verification evidence is recorded separately when complete.
 
 - **Store:** retain one physical-work slot, existing frozen reader/decoder and
   verified replacement. Preserve ConfigurationOperationContext. Add an explicit

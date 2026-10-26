@@ -48,12 +48,12 @@ Each record carries three statuses, because merged does not mean it works:
 | [0022](0022-configuration-identity-path-and-host-bounds.md) | Complete identity, path and host configuration bounds | accepted | partial | none |
 | [0023](0023-exact-schema-two-persistence.md) | Keep schema two and refuse inexact committed durations | accepted | partial | none |
 | [0024](0024-strict-configuration-file-grammar.md) | Strict syntax and Unicode throughout configuration files | accepted | implemented | none |
-| [0025](0025-hold-mixed-configuration-apply.md) | Hold a mixed configuration apply until required inputs verify | accepted | planned | none |
+| [0025](0025-hold-mixed-configuration-apply.md) | Hold a mixed configuration apply until required inputs verify | accepted | partial | none |
 | [0026](0026-bounded-platform-and-preferences-files.md) | Bound platform and preferences files through the shared file contract | accepted | implemented | none |
 | [0027](0027-refuse-external-configuration-edits.md) | Refuse ordinary saves over changed configuration files | accepted | partial | none |
 | [0028](0028-fixed-writable-state-filenames.md) | Fixed writable state filenames within the canonical root | accepted | partial | none |
 | [0029](0029-bound-runtime-display-text.md) | Bound runtime display text with explicit notices | accepted | partial | none |
 | [0030](0030-ordinary-runtime-reply-frame-cap.md) | Ordinary v2 replies and stream frames capped at 64 KiB | accepted | planned | none |
 | [0031](0031-incremental-runtime-development-single-activation.md) | Incremental runtime development with one AppState activation | accepted | partial | none |
-| [0032](0032-explicit-reload-and-reconcile.md) | Explicit configuration reload adopts and reconciles eligible changes | accepted | planned | none |
+| [0032](0032-explicit-reload-and-reconcile.md) | Explicit configuration reload adopts and reconciles eligible changes | accepted | partial | none |
 | [0033](0033-headless-real-host-simulation.md) | Headless real-host simulation with explicit effect injection | accepted | implemented | none |
