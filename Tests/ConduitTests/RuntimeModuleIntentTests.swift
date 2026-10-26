@@ -18,7 +18,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         RuntimeLifecycleRequest(actions: PrivateModuleSlots(proxy: proxy, dns: dns, tunnels: tunnels), expectedRevisions: expected)
     }
 
-    private func admitted(_ intents: inout RuntimeModuleIntents, _ request: RuntimeLifecycleRequest) throws -> Int {
+    private func admitted(_ intents: inout RuntimeModuleIntents, _ request: RuntimeLifecycleRequest) throws -> RuntimeLifecycleTicket {
         try intents.admit(request).get()
     }
 
@@ -34,7 +34,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         XCTAssertTrue(intents.stagedDNSForwarderEnabled, "the pending explicit Start's write stages the enable")
         XCTAssertTrue(intents.modules.dns.fenced, "the fence protects runtime activation until the verified write")
         XCTAssertFalse(intents.modules.dns.enabled)
-        XCTAssertEqual(intents.authorize(group: group), [.dns])
+        XCTAssertEqual(intents.authorize(group), [.dns])
         XCTAssertFalse(intents.modules.dns.fenced)
         XCTAssertTrue(intents.modules.dns.enabled)
 
@@ -52,21 +52,21 @@ final class RuntimeModuleIntentTests: XCTestCase {
             if stopFirst { intents.stop([.dns], terminal: false) }
             let before = intents.modules.dns
             let held = try admitted(&intents, request(dns: .start))
-            intents.retire(group: held)
+            intents.retire(held)
             XCTAssertEqual(intents.modules.dns.enabled, before.enabled, "held: \(dnsEnabled) \(stopFirst)")
             XCTAssertEqual(intents.modules.dns.fenced, before.fenced, "held: \(dnsEnabled) \(stopFirst)")
             XCTAssertNil(intents.modules.dns.pending)
 
             let failed = try admitted(&intents, request(dns: .start))
-            XCTAssertEqual(intents.authorize(group: failed), [.dns])
+            XCTAssertEqual(intents.authorize(failed), [.dns])
             let replacing = try admitted(&intents, request(dns: .start))
-            intents.settle(.dns, group: failed, succeeded: false)
+            intents.settle(.dns, ticket:failed, succeeded: false)
             XCTAssertNil(intents.modules.dns.authorized, "the replaced authorization is gone")
-            XCTAssertEqual(intents.authorize(group: replacing), [.dns])
-            intents.settle(.dns, group: replacing, succeeded: false)
+            XCTAssertEqual(intents.authorize(replacing), [.dns])
+            intents.settle(.dns, ticket:replacing, succeeded: false)
             XCTAssertEqual(intents.modules.dns.enabled, before.enabled, "failed: the chain restores the pre-Start state")
             XCTAssertEqual(intents.modules.dns.fenced, before.fenced, "failed: \(dnsEnabled) \(stopFirst)")
-            XCTAssertFalse(intents.conditionalActivationAllowed(group: replacing))
+            XCTAssertFalse(intents.conditionalActivationAllowed(replacing))
         }
     }
 
@@ -76,25 +76,79 @@ final class RuntimeModuleIntentTests: XCTestCase {
         var disabled = RuntimeModuleIntents(dnsEnabled: false)
         let off = try admitted(&disabled, request(proxy: .start, dns: .conditionalActivation))
         XCTAssertFalse(disabled.stagedDNSForwarderEnabled)
-        XCTAssertFalse(disabled.conditionalActivationAllowed(group: off), "a disabled DNS is a typed no-op")
-        XCTAssertEqual(disabled.authorize(group: off), [.proxy], "the companion is not a member of the shared prepare")
+        XCTAssertFalse(disabled.conditionalActivationAllowed(off), "a disabled DNS is a typed no-op")
+        XCTAssertEqual(disabled.authorize(off), [.proxy], "the companion is no explicit-enable member, though it shares the input")
         XCTAssertFalse(disabled.modules.dns.enabled)
 
         var enabled = RuntimeModuleIntents(dnsEnabled: true)
         let on = try admitted(&enabled, request(proxy: .start, dns: .conditionalActivation))
-        XCTAssertTrue(enabled.conditionalActivationAllowed(group: on))
-        enabled.finishConditional(group: on)
+        XCTAssertEqual(enabled.authorize(on), [.proxy])
+        XCTAssertTrue(enabled.conditionalActivationAllowed(on))
+        enabled.settleConditional(on, succeeded: false)
         XCTAssertTrue(enabled.modules.dns.enabled, "a failed companion keeps the prior enable and fence")
         XCTAssertFalse(enabled.modules.dns.fenced)
+        XCTAssertTrue(enabled.stagedDNSForwarderEnabled, "and the configured intent")
 
+        var retried = RuntimeModuleIntents(dnsEnabled: false)
+        retried.observeDurableDNS(true)
+        let explicit = try admitted(&retried, request(proxy: .start, dns: .conditionalActivation))
+        XCTAssertEqual(retried.authorize(explicit), [.proxy])
+        retried.settleConditional(explicit, succeeded: false)
+        XCTAssertFalse(retried.modules.dns.enabled, "a failed companion grants no permission it did not have")
+        let later = try admitted(&retried, request(proxy: .start, dns: .conditionalActivation))
+        XCTAssertEqual(retried.authorize(later), [.proxy])
+        retried.settleConditional(later, succeeded: true)
+        XCTAssertTrue(retried.modules.dns.enabled, "a started companion keeps the runtime permission")
+        XCTAssertFalse(retried.modules.dns.fenced)
+
+        XCTAssertEqual(enabled.admit(request(dns: .conditionalActivation)), .failure(.invalid), "a companion needs a proxy Start")
+        XCTAssertEqual(enabled.admit(request(proxy: .conditionalActivation)), .failure(.invalid))
+    }
+
+    /// A verified write's saved enable survives a held or failed Start (decision 0015): the fence and the permission return, the saved
+    /// fact does not. A newer DNS Stop wins over a late write of the older enable.
+    func testAVerifiedEnableSurvivesItsHeldStartAndLosesToANewerStop() throws {
+        var held = RuntimeModuleIntents(dnsEnabled: false)
+        held.stop([.dns], terminal: false)
+        let group = try admitted(&held, request(dns: .start))
+        held.recordVerifiedDNSWrite(held.stagedDNSForwarderEnabled, for:group)
+        held.retire(group)
+        XCTAssertTrue(held.stagedDNSForwarderEnabled, "the next write keeps the enable the file verified")
+        XCTAssertTrue(held.modules.dns.fenced, "the prior fence returns")
+        XCTAssertFalse(held.modules.dns.enabled, "and no permission is left")
+
+        var failed = RuntimeModuleIntents(dnsEnabled: false)
+        let start = try admitted(&failed, request(dns: .start))
+        failed.recordVerifiedDNSWrite(true, for:start)
+        XCTAssertEqual(failed.authorize(start), [.dns])
+        failed.settle(.dns, ticket:start, succeeded: false)
+        XCTAssertTrue(failed.stagedDNSForwarderEnabled)
+        XCTAssertFalse(failed.modules.dns.enabled)
+
+        var late = RuntimeModuleIntents(dnsEnabled: false)
+        let staged = try admitted(&late, request(dns: .start))
+        late.stop([.dns], terminal: false)
+        late.recordVerifiedDNSWrite(true, for:staged)
+        XCTAssertFalse(late.stagedDNSForwarderEnabled, "the Stop's disable wins over the late older write")
+    }
+
+    /// A companion changes no DNS control (decision 0036): admitted after a DNS Stop, it keeps the Stop's reserved disable save and DNS's
+    /// revision; admitted beside a pending explicit DNS Start, it does not cancel that Start.
+    func testACompanionKeepsDNSControlAndItsSave() throws {
         var stopped = RuntimeModuleIntents(dnsEnabled: true)
-        let restart = try admitted(&stopped, request(proxy: .start, dns: .conditionalActivation))
-        stopped.stop([.dns], terminal: false)
-        XCTAssertFalse(stopped.conditionalActivationAllowed(group: restart))
-        XCTAssertTrue(stopped.isPending(group: restart), "the proxy Start is not stopped by the companion's cancellation")
+        let save = stopped.stop([.dns], terminal: false)
+        let revision = stopped.modules.dns.revision
+        let observed = PrivateModuleSlots<Int?>(proxy: stopped.modules.proxy.revision, dns: revision, tunnels: nil)
+        _ = try stopped.admit(request(proxy: .start, dns: .conditionalActivation, expected: observed)).get()
+        XCTAssertTrue(stopped.stopSaveIsCurrent(revision: save), "the companion keeps the Stop's disable save")
+        XCTAssertEqual(stopped.modules.dns.revision, revision, "the companion does not advance DNS's revision")
+        XCTAssertTrue(stopped.modules.dns.fenced)
 
-        XCTAssertEqual(stopped.admit(request(dns: .conditionalActivation)), .failure(.invalid), "a companion needs a proxy Start")
-        XCTAssertEqual(stopped.admit(request(proxy: .conditionalActivation)), .failure(.invalid))
+        var starting = RuntimeModuleIntents(dnsEnabled: false)
+        _ = try starting.admit(request(dns: .start)).get()
+        let pending = starting.modules.dns.pending
+        _ = try starting.admit(request(proxy: .start, dns: .conditionalActivation)).get()
+        XCTAssertEqual(starting.modules.dns.pending, pending, "the companion does not cancel the explicit DNS Start")
     }
 
     /// One stale actionable slot rejects the whole request, and the rejection changes nothing.
@@ -110,14 +164,59 @@ final class RuntimeModuleIntentTests: XCTestCase {
     /// Superseding one member ends the whole pending group, and only the group's own records: a newer pending operation stays.
     func testSupersedingOneMemberEndsTheWholeGroupOnly() throws {
         var intents = RuntimeModuleIntents(dnsEnabled: true)
-        let group = try admitted(&intents, request(proxy: .start, dns: .conditionalActivation, tunnels: .start))
+        let group = try admitted(&intents, request(proxy: .start, tunnels: .start))
         let newer = try admitted(&intents, request(dns: .start))
-        XCTAssertTrue(intents.isPending(group: group), "replacing the companion leaves the group")
         intents.stop([.tunnels], terminal: false)
-        XCTAssertFalse(intents.isPending(group: group))
+        XCTAssertFalse(intents.isPending(group))
         XCTAssertNil(intents.modules.proxy.pending, "the proxy member ended with the group")
-        XCTAssertTrue(intents.isPending(group: newer), "the newer DNS Start is not the old group's")
+        XCTAssertTrue(intents.isPending(newer), "the newer DNS Start is not the old group's")
         XCTAssertEqual(intents.modules.proxy.revision, intents.counter, "an ended member takes the superseding revision")
+    }
+
+    /// The companion depends on the group's shared input (decision 0035). A DNS Stop, or a newer DNS Start, before that input is adopted
+    /// ends the whole group and leaves the newer DNS operation in place. After the group is authorized, a DNS Stop cancels only the companion.
+    func testTheCompanionEndsItsGroupBeforeTheSharedInputAndOnlyItselfAfter() throws {
+        var stoppedEarly = RuntimeModuleIntents(dnsEnabled: true)
+        let early = try admitted(&stoppedEarly, request(proxy: .start, dns: .conditionalActivation))
+        stoppedEarly.stop([.dns], terminal: false)
+        XCTAssertFalse(stoppedEarly.isPending(early), "a DNS Stop before the shared input ends the whole group")
+        XCTAssertEqual(stoppedEarly.authorize(early), [], "a stale group is never authorized")
+        stoppedEarly.retire(early)
+        XCTAssertNil(stoppedEarly.modules.proxy.pending)
+        XCTAssertNotNil(stoppedEarly.modules.dns.pending, "the Stop's own save stays")
+
+        var replaced = RuntimeModuleIntents(dnsEnabled: true)
+        let old = try admitted(&replaced, request(proxy: .start, dns: .conditionalActivation))
+        let newer = try admitted(&replaced, request(dns: .start))
+        XCTAssertFalse(replaced.isPending(old), "a newer DNS Start before the shared input ends the old group")
+        XCTAssertTrue(replaced.isPending(newer), "and keeps its own reference")
+
+        var stoppedLate = RuntimeModuleIntents(dnsEnabled: true)
+        let late = try admitted(&stoppedLate, request(proxy: .start, dns: .conditionalActivation))
+        XCTAssertEqual(stoppedLate.authorize(late), [.proxy])
+        stoppedLate.stop([.dns], terminal: false)
+        XCTAssertFalse(stoppedLate.conditionalActivationAllowed(late), "after the shared input, a DNS Stop cancels the companion")
+        XCTAssertEqual(stoppedLate.modules.proxy.authorized?.group, late.group, "and leaves the started proxy alone")
+    }
+
+    /// A reload that observes DNS configured on is not itself a permission, but a later explicit proxy Start with its companion may start
+    /// DNS once the group's shared input is adopted. A fenced DNS keeps its disable through the same reload.
+    func testAConfiguredDNSActivatesOnlyThroughALaterExplicitCompanion() throws {
+        var intents = RuntimeModuleIntents(dnsEnabled: false)
+        intents.observeDurableDNS(true)
+        XCTAssertFalse(intents.modules.dns.enabled, "the observation alone grants no runtime permission")
+        let group = try admitted(&intents, request(proxy: .start, dns: .conditionalActivation))
+        XCTAssertFalse(intents.conditionalActivationAllowed(group), "not before the shared input is adopted")
+        XCTAssertEqual(intents.authorize(group), [.proxy])
+        XCTAssertTrue(intents.conditionalActivationAllowed(group), "the explicit companion may activate the configured DNS")
+        XCTAssertFalse(intents.modules.dns.fenced)
+
+        var fenced = RuntimeModuleIntents(dnsEnabled: true)
+        fenced.stop([.dns], terminal: false)
+        fenced.observeDurableDNS(true)
+        let blocked = try admitted(&fenced, request(proxy: .start, dns: .conditionalActivation))
+        XCTAssertEqual(fenced.authorize(blocked), [.proxy])
+        XCTAssertFalse(fenced.conditionalActivationAllowed(blocked), "a Stop's fence keeps DNS off through a reload")
     }
 
     /// A terminal stop latches and persists no disable, but keeps a DNS save an earlier session Stop reserved.
@@ -166,9 +265,13 @@ final class RuntimeModuleIntentTests: XCTestCase {
         case authorize, retire, fail, succeed, observeOn, observeOff
     }
 
-    /// Every sequence of up to four steps from both DNS starting values. The checks are invariants stated from the decisions, not a copy of
-    /// the transitions: only an authorization raises a permission or clears a fence; a held or failed Start restores what its admission found;
-    /// a refusal changes nothing; the counter never goes back; the projection is the explicit DNS target, else the durable intent.
+    /// A bounded property sweep, not an independent reference model: it drives the production value and reads its own members, priors and
+    /// group helpers, then checks properties stated from the decisions. Every sequence of up to four steps from both DNS starting values:
+    /// within this alphabet only an authorization raises a permission or clears a fence; a companion's admission changes no DNS control; a
+    /// held or failed Start restores what its admission found; a refusal changes nothing; the counter never goes back; a pending explicit DNS
+    /// Start stages the enable. The alphabet has no companion settlement: its one runtime grant, never a fence or configured change, is
+    /// covered by `testAConditionalActivationNeverEnablesAndADNSStopCancelsOnlyIt`. The independent workflow reference adapter is still due
+    /// with the workflow integration.
     func testEveryBoundedSequenceKeepsTheIntentInvariants() {
         let depth = 4
         var sequences: [[Step]] = [[]]
@@ -194,7 +297,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
 
     private func check(_ sequence: [Step], dnsEnabled: Bool, coverage: inout [String: Int]) -> String? {
         var intents = RuntimeModuleIntents(dnsEnabled: dnsEnabled)
-        var latest: Int?
+        var latest: RuntimeLifecycleTicket?
         var admittedFrom: [Int: RuntimeModuleIntents] = [:]
         for step in sequence {
             let before = intents
@@ -207,9 +310,9 @@ final class RuntimeModuleIntentTests: XCTestCase {
                 default: request(proxy: .start, expected: PrivateModuleSlots(proxy: intents.modules.proxy.revision - 1, dns: nil, tunnels: nil))
                 }
                 switch intents.admit(asked) {
-                case .success(let group):
-                    latest = group
-                    admittedFrom[group] = before
+                case .success(let ticket):
+                    latest = ticket
+                    admittedFrom[ticket.group] = before
                 case .failure(let refusal):
                     if intents != before { return "a refusal changed the intent" }
                     coverage["refusal.unchanged", default: 0] += 1
@@ -229,16 +332,16 @@ final class RuntimeModuleIntentTests: XCTestCase {
                 intents.stop(Set(ControlModule.allCases), terminal: true)
             case .authorize:
                 guard let group = latest else { continue }
-                if !intents.authorize(group: group).isEmpty {
+                if !intents.authorize(group).isEmpty {
                     if before.modules.proxy.fenced && !intents.modules.proxy.fenced
                         || before.modules.dns.fenced && !intents.modules.dns.fenced {
                         coverage["authorize.clearedFence", default: 0] += 1
                     }
                 }
             case .retire:
-                guard let group = latest, let origin = admittedFrom[group] else { continue }
-                let members = intents.members(of: group)
-                intents.retire(group: group)
+                guard let group = latest, let origin = admittedFrom[group.group] else { continue }
+                let members = intents.members(of: group.group)
+                intents.retire(group)
                 for module in members {
                     if intents.modules[module].enabled != origin.modules[module].enabled
                         || intents.modules[module].fenced != origin.modules[module].fenced {
@@ -248,9 +351,9 @@ final class RuntimeModuleIntentTests: XCTestCase {
                 }
             case .fail, .succeed:
                 guard let group = latest else { continue }
-                for module in ControlModule.allCases where intents.modules[module].authorized?.group == group {
+                for module in ControlModule.allCases where intents.modules[module].authorized?.group == group.group {
                     let prior = intents.modules[module].authorized!
-                    intents.settle(module, group: group, succeeded: step == .succeed)
+                    intents.settle(module, ticket: group, succeeded: step == .succeed)
                     if step == .fail {
                         if intents.modules[module].enabled != prior.priorEnabled || intents.modules[module].fenced != prior.priorFenced {
                             return "a failed Start left \(module) different from its prior"
@@ -263,11 +366,11 @@ final class RuntimeModuleIntentTests: XCTestCase {
                 if before.modules.dns.enabled && !intents.modules.dns.enabled { coverage["observe.lowered", default: 0] += 1 }
             }
             if intents.counter < before.counter { return "the counter went back" }
+            if step == .facade, intents.modules.dns != before.modules.dns { return "a companion changed DNS's control" }
             for module in ControlModule.allCases {
                 let raised = !before.modules[module].enabled && intents.modules[module].enabled
                 let cleared = before.modules[module].fenced && !intents.modules[module].fenced
                 if (raised || cleared) && step != .authorize { return "\(step) raised \(module)'s permission or cleared its fence" }
-                if case .conditional = intents.modules[module].pending, module != .dns { return "a companion on \(module)" }
                 if case .stopSave = intents.modules[module].pending, module != .dns { return "a save on \(module)" }
             }
             if case .start = intents.modules.dns.pending {
@@ -337,8 +440,6 @@ final class RuntimeModuleIntentTests: XCTestCase {
         XCTAssertEqual(writes(fixture, at: fixture.plan.platformConfig.path), 0, "the platform file is never written")
         XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.platformConfig.path), external)
         XCTAssertEqual(fixture.store.values?.runtime.dnsForwarderEnabled, false)
-        let reread = try XCTUnwrap(fixture.access.storedBytes(at: fixture.plan.config.path))
-        XCTAssertFalse(String(decoding: reread, as: UTF8.self).contains("\"dnsForwarderEnabled\":true"))
 
         let values = try XCTUnwrap(fixture.store.values)
         guard case .admitted(let coupled) = await fixture.store.commitRuntimeAndPlatform(
@@ -369,20 +470,64 @@ final class RuntimeModuleIntentTests: XCTestCase {
         XCTAssertEqual(fixture.store.values?.runtime.dnsForwarderEnabled, true, "no adopted value claims the disable persisted")
     }
 
-    /// A runtime file that carries legacy preference values with no sidecar is held, as every runtime rewrite is (decision 0026).
-    func testTheDNSDisableKeepsTheLegacyPreferenceGuard() async throws {
-        let staged = try enabledRuntime()
-        var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: staged) as? [String: Any])
-        object["showMenuBarIcon"] = false
-        let legacy = try JSONSerialization.data(withJSONObject: object)
-        let fixture = try ConfigurationStoreTests.Fixture(runtime: legacy, platform: try platformBytes())
-        defer { fixture.close() }
-        try await load(fixture)
+    private enum SidecarEdit: CaseIterable {
+        case none, delete, change
+    }
 
-        let outcome = await disable(fixture)
-        XCTAssertEqual(outcome, .notAttempted(.preservationHeld(.sidecarAbsent)))
-        XCTAssertEqual(writes(fixture, at: fixture.plan.config.path), 0)
-        XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.config.path), legacy)
+    /// The decoded `dnsForwarderEnabled` of the runtime file on disk, through the store's own load and the production decoder.
+    private func savedDNSEnabled(_ fixture: ConfigurationStoreTests.Fixture) async throws -> Bool? {
+        try await load(fixture)
+        return fixture.store.values?.runtime.dnsForwarderEnabled
+    }
+
+    /// The runtime-only write keeps the legacy guard for both sidecars a runtime file can carry values for (decision 0026): an absent
+    /// sidecar holds it, a present unchanged one lets it write, and one deleted or changed since its baseline holds it. No row writes a
+    /// sidecar. A persisted row's file decodes to the disable.
+    func testTheDNSDisableKeepsTheLegacyGuardForBothSidecars() async throws {
+        let sidecars: [(ConfigurationComponent, String, Any, () throws -> Data)] = [
+            (.platform, "manageSystemProxy", true, platformBytes),
+            (.preferences, "showMenuBarIcon", false, { try AppPreferencesPersistence.stagedData(for: AppPreferences()) }),
+        ]
+        var rows = 0
+        for (sidecar, key, value, bytes) in sidecars {
+            for present in [false, true] {
+                for edit in SidecarEdit.allCases where present || edit == .none {
+                    var object = try XCTUnwrap(try JSONSerialization.jsonObject(with: try enabledRuntime()) as? [String: Any])
+                    object[key] = value
+                    let legacy = try JSONSerialization.data(withJSONObject: object)
+                    let platform = sidecar == .platform ? (present ? try bytes() : nil) : try platformBytes()
+                    let preferences = sidecar == .preferences && present ? try bytes() : nil
+                    let fixture = try ConfigurationStoreTests.Fixture(runtime: legacy, platform: platform, preferences: preferences)
+                    defer { fixture.close() }
+                    try await load(fixture)
+                    let path = fixture.session.configurationFile(for: sidecar).path
+                    switch edit {
+                    case .none: break
+                    case .delete: fixture.access.externalEdit(.remove, at: path)
+                    case .change: fixture.access.externalEdit(.replace(Data("{}".utf8)), at: path)
+                    }
+                    let label = "\(sidecar) present=\(present) edit=\(edit)"
+                    let outcome = await disable(fixture)
+                    switch (present, edit) {
+                    case (false, _):
+                        XCTAssertEqual(outcome, .notAttempted(.preservationHeld(.sidecarAbsent)), label)
+                        XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.config.path), legacy, label)
+                    case (true, .none):
+                        guard case .persisted = outcome else { XCTFail("\(label): \(String(describing: outcome))"); continue }
+                        let saved = try await savedDNSEnabled(fixture)
+                        XCTAssertEqual(saved, false, "\(label): the saved file decodes to the disable")
+                    case (true, _):
+                        XCTAssertEqual(outcome, .notAttempted(.preservationHeld(.sidecarChanged)), label)
+                        XCTAssertEqual(fixture.access.storedBytes(at: fixture.plan.config.path), legacy, label)
+                    }
+                    for component in [ConfigurationComponent.platform, .preferences] {
+                        XCTAssertEqual(writes(fixture, at: fixture.session.configurationFile(for: component).path), 0, "\(label): \(component)")
+                    }
+                    rows += 1
+                }
+            }
+        }
+        XCTAssertEqual(rows, 8)
     }
 
     /// An already-disabled file verifies without a write, and a revoked claim writes nothing.
