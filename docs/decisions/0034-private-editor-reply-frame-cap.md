@@ -109,7 +109,8 @@ mutations failed their intended assertions before byte-exact restoration and pas
 [actual Release experiment](../experiments/private-editor-codec/README.md) measures reply sizing,
 owner/draft lifetimes and batched reading. Its conservative numeric allowance is 7,499,714 bytes.
 The [verification checkpoint](../verification-private-editor-codec-2026-10-26.md) records scope and limits.
-Full workflow and actual-host service adoption remain due. Causal save receipts remain with the workflow that implements canonical
+All 41 local workflow checks passed on unchanged source (3,412 Swift tests, zero failures and four skips;
+103 simulator records passed). Actual-host service adoption remains due. Causal save receipts remain with the workflow that implements canonical
 intent merging; admission is kept separate from settlement.
 
 The [historical experiment](../experiments/private-editor-reply/README.md) supports

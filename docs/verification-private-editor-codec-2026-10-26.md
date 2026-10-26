@@ -70,8 +70,25 @@ per phase cannot establish run-to-run variance. These timings do not measure hos
 
 ## Full workflow
 
-Verification is running on frozen source after `641353f`; final counts and fingerprint will be added
-before push. No passing full-workflow or hosted-CI result is claimed yet.
+All 40 required `swift.yml` checks plus the targeted DNS ephemeral-pair scenario passed on unchanged
+source at `227d99f`. The Swift suite ran 3,412 tests with zero failures and four skips: two live GSS
+tests without a Kerberos ticket and two opt-in memory diagnostics. All 103 simulator records passed,
+as did the performance gate. The relevant source/test/script/resource/package fingerprint was:
+
+```text
+8dd0656741f5dfc407c90d108b07df51a127f61b3f9ed90f0ea817855ef826d4
+```
+
+The preceding stable run at `641353f` passed 40/41 checks but had four AppState harness scratch-root
+cleanup failures (POSIX EPERM), each leaving only `proxy.log`. All four passed a targeted recheck.
+Independent subscription review found that queued file writes and main-actor log deliveries can
+outlive dropping AppState. The test-only correction `1aa2793` joins launch recovery and detaches/drains
+the existing file writer before releasing the root; it does not retry or suppress cleanup errors.
+All 152 harness/logging tests passed, followed by the complete passing workflow above. There is no
+deterministic injected witness tying that queue race to Foundation's exact EPERM mapping.
+
+Exact-head hosted checks and review disposition belong to the PR; local checks alone do not claim
+hosted CI success.
 
 ## Remaining adoption gates
 
