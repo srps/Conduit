@@ -425,8 +425,8 @@ final class ConfigurationStoreSourceTests: XCTestCase {
 
     // MARK: - Canonically equivalent but byte-distinct strings
 
-    /// Two spellings of one URL: a precomposed é, and e followed by a combining acute accent. Swift's `String ==` compares canonical
-    /// equivalence, so it calls them equal, but their UTF-8 bytes differ, and so do the file bytes a save writes.
+    /// Two spellings of one URL: a precomposed é, and e followed by a combining acute accent. Their UTF-8 bytes differ, and so do the file
+    /// bytes a save writes, whatever a value equality says about them.
     private static let composedURL = "https://example.test/caf\u{00E9}"
     private static let decomposedURL = "https://example.test/cafe\u{0301}"
 
@@ -434,14 +434,10 @@ final class ConfigurationStoreSourceTests: XCTestCase {
         string.map { Array($0.utf8) }
     }
 
-    func testTheTwoSpellingsAreStringEqualButByteDistinct() {
-        XCTAssertTrue(Self.composedURL == Self.decomposedURL, "String == compares canonical equivalence")
-        XCTAssertNotEqual(utf8(Self.composedURL), utf8(Self.decomposedURL))
-    }
-
     /// The missing preferences sidecar takes the runtime file's legacy URL. An outside edit replaces it with the other spelling, and the
     /// reload adopts those exact bytes. The effective value changed bytewise, so the token issued for the old spelling must be retired.
     func testAReloadThatRespellsAMissingSidecarsLegacyURLRetiresItsToken() async throws {
+        XCTAssertNotEqual(utf8(Self.composedURL), utf8(Self.decomposedURL), "the fixture's two spellings are byte-distinct")
         let fixture = try ConfigurationStoreTests.Fixture(runtime: try runtimeFile(["preferredBrowserTestURL": Self.composedURL]))
         defer { fixture.close() }
         guard await adopted(fixture) else { return }

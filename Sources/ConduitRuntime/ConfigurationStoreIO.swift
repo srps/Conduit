@@ -121,6 +121,8 @@ enum ConfigurationStoreIO {
         stage: (Value) throws -> Data
     ) -> Result<Bool, UnexpectedStagingCode> {
         guard !present else { return .success(false) }
+        // A first load has nothing to compare, and its own baseline already changes, so no value is encoded.
+        guard let previous else { return .success(true) }
         let loadedBytes: Data
         switch canonicalBytes(loaded, stage: stage) {
         case .bytes(let bytes):
