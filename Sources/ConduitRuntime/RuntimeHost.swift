@@ -14,6 +14,12 @@ private struct RuntimeVPNFlapWindowConfig: Sendable {
     var minVisibleSeconds: TimeInterval
 }
 
+/// Why `RuntimeHost.open` refused the startup inputs. The workflow's own type stays internal; the entry point gets the typed
+/// `config.workflow.observed` event and reports it, as it reports a failed load.
+package struct RuntimeOpenRefusal: Error, Sendable {
+    package let event: RuntimeEvent
+}
+
 /// Shared runtime host, run by `ConduitDaemon` (decision 0013).
 ///
 /// This is the production-daemon counterpart to the runtime ownership that
@@ -28,6 +34,12 @@ package final class RuntimeHost {
     /// lease stays open while the host runs, whatever its caller drops. Stop does
     /// not release it; the entry point's own pin does.
     private let stateSession: StateRootSession
+    /// The one configuration owner of this host (decisions 0031 and 0032). It holds the sole store privately, and every reload, Start
+    /// and Stop is admitted through it.
+    private let workflow: RuntimeConfigurationWorkflow
+    /// Start, Stop and reload calls begun and not yet finished. A settle reads it, so a call that has not yet reached the lane or the
+    /// workflow, still waiting for launch recovery, is seen.
+    private(set) var pendingAdmissions = 0
     let environment: RuntimeEnvironment
     let logger: any LogSink
     let eventWriter: RuntimeEventFileWriter
@@ -54,6 +66,8 @@ package final class RuntimeHost {
     /// managers, and the directories they write. Supplied by `effects`, so a
     /// host test never rewrites the machine it runs on.
     private let commandRunner: @Sendable (String, [String]) throws -> CommandResult
+    /// The stale-listener probe the system proxy manager asks; the effects supply it, so no manager reaches the real port by default.
+    private let loopbackPortProbe: @Sendable (Int) -> Bool
     /// Twin of `AppState.dnsResponds`, from `effects`.
     private let dnsResponds: @Sendable (Int) -> Bool
     private let homeDirectory: URL
@@ -65,10 +79,9 @@ package final class RuntimeHost {
     /// #13 rather than a twin of it.
     private let reconciler: RuntimeReconciler
 
-    // Platform side-effect coordinators. Default daemon startup applies
-    // nothing until `startRuntime()` is called (future control socket
-    // command); what `init` does start is launch recovery, which only hands
-    // back what a crashed run left applied.
+    // Platform side-effect coordinators. Startup applies nothing until
+    // `startRuntime()` is called; what `init` does start is launch recovery,
+    // which only hands back what a crashed run left applied.
     /// Prior values of the platform settings we change, so teardown restores
     /// rather than blanket-clearing. Shared by every side-effect manager.
     private lazy var platformStateJournal = PlatformStateJournal(
@@ -80,6 +93,7 @@ package final class RuntimeHost {
         privilegeClient: auditedPrivilegeClient,
         journal: platformStateJournal,
         commandRunner: commandRunner,
+        portProbe: loopbackPortProbe,
         locationRecovery: locationRecovery,
         configProvider: orchestrator.configSnapshotProvider
     )
@@ -226,6 +240,52 @@ package final class RuntimeHost {
     /// `exit(0)`; the host itself never exits, so a test can observe the call.
     private let terminalExit: @MainActor () -> Void
 
+    /// Opens the host over its one configuration owner (decisions 0031 and 0032). The startup observation goes through the store before
+    /// the orchestrator and the reconciler take their baselines, so every baseline comes from that observation. A caller that runs a
+    /// startup migration runs it before this call, under the same session. Nothing else reads or writes configuration at open.
+    ///
+    /// Throws `RuntimeOpenRefusal` when the startup inputs are refused, and then no host is built.
+    package static func open(
+        stateSession: StateRootSession,
+        logger: any LogSink,
+        startupAllowsMissing: Bool,
+        startedAt: Date,
+        terminalExit: @escaping @MainActor () -> Void,
+        effects: RuntimeHostEffects,
+        networkLocationLimits: NetworkLocationLimits = .init(),
+        environmentDriftInterval: Duration = .seconds(300),
+        reapplyRetrySchedule: ConfigReapplyRetry.Schedule = .standard,
+        splitDNSHelperCheckInterval: Duration = SplitDNSEntryFileRepair.helperCheckInterval
+    ) async throws -> RuntimeHost {
+        let store = ConfigurationStore(
+            session: stateSession,
+            access: effects.stateFiles,
+            work: PlatformWork(label: "io.github.srps.Conduit.configuration-store")
+        )
+        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: startupAllowsMissing)
+        let opened: RuntimeConfigurationWorkflow.Opened
+        do {
+            opened = try await workflow.open()
+        } catch let refusal as RuntimeConfigurationWorkflow.OpenRefusal {
+            throw RuntimeOpenRefusal(event: RuntimeEvent(payload: .configWorkflow(refusal.event)))
+        }
+        let host = RuntimeHost(
+            stateSession: stateSession,
+            logger: logger,
+            loadedConfiguration: opened,
+            workflow: workflow,
+            startedAt: startedAt,
+            terminalExit: terminalExit,
+            effects: effects,
+            networkLocationLimits: networkLocationLimits,
+            environmentDriftInterval: environmentDriftInterval,
+            reapplyRetrySchedule: reapplyRetrySchedule,
+            splitDNSHelperCheckInterval: splitDNSHelperCheckInterval
+        )
+        host.emitConfigurationEvents(opened.events)
+        return host
+    }
+
     /// - Parameters:
     ///   - stateSession: the root's writer authority, taken before the load
     ///     that produced `loadedConfiguration` (decision 0028). The host keeps
@@ -239,10 +299,11 @@ package final class RuntimeHost {
     ///   - effects: every machine-facing adapter and owned path (decision 0033).
     ///     Production passes the real ones from `ConduitDaemon`; a simulator or
     ///     test passes fakes and scratch paths. Nothing is defaulted here.
-    package init(
+    private init(
         stateSession: StateRootSession,
         logger: any LogSink,
-        loadedConfiguration: RuntimeConfigurationLoadResult,
+        loadedConfiguration: RuntimeConfigurationWorkflow.Opened,
+        workflow: RuntimeConfigurationWorkflow,
         startedAt: Date,
         terminalExit: @escaping @MainActor () -> Void,
         effects: RuntimeHostEffects,
@@ -261,6 +322,7 @@ package final class RuntimeHost {
         self.networkLocationStoreFactory = effects.networkLocationStoreFactory
         self.networkLocationLimits = networkLocationLimits
         self.stateSession = stateSession
+        self.workflow = workflow
         self.environment = stateSession.environment
         let environment = stateSession.environment
         self.logger = logger
@@ -268,6 +330,7 @@ package final class RuntimeHost {
         self.platformConfig = loadedConfiguration.platformConfig
         self.appPreferences = loadedConfiguration.appPreferences
         self.commandRunner = effects.commandRunner
+        self.loopbackPortProbe = effects.loopbackPortProbe
         self.homeDirectory = effects.homeDirectory
         self.resolverDirectory = effects.resolverDirectory
         self.reconciler = RuntimeReconciler(
@@ -284,7 +347,7 @@ package final class RuntimeHost {
         // The diagnostics log and its writers come before any privileged adapter. `RuntimeEventLog.setSink` does not
         // replay records appended before it, so the sink is bound here, before the factory can emit. An event from the
         // adapter's construction or from its first command then reaches the log and `events.ndjson` exactly once. The
-        // log is the orchestrator's log below (#222 shares it with the diagnostic writers).
+        // log is the orchestrator's log below, shared with the diagnostic writers.
         let diagnosticsEventLog = RuntimeEventLog()
         let eventWriter = RuntimeEventFileWriter(
             fileURL: environment.eventsFile,
@@ -370,11 +433,9 @@ package final class RuntimeHost {
                 self.writeSnapshotFile(snapshot: self.orchestrator.snapshot)
             }
         }
-        orchestrator.onConfigChange = { [weak self, deliveries] updatedConfig in
-            deliveries.deliver {
-                self?.config = updatedConfig
-            }
-        }
+        // `onConfigChange` is not wired. The orchestrator fires it only from `applyConfigChange`, which here runs only the reconciler's
+        // pushes of inputs this host already adopted, and its delivery lands later. A writer there would move `config` outside
+        // `adoptHostView`, which keeps the accepted view, the flap window and `configGeneration` together.
         orchestrator.onEvent = { [weak self, deliveries] event in
             deliveries.deliver {
                 self?.handle(orchestratorEvent: event)
@@ -486,9 +547,41 @@ package final class RuntimeHost {
     /// is checked after every suspension and, under each manager's lock,
     /// before every manager step; see `LifecycleLane`.
     package func startRuntime() async throws {
+        guard !workflow.isTerminal else {
+            emitConfigurationEvents(workflow.terminalRefusal())
+            throw RuntimeConfigurationWorkflow.StartRefusal.terminated
+        }
+        // Admitted before recovery is awaited, so a Stop during recovery is never queued behind it (decision 0015). Preparation below
+        // checks this same admission again, so it cannot clear a newer Stop.
+        pendingAdmissions += 1
+        defer { pendingAdmissions -= 1 }
+        guard let ticket = workflow.admitStart() else {
+            emitConfigurationEvents([.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .intentExhausted))])
+            throw RuntimeConfigurationWorkflow.StartRefusal.intentExhausted
+        }
+        // Any admission makes a pending settle stale, whether or not it has reached the lane yet.
+        stoppedEffectsJoin?.finish(.superseded)
         await awaitLaunchRecovery()
+        let preparation = await workflow.prepareStart(ticket)
+        emitConfigurationEvents(preparation.events)
+        switch preparation.preparation {
+        case .superseded:
+            return
+        case .held:
+            throw RuntimeConfigurationWorkflow.StartRefusal.held
+        case .ready(let verified):
+            // A `true` answer checked the admission last, with no suspension since.
+            guard await pushVerifiedInput(verified, ticket: ticket) else {
+                emitConfigurationEvents(workflow.supersession(of: ticket))
+                return
+            }
+        }
         logNonBlockingConfigProblems()
-        guard let token = await admit(.start, .runtimeStart) else { return }
+        guard let token = await admit(.start, .runtimeStart) else {
+            // The identical start this call joined has ended. Report what it left: a joined start that failed or was stopped is not success.
+            guard runtimeStarted else { throw RuntimeConfigurationWorkflow.StartRefusal.notRunning }
+            return
+        }
         defer { runtimeLane.end(token) }
         do {
             try await orchestrator.startProxy()
@@ -496,27 +589,30 @@ package final class RuntimeHost {
                 eventSink: { [eventLog = orchestrator.eventLog] event in eventLog.append(event) }
             )
         } catch {
-            // A failed start must not leave the machine pointing at listeners
-            // that are not there. These side effects outlive the process and
-            // are not self-healing — a system PAC setting naming a dead PAC
-            // port, or `/etc/resolver` files naming a dead forwarder, break
-            // networking for *every* client on the machine, and the only other
-            // path that clears them is an explicit stop that nobody is going to
-            // issue for a daemon that never came up. `stopRuntime` is
-            // idempotent, so this is safe wherever in the sequence we failed.
+            // A start that a stop or a newer start superseded has nothing to revert: that owner cleaned up, and reverting here would undo its work.
+            guard !token.isSuperseded else {
+                _ = isCurrent(token, .runtimeStart)
+                return
+            }
+            // Restore owned surfaces after bind failure: a dead PAC/proxy endpoint or resolver can break networking after this process exits.
             logger.log(
                 .warning,
                 "Runtime start failed (\(error.displayDescription)) — reverting system proxy, environment and DNS resolver settings so they cannot point at listeners that are not running.",
                 category: .system
             )
-            await stopRuntime()
+            // The failed intent ends before anything suspends, so a reload pass admitted under it does nothing. No Stop is recorded: nothing
+            // fences a newer Start. The revert runs under this start's own token and waits only for effects already running, never for a queued
+            // pass, which waits for this token. The token ends once, in the defer above.
+            workflow.endFailedStart(ticket)
+            await runStopCleanup(token: token, operation: .runtimeStart, terminal: false)
             throw error
         }
         // A stop issued while the listeners came up has already queued its
         // clears; applying now would put the surfaces back after them.
         guard isCurrent(token, .runtimeStart) else { return }
 
-        let config = self.config
+        // The runtime input is the one the push just reported held. The platform flags are this start's verified intent.
+        let config = heldRuntimeConfig
         let platform = platformConfig
         let systemProxy = systemConduit
         let environment = environmentManager
@@ -683,18 +779,40 @@ package final class RuntimeHost {
     /// teardown, except, again, the one on the way to `exit`, which must reach
     /// it: it supersedes the one in flight, which then stops at its next step.
     package func stopRuntime(exitAfterStop: Bool = false) async {
+        // The fence, and for a terminal stop the latch, is established at admission, before recovery is awaited (decision 0015).
+        pendingAdmissions += 1
+        defer { pendingAdmissions -= 1 }
+        let stop = workflow.admitStop(terminal: exitAfterStop)
+        stoppedEffectsJoin?.finish(.superseded)
         await awaitLaunchRecovery()
+        // A newer Start or Stop admitted during recovery owns the surfaces now, so this Stop does nothing more. A terminal stop always
+        // finishes. The check runs before the lane is taken, so no suspension separates it from the admission.
+        guard exitAfterStop || workflow.isLatest(stop) else { return }
         guard let token = await admit(.stop, .runtimeStop, coalescing: !exitAfterStop) else { return }
         defer { runtimeLane.end(token) }
-        let terminal = exitAfterStop
+        await runStopCleanup(token: token, operation: .runtimeStop, terminal: exitAfterStop)
+        if exitAfterStop {
+            await flushEvents()
+            terminalExit()
+        }
+    }
+
+    /// The one physical teardown, run under `token` by whichever stop or failed start holds the lane. It waits only for effects already in
+    /// flight (`quiesceEffects`), never for a queued reconcile pass: that pass waits for the lane this token holds. A superseded token stops
+    /// it at its next step, unless `terminal` says it must finish. Every await is followed by the token check before the next step acts.
+    private func runStopCleanup(token: LifecycleLane.Token, operation: LifecycleOperation, terminal: Bool) async {
+        await reconciler.quiesceEffects()
+        // A newer start or stop may have begun during that wait. It owns the observers and the state now, so this teardown stops here.
+        guard terminal || isCurrent(token, operation) else { return }
         runtimeStarted = false
         stopDNSHealthTimer()
         vpnStatusMonitor.stop()
         networkLocationObserver.stop()
         networkPathObserver.stop()
 
-        let config = self.config
-        let platform = platformConfig
+        // Cleanup clears what the machine holds: the runtime input it was pushed, and the flags the reconciler completed. A flag that never landed is covered by the journal.
+        let config = heldRuntimeConfig
+        let platform = completedPlatformBaseline
         let systemProxy = systemConduit
         let environment = environmentManager
         let resolvers = dnsManager
@@ -711,11 +829,11 @@ package final class RuntimeHost {
                 }
             }
         }
-        guard terminal || isCurrent(token, .runtimeStop) else { return }
+        guard terminal || isCurrent(token, operation) else { return }
         await orchestrator.stopTunnels()
         await orchestrator.stopDNS()
         await orchestrator.stopProxy()
-        guard terminal || isCurrent(token, .runtimeStop) else { return }
+        guard terminal || isCurrent(token, operation) else { return }
 
         // Each surface is cleared when its flag is on *or* when the journal
         // says the surface is ours, as in `AppState.stopProxy`. The flag alone
@@ -772,16 +890,11 @@ package final class RuntimeHost {
             }
         }
         recordSplitDNS(entryFiles, source: .stop, startedAt: stopGeneration)
-        guard terminal || isCurrent(token, .runtimeStop) else { return }
+        guard terminal || isCurrent(token, operation) else { return }
 
         logger.log(.notice, "Daemon runtime stopped.", category: .general)
-        // The stopped state is submitted. Only the terminal stop awaits the shared phase before exit, and it
-        // exits whatever the report says: diagnostics never gate the exit. An ordinary stop does not hold the lane.
+        // The stopped state is submitted. A terminal stop flushes and exits after this, in `stopRuntime`.
         writeSnapshotFile(snapshot: orchestrator.snapshot)
-        if exitAfterStop {
-            await flushEvents()
-            terminalExit()
-        }
     }
 
     /// Joins the work a stopped host still runs: its credential warm-up, and the observer deliveries admitted before
@@ -801,9 +914,13 @@ package final class RuntimeHost {
     /// - A start, a stop, or an adopted reload admitted while the join is pending makes the result `.superseded`.
     package func settleStoppedEffects(until deadline: ContinuousClock.Instant) async -> StoppedEffectsSettlement {
         guard stoppedEffectsJoin == nil else { return .busy }
-        guard runtimeIsDown else { return .runtimeActive }
+        if let pending = stoppedEffectsPending() { return pending }
         guard ContinuousClock.now < deadline else { return .deadlineExpired }
-        let join = StoppedEffectsJoin(lifecycleGeneration: lifecycleGeneration, configGeneration: configGeneration)
+        let join = StoppedEffectsJoin(
+            lifecycleGeneration: lifecycleGeneration,
+            configGeneration: configGeneration,
+            intentGeneration: workflow.generation
+        )
         stoppedEffectsJoin = join
         let warmup = credentialWarmup
         let deliveries = self.deliveries
@@ -821,6 +938,16 @@ package final class RuntimeHost {
         return await join.outcome()
     }
 
+    /// The runtime input the machine holds: the reconciler's baseline, which moves only when a push reports the input held. Machine-acting
+    /// paths read this. The host's `config` is the accepted view that status reports, and it can run ahead of the machine.
+    private var heldRuntimeConfig: ProxyConfig { reconciler.lastReconciledConfig }
+
+    /// The platform flags the reconciler has completed actions for. A flag moves when its action lands, so cleanup clears against this
+    /// baseline. It is not a reading of each surface's physical state: the reconciler also adopts a flag with no action to run while the
+    /// runtime is down. Retries, reconciles, drift and the start apply read the desired flags (`platformConfig`), because a switch that
+    /// failed to land is what they must retry, and the baseline still names the old value for it.
+    private var completedPlatformBaseline: PlatformIntegrationConfig { reconciler.lastReconciledPlatformConfig }
+
     /// Whether the host's actual runtime is down: its lifecycle lane is idle, no proxy or DNS is up, and no tunnel is
     /// bound. The `runtimeStarted` flag is one input, not the answer, since a reload can leave DNS up while it is false.
     private var runtimeIsDown: Bool {
@@ -829,53 +956,129 @@ package final class RuntimeHost {
             && orchestrator.snapshot.bindings.tunnels.isEmpty
     }
 
-    /// Frees the slot and gives any still-waiting caller the join's answer. The answer is `.settled` only if both
-    /// generations are unchanged and the runtime is down at this moment.
+    /// What keeps a settle from answering `.settled` now, or nil. A settle asks when it begins and its join asks when it finishes, in this
+    /// one order, so the same host state gets the same answer at either end. Every answer fails closed. A configuration operation comes
+    /// first, since it may still write. Then a Start, Stop or reload call not yet finished, a call still waiting for launch recovery
+    /// included, or a runtime still up. A pass in flight is the last answer: with no call pending and the runtime down, it is the only
+    /// work left.
+    private func stoppedEffectsPending() -> StoppedEffectsSettlement? {
+        guard workflow.isIdle else { return .configurationPending }
+        guard pendingAdmissions == 0, runtimeIsDown else { return .runtimeActive }
+        guard !reconciler.hasPassInFlight else { return .reconcilePending }
+        return nil
+    }
+
+    /// Frees the slot and answers `.settled` only if lifecycle, configuration and intent generations are unchanged and nothing is
+    /// pending (`stoppedEffectsPending`).
     private func finishStoppedEffectsJoin(_ join: StoppedEffectsJoin) {
         if stoppedEffectsJoin === join { stoppedEffectsJoin = nil }
-        guard lifecycleGeneration == join.lifecycleGeneration, configGeneration == join.configGeneration else {
+        guard lifecycleGeneration == join.lifecycleGeneration, configGeneration == join.configGeneration,
+              workflow.generation == join.intentGeneration else {
             join.finish(.superseded)
             return
         }
-        join.finish(runtimeIsDown ? .settled : .runtimeActive)
+        join.finish(stoppedEffectsPending() ?? .settled)
     }
 
-    func reloadConfiguration() async {
+    /// An explicit reload-and-reconcile (decision 0032). The workflow observes the files through the store, read-only, and decides what
+    /// may apply. The generation is captured before the first suspension, launch recovery included, so an admission made during that
+    /// wait makes this reload stale. A stale or held observation changes no applied view, reconciler baseline or configuration generation.
+    package func reloadConfiguration() async {
+        // Counted from the call, so a settle that starts while this reload waits for recovery sees it as pending work.
+        pendingAdmissions += 1
+        defer { pendingAdmissions -= 1 }
+        let captured = workflow.generation
         await awaitLaunchRecovery()
-        let loaded: RuntimeConfigurationLoadResult
-        do {
-            loaded = try ProxyConfigPersistence.loadAllMigrating(in: environment, allowMissing: false) { candidate in
-                if let problem = candidate.validate().first(where: \.blocksProxyStart) { throw problem }
-            }
-        } catch {
-            let event = RuntimeEvent(kind: .config, event: "config.reload_rejected", detail: error.localizedDescription)
-            orchestrator.eventLog.append(event)
-            logger.log(.error, event.detail ?? event.event, category: .system)
+        let outcome = await workflow.reload(capturedAt: captured)
+        emitConfigurationEvents(outcome.events)
+        if let preferences = outcome.preferences {
+            appPreferences = preferences
+        }
+        // An adopted observation changes the host view a pending settle read, whether or not its runtime input may apply.
+        if outcome.preferences != nil || outcome.applied != nil {
+            stoppedEffectsJoin?.finish(.superseded)
+        }
+        guard let applied = outcome.applied else {
+            writeSnapshotFile(snapshot: orchestrator.snapshot)
             return
         }
-        for warning in loaded.warnings {
-            logger.log(.warning, warning, category: .system)
-        }
-        config = loaded.config
-        platformConfig = loaded.platformConfig
-        appPreferences = loaded.appPreferences
+        // Every eligible reload counts, an unchanged one included.
+        adoptHostView(runtime: applied.runtime, platform: applied.platform)
         logNonBlockingConfigProblems()
-        vpnFlapWindowBox.withLockedValue { window in
-            window.graceSeconds = config.vpnFlapGraceSeconds
-            window.minVisibleSeconds = config.vpnFlapMinVisibleSeconds
-        }
-        configGeneration += 1
-        // An adopted reload changes the host view a pending settle observed, so that settle's result is stale.
-        stoppedEffectsJoin?.finish(.superseded)
         // Queued and then awaited: a caller that reloads and then stops must
         // see the machine the reload left, and the control path has no
         // editor to hand back to while the pass runs. What the pass does is
         // the `RuntimeReconcilerHost` conformance below.
-        reconciler.reconcile(config: config, platformConfig: platformConfig)
+        // The pass acts only while this reload's observation still stands: no newer Start or Stop, and no fence (decision 0032).
+        reconciler.reconcile(config: config, platformConfig: platformConfig, isCurrent: { [workflow] in
+            workflow.isLatest(captured) && !workflow.stopFenced
+        })
         await reconciler.drain()
         logger.log(.notice, "Daemon configuration reloaded.", category: .general)
         // Submitted, not awaited, as in `startRuntime`.
         writeSnapshotFile(snapshot: orchestrator.snapshot)
+    }
+
+    /// The one emitter for `config.workflow.*` (decision 0031). Each typed value becomes its record, and the log line is derived from it.
+    private func emitConfigurationEvents(_ events: [ConfigurationWorkflowEvent]) {
+        for event in events {
+            let record = RuntimeEvent(payload: .configWorkflow(event))
+            orchestrator.eventLog.append(record)
+            logger.log(Self.configurationLogLevel(event), "Config: \(record.event) \(record.detail ?? "")", category: .system)
+        }
+    }
+
+    private static func configurationLogLevel(_ event: ConfigurationWorkflowEvent) -> LogLevel {
+        switch event {
+        case .observed(let observed):
+            switch observed.observation {
+            case .adopted: .notice
+            case .refused: .warning
+            }
+        case .committed(let committed):
+            switch committed.write {
+            case .persisted, .unchanged: .notice
+            case .notPersisted, .unknown, .conflict, .notAttempted: .warning
+            }
+        case .held, .superseded:
+            .warning
+        }
+    }
+
+    /// Converges the verified pair through the reconciler under this Start's admission, then updates the host view.
+    /// A newer eligible reload owns the view if it completes during the wait; superseded input cannot start listeners.
+    private func pushVerifiedInput(_ verified: VerifiedRuntimePlatformInput, ticket: RuntimeConfigurationWorkflow.StartTicket) async -> Bool {
+        guard workflow.isCurrent(ticket) else { return false }
+        // Through the reconciler, so the orchestrator push is one serialized pass that carries this Start's admission. The reconciler's
+        // baseline moves only to what a push reports as held, so an abandoned push leaves the baseline honest.
+        let reloads = configGeneration
+        reconciler.reconcile(config: verified.runtime, platformConfig: verified.platform, isCurrent: { [workflow] in
+            workflow.isCurrent(ticket)
+        })
+        await reconciler.drain()
+        guard workflow.isCurrent(ticket) else { return false }
+        // A reload that applied while this push waited replaced its request with a newer verified input, and set the host view itself. That
+        // input is the one to start, so this Start leaves it in place.
+        guard configGeneration == reloads else { return true }
+        // Only `adoptHostView` writes the view, and a reload bumps the generation checked above, so the view is still what this Start
+        // found. A Start counts only when it changes the accepted pair: one after a held reload, or after an external edit with none.
+        if config != verified.runtime || platformConfig != verified.platform {
+            adoptHostView(runtime: verified.runtime, platform: verified.platform)
+        }
+        return true
+    }
+
+    /// The one writer of the accepted host view after `open`: the runtime and platform inputs status reports, the VPN monitor's
+    /// flap-window timings, and `configGeneration`, which counts adoptions of this view. The view is not a durable or applied counter; the
+    /// machine-acting paths read the reconciler's baselines. The caller logs the non-blocking validation problems once.
+    private func adoptHostView(runtime: ProxyConfig, platform: PlatformIntegrationConfig) {
+        config = runtime
+        platformConfig = platform
+        vpnFlapWindowBox.withLockedValue { window in
+            window.graceSeconds = runtime.vpnFlapGraceSeconds
+            window.minVisibleSeconds = runtime.vpnFlapMinVisibleSeconds
+        }
+        configGeneration += 1
     }
 
     /// The errors `LocalProxyServer.start` deliberately ignores. A blocking
@@ -892,8 +1095,10 @@ package final class RuntimeHost {
     /// Intercept resolver files for the reconciler's passes, which still run
     /// on this actor. Twin of `AppState.refreshInterceptFiles`; the rule is
     /// `DNSManager.refreshInterceptFiles`.
-    private func refreshInterceptFiles(for config: ProxyConfig) throws {
-        guard platformConfig.manageDNSResolvers else { return }
+    /// The platform is the caller's: a pass refreshes with the flags it is applying, and a retry with the flags the machine holds. It is
+    /// never read live from the host, because the host's flags can be ahead of the pass.
+    private func refreshInterceptFiles(for config: ProxyConfig, platform: PlatformIntegrationConfig) throws {
+        guard platform.manageDNSResolvers else { return }
         try dnsManager.refreshInterceptFiles(
             config: config,
             interceptReady: orchestrator.snapshot.bindings.dnsInterceptReady,
@@ -1024,7 +1229,7 @@ package final class RuntimeHost {
             let proxyToken = runtimeLane.observationToken
             let dnsToken = runtimeLane.observationToken
             let proxy = systemConduit, dns = systemDNSManager
-            let config = self.config, platform = platformConfig
+            let config = heldRuntimeConfig, platform = platformConfig
             let pacURL = orchestrator.snapshot.bindings.localPACURL
             let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
             let events = orchestrator.eventLog, logger = logger
@@ -1112,7 +1317,7 @@ package final class RuntimeHost {
         if !wasPending, splitDNSRepair.pending != nil { endSplitDNSHelperCheck() }
         // Settled by something other than a retry (a VPN flip, a start, a
         // config change): the switch's action has landed all the same.
-        if wasPending { settleResolverSwitchBaseline(managed: platformConfig.manageDNSResolvers) }
+        if wasPending { settleResolverSwitchBaseline(platform: platformConfig) }
         scheduleSplitDNSHelperCheck()
     }
 
@@ -1154,7 +1359,7 @@ package final class RuntimeHost {
             runtimeStarted: runtimeStarted,
             report: recordSplitDNSEvent
         )
-        settleResolverSwitchBaseline(managed: platformConfig.manageDNSResolvers)
+        settleResolverSwitchBaseline(platform: platformConfig)
         scheduleSplitDNSHelperCheck()
     }
 
@@ -1167,11 +1372,13 @@ package final class RuntimeHost {
     /// refresh the switch-on owes is retried here first; one that fails
     /// again is reported (`platform.split_dns_intercept_refresh_failed`),
     /// and the next DNS start or DNS-affecting config change rewrites them.
-    private func settleResolverSwitchBaseline(managed: Bool) {
+    /// `platform` is the desired flags the switch is landing, carried by the caller. The baseline has not moved yet at this point, so it
+    /// cannot say whether the switch is on.
+    private func settleResolverSwitchBaseline(platform: PlatformIntegrationConfig) {
         guard splitDNSRepair.pending == nil else { return }
-        if managed, resolverSwitchInterceptRefreshFailed {
+        if platform.manageDNSResolvers, resolverSwitchInterceptRefreshFailed {
             do {
-                try refreshInterceptFiles(for: config)
+                try refreshInterceptFiles(for: heldRuntimeConfig, platform: platform)
                 resolverSwitchInterceptRefreshFailed = false
             } catch {
                 recordSplitDNSEvent(
@@ -1184,7 +1391,7 @@ package final class RuntimeHost {
                 )
             }
         }
-        reconciler.markResolverSwitchLanded(manageDNSResolvers: managed)
+        reconciler.markResolverSwitchLanded(manageDNSResolvers: platform.manageDNSResolvers)
     }
 
     /// Twin of `AppState.scheduleSplitDNSHelperCheck`, and this host's only
@@ -1234,7 +1441,7 @@ package final class RuntimeHost {
             await runtimeLane.waitUntilIdle()
             guard platformConfig.manageSystemProxy, runtimeState().proxyIsUp else { return }
             let token = runtimeLane.observationToken
-            let proxy = systemConduit, config = config, platform = platformConfig
+            let proxy = systemConduit, config = heldRuntimeConfig, platform = platformConfig
             let pacURL = orchestrator.snapshot.bindings.localPACURL
             let events = orchestrator.eventLog, logger = logger
             let retry = await platformWork.run { () -> Duration? in
@@ -1281,7 +1488,7 @@ package final class RuntimeHost {
             await runtimeLane.waitUntilIdle()
             guard platformConfig.manageEnvironmentVariables, runtimeState().proxyIsUp else { return }
             let token = runtimeLane.observationToken
-            let repair = environmentDriftRepair, config = config
+            let repair = environmentDriftRepair, config = heldRuntimeConfig
             let generation = environmentManager.generation, passTrigger = trigger
             let retry = await platformWork.run {
                 repair.run(config: config, generation: generation, trigger: passTrigger, isCurrent: { !token.isSuperseded })
@@ -1324,7 +1531,7 @@ package final class RuntimeHost {
         await runtimeLane.waitUntilIdle()
         guard !token.isSuperseded else { return .notWanted(reason: "superseded") }
         guard runtimeState().proxyIsUp else { return .notWanted(reason: "proxy_stopped") }
-        let config = config, platform = platformConfig
+        let config = heldRuntimeConfig, platform = platformConfig
         switch surface {
         case .systemProxy:
             guard platform.manageSystemProxy else { return .notWanted(reason: "switch_off") }
@@ -1523,7 +1730,13 @@ extension RuntimeHost {
             respondsOnPort: effects.dnsResponds,
             locationRecovery: locationRecovery
         )
-        let systemProxy = SystemProxyManager(privilegeClient: audited, journal: journal, commandRunner: runner, locationRecovery: locationRecovery)
+        let systemProxy = SystemProxyManager(
+            privilegeClient: audited,
+            journal: journal,
+            commandRunner: runner,
+            portProbe: effects.loopbackPortProbe,
+            locationRecovery: locationRecovery
+        )
         let recovery = LaunchRecovery {
             LaunchRecovery.recoverPlatformSurfaces(
                 systemDNS: systemDNS,
@@ -1548,8 +1761,10 @@ extension RuntimeHost {
 /// in `AppState`, over this host's managers and logger; the rules about what
 /// a pass may read live in `RuntimeReconciler`, not here.
 extension RuntimeHost: RuntimeReconcilerHost {
-    package func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
+    /// The host has no presentation mirror, so the orchestrator's config after the push is the input it holds.
+    package func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async -> RuntimeConfigApplication {
         await orchestrator.applyConfigChange(new, from: old)
+        return .held(orchestrator.config)
     }
 
     /// A reload's pass waits for any start or stop in flight, so it acts on
@@ -1606,7 +1821,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
                 // Runs whatever the reconcile did: see
                 // `DNSResolverReconciliation`.
                 refreshInterceptFiles: {
-                    try refreshInterceptFiles(for: new)
+                    try refreshInterceptFiles(for: new, platform: platform)
                 }
             )
             recordSplitDNS(entryFiles, source: .configChange)
@@ -1749,7 +1964,7 @@ extension RuntimeHost: RuntimeReconcilerHost {
             return applied
         case .refreshInterceptFiles:
             let refreshed = attempt("Could not apply intercept resolver files after the setting changed") {
-                try refreshInterceptFiles(for: config)
+                try refreshInterceptFiles(for: config, platform: platform)
             }
             resolverSwitchInterceptRefreshFailed = !refreshed
             return refreshed
@@ -1805,8 +2020,9 @@ extension RuntimeHost: RuntimeReconcilerHost {
         }
     }
 
-    /// Twin of `AppState.applySystemProxySwitch`: a failure rewinds the flag
-    /// for the next reload, and the retry looks again sooner (#194).
+    /// Twin of `AppState.applySystemProxySwitch`: a failure is reported to the
+    /// retry, and the completed baseline does not move for it, so the switch is
+    /// still owed when the retry looks again sooner (#194).
     private func applySystemProxySwitch(config: ProxyConfig, platform: PlatformIntegrationConfig,
                                         cause: ConfigReapplyRetry.Cause) -> Bool {
         do {

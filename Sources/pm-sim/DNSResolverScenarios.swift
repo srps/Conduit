@@ -47,7 +47,7 @@ enum DNSResolverScenarios {
     /// | # | expected                                                        |
     /// |---|-----------------------------------------------------------------|
     /// | A | UDP and TCP end up on one port, and not the one that was taken  |
-    /// | B | one `dns.listener_port_retry` event names the port given up     |
+    /// | B | `dns.listener_port_retry` events, the first naming the taken port |
     /// | C | a query is answered on both transports of the new pair          |
     ///
     /// It used to keep the UDP port, warn, and serve UDP only, which a client
@@ -104,10 +104,17 @@ enum DNSResolverScenarios {
         let passA = udpPort != 0 && udpPort == tcpPort && udpPort != taken
 
         // ── Case B: the retry is an event, naming the port given up ──
+        // The squatter takes only the first port. Another process may hold the TCP twin of a later pick too, so a start that bound the
+        // pair may have retried more than once, but never on its last attempt, which gives up instead.
         let seen = events.withLockedValue { $0 }
         notes.append("B events: \(seen.map { "\($0.event)[\($0.detail ?? "")]" })")
-        let passB = seen.map(\.event) == ["dns.listener_port_retry"]
-            && seen.first?.detail?.hasPrefix("port=\(taken) attempt=1 ") == true
+        let attempts = LocalDNSForwarder.ephemeralPairAttempts
+        let passB = (1..<attempts).contains(seen.count)
+            && seen.first?.detail == "port=\(taken) attempt=1 of=\(attempts) reason=tcp_port_in_use"
+            && seen.enumerated().allSatisfy { index, event in
+                event.event == "dns.listener_port_retry" && event.kind == .health
+                    && event.detail?.hasSuffix(" attempt=\(index + 1) of=\(attempts) reason=tcp_port_in_use") == true
+            }
 
         // ── Case C: both transports of the new pair answer ──
         let query = DNSWireFormat.buildQuery(domain: "host.pair.test", txID: 0x5157, qtype: 1)
@@ -121,7 +128,7 @@ enum DNSResolverScenarios {
         let pass = passA && passB && passC
         notes.append("A=\(verdict(passA)) B=\(verdict(passB)) C=\(verdict(passC))")
         notes.append(pass
-            ? "PASS — a taken TCP twin moves the pair to a fresh port, with one event, and both transports answer"
+            ? "PASS — a taken TCP twin moves the pair to a fresh port, with retry events, and both transports answer"
             : "FAIL — see per-case lines above")
 
         return ScenarioResult(

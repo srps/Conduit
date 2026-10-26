@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: selected “Reload and reconcile eligible changes (Recommended)”)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -11,8 +11,8 @@
 
 [0027](0027-refuse-external-configuration-edits.md) refuses ordinary saves over
 changed files until explicit reload/review. The shared-host workflow now needs
-the meaning of that explicit action. The existing tested host reload reads via
-a migration-capable loader and reconciles; it has no production caller. The daemon
+the meaning of that explicit action. At selection, the tested host reload read via
+a migration-capable loader and reconciled; it had no production caller. The daemon
 has no reload endpoint or SIGHUP handler. The app has startup/import paths but no
 explicit disk-reload action. The diagnostic pm-proxy has its own reload behavior.
 The owner reviewed the alternatives in [#186](https://github.com/srps/Conduit/issues/186)
@@ -90,9 +90,26 @@ required-default commits, mixed-input holds and the same writer authority path.
 
 ## Implementation evidence
 
-None yet. The reviewed proposal is [design-runtime-reload-review.md](../design-runtime-reload-review.md).
-Session/store authority preparation is merged in [PR #242](https://github.com/srps/Conduit/pull/242);
-it does not implement the adopted reload workflow.
+[RuntimeConfigurationWorkflow](../../Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift)
+now observes files through its private store, adopts supported drafts and returns
+only eligible runtime/platform input. [RuntimeHost](../../Sources/ConduitRuntime/RuntimeHost.swift)
+consumes that result, replacing its migration-capable reload; startup migration
+remains separate. Required defaults commit through Start, and terminal admission
+cannot reopen in the same process.
+
+[Phase tests](../../Tests/ConduitTests/ConfigurationWorkflowPhaseTests.swift),
+[admission tests](../../Tests/ConduitTests/ConfigurationWorkflowAdmissionTests.swift),
+[the independent workflow model](../../Tests/ConduitTests/ConfigurationWorkflowModelTests.swift),
+[real-host tests](../../Tests/ConduitTests/DaemonRuntimeHostTests.swift) and the
+[actual-host simulator](../../Sources/pm-sim/RuntimeHostEffectsScenarios.swift)
+exercise read-only reload, held/refused inputs, Stop and newer Start fences, and
+required commits. The model covers store I/O and returned eligibility; real-host
+tests cover lifecycle effects separately.
+
+Still open: the private editor observation/request integration, retained
+client-owned draft/token behavior and final AppState activation. The shared host
+has no production reload endpoint yet. The [review proposal](../design-runtime-reload-review.md)
+retains the alternatives; code/test evidence does not imply release readiness.
 
 Does not prove: installed-app behavior, real VPN/auth/PAC operation or daemon handoff.
 

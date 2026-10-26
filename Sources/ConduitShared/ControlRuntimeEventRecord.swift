@@ -3,23 +3,21 @@ import Foundation
 
 /// One event on the v2 wire, classified by what this build knows.
 ///
-/// - `known`: a v1-layout event, or a typed event whose family and lifecycle type this
+/// - `known`: a v1-layout event, or a typed event whose family and type this
 ///   build defines. Its own decoder validates it. A malformed known payload, a known
 ///   outer name with an unknown family or type, or an outer name, kind or detail that
 ///   disagrees with its payload, is a decode error. It never becomes `unknown`.
 /// - `unknown`: a future informational event. Both its outer name and its typed value are
 ///   ones this build does not define: the name is not a known event name, and the family
-///   or the lifecycle type is not known. It keeps only bounded, redacted text, and its
+///   or the type is not known. It keeps only bounded, redacted text, and its
 ///   structured payload is discarded.
 ///
-/// The decision reads the typed family, and for the lifecycle family its type, before any
+/// The decision reads the typed family and its type before any
 /// payload is decoded. An unknown family's payload is never read at all, so its shape is
 /// opaque. A record with no `typed` value is the v1 layout, so it is always known.
 ///
-/// The vocabulary is the event worker's: `ControlTypedRuntimeEvent.knownFamilies`,
-/// `ControlLifecycleEvent.knownWireTypes` and `ControlLifecycleEvent.knownEventNames`. The
-/// only name written here is the `lifecycle` family, the one family whose payload is
-/// discriminated by a type, so it is the only family whose type is probed.
+/// Family dispatch shares the codec's closed enum; type and name inventories come from each family's codec.
+/// Adding a family requires an exhaustive classification branch before its payload can be accepted or discarded.
 package enum ControlRuntimeEventRecord: Codable, Sendable, Equatable {
     case known(ControlRuntimeEvent)
     case unknown(ControlUnknownEventDisplay)
@@ -40,6 +38,15 @@ package enum ControlRuntimeEventRecord: Codable, Sendable, Equatable {
     /// Only the lifecycle type of a lifecycle value. Its other fields are not read here.
     private struct LifecycleProbe: Decodable {
         let lifecycle: TypeProbe
+
+        struct TypeProbe: Decodable {
+            let type: String
+        }
+    }
+
+    /// Only the type of a `config.workflow` value. Its other fields are not read here.
+    private struct ConfigWorkflowProbe: Decodable {
+        let configWorkflow: TypeProbe
 
         struct TypeProbe: Decodable {
             let type: String
@@ -77,17 +84,18 @@ package enum ControlRuntimeEventRecord: Codable, Sendable, Equatable {
         // else, so an unknown family's payload is never decoded.
         let family = try container.decode(FamilyProbe.self, forKey: .typed).family
         let typedIsKnown: Bool
-        if !ControlTypedRuntimeEvent.knownFamilies.contains(family) {
+        switch ControlTypedRuntimeEvent.Family(rawValue: family) {
+        case nil:
             typedIsKnown = false
-        } else if family == "lifecycle" {
-            // The lifecycle family's payload is named by its type. A missing payload throws here,
-            // as malformed, because a lifecycle value without its type is not an event at all.
+        case .lifecycle?:
             let type = try container.decode(LifecycleProbe.self, forKey: .typed).lifecycle.type
             typedIsKnown = ControlLifecycleEvent.knownWireTypes.contains(type)
-        } else {
-            typedIsKnown = true
+        case .configWorkflow?:
+            let type = try container.decode(ConfigWorkflowProbe.self, forKey: .typed).configWorkflow.type
+            typedIsKnown = ControlConfigWorkflowEvent.knownWireTypes.contains(type)
         }
         return !typedIsKnown && !ControlLifecycleEvent.knownEventNames.contains(event)
+            && !ControlConfigWorkflowEvent.knownEventNames.contains(event)
     }
 
     package func encode(to encoder: any Encoder) throws {

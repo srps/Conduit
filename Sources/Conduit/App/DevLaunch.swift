@@ -472,6 +472,8 @@ enum DevLaunch {
             resolverDirectory: resolverDirectory.path,
             loginItemManager: loginItems.manager,
             vpnStatusMonitor: vpn,
+            // A configured PAC URL would otherwise be fetched from the network, through the curl fallback included.
+            pacEvaluator: FakePacEvaluator(),
             networkLocationObserver: FakeNetworkLocationObserver(),
             networkLocationStoreFactory: { _ in
                 FakeNetworkLocationStore(snapshot: NetworkLocationSnapshot(
@@ -499,7 +501,7 @@ enum DevLaunch {
         // have no seams yet (see AGENTS.md).
         state.logStore.log(
             .notice,
-            "Dev mode: FakeMachine and scratch state. Helper, credentials, updater, login items, resolver and VPN are fakes. Notifications and network-path observation are real.",
+            "Dev mode: FakeMachine and scratch state. Helper, credentials, updater, login items, resolver, VPN and PAC fetching are fakes. Notifications and network-path observation are real.",
             category: .system
         )
         session = Session(options: options, machine: machine, vpn: vpn, loginItems: loginItems, helper: helper, secrets: secrets)

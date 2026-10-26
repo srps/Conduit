@@ -145,6 +145,14 @@ TYPED_NAMES = {
 TYPED_DIRECTORY = 'Sources/RuntimeEvents/'
 TYPED_INVENTORY = 'Sources/RuntimeEvents/LifecycleEvents.swift'
 LIFECYCLE_NAMESPACE = 'lifecycle.'
+# The `config.workflow.*` family (decisions 0031 and 0032): closed like the lifecycle namespace, with its own domain inventory
+# and its own wire file. Other `config.*` names keep their legacy envelope and are not pinned here.
+CONFIG_WORKFLOW_TYPED_NAMES = {
+    'config.workflow.observed', 'config.workflow.committed', 'config.workflow.held', 'config.workflow.superseded',
+}
+CONFIG_WORKFLOW_NAMESPACE = 'config.workflow.'
+CONFIG_WORKFLOW_INVENTORY = 'Sources/RuntimeEvents/ConfigurationWorkflowEvents.swift'
+WIRE_CONFIG_WORKFLOW_FILE = 'Sources/ConduitShared/ControlConfigWorkflowEvent.swift'
 # The kernel's legacy envelope gate. It must test the namespace prefix, with no exception list.
 PAYLOAD_INVENTORY = 'Sources/RuntimeEvents/RuntimeEventPayload.swift'
 # The wire's spelling of the typed names: a projection of the typed value, pinned to the
@@ -520,6 +528,11 @@ def check(root):
                 what = 'a typed name' if literal.text in TYPED_NAMES else 'in the closed lifecycle namespace'
                 problems.append(f'{where}: `{literal.text}` is {what}; emit it through RuntimeEvent(payload:) '
                                 'and match its typed value, not a literal (decision 0013)')
+            if (literal.text.startswith(CONFIG_WORKFLOW_NAMESPACE)
+                    and not relative.startswith(TYPED_DIRECTORY) and relative != WIRE_CONFIG_WORKFLOW_FILE):
+                what = 'a typed name' if literal.text in CONFIG_WORKFLOW_TYPED_NAMES else 'in the closed config.workflow namespace'
+                problems.append(f'{where}: `{literal.text}` is {what}; emit it through RuntimeEvent(payload:) '
+                                'and match its typed value, not a literal (decisions 0031 and 0032)')
             if not is_event_literal(literal, families, seen_exceptions):
                 continue
             if literal.built:
@@ -578,14 +591,30 @@ def typed_inventory_problems(root):
     if 'legacyLifecycleNames' in payload_text:
         problems.append(f'{PAYLOAD_INVENTORY}: legacyLifecycleNames reintroduces an untyped lifecycle exception; '
                         'the namespace is closed, so a lifecycle name gets a typed case')
-    if 'name.hasPrefix(namespacePrefix)' not in payload_text:
+    if 'name.hasPrefix(lifecyclePrefix)' not in payload_text:
         problems.append(f'{PAYLOAD_INVENTORY}: requiresTypedPayload no longer closes the lifecycle namespace')
+    if 'name.hasPrefix(configWorkflowPrefix)' not in payload_text:
+        problems.append(f'{PAYLOAD_INVENTORY}: requiresTypedPayload no longer closes the config.workflow namespace')
     wire = root / WIRE_TYPED_FILE
     wire_text = wire.read_text() if wire.exists() else ''
     wire_names = set(re.findall(r'"(lifecycle\.[a-z_]+)"', wire_text))
     if wire_names != TYPED_NAMES:
         problems.append(f'{WIRE_TYPED_FILE}: the wire spells {sorted(wire_names)}, but the typed inventory '
                         f'pins {sorted(TYPED_NAMES)}; change both together')
+    # The config.workflow family: the domain enum lists every name, the wire file spells the same set, and both are pinned here.
+    cw_inventory = root / CONFIG_WORKFLOW_INVENTORY
+    cw_text = cw_inventory.read_text() if cw_inventory.exists() else ''
+    cw_block = re.search(r'enum ConfigurationWorkflowEventName\b[^{]*\{(.*?)\n\}', cw_text, re.S)
+    cw_listed = set(re.findall(r'"(config\.workflow\.[a-z_]+)"', cw_block.group(1))) if cw_block else set()
+    if cw_listed != CONFIG_WORKFLOW_TYPED_NAMES:
+        problems.append(f'{CONFIG_WORKFLOW_INVENTORY}: ConfigurationWorkflowEventName lists {sorted(cw_listed)}, but the typed '
+                        f'inventory pins {sorted(CONFIG_WORKFLOW_TYPED_NAMES)}; change both together')
+    cw_wire = root / WIRE_CONFIG_WORKFLOW_FILE
+    cw_wire_text = cw_wire.read_text() if cw_wire.exists() else ''
+    cw_wire_names = set(re.findall(r'"(config\.workflow\.[a-z_]+)"', cw_wire_text))
+    if cw_wire_names != CONFIG_WORKFLOW_TYPED_NAMES:
+        problems.append(f'{WIRE_CONFIG_WORKFLOW_FILE}: the wire spells {sorted(cw_wire_names)}, but the typed inventory '
+                        f'pins {sorted(CONFIG_WORKFLOW_TYPED_NAMES)}; change both together')
     kernel = root / KERNEL_EVENT
     if not kernel.exists() or '!RuntimeEventPayload.requiresTypedPayload(event)' not in kernel.read_text():
         problems.append(f'{KERNEL_EVENT}: the legacy RuntimeEvent init no longer refuses the lifecycle namespace; '

@@ -318,6 +318,12 @@ final class AppState: ObservableObject {
     ///   - credentialStore: where saved credentials live. In production the
     ///     login Keychain; a fake host keeps them in memory, or its
     ///     credential controls would edit the installed app's entries.
+    ///   - pacEvaluator: where PAC scripts are fetched and evaluated, for
+    ///     routing and the Settings preview. Nil is the CFNetwork evaluator
+    ///     with the curl fallback; `AppStateHarness` and `DevLaunch` inject a fake. The seam
+    ///     goes with this runtime when the app activates the shared
+    ///     `RuntimeHost` (decision 0031), whose `RuntimeHostEffects.pacEvaluator`
+    ///     already carries the same role.
     /// - Parameter stateSession: the prepared writer authority for the state root
     ///   (decision 0028). Required: no construction path takes a raw environment,
     ///   so no writer here exists without its lease. The launch takes the session
@@ -342,6 +348,7 @@ final class AppState: ObservableObject {
         resolverDirectory: String? = nil,
         loginItemManager: LoginItemManager? = nil,
         vpnStatusMonitor: VPNStatusObserving? = nil,
+        pacEvaluator injectedPACEvaluator: (any PacEvaluator)? = nil,
         networkLocationObserver: any NetworkLocationObserving = NetworkLocationMonitor(),
         networkLocationStoreFactory: @escaping @Sendable (any PrivilegeClient) -> (any NetworkLocationStoring)? = { SystemNetworkLocationStore(privilegeClient: $0) },
         networkLocationLimits: NetworkLocationLimits = .init(),
@@ -468,10 +475,14 @@ final class AppState: ObservableObject {
         // corporate-network behaviour without re-introducing a kernel-side
         // `Process()` shellout.
         //
-        let pacEvaluator = AppState.makePACEvaluator(
-            insecureFetcher: AppState.curlPACFetcher
-        )
-        logStore.log(.notice, "PAC: using CFNetwork evaluator.", category: .pac)
+        // A host over fakes injects its own evaluator instead (`pacEvaluator`), so it fetches no PAC from the network.
+        let pacEvaluator: any PacEvaluator
+        if let injectedPACEvaluator {
+            pacEvaluator = injectedPACEvaluator
+        } else {
+            pacEvaluator = AppState.makePACEvaluator(insecureFetcher: AppState.curlPACFetcher)
+            logStore.log(.notice, "PAC: using CFNetwork evaluator.", category: .pac)
+        }
         self.pacEvaluator = pacEvaluator
 
         // Construct orchestrator BEFORE the auth factory + credential
@@ -577,8 +588,8 @@ final class AppState: ObservableObject {
         // its apply after later edits may have landed in the editor; the
         // orchestrator writes the pass's config into its box and echoes the
         // box, and wiring that echo back into `config` replaced the newer
-        // edits with the older save. The daemon keeps the callback: it has
-        // no editor to protect and reads its config back from the runtime.
+        // edits with the older save. `RuntimeHost` leaves it unwired too:
+        // its accepted view moves only through the configuration workflow.
         orchestrator.onEvent = { [weak self, deliveries] event in
             deliveries.deliver {
                 self?.handle(orchestratorEvent: event)
@@ -1173,8 +1184,8 @@ final class AppState: ObservableObject {
 
     // MARK: - RuntimeReconcilerHost
 
-    func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
-        guard !rejectUnavailableConfiguration() else { return }
+    func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async -> RuntimeConfigApplication {
+        guard !rejectUnavailableConfiguration() else { return .notHeld }
         // A pass queued before a DNS start or stop carries the flag from
         // before it; the lifecycle's own value wins on both sides, so the
         // pass neither reverts it in the runtime nor restarts DNS over it.
@@ -1183,6 +1194,8 @@ final class AppState: ObservableObject {
         old.dnsForwarderEnabled = config.dnsForwarderEnabled
         applyCommittedHostSettings(new)
         await orchestrator.applyConfigChange(new, from: old)
+        // The value this call assigned, not `orchestrator.config` read now: the presentation mirror can change that while the call suspends.
+        return .held(new)
     }
 
     /// The settings this host keeps outside the orchestrator, from a
@@ -1626,7 +1639,9 @@ final class AppState: ObservableObject {
             throw configurationLoadError
         }
         await awaitLaunchRecovery()
-        guard orchestrator.snapshot.runtimeStatus.state != .starting && orchestrator.snapshot.runtimeStatus.state != .running else { return false }
+        // A stop still tearing down leaves the snapshot `running`; a start admitted then runs after it instead of returning as though up.
+        let state = orchestrator.snapshot.runtimeStatus.state
+        guard (state != .starting && state != .running) || orchestrator.isStopInFlight else { return false }
         guard let token = await admit(proxyLane, .start, .proxyStart) else { return false }
         defer { proxyLane.end(token) }
 
@@ -1687,19 +1702,12 @@ final class AppState: ObservableObject {
             }
             return true
         } catch {
-            // A failed start must not leave the machine pointing at listeners
-            // that are not there. The side effects outlive us and are not
-            // self-healing: the system PAC setting keeps naming a PAC server on
-            // a port nothing serves, and `/etc/resolver` files keep sending
-            // whole domains to a dead forwarder — so every client on the
-            // machine loses networking, not just this app. Nothing else clears
-            // them either, because the only other cleanup path is a *user*
-            // stop, and a user staring at a failed start has no reason to press
-            // stop.
-            //
-            // The teardown is the same one a stop runs, and it is idempotent
-            // (each step tests `isCleared` first), so this is safe whether the
-            // failure happened before or after any of it was applied.
+            // A superseded start has nothing to revert: the stop or newer start that superseded it owns the listeners and the surfaces now.
+            // Twin of `RuntimeHost.startRuntime`.
+            guard isCurrent(token, on: proxyLane, .proxyStart) else { return false }
+            // Revert the surfaces this start may have applied. A PAC or resolver entry left naming a dead listener breaks every client on the
+            // machine, and nothing else clears it. The teardown is the stop's, and each step is idempotent, so it is safe whether or not a
+            // given surface was applied.
             logStore.log(
                 .warning,
                 "Proxy start failed (\(error.displayDescription)) — reverting system proxy, environment and DNS resolver settings so they cannot point at listeners that are not running.",

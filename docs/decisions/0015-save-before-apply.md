@@ -82,7 +82,7 @@ applied state solely from a saved flag or label a pending stop as stopped.
 
 ## Implementation evidence
 
-Partial, on branch `codex/exact-schema-two-persistence`, not merged. The app's
+Partial: the exact-schema-two app gate is merged (PRs227/228). The app's
 commit path in [AppState.swift](../../Sources/Conduit/App/AppState.swift)
 (`saveConfig`) reconciles the runtime only after the save is written and the
 config blocks no proxy start. A refused save, or a commit that blocks a start,
@@ -109,13 +109,13 @@ exclusive ownership across processes or machine cleanup after a deadline.
 
 Store core, not adopted (2026-10-25): [`ConfigurationStore.swift`](../../Sources/ConduitRuntime/ConfigurationStore.swift) makes one serialized writer for the runtime, platform and preferences files. It stages the runtime and platform candidates before the first write, writes the platform file first, and reports typed persistence facts with the caller's context. Each operation holds one busy slot and refuses an overlapping call as busy without queuing it. It has no Start, Stop, apply, intent counter or request ledger, and no app path constructs it yet. Evidence and limits are in [the verification note](../verification-configuration-store-2026-10-25.md).
 
-Physical verification primitive, unwired (2026-10-24): [`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift)
-classifies one runtime-file replacement as verified persisted, verified not persisted, unknown or not started, from a pre-read, the write's own result and a bounded read-back. The outcome carries no bytes. It is not a store: it takes no intent generation, mints no receipt and does not check the expected prior. Evidence and limits are in [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
+Physical verification primitive, consumed by the store core (2026-10-25): [`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift)
+classifies a component replacement as verified persisted, verified not persisted, unknown or not started, from an expected-baseline pre-read, the write's own result and bounded read-back. The outcome carries no bytes. It takes no intent generation and mints no receipt; the store owns component baselines/receipts, while the actual workflow owns intent and apply. Evidence and limits are in [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
 
 ## Open questions
 
 Classify secret-free committed fields and coupled components before their client
 commands. Decision [0017](0017-exclusive-state-directory-writer.md) settles writer lifetime
-with an exclusive lease; its adapter, writer coverage and upgrade evidence remain
-due. Settle listener handoff failure/retirement policy before changing those paths. Size total shutdown and
+with an exclusive lease. Its OS adapter and startup acquisition are implemented;
+complete writer coverage, shutdown accounting and upgrade evidence remain due. Settle listener handoff failure/retirement policy before changing those paths. Size total shutdown and
 helper/lock budgets with evidence.

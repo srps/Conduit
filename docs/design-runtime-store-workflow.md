@@ -119,7 +119,8 @@ requires an ordinary save to refuse observed byte changes since the verified
 baseline, preserving the file/draft and holding the new apply until explicit
 reload/review. Formatting-only edits conflict. A failed pre-read cannot authorize
 a replacement. Reload uses the same owner and cannot bypass eligibility or
-Stop/shutdown fences. This is a planned store check, not filesystem compare-and-swap;
+Stop/shutdown fences. The store core implements this check; actual-host adoption
+remains open. It is not filesystem compare-and-swap;
 nonparticipating editors can still race after it. The owner selected this over
 legacy overwrite authority on 2026-10-24.
 
@@ -168,12 +169,12 @@ it must be a deliberate tested refinement, not inferred from individual saved fl
 
 The runtime boundary, exact schema-two staging and bridge correction merged in
 PR #228; the runtime physical replacement seam/model merged in PR #229. The
-shared sidecar boundary merged in PR #230. These are building blocks, not the async
-store. Implement the selected external-edit check (0027) alongside expected-prior revisions.
-Add the sole leased writer,
-intent/revision fencing and bounded metadata, followed by the client workflow and
-host adoption. Startup must acquire authority before migration/recovery, and every
-journal/configuration writer must participate before shipping lease enforcement.
+shared sidecar boundary merged in PR #230. PR232 implements the verified-store core and selected external-edit check (0027),
+with expected-prior revisions. PR236 takes startup authority before migration and
+recovery, and PR242 gives the store its session-owned replacement capability.
+Actual intent/revision fencing and eligible apply through the sole host workflow
+remain in progress. Complete journal/configuration writer accounting and logical
+shutdown proof still precede convergence.
 
 Drive actual production adapters against an independent bounded model. Cover
 rename followed by error, unknown read-back, old queued writes, Stop during save,
@@ -240,9 +241,10 @@ to establish those unadopted host fences.
 Verify the production store against an independent bounded model for open/reload,
 conditional writes, stale baseline tokens, busy refusal, missing files, read
 failures, formatting/unknown-field edits, partial results and unchanged verification.
-Keep the physical classifier matrix and scratch OS witnesses. pm-sim exercises
-the physical mechanism through PlatformMac; it does not gain a ConduitRuntime
-dependency. The complete configuration event family and one owner emitter move
+Keep the physical classifier matrix and scratch OS witnesses. The initial store-core scenarios exercised the physical mechanism through
+PlatformMac. Decision0033 subsequently adds the scoped ConduitRuntime dependency
+and actual-host scenarios with explicit effects; workflow coverage must use that
+same boundary. The complete configuration event family and one owner emitter move
 with actual workflow/host adoption. This core reports typed persistence facts
 and does not invent a parallel configuration/lifecycle coordinator.
 
@@ -367,7 +369,8 @@ work; this checkpoint does not claim either.
 ## Next workflow contract checkpoint (2026-10-25)
 
 The session/store capability is implemented and focused verification passes.
-Actual host/workflow/client adoption remains open. The editor contract below is
+The headless host/workflow slice now consumes the store; actual client/AppState
+adoption remains open. The editor contract below is
 an API refinement for review, not an implemented private read protocol or a
 selected reply budget.
 
@@ -411,8 +414,10 @@ client's reload event.
 
 Claude and Codex reviewed this shape against the actual host/store/daemon source.
 Decision 0032 selects reload-and-reconcile. The owner selected the scoped simulator dependency and explicit effect injection
-in [0033](decisions/0033-headless-real-host-simulation.md). No new workflow
-implementation or simulator scenario is claimed.
+in [0033](decisions/0033-headless-real-host-simulation.md). PR243 implements the
+effect boundary and actual-host scenario. The next headless slice consumes the
+workflow responsibilities below; client/editor integration and AppState activation
+remain open. Full verification evidence is recorded separately when complete.
 
 - **Store:** retain one physical-work slot, existing frozen reader/decoder and
   verified replacement. Preserve ConfigurationOperationContext. Add an explicit

@@ -330,7 +330,205 @@ final class ListenerRecycleTests: XCTestCase {
         }
     }
 
+    // MARK: - Lifecycle across a stop
+
+    /// The health ladder began under the listener it was checking. A stop lands while its first step is held, so the ladder resumes with no
+    /// pool behind it, and its recycle step would cold-start the listener. The ladder must end instead: nothing binds, and it reports no recovery.
+    func testAStopDuringTheHealthLadderLeavesNoListenerAndEndsTheLadder() async throws {
+        let harness = makeHarness()
+        let port = try await startOnPinnedPort(harness)
+        let service = HeldLadderService(server: harness.server, holding: .closeStalledConnections)
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink())
+
+        let ladder = Task { await recovery.recover(trigger: .unreachable(detail: "gated")) }
+        for _ in 0..<5_000 where !service.isEntered {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(service.isEntered, "the ladder is held inside its first step")
+
+        await harness.server.stop()
+        service.release()
+        let recovered = await ladder.value
+        withExtendedLifetime(service) {}
+
+        XCTAssertFalse(recovered, "a ladder the stop overtook reports no recovery")
+        XCTAssertEqual(service.refusedSteps, [.closeStalledConnections], "the held step was refused at the server")
+        XCTAssertNil(harness.server.listeningPort, "the ladder's recycle must not re-listen after the stop")
+        XCTAssertFalse(canConnect(to: port), "nothing answers on the configured port")
+    }
+
+    /// The ladder's own cold-start fallback moves the lifecycle it began under, and must not refuse itself: the stamp the fallback publishes under
+    /// carries forward. A server that never started has no pool, so its recycle takes the fallback.
+    func testTheLaddersOwnColdStartFallbackIsNotRefusedByItsStamp() async throws {
+        let harness = makeHarness()
+        let port = try await reserveFreePort()
+        harness.portBox.withLockedValue { $0 = port }
+        addTeardownBlock { await harness.server.stop() }
+
+        let service = HeldLadderService(server: harness.server, holding: nil)
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink())
+        let recovered = await recovery.recover(trigger: .unreachable(detail: "gated"))
+        withExtendedLifetime(service) {}
+
+        XCTAssertFalse(recovered, "the health check still fails after the fallback, so the ladder is exhausted")
+        XCTAssertEqual(harness.server.listeningPort, port, "the fallback bound the configured port under the ladder's own stamp")
+    }
+
+    /// A recycle admitted under a lifecycle a stop has since moved on binds nothing, and reports the cancellation.
+    func testARecycleAdmittedBeforeAStopIsRefusedWithoutBinding() async throws {
+        let harness = makeHarness()
+        let port = try await startOnPinnedPort(harness)
+        let admitted = harness.server.listenerStamp
+        await harness.server.stop()
+
+        do {
+            try await harness.server.recycleListener(expecting: admitted)
+            XCTFail("a recycle under a stopped lifecycle must be refused")
+        } catch is CancellationError {
+            // Expected: the stop moved the lifecycle on.
+        }
+        XCTAssertNil(harness.server.listeningPort, "a refused recycle leaves no listener")
+        XCTAssertFalse(canConnect(to: port))
+    }
+
+    /// A ladder admitted under one lifecycle is held inside its upstream switch, after its own check passed and before the server acts. A
+    /// stop and a newer start replace the server's pool meanwhile. Released, the step is refused at the server: the newer pool's upstream
+    /// is not switched, and the newer listener keeps serving.
+    func testALadderHeldAcrossAStopAndANewerStartNeverReachesTheNewerPool() async throws {
+        let harness = makeHarness()
+        let port = try await startOnPinnedPort(harness)
+        let service = HeldLadderService(server: harness.server, holding: .switchUpstream)
+        let recovery = AutoRecovery(service: service, logger: DiscardingLogSink())
+
+        let ladder = Task { await recovery.recover(trigger: .unreachable(detail: "gated")) }
+        for _ in 0..<5_000 where !service.isEntered {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertTrue(service.isEntered, "the ladder is held inside its upstream switch")
+
+        await harness.server.stop()
+        try await harness.server.start()
+        let selected = harness.server.activeUpstream()
+        service.release()
+        let recovered = await ladder.value
+        withExtendedLifetime(service) {}
+
+        XCTAssertFalse(recovered, "a ladder a newer start overtook reports no recovery")
+        XCTAssertEqual(service.refusedSteps, [.switchUpstream], "the held step was refused at the server")
+        XCTAssertEqual(harness.server.activeUpstream(), selected, "the newer pool's upstream was not switched")
+        XCTAssertEqual(harness.server.listeningPort, port, "the newer listener is untouched")
+        XCTAssertTrue(canConnect(to: port))
+        await harness.server.stop()
+    }
+
+    /// A step's stamp names one server. A stamp read from another server authorizes nothing here, even at the same epoch.
+    func testAStampFromAnotherServerAuthorizesNothing() async throws {
+        let harness = makeHarness()
+        let port = try await startOnPinnedPort(harness)
+        let other = makeHarness()
+        _ = try await startOnPinnedPort(other)
+        let foreign = other.server.listenerStamp
+        await other.server.stop()
+        let selected = harness.server.activeUpstream()
+
+        for step in RecoveryStep.allCases {
+            do {
+                switch step {
+                case .closeStalledConnections: _ = try await harness.server.closeStalledConnections(expecting: foreign)
+                case .reauthenticate: try await harness.server.reauthenticate(expecting: foreign)
+                case .switchUpstream: _ = try await harness.server.switchToNextUpstream(expecting: foreign)
+                case .recycleListener: _ = try await harness.server.recycleListener(expecting: foreign)
+                }
+                XCTFail("\(step) ran under another server's stamp")
+            } catch is CancellationError {
+                // Expected: the stamp is not this server's.
+            }
+        }
+        do {
+            _ = try await harness.server.performHealthCheck(expecting: foreign)
+            XCTFail("a health check ran under another server's stamp")
+        } catch is CancellationError {
+            // Expected.
+        }
+        XCTAssertEqual(harness.server.activeUpstream(), selected)
+        XCTAssertEqual(harness.server.listeningPort, port)
+        await harness.server.stop()
+    }
+
     // MARK: - Helpers
+
+    /// A recovery service that forwards every step to a real server, under the stamp the ladder passes. Its health check always fails, so
+    /// the ladder keeps going, and one step can be held after the ladder's own check and before the server acts, so a test can move the
+    /// server's lifecycle in exactly that window. It records the steps the server refused.
+    private final class HeldLadderService: RecoverableProxyService, @unchecked Sendable {
+        private let server: LocalProxyServer
+        private let lock = NSLock()
+        private var holding: RecoveryStep?
+        private var entered = false
+        private var waiter: CheckedContinuation<Void, Never>?
+        private var refused: [RecoveryStep] = []
+
+        init(server: LocalProxyServer, holding step: RecoveryStep?) {
+            self.server = server
+            self.holding = step
+        }
+
+        var isEntered: Bool { lock.withLock { entered } }
+        var refusedSteps: [RecoveryStep] { lock.withLock { refused } }
+
+        func release() {
+            let resumed = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                holding = nil
+                defer { waiter = nil }
+                return waiter
+            }
+            resumed?.resume()
+        }
+
+        var listenerStamp: ListenerStamp { server.listenerStamp }
+
+        func closeStalledConnections(expecting stamp: ListenerStamp) async throws -> Int {
+            try await forward(.closeStalledConnections) { try await self.server.closeStalledConnections(expecting: stamp) }
+        }
+
+        func reauthenticate(expecting stamp: ListenerStamp) async throws {
+            try await forward(.reauthenticate) { try await self.server.reauthenticate(expecting: stamp) }
+        }
+
+        func switchToNextUpstream(expecting stamp: ListenerStamp) async throws -> String? {
+            try await forward(.switchUpstream) { try await self.server.switchToNextUpstream(expecting: stamp) }
+        }
+
+        func performHealthCheck(expecting stamp: ListenerStamp) async throws -> HealthCheckResult {
+            .unhealthy(.unreachable(detail: "gated"), responseTimeMS: 0)
+        }
+
+        func recycleListener(expecting stamp: ListenerStamp) async throws -> ListenerStamp {
+            try await forward(.recycleListener) { try await self.server.recycleListener(expecting: stamp) }
+        }
+
+        private func forward<T>(_ step: RecoveryStep, _ body: () async throws -> T) async throws -> T {
+            await hold(step)
+            do {
+                return try await body()
+            } catch is CancellationError {
+                lock.withLock { refused.append(step) }
+                throw CancellationError()
+            }
+        }
+
+        private func hold(_ step: RecoveryStep) async {
+            await withCheckedContinuation { continuation in
+                let proceed = lock.withLock { () -> Bool in
+                    guard holding == step else { return true }
+                    entered = true
+                    waiter = continuation
+                    return false
+                }
+                if proceed { continuation.resume() }
+            }
+        }
+    }
 
     /// Binds and listens on `port` (0 for an OS-assigned one) so the server
     /// cannot have it.

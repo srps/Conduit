@@ -93,6 +93,16 @@ enum ConfigurationNotAttemptedReason: Error, Equatable, Sendable {
     /// The component's file version is at its maximum, so a verified write could not name a newer version. The write is refused before
     /// any I/O. Verification and latching still work, and only a new store incarnation recovers.
     case versionExhausted
+    /// The workflow's claim was revoked before the replacement started: a newer Start or Stop was admitted, or a Stop fence is in force.
+    /// Nothing was written. A replacement that had already started is never reported this way.
+    case superseded
+}
+
+/// The workflow's permission for one physical replacement. The store checks it on `PlatformWork`, after the preservation read and
+/// immediately before the replacement starts. The check reads the workflow's own intent state under a short lock, and no lock is
+/// held across I/O. Once a replacement has started, its read-back and its persistence facts are reported whatever the claim says.
+struct ConfigurationWriteClaim: Sendable {
+    let isCurrent: @Sendable () -> Bool
 }
 
 /// Why a runtime rewrite was held so that legacy preference values the runtime file carries are not dropped unseen (decision 0026). The
@@ -141,11 +151,32 @@ enum ConfigurationVerifyOutcome: Equatable, Sendable {
     case notAttempted(ConfigurationNotAttemptedReason)
 }
 
+/// The exact staged pair that verified in one coupled commit (decision 0025). It exists only when both required receipts verified. It
+/// is never assembled from the store's independently updated per-file values, so no mixture of old and new fields can reach the apply.
+struct VerifiedRuntimePlatformInput: Equatable, Sendable {
+    let runtime: ProxyConfig
+    let platform: PlatformIntegrationConfig
+    let runtimeReceipt: ConfigurationReceipt
+    let platformReceipt: ConfigurationReceipt
+}
+
 /// The outcomes of one coupled runtime and platform commit. Each write is independent; the platform write is first.
 struct RuntimePlatformCommitResult: Equatable, Sendable {
     let context: ConfigurationOperationContext
     let runtime: ConfigurationWriteOutcome
     let platform: ConfigurationWriteOutcome
+    /// Set only when both outcomes verified. The pair is the staged candidate of this commit, not the store's current values.
+    var verifiedInput: VerifiedRuntimePlatformInput?
+}
+
+extension ConfigurationWriteOutcome {
+    /// The receipt a verified outcome carries. A write that did not verify has none.
+    var verifiedReceipt: ConfigurationReceipt? {
+        switch self {
+        case .persisted(let receipt, _), .unchanged(let receipt): receipt
+        case .notPersisted, .unknown, .conflict, .notAttempted: nil
+        }
+    }
 }
 
 /// The outcome of one preferences commit, which is independent of the runtime and platform commit.

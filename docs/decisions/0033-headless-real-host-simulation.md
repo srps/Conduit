@@ -95,6 +95,12 @@ The reviewed alternatives remain in
 
 Does not prove: real VPN/auth/PAC behavior, installed-app validation or daemon handoff.
 
+The [workflow integration checkpoint](../verification-runtime-workflow-2026-10-26.md)
+extends the actual-host scenario to verified reload/Start/Stop and listener
+supersession, using mandatory state-file and loopback-probe effects. The shared
+held-PAC fake is consumed by tests and pm-sim. This retains the scoped production
+facade and adds no store/lease exposure or public test hook.
+
 ## Open questions
 
 None for this scoped change. Private editor reply sizing and remaining service

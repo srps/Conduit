@@ -9,10 +9,23 @@ package final class LocalPACServer: @unchecked Sendable {
     package static let pacPath = "/proxy.pac"
     package static let contentType = "application/x-ns-proxy-autoconfig; charset=utf-8"
 
+    private struct Runtime {
+        var channel: Channel?
+        /// Each start takes the next epoch and each stop supersedes it, so a bind that finishes after either one owns nothing.
+        var epoch = 0
+    }
+
+    /// What `admit` decided: a listener is already up and took the script, or this start owns the epoch it took.
+    private enum Attempt {
+        case running
+        case bind(epoch: Int)
+    }
+
     private let group: MultiThreadedEventLoopGroup
     private let logger: any LogSink
+    /// Written only under `runtime`'s lock, so a script always belongs to the start or stop that holds the lock.
     private let scriptBox = NIOLockedValueBox<Data>(Data())
-    private var channel: Channel?
+    private let runtime = NIOLockedValueBox(Runtime())
 
     package init(
         group: MultiThreadedEventLoopGroup = .singleton,
@@ -23,24 +36,21 @@ package final class LocalPACServer: @unchecked Sendable {
     }
 
     package var listeningHost: String? {
-        channel?.localAddress?.ipAddress
+        runtime.withLockedValue { $0.channel?.localAddress?.ipAddress }
     }
 
     package var listeningPort: Int? {
-        channel?.localAddress?.port
+        runtime.withLockedValue { $0.channel?.localAddress?.port }
     }
 
     package var isRunning: Bool {
-        channel?.isActive == true
+        runtime.withLockedValue { $0.channel?.isActive == true }
     }
 
+    /// A bind that completes after a stop, or after a newer start, closes its own candidate and throws `CancellationError`. It never
+    /// publishes over the owner that superseded it.
     package func start(host: String = "127.0.0.1", port: Int, script: String) async throws {
-        if isRunning {
-            updateScript(script)
-            return
-        }
-
-        updateScript(script)
+        guard case .bind(let epoch) = admit(script: script) else { return }
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -57,7 +67,19 @@ package final class LocalPACServer: @unchecked Sendable {
             }
 
         let bound = try await bootstrap.bind(host: host, port: port).get()
-        channel = bound
+        let published = runtime.withLockedValue { r -> Bool in
+            guard r.epoch == epoch else { return false }
+            r.channel = bound
+            return true
+        }
+        guard published else {
+            do {
+                try await bound.close().get()
+            } catch {
+                logger.log(.warning, "Local PAC server could not close a superseded listener: \(error.localizedDescription)", category: .pac)
+            }
+            throw CancellationError()
+        }
         let actualHost = bound.localAddress?.ipAddress ?? host
         let actualPort = bound.localAddress?.port ?? port
         logger.log(.notice, "Local PAC server listening on \(actualHost):\(actualPort).", category: .pac)
@@ -65,19 +87,37 @@ package final class LocalPACServer: @unchecked Sendable {
 
     package func updateScript(_ script: String) {
         let data = Data(script.utf8)
-        scriptBox.withLockedValue { $0 = data }
+        runtime.withLockedValue { _ in scriptBox.withLockedValue { $0 = data } }
     }
 
+    /// The running check, the epoch advance and the script write share one lock acquisition. Split apart, a stop could detach between
+    /// them and this start's epoch would then publish over a listener that stop had already superseded.
+    private func admit(script: String) -> Attempt {
+        let data = Data(script.utf8)
+        return runtime.withLockedValue { r -> Attempt in
+            scriptBox.withLockedValue { $0 = data }
+            if r.channel?.isActive == true { return .running }
+            r.epoch += 1
+            return .bind(epoch: r.epoch)
+        }
+    }
+
+    /// Supersedes any start still binding, and detaches the published channel, in the same lock acquisition as the script clear. A newer
+    /// start's channel and script are therefore never cleared by this stop, and the close suspends only after the detach.
     package func stop() async {
-        let wasRunning = channel != nil
-        if let channel {
-            _ = try? await channel.close().get()
+        let detached = runtime.withLockedValue { r -> Channel? in
+            r.epoch += 1
+            scriptBox.withLockedValue { $0.removeAll(keepingCapacity: false) }
+            defer { r.channel = nil }
+            return r.channel
         }
-        channel = nil
-        scriptBox.withLockedValue { $0.removeAll(keepingCapacity: false) }
-        if wasRunning {
-            logger.log(.notice, "Local PAC server stopped.", category: .pac)
+        guard let detached else { return }
+        do {
+            try await detached.close().get()
+        } catch {
+            logger.log(.warning, "Local PAC server could not close its listener: \(error.localizedDescription)", category: .pac)
         }
+        logger.log(.notice, "Local PAC server stopped.", category: .pac)
     }
 }
 

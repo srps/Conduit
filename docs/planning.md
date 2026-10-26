@@ -85,8 +85,9 @@ memory and later over a socket. It must define command completion, cancellation
 after acceptance, deadline/unknown-outcome handling, initial-snapshot ordering,
 replay gaps and slow-subscriber behavior. The existing synchronous `DaemonClient`
 and thin `ControlDaemonStatus` do not yet meet that boundary. Proposed types must
-eliminate contradictory outcomes and duplicate derived state, keep credentials
-out of Codable messages, and preserve existing wire compatibility deliberately.
+eliminate contradictory outcomes and duplicate derived state, keep private values
+out of ordinary control/status/events and use the explicitly encoded private
+configuration boundary (0018), preserving existing wire compatibility deliberately.
 
 Desired configuration, successfully persisted configuration and applied machine
 state are distinct. AppState keeps drafts and UI policy; the current persistence

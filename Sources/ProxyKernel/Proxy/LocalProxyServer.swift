@@ -5,6 +5,17 @@ import NIOCore
 import NIOHTTP1
 import NIOPosix
 
+/// One server's listener lifecycle, as an optimistic identity: the server it was read from and that server's `refs.epoch`, read
+/// together. A stop and a start both move the epoch. A normal recycle keeps the pool, so it keeps the stamp. A cold-start fallback
+/// publishes under a new one and returns it, so the owner that asked for the recycle is not refused by its own fallback.
+///
+/// A stamp authorizes a step on its own server's listener and pool, and nothing else: another server never matches it. It is not the
+/// runtime's lifecycle authority (the hosts admit Start and Stop) and not a state-root writer lease. Only this file makes one.
+package struct ListenerStamp: Equatable, Sendable {
+    fileprivate let server: UUID
+    fileprivate let epoch: Int
+}
+
 package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyService {
     private let logger: any LogSink
     private let configProvider: () -> ProxyConfig
@@ -87,9 +98,26 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         var epoch = 0
     }
     private let refs = NIOLockedValueBox(RuntimeRefs())
+    /// Names this server in the stamps it hands out, so a stamp read from another server never matches this one.
+    private let identity = UUID()
 
     private var pool: ConnectionPool? {
         refs.withLockedValue { $0.connectionPool }
+    }
+
+    /// Whether `stamp` was read from this server under `epoch`. Called with the refs lock held, by every check that guards a step.
+    private func owns(_ stamp: ListenerStamp, at epoch: Int) -> Bool {
+        stamp.server == identity && stamp.epoch == epoch
+    }
+
+    /// The pool `stamp` authorizes, read in the same lock acquisition as the check. Once a stop or start has moved the lifecycle on, the
+    /// pool there belongs to that newer lifecycle, so this throws `CancellationError` and the step admitted under the older one never
+    /// reaches it. `nil` when the authorized lifecycle has no pool.
+    private func pool(authorizedBy stamp: ListenerStamp) throws -> ConnectionPool? {
+        try refs.withLockedValue { r in
+            guard owns(stamp, at: r.epoch) else { throw CancellationError() }
+            return r.connectionPool
+        }
     }
 
     package var listeningHost: String? {
@@ -98,6 +126,16 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
 
     package var listeningPort: Int? {
         refs.withLockedValue { $0.serverChannel }?.localAddress?.port
+    }
+
+    /// The lifecycle this server's listener is under now. See `ListenerStamp`.
+    package var listenerStamp: ListenerStamp {
+        ListenerStamp(server: identity, epoch: refs.withLockedValue { $0.epoch })
+    }
+
+    /// Whether `stamp` is still the lifecycle the server is under: no stop or start has moved it on since it was read.
+    private func isCurrent(_ stamp: ListenerStamp) -> Bool {
+        refs.withLockedValue { owns(stamp, at: $0.epoch) }
     }
 
     /// How many accept sockets this server has bound since it was created.
@@ -165,22 +203,38 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         )
     }
 
-    package func start() async throws {
+    /// `expected`, when given, is the lifecycle the caller was admitted under. A start that finds it moved on binds nothing and throws
+    /// `CancellationError`. The check and the epoch bump share one lock acquisition, so a stop either lands before it, and is seen, or after it,
+    /// and supersedes it at publish. Returns the stamp the listener was published under.
+    @discardableResult
+    package func start(expecting expected: ListenerStamp? = nil) async throws -> ListenerStamp {
         enum StartGate {
-            case alreadyRunning
+            case alreadyRunning(ListenerStamp)
+            case superseded
             case proceed(stale: RuntimeRefs, epoch: Int)
         }
-        // One atomic decision: bail if a live listener exists, otherwise
-        // detach whatever is there. Check and detach must share one lock
-        // acquisition — split in two, a concurrent start() could publish
-        // between them and have its fresh refs detached as "stale".
+        // One atomic decision: refuse a superseded caller, bail if a live
+        // listener exists, otherwise detach whatever is there. Check and detach
+        // must share one lock acquisition — split in two, a concurrent start()
+        // could publish between them and have its fresh refs detached as "stale".
         let gate = refs.withLockedValue { r -> StartGate in
-            if r.serverChannel?.isActive == true { return .alreadyRunning }
+            if let expected, !owns(expected, at: r.epoch) { return .superseded }
+            if r.serverChannel?.isActive == true { return .alreadyRunning(ListenerStamp(server: identity, epoch: r.epoch)) }
             let stale = r
             r = RuntimeRefs(epoch: stale.epoch + 1)
             return .proceed(stale: stale, epoch: stale.epoch + 1)
         }
-        guard case .proceed(let stale, let epoch) = gate else { return }
+        let stale: RuntimeRefs
+        let epoch: Int
+        switch gate {
+        case .superseded:
+            throw CancellationError()
+        case .alreadyRunning(let stamp):
+            return stamp
+        case .proceed(let proceeding, let bumped):
+            stale = proceeding
+            epoch = bumped
+        }
 
         // The listener can die without a stop() (socket closed externally,
         // process-level hiccup). Tear stale refs down before building
@@ -259,6 +313,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
 
         try await startSOCKSIfEnabled(config: config, coordinator: coordinator, listenHost: listenHost, epoch: epoch)
         schedulePrewarm(pool: pool)
+        return ListenerStamp(server: identity, epoch: epoch)
     }
 
     /// Start the SOCKS5 listener when enabled, publishing it under the same
@@ -339,15 +394,26 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     /// Existing accepted child channels are independent of the parent accept socket
     /// at the BSD-socket level — closing the listener does not propagate to them.
     /// They continue to serve their owners until each side closes its end normally.
+    /// Recycles the listener as it stands now, with no lifecycle to check. See `recycleListener(expecting:)`.
     package func recycleListener() async throws {
-        let (existingPool, existingCoordinator, existingChannel, existingAddress, epoch) = refs.withLockedValue {
-            ($0.connectionPool, $0.connectCoordinator, $0.serverChannel, $0.serverAddress, $0.epoch)
-        }
-        guard let pool = existingPool, let coordinator = existingCoordinator else {
+        try await recycleListener(expecting: listenerStamp)
+    }
+
+    /// `expected` is the lifecycle the recycle was admitted under. A stop or start that moved it on makes the recycle bind nothing: it is
+    /// checked at entry, after the old accept socket closes, and at publish. A normal recycle keeps the pool, so it returns `expected`; the
+    /// cold-start fallback is checked by `start`'s own gate and returns the stamp it published under.
+    @discardableResult
+    package func recycleListener(expecting expected: ListenerStamp) async throws -> ListenerStamp {
+        // The check and the read share one lock acquisition, so what the recycle inspects is the lifecycle it was admitted under.
+        let admitted = refs.withLockedValue { r -> RuntimeRefs? in owns(expected, at: r.epoch) ? r : nil }
+        guard let admitted else { throw CancellationError() }
+        let epoch = expected.epoch
+        let existingChannel = admitted.serverChannel
+        let existingAddress = admitted.serverAddress
+        guard let pool = admitted.connectionPool, let coordinator = admitted.connectCoordinator else {
             // No prior listener state — fall through to a normal start so the
             // recovery step still has end-to-end semantics in the cold-start case.
-            try await start()
-            return
+            return try await start(expecting: expected)
         }
 
         let config = configProvider()
@@ -394,7 +460,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
                 "Listener recycle skipped: accept socket on \(wanted.host):\(wanted.port) is healthy.",
                 category: .proxy
             )
-            return
+            return expected
         }
 
         // The accept socket must be released before its replacement can take
@@ -411,6 +477,8 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         if let detached {
             _ = try? await detached.close().get()
         }
+        // The close suspends. A stop that landed in it has torn the pool down, so the bind would only be closed again: refuse here.
+        guard isCurrent(expected) else { throw CancellationError() }
 
         let newChannel: Channel
         do {
@@ -453,6 +521,7 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         let actualHost = newChannel.localAddress?.ipAddress ?? listenHost
         let actualPort = newChannel.localAddress?.port ?? config.localPort
         logger.log(.notice, "Local proxy listener recycled on \(actualHost):\(actualPort) — pool and active connections preserved.", category: .proxy)
+        return expected
     }
 
     /// Closes the accept socket without touching the pool, coordinator or
@@ -629,7 +698,16 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
     }
 
     package func performHealthCheck() async -> HealthCheckResult {
-        guard let pool = self.pool else {
+        await healthCheck(on: pool)
+    }
+
+    /// The ladder's check, on the pool `stamp` authorizes. See `pool(authorizedBy:)`.
+    package func performHealthCheck(expecting stamp: ListenerStamp) async throws -> HealthCheckResult {
+        await healthCheck(on: try pool(authorizedBy: stamp))
+    }
+
+    private func healthCheck(on pool: ConnectionPool?) async -> HealthCheckResult {
+        guard let pool else {
             return .unhealthy(.unreachable(detail: "Proxy stopped"), responseTimeMS: 0)
         }
         return await pool.healthCheck(urlString: configProvider().healthCheckURL)
@@ -653,16 +731,27 @@ package final class LocalProxyServer: @unchecked Sendable, RecoverableProxyServi
         pool?.resetCircuitsAfterFlap()
     }
 
-    package func closeStalledConnections() async throws -> Int {
-        pool?.closeStalledConnections(olderThan: configProvider().stalledConnectionTimeoutSeconds) ?? 0
+    // The ladder's steps act on the pool their stamp authorizes, never on whatever pool a newer start has published since. See
+    // `pool(authorizedBy:)`. The unscoped forms are explicit operations on the current pool.
+
+    package func closeStalledConnections(expecting stamp: ListenerStamp) async throws -> Int {
+        try pool(authorizedBy: stamp)?.closeStalledConnections(olderThan: configProvider().stalledConnectionTimeoutSeconds) ?? 0
     }
 
     package func reauthenticate() async throws {
         pool?.resetAuthentication()
     }
 
+    package func reauthenticate(expecting stamp: ListenerStamp) async throws {
+        try pool(authorizedBy: stamp)?.resetAuthentication()
+    }
+
     package func switchToNextUpstream() async throws -> String? {
         pool?.switchToNextUpstream()
+    }
+
+    package func switchToNextUpstream(expecting stamp: ListenerStamp) async throws -> String? {
+        try pool(authorizedBy: stamp)?.switchToNextUpstream()
     }
 
 }

@@ -407,6 +407,148 @@ final class ConnectivityProbeSupersessionTests: XCTestCase {
         try await upstream.close()
     }
 
+    // MARK: - A stop during a health continuation's probe
+
+    /// A local upstream that answers every health check, so no recovery ladder runs and takes a scripted verdict.
+    private func healthyUpstream() async throws -> Channel {
+        try await ServerBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .childChannelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.configureHTTPServerPipeline()
+                    try channel.pipeline.syncOperations.addHandler(HealthyProxy())
+                }
+            }.bind(host: "127.0.0.1", port: 0).get()
+    }
+
+    /// Waits, bounded, until `detail` is reported as a dropped probe. The continuation that awaited that probe returns in the same turn.
+    private func waitForSupersession(_ orchestrator: ProxyOrchestrator, _ detail: String) async throws {
+        for _ in 0..<5_000 where !details(orchestrator, "connectivity.probe_superseded").contains(detail) {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
+    /// The ladder against a dead upstream exhausts, then probes connectivity before it decides the state. A stop admitted while that probe
+    /// is out owns the state and the monitors: the probe is dropped, and the stopped runtime is neither reported running nor given back
+    /// the health loop whose next ladder would cold-start the listener.
+    func testAnExhaustedLaddersProbeThatOutlivesAStopLeavesTheListenerStopped() async throws {
+        let script = ProbeScript()
+        let orchestrator = makeOrchestrator(script)
+        _ = script.next(reachable: true)                            // start
+        let ladderProbe = script.next(reachable: true, hold: true)  // after the ladder exhausts against the dead port
+        try await orchestrator.startProxy()
+        for _ in 0..<5_000 where !script.isParked(ladderProbe) { try await Task.sleep(for: .milliseconds(1)) }
+        XCTAssertTrue(script.isParked(ladderProbe), "the exhausted ladder is probing")
+        XCTAssertEqual(details(orchestrator, "recovery.exhausted").count, 1)
+
+        await orchestrator.stopProxy()
+        script.release(ladderProbe)
+        let dropped = "by=lifecycle probed_vpn=unknown current_vpn=unknown reachable=true"
+        try await waitForSupersession(orchestrator, dropped)
+
+        XCTAssertEqual(details(orchestrator, "connectivity.probe_superseded"), [dropped])
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "the stop's state stands")
+        XCTAssertNil(orchestrator.snapshot.bindings.proxyPort, "no listener came back")
+        XCTAssertEqual(script.callCount, 2, "nothing probed again for the stopped runtime")
+    }
+
+    /// The direct-mode retry probes while the timer that started it is still running. A stop admitted during that probe owns the state: the
+    /// result is dropped, so routing, the state and the monitors stay as the stop left them.
+    func testAReprobeThatOutlivesAStopLeavesTheListenerStopped() async throws {
+        let upstream = try await healthyUpstream()
+        let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
+        let probes = NIOLockedValueBox(0)
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)]
+        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+            connectivityProbe: { upstreams in
+                let call = probes.withLockedValue { $0 += 1; return $0 }
+                // The first retry: a stop is admitted and finishes while it is out, and only then does the upstream answer. The stop
+                // cancels the retry timer when it is admitted, so no later tick probes.
+                if call == 2, let orchestrator = box.withLockedValue({ $0 }) { await orchestrator.stopProxy() }
+                return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: call >= 2) })
+            },
+            directReprobeInterval: { _ in 0.2 })
+        box.withLockedValue { $0 = orchestrator }
+        await orchestrator.handleVPNStateChange(.connected)
+        try await orchestrator.startProxy()
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .upstreamsUnreachable, "started on the VPN with no upstream answering")
+
+        let dropped = "by=lifecycle probed_vpn=connected current_vpn=connected reachable=true"
+        try await waitForSupersession(orchestrator, dropped)
+
+        XCTAssertEqual(details(orchestrator, "connectivity.probe_superseded"), [dropped])
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "the stop's state stands")
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .upstreamsUnreachable, "the dropped retry commits no routing")
+        XCTAssertNil(orchestrator.snapshot.bindings.proxyPort)
+        XCTAssertEqual(probes.withLockedValue { $0 }, 2, "nothing probed again for the stopped runtime")
+        try await upstream.close()
+    }
+
+    /// The error-rate alarm re-probes the upstreams. A stop is admitted and finishes while that probe is out, and only then does the
+    /// probe find them unreachable. The result is dropped, so the stopped runtime's routing, state and monitors stay as the stop left them.
+    func testAnErrorRateRetryThatOutlivesAStopLeavesTheListenerStopped() async throws {
+        let upstream = try await healthyUpstream()
+        let box = NIOLockedValueBox<ProxyOrchestrator?>(nil)
+        let probes = NIOLockedValueBox(0)
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)]
+        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+            connectivityProbe: { upstreams in
+                let call = probes.withLockedValue { $0 += 1; return $0 }
+                // The alarm's retry: a stop is admitted and finishes while it is out.
+                if call == 2, let orchestrator = box.withLockedValue({ $0 }) { await orchestrator.stopProxy() }
+                return UpstreamProbeSummary(results: upstreams.map { ProbeResult(proxy: $0, latencyMS: 0, reachable: call == 1) })
+            })
+        box.withLockedValue { $0 = orchestrator }
+        try await orchestrator.startProxy()
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .none, "started routing through the upstream")
+
+        for _ in 0..<20 { orchestrator.recordRequestCompletion(.failed(.upstream)) }
+        XCTAssertEqual(details(orchestrator, "error_rate.alarm").count, 1, "the alarm started its retry")
+        let dropped = "by=lifecycle probed_vpn=unknown current_vpn=unknown reachable=false"
+        try await waitForSupersession(orchestrator, dropped)
+
+        XCTAssertEqual(details(orchestrator, "connectivity.probe_superseded"), [dropped])
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "the stop's state stands")
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .none, "the dropped retry commits no routing")
+        XCTAssertNil(orchestrator.snapshot.bindings.proxyPort)
+        XCTAssertEqual(probes.withLockedValue { $0 }, 2, "nothing probed again for the stopped runtime")
+        try await upstream.close()
+    }
+
+    /// A confirmed disconnect probes before it decides routing. A stop admitted during the probe owns the state and the monitors; the
+    /// transition still commits its routing and its sweeps, but it does not report the stopped runtime running.
+    func testADisconnectProbeThatOutlivesAStopLeavesTheListenerStopped() async throws {
+        let upstream = try await healthyUpstream()
+        let script = ProbeScript()
+        var config = ProxyConfig()
+        config.localPort = 0; config.localPACEnabled = false; config.pacRoutingEnabled = false
+        config.healthCheckIntervalSeconds = 3600
+        config.upstreams = [UpstreamProxy(name: "fixture", host: "127.0.0.1", port: try XCTUnwrap(upstream.localAddress?.port), priority: 0)]
+        let orchestrator = ProxyOrchestrator(config: config, authenticatorProvider: { _ in MockAuthenticator(scheme: "Basic", token: "fixture") },
+                                             connectivityProbe: { await script.probe($0) })
+        _ = script.next(reachable: true)
+        try await orchestrator.startProxy()
+        _ = script.next(reachable: true)
+        await orchestrator.handleVPNStateChange(.connected)
+
+        let disconnectProbe = script.next(reachable: false, hold: true)
+        let disconnect = Task { @MainActor in await orchestrator.handleVPNStateChange(.disconnected(reason: .userInitiated)) }
+        try await waitUntilParked(script, disconnectProbe)
+        await orchestrator.stopProxy()
+        script.release(disconnectProbe)
+        await disconnect.value
+
+        XCTAssertEqual(orchestrator.snapshot.directModeCause, .vpnDisconnected, "the transition still commits its routing")
+        XCTAssertEqual(orchestrator.snapshot.runtimeStatus.state, .stopped, "the stop's state stands")
+        XCTAssertNil(orchestrator.snapshot.bindings.proxyPort)
+        try await upstream.close()
+    }
+
     /// Hosts stamp reports on the monitor's callback. An older report that
     /// lands after a newer one is dropped whole: the newer state runs its own
     /// path sweeps, which close whatever the older one stranded.

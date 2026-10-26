@@ -831,12 +831,15 @@ final class RuntimeClientCodecTests: XCTestCase {
         XCTAssertFalse(String(describing: record).contains("?token="))
     }
 
-    func testAFutureLifecycleTypeIsDisplayedNotMalformed() throws {
-        let record = try decodeRecord(#"""
-        {"timestamp":0,"kind":"lifecycle","event":"lifecycle.future_thing","detail":"later","typed":{"family":"lifecycle","lifecycle":{"type":"future_kind","extra":1}}}
-        """#)
-        guard case .unknown(let display) = record else { return XCTFail("an unknown lifecycle type must be a display record") }
-        XCTAssertEqual(display.event, "lifecycle.future_thing")
+    func testAFutureTypeInEitherKnownFamilyIsDisplayedNotMalformed() throws {
+        let records = [
+            #"{"timestamp":0,"kind":"lifecycle","event":"lifecycle.future_thing","detail":"later","typed":{"family":"lifecycle","lifecycle":{"type":"future_kind","extra":1}}}"#,
+            #"{"timestamp":0,"kind":"config","event":"config.workflow.future_thing","detail":"later","typed":{"family":"config_workflow","configWorkflow":{"type":"future_kind","extra":1}}}"#,
+        ]
+        for json in records {
+            guard case .unknown(let display) = try decodeRecord(json) else { return XCTFail("an unknown type must be a display record") }
+            XCTAssertTrue(display.event.hasSuffix(".future_thing"))
+        }
     }
 
     func testAnEventWithNoTypedValueIsTheKnownV1Layout() throws {
@@ -857,10 +860,12 @@ final class RuntimeClientCodecTests: XCTestCase {
         ))
     }
 
-    func testAKnownEventNameWithAnUnknownLifecycleTypeIsCorruptNotDisplayed() {
-        XCTAssertThrowsError(try decodeRecord(
-            #"{"timestamp":0,"kind":"lifecycle","event":"lifecycle.coalesced","detail":"x","typed":{"family":"lifecycle","lifecycle":{"type":"future_kind"}}}"#
-        ))
+    func testAKnownEventNameWithAnUnknownTypeInEitherFamilyIsCorruptNotDisplayed() {
+        let records = [
+            #"{"timestamp":0,"kind":"lifecycle","event":"lifecycle.coalesced","detail":"x","typed":{"family":"lifecycle","lifecycle":{"type":"future_kind"}}}"#,
+            #"{"timestamp":0,"kind":"config","event":"config.workflow.held","detail":"x","typed":{"family":"config_workflow","configWorkflow":{"type":"future_kind"}}}"#,
+        ]
+        for json in records { XCTAssertThrowsError(try decodeRecord(json)) }
     }
 
     func testAnUnknownEventNameWithAKnownFamilyAndTypeStaysStrict() {
@@ -894,23 +899,6 @@ final class RuntimeClientCodecTests: XCTestCase {
         XCTAssertThrowsError(try decodeRecord(
             #"{"timestamp":0,"kind":"lifecycle","event":"lifecycle.future_thing","typed":{"family":"lifecycle","lifecycle":5}}"#
         ), "a lifecycle payload that is not an object")
-    }
-
-    func testTheEventWorkersVocabularyIsTheOneTheClassifierReads() {
-        // The classifier reads these sets. A renamed or added spelling must fail here, not
-        // read as an unknown record in production.
-        let cases: [ControlLifecycleEvent] = [
-            .superseded(operation: .proxyStart, generation: 1, current: 2, reason: .superseded),
-            .coalesced(operation: .proxyStart, joined: 2),
-            .terminationDrainExpired(deadlineMilliseconds: 500),
-            .versionChanged(from: "1.0", to: "1.1"),
-        ]
-        XCTAssertEqual(ControlLifecycleEvent.knownEventNames, Set(cases.map(\.name)))
-        XCTAssertEqual(
-            ControlLifecycleEvent.knownWireTypes,
-            ["superseded", "coalesced", "termination_drain_expired", "version_changed"]
-        )
-        XCTAssertEqual(ControlTypedRuntimeEvent.knownFamilies, ["lifecycle"])
     }
 
     func testAnUnboundedDisplayDetailIsTruncatedAtAFixedBound() throws {

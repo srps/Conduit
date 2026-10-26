@@ -30,8 +30,9 @@ enum SettingsRetryScenarios {
             self.manager = manager
         }
 
-        func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async {
+        func applyConfigChange(_ new: ProxyConfig, from old: ProxyConfig) async -> RuntimeConfigApplication {
             appliedConfigs.append(new)
+            return .held(new)
         }
 
         func runtimeState() -> RuntimeReconciler.RuntimeState {

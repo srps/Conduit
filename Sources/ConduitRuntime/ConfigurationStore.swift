@@ -47,6 +47,8 @@ private struct ConfigurationPreservationCheck: Sendable {
 /// bytes. The hash of those bytes is computed on `PlatformWork`.
 private enum ConfigurationWriteAttempt: Sendable {
     case held(ConfigurationPreservationHold)
+    /// The workflow's claim was revoked before the replacement, so no write was made.
+    case revoked
     case replaced(ConfigurationFileReplacementOutcome, verifiedBaseline: ConfigurationFileBaseline?)
 }
 
@@ -111,14 +113,24 @@ final class ConfigurationStore {
     /// Opens or reloads the three files from one observation, read-only. The values and baselines adopt from the same bytes that were
     /// decoded. A missing file is absent and uncommitted, and nothing is written. A refused observation keeps the last values for
     /// display and holds no baseline, so no write can be authorized from it. A reload is the only way out of a latched conflict.
-    func load(context: ConfigurationOperationContext) async -> ConfigurationStoreAdmission<ConfigurationLoadReport> {
+    /// `allowMissing` is the startup's explicit choice (the loader's own `allowMissing`), so the reload and the open keep the combinations
+    /// the loader accepts. The store never chooses it.
+    func load(context: ConfigurationOperationContext, allowMissing: Bool) async -> ConfigurationStoreAdmission<ConfigurationLoadReport> {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
         let currentPlan = session.plan
         let access = self.access
-        let observed = await work.run { ConfigurationStoreIO.observeAndDecode(plan: currentPlan, access: access) }
+        let observed = await work.run {
+            ConfigurationStoreIO.observeAndDecode(plan: currentPlan, access: access, allowMissing: allowMissing)
+        }
         return .admitted(ConfigurationLoadReport(context: context, outcome: adopt(observed)))
+    }
+
+    /// Whether the store's current observation found the component's file. An absent file is uncommitted, and it is not a verified
+    /// persistence fact.
+    func isPresent(_ component: ConfigurationComponent) -> Bool {
+        records[component].present
     }
 
     /// Commits the runtime and platform files as one coupled operation (decisions 0015 and 0025). Both candidates stage before the
@@ -131,7 +143,8 @@ final class ConfigurationStore {
         _ runtime: ProxyConfig,
         _ platform: PlatformIntegrationConfig,
         expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>,
-        context: ConfigurationOperationContext
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim
     ) async -> ConfigurationStoreAdmission<RuntimePlatformCommitResult> {
         guard !isBusy else { return .busy }
         isBusy = true
@@ -140,7 +153,9 @@ final class ConfigurationStore {
         // behind the other one, and it reports that hold, not the other file's reason.
         switch (authority(expected.runtime, for: .runtime), authority(expected.platform, for: .platform)) {
         case (.success(let runtimeBaseline), .success(let platformBaseline)):
-            return .admitted(await commitCoupled(runtime, platform, runtimeBaseline, platformBaseline, context: context))
+            return .admitted(await commitCoupled(
+                runtime, platform, runtimeBaseline, platformBaseline, context: context, claim: claim
+            ))
         case (.failure(let runtimeReason), .failure(let platformReason)):
             return .admitted(RuntimePlatformCommitResult(
                 context: context,
@@ -166,7 +181,8 @@ final class ConfigurationStore {
     func commitPreferences(
         _ preferences: AppPreferences,
         expecting expected: ConfigurationBaselineToken?,
-        context: ConfigurationOperationContext
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim
     ) async -> ConfigurationStoreAdmission<PreferencesCommitResult> {
         guard !isBusy else { return .busy }
         isBusy = true
@@ -189,7 +205,8 @@ final class ConfigurationStore {
                 baseline: baseline,
                 sameValue: values?.preferences == staged.value,
                 preservation: nil,
-                context: context
+                context: context,
+                claim: claim
             )
             if outcome.isVerified {
                 values?.preferences = staged.value
@@ -228,7 +245,8 @@ final class ConfigurationStore {
         _ platform: PlatformIntegrationConfig,
         _ runtimeBaseline: ConfigurationFileBaseline,
         _ platformBaseline: ConfigurationFileBaseline,
-        context: ConfigurationOperationContext
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim
     ) async -> RuntimePlatformCommitResult {
         let platformSource = session.plan.platformConfig.path
         let staged = await work.run {
@@ -251,7 +269,8 @@ final class ConfigurationStore {
             baseline: platformBaseline,
             sameValue: values?.platform == pair.platform.value,
             preservation: nil,
-            context: context
+            context: context,
+            claim: claim
         )
         guard platformOutcome.isVerified else {
             return RuntimePlatformCommitResult(context: context, runtime: .notAttempted(.heldBehindPlatform), platform: platformOutcome)
@@ -283,12 +302,23 @@ final class ConfigurationStore {
             baseline: runtimeBaseline,
             sameValue: sameRuntime,
             preservation: preservation,
-            context: context
+            context: context,
+            claim: claim
         )
         if runtimeOutcome.isVerified {
             values?.runtime = pair.runtime.value
         }
-        return RuntimePlatformCommitResult(context: context, runtime: runtimeOutcome, platform: platformOutcome)
+        var result = RuntimePlatformCommitResult(context: context, runtime: runtimeOutcome, platform: platformOutcome)
+        // The exact pair is this commit's staged candidates, and only when both receipts verified. The store's per-file values are not used.
+        if let runtimeReceipt = runtimeOutcome.verifiedReceipt, let platformReceipt = platformOutcome.verifiedReceipt {
+            result.verifiedInput = VerifiedRuntimePlatformInput(
+                runtime: pair.runtime.value,
+                platform: pair.platform.value,
+                runtimeReceipt: runtimeReceipt,
+                platformReceipt: platformReceipt
+            )
+        }
+        return result
     }
 
     /// Verifies a present component whose verified value already is the candidate, without writing it, and saves every other candidate.
@@ -300,12 +330,13 @@ final class ConfigurationStore {
         baseline: ConfigurationFileBaseline,
         sameValue: Bool,
         preservation: ConfigurationPreservationCheck?,
-        context: ConfigurationOperationContext
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim
     ) async -> ConfigurationWriteOutcome {
         if sameValue, records[component].present {
             return await verifyCurrent(component, baseline: baseline, context: context)
         }
-        return await write(bytes, component: component, baseline: baseline, preservation: preservation, context: context)
+        return await write(bytes, component: component, baseline: baseline, preservation: preservation, context: context, claim: claim)
     }
 
     /// One conditional replacement of one file, and the store's bookkeeping for its result. Every physical step runs on `PlatformWork`.
@@ -316,7 +347,8 @@ final class ConfigurationStore {
         component: ConfigurationComponent,
         baseline: ConfigurationFileBaseline,
         preservation: ConfigurationPreservationCheck?,
-        context: ConfigurationOperationContext
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim
     ) async -> ConfigurationWriteOutcome {
         // Refused before any I/O: a verified write names a newer version, and the version never wraps.
         guard Self.canAdvance(records[component].version) else { return .notAttempted(.versionExhausted) }
@@ -337,6 +369,9 @@ final class ConfigurationStore {
                     return .held(.sidecarUnreadable(error))
                 }
             }
+            // Checked after the preservation read and immediately before the replacement (decision 0015). Once the replacement starts,
+            // its read-back runs to the end whatever the claim says, so its persistence facts are kept.
+            guard claim.isCurrent() else { return .revoked }
             let outcome = session.replaceConfigurationFile(component, staged: bytes, expecting: baseline, access: access)
             // The read-back equals the staged bytes, so the new baseline is the identity of those bytes, hashed off the MainActor.
             if case .verifiedPersisted = outcome {
@@ -351,6 +386,9 @@ final class ConfigurationStore {
                 latch(preservation.component)
             }
             return .notAttempted(.preservationHeld(hold))
+        case .revoked:
+            // Nothing was written, so no baseline changes and nothing latches. The next admission decides the file's fate.
+            return .notAttempted(.superseded)
         case .replaced(let outcome, let verifiedBaseline):
             return settle(outcome, verifiedBaseline: verifiedBaseline, component: component, context: context)
         }
@@ -370,7 +408,7 @@ final class ConfigurationStore {
             records[component].baseline = verified
             records[component].present = true
             records[component].carriedLegacy = []
-            // Checked before the write. The busy slot keeps every other operation from changing the version in between.
+            // The version advances here, after the claim and the canAdvance check above. The busy slot keeps every other operation from changing it in between.
             records[component].version += 1
             return .persisted(receipt(component, context: context), reportedWriteError: reported)
         case .verifiedNotPersisted(let error):
