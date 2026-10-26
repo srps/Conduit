@@ -1,8 +1,9 @@
 # Runtime client: stage-1 inventory and review gates
 
-Checkpoint: 2026-10-24, before AppState adopts the client. This is an inventory and
-measurement plan, not an additional accepted decision or a claim of release
-completion. Decisions 0013–0027 record the selected shapes and separate implementation status.
+Foundation inventory from 2026-10-24, with current status corrected on 2026-10-26.
+AppState has not adopted the client. This document retains the original inventory
+and measurements; [ROADMAP](../ROADMAP.md) owns execution status and
+[decision records](decisions/README.md) own selected policies.
 
 ## Implementation status
 
@@ -12,18 +13,19 @@ Foundation merged in PR #220 (`fd630d1`), with hosted Swift/CodeQL checks passed
 - The `ControlRuntime*` value types, the v2 envelope (version 2, separate from v1's version 1) and its frame codec, which writes `Date` values as epoch seconds on the scale of `ControlTimestamp`, plus pages and the snapshot projection.
 - The `RuntimeClient` protocol (`submit`, `lookupAdmission`, `outcome`, `subscribe`, `readPage`, `readSnapshot`) with its deadline, subscription and client-error types. Each v2 message carries a correlation ID, and the stamps and page requests name the incarnation they read.
 
-The framed adapter is implemented on `codex/framed-runtime-client`: the v2 codec
+The framed adapter is merged: the v2 codec
 runs over an injected byte transport, with explicit limits/deadlines, one-send
 mutation error mapping and single-pull stream handles. Its package factory returns
 the existing `RuntimeClient` protocol; the concrete adapter remains private.
 See [the adapter checkpoint](runtime-framed-client-2026-10-24.md) for source and
 verification evidence. It is not an in-memory service or production transport.
 
-Not implemented: the admission/lookup/subscription engine, the production v2
-socket, the combined configuration commit/start workflow and AppState adoption.
-Request lookup and admission are exercised through scripted/simulated transports;
-actual host behavior remains unverified. V1 control and helper IPC are unchanged,
-and no production peer uses v2.
+The bounded admission/lookup/subscription engine is implemented in
+[`RuntimeServiceCore`](../Sources/ConduitRuntime/RuntimeServiceCore.swift), with
+headless transport coverage. The shared host now consumes the sole configuration
+store/workflow (PR #244). Actual host/service adaptation, interactive private
+operations, a production v2 socket and AppState adoption remain incomplete.
+V1 control and helper IPC remain compatible; no production peer uses v2.
 
 The shared-host extraction merged in PR #221 (`3d566d8`) and added ConduitRuntime, with its own [verification checkpoint](verification-runtime-host-extraction-2026-10-24.md). AppState still runs its twin; this inventory does not claim client adoption.
 
@@ -32,16 +34,19 @@ MiB and refined by domain/startup bounds (0021–0022). Its explicit codec and
 [domain bridge](../Sources/ProxyControlBridge/PrivateConfigurationBridge.swift) are
 implemented through PR #227/#228; global single-body admission and independent
 Stop/status capacity remain adoption obligations.
-Not selected: ordinary v2 frame/page/queue/retention limits. The v1 16 KiB frame (`ControlSocket.maxFrameBytes`) is retained. The design's 16 KiB v2 figure and 64-row pages remain review inputs.
+The ordinary v2 reply/stream ceiling is selected at 64 KiB (0030), and complete
+private editor replies at 8 MiB (0034). The v1 16 KiB frame
+(`ControlSocket.maxFrameBytes`) remains compatible. Queue, page, retention and
+deadline shipping defaults still need actual-adapter measurements; historical
+example values are not production defaults.
 
-Open gates: verified component receipts and the selected mixed-apply gate (0025),
-complete writer adoption under the selected canonical root (0020), listener
-handoff, measured admission/capacity/latency and total shutdown. External-file
-edit conflicts must refuse ordinary saves pending explicit reload/review (0027);
-the expected-prior store check remains planned. No
-registry is selected. Runtime and sidecar input/staging boundaries merged in
-PR #228/#230; the runtime replacement/read-back primitive/model merged in PR #229.
-These foundations are not the asynchronous store.
+The asynchronous store implements verified component receipts, the mixed-apply
+gate (0025) and expected-prior external-edit checks (0027). PR #247 protects
+missing-sidecar source authority; PR #248 uses byte-aware intent/cache identity.
+These mechanisms still need complete interactive adoption and the final AppState
+writer removal. Measured admission/capacity/latency and total shutdown remain
+release gates. Listener handoff is a separate conditional choice, not a
+prerequisite for behavior-preserving host convergence. No registry is selected.
 
 ## Focused evidence
 
@@ -127,8 +132,10 @@ Stop/Quit policy remains independent.
 
 ## Bounds and measurement
 
-V1 remains 16 KiB. The design's 16 KiB v2 figure, 64 rows/page and other example
-values are review inputs, not selected shipping defaults. Item counts alone do
+V1 remains 16 KiB; ordinary v2 replies/streams are capped at 64 KiB (0030).
+Private requests and complete editor replies each have an 8 MiB cap. Historical
+16 KiB v2 figures, 64 rows/page and other example profile values must not be
+interpreted as selected shipping defaults. Item counts alone do
 not prove a byte bound. Pages must obey encoded bytes and guarantee either
 progress or an explicit oversized-row result; totals cannot become sample sizes.
 
@@ -153,7 +160,9 @@ Live `lifecycle.*` producers include superseded, coalesced,
 termination_drain_expired **and version_changed** (AppUpdates). The fourth producer
 was missed by the initial three-name inventory and is included in the merged
 foundation. All four emitted names now use typed values across producer, codecs,
-bridge and assertions. Other families remain legacy and the global catalogue is
+bridge and assertions. Configuration workflow decisions are also typed through
+the shared-host adoption in PR #244; other families migrate with their owners.
+The global catalogue is
 still hand-maintained. `lifecycle.crash_restart` is catalogued as planned,
 not an emitted event. Migrated names derive metadata from typed fields; the
 legacy producer must refuse the closed namespace, including dynamically formed

@@ -36,7 +36,7 @@ Both input sources use one store/load/write pipeline and one runtime owner.
 Stop still fences immediately and Quit preserves its selected exceptions.
 The rule adds no registry, parallel loader, per-client execution path or compatibility
 mode matrix. Complete shared ownership, then activate AppState once and delete its
-replaced runtime/save paths as selected in0031.
+replaced runtime/save paths as selected in 0031.
 
 ## Alternatives
 
