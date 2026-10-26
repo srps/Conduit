@@ -1,0 +1,11 @@
+--- a/Sources/ConduitRuntime/ConfigurationStore.swift
++++ b/Sources/ConduitRuntime/ConfigurationStore.swift
+@@ -558,7 +558,7 @@
+             // absence is the same. The worker decided it by canonical bytes. A runtime edit that leaves the value's bytes as they were keeps
+             // the sidecar's token.
+             func advances(_ component: ConfigurationComponent) -> Bool {
+-                records[component].baseline != observed.baselines[component] || observed.valueMoved[component]
++                records[component].baseline != observed.baselines[component] || false
+             }
+             for component in ConfigurationComponent.allCases where advances(component) && !Self.canAdvance(records[component].version) {
+                 latchAll()

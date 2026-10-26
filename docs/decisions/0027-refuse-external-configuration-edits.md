@@ -107,11 +107,13 @@ and deletion relative to a verified absent or present baseline also conflict. A 
 pre-read authorizes no write (`preReadFailed`). The replacement itself is
 [`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift),
 which runs the pre-read against an opaque baseline and then the existing write and read-back
-classifier. The next store correction replaces synthesized value equality with canonical persisted-value comparison
+classifier. The store correction replaces synthesized value equality with canonical persisted-value comparison
 on the store worker: Unicode-equivalent strings can otherwise hide different URL/configuration bytes. The canonical
 comparison controls verify-without-rewrite; raw observed bytes still decide whether a file changed. Source-dependent
-missing-sidecar tokens and first-creation checks are being verified with that correction; no completed validation is
-claimed here.
+missing-sidecar tokens and first-creation checks accompany that correction. The
+[verification checkpoint](../verification-configuration-source-2026-10-26.md) records 169 focused tests, five executed source mutations, independent READY review and all
+41 passing local workflow checks (3,432 Swift tests, four skips, zero failures; 103 simulator records).
+Client/AppState adoption and owner validation remain open.
 
 Evidence is separate by kind, and each kind covers only what it names:
 

@@ -49,7 +49,8 @@ Independent subscription-backed Claude reviews and the
 [verification record](./docs/verification-private-editor-codec-2026-10-26.md) state the scope, earlier failures and limits.
 Devin's optional full review was skipped for expired credits; it is not review evidence.
 
-The next store correction addresses missing-sidecar source freshness and exact persisted-value comparison.
+Client adoption also requires the store's missing-sidecar source authority and canonical persisted-value comparison;
+the [verification checkpoint](./docs/verification-configuration-source-2026-10-26.md) records that correction and its limits.
 The related apply/reconciler equality risk is tracked in [#246](https://github.com/srps/Conduit/issues/246) and must be
 reproduced and resolved before the private apply path ships. Neither correction creates another app writer.
 

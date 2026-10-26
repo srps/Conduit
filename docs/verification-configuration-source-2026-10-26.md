@@ -53,7 +53,9 @@ compiler failure or crash:
 | Compare canonical JSON as Swift Strings | PAC URL save and handover |
 | Reject an unrepresentable current value during valid repair | Repair candidate |
 
-Restored targeted tests and both sequential models passed; exact committed bytes were restored:
+Restored targeted tests and both sequential models passed; exact committed bytes were restored.
+The [mutation manifest and patches](experiments/configuration-source-guards/README.md) also compare
+all changed production sources at the immutable review head, workflow head and restored tree:
 
     ConfigurationStore.swift ac8d47f48241bacac647b87b4d966b8b5bc215a4d74c632c7980b0fecae56597
     ConfigurationStoreIO.swift 6ff40088a66abeb0b10204cc308648b19cf7a72b5855d99492d687b947624f11
@@ -64,8 +66,23 @@ non-Error refusal in Result, corrected with a private typed wrapper. Neither cou
 
 ## Independent review and full workflow
 
-Independent static review of immutable 0090a6b and full workflow checks are in progress.
-No full-workflow or hosted-CI success is claimed yet.
+Independent subscription-backed Opus review of immutable 0090a6b returned READY with no blocking
+finding. It was static, not execution evidence. Subsequent source changes only removed stale test
+comment wording; production bytes remain those reviewed. All 40 required workflow checks plus the targeted DNS scenario passed on unchanged source at 3f6b80f:
+3,432 Swift tests, zero failures and four skips (two live GSS tests without a ticket and two opt-in memory
+diagnostics); all 103 simulator records and the performance gate passed. The relevant source/test/
+script/resource/package fingerprint was:
+
+    d570312d980fd480333161276521e06d13728e4d56c7781462a21e7053cd0b3c
+
+Exact-head hosted CI and review disposition belong to the integration PR; local checks do not claim them.
+
+Coverage limits noted by review: legacy platform value movement is a focused witness, not a variant
+in the runtime/platform seeded model. The workflow model does not delete a sidecar after load.
+A refused runtime-source path is classified by existing replacement-refused vocabulary, but the
+store-owned role cannot reach that refusal without an invalid capability or a new hook. None is added.
+Unexpected canonical sidecar-staging failures could make repeated reloads refuse if a future field
+makes them possible; current bounded Bool/enum/URL fields cannot reach that branch.
 
 ## Limits and remaining gates
 

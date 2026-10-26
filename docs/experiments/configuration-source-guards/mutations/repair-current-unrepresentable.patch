@@ -1,0 +1,12 @@
+--- a/Sources/ConduitRuntime/ConfigurationStoreIO.swift
++++ b/Sources/ConduitRuntime/ConfigurationStoreIO.swift
+@@ -171,7 +171,8 @@
+         case .refused(.unexpected(let code)):
+             return .failure(UnexpectedStagingCode(code: code))
+         case .refused(let refusal):
+-            return .success(.currentNotRepresentable(refusal))
++            _ = refusal
++            return .failure(UnexpectedStagingCode(code: 777))
+         }
+     }
+ 
