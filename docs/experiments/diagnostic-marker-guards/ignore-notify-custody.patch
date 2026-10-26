@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Support/RecordDrainWaiter.swift
++++ b/Sources/ProxyKernel/Support/RecordDrainWaiter.swift
+@@ -110,7 +110,7 @@
+                 await withCheckedContinuation { (continuation: CheckedContinuation<RecordDrainOutcome, Never>) in
+                     let immediate = state.withLockedValue { s -> RecordDrainOutcome? in
+                         if pending.cancelRequested { return .cancelled }
+-                        if s.current != nil || s.notifyOwner != nil || s.liveTimers.count >= timerSlots { return .busy }
++                        if s.current != nil || s.liveTimers.count >= timerSlots { return .busy }
+                         let remaining = ContinuousClock.now.duration(to: deadline)
+                         guard remaining > .zero else { return .skippedBudget }
+                         pending.continuation = continuation

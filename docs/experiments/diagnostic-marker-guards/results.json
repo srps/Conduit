@@ -1,0 +1,64 @@
+{
+  "production_checkpoint": "5c74430c45f2b6f92ae958fceb6c04aa11d181e8",
+  "test_checkpoint": "15b60cc",
+  "guard_sources_match_current": true,
+  "tests_restored": {
+    "count": 28,
+    "failures": 0
+  },
+  "initial_survivor": {
+    "name": "release-all-timers",
+    "test": "RecordDrainWaiterTests.testSecondSlotTakesAWaitBesideAHeldBodyAndCleanupRunsOncePerIdleTransition",
+    "exit": 0,
+    "correction": "Strengthened the held-reservation saturation witness; removed the unsupported cleanup-order comment."
+  },
+  "mutants": [
+    {
+      "name": "events-one-timer",
+      "file": "Sources/ProxyKernel/Support/RuntimeEventFileWriter.swift",
+      "filter": "DiagnosticDrainPhaseTests.testDiagnosticFlush(LateConfirmation|EarlyRetry)IsNotRefusedByTheFirstEventsWaitsHeldTimerBody",
+      "exit": 1,
+      "assertion_failures": [
+        "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift:325: error: -[ConduitTests.DiagnosticDrainPhaseTests testDiagnosticFlushEarlyRetryIsNotRefusedByTheFirstEventsWaitsHeldTimerBody] : XCTAssertEqual failed: (\"timedOut\") is not equal to (\"success\") - the early retry registered its own timer beside the held one",
+        "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift:328: error: -[ConduitTests.DiagnosticDrainPhaseTests testDiagnosticFlushEarlyRetryIsNotRefusedByTheFirstEventsWaitsHeldTimerBody] : XCTAssertEqual failed: (\"Optional(ProxyKernel.RecordDrainOutcome.busy)\") is not equal to (\"Optional(ProxyKernel.RecordDrainOutcome.drained)\") - the early retry waited for the marker",
+        "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift:332: error: -[ConduitTests.DiagnosticDrainPhaseTests testDiagnosticFlushEarlyRetryIsNotRefusedByTheFirstEventsWaitsHeldTimerBody] : XCTAssertEqual failed: (\"1\") is not equal to (\"0\")",
+        "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift:302: error: -[ConduitTests.DiagnosticDrainPhaseTests testDiagnosticFlushLateConfirmationIsNotRefusedByTheFirstEventsWaitsHeldTimerBody] : XCTAssertEqual failed: (\"timedOut\") is not equal to (\"success\") - the late confirmation registered its own timer beside the held one",
+        "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift:306: error: -[ConduitTests.DiagnosticDrainPhaseTests testDiagnosticFlushLateConfirmationIsNotRefusedByTheFirstEventsWaitsHeldTimerBody] : XCTAssertEqual failed: (\"Optional(ProxyKernel.RecordDrainOutcome.busy)\") is not equal to (\"Optional(ProxyKernel.RecordDrainOutcome.drained)\") - the late confirmation waited for the marker",
+        "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift:307: error: -[ConduitTests.DiagnosticDrainPhaseTests testDiagnosticFlushLateConfirmationIsNotRefusedByTheFirstEventsWaitsHeldTimerBody] : XCTAssertEqual failed: (\"unconfirmed\") is not equal to (\"confirmed\")",
+        "Tests/ConduitTests/DiagnosticDrainPhaseTests.swift:308: error: -[ConduitTests.DiagnosticDrainPhaseTests testDiagnosticFlushLateConfirmationIsNotRefusedByTheFirstEventsWaitsHeldTimerBody] : XCTAssertEqual failed: (\"1\") is not equal to (\"0\")"
+      ],
+      "seconds": 59.4,
+      "patch_sha256": "219a6c4716271fd8b73071410927ff617dcb7c35984e572b390cc954b01b23e0",
+      "source_sha256": "51de124b6d5a195ff40f3348f212d852d67badae285436959a56d696b321a19b",
+      "mutant_sha256": "513e201aaa2c4a167d0db5ba7f7fc1851285a144ab375fd617fad56f49fa1b23"
+    },
+    {
+      "name": "release-all-timers",
+      "file": "Sources/ProxyKernel/Support/RecordDrainWaiter.swift",
+      "filter": "RecordDrainWaiterTests.testTwoRetiredBodiesRefuseEveryFurtherWaitAndTheRefusalsCreateNoTimer",
+      "exit": 1,
+      "assertion_failures": [
+        "Tests/ConduitTests/RecordDrainWaiterTests.swift:365: error: -[ConduitTests.RecordDrainWaiterTests testTwoRetiredBodiesRefuseEveryFurtherWaitAndTheRefusalsCreateNoTimer] : XCTAssertEqual failed: (\"timedOut\") is not equal to (\"busy\") - the unreleased second body and the replacement fill both slots",
+        "Tests/ConduitTests/RecordDrainWaiterTests.swift:366: error: -[ConduitTests.RecordDrainWaiterTests testTwoRetiredBodiesRefuseEveryFurtherWaitAndTheRefusalsCreateNoTimer] : XCTAssertEqual failed: (\"4\") is not equal to (\"3\") - releasing one reservation never releases another reservation's slot",
+        "Tests/ConduitTests/RecordDrainWaiterTests.swift:374: error: -[ConduitTests.RecordDrainWaiterTests testTwoRetiredBodiesRefuseEveryFurtherWaitAndTheRefusalsCreateNoTimer] : XCTAssertEqual failed: (\"4\") is not equal to (\"3\")"
+      ],
+      "seconds": 24.65,
+      "patch_sha256": "f5600cc1ec068d39256b73d8be429187567ae8d2600851331ead73a6be5c3476",
+      "source_sha256": "3079cab332fd9759e14fd112fbf1778ede27c4ec60d71f5cdbdd931feb864596",
+      "mutant_sha256": "bf133367bbc35a66f767d01e04c1b3e2baf051feef1994fd648fcd1f1e4ff300"
+    },
+    {
+      "name": "ignore-notify-custody",
+      "file": "Sources/ProxyKernel/Support/RecordDrainWaiter.swift",
+      "filter": "RecordDrainWaiterTests.testProbeOutcomeAfterEachHistory",
+      "exit": 1,
+      "assertion_failures": [
+        "Tests/ConduitTests/RecordDrainWaiterTests.swift:270: error: -[ConduitTests.RecordDrainWaiterTests testProbeOutcomeAfterEachHistory] : XCTAssertEqual failed: (\"timedOut\") is not equal to (\"busy\") - slots 2 after [ConduitTests.RecordDrainWaiterTests.(unknown context at $115c5f828).Prior.timedOut]: the timed-out wait's notify is still registered"
+      ],
+      "seconds": 12.67,
+      "patch_sha256": "88dffdaf8987ead3d662dad07d404677cb34b1e448b5c81010ef137c14c647e3",
+      "source_sha256": "3079cab332fd9759e14fd112fbf1778ede27c4ec60d71f5cdbdd931feb864596",
+      "mutant_sha256": "7bb0395363b7baffd0ab166a739585476da260ccdb84959192f98bd0b23f74fa"
+    }
+  ]
+}

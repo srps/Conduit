@@ -1,6 +1,6 @@
 # Diagnostic marker drain verification (2026-10-26)
 
-Status: deterministic regression reproduced; correction and acceptance verification in progress.
+Status: correction implemented and focused checks/guard mutations verified; all local workflow checks verified; hosted acceptance pending.
 Related work: [#47](https://github.com/srps/Conduit/issues/47), [#186](https://github.com/srps/Conduit/issues/186), and the [protected-artifact design](design-protected-runtime-artifacts.md).
 
 ## Failure and witness
@@ -26,7 +26,7 @@ returns and contains neither of those test defects.
 
 ## Bounded correction
 
-The intended correction uses the existing waiter core and reservation identity, with one
+The correction uses the existing waiter core and reservation identity, with one
 logical caller and one outstanding group notify. Only the events writer allows two live timer
 bodies, accounting for the phase's first wait and its one extra confirmation. Other writers
 keep one. A timeout or cancellation retains its notify and still refuses an overlapping wait.
@@ -45,4 +45,28 @@ work establishes neither forced physical cancellation nor the total shutdown bou
 
 ## Acceptance evidence
 
-Pending source freeze, independent review, regression guard mutations and all workflow gates.
+Source checkpoint `5c74430`, followed by the stronger test witness in `15b60cc`:
+
+- Author and independent parent each ran the exact focused wrapper: 149 tests,
+  zero failures, catalogue/decision checks and `pm-sim bounded-writers` passed.
+  This includes 82 actual-host tests, 13 phase tests and 15 waiter tests.
+- Three [actual source mutations](experiments/diagnostic-marker-guards/README.md)
+  compiled and failed the intended assertions. The first ownership mutant survived
+  a cleanup-count test; the strengthened saturation witness then killed it. Exact
+  source restoration and all 28 waiter/phase tests passed afterwards.
+- Fresh official subscription-backed Claude review found no production regression
+  at the immutable checkpoint; the test-only saturation delta was also reviewed and accepted.
+- All 41 required local workflow checks passed at `15b60cc`, with source/test
+  fingerprint `c1c0d2488157f4c59425e65b4eb4cf64bd01c1b016f0d73ac05bb8b3534af484` stable throughout: full Swift suite 3,459 tests,
+  four skips, zero failures; all 103 simulator records, performance gate,
+  packaging/update/entry checks and boundary regressions passed.
+- A temporary traced notify-mutant replay showed both expected-busy histories
+  returning timedOut; XCTest reported one diagnostic at their shared assertion
+  line. Source restoration and another 28-test pass preserved that same complete
+  workflow fingerprint. This resolves the row-outcome question without claiming
+  a cause inside XCTest's diagnostic reporting.
+- Exact-head hosted CI is pending.
+
+The test timer holds use bounded semaphore waits on cooperative-pool threads.
+A strict or very small pool was not verified; this is a test-fixture robustness
+follow-up, not production isolation evidence. No TSan evidence is claimed.

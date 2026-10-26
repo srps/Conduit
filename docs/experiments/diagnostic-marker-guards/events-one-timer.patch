@@ -1,0 +1,11 @@
+--- a/Sources/ProxyKernel/Support/RuntimeEventFileWriter.swift
++++ b/Sources/ProxyKernel/Support/RuntimeEventFileWriter.swift
+@@ -6,7 +6,7 @@
+     /// `DiagnosticFlush` spends a first events wait and at most one further one. A first wait that drained can leave its
+     /// cancelled timer body running, so the further wait takes the second slot instead of being refused. Two retired
+     /// bodies, from this phase or an earlier call, still make a third wait `busy`.
+-    static let drainTimerSlots = 2
++    static let drainTimerSlots = 1
+ 
+     private let writer: BoundedRecordWriter
+     private let maxBytes: Int
