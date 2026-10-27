@@ -231,21 +231,38 @@ final class RuntimeClientContractTests: XCTestCase {
     }
 
     /// One observed reading tells a client both the held helper verdict to show and whether this pass's own read was busy. The flag is
-    /// written only when set, so a conclusive pass encodes as before, and an absent flag decodes as a conclusive read.
+    /// written only where the verdict does not imply it, a busy read that kept a conclusive verdict, so a conclusive pass and a `busy`
+    /// verdict encode as before, and an absent flag decodes as what the verdict implies. The two pairs no pass produces are refused on
+    /// construction and on decode.
     func testAPreflightReadingCarriesTheHeldVerdictAndWhetherItsReadWasBusy() throws {
         let off = ControlIntegrationStatus(enabled: false, alreadyApplied: false, privilegeLevel: .none)
-        let busy = ControlPreflightItems(systemProxy: off, environmentVariables: off, splitDNS: off, helper: .installed, helperReadBusy: true)
+        func items(_ helper: ControlHelperStatus, busy: Bool? = nil) throws -> ControlPreflightItems {
+            try ControlPreflightItems(systemProxy: off, environmentVariables: off, splitDNS: off, helper: helper, helperReadBusy: busy)
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = .sortedKeys
-        let busyText = String(decoding: try encoder.encode(busy), as: UTF8.self)
-        XCTAssertTrue(busyText.contains(#""helper":"installed","helperReadBusy":true"#), busyText)
-        XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(busyText.utf8)), busy)
+        func text(_ value: ControlPreflightItems) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
 
-        var conclusive = busy
-        conclusive.helperReadBusy = false
-        let conclusiveText = String(decoding: try encoder.encode(conclusive), as: UTF8.self)
-        XCTAssertFalse(conclusiveText.contains("helperReadBusy"), conclusiveText)
-        XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(conclusiveText.utf8)), conclusive)
+        let kept = try items(.installed, busy: true)
+        XCTAssertTrue(try text(kept).contains(#""helper":"installed","helperReadBusy":true"#), try text(kept))
+        XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(try text(kept).utf8)), kept)
+        for (helper, implied) in [(ControlHelperStatus.installed, false), (.busy, true), (.notInstalled, false)] {
+            let value = try items(helper)
+            XCTAssertEqual(value.helperReadBusy, implied, "\(helper)")
+            XCTAssertFalse(try text(value).contains("helperReadBusy"), try text(value))
+            XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(try text(value).utf8)), value)
+        }
+
+        XCTAssertThrowsError(try items(.busy, busy: false), "a busy verdict comes only from a busy read")
+        XCTAssertThrowsError(try items(.notInstalled, busy: true), "a busy read implies an installed binary")
+        let base = try text(try items(.installed))
+        for refused in [
+            base.replacingOccurrences(of: #""helper":"installed""#, with: #""helper":"busy","helperReadBusy":false"#),
+            base.replacingOccurrences(of: #""helper":"installed""#, with: #""helper":"notInstalled","helperReadBusy":true"#),
+        ] {
+            XCTAssertNotEqual(refused, base, "the mutation applies")
+            XCTAssertThrowsError(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(refused.utf8)), refused)
+        }
     }
 
     // MARK: - Incarnation scope

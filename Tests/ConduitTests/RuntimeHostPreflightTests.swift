@@ -175,6 +175,9 @@ final class RuntimeHostPreflightTests: XCTestCase {
         XCTAssertFalse(composed.harness.hold.reachedOnMainThread, "the helper is read off the main actor")
         let joined = try await composed.accepted(.refreshPreflight(helperReplaced: false))
         let replacing = try await composed.accepted(.refreshPreflight(helperReplaced: true))
+        // Both join the pending pass at launch; every launch has run once the host holds no admission.
+        for _ in 0..<2_000 where !composed.host.controlAdmissions.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(composed.host.controlAdmissions.isEmpty)
         composed.harness.hold.release()
 
         let outcomes = try await composed.finished([early, joined, replacing], on: stream)
@@ -203,6 +206,10 @@ final class RuntimeHostPreflightTests: XCTestCase {
         for _ in 0..<3 { joined.append(try await composed.accepted(.refreshPreflight(helperReplaced: false))) }
         let refused = try await composed.submit(.refreshPreflight(helperReplaced: false))
         XCTAssertEqual(refused, .rejected(.queueFull))
+        XCTAssertEqual(composed.host.pendingAdmissions, 4, "each admitted request is pending work from its fence")
+        // The later three join the pending pass as each launches; every launch has run once the host holds no admission.
+        for _ in 0..<2_000 where !composed.host.controlAdmissions.isEmpty { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertTrue(composed.host.controlAdmissions.isEmpty, "every request launched while the first pass was reading")
         XCTAssertNotNil(composed.host.preflight.running)
         XCTAssertNotNil(composed.host.preflight.pending)
         composed.harness.hold.release()
@@ -214,6 +221,54 @@ final class RuntimeHostPreflightTests: XCTestCase {
         XCTAssertEqual(helper.statusReads - reads, 2, "two passes read the helper")
         XCTAssertNil(composed.host.preflight.running)
         XCTAssertNil(composed.host.preflight.pending)
+    }
+
+    /// The fence starts no effect. An accepted request whose launch has not run has made no pass and read nothing, yet it is pending work,
+    /// and a replacement it names is already recorded: the generation moved at the fence. Manual hops hold the launches. Once they run,
+    /// both requests join one pass, which reads once.
+    func testAnAdmittedRequestStartsNoPassUntilItsEffectLaunches() async throws {
+        let helper = FakeHelperLifecycle(status: .installed)
+        let harness = try makeInteractiveHarness(platform: PlatformIntegrationConfig(), dnsForwarderEnabled: false)
+        harness.helperStatus = helper
+        self.harness = harness
+        let host = try await harness.makeHost()
+        let scheduling = ManualOwnerScheduling()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.limits(), timing: ManualRuntimeTiming().timing, scheduling: scheduling
+        )
+        let reads = helper.statusReads
+        let generation = host.preflight.generation
+        func admit(helperReplaced: Bool) throws -> ControlOperationID {
+            let admission = composition.service.submit(ControlOperationRequest(
+                requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation,
+                command: .refreshPreflight(helperReplaced: helperReplaced)
+            ))
+            guard case .accepted(let operation) = admission else {
+                XCTFail("expected an accepted admission, got \(admission)")
+                throw RuntimeClientError.unexpectedReply
+            }
+            return operation
+        }
+
+        let first = try admit(helperReplaced: false)
+        let second = try admit(helperReplaced: true)
+        XCTAssertEqual(host.pendingAdmissions, 2, "each accepted request is pending work before it launches")
+        XCTAssertEqual(host.preflight.generation, generation + 1, "the replacement is recorded at the fence")
+        XCTAssertNil(host.preflight.running)
+        XCTAssertNil(host.preflight.pending, "the fence made no pass")
+        XCTAssertEqual(helper.statusReads, reads, "and nothing was read")
+
+        scheduling.drainAll()
+        for _ in 0..<2_000 where host.pendingAdmissions > 0 { try await Task.sleep(for: .milliseconds(5)) }
+        XCTAssertEqual(host.pendingAdmissions, 0)
+        scheduling.drainAll()
+        func lookup(_ operation: ControlOperationID) -> ControlOperationLookup {
+            composition.service.operationLookup(ControlOperationQuery(expectedIncarnation: host.incarnation, operationID: operation))
+        }
+        guard case .finished(let outcome) = lookup(first) else { return XCTFail("the first request settled: \(lookup(first))") }
+        _ = try items(outcome)
+        XCTAssertEqual(lookup(second), lookup(first), "both launched requests joined one pass")
+        XCTAssertEqual(helper.statusReads - reads, 1)
     }
 
     /// The quit does not wait for a pass that is reading, and a request after its latch is refused as stopping. The pass reading at the

@@ -369,7 +369,8 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             ("submit-start-companion", .start(.proxy, ifModuleRevision: lifecycle, conditionalDNSRevision: lifecycle)),
             ("submit-test-dns", .testDNS),
             ("submit-test-upstream", .testUpstream(upstream)),
-            ("submit-refresh-preflight", .refreshPreflight(helperReplaced: true)),
+            // JSON `false` is a byte longer than `true`, as for the login-item flag below.
+            ("submit-refresh-preflight", .refreshPreflight(helperReplaced: false)),
             ("submit-credentials-changed", .credentialsChanged),
             ("submit-set-launch-at-login", .setLaunchAtLogin(false, ifPlatformBaseline: platformBaseline)),
             ("submit-quit-both-flushes", .quit(total: try ControlWireBudget(Int(Int32.max)), flush: flush)),
@@ -504,11 +505,14 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         ))
 
         let status = ControlIntegrationStatus(enabled: false, alreadyApplied: false, privilegeLevel: try widest(ControlPrivilegeLevel.allCases))
-        // A busy read is the widest: it carries the held verdict and the busy flag, which a conclusive read leaves out.
-        let items = ControlPreflightItems(
-            systemProxy: status, environmentVariables: status, splitDNS: status, helper: try widest(ControlHelperStatus.allCases),
-            helperReadBusy: true
-        )
+        // Every helper verdict with each busy flag the type accepts; the pairs no pass produces are refused by the initializer, and skipped.
+        let items = try widest(ControlHelperStatus.allCases.flatMap { helper in
+            [false, true].compactMap { busy in
+                try? ControlPreflightItems(
+                    systemProxy: status, environmentVariables: status, splitDNS: status, helper: helper, helperReadBusy: busy
+                )
+            }
+        })
         let reading = try widest([ControlPreflightReading.observed(items)] + ControlPreflightUnavailableReason.allCases.map { .unavailable($0) })
         let observedAt = try widest([
             try ControlTimestamp(-Double.greatestFiniteMagnitude), try ControlTimestamp(-2.2250738585072014e-308),

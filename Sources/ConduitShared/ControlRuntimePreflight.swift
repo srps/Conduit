@@ -49,23 +49,33 @@ package struct ControlPreflightItems: Codable, Sendable, Equatable {
     package var splitDNS: ControlIntegrationStatus
     /// The verdict the host holds after this pass, for display: a `busy` read keeps the last conclusive one (STYLE rule 11), and is the
     /// status itself only where none is held.
-    package var helper: ControlHelperStatus
+    package let helper: ControlHelperStatus
     /// This pass's own helper read was `busy`. It is inconclusive, so it grants nothing: `helper` may still show the last conclusive verdict,
     /// and the client schedules its one re-read. False for a conclusive read.
-    package var helperReadBusy: Bool
+    package let helperReadBusy: Bool
 
+    /// `helperReadBusy` defaults to what `helper` implies: a `busy` verdict comes only from a busy read. Throws `invalidValue` for a pair no
+    /// pass produces (`isConsistent`).
     package init(
         systemProxy: ControlIntegrationStatus,
         environmentVariables: ControlIntegrationStatus,
         splitDNS: ControlIntegrationStatus,
         helper: ControlHelperStatus,
-        helperReadBusy: Bool = false
-    ) {
+        helperReadBusy: Bool? = nil
+    ) throws {
+        let readBusy = helperReadBusy ?? (helper == .busy)
+        guard Self.isConsistent(helper: helper, readBusy: readBusy) else { throw ControlRuntimeWireError.invalidValue }
         self.systemProxy = systemProxy
         self.environmentVariables = environmentVariables
         self.splitDNS = splitDNS
         self.helper = helper
-        self.helperReadBusy = helperReadBusy
+        self.helperReadBusy = readBusy
+    }
+
+    /// The two pairs no pass produces: a `busy` verdict from a conclusive read, and a busy read that leaves no helper installed (a busy read
+    /// implies the helper's binary, so it never yields `notInstalled`). Field consistency only; the verdict's transitions stay the host's.
+    private static func isConsistent(helper: ControlHelperStatus, readBusy: Bool) -> Bool {
+        (helper != .busy || readBusy) && !(readBusy && helper == .notInstalled)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -76,23 +86,33 @@ package struct ControlPreflightItems: Codable, Sendable, Equatable {
         case helperReadBusy
     }
 
-    /// `helperReadBusy` is written only when set, so a conclusive pass encodes as before.
+    /// An absent `helperReadBusy` is what `helper` implies, so a conclusive pass, and a `busy` verdict, encode as before.
     package init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        systemProxy = try container.decode(ControlIntegrationStatus.self, forKey: .systemProxy)
-        environmentVariables = try container.decode(ControlIntegrationStatus.self, forKey: .environmentVariables)
-        splitDNS = try container.decode(ControlIntegrationStatus.self, forKey: .splitDNS)
-        helper = try container.decode(ControlHelperStatus.self, forKey: .helper)
-        helperReadBusy = try container.decodeIfPresent(Bool.self, forKey: .helperReadBusy) ?? false
+        do {
+            try self.init(
+                systemProxy: try container.decode(ControlIntegrationStatus.self, forKey: .systemProxy),
+                environmentVariables: try container.decode(ControlIntegrationStatus.self, forKey: .environmentVariables),
+                splitDNS: try container.decode(ControlIntegrationStatus.self, forKey: .splitDNS),
+                helper: try container.decode(ControlHelperStatus.self, forKey: .helper),
+                helperReadBusy: try container.decodeIfPresent(Bool.self, forKey: .helperReadBusy)
+            )
+        } catch is ControlRuntimeWireError {
+            throw DecodingError.dataCorruptedError(forKey: .helperReadBusy, in: container, debugDescription: "a helper pair no pass produces")
+        }
     }
 
+    /// Writes `helperReadBusy` only where `helper` does not imply it: a busy read that kept a conclusive verdict.
     package func encode(to encoder: any Encoder) throws {
+        guard Self.isConsistent(helper: helper, readBusy: helperReadBusy) else {
+            throw EncodingError.invalidValue(helperReadBusy, .init(codingPath: encoder.codingPath, debugDescription: "a helper pair no pass produces"))
+        }
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(systemProxy, forKey: .systemProxy)
         try container.encode(environmentVariables, forKey: .environmentVariables)
         try container.encode(splitDNS, forKey: .splitDNS)
         try container.encode(helper, forKey: .helper)
-        if helperReadBusy { try container.encode(true, forKey: .helperReadBusy) }
+        if helperReadBusy != (helper == .busy) { try container.encode(helperReadBusy, forKey: .helperReadBusy) }
     }
 
     /// Derived from the item statuses; it cannot disagree with them.

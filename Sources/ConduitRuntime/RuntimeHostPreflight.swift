@@ -6,8 +6,8 @@ import ProxyKernel
 
 /// The host's preflight state, twin of `AppState`'s helper verdict and refresh ID. The held verdict is what a `busy` read keeps
 /// (`HelperToolPrivilegeClient.Status.updated(by:)`). A helper replacement marks it stale and advances `generation`, so a pass that began
-/// before it changes and repairs nothing. At most two passes exist: the one running, and the one pending that every request admitted
-/// meanwhile joins. No waiter list is kept: each admitted operation's effect awaits its pass, and the service's ordinary capacity bounds them.
+/// before it changes and repairs nothing. At most two passes exist: the one running, and the one pending that every request launched
+/// meanwhile joins. No waiter list is kept: each launched operation's effect awaits its pass, and the service's ordinary capacity bounds them.
 struct RuntimeHostPreflightState {
     var heldHelperStatus: HelperToolPrivilegeClient.Status = .notInstalled
     /// Set when the helper was replaced: the held verdict was about the old one, so a `busy` read must not keep it. Cleared by the first
@@ -19,14 +19,20 @@ struct RuntimeHostPreflightState {
 }
 
 extension RuntimeHost {
-    /// The pass a preflight request admitted in this turn joins: the pending one, which has not begun, or a new one that begins once the
-    /// running pass has ended. A request never joins the running pass, so every reading it gets was taken after its admission. With
-    /// `helperReplaced`, the held verdict is stale and the generation advances first, so the running pass's reading is dropped.
-    func admitPreflight(helperReplaced: Bool) -> Task<ControlOperationOutcome, Never> {
+    /// The fence half of a preflight request, in its admission turn: it starts no pass. With `helperReplaced` the held verdict is stale and
+    /// the generation advances at once, so a pass already reading is dropped whenever this request launches. The request is pending work
+    /// from here until its effect has its pass's answer (`preflightPass`).
+    func admitPreflight(helperReplaced: Bool) {
         if helperReplaced {
             preflight.verdictStale = true
             preflight.generation += 1
         }
+        pendingAdmissions += 1
+    }
+
+    /// The pass an admitted request's effect joins at launch: the pending one, which has not begun, or a new one that begins once the
+    /// running pass has ended. A request never joins the running pass, so every reading it gets was taken after its admission and launch.
+    func preflightPass() -> Task<ControlOperationOutcome, Never> {
         if let pending = preflight.pending { return pending }
         let previous = preflight.running
         let pass = Task { @MainActor [weak self] () -> ControlOperationOutcome in
@@ -47,10 +53,9 @@ extension RuntimeHost {
     /// the run state, the VPN gate and the held verdict; the helper read and the evaluation run on a global queue, never on `platformWork`, so
     /// no teardown queues behind a slow ping. A pass that begins after the quit latched reads nothing, and one whose generation moved or that
     /// ends after the latch fails `staleRevision`: its reading may describe a replaced helper, so it updates no verdict and repairs nothing.
-    /// With no helper source the reading is `notObserved`. Counted as pending work, so a settle sees a pass whose repairs may still follow.
+    /// With no helper source the reading is `notObserved`. Every request that joined it is still pending work while it runs, so a settle sees
+    /// a pass whose repairs may still follow.
     private func runPreflightPass() async -> ControlOperationOutcome {
-        pendingAdmissions += 1
-        defer { pendingAdmissions -= 1 }
         await awaitLaunchRecovery()
         guard !workflow.isTerminal else { return .failed(.staleRevision) }
         guard let stamp = snapshot()?.stamp else { return .failed(.internalFailure) }
@@ -102,18 +107,23 @@ extension RuntimeHost {
 /// The preflight's PlatformMac values on the control wire. The bridge does not import PlatformMac, so the mapping lives with the host. Each
 /// switch is exhaustive, so a new case fails to compile here. The helper's own refusal text is not carried.
 enum RuntimePreflightProjection {
+    /// `helper` is the verdict `updated(by:)` held after the read, so the pair is always one a pass produces.
     static func items(
         _ preflight: ActivationPreflight,
         helper: HelperToolPrivilegeClient.Status,
         readBusy: Bool
     ) -> ControlPreflightItems {
-        ControlPreflightItems(
-            systemProxy: status(preflight.systemProxy),
-            environmentVariables: status(preflight.environmentVariables),
-            splitDNS: status(preflight.splitDNS),
-            helper: self.helper(helper),
-            helperReadBusy: readBusy
-        )
+        do {
+            return try ControlPreflightItems(
+                systemProxy: status(preflight.systemProxy),
+                environmentVariables: status(preflight.environmentVariables),
+                splitDNS: status(preflight.splitDNS),
+                helper: self.helper(helper),
+                helperReadBusy: readBusy
+            )
+        } catch {
+            preconditionFailure("a held verdict is consistent with the read it was updated by")
+        }
     }
 
     static func status(_ status: IntegrationStatus) -> ControlIntegrationStatus {

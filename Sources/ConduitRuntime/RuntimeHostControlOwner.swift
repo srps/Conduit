@@ -118,8 +118,8 @@ enum RuntimeControlAdmission {
     case quit(Task<Void, Never>, RuntimeQuitFlush)
     /// A DNS liveness probe of the port the fence chose.
     case dnsProbe(port: Int)
-    /// A preflight request, joined to the pass that begins after its admission (`admitPreflight`).
-    case preflight(Task<ControlOperationOutcome, Never>)
+    /// A preflight request, pending work from its admission (`admitPreflight`); its effect joins a pass at launch (`preflightPass`).
+    case preflight
     /// The client changed the saved password; the effect drops the cached credential.
     case credentialsChanged
 }
@@ -222,7 +222,8 @@ extension RuntimeHost: ControlCommandOwner {
         case .refreshPreflight(let helperReplaced):
             // The app's preflight refresh. It reads; it changes no intent. A replacement it names revokes the pass already reading.
             guard !workflow.isTerminal else { return .rejected(.hostStopping) }
-            controlAdmissions[operation] = .preflight(admitPreflight(helperReplaced: helperReplaced))
+            admitPreflight(helperReplaced: helperReplaced)
+            controlAdmissions[operation] = .preflight
             return .admitted
         case .credentialsChanged:
             guard !workflow.isTerminal else { return .rejected(.hostStopping) }
@@ -300,9 +301,12 @@ extension RuntimeHost: ControlCommandOwner {
                 report.quiesced()
                 onControlStateChange?()
             }
-        case .preflight(let pass):
-            // Quiesced when its pass ends: the read may outlast the quit, and the operation keeps its capacity until then.
+        case .preflight:
+            // The pass is joined in this launch turn. Quiesced when it ends: the read may outlast the quit, and the operation keeps its
+            // capacity, and its pending count, until then.
+            let pass = preflightPass()
             Task { @MainActor [self] in
+                defer { pendingAdmissions -= 1 }
                 report.settled(await pass.value)
                 report.quiesced()
                 onControlStateChange?()
