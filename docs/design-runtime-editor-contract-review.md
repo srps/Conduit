@@ -251,8 +251,8 @@ acceptance remain separate work; none is proved by this proposal.
 
 The owner selected whole-request lifecycle validation in [0035](decisions/0035-whole-request-lifecycle-validation.md).
 The [reviewed alternatives](design-runtime-editor-admission-options.md) retain the rationale and the
-separate, still-unselected dependent DNS startup choice. Keep exact revisions and save-only meanings;
-settle that remaining choice before implementing the affected private update/Start path.
+separate selected conditional DNS activation ([0036](decisions/0036-conditional-dns-activation.md)).
+Keep exact revisions and save-only meanings while implementing the approved interactive path.
 
 Put host-owned store operations in generation order within bounded ordinary
 admission. A Start waiting behind an in-flight operation rechecks its ticket and

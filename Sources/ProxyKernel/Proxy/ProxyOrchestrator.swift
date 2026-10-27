@@ -728,23 +728,20 @@ package final class ProxyOrchestrator {
 
         // The forwarder binds `ProxyConfig.dnsForwarderHost`, not the proxy's
         // listen host, so only a DNS section edit restarts it.
-        if diff.dnsChanged && snapshot.dnsRunState == .running {
+        // A stop in flight still reads running until its teardown ends; a restart admitted then would bind after it. The restart's epoch
+        // is the one this check found running, taken in the same turn.
+        if diff.dnsChanged && snapshot.dnsRunState == .running && dnsLifecycle.admitsRunning {
+            let epoch = dnsLifecycle.epoch
             emitEvent(.config, "config.dns_restart", detail: "reason=dns_section")
             logStore.log(.notice, "Config reload: DNS config changed, restarting DNS forwarder.", category: .network)
-            await stopTransparentProxy()
-            await dnsForwarder.stop()
-            mutateSnapshot {
-                $0.dnsRunState = .stopped
-                $0.dnsQueryCount = 0
-                $0.dnsDoHFallbackCount = 0
-                $0.dnsCacheHitCount = 0
-                $0.bindings.dnsHost = nil
-                $0.bindings.dnsPort = nil
+            // The rebind is a start too: a start that finds it in flight joins its completion rather than reading `starting` as done.
+            await awaitInfallibleStart(category: .network) {
+                try await self.dnsLifecycle.runStart(epoch: epoch) { await self.restartDNS(epoch: epoch) }
             }
-            await startDNS()
         }
 
-        if diff.tunnelsChanged && (snapshot.tunnelsRunState == .running || snapshot.tunnelsRunState == .warning) {
+        if diff.tunnelsChanged && (snapshot.tunnelsRunState == .running || snapshot.tunnelsRunState == .warning)
+            && tunnelLifecycle.admitsRunning {
             emitEvent(.config, "config.tunnels_reconcile")
             logStore.log(.notice, "Config reload: tunnel definitions changed, reconciling.", category: .tunnel)
             await reconcileTunnels()
@@ -1115,7 +1112,8 @@ package final class ProxyOrchestrator {
         )
     }()
 
-    private lazy var dnsForwarder = LocalDNSForwarder(
+    /// Internal so a test can hand in, before the first start, a forwarder whose `willBindTCP` holds a start inside its bind.
+    lazy var dnsForwarder = LocalDNSForwarder(
         group: MultiThreadedEventLoopGroup.singleton,
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
@@ -1200,7 +1198,8 @@ package final class ProxyOrchestrator {
 
     private let tunnelAuthHandshakeLimiter = AuthHandshakeLimiter()
 
-    private lazy var tunnelConnectionPool = ConnectionPool(
+    /// Shared by the tunnels and the transparent proxy. Internal so a test can see that a tunnel start leaves its connections alone.
+    lazy var tunnelConnectionPool = ConnectionPool(
         group: MultiThreadedEventLoopGroup.singleton,
         logger: logStore,
         configProvider: { [configBox] in configBox.current },
@@ -1227,7 +1226,8 @@ package final class ProxyOrchestrator {
 
     private let tunnelHealthProber = TunnelHealthProber()
 
-    private lazy var tunnelForwarder = TunnelForwarder(
+    /// Internal so a test can see which listeners and sessions a start keeps.
+    lazy var tunnelForwarder = TunnelForwarder(
         group: MultiThreadedEventLoopGroup.singleton,
         connectCoordinator: tunnelCoordinator,
         connectionPool: tunnelConnectionPool,
@@ -1331,8 +1331,15 @@ package final class ProxyOrchestrator {
 
     /// Each start takes the next epoch, and each stop supersedes it. A start awaits PAC and probe work before its listener step, so a stop can
     /// run in that window. A start checks its epoch after every suspension and before every physical step, and throws `CancellationError`
-    /// once superseded, so it binds and publishes nothing the superseding owner did not expect.
-    private var lifecycleEpoch = 0
+    /// once superseded, so it binds and publishes nothing the superseding owner did not expect. The listeners bind and close as effects of
+    /// `proxyLifecycle`, one at a time.
+    private let proxyLifecycle = PhysicalLifecycle()
+    private var lifecycleEpoch: Int { proxyLifecycle.epoch }
+    /// The DNS forwarder and the transparent proxy bind and close as its effects, ordered as the proxy listeners are. Internal so a test
+    /// can wait for an operation's admission.
+    let dnsLifecycle = PhysicalLifecycle()
+    /// The tunnel listeners bind, reconcile and close as its effects. Internal so a test can wait for an operation's admission.
+    let tunnelLifecycle = PhysicalLifecycle()
     /// Stops whose teardown has not finished. A start admitted while one runs is not an identical start to join: it runs after that stop.
     private var stopsInFlight = 0
     /// Whether a stop's teardown is still running. A start admitted now runs after it, so a caller that would otherwise treat the running
@@ -1342,45 +1349,41 @@ package final class ProxyOrchestrator {
     /// teardown ends, so until then the snapshot still reads active. A continuation that resumes in between must not start a monitor or
     /// report the runtime running: a health loop started then outlives the stop, and its next ladder would cold-start the listener.
     private var isProxyLive: Bool { stopsInFlight == 0 && isProxyActive }
-    /// The one physical effect running now: a listener bind, or a teardown. Only `runPhysicalEffect` creates it, once it owns the slot, and the
-    /// effect clears the slot itself before it completes, so a waiter never awaits a finished handle.
-    private var activePhysical: Task<Void, Error>?
 
     private func ensureStartCurrent(_ epoch: Int) throws {
-        guard epoch == lifecycleEpoch else { throw CancellationError() }
+        try proxyLifecycle.ensureCurrent(epoch)
     }
 
-    /// Runs `body` as the physical effect for `epoch`. It first waits for the active effect, if any, to end. Then, with no suspension between
-    /// the check and the claim, it runs `body` only if `epoch` is still the latest. Returns `false`, having run nothing, when a newer
-    /// lifecycle operation was admitted meanwhile: that operation now owns the listeners. An effect that has claimed the slot runs to its end.
+    /// Runs `body` as the proxy listeners' physical effect for `epoch`; see `PhysicalLifecycle.run`.
     @discardableResult
     private func runPhysicalEffect(epoch: Int, _ body: @escaping @MainActor () async throws -> Void) async throws -> Bool {
-        while let active = activePhysical {
-            _ = await active.result
-        }
-        guard epoch == lifecycleEpoch else { return false }
-        let effect = Task<Void, Error> { @MainActor in
-            defer { self.activePhysical = nil }
-            try await body()
-        }
-        activePhysical = effect
-        try await effect.value
-        return true
+        try await proxyLifecycle.run(epoch: epoch, body)
     }
 
-    /// Closes the listeners as the teardown for `epoch`. Returns `false` when a newer operation superseded it before it claimed the slot: the
-    /// listeners and the snapshot then belong to that operation, and this one leaves both alone. A teardown that claimed the slot closes
-    /// what it owns, so nothing it owns is left open.
+    /// Runs `body`, which cannot fail, as `lifecycle`'s effect for `epoch`. Returns `false` when a newer operation superseded it before it
+    /// claimed the slot: the listeners and the snapshot then belong to that operation, and this one leaves both alone.
     @discardableResult
-    private func runTeardown(epoch: Int, scope: CloseScope) async -> Bool {
+    private func runInfallibleEffect(
+        _ lifecycle: PhysicalLifecycle,
+        epoch: Int,
+        category: LogCategory,
+        _ body: @escaping @MainActor () async -> Void
+    ) async -> Bool {
         do {
-            return try await runPhysicalEffect(epoch: epoch) { await self.tearDownListeners(scope: scope) }
+            return try await lifecycle.run(epoch: epoch, body)
         } catch {
-            // Unreachable today: the teardown body does not throw, and a lost claim returns `false` rather than throwing. The shared
-            // effect runner throws for a bind's body, so the handler stays, and it would mean the claimed effect ran to its end.
-            logStore.log(.error, "Listener teardown failed: \(error.localizedDescription)", category: .proxy)
+            // Unreachable today: the body does not throw, and a lost claim returns `false` rather than throwing. The shared effect runner
+            // throws for a bind's body, so the handler stays, and it would mean the claimed effect ran to its end.
+            logStore.log(.error, "Listener effect failed: \(error.localizedDescription)", category: category)
             return true
         }
+    }
+
+    /// Closes the listeners as the teardown for `epoch`. A teardown that claimed the slot closes what it owns, so nothing it owns is left
+    /// open.
+    @discardableResult
+    private func runTeardown(epoch: Int, scope: CloseScope) async -> Bool {
+        await runInfallibleEffect(proxyLifecycle, epoch: epoch, category: .proxy) { await self.tearDownListeners(scope: scope) }
     }
 
     /// Closes both listeners. Only ever run as the body of a teardown effect, so nothing binds while it closes.
@@ -1390,19 +1393,29 @@ package final class ProxyOrchestrator {
     }
 
     package func startProxy() async throws {
-        // An equivalent start in flight or running answers for itself. A stop still in flight is different: it tears down what this start
-        // would have joined, so this start runs after it instead of returning as though the listeners were still up.
+        // An equivalent start in flight answers with its own completion, its PAC and probe work included, so a caller never takes its
+        // `starting` for done: it returns once that start published `running`, and throws what that start threw. One admitted after a stop
+        // runs after that stop, and is joinable too. A start already running answers for itself. A stop still in flight is different: it
+        // tears down what this start would have found, so this start runs after it instead of returning as though the listeners were up.
+        if let inFlight = proxyLifecycle.joinableStart() {
+            try await inFlight.value
+            return
+        }
         let state = snapshot.runtimeStatus.state
         guard (state != .starting && state != .running) || stopsInFlight > 0 else { return }
-        lifecycleEpoch += 1
-        let epoch = lifecycleEpoch
+        // Admitted and published as starting in one turn, so a stop admitted after it always publishes over it.
+        let epoch = proxyLifecycle.admit(running: true)
         emitEvent(.lifecycle, "proxy.starting")
-
         mutateSnapshot {
             $0.runtimeStatus.state = .starting
             $0.proxyError = nil
         }
+        try await proxyLifecycle.runStart(epoch: epoch) { try await self.runProxyStart(epoch: epoch) }
+    }
 
+    /// The rest of the proxy start admitted at `epoch`, its PAC and probe work, bind and publication, run as `proxyLifecycle`'s joinable
+    /// completion.
+    private func runProxyStart(epoch: Int) async throws {
         do {
             // A VPN report during startup supersedes the probe; the listener
             // is not up yet, so that report reacts to nothing and this probe
@@ -1509,8 +1522,7 @@ package final class ProxyOrchestrator {
     /// the old listener can outlive the listener swap. See `docs/design-vpn-flap-resilience.md`.
     package func stopProxy(scope: CloseScope = .all) async {
         // Supersedes a start still awaiting its PAC, probe or bind work, which then stops at its next check.
-        lifecycleEpoch += 1
-        let epoch = lifecycleEpoch
+        let epoch = proxyLifecycle.admit(running: false)
         stopsInFlight += 1
         defer { stopsInFlight -= 1 }
         emitEvent(.lifecycle, "proxy.stopping")
@@ -1618,8 +1630,36 @@ package final class ProxyOrchestrator {
     }
 
     package func startDNS() async {
-        guard snapshot.dnsRunState != .starting else { return }
+        // A start in flight, a config rebind included, answers with its own completion, the forwarder and the transparent proxy together,
+        // as `startProxy` does. One running, with no stop admitted since, answers for itself: rebinding would close live listeners for
+        // nothing. A DNS config edit rebinds through `restartDNS`; a start after a stop runs after that stop's teardown.
+        if let inFlight = dnsLifecycle.joinableStart() {
+            await awaitInfallibleStart(category: .network) { try await inFlight.value }
+            return
+        }
+        let state = snapshot.dnsRunState
+        guard (state != .starting && state != .running) || !dnsLifecycle.admitsRunning else { return }
+        let epoch = dnsLifecycle.admit(running: true)
+        await awaitInfallibleStart(category: .network) {
+            try await self.dnsLifecycle.runStart(epoch: epoch) { await self.runDNSStart(epoch: epoch) }
+        }
+    }
 
+    /// Awaits a start whose body cannot fail, its own or one it joined. Its outcome is the snapshot it published; a thrown error is
+    /// unreachable today and is logged, as `runInfallibleEffect` does.
+    private func awaitInfallibleStart(category: LogCategory, _ start: () async throws -> Void) async {
+        do {
+            try await start()
+        } catch {
+            logStore.log(.error, "Listener start failed: \(error.localizedDescription)", category: category)
+        }
+    }
+
+    /// Binds the forwarder, then the transparent proxy, as one effect for `epoch`, and publishes each only while `epoch` is the latest. A
+    /// stop admitted during the bind closes what it bound once the effect ends. A config restart runs this under the epoch it captured, so
+    /// it never renews a start that a newer stop took away.
+    private func runDNSStart(epoch: Int) async {
+        guard dnsLifecycle.isCurrent(epoch) else { return }
         mutateSnapshot {
             $0.dnsRunState = .starting
             $0.dnsError = nil
@@ -1627,19 +1667,29 @@ package final class ProxyOrchestrator {
         let currentConfig = config
 
         do {
-            try await dnsForwarder.start(host: ProxyConfig.dnsForwarderHost, port: currentConfig.dnsForwarderPort)
-            mutateSnapshot {
-                $0.dnsRunState = .running
-                $0.bindings.dnsHost = self.dnsForwarder.listeningHost
-                $0.bindings.dnsPort = self.dnsForwarder.listeningPort
-            }
+            try await dnsLifecycle.run(epoch: epoch) {
+                // A start superseded after its bind, with a stop admitted between that never ran its teardown, or a failed start that
+                // could not release its UDP port, left a bind open: close it first.
+                if self.dnsForwarder.listeningPort != nil {
+                    await self.closeDNSListeners()
+                }
+                try await self.dnsForwarder.start(host: ProxyConfig.dnsForwarderHost, port: currentConfig.dnsForwarderPort)
+                guard self.dnsLifecycle.isCurrent(epoch) else { return }
+                self.mutateSnapshot {
+                    $0.dnsRunState = .running
+                    $0.bindings.dnsHost = self.dnsForwarder.listeningHost
+                    $0.bindings.dnsPort = self.dnsForwarder.listeningPort
+                }
 
-            if currentConfig.transparentProxyEnabled, !currentConfig.enabledInterceptRules.isEmpty {
-                await startTransparentProxy(config: currentConfig)
+                if currentConfig.transparentProxyEnabled, !currentConfig.enabledInterceptRules.isEmpty {
+                    await self.startTransparentProxy(config: currentConfig, epoch: epoch)
+                }
             }
         } catch {
             let message = error.displayDescription
             logStore.log(.warning, "Could not start DNS forwarder on \(ProxyConfig.dnsForwarderHost):\(currentConfig.dnsForwarderPort): \(message)", category: .network)
+            // An operation admitted during the bind owns the snapshot now; this failure must not publish over it.
+            guard dnsLifecycle.isCurrent(epoch) else { return }
             mutateSnapshot {
                 $0.dnsRunState = .failed
                 $0.bindings.dnsHost = nil
@@ -1650,8 +1700,10 @@ package final class ProxyOrchestrator {
     }
 
     package func stopDNS() async {
-        await stopTransparentProxy()
-        await dnsForwarder.stop()
+        let epoch = dnsLifecycle.admit(running: false)
+        // Superseded before its teardown ran, or during it: the newer operation owns the listeners and the snapshot.
+        guard await runInfallibleEffect(dnsLifecycle, epoch: epoch, category: .network, { await self.closeDNSListeners() }),
+              dnsLifecycle.isCurrent(epoch) else { return }
         mutateSnapshot {
             $0.dnsRunState = .stopped
             $0.dnsQueryCount = 0
@@ -1663,7 +1715,43 @@ package final class ProxyOrchestrator {
         }
     }
 
+    /// Restarts the running forwarder on the applied config as one operation under `epoch`, the running start the caller found admitted:
+    /// a start or stop admitted after it supersedes the restart, which neither rebinds nor publishes after that operation.
+    private func restartDNS(epoch: Int) async {
+        if await runInfallibleEffect(dnsLifecycle, epoch: epoch, category: .network, { await self.closeDNSListeners() }),
+           dnsLifecycle.isCurrent(epoch) {
+            mutateSnapshot {
+                $0.dnsRunState = .stopped
+                $0.dnsQueryCount = 0
+                $0.dnsDoHFallbackCount = 0
+                $0.dnsCacheHitCount = 0
+                $0.bindings.dnsHost = nil
+                $0.bindings.dnsPort = nil
+            }
+            await runDNSStart(epoch: epoch)
+        }
+        // A start or stop admitted during the teardown or the rebind owns the forwarder and the snapshot now. Not a failure.
+        guard !dnsLifecycle.isCurrent(epoch) else { return }
+        emitEvent(.config, "config.dns_restart", detail: "reason=dns_section outcome=superseded")
+        logStore.log(.info, "Config reload: DNS restart superseded by a start or stop.", category: .network)
+    }
+
+    /// Closes the transparent proxy, then the forwarder. Only ever run inside a `dnsLifecycle` effect, so nothing binds while it closes.
+    private func closeDNSListeners() async {
+        await stopTransparentProxy()
+        await dnsForwarder.stop()
+    }
+
     package func startTunnels() async {
+        // A start in flight answers with its own completion, as `startProxy` does. One running, with no stop admitted since, answers for
+        // itself: rebinding would close live listeners and reset the session count under sessions that outlive them. A config edit has its
+        // own reconcile; a start after a stop runs after it.
+        if let inFlight = tunnelLifecycle.joinableStart() {
+            await awaitInfallibleStart(category: .tunnel) { try await inFlight.value }
+            return
+        }
+        let state = snapshot.tunnelsRunState
+        guard ![.starting, .running, .warning].contains(state) || !tunnelLifecycle.admitsRunning else { return }
         let currentConfig = config
         let activeTunnels = currentConfig.tunnelDefinitions.filter(\.enabled)
         guard !activeTunnels.isEmpty else {
@@ -1710,6 +1798,7 @@ package final class ProxyOrchestrator {
             return
         }
 
+        let epoch = tunnelLifecycle.admit(running: true)
         mutateSnapshot {
             $0.tunnelsRunState = .starting
             $0.tunnelsError = nil
@@ -1728,43 +1817,74 @@ package final class ProxyOrchestrator {
             maxPerTunnel: currentConfig.maxSessionsPerTunnel
         )
 
-        let result = await tunnelForwarder.start(
-            tunnels: activeTunnels,
-            listenHost: currentConfig.effectiveTunnelListenHost
-        )
-
-        if result.started == 0 {
-            await tunnelForwarder.stop()
-            tunnelConnectionPool.closeAll()
-            mutateSnapshot {
-                $0.tunnelsRunState = .failed
-                $0.tunnelsError = "All tunnel listeners failed to bind."
-                $0.tunnelActiveCount = 0
-                $0.tunnelSessionCount = 0
-                $0.tunnelDNSOverrideStatus = .notNeeded
-                $0.bindings.tunnels = []
+        // The listeners bind, and publish, as one effect, run as `tunnelLifecycle`'s joinable start. A stop admitted during the bind closes
+        // them once the effect ends, so a superseded start publishes nothing and starts no prober.
+        await awaitInfallibleStart(category: .tunnel) {
+            try await self.tunnelLifecycle.runStart(epoch: epoch) {
+                await self.bindTunnelListeners(activeTunnels, config: currentConfig, epoch: epoch)
             }
-        } else {
-            mutateSnapshot {
-                $0.tunnelDNSOverrideStatus = result.dnsOverrideStatus
-                $0.bindings.tunnels = result.bindings
-                $0.tunnelSessionCount = self.tunnelForwarder.sessionTracker.totalActiveSessions
-                $0.tunnelsRunState = .running
-                $0.tunnelActiveCount = result.started
-                if result.failed > 0 {
-                    $0.tunnelsError = "\(result.failed) tunnel(s) failed to bind — check logs."
-                }
-            }
-        }
-
-        logStore.log(.notice, "Protocol tunnels started: \(result.started) active, \(result.failed) failed.", category: .tunnel)
-
-        if result.started > 0 {
-            startTunnelHealthProbing()
         }
     }
 
-    private func startTunnelHealthProbing() {
+    /// The tunnel start's one physical effect for `epoch`: bind the listeners, then publish what bound.
+    private func bindTunnelListeners(_ activeTunnels: [TunnelDefinition], config currentConfig: ProxyConfig, epoch: Int) async {
+        await runInfallibleEffect(tunnelLifecycle, epoch: epoch, category: .tunnel) {
+            // A start superseded after its bind by this one, with a stop admitted between that never ran its teardown, left listeners
+            // open: close those listeners first, so nothing binds twice. Only the listeners: the pool is shared with the transparent proxy,
+            // and a start leaves its connections alone. A first start finds no listener and closes nothing.
+            if !self.tunnelForwarder.listenersByID.isEmpty {
+                await self.tunnelForwarder.stop()
+            }
+            let result = await self.tunnelForwarder.start(
+                tunnels: activeTunnels,
+                listenHost: currentConfig.effectiveTunnelListenHost
+            )
+            if result.started == 0 {
+                await self.closeTunnelListeners()
+            }
+            guard self.tunnelLifecycle.isCurrent(epoch) else { return }
+
+            if result.started == 0 {
+                self.mutateSnapshot {
+                    $0.tunnelsRunState = .failed
+                    $0.tunnelsError = "All tunnel listeners failed to bind."
+                    $0.tunnelActiveCount = 0
+                    $0.tunnelSessionCount = 0
+                    $0.tunnelDNSOverrideStatus = .notNeeded
+                    $0.bindings.tunnels = []
+                }
+            } else {
+                self.mutateSnapshot {
+                    $0.tunnelDNSOverrideStatus = result.dnsOverrideStatus
+                    $0.bindings.tunnels = result.bindings
+                    $0.tunnelSessionCount = self.tunnelForwarder.sessionTracker.totalActiveSessions
+                    $0.tunnelsRunState = .running
+                    $0.tunnelActiveCount = result.started
+                    if result.failed > 0 {
+                        $0.tunnelsError = "\(result.failed) tunnel(s) failed to bind — check logs."
+                    }
+                }
+            }
+
+            self.logStore.log(.notice, "Protocol tunnels started: \(result.started) active, \(result.failed) failed.", category: .tunnel)
+
+            if result.started > 0 {
+                self.startTunnelHealthProbing(epoch: epoch)
+            }
+        }
+    }
+
+    /// Closes every tunnel listener and the tunnels' upstream pool, which the transparent proxy shares. Run only by an explicit stop and by
+    /// a start whose every bind failed, as before the lifecycle; only ever inside a `tunnelLifecycle` effect, so nothing binds while it
+    /// closes.
+    private func closeTunnelListeners() async {
+        await tunnelForwarder.stop()
+        tunnelConnectionPool.closeAll()
+    }
+
+    /// Probes the published bindings for `epoch`. A result that lands after a newer start or stop describes listeners that operation
+    /// replaced or closed, so it is dropped.
+    private func startTunnelHealthProbing(epoch: Int) {
         // Capture probe targets keyed by the binding's stable id (sourced from
         // `TunnelDefinition.id`). Matching health results back to bindings by id is unambiguous
         // even when two tunnels share an effective label (possible with duplicate user-defined
@@ -1778,7 +1898,7 @@ package final class ProxyOrchestrator {
             tunnels: { probeTargets },
             onResult: { [weak self] results in
                 Task { @MainActor in
-                    guard let s = self else { return }
+                    guard let s = self, s.tunnelLifecycle.isCurrent(epoch) else { return }
 
                     // Collect the per-binding health deltas first, then commit them atomically
                     // inside a single `mutateSnapshot` that also derives the run-state
@@ -1814,7 +1934,12 @@ package final class ProxyOrchestrator {
         )
     }
 
+    /// Reconciles the running tunnels as one effect under the latest epoch, which is the start that bound them. Stopped tunnels stay
+    /// stopped: after a stop, or before any start, there is nothing to reconcile, and a stop admitted during the reconcile closes what it
+    /// bound once the effect ends.
     package func reconcileTunnels() async {
+        guard tunnelLifecycle.admitsRunning else { return }
+        let epoch = tunnelLifecycle.epoch
         let currentConfig = config
 
         // Mirror the boundary-validation that `startTunnels()` runs (empty remote host,
@@ -1850,53 +1975,58 @@ package final class ProxyOrchestrator {
             maxGlobal: currentConfig.maxTunnelSessions,
             maxPerTunnel: currentConfig.maxSessionsPerTunnel
         )
-        let result = await tunnelForwarder.reconcile(
-            newDefinitions: currentConfig.tunnelDefinitions,
-            listenHost: currentConfig.effectiveTunnelListenHost
-        )
-        mutateSnapshot {
-            $0.tunnelDNSOverrideStatus = result.dnsOverrideStatus
-            // Merge per-binding health from the previous snapshot so a reconcile doesn't
-            // silently flip every binding back to `healthy: true` (the default on the rebuilt
-            // `TunnelBindingInfo`) until the next probe cycle — otherwise a hot-reload opens
-            // a false-OK window up to one probe interval wide.
-            let previousHealthy = Dictionary(
-                uniqueKeysWithValues: $0.bindings.tunnels.map { ($0.id, $0.healthy) }
+        await runInfallibleEffect(tunnelLifecycle, epoch: epoch, category: .tunnel) {
+            let result = await self.tunnelForwarder.reconcile(
+                newDefinitions: currentConfig.tunnelDefinitions,
+                listenHost: currentConfig.effectiveTunnelListenHost
             )
-            $0.bindings.tunnels = result.bindings.map { binding in
-                var merged = binding
-                merged.healthy = previousHealthy[binding.id] ?? true
-                return merged
+            guard self.tunnelLifecycle.isCurrent(epoch) else { return }
+            self.mutateSnapshot {
+                $0.tunnelDNSOverrideStatus = result.dnsOverrideStatus
+                // Merge per-binding health from the previous snapshot so a reconcile doesn't
+                // silently flip every binding back to `healthy: true` (the default on the rebuilt
+                // `TunnelBindingInfo`) until the next probe cycle — otherwise a hot-reload opens
+                // a false-OK window up to one probe interval wide.
+                let previousHealthy = Dictionary(
+                    uniqueKeysWithValues: $0.bindings.tunnels.map { ($0.id, $0.healthy) }
+                )
+                $0.bindings.tunnels = result.bindings.map { binding in
+                    var merged = binding
+                    merged.healthy = previousHealthy[binding.id] ?? true
+                    return merged
+                }
+                $0.tunnelSessionCount = self.tunnelForwarder.sessionTracker.totalActiveSessions
+                $0.tunnelActiveCount = result.started
+                // Derive run state from the preserved-healthy set so `.warning` survives a reload
+                // instead of being unconditionally overwritten with `.running`.
+                if result.started == 0 {
+                    $0.tunnelsRunState = .stopped
+                } else if $0.bindings.tunnels.contains(where: { !$0.healthy }) {
+                    $0.tunnelsRunState = .warning
+                } else {
+                    $0.tunnelsRunState = .running
+                }
+                $0.tunnelsError = result.failed > 0 ? "\(result.failed) tunnel(s) failed — check logs." : nil
             }
-            $0.tunnelSessionCount = self.tunnelForwarder.sessionTracker.totalActiveSessions
-            $0.tunnelActiveCount = result.started
-            // Derive run state from the preserved-healthy set so `.warning` survives a reload
-            // instead of being unconditionally overwritten with `.running`.
-            if result.started == 0 {
-                $0.tunnelsRunState = .stopped
-            } else if $0.bindings.tunnels.contains(where: { !$0.healthy }) {
-                $0.tunnelsRunState = .warning
-            } else {
-                $0.tunnelsRunState = .running
-            }
-            $0.tunnelsError = result.failed > 0 ? "\(result.failed) tunnel(s) failed — check logs." : nil
-        }
-        logStore.log(.notice, "Tunnel reconciliation: \(result.started) active, \(result.failed) failed.", category: .tunnel)
+            self.logStore.log(.notice, "Tunnel reconciliation: \(result.started) active, \(result.failed) failed.", category: .tunnel)
 
-        // Re-snapshot the prober targets against the reconciled binding set.
-        // `startTunnelHealthProbing` captures `bindings` at call time, so without this
-        // the prober would keep probing the pre-reconciliation target list and miss
-        // any tunnels that were added, removed, or re-bound.
-        tunnelHealthProber.stop()
-        if result.started > 0 {
-            startTunnelHealthProbing()
+            // Re-snapshot the prober targets against the reconciled binding set.
+            // `startTunnelHealthProbing` captures `bindings` at call time, so without this
+            // the prober would keep probing the pre-reconciliation target list and miss
+            // any tunnels that were added, removed, or re-bound.
+            self.tunnelHealthProber.stop()
+            if result.started > 0 {
+                self.startTunnelHealthProbing(epoch: epoch)
+            }
         }
     }
 
     package func stopTunnels() async {
+        let epoch = tunnelLifecycle.admit(running: false)
         tunnelHealthProber.stop()
-        await tunnelForwarder.stop()
-        tunnelConnectionPool.closeAll()
+        // Superseded before its teardown ran, or during it: the newer operation owns the listeners and the snapshot.
+        guard await runInfallibleEffect(tunnelLifecycle, epoch: epoch, category: .tunnel, { await self.closeTunnelListeners() }),
+              tunnelLifecycle.isCurrent(epoch) else { return }
         mutateSnapshot {
             $0.tunnelsRunState = .stopped
             $0.tunnelActiveCount = 0
@@ -3073,7 +3203,9 @@ package final class ProxyOrchestrator {
 
     // MARK: - Transparent TCP Proxy
 
-    private func startTransparentProxy(config: ProxyConfig) async {
+    /// Runs inside the DNS start effect for `epoch`. A stop admitted during it closes the listener and the relay once that effect ends, so
+    /// a superseded start publishes nothing and starts no timer.
+    private func startTransparentProxy(config: ProxyConfig, epoch: Int) async {
         let ip = config.transparentProxyIP
         let port = config.transparentProxyPort
 
@@ -3123,6 +3255,7 @@ package final class ProxyOrchestrator {
         // resolver files on this: those files hand clients the intercept IP,
         // so writing them while nothing accepts there strands every
         // intercepted domain behind a refused connection.
+        guard dnsLifecycle.isCurrent(epoch) else { return }
         mutateSnapshot {
             $0.bindings.transparentProxyHost = ip
             $0.bindings.transparentProxyPort = self.transparentProxy.listeningPort

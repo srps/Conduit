@@ -51,6 +51,53 @@ extension ControlLifecycleEvent {
             self = .terminationDrainExpired(deadlineMilliseconds: expired.deadlineMilliseconds)
         case .versionChanged(let changed):
             self = .versionChanged(from: changed.from, to: changed.to)
+        case .moduleSettled(let settled):
+            self = .moduleSettled(settlement: ControlLifecycleSettlement(settled.settlement), group: settled.group)
+        }
+    }
+}
+
+extension ControlLifecycleSettlement {
+    package init(_ settlement: LifecycleModuleSettlement) {
+        switch settlement {
+        case .explicit(let module, let result):
+            self = .explicit(ControlModule(module), ControlLifecycleModuleResult(result))
+        case .conditionalDNS(let result):
+            self = .conditionalDNS(ControlLifecycleConditionalDNSResult(result))
+        }
+    }
+}
+
+extension ControlModule {
+    package init(_ module: LifecycleModule) {
+        switch module {
+        case .proxy: self = .proxy
+        case .dns: self = .dns
+        case .tunnels: self = .tunnels
+        }
+    }
+}
+
+extension ControlLifecycleModuleResult {
+    package init(_ result: LifecycleModuleStartResult) {
+        switch result {
+        case .started: self = .started
+        case .notConfigured: self = .notConfigured
+        case .failed: self = .failed
+        case .superseded: self = .superseded
+        }
+    }
+}
+
+extension ControlLifecycleConditionalDNSResult {
+    package init(_ result: LifecycleConditionalDNSResult) {
+        switch result {
+        case .started: self = .started
+        case .fenced: self = .fenced
+        case .notConfigured: self = .notConfigured
+        case .alreadyActive: self = .alreadyActive
+        case .superseded: self = .superseded
+        case .failed: self = .failed
         }
     }
 }
@@ -64,6 +111,8 @@ extension ControlLifecycleOperation {
         case .dnsStop: self = .dnsStop
         case .runtimeStart: self = .runtimeStart
         case .runtimeStop: self = .runtimeStop
+        case .tunnelsStart: self = .tunnelsStart
+        case .tunnelsStop: self = .tunnelsStop
         }
     }
 }
@@ -137,6 +186,7 @@ extension ControlConfigWorkflowIntentPhase {
         switch phase {
         case .start: self = .start
         case .reload: self = .reload
+        case .stop: self = .stop
         }
     }
 }
@@ -216,6 +266,10 @@ extension ControlConfigWorkflowHoldReason {
         case .heldBehind: self = .heldBehind
         case .intentExhausted: self = .intentExhausted
         case .terminating: self = .terminating
+        case .inputReplaced: self = .inputReplaced
+        case .stopSaveOwed: self = .stopSaveOwed
+        case .storeBusy: self = .storeBusy
+        case .staleRevision: self = .staleRevision
         }
     }
 }

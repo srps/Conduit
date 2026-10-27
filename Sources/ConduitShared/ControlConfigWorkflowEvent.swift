@@ -25,6 +25,7 @@ package enum ControlConfigWorkflowObservationPhase: String, Codable, Sendable, E
 package enum ControlConfigWorkflowIntentPhase: String, Codable, Sendable, Equatable, CaseIterable {
     case start
     case reload
+    case stop
 }
 
 package enum ControlConfigWorkflowRefusal: Sendable, Equatable {
@@ -107,6 +108,10 @@ package enum ControlConfigWorkflowHoldReason: String, Codable, Sendable, Equatab
     case heldBehind = "held_behind"
     case intentExhausted = "intent_exhausted"
     case terminating
+    case inputReplaced = "input_replaced"
+    case stopSaveOwed = "stop_save_owed"
+    case storeBusy = "store_busy"
+    case staleRevision = "stale_revision"
 }
 
 package enum ControlConfigWorkflowEvent: Codable, Sendable, Equatable {
@@ -147,19 +152,24 @@ package enum ControlConfigWorkflowEvent: Codable, Sendable, Equatable {
         reason: ControlConfigWorkflowHoldReason
     ) -> Bool {
         switch reason {
-        case .stopFenced: input == .unit
+        case .stopFenced: phase != .stop && input == .unit
         case .heldBehind: phase == .start && input == .runtime
         case .commitFailed: phase == .start
         case .intentExhausted: phase == .start && input == .unit
-        case .startBlocking: input == .runtime
+        case .startBlocking: phase != .stop && input == .runtime
         case .uncommitted: phase == .reload && input == .unit
         case .terminating: phase == .start && input == .unit
+        case .inputReplaced: phase == .start && input == .unit
+        case .stopSaveOwed: phase == .start && input == .unit
+        case .storeBusy: (phase == .start && input == .unit) || (phase == .stop && input == .runtime)
+        case .staleRevision: phase == .start && input == .unit
         }
     }
 
-    /// The mirror of the domain's `ConfigurationWorkflowSuperseded.isValid`: a reload's floor is 0, and a start's is 1.
+    /// The mirror of the domain's `ConfigurationWorkflowSuperseded.isValid`: a reload's floor is 0, a start's is 1, and a stop is never
+    /// superseded.
     package static func isValidSuperseded(phase: ControlConfigWorkflowIntentPhase, generation: Int, current: Int) -> Bool {
-        (phase == .start ? generation >= 1 : generation >= 0) && current > generation
+        phase != .stop && (phase == .start ? generation >= 1 : generation >= 0) && current > generation
     }
 
     /// The stable event name, the same spelling the domain derives.

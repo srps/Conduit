@@ -30,10 +30,12 @@ package enum ConfigurationWorkflowObservationPhase: String, Codable, Sendable, E
     case reload
 }
 
-/// The phases that admit intent. A Start and a reload can each be held or superseded.
+/// The phases that admit intent. A Start and a reload can each be held or superseded. A Stop is never held or superseded as a whole: its
+/// fence holds at admission. Only the disable save a session DNS Stop owes can be held, when the store's one slot is busy.
 package enum ConfigurationWorkflowIntentPhase: String, Codable, Sendable, Equatable, CaseIterable {
     case start
     case reload
+    case stop
 }
 
 /// Why an observation was refused. Only the file-scoped cases name a file.
@@ -108,6 +110,17 @@ package enum ConfigurationWorkflowHoldReason: String, Codable, Sendable, Equatab
     case intentExhausted = "intent_exhausted"
     /// A terminal stop has latched, so no Start is admitted again in this process (the quit policy).
     case terminating
+    /// The saved input this Start captured at preparation no longer stands, so its remaining effects hold: a newer observation, write or
+    /// intent changed it, or a refused reload or a lost baseline left the store without the baselines its receipts name. It is not rebound
+    /// or retried (decision 0037).
+    case inputReplaced = "input_replaced"
+    /// DNS still owes a session Stop's disable save, which a facade Start may not displace, so the whole Start was refused at admission.
+    case stopSaveOwed = "stop_save_owed"
+    /// Another operation held the store's one slot when this Start's preparation began, so it captured no input and wrote nothing.
+    case storeBusy = "store_busy"
+    /// A lifecycle revision the request named moved since its caller observed it, so the whole request was refused at admission before any
+    /// persistence or intent change (decision 0035).
+    case staleRevision = "stale_revision"
 }
 
 /// `config.workflow.observed`: an open or a reload observed the inputs, and the store adopted or refused the observation.
@@ -138,21 +151,26 @@ package struct ConfigurationWorkflowHeld: Equatable, Sendable {
     package let input: ConfigurationWorkflowHeldInput
     package let reason: ConfigurationWorkflowHoldReason
 
-    /// The combinations the workflow produces. A Stop fence holds the whole unit in either phase, a held runtime write belongs to a
-    /// Start, and an exhausted generation refuses a Start for the whole unit.
+    /// The combinations the workflow produces. A Stop fence holds the whole unit in a Start or a reload, a held runtime write belongs to
+    /// a Start, and an exhausted generation refuses a Start for the whole unit. The Stop phase holds only the runtime-only disable save a
+    /// busy store slot kept from running.
     package static func isValid(
         phase: ConfigurationWorkflowIntentPhase,
         input: ConfigurationWorkflowHeldInput,
         reason: ConfigurationWorkflowHoldReason
     ) -> Bool {
         switch reason {
-        case .stopFenced: input == .unit
+        case .stopFenced: phase != .stop && input == .unit
         case .heldBehind: phase == .start && input == .runtime
         case .commitFailed: phase == .start
         case .intentExhausted: phase == .start && input == .unit
-        case .startBlocking: input == .runtime
+        case .startBlocking: phase != .stop && input == .runtime
         case .uncommitted: phase == .reload && input == .unit
         case .terminating: phase == .start && input == .unit
+        case .inputReplaced: phase == .start && input == .unit
+        case .stopSaveOwed: phase == .start && input == .unit
+        case .storeBusy: (phase == .start && input == .unit) || (phase == .stop && input == .runtime)
+        case .staleRevision: phase == .start && input == .unit
         }
     }
 
@@ -173,8 +191,9 @@ package struct ConfigurationWorkflowSuperseded: Equatable, Sendable {
     /// The workflow's latest generation when the operation stopped. Strictly newer than `generation`.
     package let current: Int
 
+    /// A Stop is never superseded.
     package static func isValid(phase: ConfigurationWorkflowIntentPhase, generation: Int, current: Int) -> Bool {
-        (phase == .start ? generation >= 1 : generation >= 0) && current > generation
+        phase != .stop && (phase == .start ? generation >= 1 : generation >= 0) && current > generation
     }
 
     package init(phase: ConfigurationWorkflowIntentPhase, generation: Int, current: Int) {

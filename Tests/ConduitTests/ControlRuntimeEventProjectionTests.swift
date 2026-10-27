@@ -94,6 +94,12 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
             #"{"timestamp":1700000000,"kind":"lifecycle","event":"lifecycle.superseded","typed":{"family":"config","lifecycle":{}}}"#,
             // a version change missing its `to`
             #"{"timestamp":1700000000,"kind":"lifecycle","event":"lifecycle.version_changed","typed":{"family":"lifecycle","lifecycle":{"type":"version_changed","from":"0.4.1"}}}"#,
+            // a companion on a module other than DNS
+            #"{"timestamp":1700000000,"kind":"lifecycle","event":"lifecycle.module_settled","detail":"module=proxy source=conditional outcome=started group=1","typed":{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"proxy","source":"conditional","outcome":"started","group":1}}}"#,
+            // an explicit member with a companion's result
+            #"{"timestamp":1700000000,"kind":"lifecycle","event":"lifecycle.module_settled","detail":"module=tunnels source=explicit outcome=already_active group=1","typed":{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"tunnels","source":"explicit","outcome":"already_active","group":1}}}"#,
+            // a settlement in group zero
+            #"{"timestamp":1700000000,"kind":"lifecycle","event":"lifecycle.module_settled","detail":"module=dns source=explicit outcome=failed group=0","typed":{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"dns","source":"explicit","outcome":"failed","group":0}}}"#,
         ]
         for line in rejected {
             XCTAssertThrowsError(try decoder.decode(ControlRuntimeEvent.self, from: Data(line.utf8)), line)
@@ -124,6 +130,32 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
                 ControlLifecycleEvent.isValidTerminationDrain(deadlineMilliseconds: deadline)
             )
         }
+    }
+
+    /// Every spellable settlement projects to the wire value with the same module, source and outcome spelling, and the two copies of
+    /// the settlement rule agree on it at every group in a small grid.
+    func testEverySettlementProjectsAndTheWireAndTheDomainAgreeOnItsRule() throws {
+        for settlement in LifecycleModuleSettlement.everySpelling {
+            let wire = ControlLifecycleSettlement(settlement)
+            XCTAssertEqual(wire.module.rawValue, settlement.module.rawValue)
+            XCTAssertEqual(wire.source, settlement.source)
+            XCTAssertEqual(wire.outcome, settlement.outcome)
+            for group in -1...2 {
+                XCTAssertEqual(
+                    LifecycleModuleSettled.isValid(settlement: settlement, group: group),
+                    ControlLifecycleEvent.isValidModuleSettled(settlement: wire, group: group),
+                    "\(settlement) group \(group)"
+                )
+            }
+            guard LifecycleModuleSettled.isValid(settlement: settlement, group: 1) else { continue }
+            let projected = ControlRuntimeEvent(RuntimeEvent(payload: .lifecycle(.moduleSettled(
+                LifecycleModuleSettled(settlement: settlement, group: 1)
+            ))))
+            XCTAssertEqual(projected.typed, .lifecycle(.moduleSettled(settlement: wire, group: 1)))
+            XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeEvent.self, from: JSONEncoder().encode(projected)), projected)
+        }
+        XCTAssertEqual(ControlLifecycleModuleResult.allCases.map(\.rawValue), LifecycleModuleStartResult.allCases.map(\.rawValue))
+        XCTAssertEqual(ControlLifecycleConditionalDNSResult.allCases.map(\.rawValue), LifecycleConditionalDNSResult.allCases.map(\.rawValue))
     }
 
     /// The version grammar and the pair rule are a second copy on each side. Pairs over a grid of boundaries,
@@ -163,7 +195,7 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
     func testTheKnownVocabularyIsWhatTheWireWrites() throws {
         XCTAssertEqual(
             ControlLifecycleEvent.knownWireTypes,
-            ["superseded", "coalesced", "termination_drain_expired", "version_changed"]
+            ["superseded", "coalesced", "termination_drain_expired", "version_changed", "module_settled"]
         )
         XCTAssertEqual(ControlLifecycleEvent.knownEventNames, Set(LifecycleEventName.allCases.map(\.rawValue)))
         let values: [ControlLifecycleEvent] = [
@@ -171,6 +203,8 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
             .coalesced(operation: .dnsStop, joined: 2),
             .terminationDrainExpired(deadlineMilliseconds: 200),
             .versionChanged(from: "0.4.1", to: "0.5.0"),
+            .moduleSettled(settlement: .explicit(.tunnels, .failed), group: 3),
+            .moduleSettled(settlement: .conditionalDNS(.fenced), group: 1),
         ]
         for value in values {
             XCTAssertTrue(ControlLifecycleEvent.knownEventNames.contains(value.name), value.name)
@@ -191,7 +225,9 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
             .coalesced(LifecycleCoalesced(operation: .dnsStop, joined: 2)),
             .terminationDrainExpired(LifecycleTerminationDrainExpired(deadlineMilliseconds: 200)),
             .versionChanged(LifecycleVersionChanged(from: "0.4.1", to: "0.5.8-rc.1+7")),
-        ]
+        ] + LifecycleModuleSettlement.everySpelling.filter { LifecycleModuleSettled.isValid(settlement: $0, group: 2) }.map {
+            LifecycleEvent.moduleSettled(LifecycleModuleSettled(settlement: $0, group: 2))
+        }
         for value in values {
             let domain = RuntimeEvent(payload: .lifecycle(value))
             let projected = ControlRuntimeEvent(domain)
@@ -297,6 +333,10 @@ final class ControlRuntimeEventProjectionTests: XCTestCase {
         XCTAssertThrowsError(try encoder.encode(ControlLifecycleEvent.versionChanged(
             from: "0.4.1", to: String(repeating: "a", count: ControlLifecycleEvent.maximumVersionBytes + 1)
         )), "a version one byte past the bound")
+        XCTAssertThrowsError(try encoder.encode(ControlLifecycleEvent.moduleSettled(settlement: .explicit(.dns, .started), group: 0)),
+                             "a settlement in group zero")
+        XCTAssertThrowsError(try encoder.encode(ControlLifecycleEvent.moduleSettled(settlement: .explicit(.proxy, .notConfigured), group: 1)),
+                             "a proxy member that is not configured")
         let contradictory = ControlRuntimeEvent(
             timestamp: Date(timeIntervalSince1970: 1_700_000_000),
             kind: "lifecycle",

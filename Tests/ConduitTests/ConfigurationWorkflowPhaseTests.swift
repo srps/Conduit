@@ -106,7 +106,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
         let queue = PlatformWork(label: "test.workflow-phase.queue")
         let workflow = workflow(session, files: files, work: queue)
         _ = try await workflow.open()
-        let ticket = try XCTUnwrap(workflow.admitStart())
+        let ticket = try workflow.admitStart().get()
 
         // A blocked job holds the queue. The commit queues behind it and waits there until the blocker is released. Each step is observed
         // rather than timed: the blocker has started, and the workflow is in flight, which means it passed its admission and awaits the commit.
@@ -152,7 +152,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
         let files = ParkingFiles()
         let workflow = workflow(session, files: files, work: PlatformWork(label: "test.workflow-phase"))
         _ = try await workflow.open()
-        let ticket = try XCTUnwrap(workflow.admitStart())
+        let ticket = try workflow.admitStart().get()
 
         files.arm(.replace)
         let prepared = Task { await workflow.prepareStart(ticket) }
@@ -187,7 +187,7 @@ final class ConfigurationWorkflowPhaseTests: XCTestCase {
         let reload = Task { await workflow.reload(capturedAt: captured) }
         let parked = await files.waitUntilParked()
         XCTAssertTrue(parked, "the reload's read was reached")
-        _ = try XCTUnwrap(workflow.admitStart())
+        _ = try workflow.admitStart().get()
         files.release()
         let outcome = await reload.value
 

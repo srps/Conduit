@@ -29,6 +29,11 @@ final class ConfigurationWorkflowEventTests: XCTestCase {
         .held(ConfigurationWorkflowHeld(phase: .start, input: .platform, reason: .commitFailed)),
         .held(ConfigurationWorkflowHeld(phase: .reload, input: .runtime, reason: .startBlocking)),
         .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .uncommitted)),
+        .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .inputReplaced)),
+        .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .stopSaveOwed)),
+        .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .storeBusy)),
+        .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .staleRevision)),
+        .held(ConfigurationWorkflowHeld(phase: .stop, input: .runtime, reason: .storeBusy)),
         .superseded(ConfigurationWorkflowSuperseded(phase: .start, generation: 3, current: 4)),
     ]
 
@@ -90,6 +95,21 @@ final class ConfigurationWorkflowEventTests: XCTestCase {
             #"{"type":"held","phase":"reload","component":"platform","reason":"start_blocking"}"#,
             #"{"type":"held","phase":"start","component":"unit","reason":"uncommitted"}"#,
             #"{"type":"held","phase":"reload","component":"unit","reason":"terminating"}"#,
+            // A replaced capture, an owed Stop save and a busy store hold only a Start's whole unit.
+            #"{"type":"held","phase":"reload","component":"unit","reason":"input_replaced"}"#,
+            #"{"type":"held","phase":"start","component":"runtime","reason":"input_replaced"}"#,
+            #"{"type":"held","phase":"reload","component":"unit","reason":"stop_save_owed"}"#,
+            #"{"type":"held","phase":"start","component":"platform","reason":"stop_save_owed"}"#,
+            #"{"type":"held","phase":"reload","component":"unit","reason":"store_busy"}"#,
+            #"{"type":"held","phase":"start","component":"runtime","reason":"store_busy"}"#,
+            // The Stop phase holds only the runtime disable save a busy store kept from running.
+            #"{"type":"held","phase":"stop","component":"unit","reason":"store_busy"}"#,
+            #"{"type":"held","phase":"stop","component":"platform","reason":"store_busy"}"#,
+            #"{"type":"held","phase":"stop","component":"unit","reason":"stop_fenced"}"#,
+            #"{"type":"held","phase":"stop","component":"runtime","reason":"start_blocking"}"#,
+            #"{"type":"held","phase":"stop","component":"runtime","reason":"commit_failed"}"#,
+            // A Stop is never superseded.
+            #"{"type":"superseded","phase":"stop","generation":3,"current":4}"#,
             // A superseded generation is older than the latest.
             #"{"type":"superseded","phase":"start","generation":3,"current":3}"#,
             // An unknown write cause is refused.
@@ -142,5 +162,22 @@ final class ConfigurationWorkflowEventTests: XCTestCase {
         XCTAssertFalse(ConfigurationWorkflowSuperseded.isValid(phase: .start, generation: 0, current: 1))
         XCTAssertTrue(ConfigurationWorkflowSuperseded.isValid(phase: .reload, generation: 0, current: 1))
         XCTAssertFalse(ConfigurationWorkflowSuperseded.isValid(phase: .reload, generation: 2, current: 2))
+        XCTAssertTrue(ConfigurationWorkflowHeld.isValid(phase: .stop, input: .runtime, reason: .storeBusy))
+        XCTAssertFalse(ConfigurationWorkflowSuperseded.isValid(phase: .stop, generation: 1, current: 2))
+        // The wire admits exactly the domain's combinations, every phase, input and reason included.
+        for phase in ConfigurationWorkflowIntentPhase.allCases {
+            for input in ConfigurationWorkflowHeldInput.allCases {
+                for reason in ConfigurationWorkflowHoldReason.allCases {
+                    XCTAssertEqual(
+                        ControlConfigWorkflowEvent.isValidHeld(
+                            phase: ControlConfigWorkflowIntentPhase(phase), input: ControlConfigWorkflowHeldInput(input),
+                            reason: ControlConfigWorkflowHoldReason(reason)
+                        ),
+                        ConfigurationWorkflowHeld.isValid(phase: phase, input: input, reason: reason),
+                        "\(phase) \(input) \(reason)"
+                    )
+                }
+            }
+        }
     }
 }

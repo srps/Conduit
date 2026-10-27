@@ -27,4 +27,18 @@ extension Array where Element == RuntimeEvent {
             return coalesced
         }
     }
+
+    var settledValues: [LifecycleModuleSettled] {
+        lifecycleValues.compactMap { value -> LifecycleModuleSettled? in
+            guard case .moduleSettled(let settled) = value else { return nil }
+            return settled
+        }
+    }
+}
+
+extension LifecycleModuleSettlement {
+    /// Every settlement the closed sets can spell, valid or not: each module with each member result, and each companion result.
+    static let everySpelling: [LifecycleModuleSettlement] =
+        LifecycleModule.allCases.flatMap { module in LifecycleModuleStartResult.allCases.map { .explicit(module, $0) } }
+        + LifecycleConditionalDNSResult.allCases.map { .conditionalDNS($0) }
 }

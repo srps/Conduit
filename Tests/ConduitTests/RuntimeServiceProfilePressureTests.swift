@@ -404,8 +404,11 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
             let request = try encoded(900 + n, call, requestCap: limits.maxRequestBytes)
             launches.append(launch(transport, request, expecting: .admitted, replyLimits: replyLimits, deadline: deadline, tally: dns))
         }
-        let reserved = await awaitState { transport.lanes.inFlight(.stop(.dns)) == stopLane }
-        XCTAssertTrue(reserved, "the dns Stop lane holds exactly its own reservations")
+        // The excess attempt must reach the full lane and be refused before anything drains, or it could find a released reservation.
+        let reserved = await awaitState {
+            transport.lanes.inFlight(.stop(.dns)) == stopLane && dns.laneBusy == attempts - stopLane
+        }
+        XCTAssertTrue(reserved, "the dns Stop lane holds exactly its own reservations, and refuses the one beyond them")
 
         let others = Tally()
         for (index, module) in [ControlModule.proxy, .tunnels].enumerated() {

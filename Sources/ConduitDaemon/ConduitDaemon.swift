@@ -161,10 +161,9 @@ enum ConduitDaemon {
 
         if args.contains("--exit-after-ready") {
             if args.contains("--start-runtime") {
-                await host.stopRuntime()
-                // The non-terminal stop only submits the stopped state. The readiness flush above does not cover it,
-                // so the process boundary confirms it here, before the process returns.
-                await host.flushEvents()
+                // The process quit: the saved launch intent stays, and the shutdown confirms its own stopped state's flush
+                // before the process returns. It never exits, so `main` returning ends the process.
+                await host.shutdown()
             }
             logger.flush()
             return

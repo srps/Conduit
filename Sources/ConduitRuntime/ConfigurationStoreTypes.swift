@@ -111,8 +111,9 @@ struct ConfigurationWriteClaim: Sendable {
     let isCurrent: @Sendable () -> Bool
 }
 
-/// Why a runtime rewrite was held so that legacy preference values the runtime file carries are not dropped unseen (decision 0026). The
-/// preferences sidecar is the only file the guard checks. Each case names a closed state, and none carries a value.
+/// Why a runtime rewrite was held so that legacy sidecar values the runtime file carries are not dropped unseen (decision 0026). The coupled
+/// commit checks the preferences sidecar, since it verifies the platform file itself first. The DNS lifecycle commit, which writes the runtime
+/// file alone, checks every carried sidecar. Each case names a closed state, and none carries a value.
 enum ConfigurationPreservationHold: Equatable, Sendable {
     /// The sidecar is absent, so the runtime file's legacy values have no saved home. Saving the preferences first, then retrying, is the path.
     case sidecarAbsent
@@ -164,6 +165,15 @@ struct VerifiedRuntimePlatformInput: Equatable, Sendable {
     let platform: PlatformIntegrationConfig
     let runtimeReceipt: ConfigurationReceipt
     let platformReceipt: ConfigurationReceipt
+
+    /// Whether `other` is this same pair at the same store versions, whichever operation verified it. A receipt's context names the
+    /// operation, so two Starts that captured one unchanged pair never have equal receipts.
+    func isSamePair(as other: VerifiedRuntimePlatformInput) -> Bool {
+        runtime == other.runtime && platform == other.platform
+            && [(runtimeReceipt, other.runtimeReceipt), (platformReceipt, other.platformReceipt)].allSatisfy { mine, theirs in
+                mine.storeIncarnation == theirs.storeIncarnation && mine.version == theirs.version
+            }
+    }
 }
 
 /// The outcomes of one coupled runtime and platform commit. Each write is independent; the platform write is first.
@@ -189,6 +199,13 @@ extension ConfigurationWriteOutcome {
 struct PreferencesCommitResult: Equatable, Sendable {
     let context: ConfigurationOperationContext
     let preferences: ConfigurationWriteOutcome
+}
+
+/// The runtime file's fact from a DNS lifecycle commit, the Stop exception of decision 0015. It names no platform outcome and no
+/// verified pair: the commit touches the runtime file alone and authorizes no apply.
+struct DNSLifecycleCommitResult: Equatable, Sendable {
+    let context: ConfigurationOperationContext
+    let runtime: ConfigurationWriteOutcome
 }
 
 /// The outcomes of one verification. A component that was not requested has no outcome.

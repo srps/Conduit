@@ -44,15 +44,14 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
     // MARK: - Bounded model
 
-    /// The reference: a generation that advances on each Start and each Stop, a fence that a Start clears and a Stop sets, and a
-    /// ticket that is current only while its generation is the latest and no fence is in force.
+    /// The reference: a generation that advances on each Start and each Stop, a fence that a Stop sets and only an authorized Start
+    /// clears (decision 0035), so no admission alone clears it, and a ticket that is current only while its generation is the latest.
     private struct Oracle {
         var generation = 0
         var fenced = false
 
         mutating func start() {
             generation += 1
-            fenced = false
         }
 
         mutating func stop() {
@@ -61,7 +60,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         }
 
         func isCurrent(_ ticketGeneration: Int) -> Bool {
-            ticketGeneration == generation && !fenced
+            ticketGeneration == generation
         }
     }
 
@@ -82,7 +81,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
                 switch operation {
                 case .start:
                     oracle.start()
-                    guard let ticket = workflow.admitStart() else {
+                    guard case .success(let ticket) = workflow.admitStart() else {
                         return XCTFail("\(trace): a start was refused below the maximum generation")
                     }
                     starts.append(ticket)
@@ -94,9 +93,8 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
                     captures.append(workflow.generation)
                 case .claim:
                     guard let ticket = starts.last else { continue }
-                    let claim = workflow.writeClaim(for: ticket)
+                    // The store's write claim is built from this same admission check at the capture (`prepareStart`).
                     XCTAssertEqual(workflow.isCurrent(ticket), oracle.isCurrent(ticket.generation), "\(trace)")
-                    XCTAssertEqual(claim.isCurrent(), oracle.isCurrent(ticket.generation), "\(trace)")
                 }
                 XCTAssertEqual(workflow.generation, oracle.generation, "\(trace)")
                 XCTAssertEqual(workflow.stopFenced, oracle.fenced, "\(trace)")
@@ -142,11 +140,12 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         ])
         XCTAssertFalse(FileManager.default.fileExists(atPath: session.environment.configFile.path), "a reload writes nothing")
 
-        let ticket = try XCTUnwrap(workflow.admitStart())
+        let ticket = try workflow.admitStart().get()
         let started = await workflow.prepareStart(ticket)
-        guard case .ready(let verified) = started.preparation else {
+        guard case .ready(let prepared) = started.preparation else {
             return XCTFail("a Start with missing defaults verifies after committing them, got \(started.preparation)")
         }
+        let verified = prepared.input
         XCTAssertEqual(verified.runtime, opened.values.runtime)
         XCTAssertEqual(verified.platform, opened.values.platform)
         XCTAssertTrue(FileManager.default.fileExists(atPath: session.environment.configFile.path), "the default is persisted before the start")
@@ -169,7 +168,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
         let captured = workflow.generation
         XCTAssertEqual(captured, 0)
-        _ = try XCTUnwrap(workflow.admitStart())
+        _ = try workflow.admitStart().get()
         let reload = await workflow.reload(capturedAt: captured)
 
         XCTAssertNil(reload.applied)
@@ -208,10 +207,18 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
 
         let failed = workflow(session, generation: Int.max - 1)
         _ = try await failed.open()
-        let last = try XCTUnwrap(failed.admitStart())
+        let last = try failed.admitStart().get()
         XCTAssertEqual(last.generation, Int.max)
-        XCTAssertNil(failed.admitStart(), "no generation is left for another Start")
+        XCTAssertEqual(failed.admitStart(), .failure(.intentExhausted), "no generation is left for another Start")
+        XCTAssertEqual(failed.admissionEvents(.intentExhausted), [
+            .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .intentExhausted)),
+        ])
         XCTAssertTrue(failed.isCurrent(last), "a refused Start changes neither the generation nor the fence")
+        guard case .ready(let ready) = await failed.prepareStart(last).preparation else {
+            return XCTFail("the last Start prepares its defaults")
+        }
+        let committed = try Data(contentsOf: session.environment.configFile)
+        XCTAssertTrue(failed.authorize(ready), "the host fails a Start only after authorizing it")
         failed.endFailedStart(last)
         XCTAssertEqual(failed.generation, Int.max)
         XCTAssertTrue(failed.stopFenced, "ending a failed Start at the maximum fences in place of advancing")
@@ -220,17 +227,149 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         let prepared = await failed.prepareStart(last)
         XCTAssertEqual(prepared.preparation.isSuperseded, true)
         XCTAssertEqual(prepared.events, [fenceHold])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: session.environment.configFile.path), "a fenced Start commits nothing")
+        XCTAssertEqual(try Data(contentsOf: session.environment.configFile), committed, "a fenced Start commits nothing")
 
         let stopped = workflow(session, generation: Int.max)
         _ = try await stopped.open()
-        XCTAssertNil(stopped.admitStart())
+        XCTAssertEqual(stopped.admitStart(), .failure(.intentExhausted))
         XCTAssertFalse(stopped.stopFenced, "an exhausted Start leaves the fence where it was")
         XCTAssertEqual(stopped.admitStop(), Int.max, "a Stop at the maximum fences without advancing")
         XCTAssertTrue(stopped.stopFenced)
         let reload = await stopped.reload(capturedAt: stopped.generation)
         XCTAssertNil(reload.applied)
         XCTAssertEqual(reload.events.last, .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .stopFenced)))
+    }
+
+    /// Decision 0037: a saved-input Start captures the store's pair at preparation, not admission. A reload of valid B while the Start is
+    /// queued supplies B, and B's observed bytes are verified, never written over. A reload of B after the capture holds the prepared Start:
+    /// it is neither authorized nor rebound, and its cause is the replaced input.
+    func testAFacadeStartNeverWritesOverAReloadObservedDNSValue() async throws {
+        let (session, directory) = try scratchSession()
+        defer {
+            releaseScratchStateRoot(session)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let workflow = workflow(session)
+        _ = try await workflow.open()
+        let first = try workflow.admitStart().get()
+        guard case .ready(let committed) = await workflow.prepareStart(first).preparation else {
+            return XCTFail("the defaults commit verifies")
+        }
+        XCTAssertTrue(workflow.authorize(committed))
+        workflow.finishStart(first, succeeded: true)
+
+        // B arrives before preparation: the queued facade uses it.
+        let facade = try workflow.admitStart().get()
+        XCTAssertNil(facade.lifecycle.dnsStaged, "a queued facade carries no configuration value")
+        let external = try externalEdit(session, dnsForwarderEnabled: true, profileName: "Edited B")
+        let reload = await workflow.reload(capturedAt: workflow.generation)
+        XCTAssertEqual(reload.applied?.runtime.dnsForwarderEnabled, true, "the reload adopted the verified DNS on")
+
+        let prepared = await workflow.prepareStart(facade)
+        guard case .ready(let ready) = prepared.preparation else {
+            return XCTFail("a reload before the capture supplies the saved input, got \(prepared.preparation)")
+        }
+        XCTAssertEqual(ready.input.runtime.dnsForwarderEnabled, true, "the capture used B's DNS on")
+        XCTAssertEqual(ready.input.runtime.profileName, "Edited B", "and the rest of B")
+        XCTAssertEqual(ready.ticket.lifecycle.dnsStaged, true)
+        XCTAssertEqual(try Data(contentsOf: session.environment.configFile), external, "the observed file is not written over")
+        XCTAssertTrue(workflow.isCurrent(ready))
+
+        // C replaces the captured pair before the effects: the prepared Start holds and is not rebound.
+        _ = try externalEdit(session, dnsForwarderEnabled: true, profileName: "Edited C")
+        let later = await workflow.reload(capturedAt: workflow.generation)
+        XCTAssertEqual(later.applied?.runtime.profileName, "Edited C", "the newer observation is adopted as the store's fact")
+        XCTAssertFalse(workflow.isCurrent(ready), "it replaced the pair the Start captured")
+        XCTAssertTrue(workflow.isCurrent(ready.ticket), "no newer admission came, so only the input moved")
+        XCTAssertEqual(workflow.supersession(of: ready.ticket), [
+            .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .inputReplaced)),
+        ])
+        XCTAssertFalse(workflow.authorize(ready), "the replaced input authorizes nothing")
+        workflow.retire(ready.ticket)
+        XCTAssertFalse(workflow.isCurrent(ready.ticket))
+    }
+
+    /// A reload that observes the captured pair's unchanged bytes keeps the store's versions, so it replaces nothing.
+    func testAnUnchangedReloadAfterTheCaptureKeepsThePreparedStart() async throws {
+        let (session, directory) = try scratchSession()
+        defer {
+            releaseScratchStateRoot(session)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let workflow = workflow(session)
+        _ = try await workflow.open()
+        let ticket = try workflow.admitStart().get()
+        guard case .ready(let ready) = await workflow.prepareStart(ticket).preparation else {
+            return XCTFail("the defaults commit verifies")
+        }
+        _ = await workflow.reload(capturedAt: workflow.generation)
+        XCTAssertTrue(workflow.isCurrent(ready), "an unchanged observation keeps the captured pair")
+        XCTAssertTrue(workflow.authorize(ready))
+    }
+
+    /// A session DNS Stop fences at once and owes its disable. A facade Start is refused whole while it is owed. The save goes through the
+    /// runtime-only lifecycle commit and ends the obligation only once verified; the next facade Start then captures the saved false.
+    func testASessionDNSStopOwesItsDisableUntilTheRuntimeOnlySaveVerifies() async throws {
+        let (session, directory) = try scratchSession()
+        defer {
+            releaseScratchStateRoot(session)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let workflow = workflow(session)
+        _ = try await workflow.open()
+        _ = try externalEdit(session, dnsForwarderEnabled: true, profileName: "DNS on")
+        _ = await workflow.reload(capturedAt: workflow.generation)
+        let none = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(none.save, .notOwed)
+
+        let stop = workflow.admitStop([.dns], reason: .session)
+        XCTAssertEqual(workflow.generation, stop)
+        XCTAssertEqual(workflow.admitStart(), .failure(.stopSaveOwed), "the facade may not displace the owed save")
+        XCTAssertEqual(workflow.generation, stop, "and its refusal changes nothing")
+
+        let saved = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(saved.save, .saved)
+        XCTAssertEqual(saved.events, [.committed(ConfigurationWorkflowCommitted(file: .runtime, write: .persisted(reportedError: false)))])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: session.environment.platformConfigFile.path), "no sidecar is written")
+        let after = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(after.save, .notOwed, "the verified save ended the obligation")
+
+        let ticket = try workflow.admitStart().get()
+        guard case .ready(let ready) = await workflow.prepareStart(ticket).preparation else {
+            return XCTFail("the facade Start prepares once the save verified")
+        }
+        XCTAssertFalse(ready.input.runtime.dnsForwarderEnabled, "it captures the saved disable")
+        XCTAssertEqual(ready.input.runtime.profileName, "DNS on", "and keeps the rest of the runtime file")
+    }
+
+    /// A runtime file changed outside the store since its baseline conflicts: the disable is not written over it and stays owed.
+    func testAnOwedDNSDisableIsNotWrittenOverAChangedFile() async throws {
+        let (session, directory) = try scratchSession()
+        defer {
+            releaseScratchStateRoot(session)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        let workflow = workflow(session)
+        _ = try await workflow.open()
+        _ = try externalEdit(session, dnsForwarderEnabled: true, profileName: "DNS on")
+        _ = await workflow.reload(capturedAt: workflow.generation)
+        workflow.admitStop([.dns], reason: .session)
+        let external = try externalEdit(session, dnsForwarderEnabled: true, profileName: "Edited elsewhere")
+
+        let attempt = await workflow.saveOwedDNSStop()
+        XCTAssertEqual(attempt.save, .owed)
+        XCTAssertEqual(attempt.events, [.committed(ConfigurationWorkflowCommitted(file: .runtime, write: .conflict))])
+        XCTAssertEqual(try Data(contentsOf: session.environment.configFile), external, "the changed file is kept")
+        XCTAssertEqual(workflow.admitStart(), .failure(.stopSaveOwed), "the disable is still owed")
+    }
+
+    private func externalEdit(_ session: StateRootSession, dnsForwarderEnabled: Bool, profileName: String) throws -> Data {
+        var edited = GenericDefaults.shared.makeConfig()
+        edited.dnsForwarderEnabled = dnsForwarderEnabled
+        edited.profileName = profileName
+        let external = try ProxyConfigPersistence.stagedFileData(for: edited)
+        try external.write(to: session.environment.configFile)
+        return external
     }
 
     /// A Start whose preparation resumes after a newer Stop stops without preparing anything, and says why.
@@ -243,7 +382,7 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
         let workflow = workflow(session)
         _ = try await workflow.open()
 
-        let ticket = try XCTUnwrap(workflow.admitStart())
+        let ticket = try workflow.admitStart().get()
         workflow.admitStop()
         let started = await workflow.prepareStart(ticket)
 

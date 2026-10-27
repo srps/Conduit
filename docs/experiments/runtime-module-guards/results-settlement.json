@@ -1,0 +1,295 @@
+{
+  "head": "a7f4366779ddca8e307afeaf0b2e515a8367aa05",
+  "test_sha256": {
+    "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift": "663890f493f656de0ff742c5720de2db292e97002c12f6cb35716241557aeee7",
+    "Tests/ConduitTests/RuntimeHostInteractiveTests.swift": "f725a1aacd33844cdfc284498a2f90fa3f4d70a8e387d2be1af67cdf7e2811cd",
+    "Tests/ConduitTests/RuntimeModuleIntentTests.swift": "f9d401895b8aa70d0c8a90cfc4e33f359da17f128416ad120a631009bff94ebf"
+  },
+  "source_sha256": {
+    "Sources/ConduitRuntime/RuntimeModuleIntent.swift": "903ece09cfe0f7604c07607e15b5f11971ed4499f3f71b417613b3719bef53f0",
+    "Sources/ConduitRuntime/RuntimeHostLifecycle.swift": "dbe0171de7a4295dba888328b29cba7c6d858f4f1c829ed4bfd7d7949f64a0dd",
+    "Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift": "2064762c14b312ce8ee92219b74f1ec4bb838bc2c9fa6a832185daec635a2290",
+    "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift": "903f2ad7da27b4758b7587eb1214b5a773529cc1aafdf7cd7e74a84ffe68f076",
+    "Sources/ProxyKernel/Proxy/PhysicalLifecycle.swift": "96227dcab76986e089777b2df2716c7ce5bc437cd958566f272265c546242d71"
+  },
+  "restored_exactly": true,
+  "checks": [
+    {
+      "invalid_markers": [],
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 45.08,
+      "assertion_count": 0,
+      "assertions": []
+    },
+    {
+      "invalid_markers": [],
+      "name": "stale-whole-request",
+      "exit": 1,
+      "seconds": 8.39,
+      "assertion_count": 5,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1052: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : failed - a stale DNS revision refuses the combined request",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1056: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : XCTAssertEqual failed: (\"PrivateModuleSlots<Int>(proxy: 2, dns: 1, tunnels: 0)\") is not equal to (\"PrivateModuleSlots<Int>(proxy: 0, dns: 1, tunnels: 0)\") - the refusal changes no revision",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1058: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : XCTAssertNotEqual failed: (\"running\") is equal to (\"running\") - and starts nothing",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1059: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : XCTAssertFalse failed",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1060: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : XCTAssertTrue failed"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "borrow-pending-enable",
+      "exit": 1,
+      "seconds": 6.99,
+      "assertion_count": 8,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1255: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable] : XCTAssertFalse failed - its input keeps DNS's durable false",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1256: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable] : XCTAssertEqual failed: (\"Optional(true)\") is not equal to (\"Optional(false)\") - and so does the file",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1259: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable] : XCTAssertFalse failed - its companion has no enable to act on",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1260: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable] : XCTAssertFalse failed - and the retired DNS Start left none persisted",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:384: error: -[ConduitTests.RuntimeModuleIntentTests testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable] : XCTAssertEqual failed: (\"Optional(true)\") is not equal to (\"Optional(false)\") - the proxy request stages the durable value",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:390: error: -[ConduitTests.RuntimeModuleIntentTests testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable] : XCTAssertFalse failed - no companion acts on the held Start's enable",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:391: error: -[ConduitTests.RuntimeModuleIntentTests testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable] : XCTAssertFalse failed - and the held Start left no persisted enable",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:392: error: -[ConduitTests.RuntimeModuleIntentTests testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable] : XCTAssertFalse failed"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "unfinished-grant-retirement",
+      "exit": 1,
+      "seconds": 16.14,
+      "assertion_count": 4,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:621: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyStopWhileTheWholeHostStartAppliesHoldsItWhole] : XCTAssertFalse failed - dns keeps no grant from the held group",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:621: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyStopWhileTheWholeHostStartAppliesHoldsItWhole] : XCTAssertFalse failed - tunnels keeps no grant from the held group",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:576: error: -[ConduitTests.RuntimeHostInteractiveTests testAStartThatThrowsAfterAuthorizationLeavesNoGrantForItsUnsettledMembers] : XCTAssertFalse failed - dns keeps no grant from the aborted group",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:576: error: -[ConduitTests.RuntimeHostInteractiveTests testAStartThatThrowsAfterAuthorizationLeavesNoGrantForItsUnsettledMembers] : XCTAssertFalse failed - tunnels keeps no grant from the aborted group"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "conditional-pair-after-wait",
+      "exit": 1,
+      "seconds": 8.84,
+      "assertion_count": 2,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1023: error: -[ConduitTests.RuntimeHostInteractiveTests testAReloadThatReplacesThePairHoldsTheCompanionAndKeepsTheCompletedProxy] : XCTAssertTrue failed - the held companion started no relay",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1024: error: -[ConduitTests.RuntimeHostInteractiveTests testAReloadThatReplacesThePairHoldsTheCompanionAndKeepsTheCompletedProxy] : XCTAssertFalse failed - and pointed no interface at the loopback forwarder"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "stop-save-busy-event",
+      "exit": 1,
+      "seconds": 7.34,
+      "assertion_count": 2,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1162: error: -[ConduitTests.RuntimeHostInteractiveTests testABusyStoreHoldsTheOwedDisableWithItsTypedStopCauseAndKeepsTheFence] : XCTAssertEqual failed: (\"[]\") is not equal to (\"[RuntimeEvents.ConfigurationWorkflowEvent.held(RuntimeEvents.ConfigurationWorkflowHeld(phase: RuntimeEvents.ConfigurationWorkflowIntentPhase.stop, input: RuntimeEvents.ConfigurationWorkflowHeldInput.runtime, reason: RuntimeEvents.ConfigurationWorkflowHoldReason.storeBusy))]\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1163: error: -[ConduitTests.RuntimeHostInteractiveTests testABusyStoreHoldsTheOwedDisableWithItsTypedStopCauseAndKeepsTheFence] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(\"phase=stop component=runtime reason=store_busy\")\")"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "owed-disable-fulfilment",
+      "exit": 1,
+      "seconds": 6.31,
+      "assertion_count": 1,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1136: error: -[ConduitTests.RuntimeHostInteractiveTests testAVerifiedSharedWriteOfTheOwedDisableEndsTheObligationAndKeepsTheFence] : XCTAssertEqual failed: (\"saved\") is not equal to (\"notOwed\") - the verified shared write ended the obligation"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "stop-the-wrong-modules",
+      "exit": 1,
+      "seconds": 7.58,
+      "assertion_count": 52,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true tunnelsStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStart proxyStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStart tunnelsStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true restart proxyStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true restart tunnelsStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true dnsStart proxyStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true dnsStart tunnelsStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1453: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"started(ConduitRuntime.RuntimeModuleStartOutcome(modules: ConduitShared.PrivateModuleSlots<Swift.Optional<RuntimeEvents.LifecycleModuleStartResult>>(proxy: Optional(RuntimeEvents.LifecycleModuleStartResult.started), dns: nil, tunnels: nil), conditionalDNS: Optional(RuntimeEvents.LifecycleConditionalDNSResult.fenced)))\") is not equal to (\"started(ConduitRuntime.RuntimeModuleStartOutcome(modules: ConduitShared.PrivateModuleSlots<Swift.Optional<RuntimeEvents.LifecycleModuleStartResult>>(proxy: Optional(RuntimeEvents.LifecycleModuleStartResult.started), dns: nil, tunnels: nil), conditionalDNS: Optional(RuntimeEvents.LifecycleConditionalDNSResult.started)))\") - saved=true tunnel=true proxyStop proxyStart",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1423: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - saved=true tunnel=true proxyStop proxyStart: DNS run state",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1424: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - saved=true tunnel=true proxyStop proxyStart: system DNS",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1425: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"Optional(false)\") is not equal to (\"Optional(true)\") - saved=true tunnel=true proxyStop proxyStart: saved DNS intent",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStop proxyStart: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1426: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStop: DNS fence",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1453: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"started(ConduitRuntime.RuntimeModuleStartOutcome(modules: ConduitShared.PrivateModuleSlots<Swift.Optional<RuntimeEvents.LifecycleModuleStartResult>>(proxy: Optional(RuntimeEvents.LifecycleModuleStartResult.started), dns: nil, tunnels: nil), conditionalDNS: Optional(RuntimeEvents.LifecycleConditionalDNSResult.fenced)))\") is not equal to (\"started(ConduitRuntime.RuntimeModuleStartOutcome(modules: ConduitShared.PrivateModuleSlots<Swift.Optional<RuntimeEvents.LifecycleModuleStartResult>>(proxy: Optional(RuntimeEvents.LifecycleModuleStartResult.started), dns: nil, tunnels: nil), conditionalDNS: Optional(RuntimeEvents.LifecycleConditionalDNSResult.started)))\") - saved=true tunnel=true proxyStop restart",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1423: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - saved=true tunnel=true proxyStop restart: DNS run state",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1424: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - saved=true tunnel=true proxyStop restart: system DNS"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "stop-takeover-dns-start",
+      "exit": 1,
+      "seconds": 17.68,
+      "assertion_count": 3,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:907: error: -[ConduitTests.RuntimeHostInteractiveTests testAnExplicitDNSStartThatTakesOverAStopInFlightBringsDNSBackUp] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(Set([ConduitShared.ControlModule.dns]))\") - the Start took the lane from the Stop in flight",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:915: error: -[ConduitTests.RuntimeHostInteractiveTests testAnExplicitDNSStartThatTakesOverAStopInFlightBringsDNSBackUp] : XCTAssertTrue failed - system DNS points at the forwarder again",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:916: error: -[ConduitTests.RuntimeHostInteractiveTests testAnExplicitDNSStartThatTakesOverAStopInFlightBringsDNSBackUp] : XCTAssertNotNil failed - and its health probe runs"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "stop-takeover-tunnels-start",
+      "exit": 1,
+      "seconds": 18.4,
+      "assertion_count": 3,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:759: error: -[ConduitTests.RuntimeHostInteractiveTests testATunnelsStartThatTakesOverAStopInFlightRenewsTheKernelStart] : XCTAssertTrue failed - the new owner renewed the kernel start",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:766: error: -[ConduitTests.RuntimeHostInteractiveTests testATunnelsStartThatTakesOverAStopInFlightRenewsTheKernelStart] : XCTAssertEqual failed: (\"stopped\") is not equal to (\"running\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:767: error: -[ConduitTests.RuntimeHostInteractiveTests testATunnelsStartThatTakesOverAStopInFlightRenewsTheKernelStart] : XCTAssertEqual failed: (\"[]\") is not equal to (\"[63072]\") - the listener is live"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "join-after-member-settled",
+      "exit": 1,
+      "seconds": 18.8,
+      "assertion_count": 7,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:661: error: -[ConduitTests.RuntimeHostInteractiveTests testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt] : XCTAssertEqual failed: (\"1\") is not equal to (\"2\") - the identical Start ran its own DNS attempt instead of joining",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:665: error: -[ConduitTests.RuntimeHostInteractiveTests testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt] : failed - the first Start lost its lanes to the second",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:673: error: -[ConduitTests.RuntimeHostInteractiveTests testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt] : XCTAssertGreaterThan failed: (\"2\") is not greater than (\"2\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:674: error: -[ConduitTests.RuntimeHostInteractiveTests testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt] : XCTAssertEqual failed: (\"[RuntimeEvents.LifecycleModuleSettlement.explicit(RuntimeEvents.LifecycleModule.dns, RuntimeEvents.LifecycleModuleStartResult.failed)]\") is not equal to (\"[RuntimeEvents.LifecycleModuleSettlement.explicit(RuntimeEvents.LifecycleModule.dns, RuntimeEvents.LifecycleModuleStartResult.failed), RuntimeEvents.LifecycleModuleSettlement.explicit(RuntimeEvents.LifecycleModule.proxy, RuntimeEvents.LifecycleModuleStartResult.started), RuntimeEvents.LifecycleModuleSettlement.explicit(RuntimeEvents.LifecycleModule.tunnels, RuntimeEvents.LifecycleModuleStartResult.started)]\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:676: error: -[ConduitTests.RuntimeHostInteractiveTests testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt] : XCTAssertTrue failed - nothing joined",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:677: error: -[ConduitTests.RuntimeHostInteractiveTests testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt] : XCTAssertTrue failed - the second Start's own failed attempt restored the fence it found",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:681: error: -[ConduitTests.RuntimeHostInteractiveTests testAnIdenticalStartAfterAMemberFailedRunsItsOwnAttempt] : XCTAssertEqual failed: (\"Optional(RuntimeEvents.LifecycleConditionalDNSResult.failed)\") is not equal to (\"Optional(RuntimeEvents.LifecycleConditionalDNSResult.fenced)\") - no grant was left for a companion to act on"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "restore-displaced-disable",
+      "exit": 1,
+      "seconds": 7.49,
+      "assertion_count": 12,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1228: error: -[ConduitTests.RuntimeHostInteractiveTests testAHeldExplicitDNSStartGivesBackTheDisableSaveItDisplaced] : XCTAssertFalse failed - the parked reload adopted no stale enable",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1231: error: -[ConduitTests.RuntimeHostInteractiveTests testAHeldExplicitDNSStartGivesBackTheDisableSaveItDisplaced] : XCTAssertFalse failed - and neither does a later reload",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1232: error: -[ConduitTests.RuntimeHostInteractiveTests testAHeldExplicitDNSStartGivesBackTheDisableSaveItDisplaced] : failed - a facade Start still waits for the owed save",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:87: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertTrue failed - the displaced disable save is owed again",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:89: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertFalse failed - a reload adopts no stale enable while it is owed",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:90: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertEqual failed: (\"success(ConduitRuntime.RuntimeLifecycleTicket(group: 3, actions: ConduitShared.PrivateModuleSlots<ConduitRuntime.RuntimeModuleAction>(proxy: ConduitRuntime.RuntimeModuleAction.start, dns: ConduitRuntime.RuntimeModuleAction.configuredStart, tunnels: ConduitRuntime.RuntimeModuleAction.start), dnsRevision: 3, dnsIntentRevision: 2, binding: ConduitRuntime.RuntimeInputBinding.queued))\") is not equal to (\"failure(ConduitRuntime.RuntimeLifecycleRefusal.busy(ConduitShared.ControlModule.dns))\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:92: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertEqual failed: (\"Optional(true)\") is not equal to (\"Optional(false)\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:124: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertTrue failed - facade: the Stop gave the save back",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:124: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertTrue failed - processQuit: the Stop gave the save back",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:158: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertTrue failed - a newer DNS Start, retired: the disable save is still owed",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:158: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertTrue failed - a facade Stop: the disable save is still owed",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:158: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertTrue failed - a proxy Start that ends the group: the disable save is still owed"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "join-full-proxy-start",
+      "exit": 1,
+      "seconds": 19.69,
+      "assertion_count": 1,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:795: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyStartBesideAStartHeldOnItsPACReportsTheRealFailedBind] : failed - the proxy Start owns its lane, so it reports the bind's own failure"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "join-full-dns-start",
+      "exit": 1,
+      "seconds": 12.94,
+      "assertion_count": 2,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:477: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSStartBesideABindInFlightReturnsWithThatBindsCompletion] : XCTAssertEqual failed: (\"[\"joined starting\"]\") is not equal to (\"[]\") - the joiner waits for the bind in flight",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:483: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSStartBesideABindInFlightReturnsWithThatBindsCompletion] : XCTAssertEqual failed: (\"[\"joined starting\"]\") is not equal to (\"[\"joined running\"]\")"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "join-full-tunnel-start",
+      "exit": 1,
+      "seconds": 7.94,
+      "assertion_count": 2,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:537: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartBesideAStartInFlightReturnsWithItsCompletion] : XCTAssertEqual failed: (\"[\"joined starting\"]\") is not equal to (\"[]\") - the joiner waits for the start in flight",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:543: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartBesideAStartInFlightReturnsWithItsCompletion] : XCTAssertEqual failed: (\"[\"joined starting\"]\") is not equal to (\"[\"joined running\"]\")"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "older-completion-clears-newer",
+      "exit": 1,
+      "seconds": 15.96,
+      "assertion_count": 1,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:832: error: -[ConduitTests.PhysicalLifecycleTests testOnlyTheLatestStartIsJoinableAndAnOlderCompletionNeverClearsIt] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(Swift.Task<(), Swift.Error>(_task: (Opaque Value)))\") - the older completion left the newer one in place"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "configured-start-must-preserve-carried-disable",
+      "exit": 1,
+      "seconds": 12.39,
+      "assertion_count": 2,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:101: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertEqual failed: (\"success(ConduitRuntime.RuntimeLifecycleTicket(group: 3, actions: ConduitShared.PrivateModuleSlots<ConduitRuntime.RuntimeModuleAction>(proxy: ConduitRuntime.RuntimeModuleAction.start, dns: ConduitRuntime.RuntimeModuleAction.configuredStart, tunnels: ConduitRuntime.RuntimeModuleAction.start), dnsRevision: 3, dnsIntentRevision: 2, binding: ConduitRuntime.RuntimeInputBinding.queued))\") is not equal to (\"failure(ConduitRuntime.RuntimeLifecycleRefusal.busy(ConduitShared.ControlModule.dns))\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:102: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertEqual failed: (\"RuntimeModuleIntents(counter: 3, terminal: false, modules: ConduitShared.PrivateModuleSlots<ConduitRuntime.RuntimeModuleIntent>(proxy: ConduitRuntime.RuntimeModuleIntent(revision: 3, enabled: false, fenced: false, pending: Optional(ConduitRuntime.RuntimeModulePending.start(ConduitRuntime.RuntimeModuleStart(group: 3, priorEnabled: false, priorFenced: false, configured: false, displacesOwedSave: false))), authorized: nil, startedGroup: nil), dns: ConduitRuntime.RuntimeModuleIntent(revision: 3, enabled: false, fenced: true, pending: Optional(ConduitRuntime.RuntimeModulePending.start(ConduitRuntime.RuntimeModuleStart(group: 3, priorEnabled: false, priorFenced: true, configured: true, displacesOwedSave: true))), authorized: nil, startedGroup: nil), tunnels: ConduitRuntime.RuntimeModuleIntent(revision: 3, enabled: false, fenced: false, pending: Optional(ConduitRuntime.RuntimeModulePending.start(ConduitRuntime.RuntimeModuleStart(group: 3, priorEnabled: false, priorFenced: false, configured: false, displacesOwedSave: false))), authorized: nil, startedGroup: nil)), dnsConfigured: false, dnsIntentRevision: Optional(2))\") is not equal to (\"RuntimeModuleIntents(counter: 2, terminal: false, modules: ConduitShared.PrivateModuleSlots<ConduitRuntime.RuntimeModuleIntent>(proxy: ConduitRuntime.RuntimeModuleIntent(revision: 0, enabled: false, fenced: false, pending: nil, authorized: nil, startedGroup: nil), dns: ConduitRuntime.RuntimeModuleIntent(revision: 2, enabled: false, fenced: true, pending: Optional(ConduitRuntime.RuntimeModulePending.start(ConduitRuntime.RuntimeModuleStart(group: 2, priorEnabled: false, priorFenced: true, configured: false, displacesOwedSave: true))), authorized: nil, startedGroup: nil), tunnels: ConduitRuntime.RuntimeModuleIntent(revision: 0, enabled: false, fenced: false, pending: nil, authorized: nil, startedGroup: nil)), dnsConfigured: false, dnsIntentRevision: Optional(2))\") - the refusal changes nothing"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "late-own-enable-resolves-restored-disable",
+      "exit": 1,
+      "seconds": 10.77,
+      "assertion_count": 2,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:126: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertNil failed: \"stopSave(revision: 2)\" - facade: its own late enable ends the obligation",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeModuleIntentTests.swift:126: error: -[ConduitTests.RuntimeModuleIntentTests testAnExplicitDNSStartKeepsTheDisableSaveItDisplacedUntilAWriteVerifies] : XCTAssertNil failed: \"stopSave(revision: 2)\" - processQuit: its own late enable ends the obligation"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "carried-disable-reported-honestly",
+      "exit": 1,
+      "seconds": 11.36,
+      "assertion_count": 1,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1188: error: -[ConduitTests.RuntimeHostInteractiveTests testAnOwedDisableCarriedByAPendingDNSStartIsReportedOwedAndNotWritten] : XCTAssertEqual failed: (\"notOwed\") is not equal to (\"owed\") - the pending Start carries the obligation"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "owned-unconfigured-dns-cleanup",
+      "exit": 1,
+      "seconds": 11.69,
+      "assertion_count": 2,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:712: error: -[ConduitTests.RuntimeHostInteractiveTests testAFacadeStartOverAStopInFlightFinishesTheTeardownOfDNSConfiguredOff] : XCTAssertNotEqual failed: (\"running\") is equal to (\"running\") - nothing listens behind the not_configured DNS",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:713: error: -[ConduitTests.RuntimeHostInteractiveTests testAFacadeStartOverAStopInFlightFinishesTheTeardownOfDNSConfiguredOff] : XCTAssertNil failed: \"59789\""
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "unconfigured-start-must-not-clear-idle-dns",
+      "exit": 1,
+      "seconds": 12.46,
+      "assertion_count": 1,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostInteractiveTests.swift:728: error: -[ConduitTests.RuntimeHostInteractiveTests testAFacadeStartWithDNSConfiguredOffLeavesAUserLoopbackResolverAlone] : XCTAssertEqual failed: (\"[]\") is not equal to (\"[\"127.0.0.1\"]\") - the user's resolver is left alone"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "restored",
+      "exit": 0,
+      "seconds": 58.42,
+      "assertion_count": 0,
+      "assertions": []
+    }
+  ],
+  "baseline_tests": 80,
+  "restored_tests": 80
+}

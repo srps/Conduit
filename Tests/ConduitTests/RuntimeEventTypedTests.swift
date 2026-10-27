@@ -27,6 +27,14 @@ final class RuntimeEventTypedTests: XCTestCase {
          "lifecycle.version_changed", "from=0.4.1 to=0.5.0"),
         (.versionChanged(LifecycleVersionChanged(from: "0.5.8-rc.1+7", to: "unbundled")),
          "lifecycle.version_changed", "from=0.5.8-rc.1+7 to=unbundled"),
+        (.moduleSettled(LifecycleModuleSettled(settlement: .explicit(.dns, .failed), group: 3)),
+         "lifecycle.module_settled", "module=dns source=explicit outcome=failed group=3"),
+        (.moduleSettled(LifecycleModuleSettled(settlement: .explicit(.tunnels, .notConfigured), group: 1)),
+         "lifecycle.module_settled", "module=tunnels source=explicit outcome=not_configured group=1"),
+        (.moduleSettled(LifecycleModuleSettled(settlement: .explicit(.proxy, .superseded), group: 2)),
+         "lifecycle.module_settled", "module=proxy source=explicit outcome=superseded group=2"),
+        (.moduleSettled(LifecycleModuleSettled(settlement: .conditionalDNS(.alreadyActive), group: 4)),
+         "lifecycle.module_settled", "module=dns source=conditional outcome=already_active group=4"),
     ]
 
     private let superseded = #"{"family":"lifecycle","lifecycle":{"type":"superseded","operation":"proxy_start","generation":1,"current":2,"reason":"superseded"}}"#
@@ -41,17 +49,64 @@ final class RuntimeEventTypedTests: XCTestCase {
         }
     }
 
-    func testTheTypedInventoryIsTheFourLifecycleNamesAndTheConfigWorkflowFour() {
+    func testTheTypedInventoryIsTheFiveLifecycleNamesAndTheConfigWorkflowFour() {
         XCTAssertEqual(
             RuntimeEventPayload.typedNames,
             Set([
                 "lifecycle.superseded", "lifecycle.coalesced", "lifecycle.termination_drain_expired",
-                "lifecycle.version_changed",
+                "lifecycle.version_changed", "lifecycle.module_settled",
                 "config.workflow.observed", "config.workflow.committed", "config.workflow.held", "config.workflow.superseded",
             ])
         )
-        XCTAssertEqual(LifecycleEventName.allCases.count, 4)
+        XCTAssertEqual(LifecycleEventName.allCases.count, 5)
         XCTAssertEqual(ConfigurationWorkflowEventName.allCases.count, 4)
+    }
+
+    /// The settlement's closed sets keep their spelling, and only two spellable combinations are refused: a proxy member that is
+    /// `not_configured`, and a group below 1. The companion's set is separate, so `fenced` and `already_active` never name a member.
+    func testTheSettlementSetsAreClosedAndOnlyTheImpossibleCombinationsAreRefused() {
+        XCTAssertEqual(LifecycleModule.allCases.map(\.rawValue), ["proxy", "dns", "tunnels"])
+        XCTAssertEqual(LifecycleModuleStartResult.allCases.map(\.rawValue), ["started", "not_configured", "failed", "superseded"])
+        XCTAssertEqual(
+            LifecycleConditionalDNSResult.allCases.map(\.rawValue),
+            ["started", "fenced", "not_configured", "already_active", "superseded", "failed"]
+        )
+        XCTAssertEqual(LifecycleModuleSettlement.everySpelling.count, 3 * 4 + 6)
+        for settlement in LifecycleModuleSettlement.everySpelling {
+            XCTAssertEqual(LifecycleModuleSettled.isValid(settlement: settlement, group: 1), settlement != .explicit(.proxy, .notConfigured),
+                           "\(settlement)")
+            XCTAssertFalse(LifecycleModuleSettled.isValid(settlement: settlement, group: 0), "\(settlement)")
+            XCTAssertFalse(LifecycleModuleSettled.isValid(settlement: settlement, group: -1), "\(settlement)")
+        }
+        XCTAssertEqual(LifecycleModuleSettlement.conditionalDNS(.fenced).module, .dns)
+    }
+
+    /// Every valid settlement renders a line of closed tokens and an integer that the sanitizer leaves unchanged, at the smallest and the
+    /// largest group, and it survives the file: no free text, configuration value or URL has a field to occupy.
+    func testEverySettlementIsASecretFreeFixedPointAndRoundTripsTheFile() throws {
+        for settlement in LifecycleModuleSettlement.everySpelling {
+            for group in [1, Int.max] where LifecycleModuleSettled.isValid(settlement: settlement, group: group) {
+                let value = LifecycleEvent.moduleSettled(LifecycleModuleSettled(settlement: settlement, group: group))
+                let expected = "module=\(settlement.module.rawValue) source=\(settlement.source) outcome=\(settlement.outcome) group=\(group)"
+                XCTAssertEqual(value.detail, expected)
+                XCTAssertEqual(SensitiveValueSanitizer.sanitize(value.detail), value.detail, "\(settlement) \(group)")
+                let original = RuntimeEvent(payload: .lifecycle(value))
+                XCTAssertEqual(original.detail, value.detail)
+                let decoded = try CanonicalJSON.decoder().decode(RuntimeEvent.self, from: try CanonicalJSON.encoder().encode(original))
+                XCTAssertEqual(decoded.typed, original.typed, "\(settlement) \(group)")
+                XCTAssertEqual(decoded.detail, original.detail, "\(settlement) \(group)")
+            }
+        }
+    }
+
+    func testASettlementCarriesItsClosedFieldsInTheFile() throws {
+        let event = RuntimeEvent(payload: .lifecycle(.moduleSettled(LifecycleModuleSettled(settlement: .conditionalDNS(.fenced), group: 2))))
+        let line = String(decoding: try CanonicalJSON.encoder().encode(event), as: UTF8.self)
+        XCTAssertTrue(
+            line.contains(#""typed":{"family":"lifecycle","lifecycle":{"group":2,"module":"dns","outcome":"fenced","source":"conditional","type":"module_settled"}}"#),
+            line
+        )
+        XCTAssertTrue(line.contains(#""detail":"module=dns source=conditional outcome=fenced group=2""#), line)
     }
 
     /// The namespace is closed with no untyped exception. The legacy envelope traps on a name
@@ -224,7 +279,7 @@ final class RuntimeEventTypedTests: XCTestCase {
     func testEveryOperationAndReasonKeepsItsLegacySpelling() {
         XCTAssertEqual(
             LifecycleOperation.allCases.map(\.rawValue).sorted(),
-            ["dns_start", "dns_stop", "proxy_start", "proxy_stop", "runtime_start", "runtime_stop"]
+            ["dns_start", "dns_stop", "proxy_start", "proxy_stop", "runtime_start", "runtime_stop", "tunnels_start", "tunnels_stop"]
         )
         XCTAssertEqual(LifecycleSupersessionReason.allCases.map(\.rawValue).sorted(), ["runtime_down", "superseded"])
     }
@@ -356,6 +411,30 @@ final class RuntimeEventTypedTests: XCTestCase {
             ("a version_changed without its to field",
              "lifecycle.version_changed", "lifecycle", "from=0.4.1 to=0.5.0",
              #"{"family":"lifecycle","lifecycle":{"type":"version_changed","from":"0.4.1"}}"#),
+            ("a settlement in group zero",
+             "lifecycle.module_settled", "lifecycle", "module=dns source=explicit outcome=failed group=0",
+             #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"dns","source":"explicit","outcome":"failed","group":0}}"#),
+            ("a proxy member that is not configured",
+             "lifecycle.module_settled", "lifecycle", "module=proxy source=explicit outcome=not_configured group=1",
+             #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"proxy","source":"explicit","outcome":"not_configured","group":1}}"#),
+            ("an explicit member with a companion's result",
+             "lifecycle.module_settled", "lifecycle", "module=dns source=explicit outcome=fenced group=1",
+             #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"dns","source":"explicit","outcome":"fenced","group":1}}"#),
+            ("a companion on another module",
+             "lifecycle.module_settled", "lifecycle", "module=tunnels source=conditional outcome=started group=1",
+             #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"tunnels","source":"conditional","outcome":"started","group":1}}"#),
+            ("an unknown source",
+             "lifecycle.module_settled", "lifecycle", "module=dns source=menu outcome=started group=1",
+             #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"dns","source":"menu","outcome":"started","group":1}}"#),
+            ("an unknown module",
+             "lifecycle.module_settled", "lifecycle", "module=pac source=explicit outcome=started group=1",
+             #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"pac","source":"explicit","outcome":"started","group":1}}"#),
+            ("free text in place of an outcome",
+             "lifecycle.module_settled", "lifecycle", "module=dns source=explicit outcome=bind failed group=1",
+             #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"dns","source":"explicit","outcome":"bind failed","group":1}}"#),
+            ("a settlement without its group",
+             "lifecycle.module_settled", "lifecycle", "module=dns source=explicit outcome=failed group=1",
+             #"{"family":"lifecycle","lifecycle":{"type":"module_settled","module":"dns","source":"explicit","outcome":"failed"}}"#),
             ("a name that disagrees with its payload",
              "lifecycle.coalesced", "lifecycle", detail, superseded),
             ("a kind that disagrees with its payload",
