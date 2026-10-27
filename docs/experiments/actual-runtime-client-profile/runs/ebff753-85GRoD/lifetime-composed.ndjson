@@ -1,0 +1,14 @@
+{"footprintOverBaselineBytes":0,"footprintPeakBytes":2097608,"mallocInUseBytes":145232,"mallocOverBaselineBytes":0,"mode":"lifetime-composed","peakRSSBytes":10305536,"phaseMaxFootprintBytes":2097608,"phaseMaxMallocInUseBytes":145232,"phaseMaxResidentBytes":10223616,"phaseSamples":1,"phaseSeconds":0.00020041700000000002,"physicalFootprintBytes":2097608,"record":"stage","residentBytes":10223616,"seconds":0.00021908299999999999,"stage":"baseline"}
+{"clientAndHostShareOneProcess":true,"mode":"lifetime-composed","outcomePollIntervalMS":1,"record":"measurement-method","samplerEnabled":true,"samplerIntervalMS":1,"samplerTakesMallocZoneLocks":true,"statusSampleIntervalMS":2,"workerOutcomePollIntervalMS":2}
+{"aliasByteCapacityPerPartition":16384,"aliasPartitionAccountingDiscrepancy":false,"aliasPartitionsChargedByInitializer":5,"aliasPartitionsInSource":5,"initializerBudgetBytes":6902606,"initializerBudgetStatus":"alias partitions match source; candidate value, not a default","label":"CANDIDATE experimental profile; not a shipping default","maxReplyBytes":65536,"maxRequestBytes":65536,"mode":"lifetime-composed","privateReplyFrameCap":8388608,"privateRequestFrameCap":8388608,"record":"profile","retentionSeconds":300,"runtimeFileBytes":8388608,"sidecarFileBytes":131072}
+{"depth":1,"mode":"lifetime-composed","record":"lifetime-depth"}
+{"flushConfirmed":true,"flushMS":0.020417000000000001,"mode":"lifetime-composed","record":"release-settle","settled":true,"settleMS":0.078750000000000001}
+{"mode":"lifetime-composed","name":"release.settled","passed":true,"record":"check"}
+{"mode":"lifetime-composed","name":"release.flushConfirmed","passed":true,"record":"check"}
+{"deallocationWaitMS":0.00029100000000000003,"hostDeallocated":true,"mode":"lifetime-composed","record":"release-host"}
+{"mode":"lifetime-composed","name":"release.hostDeallocated","passed":true,"record":"check"}
+{"attempts":1,"closeFailures":0,"leaseReacquired":true,"leaseWaitMS":1.094417,"mode":"lifetime-composed","probeLeaseReleasedAndReacquired":true,"record":"release-lease"}
+{"mode":"lifetime-composed","name":"release.leaseClosed","passed":true,"record":"check"}
+{"mode":"lifetime-composed","name":"release.scratchRemoved","passed":true,"record":"check"}
+{"footprintOverBaselineBytes":4817064,"footprintPeakBytes":6914672,"mallocInUseBytes":3434352,"mallocOverBaselineBytes":3289120,"mode":"lifetime-composed","peakRSSBytes":21807104,"phaseMaxFootprintBytes":6914672,"phaseMaxMallocInUseBytes":3543296,"phaseMaxResidentBytes":21807104,"phaseSamples":96,"phaseSeconds":0.12434133300000001,"physicalFootprintBytes":6914672,"record":"stage","released":true,"residentBytes":21807104,"seconds":0.124542583,"stage":"after-release"}
+{"failedChecks":0,"failures":[],"inconclusive":[],"mode":"lifetime-composed","record":"summary","released":true}

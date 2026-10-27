@@ -21,7 +21,7 @@ import time
 MODES = ['lifetime-open', 'lifetime-composed', 'lifetime-read', 'lifetime-save', 'lifetime-start', 'small',
          'realistic-valid-64', 'realistic-valid-128', 'validator-widest', 'escape-maximum', 'padded-8mib', 'repeat',
          'contention', 'contention-encode', 'contention-store', 'contention-encode-nosampler', 'contention-store-nosampler',
-         'held', 'cancel', 'codec-bounds']
+         'held', 'cancel', 'client-quit-widest', 'codec-bounds']
 # Fresh-process trials per mode; the live-A contention modes run several so a single outlier is visible as one.
 TRIALS = {'contention-encode': 3, 'contention-store': 3, 'contention-encode-nosampler': 3, 'contention-store-nosampler': 3}
 MODE_TIMEOUT_SECONDS = 300

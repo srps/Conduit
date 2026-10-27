@@ -7,7 +7,8 @@
 //
 // Modes (one fresh process each; see README.md): lifetime-open, lifetime-composed, lifetime-read, lifetime-save, lifetime-start,
 // small, realistic-valid-64, realistic-valid-128, validator-widest, escape-maximum, padded-8mib, repeat, contention,
-// contention-encode, contention-store, held, cancel, codec-bounds; any mode with `-nosampler` runs without the memory sampler.
+// contention-encode, contention-store, held, cancel, client-quit-widest (the actual `RuntimeClientQuit.quit` routine), codec-bounds;
+// any mode with `-nosampler` runs without the memory sampler.
 // Usage: probe <mode>[-nosampler] <scratch-dir>. The scratch directory is removed only after every release proof agrees.
 //
 // `GenericDefaults.shared` is initialized by the actual store decode (`ProxyConfig.init(from:)`), which reads `NSUserName()`
@@ -1192,8 +1193,8 @@ func emitProfile(_ out: Output) -> RuntimeServiceLimits? {
 }
 
 /// small: scratch session, actual host open, composition, private read, frozen save, readback, preferences save, a private
-/// proxy Start on a live loopback listener, status reads, an ordinary Stop, then the framed Quit with its ID-bound final save,
-/// and the confirmed release.
+/// proxy Start on a live loopback listener, status reads, an ordinary Stop, then the framed Quit with its ID-bound final save
+/// (composed here from the clients' primitives, not the client quit routine), and the confirmed release.
 @MainActor
 func runFlow(_ run: HostRun, limits: RuntimeServiceLimits, fixture: Fixture) async throws {
     let out = run.out
@@ -1385,8 +1386,9 @@ func runFlow(_ run: HostRun, limits: RuntimeServiceLimits, fixture: Fixture) asy
               "admissionMS": stopAdmissionMS, "completionMS": stopped.ms, "lookups": stopped.lookups])
     stages.stage("ordinary-stop-settled")
 
-    // The framed Quit with its ID-bound reserved configuration save, under one total deadline.
-    var quitRecord: [String: Any] = ["probeHeld": "fixture"]
+    // The framed Quit with its ID-bound reserved configuration save, under one total deadline. This step composes the Quit and the
+    // final save from the clients' primitives itself; it is NOT `RuntimeClientQuit.quit`, which `client-quit-widest` exercises.
+    var quitRecord: [String: Any] = ["probeHeld": "fixture", "quitPath": "manual-composition-not-RuntimeClientQuit"]
     do {
         let (beforeQuit, _) = try await run.read()
         let quitValues = try PrivateConfigurationBridge.makeValues(from: beforeQuit)
@@ -2033,6 +2035,247 @@ func runCancel(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
     try await run.plainQuit()
 }
 
+// MARK: - The actual client quit routine
+
+func quitStepLabel(_ step: RuntimeQuitStep) -> String {
+    switch step {
+    case .notDeclared: "notDeclared"
+    case .settled(let outcome): "settled.\(outcomeLabel(outcome))"
+    case .rejected(let code): "rejected.\(code.rawValue)"
+    case .notRecorded(let reason): "notRecorded.\(reason.rawValue)"
+    case .clientFailure(let error): "clientFailure.\(errorLabel(error))"
+    case .unsettled: "unsettled"
+    case .skipped: "skipped"
+    }
+}
+
+/// The caller's own record of when the routine invoked each final-save producer and which prior step it handed over. The
+/// producers are the caller's closures, so recording inside them adds no hook to the routine.
+final class ProducerLog: @unchecked Sendable {
+    struct Entry {
+        let name: String
+        let at: ContinuousClock.Instant
+        let handed: String
+        let rebasedRuntime: Bool
+        let rebasedPlatform: Bool
+    }
+
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+
+    func record(_ name: String, _ handed: RuntimeQuitStep, rebasedRuntime: Bool = false, rebasedPlatform: Bool = false) {
+        let entry = Entry(name: name, at: .now, handed: quitStepLabel(handed), rebasedRuntime: rebasedRuntime, rebasedPlatform: rebasedPlatform)
+        lock.withLock { entries.append(entry) }
+    }
+
+    var all: [Entry] { lock.withLock { entries } }
+}
+
+/// client-quit-widest: the ACTUAL client quit routine, `RuntimeClientQuit.quit` from ConduitShared, over the real framed and
+/// private clients. Its commands are not composed here. The validator-widest fixture runs with the proxy started. An earlier wide save-only
+/// update P is held in its runtime-file replacement (the file-access seam), the routine is started with P named as its prior
+/// update, and only then is P released. The final-save producers are the caller's: all save-only, the configuration at the exact
+/// baselines read before the quit and rebased only from P's settled receipt, the preferences at their exact baseline. Measured:
+/// the routine's duration, when each producer ran after the release, memory at each stage, every declared step, the files on
+/// disk and the physical cleanup (listener closed, fake system proxy cleared, host runtime state down).
+@MainActor
+func runClientQuit(_ run: HostRun, limits: RuntimeServiceLimits) async throws {
+    let out = run.out
+    let stages = run.stages
+    let gate = run.fakes.files.replaceGate
+    // Never leave the store held on an error path: the error handler's shutdown would wait on it.
+    defer { gate.release() }
+    let port = try reserveLoopbackPort()
+    let widest = makeValidatorWidestConfig(port: port)
+    let priorDraft = { var draft = widest; draft.logging.verbose = true; return draft }()
+    // Distinct from the fixture and from P, at the same width: one upstream priority, still within its validated range.
+    let finalDraft = { var draft = widest; draft.upstreams[0].priority = Int.max - 1_000; return draft }()
+    let platform = makePlatform()
+    let finalPreferences = { var preferences = makeSmallPreferences(); preferences.automaticUpdateChecks = true; return preferences }()
+    out.emit(["record": "fixture", "fixture": "validator-widest", "quitPath": "RuntimeClientQuit.quit",
+              "validationProblems": widest.validate().count, "priorDraftValidationProblems": priorDraft.validate().count,
+              "finalDraftValidationProblems": finalDraft.validate().count,
+              "resourceViolation": widest.resourceViolation() == nil && finalDraft.resourceViolation() == nil ? "none" : "violated",
+              "upstreams": widest.upstreams.count, "tunnels": widest.tunnels.definitions.count, "tunnelCase": "hard-ceiling-128"])
+    out.check(widest.validate().isEmpty && priorDraft.validate().isEmpty && finalDraft.validate().isEmpty
+              && widest.resourceViolation() == nil && finalDraft.resourceViolation() == nil, "fixture.validatorAccepts")
+    _ = try await run.openRunning(limits: limits, config: widest)
+    out.check(loopbackAccepts(port) && run.fakes.machine.service("Wi-Fi").webProxy.enabled, "setup.listenerAndSystemProxyLive")
+    stages.stage("running-validator-widest", ["probeHeld": "fixture,prior-draft,final-draft"])
+
+    let editor = run.editor
+    let control = run.control
+    guard let incarnation = run.incarnation else { throw ProbeError("noIncarnation") }
+    let priorID = ControlRequestID(rawValue: UUID())
+    let baselines: (runtime: PrivateBaseline, platform: PrivateBaseline, preferences: PrivateBaseline)
+    var priorTask: Task<String, Never>?
+    gate.arm()
+    do {
+        let observed = try await run.read().0
+        guard let runtime = observed.components.runtime.baseline, let platformBaseline = observed.components.platform.baseline,
+              let preferences = observed.components.preferences.baseline else { throw ProbeError("noBaseline") }
+        baselines = (runtime, platformBaseline, preferences)
+        priorTask = Task.detached { () -> String in
+            do {
+                return admissionLabel(try await privateSubmit(
+                    editor, incarnation: incarnation, config: priorDraft, platform: platform, observed: observed, modules: allSaveOnly,
+                    requestID: priorID, deadline: .after(.seconds(60), from: .now)
+                ))
+            } catch { return errorLabel(error) }
+        }
+    }
+    let holdDeadline = ContinuousClock.now.advanced(by: .seconds(10))
+    while !gate.isHolding, ContinuousClock.now < holdDeadline { try await Task.sleep(for: .milliseconds(1)) }
+    out.check(gate.isHolding, "prior.heldInRuntimeFileReplacement")
+    guard gate.isHolding else { throw ProbeError("priorNotHeld") }
+    stages.stage("prior-held", ["probeHeld": "fixture,prior-draft,final-draft,observation-until-prior-admitted"])
+
+    let log = ProducerLog()
+    let configurationProducer: @Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivateConfigurationRequest = { requestID, handed in
+        var runtimeBaseline = baselines.runtime
+        var platformBaseline = baselines.platform
+        var rebasedRuntime = false
+        var rebasedPlatform = false
+        // A settled receipt of the prior update is the only fact a submitted baseline may be rebased from.
+        if case .settled(.configurationSettled(let receipt)) = handed {
+            if let baseline = receipt.runtime.baseline { runtimeBaseline = baseline; rebasedRuntime = true }
+            if let baseline = receipt.platform.baseline { platformBaseline = baseline; rebasedPlatform = true }
+        }
+        log.record("configuration", handed, rebasedRuntime: rebasedRuntime, rebasedPlatform: rebasedPlatform)
+        return try PrivateConfigurationBridge.makeRequest(
+            config: finalDraft, platform: platform, requestID: requestID, incarnation: incarnation,
+            budget: try ControlWireBudget(60_000), runtimeBaseline: runtimeBaseline, platformBaseline: platformBaseline,
+            modules: allSaveOnly
+        )
+    }
+    let preferencesProducer: @Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivatePreferencesRequest = { requestID, handed in
+        log.record("preferences", handed)
+        return try PrivateConfigurationBridge.makePreferencesRequest(
+            preferences: finalPreferences, requestID: requestID, incarnation: incarnation,
+            budget: try ControlWireBudget(60_000), preferencesBaseline: baselines.preferences
+        )
+    }
+    let total: Duration = .seconds(30)
+    let quitStart = ContinuousClock.now
+    var quitting: Task<RuntimeClientQuitResult, Never>? = Task.detached {
+        await RuntimeClientQuit.quit(
+            control: control, editor: editor, incarnation: incarnation, total: total, now: quitStart, priorUpdate: priorID,
+            configuration: configurationProducer, preferences: preferencesProducer
+        )
+    }
+
+    // While P still holds the one frozen input: the host keeps serving status, the Quit has fenced, and no final save is mapped.
+    try await Task.sleep(for: .milliseconds(50))
+    try await run.statusSamples(20, condition: "client-quit-waiting-on-held-prior")
+    var hold: [String: Any] = ["record": "client-quit-hold"]
+    do {
+        let (during, readMS) = try await run.read()
+        hold["readDuringHold"] = "observation"
+        hold["terminalLatched"] = during.terminal
+        hold["readMS"] = readMS
+    } catch {
+        hold["readDuringHold"] = errorLabel(error)
+    }
+    do {
+        hold["proxyRunningDuringHold"] = try await run.readSnapshot().0.proxyState == .running
+    } catch {
+        hold["snapshotDuringHold"] = errorLabel(error)
+    }
+    hold["listenerAcceptsDuringHold"] = loopbackAccepts(port)
+    hold["producerCallsDuringHold"] = log.all.count
+    hold["priorStillHeld"] = gate.isHolding
+    hold["heldForMS"] = elapsedMS(since: quitStart)
+    out.emit(hold)
+    out.check(log.all.isEmpty && gate.isHolding, "routine.noFinalSaveMappedWhilePriorHoldsInput")
+    out.check(hold["terminalLatched"] as? Bool == true, "routine.quitFencedBeforePriorReleased")
+    stages.stage("routine-waiting-on-held-prior", ["probeHeld": "fixture,prior-draft,final-draft"])
+
+    let releasedAt = ContinuousClock.now
+    gate.release()
+    let result = await quitting!.value
+    let routineMS = elapsedMS(since: quitStart)
+    let releaseToReturnMS = elapsedMS(since: releasedAt)
+    quitting = nil
+    let priorAdmission = await priorTask!.value
+    priorTask = nil
+    stages.stage("client-quit-returned", ["routineMS": routineMS, "releaseToReturnMS": releaseToReturnMS,
+                                          "probeHeld": "fixture,prior-draft,final-draft,result"])
+
+    let entries = log.all
+    var routine: [String: Any] = [
+        "record": "client-quit", "path": "RuntimeClientQuit.quit", "totalDeadlineMS": milliseconds(total),
+        "quit": quitStepLabel(result.quit), "priorUpdate": quitStepLabel(result.priorUpdate),
+        "configuration": quitStepLabel(result.configuration), "preferences": quitStepLabel(result.preferences),
+        "observationFailure": result.observationFailure.map { errorLabel($0) } ?? "none", "priorAdmission": priorAdmission,
+        "routineMS": routineMS, "releaseToReturnMS": releaseToReturnMS,
+        "returnedBeforeFinalReadReserve": routineMS < milliseconds(total) - 200, "producerCalls": entries.count,
+        "producerOrder": entries.map(\.name).joined(separator: ","),
+    ]
+    for entry in entries {
+        routine["\(entry.name)ProducerAfterReleaseMS"] = milliseconds(releasedAt.duration(to: entry.at))
+        routine["\(entry.name)ProducerHanded"] = entry.handed
+    }
+    let configurationEntry = entries.first { $0.name == "configuration" }
+    routine["configurationRebasedRuntimeFromPriorReceipt"] = configurationEntry?.rebasedRuntime ?? false
+    routine["configurationRebasedPlatformFromPriorReceipt"] = configurationEntry?.rebasedPlatform ?? false
+    if case .settled(.configurationSettled(let receipt)) = result.priorUpdate {
+        routine["priorRuntimeWrite"] = writeLabel(receipt.runtime.write)
+        routine["priorPlatformWrite"] = writeLabel(receipt.platform.write)
+    }
+    var finalPersisted = false
+    var finalSaveOnly = false
+    if case .settled(.configurationSettled(let receipt)) = result.configuration {
+        finalPersisted = receipt.runtime.write == .persisted(reportedError: false)
+        finalSaveOnly = receipt.applied == nil && receipt.modules.isEmpty
+        routine["finalRuntimeWrite"] = writeLabel(receipt.runtime.write)
+        routine["finalPlatformWrite"] = writeLabel(receipt.platform.write)
+        routine["finalAppliedField"] = receipt.applied.map { $0 ? "true" : "false" } ?? "absent"
+        routine["finalModuleReceipts"] = receipt.modules.count
+        routine["finalLookupReplyFrameBytes"] = ordinaryFrameBytes(.response(.lookup(.finished(.configurationSettled(receipt)))))
+    }
+    var preferencesPersisted = false
+    if case .settled(.preferencesSettled(let receipt)) = result.preferences {
+        preferencesPersisted = receipt.preferences.write == .persisted(reportedError: false)
+        routine["finalPreferencesWrite"] = writeLabel(receipt.preferences.write)
+    }
+    // Physical cleanup, read from the fakes and the loopback port, not from the routine's answer.
+    let listenerClosed = !loopbackAccepts(port)
+    let systemProxyCleared = !run.fakes.machine.service("Wi-Fi").webProxy.enabled
+    let hostProxyDown = run.host?.runtimeState().proxyIsUp == false
+    routine["listenerClosed"] = listenerClosed
+    routine["systemProxyCleared"] = systemProxyCleared
+    routine["hostRuntimeProxyDown"] = hostProxyDown
+    out.emit(routine)
+
+    out.check(quitStepLabel(result.quit) == "settled.completed.quit", "routine.quitCompleted")
+    out.check(quitStepLabel(result.priorUpdate) == "settled.configurationSettled", "routine.priorUpdateSettled")
+    out.check(finalPersisted && finalSaveOnly, "routine.finalConfigurationPersistedSaveOnly")
+    out.check(preferencesPersisted, "routine.finalPreferencesPersisted")
+    out.check(result.observationFailure == nil, "routine.noObservationFailure")
+    out.check(entries.map(\.name) == ["configuration", "preferences"]
+              && entries.allSatisfy { releasedAt.duration(to: $0.at) >= .zero }, "routine.eachProducerOnceAfterRelease")
+    out.check(configurationEntry?.handed == quitStepLabel(result.priorUpdate), "routine.producerHandedPriorSettlement")
+    out.check(listenerClosed && systemProxyCleared && hostProxyDown, "routine.physicalCleanup")
+
+    // The files on disk, read after every step settled. Re-encoding the final request measures the frame the routine sent.
+    do {
+        let onDisk = try ProxyConfigPersistence.load(in: run.environment, allowMissing: false)
+        let preferencesOnDisk = try AppPreferencesPersistence.load(in: run.environment)
+        out.check(onDisk == finalDraft, "disk.runtimeFileIsFinalDraft")
+        out.check(preferencesOnDisk == finalPreferences, "disk.preferencesAreFinalDraft")
+        let request = try PrivateConfigurationBridge.makeRequest(
+            config: finalDraft, platform: platform, requestID: ControlRequestID(rawValue: UUID()), incarnation: incarnation,
+            budget: try ControlWireBudget(60_000), runtimeBaseline: baselines.runtime, platformBaseline: baselines.platform,
+            modules: allSaveOnly
+        )
+        out.emit(["record": "codec-sizes", "fixture": "validator-widest", "finalSaveRequestFrameBytes": try PrivateConfigurationEncoder.encode(request).count])
+    }
+    stages.stage("client-quit-verified", ["probeHeld": "fixture,prior-draft,final-draft"])
+    out.emit(["record": "fakes", "pacFetches": run.fakes.pac.fetchCount, "gssCalls": run.fakes.gss.calls,
+              "privilegedCommands": run.fakes.machine.privilege.commands.count])
+    out.check(run.fakes.pac.fetchCount == 0 && run.fakes.gss.calls == 0, "fakes.noPACOrGSS")
+}
+
 /// codec-bounds: no host. The actual codecs over the widest metadata the types admit, as separate counts from the measured
 /// frames (whose versions are small store versions, not `UInt64.max`).
 @MainActor
@@ -2168,7 +2411,7 @@ func runCodecBounds(_ out: Output) throws {
     _ = zeroRevision
 }
 
-let latencyModes = ["contention", "contention-encode", "contention-store", "held", "cancel", "codec-bounds"]
+let latencyModes = ["contention", "contention-encode", "contention-store", "held", "cancel", "client-quit-widest", "codec-bounds"]
 
 let flowModes = ["small", "realistic-valid-64", "realistic-valid-128", "validator-widest", "escape-maximum", "padded-8mib", "repeat"]
 
@@ -2263,6 +2506,8 @@ struct ProbeMain {
                     try await runHeld(run, limits: limits)
                 } else if mode == "cancel" {
                     try await runCancel(run, limits: limits)
+                } else if mode == "client-quit-widest" {
+                    try await runClientQuit(run, limits: limits)
                 } else {
                     try await runFlow(run, limits: limits, fixture: try makeFixture(mode, scratch: scratch))
                 }
