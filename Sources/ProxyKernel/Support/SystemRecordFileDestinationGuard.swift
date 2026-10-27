@@ -29,6 +29,34 @@ struct SystemRecordFileDestinationGuard: RecordFileDestinationGuarding {
     /// Whether the volume holding a directory is case-sensitive. nil means the volume does not say.
     typealias CaseSensitivityProbe = @Sendable (URL) throws -> Bool?
 
+    /// The two reads the canonical climb makes. They are one value so a test can order a real
+    /// creation between them while the real calls still answer. Production uses `system`.
+    struct PathReads: Sendable {
+        /// The `errno` a read failed with.
+        struct Failure: Error, Equatable {
+            let code: Int32
+
+            /// Nothing is at the name, or an ancestor of it is not a directory.
+            var isMissingName: Bool { code == ENOENT || code == ENOTDIR }
+        }
+
+        /// `realpath(3)`: the resolved path, or the failure that stopped it.
+        let resolve: @Sendable (String) -> Result<String, Failure>
+        /// `lstat(2)`, which does not follow a final symlink: nil when an entry is there.
+        let entryFailure: @Sendable (String) -> Failure?
+
+        static let system = PathReads(
+            resolve: { path in
+                guard let resolved = realpath(path, nil) else { return .failure(Failure(code: errno)) }
+                defer { free(resolved) }
+                return .success(String(cString: resolved))
+            },
+            entryFailure: { path in
+                var info = stat()
+                return lstat(path, &info) == 0 ? nil : Failure(code: errno)
+            })
+    }
+
     private struct FileIdentity: Equatable {
         let device: dev_t
         let inode: ino_t
@@ -50,12 +78,14 @@ struct SystemRecordFileDestinationGuard: RecordFileDestinationGuarding {
 
     private let protected: [ProtectedRecordFile]
     private let caseSensitivity: CaseSensitivityProbe
+    private let reads: PathReads
 
     /// `protected` holds at most one entry per resource code, so its capacity is fixed by
     /// `ProtectedRecordResource` at construction. A composer cannot grow it by passing more paths.
     init(
         protected: [ProtectedRecordFile],
-        caseSensitivity: @escaping CaseSensitivityProbe = SystemRecordFileDestinationGuard.volumeCaseSensitivity
+        caseSensitivity: @escaping CaseSensitivityProbe = SystemRecordFileDestinationGuard.volumeCaseSensitivity,
+        reads: PathReads = .system
     ) {
         precondition(protected.count <= ProtectedRecordResource.allCases.count,
                      "more protected files than resource codes")
@@ -63,12 +93,13 @@ struct SystemRecordFileDestinationGuard: RecordFileDestinationGuarding {
                      "a protected resource is listed twice")
         self.protected = protected
         self.caseSensitivity = caseSensitivity
+        self.reads = reads
     }
 
     func admit(destination: URL) throws {
-        let target = try Self.canonicalPath(destination, resource: nil)
+        let target = try canonicalPath(destination, resource: nil)
         for entry in protected {
-            let other = try Self.canonicalPath(entry.url, resource: entry.resource)
+            let other = try canonicalPath(entry.url, resource: entry.resource)
             // Beneath a protected file, the destination's parents would have to be created
             // as directories where that file is. An ancestor of one would become a file where
             // the protected file's directory is. Both are refused before any creation.
@@ -124,34 +155,35 @@ struct SystemRecordFileDestinationGuard: RecordFileDestinationGuarding {
     /// The climb is bounded by the input. Every missing component is a component of `url`, so the
     /// list holds at most `PATH_MAX / 2` entries (a slash and a name byte each). Only ENOENT and
     /// ENOTDIR let the climb continue; any other failure refuses, because it is not a missing name.
-    private static func canonicalPath(_ url: URL, resource: ProtectedRecordResource?) throws -> CanonicalPath {
+    ///
+    /// An entry that `lstat` finds where `realpath` found nothing gets one fresh resolution and then
+    /// either resolves or is refused, so it adds at most one read and never continues the climb.
+    private func canonicalPath(_ url: URL, resource: ProtectedRecordResource?) throws -> CanonicalPath {
         var existing = url.standardizedFileURL
         guard existing.path.utf8.count < Int(PATH_MAX) else {
             throw RecordFileDestinationRefusal(reason: .inspectionFailed, resource: resource)
         }
         var missing: [String] = []
         while true {
-            if let resolved = realpath(existing.path, nil) {
-                defer { free(resolved) }
-                let base = String(cString: resolved)
-                let path = missing.reversed()
-                    .reduce(URL(fileURLWithPath: base, isDirectory: true)) { $0.appendingPathComponent($1) }
-                    .path
-                let folded = fold(path)
-                return CanonicalPath(path: path, folded: folded, volumeDirectory: base,
-                                     components: components(of: path),
-                                     foldedComponents: components(of: folded))
-            }
-            let code = errno
-            guard code == ENOENT || code == ENOTDIR else {
+            switch reads.resolve(existing.path) {
+            case .success(let base):
+                return Self.canonicalPath(resolved: base, missing: missing)
+            case .failure(let failure) where failure.isMissingName:
+                break
+            case .failure:
                 throw RecordFileDestinationRefusal(reason: .inspectionFailed, resource: resource)
             }
-            var info = stat()
-            if lstat(existing.path, &info) == 0 {
-                throw RecordFileDestinationRefusal(reason: .inspectionFailed, resource: resource)
+            guard let entryFailure = reads.entryFailure(existing.path) else {
+                // Either the entry is a dangling symlink, or the object was created between the two
+                // reads, as a protected file's first atomic write is. A fresh resolution tells them
+                // apart: a created object resolves now and is judged like any other, and a link that
+                // still does not resolve is refused.
+                guard case .success(let base) = reads.resolve(existing.path) else {
+                    throw RecordFileDestinationRefusal(reason: .inspectionFailed, resource: resource)
+                }
+                return Self.canonicalPath(resolved: base, missing: missing)
             }
-            let lstatCode = errno
-            guard lstatCode == ENOENT || lstatCode == ENOTDIR else {
+            guard entryFailure.isMissingName else {
                 throw RecordFileDestinationRefusal(reason: .inspectionFailed, resource: resource)
             }
             let parent = existing.deletingLastPathComponent()
@@ -161,6 +193,17 @@ struct SystemRecordFileDestinationGuard: RecordFileDestinationGuarding {
             missing.append(existing.lastPathComponent)
             existing = parent
         }
+    }
+
+    /// `resolved` with the missing components, collected deepest first, appended in path order.
+    private static func canonicalPath(resolved base: String, missing: [String]) -> CanonicalPath {
+        let path = missing.reversed()
+            .reduce(URL(fileURLWithPath: base, isDirectory: true)) { $0.appendingPathComponent($1) }
+            .path
+        let folded = fold(path)
+        return CanonicalPath(path: path, folded: folded, volumeDirectory: base,
+                             components: components(of: path),
+                             foldedComponents: components(of: folded))
     }
 
     /// Whether one component list is a prefix of the other: one path names the other, or an ancestor
