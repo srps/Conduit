@@ -30,3 +30,33 @@ and JSON results. It requires write access to that isolated checkout; never run
 it over another agent's active changes. The portable script was syntax-checked;
 the executed temporary driver used the same mutation and assertion checks with a
 fixed worktree/output path.
+
+## Private updates and two-client authority
+
+The next two frozen checkpoints add independent evidence; they do not change the
+scope of the earlier 11-test experiment.
+
+- [Private results before the freshness witness](private-results-before-freshness-witness.json):
+  baseline and byte-restored runs passed 24 real-client tests. Five removals
+  failed intended assertions: exact save baselines, recorded lifecycle results
+  in receipts, admitted-input capacity, wire budgets, and the DNS Stop merge.
+  Removing the apply pair-freshness check **survived** its existing test. That is
+  a recorded coverage gap, assigned a direct replacement-during-apply witness;
+  it is not evidence that the guard is unnecessary. Replay with
+  replay-private.py OUTPUT --repo CHECKOUT.
+- [Authority model results](authority-model-results.json): the independent model
+  passed all 88 legal depth-three histories (264 transitions). Removing either
+  exact save baselines or private request-ID reuse refusal failed the model's
+  assertions; baseline and restored runs passed. Replay with
+  replay-authority-model.py OUTPUT --repo CHECKOUT.
+
+Both used fake machine effects and scratch roots, restored every mutated byte,
+and rejected compiler/crash failures as evidence. The model covers two-client
+save/read/reuse authority; draft rebasing is performed by its client adapter,
+not claimed as production AppState behavior. It does not cover all lifecycle,
+cancel/disconnect, expiry or physical schedules.
+
+Each result records its independent checkout commit and a tree-equivalent
+implementation commit. Portable drivers verify recorded source/test SHA-256
+values before writing, require a new output directory, and were syntax-checked.
+The executed temporary drivers used the same checks with fixed paths.
