@@ -244,7 +244,8 @@ final class RuntimeClientContractTests: XCTestCase {
         func text(_ value: ControlPreflightItems) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
 
         let kept = try items(.installed, busy: true)
-        XCTAssertTrue(try text(kept).contains(#""helper":"installed","helperReadBusy":true"#), try text(kept))
+        let keptText = try text(kept)
+        XCTAssertTrue(keptText.contains(#""helper":"installed","helperReadBusy":true"#), keptText)
         XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(try text(kept).utf8)), kept)
         for (helper, implied) in [(ControlHelperStatus.installed, false), (.busy, true), (.notInstalled, false)] {
             let value = try items(helper)
