@@ -60,3 +60,21 @@ Each result records its independent checkout commit and a tree-equivalent
 implementation commit. Portable drivers verify recorded source/test SHA-256
 values before writing, require a new output directory, and were syntax-checked.
 The executed temporary drivers used the same checks with fixed paths.
+
+## Terminal and combined-apply guards
+
+[Terminal/apply results](terminal-apply-results.json) cover the next frozen
+checkpoint, before request-bound final-flush IDs and common private wait-gate
+convergence. Baseline and byte-restored runs passed all 33 real-client owner
+tests. Each of three removals failed intended assertions:
+
+- An expired flush's claim left open allowed its queued write after Quit.
+- Ignoring actionable apply revisions let Stop be followed by an unstarted save.
+- Classifying Quit as ordinary made it compete with exhausted mutation capacity.
+
+These were clean assertion failures, with no compiler/crash markers, and every
+source byte was restored. Replay using replay-terminal-apply.py OUTPUT --repo
+CHECKOUT on the recorded source/test bytes. Its portable driver was
+syntax-checked; the executed driver used the same checks with fixed paths.
+This does not close the separately recorded pair-replacement coverage gap,
+verify the later request-bound reservation or establish release readiness.
