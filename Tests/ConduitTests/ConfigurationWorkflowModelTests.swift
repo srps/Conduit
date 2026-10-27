@@ -447,7 +447,7 @@ final class ConfigurationWorkflowModelTests: XCTestCase {
             files: files,
             queue: queue,
             store: store,
-            workflow: RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+            workflow: RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         )
     }
 

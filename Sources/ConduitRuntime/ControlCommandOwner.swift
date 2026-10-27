@@ -59,25 +59,28 @@ enum ControlServiceFault: Sendable, Equatable {
     case snapshotRevisionRegressed
 }
 
-/// The one owner of intent and lifecycle, seen from the service. The actual runtime host adopts this
-/// later, and it must fix Stop-before-recovery admission before it does. A fake owner in tests proves
-/// the service's contract, not the host's fence.
+/// The one owner of intent and lifecycle, seen from the service. `RuntimeHost` conforms (`RuntimeHostControlOwner.swift`): its fence is
+/// the host's own synchronous admission, which precedes launch recovery and any I/O. A fake owner in tests proves the service's contract,
+/// not the host's fence.
 @MainActor
 protocol ControlCommandOwner: AnyObject {
     var incarnation: ControlHostIncarnation { get }
 
-    /// The current safe projected state. It is captured in the same owner turn as the caller's registration.
-    func snapshot() -> ControlRuntimeSnapshot
+    /// The current safe projected state. It is captured in the same owner turn as the caller's registration. Nil when the owner cannot
+    /// project its state; the owner reports why itself, and the service answers that read as an internal failure, never a stale value.
+    func snapshot() -> ControlRuntimeSnapshot?
 
     /// The projected rows of one collection, in the same owner turn as the snapshot that names its revision. The owner projects them
     /// through the shared bounded projection, which stops at the first row past a bound, so an over-budget capture is never built in
     /// full. The service refuses an over-budget answer as a whole capture, never truncated. An internal failure is a closed fault.
     func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection
 
-    /// Synchronous admission and fence. `candidate` is the pending stop of the same module, when one exists.
+    /// Synchronous admission and fence. `candidate` is the pending stop of the same module, when one exists. `request` is the client's
+    /// request ID, which the admitted work names in every store context it reaches (decision 0018).
     /// It starts no effect and calls no report.
     func fence(
         _ command: ControlRuntimeCommand,
+        request: ControlRequestID,
         operation: ControlOperationID,
         candidate: ControlOperationID?
     ) -> ControlOwnerFenceResult

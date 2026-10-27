@@ -104,6 +104,8 @@ final class ConfigurationStore {
         /// because the defaults depend on those bytes too. A present sidecar and the runtime record have none. The store's own verified runtime
         /// write moves it, and the sidecar's first verified write clears it.
         var source: ConfigurationFileBaseline?
+        /// Why `baseline` is nil, set where it was latched and cleared by an adopted observation.
+        var latchReason: ConfigurationLatchReason?
     }
 
     private let incarnation = UUID()
@@ -123,6 +125,17 @@ final class ConfigurationStore {
         self.session = session
         self.access = access
         self.work = work
+    }
+
+    /// What the store holds for a component, in this turn, with no I/O (decisions 0032 and 0034). Only after an observation was made:
+    /// the open's refusal latches every component with its reason, and an adopted one holds a baseline for each.
+    func componentState(_ component: ConfigurationComponent) -> ConfigurationComponentState {
+        let record = records[component]
+        guard let token = baselineToken(for: component) else {
+            guard let reason = record.latchReason else { preconditionFailure("a component without a baseline was latched with its reason") }
+            return .retained(reason)
+        }
+        return record.present ? .verified(token) : .absent(token)
     }
 
     /// The token for a component's current baseline, or nil when the store holds no authoritative baseline for it.
@@ -536,13 +549,13 @@ final class ConfigurationStore {
         case .held(let hold, let sidecar):
             // Only a changed sidecar latches. An unreadable or absent one keeps its baseline, so a later check can establish it.
             if case .sidecarChanged = hold {
-                latch(sidecar)
+                latch(sidecar, .changedSinceBaseline)
             }
             return .notAttempted(.preservationHeld(hold))
         case .sourceChanged:
             // The runtime bytes differ from the ones the store established, so both files latch, as an observed conflict does.
-            latch(component)
-            latch(.runtime)
+            latch(component, .changedSinceBaseline)
+            latch(.runtime, .changedSinceBaseline)
             return .notAttempted(.sourceChanged)
         case .sourceUnreadable(let error):
             return .notAttempted(.sourceUnreadable(error))
@@ -586,12 +599,12 @@ final class ConfigurationStore {
             return .notPersisted(error)
         case .unknown(let reason, let error):
             // The file may hold the staged bytes, the prior or neither. No baseline may authorize a write until a reload.
-            latch(component)
+            latch(component, .writeUnknown)
             return .unknown(reason, reportedWriteError: error)
         case .conflict:
             // Another party changed the file after its baseline was observed (decision 0027). The latch holds until a reload, even if
             // the file later returns to the old bytes.
-            latch(component)
+            latch(component, .changedSinceBaseline)
             return .conflict
         case .notStarted(let error):
             return .notAttempted(.preReadFailed(error))
@@ -610,7 +623,7 @@ final class ConfigurationStore {
         case .unchanged:
             return .unchanged(receipt(component, context: context))
         case .changed:
-            latch(component)
+            latch(component, .changedSinceBaseline)
             return .conflict
         case .refused(let refusal):
             return .notAttempted(.refused(refusal))
@@ -635,7 +648,7 @@ final class ConfigurationStore {
         case .unchanged:
             return records[component].present ? .unchanged(receipt(component, context: context)) : .unchangedAbsent
         case .changed:
-            latch(component)
+            latch(component, .changedSinceBaseline)
             return .changed
         case .refused(let refusal):
             return .notAttempted(.refused(refusal))
@@ -668,7 +681,7 @@ final class ConfigurationStore {
     private func adopt(_ observed: ConfigurationLoadObservation) -> ConfigurationLoadOutcome {
         switch observed.outcome {
         case .failure(let refusal):
-            latchAll()
+            latchAll(.observationRefused)
             return .refused(refusal)
         case .success(let frozen):
             // A missing sidecar's value comes from the runtime file, so a change of that value is a change of the sidecar, though its own
@@ -678,7 +691,7 @@ final class ConfigurationStore {
                 records[component].baseline != observed.baselines[component] || observed.valueMoved[component]
             }
             for component in ConfigurationComponent.allCases where advances(component) && !Self.canAdvance(records[component].version) {
-                latchAll()
+                latchAll(.observationRefused)
                 return .refused(.versionExhausted(component))
             }
             let advancing = ConfigurationComponent.allCases.filter(advances)
@@ -713,6 +726,8 @@ final class ConfigurationStore {
                     records[component].version += 1
                 }
                 records[component].baseline = baseline
+                // An adopted observation read every file, so each has a baseline; a missing one would hold no authority all the same.
+                records[component].latchReason = baseline == nil ? .observationRefused : nil
                 records[component].present = loaded[component].present
                 records[component].source = component == .runtime || loaded[component].present ? nil : observed.baselines.runtime
             }
@@ -725,13 +740,14 @@ final class ConfigurationStore {
     /// Ends a component's authority until a reload. A nil baseline authorizes nothing, so every token issued before this point is refused,
     /// and no version changes here. A reload after the latch takes a newer version even when the bytes are the old ones, so those tokens
     /// stay refused for good.
-    private func latch(_ component: ConfigurationComponent) {
+    private func latch(_ component: ConfigurationComponent, _ reason: ConfigurationLatchReason) {
         records[component].baseline = nil
+        records[component].latchReason = reason
     }
 
-    private func latchAll() {
+    private func latchAll(_ reason: ConfigurationLatchReason) {
         for component in ConfigurationComponent.allCases {
-            latch(component)
+            latch(component, reason)
         }
     }
 

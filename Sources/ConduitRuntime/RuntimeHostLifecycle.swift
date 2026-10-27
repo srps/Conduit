@@ -44,6 +44,24 @@ package struct RuntimeModuleStopOutcome: Equatable, Sendable {
     package var dnsSave: RuntimeDNSStopSave?
 }
 
+/// One Start admitted in its synchronous turn and not yet run (`RuntimeHost.admitModuleStart`). It carries no configuration value: its
+/// preparation captures the saved pair later (decision 0037).
+struct RuntimeAdmittedStart: Sendable {
+    let ticket: RuntimeConfigurationWorkflow.StartTicket
+    let actions: PrivateModuleSlots<RuntimeModuleAction>
+    let operation: LifecycleOperation
+    let restartsProxy: Bool
+}
+
+/// One Stop fenced in its synchronous turn and not yet run (`RuntimeHost.admitModuleStop`).
+struct RuntimeAdmittedStop: Sendable {
+    let modules: Set<ControlModule>
+    let reason: RuntimeStopReason
+    /// The counter value the Stop's fence took. Its teardown acts only on a module still at it.
+    let revision: Int
+    let requestID: ControlRequestID?
+}
+
 // MARK: - Lane effect
 
 /// One lifecycle operation holding the lanes of its scope, one token per module (decision 0031). Every surface block checks the token of
@@ -273,22 +291,43 @@ extension RuntimeHost {
         operation: LifecycleOperation,
         restartsProxy: Bool
     ) async throws -> RuntimeModuleStartOutcome {
+        let admitted = try admitModuleStart(actions, expecting: revisions, operation: operation, restartsProxy: restartsProxy).get()
+        return try await runAdmittedStart(admitted)
+    }
+
+    /// The synchronous half of `runStart`: the whole request is admitted, or refused with its typed event, in this one turn, before
+    /// anything suspends. A refusal changes nothing. An admission is pending work from here until `runAdmittedStart` returns, so a settle
+    /// sees it, and the caller must run it. `requestID` is the client request it follows, nil for the host's own facade.
+    func admitModuleStart(
+        _ actions: PrivateModuleSlots<RuntimeModuleAction>,
+        expecting revisions: PrivateModuleSlots<Int?>,
+        operation: LifecycleOperation,
+        restartsProxy: Bool,
+        requestID: ControlRequestID? = nil
+    ) -> Result<RuntimeAdmittedStart, RuntimeStartRefusal> {
         guard !workflow.isTerminal else {
             emitConfigurationEvents(workflow.terminalRefusal())
-            throw RuntimeStartRefusal.terminated
+            return .failure(.terminated)
         }
-        pendingAdmissions += 1
-        defer { pendingAdmissions -= 1 }
-        let ticket: RuntimeConfigurationWorkflow.StartTicket
-        switch workflow.admitStart(actions, expecting: revisions) {
-        case .success(let admitted):
-            ticket = admitted
+        switch workflow.admitStart(actions, expecting: revisions, requestID: requestID) {
+        case .success(let ticket):
+            pendingAdmissions += 1
+            // Any admission makes a pending settle stale, whether or not it has reached a lane yet.
+            stoppedEffectsJoin?.finish(.superseded)
+            return .success(RuntimeAdmittedStart(ticket: ticket, actions: actions, operation: operation, restartsProxy: restartsProxy))
         case .failure(let refusal):
             emitConfigurationEvents(workflow.admissionEvents(refusal))
-            throw refusal
+            return .failure(refusal)
         }
-        // Any admission makes a pending settle stale, whether or not it has reached a lane yet.
-        stoppedEffectsJoin?.finish(.superseded)
+    }
+
+    /// The asynchronous half of `runStart`, for one admission `admitModuleStart` made. It runs once per admission.
+    func runAdmittedStart(_ admitted: RuntimeAdmittedStart) async throws -> RuntimeModuleStartOutcome {
+        defer { pendingAdmissions -= 1 }
+        let ticket = admitted.ticket
+        let actions = admitted.actions
+        let operation = admitted.operation
+        let restartsProxy = admitted.restartsProxy
         await awaitLaunchRecovery()
         let preparation = await workflow.prepareStart(ticket)
         emitConfigurationEvents(preparation.events)
@@ -810,11 +849,37 @@ extension RuntimeHost {
     /// outside the scope keep running. A session DNS Stop's physical restore runs whatever the store's slot is doing, and its disable is then
     /// saved through the runtime-only lifecycle commit; the obligation ends only once the write verifies.
     func runStop(_ modules: Set<ControlModule>, reason: RuntimeStopReason) async -> RuntimeModuleStopOutcome {
+        await runAdmittedStop(admitModuleStop(modules, reason: reason))
+    }
+
+    /// The synchronous half of `runStop`: every module of the scope is fenced in this one turn, whatever the store or launch recovery is
+    /// doing. The admission is pending work until `runAdmittedStop` returns, or until `dropAdmittedStop` releases one that never ran.
+    /// `requestID` is the client request it follows, nil for the host's own compositions.
+    func admitModuleStop(
+        _ modules: Set<ControlModule>,
+        reason: RuntimeStopReason,
+        requestID: ControlRequestID? = nil
+    ) -> RuntimeAdmittedStop {
         precondition(reason != .processQuit, "the process quit is `shutdown`")
         pendingAdmissions += 1
-        defer { pendingAdmissions -= 1 }
         let revision = workflow.admitStop(modules, reason: reason)
         stoppedEffectsJoin?.finish(.superseded)
+        return RuntimeAdmittedStop(modules: modules, reason: reason, revision: revision, requestID: requestID)
+    }
+
+    /// Releases a Stop admission that will never run, because a newer Stop of the same module replaced it before it launched. Its fence
+    /// stays: the newer Stop holds the module and owes whatever it saves.
+    func dropAdmittedStop(_ admitted: RuntimeAdmittedStop) {
+        _ = admitted
+        pendingAdmissions -= 1
+    }
+
+    /// The asynchronous half of `runStop`, for one admission `admitModuleStop` made. It runs once per admission.
+    func runAdmittedStop(_ admitted: RuntimeAdmittedStop) async -> RuntimeModuleStopOutcome {
+        defer { pendingAdmissions -= 1 }
+        let modules = admitted.modules
+        let reason = admitted.reason
+        let revision = admitted.revision
         await awaitLaunchRecovery()
         // Read before a lane is taken, so no suspension separates it from the check.
         let revisions = workflow.revisions
@@ -835,7 +900,7 @@ extension RuntimeHost {
         guard reason == .session, modules.contains(.dns) else {
             return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: nil)
         }
-        let save = await workflow.saveOwedDNSStop()
+        let save = await workflow.saveOwedDNSStop(requestID: admitted.requestID)
         emitConfigurationEvents(save.events)
         let result: RuntimeDNSStopSave = switch save.save {
         case .saved: .saved

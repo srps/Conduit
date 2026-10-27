@@ -83,8 +83,9 @@ private func freeTCPPort() throws -> Int {
 }
 
 /// One scratch root, its fakes and the one host built over it. `tearDown` stops, settles and flushes the host before the root goes.
+/// The control-owner tests build the same harness (`makeInteractiveHarness`).
 @MainActor
-private final class Harness {
+final class InteractiveHostHarness {
         let session: StateRootSession
         let environment: RuntimeEnvironment
         let machine: FakeMachine
@@ -179,6 +180,17 @@ private final class Harness {
         func typedEvents() -> [RuntimeEventPayload] {
             host?.orchestrator.eventLog.events.compactMap(\.typed) ?? []
         }
+}
+
+private typealias Harness = InteractiveHostHarness
+
+/// `makeHarness` for the other suites over the actual host.
+@MainActor
+func makeInteractiveHarness(
+    platform: PlatformIntegrationConfig,
+    dnsForwarderEnabled: Bool
+) throws -> InteractiveHostHarness {
+    try makeHarness(platform: platform, dnsForwarderEnabled: dnsForwarderEnabled)
 }
 
 /// Ephemeral listeners, one split-DNS entry, and the switches a test names.
@@ -1122,7 +1134,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
                                        work: PlatformWork(label: "test.owed-disable"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         workflow.admitStop([.dns], reason: .session)
 
@@ -1145,7 +1157,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let files = ParkedReadStateFiles()
         let store = ConfigurationStore(session: harness.session, access: files, work: PlatformWork(label: "test.busy-disable"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         let saved = try Data(contentsOf: harness.environment.configFile)
         workflow.admitStop([.dns], reason: .session)
@@ -1179,7 +1191,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
                                        work: PlatformWork(label: "test.carried-disable"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         workflow.admitStop([.dns], reason: .session)
         let start = try workflow.admitStart(PrivateModuleSlots(proxy: .none, dns: .start, tunnels: .none)).get()
@@ -1205,7 +1217,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let files = ParkedReadStateFiles()
         let store = ConfigurationStore(session: harness.session, access: files, work: PlatformWork(label: "test.displaced-disable"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         workflow.admitStop([.dns], reason: .session)
         files.arm()
@@ -1244,7 +1256,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         self.harness = harness
         let store = ConfigurationStore(session: harness.session, access: StateFileAccess.operatingSystem(),
                                        work: PlatformWork(label: "test.pending-dns-scope"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         let dnsStart = try workflow.admitStart(PrivateModuleSlots(proxy: .none, dns: .start, tunnels: .none)).get()
         let proxy = try workflow.admitStart(PrivateModuleSlots(proxy: .start, dns: .conditionalActivation, tunnels: .none)).get()

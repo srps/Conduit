@@ -39,7 +39,10 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
             access: StateFileAccess.operatingSystem(),
             work: PlatformWork(label: "test.workflow-admission")
         )
-        return RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: startupAllowsMissing, generation: generation)
+        return RuntimeConfigurationWorkflow(
+            store: store, incarnation: ControlHostIncarnation(rawValue: UUID()),
+            startupAllowsMissing: startupAllowsMissing, generation: generation
+        )
     }
 
     // MARK: - Bounded model

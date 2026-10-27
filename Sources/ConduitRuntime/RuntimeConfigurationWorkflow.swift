@@ -71,6 +71,9 @@ final class RuntimeConfigurationWorkflow {
     /// holds a member. It carries no configuration value until its preparation captures one (decision 0037).
     struct StartTicket: Equatable, Sendable {
         fileprivate(set) var lifecycle: RuntimeLifecycleTicket
+        /// The client request this Start follows, which every store context of its preparation names. Nil for the host's own facade,
+        /// which has no client request, so each of its store calls names a fresh one.
+        let requestID: ControlRequestID?
 
         var generation: Int { lifecycle.group }
     }
@@ -122,7 +125,8 @@ final class RuntimeConfigurationWorkflow {
 
     private let store: ConfigurationStore
     private let startupAllowsMissing: Bool
-    private let incarnation = ControlHostIncarnation(rawValue: UUID())
+    /// The host's one incarnation, the same value its service and observations name. The store's own baseline namespace is separate.
+    private let incarnation: ControlHostIncarnation
     /// The one per-module intent the workflow owns (decisions 0035 and 0036). The write claims read it from the platform queue, so it sits
     /// behind a short lock that no I/O holds.
     private let intent: NIOLockedValueBox<RuntimeModuleIntents>
@@ -153,11 +157,13 @@ final class RuntimeConfigurationWorkflow {
 
     /// - Parameter startupAllowsMissing: the startup's explicit `allowMissing`. A reload uses the same value, so it keeps the combinations
     ///   the loader accepts at startup, and an explicit `--config` start keeps its refusal of a missing runtime file.
+    /// - Parameter incarnation: the host's incarnation, which every store context names.
     /// - Parameter generation: the intent generation before the first admission. The host always starts at 0; a test seeds it near
     ///   `Int.max` to reach the exhausted branches.
-    init(store: ConfigurationStore, startupAllowsMissing: Bool, generation: Int = 0) {
+    init(store: ConfigurationStore, incarnation: ControlHostIncarnation, startupAllowsMissing: Bool, generation: Int = 0) {
         precondition(generation >= 0, "an intent generation is never negative")
         self.store = store
+        self.incarnation = incarnation
         self.startupAllowsMissing = startupAllowsMissing
         // DNS's configured intent is the store's adopted value, set by `open` before any admission.
         self.intent = NIOLockedValueBox(RuntimeModuleIntents(counter: generation, dnsEnabled: false))
@@ -202,6 +208,64 @@ final class RuntimeConfigurationWorkflow {
         }
     }
 
+    // MARK: - Editor observation
+
+    /// One memory observation for the private editor (decisions 0032 and 0034): the store's current values, each component's baseline or
+    /// its closed retained reason, the module intents and the terminal latch, all from this one owner turn, with no disk read and no apply.
+    /// The host's accepted view never enters it, so it confers no persistence authority the store does not hold. It is copy-on-write
+    /// values only: mapping and encoding run off the owner.
+    struct EditorCapture: Sendable {
+        let values: ConfigurationValues
+        let components: PrivateComponentSlots<PrivateComponentState>
+        let modules: PrivateModuleSlots<PrivateModuleState>
+        let terminal: Bool
+    }
+
+    /// Captures the editor observation in this turn. A host exists only after an adopted open, so the store holds values; a later refused
+    /// reload keeps them for display and marks every component retained.
+    func editorCapture() -> EditorCapture {
+        guard let values = store.values else { preconditionFailure("an opened workflow's store holds adopted values") }
+        let state = intent.withLockedValue { $0 }
+        func component(_ component: ConfigurationComponent) -> PrivateComponentState {
+            switch store.componentState(component) {
+            case .verified(let token): .verified(Self.privateBaseline(token))
+            case .absent(let token): .absent(Self.privateBaseline(token))
+            case .retained(let reason): .retained(Self.retained(reason))
+            }
+        }
+        func module(_ module: ControlModule) -> PrivateModuleState {
+            let intent = state.modules[module]
+            guard let revision = ControlLifecycleRevision(rawValue: intent.revision) else {
+                preconditionFailure("a lifecycle revision is never negative")
+            }
+            return PrivateModuleState(lifecycleRevision: revision, enabled: intent.enabled, fenced: intent.fenced)
+        }
+        return EditorCapture(
+            values: values,
+            components: PrivateComponentSlots(runtime: component(.runtime), platform: component(.platform), preferences: component(.preferences)),
+            modules: PrivateModuleSlots(proxy: module(.proxy), dns: module(.dns), tunnels: module(.tunnels)),
+            terminal: state.terminal
+        )
+    }
+
+    /// The wire form of a store token: its namespace, file and exact `UInt64` version, never narrowed.
+    static func privateBaseline(_ token: ConfigurationBaselineToken) -> PrivateBaseline {
+        let file: ControlConfigWorkflowFile = switch token.component {
+        case .runtime: .runtime
+        case .platform: .platform
+        case .preferences: .preferences
+        }
+        return PrivateBaseline(namespace: PrivateBaselineNamespace(rawValue: token.storeIncarnation), component: file, version: token.version)
+    }
+
+    private static func retained(_ reason: ConfigurationLatchReason) -> PrivateRetainedReason {
+        switch reason {
+        case .observationRefused: .observationRefused
+        case .changedSinceBaseline: .changedSinceBaseline
+        case .writeUnknown: .writeUnknown
+        }
+    }
+
     // MARK: - Start and Stop admission
 
     /// Admits the whole-host facade Start: proxy and tunnels Starts and DNS's configured Start, as one group. Synchronous, before any
@@ -217,13 +281,14 @@ final class RuntimeConfigurationWorkflow {
     /// a host bug.
     func admitStart(
         _ actions: PrivateModuleSlots<RuntimeModuleAction>,
-        expecting revisions: PrivateModuleSlots<Int?> = PrivateModuleSlots(proxy: nil, dns: nil, tunnels: nil)
+        expecting revisions: PrivateModuleSlots<Int?> = PrivateModuleSlots(proxy: nil, dns: nil, tunnels: nil),
+        requestID: ControlRequestID? = nil
     ) -> Result<StartTicket, RuntimeStartRefusal> {
         let request = RuntimeLifecycleRequest(actions: actions, expectedRevisions: revisions)
         let admission = intent.withLockedValue { $0.admit(request) }
         switch admission {
         case .success(let ticket):
-            return .success(StartTicket(lifecycle: ticket))
+            return .success(StartTicket(lifecycle: ticket, requestID: requestID))
         case .failure(.terminated):
             return .failure(.terminated)
         case .failure(.exhausted):
@@ -280,8 +345,9 @@ final class RuntimeConfigurationWorkflow {
     /// stager, the legacy-preservation checks and the runtime baseline guard all apply, and no platform file is touched. The write is claimed
     /// only while that Stop's save is still the one owed, and the obligation ends only once the write verifies. It never retries.
     /// An explicit DNS Start pending in the slot may carry the obligation instead: it is still owed, and that Start's own verified write,
-    /// or its end without one, settles it, so this writes nothing.
-    func saveOwedDNSStop() async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent]) {
+    /// or its end without one, settles it, so this writes nothing. `requestID` is the client request of the Stop that owes it, nil for
+    /// the host's own composition.
+    func saveOwedDNSStop(requestID: ControlRequestID? = nil) async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent]) {
         enum Owed { case save(revision: Int), carried, notOwed }
         let owed = intent.withLockedValue { state -> Owed in
             switch state.modules.dns.pending {
@@ -302,7 +368,7 @@ final class RuntimeConfigurationWorkflow {
         let admission = await store.commitDNSLifecycle(
             enabled: false,
             expecting: store.baselineToken(for: .runtime),
-            context: context(generation: revision),
+            context: context(generation: revision, requestID: requestID),
             claim: ConfigurationWriteClaim { intent.withLockedValue { $0.stopSaveIsCurrent(revision: revision) } }
         )
         // A busy slot attempts nothing: the disable stays owed, the fence stays, and the typed hold says why.
@@ -447,7 +513,8 @@ final class RuntimeConfigurationWorkflow {
             let lifecycle = binding.withLockedValue { $0 }
             return intent.withLockedValue { $0.isPending(lifecycle) }
         }
-        let admission = await store.commitCapturedRuntimeAndPlatform(context: context(generation: ticket.generation), claim: claim) { values in
+        let operation = context(generation: ticket.generation, requestID: ticket.requestID)
+        let admission = await store.commitCapturedRuntimeAndPlatform(context: operation, claim: claim) { values in
             // The store's adopted DNS bit is a durable fact, observed first, so a reload that adopted it before this point supplies the
             // value and is never written over.
             guard let lifecycle = intent.withLockedValue({ $0.capture(ticket.lifecycle, observedDNS: values.runtime.dnsForwarderEnabled) }),
@@ -581,12 +648,14 @@ final class RuntimeConfigurationWorkflow {
 
     // MARK: - Mapping
 
-    private func context(generation: Int) -> ConfigurationOperationContext {
+    /// The context a store call echoes. A client request names its own ID, so one request ID follows its workflow (decision 0018); the
+    /// host's own compositions, startup, reload and the facade, have no client request and name a fresh one per call.
+    private func context(generation: Int, requestID: ControlRequestID? = nil) -> ConfigurationOperationContext {
         guard let ordinal = PrivateConfigExpectedGeneration(rawValue: generation) else {
             preconditionFailure("an intent generation is never negative")
         }
         return ConfigurationOperationContext(
-            requestID: ControlRequestID(rawValue: UUID()),
+            requestID: requestID ?? ControlRequestID(rawValue: UUID()),
             hostIncarnation: incarnation,
             expectedOwnerGeneration: ordinal
         )

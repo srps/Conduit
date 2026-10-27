@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
 import PlatformMac
 import XCTest
@@ -83,7 +84,7 @@ final class ConfigurationCaptureModelTests: XCTestCase {
         try install(fixtures[.original]!, in: environment)
         try AppPreferencesPersistence.save(AppPreferences(), in: environment)
         let store = ConfigurationStore(session: session, access: StateFileAccess.operatingSystem(), work: PlatformWork(label: "test.capture-model"))
-        let workflow = RuntimeConfigurationWorkflow(store: store, startupAllowsMissing: true)
+        let workflow = RuntimeConfigurationWorkflow(store: store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true)
         _ = try await workflow.open()
         let queued = try workflow.admitStart().get()
         try install(fixtures[beforeCapture]!, in: environment)

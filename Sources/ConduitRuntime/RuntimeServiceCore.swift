@@ -219,7 +219,7 @@ final class RuntimeServiceCore {
         }
         let operation = makeOperationID()
         let candidate = stopModule.flatMap { candidates[$0] }
-        switch owner.fence(request.command, operation: operation, candidate: candidate) {
+        switch owner.fence(request.command, request: request.requestID, operation: operation, candidate: candidate) {
         case .rejected(let code):
             recordAlias(request, fingerprint: fingerprint, partition: partition, admission: .rejected(code))
             return .rejected(code)
@@ -284,7 +284,7 @@ final class RuntimeServiceCore {
 
     /// The owner's safe snapshot, when it belongs to this incarnation.
     func currentSnapshot() -> ControlRuntimeSnapshot? {
-        let snapshot = owner.snapshot()
+        guard let snapshot = owner.snapshot() else { return nil }
         return snapshot.stamp.incarnation == incarnation ? snapshot : nil
     }
 
@@ -432,7 +432,9 @@ final class RuntimeServiceCore {
     /// The retention is best effort. No lease is promised, so a retained revision can be evicted by a later capture.
     func pageSource(_ request: ControlPageRequest) -> RuntimePageSource {
         guard request.expectedIncarnation == incarnation else { return .changedIncarnation }
-        guard let snapshot = currentSnapshot() else {
+        // An owner that cannot project its state has reported why itself, so the read fails closed with no fault of the service's.
+        guard let snapshot = owner.snapshot() else { return .internalFailure }
+        guard snapshot.stamp.incarnation == incarnation else {
             // The owner's snapshot names another incarnation than this service. The owner broke its invariant, so nothing is read.
             deliver(.snapshotIncarnationMismatch)
             return .internalFailure
@@ -837,7 +839,11 @@ final class RuntimeServiceCore {
     /// fault only after the slot is complete. Nothing in the slot changes on a refusal.
     @discardableResult
     private func captureOwnerState() -> RuntimeSnapshotOffer {
-        let snapshot = owner.snapshot()
+        guard let snapshot = owner.snapshot() else {
+            // The owner reported why it could not project, so nothing is offered, no fault is delivered back to it, and the slot keeps
+            // its last value for the subscribers that already hold it. A read or an open answers this capture as an internal failure.
+            return .refused(.notEncodable)
+        }
         let offer = snapshotSlot.offer(snapshot, encodedBytes: Self.encodedSize(snapshot))
         switch offer {
         case .unchanged:

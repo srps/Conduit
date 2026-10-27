@@ -104,6 +104,27 @@ enum ConfigurationNotAttemptedReason: Error, Equatable, Sendable {
     case superseded
 }
 
+/// Why the store holds no baseline for a component (decision 0034's retained state). It is latched at the site that cleared the baseline
+/// and cleared only by an adopted observation. Each case is a closed fact; none carries a value.
+enum ConfigurationLatchReason: Equatable, Sendable {
+    /// The last load was refused, so every component holds its last values for display only.
+    case observationRefused
+    /// A write conflict, a verification that found a change, a changed sidecar during preservation, or a changed runtime source.
+    case changedSinceBaseline
+    /// A write whose read-back could not say which state the file is in.
+    case writeUnknown
+}
+
+/// What the store holds for one component now, read in the caller's turn with no I/O. It is not a fresh verification.
+enum ConfigurationComponentState: Equatable, Sendable {
+    /// The store holds this baseline, and the file was present when it was observed or verified.
+    case verified(ConfigurationBaselineToken)
+    /// The store holds this baseline for an observed absence.
+    case absent(ConfigurationBaselineToken)
+    /// No baseline; the values are the last known ones and authorize no write.
+    case retained(ConfigurationLatchReason)
+}
+
 /// The workflow's permission for one physical replacement. The store checks it on `PlatformWork`, after the source or preservation read
 /// and immediately before the replacement starts. The check reads the workflow's own intent state under a short lock, and no lock is
 /// held across I/O. Once a replacement has started, its read-back and its persistence facts are reported whatever the claim says.
