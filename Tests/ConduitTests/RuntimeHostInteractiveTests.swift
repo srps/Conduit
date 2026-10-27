@@ -682,6 +682,54 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         withExtendedLifetime(heldDNS) {}
     }
 
+    /// A reload that turns the forwarder off leaves a running forwarder up; the next Stop is what stops it. A facade Start that takes the
+    /// lanes from that Stop while it restores system DNS finds DNS configured off and settles it `not_configured`. The DNS it owns is still
+    /// listening, so it finishes the overtaken Stop's teardown under its own token: nothing listens behind that result.
+    func testAFacadeStartOverAStopInFlightFinishesTheTeardownOfDNSConfiguredOff() async throws {
+        let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: true)
+        try await host.startRuntime()
+        var edited = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+        edited.dnsForwarderEnabled = false
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+        XCTAssertFalse(host.workflow.dnsIntent.configured, "the reload adopted the forwarder off")
+        XCTAssertEqual(host.orchestrator.snapshot.dnsRunState, .running, "and stopped nothing by itself")
+
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, _ in name == PrivilegedOperation.setDNSServers.rawValue }
+        let stop = Task { await host.stopRuntime() }
+        await harness.hold.waitUntilReached()
+        let start = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where host.laneEffects.dns?.operation != .runtimeStart {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(host.laneEffects.dns?.owned, Set(ControlModule.allCases), "the Start took every lane from the Stop in flight")
+        harness.hold.release()
+        try await start.value
+        await stop.value
+
+        XCTAssertEqual(host.orchestrator.eventLog.events.settledValues.suffix(3).map(\.settlement),
+                       [.explicit(.proxy, .started), .explicit(.dns, .notConfigured), .explicit(.tunnels, .notConfigured)])
+        XCTAssertNotEqual(host.orchestrator.snapshot.dnsRunState, .running, "nothing listens behind the not_configured DNS")
+        XCTAssertNil(host.orchestrator.snapshot.bindings.dnsPort)
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertNil(host.dnsHealthTimer)
+        XCTAssertTrue(harness.machine.service("Wi-Fi").routesThroughAProxy, "the proxy member started")
+    }
+
+    /// An ordinary facade Start with DNS configured off finds DNS down on an idle lane, so it inherits nothing: it starts nothing and clears
+    /// nothing. A resolver the user pointed at 127.0.0.1 after launch recovery stays, though a clear with no journal record would read it
+    /// as residue and reset it.
+    func testAFacadeStartWithDNSConfiguredOffLeavesAUserLoopbackResolverAlone() async throws {
+        let (host, harness) = try await launch(platform: proxyAndDNS, dnsForwarderEnabled: false)
+        harness.machine.describe("Wi-Fi") { $0.dnsServers = ["127.0.0.1"] }
+        try await host.startRuntime()
+        XCTAssertEqual(host.orchestrator.eventLog.events.settledValues.map(\.settlement).filter { $0.module == .dns },
+                       [.explicit(.dns, .notConfigured)])
+        XCTAssertEqual(harness.machine.service("Wi-Fi").dnsServers, ["127.0.0.1"], "the user's resolver is left alone")
+        XCTAssertFalse(harness.machine.dnsRelayRunning)
+        XCTAssertTrue(harness.machine.service("Wi-Fi").routesThroughAProxy, "the proxy member started")
+    }
+
     /// A tunnels Stop whose kernel stop is admitted but queued behind a held effect still reads `running`. A tunnels Start that takes the
     /// lane from it owns a module in motion, so it renews the kernel's start instead of trusting that snapshot: once the slot opens, the
     /// superseded stop closes nothing and the listener is live.

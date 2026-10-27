@@ -41,8 +41,9 @@ package enum LifecycleModuleStartResult: String, Codable, Sendable, Equatable, C
     /// permission its Start grants.
     case started
     /// The verified pair names nothing for the module to start: the facade's configured DNS Start with the forwarder off, or a tunnels
-    /// Start with no enabled definition. Nothing was started; the member settled as its Start grants, so its fence is cleared and no
-    /// listener runs. A proxy member is never `notConfigured`.
+    /// Start with no enabled definition. This Start started nothing, and the member settled as its Start grants, so its fence is cleared. A
+    /// module already running on an idle lane is left as it was; what this Start took over from a Stop or Start in flight is finished and
+    /// cleaned. A proxy member is never `notConfigured`.
     case notConfigured = "not_configured"
     /// Its physical start failed. The module's prior permission and fence are restored, and so are the machine surfaces it touched.
     case failed

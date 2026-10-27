@@ -68,6 +68,9 @@ final class RuntimeLifecycleEffect {
     /// The modules this effect started from down, or took from an operation still in flight. A held or failed Start tears down only these,
     /// never a module that was already running (decision 0035).
     var owned: Set<ControlModule>
+    /// The modules whose lane was busy when this effect took it: an operation in flight was overtaken, and what it left unfinished is this
+    /// effect's. Fixed at acquisition, unlike `owned`, which also names modules that were simply down.
+    let inherited: Set<ControlModule>
     private(set) var prepared: RuntimeConfigurationWorkflow.PreparedStart?
     /// The explicit members still going on under their group.
     var active: Set<ControlModule>
@@ -88,6 +91,7 @@ final class RuntimeLifecycleEffect {
         scope: Set<ControlModule>,
         tokens: PrivateModuleSlots<LifecycleLane.Token?>,
         owned: Set<ControlModule>,
+        inherited: Set<ControlModule>,
         prepared: RuntimeConfigurationWorkflow.PreparedStart?
     ) {
         self.operation = operation
@@ -95,6 +99,7 @@ final class RuntimeLifecycleEffect {
         self.scope = scope
         self.tokens = tokens
         self.owned = owned
+        self.inherited = inherited
         self.prepared = prepared
         if case .start(let actions, _) = request {
             active = Set(ControlModule.allCases.filter { actions[$0] == .start || actions[$0] == .configuredStart })
@@ -195,7 +200,7 @@ extension RuntimeHost {
         }
         let effect = RuntimeLifecycleEffect(
             operation: operation, request: request, scope: scope, tokens: tokens,
-            owned: scope.filter { busy.contains($0) || down.contains($0) }, prepared: prepared
+            owned: scope.filter { busy.contains($0) || down.contains($0) }, inherited: busy, prepared: prepared
         )
         for module in ordered { laneEffects[module] = effect }
         return .run(effect)
@@ -397,7 +402,7 @@ extension RuntimeHost {
         // surfaces, and the kernel orders the bind after a Stop's close or joins the start in flight for its real completion.
         if start.active.contains(.dns) {
             if !config.dnsForwarderEnabled {
-                unconfigured.insert(.dns)
+                await leaveDNSUnconfigured(start, into: &unconfigured)
             } else if !start.owned.contains(.dns), orchestrator.snapshot.dnsRunState == .running {
                 // Running from the pushed pair already.
             } else if await startDNSModule(start, config: config, platform: platform, stands: {
@@ -447,6 +452,16 @@ extension RuntimeHost {
             start.conditionalDNS = await runConditionalDNS(for: start)
         }
         return start.outcome
+    }
+
+    /// DNS whose verified pair names no forwarder settles `not_configured`, and this Start starts nothing. When it took DNS's lane from a
+    /// Stop or Start in flight, it finishes that overtaken operation's teardown under its own DNS token: a reload that turned the forwarder
+    /// off stops nothing by itself, and the run state is no proof that nothing is bound. DNS that was idle, running or down, is left as it
+    /// was: a down module gets no clear, whose unknown-journal residue reset could touch a resolver the user set.
+    private func leaveDNSUnconfigured(_ start: RuntimeLifecycleEffect, into unconfigured: inout Set<ControlModule>) async {
+        unconfigured.insert(.dns)
+        guard start.inherited.contains(.dns) else { return }
+        await tearDown([.dns], under: start, terminal: false)
     }
 
     /// The kernel's proxy start, which returns once the start it ran or joined has completed. A proxy that is then not serving is no
