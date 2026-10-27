@@ -29,6 +29,9 @@ final class ConfigurationWorkflowEventTests: XCTestCase {
         .held(ConfigurationWorkflowHeld(phase: .start, input: .platform, reason: .commitFailed)),
         .held(ConfigurationWorkflowHeld(phase: .reload, input: .runtime, reason: .startBlocking)),
         .held(ConfigurationWorkflowHeld(phase: .reload, input: .unit, reason: .uncommitted)),
+        .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .inputReplaced)),
+        .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .stopSaveOwed)),
+        .held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .storeBusy)),
         .superseded(ConfigurationWorkflowSuperseded(phase: .start, generation: 3, current: 4)),
     ]
 
@@ -90,6 +93,13 @@ final class ConfigurationWorkflowEventTests: XCTestCase {
             #"{"type":"held","phase":"reload","component":"platform","reason":"start_blocking"}"#,
             #"{"type":"held","phase":"start","component":"unit","reason":"uncommitted"}"#,
             #"{"type":"held","phase":"reload","component":"unit","reason":"terminating"}"#,
+            // A replaced capture, an owed Stop save and a busy store hold only a Start's whole unit.
+            #"{"type":"held","phase":"reload","component":"unit","reason":"input_replaced"}"#,
+            #"{"type":"held","phase":"start","component":"runtime","reason":"input_replaced"}"#,
+            #"{"type":"held","phase":"reload","component":"unit","reason":"stop_save_owed"}"#,
+            #"{"type":"held","phase":"start","component":"platform","reason":"stop_save_owed"}"#,
+            #"{"type":"held","phase":"reload","component":"unit","reason":"store_busy"}"#,
+            #"{"type":"held","phase":"start","component":"runtime","reason":"store_busy"}"#,
             // A superseded generation is older than the latest.
             #"{"type":"superseded","phase":"start","generation":3,"current":3}"#,
             // An unknown write cause is refused.

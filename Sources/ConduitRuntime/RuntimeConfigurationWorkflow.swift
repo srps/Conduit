@@ -20,8 +20,8 @@ package enum RuntimeStartRefusal: LocalizedError, Equatable, Sendable {
     case notRunning
     /// DNS still owes a session Stop's disable save, which this Start may not displace. Nothing was admitted.
     case stopSaveOwed
-    /// A newer Start or Stop was admitted, or the saved input this Start captured was replaced, before its effects. Completed saves
-    /// stay reported; the remaining work did not run and is not retried.
+    /// A newer Start or Stop was admitted, or the saved input this Start captured no longer stands (changed, or its baseline lost or
+    /// refused by a reload), before its effects. Completed saves stay reported; the remaining work did not run and is not retried.
     case superseded
 
     package var errorDescription: String? {
@@ -31,7 +31,7 @@ package enum RuntimeStartRefusal: LocalizedError, Equatable, Sendable {
         case .terminated: "a terminal stop has latched, so no start runs in this process"
         case .notRunning: "the identical start this call joined ended without leaving the runtime running"
         case .stopSaveOwed: "DNS still owes a stop's disable save, so the start was not admitted"
-        case .superseded: "a newer start, stop or configuration observation replaced this start before it ran"
+        case .superseded: "a newer start or stop, or a change or loss of the saved input it captured, ended this start before it ran"
         }
     }
 
@@ -331,15 +331,6 @@ final class RuntimeConfigurationWorkflow {
     /// against newer admissions, and this alone says whether its remaining effects may use the pair.
     func holdsInput(_ prepared: PreparedStart) -> Bool {
         store.stillHolds(prepared.input)
-    }
-
-    /// The claim the store checks before each replacement this Start makes. It holds only while the admission stands.
-    func writeClaim(for ticket: StartTicket) -> ConfigurationWriteClaim {
-        let intent = self.intent
-        let lifecycle = ticket.lifecycle
-        return ConfigurationWriteClaim {
-            intent.withLockedValue { $0.holdsGroup(lifecycle) }
-        }
     }
 
     // MARK: - Start preparation

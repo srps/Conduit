@@ -538,7 +538,8 @@ package final class RuntimeHost {
         return status
     }
 
-    /// The surface work runs on `platformWork` in two blocks, one on each
+    /// The legacy whole-runtime facade Start: one admitted group over the three modules, composed as the proxy listener and its surfaces
+    /// (`applyProxySurfaces`), then DNS (`startDNSModule`), then tunnels. The surface work runs on `platformWork` in two blocks, one on each
     /// side of the forwarder start, in the order it always ran: the proxy's
     /// surfaces and the capture of the prior DNS servers, then the forwarder,
     /// then the interfaces pointed at it and the intercept files. Off the
@@ -588,12 +589,30 @@ package final class RuntimeHost {
             throw RuntimeStartRefusal.superseded
         }
         logNonBlockingConfigProblems()
-        guard let token = await admit(.start, .runtimeStart) else {
-            // The identical start this call joined has ended. Report what it left: a joined start that failed or was stopped is not success.
-            guard runtimeStarted else { throw RuntimeStartRefusal.notRunning }
+        // An overtaken Start or Stop still in flight leaves the modules' state in motion, so a Start that takes the lane from one owns them all.
+        let laneWasIdle = runtimeLane.isIdle
+        stoppedEffectsJoin?.finish(.superseded)
+        let token: LifecycleLane.Token
+        switch runtimeLane.begin(.start) {
+        case .run(let admitted):
+            token = admitted
+        case .coalesced(let generation):
+            recordLifecycle(runtimeLane.coalescedEvent(operation: .runtimeStart, joining: generation))
+            // An identical Start is running on the lane. This call's admission ended that Start's group, so this call's authorized group
+            // adopts the running effect when it captured the same pair, in this turn, before the join; that effect then settles this
+            // group. A different pair is not adopted: the running effect, left with no group, tears down what it owns.
+            let adopted = laneStart?.adopt(prepared) ?? false
+            await runtimeLane.join(generation)
+            if !adopted { workflow.endFailedStart(prepared.ticket) }
+            guard adopted, runtimeStarted else { throw RuntimeStartRefusal.notRunning }
             return
         }
         defer { runtimeLane.end(token) }
+        // What this Start owns: the modules down when it took an idle lane. A held or failed Start tears down only those, never a module
+        // that was already running, and its token keeps it from touching what a newer owner started (decision 0035).
+        let start = StartEffect(prepared: prepared, token: token, modules: laneWasIdle ? modulesDown() : Self.allModules)
+        laneStart = start
+        defer { if laneStart === start { laneStart = nil } }
         do {
             try await orchestrator.startProxy()
             credentialWarmup = credentialManager.warmCacheInBackground(
@@ -613,18 +632,44 @@ package final class RuntimeHost {
             )
             // The failed intent ends before anything suspends, so a reload pass admitted under it does nothing. No Stop is recorded: nothing
             // fences a newer Start. The revert runs under this start's own token and waits only for effects already running, never for a queued
-            // pass, which waits for this token. The token ends once, in the defer above.
-            workflow.endFailedStart(ticket)
-            await runStopCleanup(token: token, operation: .runtimeStart, terminal: false)
+            // pass, which waits for this token. The token ends once, in the defer above. A proxy that failed to bind is down whatever it was
+            // before, so its surfaces are this Start's to clear.
+            workflow.endFailedStart(start.prepared.ticket)
+            await stopModules(start.modules.union([.proxy]), token: token, operation: .runtimeStart, terminal: false)
             throw error
         }
         // A stop issued while the listeners came up has already queued its
         // clears; applying now would put the surfaces back after them.
-        try await continueStart(token, prepared)
+        try await continueStart(start)
 
         // The runtime input is the one the push just reported held. The platform flags are this start's verified intent.
         let config = heldRuntimeConfig
         let platform = platformConfig
+        try await applyProxySurfaces(start, config: config, platform: platform)
+        if config.dnsForwarderEnabled {
+            try await startDNSModule(start, config: config, platform: platform)
+        }
+        if config.tunnelDefinitions.contains(where: \.enabled) {
+            await orchestrator.startTunnels()
+            try await continueStart(start)
+        }
+
+        startLocationObserver()
+        networkPathObserver.start()
+        vpnStatusMonitor.start()
+        workflow.finishStart(start.prepared.ticket, succeeded: true)
+        runtimeStarted = true
+        logger.log(.notice, "Daemon runtime started.", category: .general)
+        // Submitted, not awaited: a diagnostic write never holds the lifecycle lane. Readiness and the terminal
+        // exit are the boundaries that confirm it (`flushEvents`).
+        writeSnapshotFile(snapshot: orchestrator.snapshot)
+    }
+
+    /// The proxy module's surfaces, once its listener is up: the system proxy, the environment, the split-DNS entry files with a sweep of
+    /// stranded intercept files, and the capture of the prior DNS servers that the DNS module restores. One `platformWork` block, so a
+    /// Stop issued while it is out queues its clears behind it.
+    private func applyProxySurfaces(_ start: StartEffect, config: ProxyConfig, platform: PlatformIntegrationConfig) async throws {
+        let token = start.token
         let systemProxy = systemConduit
         let environment = environmentManager
         let resolvers = dnsManager
@@ -700,7 +745,7 @@ package final class RuntimeHost {
         // A stop issued while the apply was out queued its clears behind
         // it, so the machine ends cleared; what must not happen now is the
         // rest of a start for a runtime that is down.
-        try await continueStart(token, prepared)
+        try await continueStart(start)
         // A VPN transition handled while the apply was out reconciled the
         // entry files then, possibly before the apply wrote them from the
         // gate it was queued with. Twin of the check in `AppState.startProxy`.
@@ -713,63 +758,54 @@ package final class RuntimeHost {
             )
             recordSplitDNS(outcome, source: .vpnTransition)
         }
+    }
 
-        if config.dnsForwarderEnabled {
-            await orchestrator.startDNS()
-            try await continueStart(token, prepared)
-            let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
-            let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
-            let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
-            await platformWork.run {
-                if platform.manageSystemDNS, forwarderRunning {
-                    systemDNS.serialized {
-                        guard !token.isSuperseded else { return }
-                        do {
-                            try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
-                        } catch {
-                            logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
-                        }
-                    }
-                }
-                // `apply` above wrote the split-DNS entry files only; the intercept
-                // files are written here, once the forwarder and the transparent
-                // proxy they point clients at are both listening.
-                guard platform.manageDNSResolvers else { return }
-                resolvers.serialized {
+    /// The DNS module's start: the forwarder, then the system DNS pointed at it and the intercept files, once the forwarder and the
+    /// transparent proxy they point clients at are both listening, then the health timer.
+    private func startDNSModule(_ start: StartEffect, config: ProxyConfig, platform: PlatformIntegrationConfig) async throws {
+        let token = start.token
+        let resolvers = dnsManager
+        let systemDNS = systemDNSManager
+        let logger = self.logger
+        await orchestrator.startDNS()
+        try await continueStart(start)
+        let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
+        let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
+        let forwarderPort = orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort
+        await platformWork.run {
+            if platform.manageSystemDNS, forwarderRunning {
+                systemDNS.serialized {
                     guard !token.isSuperseded else { return }
                     do {
-                        try resolvers.refreshInterceptFiles(
-                            config: config,
-                            interceptReady: interceptReady,
-                            forwarderRunning: forwarderRunning,
-                            logger: logger
-                        )
+                        try systemDNS.apply(forwarderPort: forwarderPort, logger: logger)
                     } catch {
-                        logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                        logger.log(.warning, "Could not set system DNS (non-fatal): \(error.localizedDescription)", category: .system)
                     }
                 }
             }
-            try await continueStart(token, prepared)
-            if platform.manageSystemDNS, forwarderRunning {
-                // Whether or not `apply` succeeded — see `AppState.startDNS`.
-                startDNSHealthTimer(forwarderPort: forwarderPort)
+            // `applyProxySurfaces` wrote the split-DNS entry files only; the intercept
+            // files are written here, once the forwarder and the transparent
+            // proxy they point clients at are both listening.
+            guard platform.manageDNSResolvers else { return }
+            resolvers.serialized {
+                guard !token.isSuperseded else { return }
+                do {
+                    try resolvers.refreshInterceptFiles(
+                        config: config,
+                        interceptReady: interceptReady,
+                        forwarderRunning: forwarderRunning,
+                        logger: logger
+                    )
+                } catch {
+                    logger.log(.warning, "Could not apply intercept resolver files (non-fatal): \(error.localizedDescription)", category: .system)
+                }
             }
         }
-
-        if config.tunnelDefinitions.contains(where: \.enabled) {
-            await orchestrator.startTunnels()
-            try await continueStart(token, prepared)
+        try await continueStart(start)
+        if platform.manageSystemDNS, forwarderRunning {
+            // Whether or not `apply` succeeded — see `AppState.startDNS`.
+            startDNSHealthTimer(forwarderPort: forwarderPort)
         }
-
-        startLocationObserver()
-        networkPathObserver.start()
-        vpnStatusMonitor.start()
-        workflow.finishStart(ticket, succeeded: true)
-        runtimeStarted = true
-        logger.log(.notice, "Daemon runtime started.", category: .general)
-        // Submitted, not awaited: a diagnostic write never holds the lifecycle lane. Readiness and the terminal
-        // exit are the boundaries that confirm it (`flushEvents`).
-        writeSnapshotFile(snapshot: orchestrator.snapshot)
     }
 
     /// Joins launch recovery first, the shutdown path included, and this is
@@ -807,7 +843,7 @@ package final class RuntimeHost {
         guard workflow.isLatest(stop) else { return }
         guard let token = await admit(.stop, .runtimeStop, coalescing: true) else { return }
         defer { runtimeLane.end(token) }
-        await runStopCleanup(token: token, operation: .runtimeStop, terminal: false)
+        await stopModules(Self.allModules, token: token, operation: .runtimeStop, terminal: false)
     }
 
     /// The process quit, and the one terminal teardown: it latches at admission, so no Start runs again in this process, persists no DNS
@@ -821,24 +857,75 @@ package final class RuntimeHost {
         await awaitLaunchRecovery()
         // It supersedes a stop in flight rather than joining it, so its own cleanup reaches the end.
         if let token = await admit(.stop, .runtimeStop, coalescing: false) {
-            await runStopCleanup(token: token, operation: .runtimeStop, terminal: true)
+            await stopModules(Self.allModules, token: token, operation: .runtimeStop, terminal: true)
             runtimeLane.end(token)
         }
         await flushEvents()
     }
 
-    /// The one physical teardown, run under `token` by whichever stop or failed start holds the lane. It waits only for effects already in
-    /// flight (`quiesceEffects`), never for a queued reconcile pass: that pass waits for the lane this token holds. A superseded token stops
-    /// it at its next step, unless `terminal` says it must finish. Every await is followed by the token check before the next step acts.
-    private func runStopCleanup(token: LifecycleLane.Token, operation: LifecycleOperation, terminal: Bool) async {
+    static let allModules = Set(ControlModule.allCases)
+
+    /// The effect of a Start that holds the lane: the prepared Start whose authorized group it runs for, its lane token, and the modules
+    /// it owns, those that were down when it took the lane. Its remaining-effect checks and its teardown read only this value. The lane
+    /// orders its physical steps; the workflow group in `prepared` is its control authority, and an identical Start that joins it on the
+    /// lane takes that authority over with `adopt`.
+    @MainActor
+    private final class StartEffect {
+        private(set) var prepared: RuntimeConfigurationWorkflow.PreparedStart
+        let token: LifecycleLane.Token
+        let modules: Set<ControlModule>
+
+        init(prepared: RuntimeConfigurationWorkflow.PreparedStart, token: LifecycleLane.Token, modules: Set<ControlModule>) {
+            self.prepared = prepared
+            self.token = token
+            self.modules = modules
+        }
+
+        /// A joining Start's authorized group takes over this effect when it captured the same pair. Returns whether it did.
+        func adopt(_ joining: RuntimeConfigurationWorkflow.PreparedStart) -> Bool {
+            guard joining.input.isSamePair(as: prepared.input) else { return false }
+            prepared = joining
+            return true
+        }
+    }
+
+    /// The Start effect on the lane, while one runs. Only an identical Start that joins it reads it.
+    private var laneStart: StartEffect?
+
+    /// The modules not running now: no proxy listener, no DNS forwarder, no tunnel bound.
+    private func modulesDown() -> Set<ControlModule> {
+        let state = runtimeState()
+        var down: Set<ControlModule> = []
+        if !state.proxyIsUp { down.insert(.proxy) }
+        if !state.dnsIsUp { down.insert(.dns) }
+        if orchestrator.snapshot.bindings.tunnels.isEmpty { down.insert(.tunnels) }
+        return down
+    }
+
+    /// The one physical teardown of `modules`, in DNS, tunnels, proxy order, run under `token` by whichever stop or Start holds the lane.
+    /// DNS restores the system DNS, stops its health timer and forwarder, and, while the proxy stays up, withdraws the intercept files that
+    /// pointed at it. Tunnels stop their listeners. The proxy stops its listener and clears the system proxy, environment and resolver
+    /// files. The runtime's observers stop only when no module stays up. It waits only for effects already in flight (`quiesceEffects`),
+    /// never for a queued reconcile pass: that pass waits for the lane this token holds. A superseded token stops it at its next step,
+    /// unless `terminal` says it must finish. Every await is followed by the token check before the next step acts.
+    private func stopModules(
+        _ modules: Set<ControlModule>,
+        token: LifecycleLane.Token,
+        operation: LifecycleOperation,
+        terminal: Bool
+    ) async {
+        guard !modules.isEmpty else { return }
         await reconciler.quiesceEffects()
         // A newer start or stop may have begun during that wait. It owns the observers and the state now, so this teardown stops here.
         guard terminal || isCurrent(token, operation) else { return }
-        runtimeStarted = false
-        stopDNSHealthTimer()
-        vpnStatusMonitor.stop()
-        networkLocationObserver.stop()
-        networkPathObserver.stop()
+        // The runtime's observers follow the modules that stay up: they stop once this teardown leaves none running.
+        let wholeRuntime = modules.union(modulesDown()) == Self.allModules
+        if wholeRuntime {
+            runtimeStarted = false
+            vpnStatusMonitor.stop()
+            networkLocationObserver.stop()
+            networkPathObserver.stop()
+        }
 
         // Cleanup clears what the machine holds: the runtime input it was pushed, and the flags the reconciler completed. A flag that never landed is covered by the journal.
         let config = heldRuntimeConfig
@@ -848,20 +935,52 @@ package final class RuntimeHost {
         let resolvers = dnsManager
         let systemDNS = systemDNSManager
         let logger = self.logger
-        await platformWork.run {
-            systemDNS.serialized {
-                guard terminal || !token.isSuperseded else { return }
-                guard platform.manageSystemDNS || systemDNS.hasSavedState() else { return }
-                do {
-                    try systemDNS.clear(logger: logger)
-                } catch {
-                    logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
+        if modules.contains(.dns) {
+            stopDNSHealthTimer()
+            await platformWork.run {
+                systemDNS.serialized {
+                    guard terminal || !token.isSuperseded else { return }
+                    guard platform.manageSystemDNS || systemDNS.hasSavedState() else { return }
+                    do {
+                        try systemDNS.clear(logger: logger)
+                    } catch {
+                        logger.log(.warning, "Could not restore system DNS: \(error.localizedDescription)", category: .system)
+                    }
                 }
             }
+            guard terminal || isCurrent(token, operation) else { return }
+            await orchestrator.stopDNS()
+            guard terminal || isCurrent(token, operation) else { return }
+            // The proxy's own clear below removes every resolver file; a proxy that stays up keeps its entry files.
+            if !modules.contains(.proxy), platform.manageDNSResolvers {
+                let interceptReady = orchestrator.snapshot.bindings.dnsInterceptReady
+                let forwarderRunning = orchestrator.snapshot.dnsRunState == .running
+                await platformWork.run {
+                    resolvers.serialized {
+                        guard terminal || !token.isSuperseded else { return }
+                        do {
+                            try resolvers.refreshInterceptFiles(
+                                config: config,
+                                interceptReady: interceptReady,
+                                forwarderRunning: forwarderRunning,
+                                logger: logger
+                            )
+                        } catch {
+                            logger.log(.warning, "Could not withdraw intercept resolver files: \(error.localizedDescription)", category: .system)
+                        }
+                    }
+                }
+                guard terminal || isCurrent(token, operation) else { return }
+            }
         }
-        guard terminal || isCurrent(token, operation) else { return }
-        await orchestrator.stopTunnels()
-        await orchestrator.stopDNS()
+        if modules.contains(.tunnels) {
+            await orchestrator.stopTunnels()
+            guard terminal || isCurrent(token, operation) else { return }
+        }
+        guard modules.contains(.proxy) else {
+            logStopped(modules)
+            return
+        }
         await orchestrator.stopProxy()
         guard terminal || isCurrent(token, operation) else { return }
 
@@ -921,9 +1040,17 @@ package final class RuntimeHost {
         }
         recordSplitDNS(entryFiles, source: .stop, startedAt: stopGeneration)
         guard terminal || isCurrent(token, operation) else { return }
+        logStopped(modules)
+    }
 
-        logger.log(.notice, "Daemon runtime stopped.", category: .general)
-        // The stopped state is submitted. A terminal stop flushes and exits after this, in `stopRuntime`.
+    /// The stopped state is submitted. A terminal stop flushes after this, in `shutdown`.
+    private func logStopped(_ modules: Set<ControlModule>) {
+        if modulesDown() == Self.allModules {
+            logger.log(.notice, "Daemon runtime stopped.", category: .general)
+        } else {
+            let names = ControlModule.allCases.filter(modules.contains).map(\.rawValue).joined(separator: ",")
+            logger.log(.notice, "Daemon runtime modules stopped: \(names).", category: .general)
+        }
         writeSnapshotFile(snapshot: orchestrator.snapshot)
     }
 
@@ -1077,14 +1204,24 @@ package final class RuntimeHost {
 
     /// Whether an authorized Start's remaining effects may run after a suspension; it throws when they may not. A Stop or a newer Start
     /// owns the surfaces then, so nothing is reverted here. A newer observation or write that replaced the prepared pair holds the rest
-    /// (decision 0037): the Start ends as failed, which restores each member's prior permission and fence, and its own teardown clears what
-    /// it applied, so it neither continues from the newer input nor leaves a new permission behind. It is not retried.
-    private func continueStart(_ token: LifecycleLane.Token, _ prepared: RuntimeConfigurationWorkflow.PreparedStart) async throws {
-        guard isCurrent(token, .runtimeStart) else { throw RuntimeStartRefusal.superseded }
-        guard workflow.holdsInput(prepared) else {
+    /// (decision 0037): the Start ends as failed, which restores each member's prior permission and fence, and its own teardown clears the
+    /// modules it owns, so it neither continues from the newer input nor leaves a new permission behind. A module that was already running
+    /// when it took the lane is left as it is. It is not retried.
+    private func continueStart(_ start: StartEffect) async throws {
+        // A newer lane owner cleans up after this Start itself.
+        guard isCurrent(start.token, .runtimeStart) else { throw RuntimeStartRefusal.superseded }
+        // The workflow group is the control authority. A newer admission that ended it without taking the lane, a Start held before the
+        // lane included, leaves no permission for what this Start activated, so it tears down the modules it owns. An identical joiner
+        // that adopted this effect is the group checked here.
+        guard workflow.isCurrent(start.prepared.ticket) else {
+            emitConfigurationEvents(workflow.supersession(of: start.prepared.ticket))
+            await stopModules(start.modules, token: start.token, operation: .runtimeStart, terminal: false)
+            throw RuntimeStartRefusal.superseded
+        }
+        guard workflow.holdsInput(start.prepared) else {
             emitConfigurationEvents([.held(ConfigurationWorkflowHeld(phase: .start, input: .unit, reason: .inputReplaced))])
-            workflow.endFailedStart(prepared.ticket)
-            await runStopCleanup(token: token, operation: .runtimeStart, terminal: false)
+            workflow.endFailedStart(start.prepared.ticket)
+            await stopModules(start.modules, token: start.token, operation: .runtimeStart, terminal: false)
             throw RuntimeStartRefusal.superseded
         }
     }

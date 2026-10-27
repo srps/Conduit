@@ -165,6 +165,15 @@ struct VerifiedRuntimePlatformInput: Equatable, Sendable {
     let platform: PlatformIntegrationConfig
     let runtimeReceipt: ConfigurationReceipt
     let platformReceipt: ConfigurationReceipt
+
+    /// Whether `other` is this same pair at the same store versions, whichever operation verified it. A receipt's context names the
+    /// operation, so two Starts that captured one unchanged pair never have equal receipts.
+    func isSamePair(as other: VerifiedRuntimePlatformInput) -> Bool {
+        runtime == other.runtime && platform == other.platform
+            && [(runtimeReceipt, other.runtimeReceipt), (platformReceipt, other.platformReceipt)].allSatisfy { mine, theirs in
+                mine.storeIncarnation == theirs.storeIncarnation && mine.version == theirs.version
+            }
+    }
 }
 
 /// The outcomes of one coupled runtime and platform commit. Each write is independent; the platform write is first.

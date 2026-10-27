@@ -62,7 +62,8 @@ private func makeHostEffects(
     vpnStatusMonitor: @escaping RuntimeVPNStatusMonitorFactory,
     dnsResponds: @escaping @Sendable (Int) -> Bool,
     homeDirectory: URL,
-    resolverDirectory: String
+    resolverDirectory: String,
+    stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
 ) -> RuntimeHostEffects {
     RuntimeHostEffects(
         privilege: privilege,
@@ -80,8 +81,62 @@ private func makeHostEffects(
         vpnStatusMonitor: vpnStatusMonitor,
         homeDirectory: homeDirectory,
         resolverDirectory: resolverDirectory,
-        stateFiles: StateFileAccess.operatingSystem()
+        stateFiles: stateFiles
     )
+}
+
+/// The operating system's state-file access, with one configuration read that parks its worker until the test releases it. Unarmed, it
+/// passes every call through, so a test can keep the store's one slot busy at a chosen point.
+private final class ParkingStateFiles: StateFileAccessing, @unchecked Sendable {
+    private let inner = StateFileAccess.operatingSystem()
+    private let condition = NSCondition()
+    private var armed = false
+    private var parked = false
+    private var released = false
+
+    func armRead() {
+        condition.withLock {
+            armed = true
+            parked = false
+            released = false
+        }
+    }
+
+    /// Waits, bounded, until a read is parked.
+    func waitUntilParked() async -> Bool {
+        for _ in 0..<2_000 {
+            if condition.withLock({ parked }) { return true }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        return false
+    }
+
+    func release() {
+        condition.withLock {
+            released = true
+            condition.broadcast()
+        }
+    }
+
+    func readConfigurationFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
+        condition.withLock {
+            guard armed else { return }
+            armed = false
+            parked = true
+            condition.broadcast()
+            while !released { condition.wait() }
+            parked = false
+        }
+        return inner.readConfigurationFile(file, limit: limit)
+    }
+
+    func replaceConfigurationFile(_ file: StateRootFile, bytes: Data) -> Result<Void, ConfigurationFileWriteError> {
+        inner.replaceConfigurationFile(file, bytes: bytes)
+    }
+
+    func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
+        inner.entryPresence(file)
+    }
 }
 
 /// The machine effects of a test that does not vary the GSS, PAC or VPN seams: each of those fails or records, and
@@ -98,7 +153,8 @@ private func hostEffects(
     vpnStatus: any VPNStatusObserving,
     dnsResponds: @escaping @Sendable (Int) -> Bool,
     homeDirectory: URL,
-    resolverDirectory: String
+    resolverDirectory: String,
+    stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
 ) -> RuntimeHostEffects {
     makeHostEffects(
         loopbackPortProbe: loopbackPortProbe,
@@ -113,7 +169,8 @@ private func hostEffects(
         vpnStatusMonitor: { _, _ in vpnStatus },
         dnsResponds: dnsResponds,
         homeDirectory: homeDirectory,
-        resolverDirectory: resolverDirectory
+        resolverDirectory: resolverDirectory,
+        stateFiles: stateFiles
     )
 }
 
@@ -1548,6 +1605,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let listings = HeldListings()
         /// Holds one machine call, subprocess or privileged, when armed.
         let hold = HeldCall()
+        /// The configuration store's file access. Unarmed it is the operating system's; armed, one read parks the store's slot.
+        let stateFiles = ParkingStateFiles()
         /// The one host `makeHost` built, owned until `tearDown` has stopped and flushed it.
         private var ownedHost: RuntimeHost?
         let secrets = InMemorySecretStore()
@@ -1626,7 +1685,8 @@ final class DaemonRuntimeHostTests: XCTestCase {
                     // As `AppStateHarness`: never the real port 53.
                     dnsResponds: FakeDNSProbe().responds(onPort:),
                     homeDirectory: stateDirectory.appendingPathComponent("home", isDirectory: true),
-                    resolverDirectory: machine.resolverDirectory.path
+                    resolverDirectory: machine.resolverDirectory.path,
+                    stateFiles: stateFiles
                 ),
                 networkLocationLimits: locationLimits,
                 reapplyRetrySchedule: reapplyRetrySchedule,
@@ -2585,7 +2645,10 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .starting, "the newer start is admitted behind the held refresh")
 
         fetch.release()
-        try await newer.value
+        // Each task's outcome is read on its own, so a failure names the start that threw and what the kernel reported then.
+        if case .failure(let error) = await newer.result {
+            XCTFail("the newer start threw \(error); state=\(host.orchestrator.snapshot.runtimeStatus.state) proxyError=\(host.orchestrator.snapshot.proxyError ?? "none")")
+        }
         let listenerPort = host.orchestrator.snapshot.bindings.proxyPort
         XCTAssertNotNil(listenerPort, "the newer start binds a listener")
         await assertSuperseded(older, "the stop and the newer start overtook the older start")
@@ -3009,6 +3072,118 @@ final class DaemonRuntimeHostTests: XCTestCase {
             "the start reports the replaced input"
         )
         await host.stopRuntime()
+    }
+
+    /// A second identical Start while the first applies joins it on the lane. Its admission ends the first Start's group in the workflow,
+    /// but the lane still orders the first Start, which finishes for both; the joiner then settles its own authorized group with that result.
+    func testAnIdenticalStartThatJoinsTheOneApplyingReportsItsSuccess() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        await host.awaitLaunchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let first = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+        let second = Task { try await host.startRuntime() }
+        for _ in 0..<5_000 where !host.orchestrator.eventLog.events.contains(where: { $0.event == "lifecycle.coalesced" }) {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(host.orchestrator.eventLog.events.contains { $0.event == "lifecycle.coalesced" }, "the second start joined the first")
+        harness.hold.release()
+        if case .failure(let error) = await first.result { XCTFail("the first start threw \(error)") }
+        if case .failure(let error) = await second.result { XCTFail("the joining start threw \(error)") }
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertTrue(harness.wifi.routesThroughAProxy, "the first start applied its surfaces for both")
+        await host.stopRuntime()
+        XCTAssertFalse(harness.wifi.routesThroughAProxy)
+    }
+
+    /// A newer Start that ends an authorized Start's group and then holds before the lane (its store slot is busy) leaves no authority.
+    /// The older Start still holds the lane and its receipts, but the owner check stops it at its next step and it tears down what it
+    /// activated: nothing is left running and no permission is resurrected.
+    func testANewerStartHeldBeforeTheLaneEndsTheAuthorizedStartItSuperseded() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        await host.awaitLaunchRecovery()
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let older = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+
+        // An unchanged reload parks in the store, so the store's one slot is busy and the receipts stay as they are.
+        harness.stateFiles.armRead()
+        let reload = Task { await host.reloadConfiguration() }
+        let parked = await harness.stateFiles.waitUntilParked()
+        XCTAssertTrue(parked, "the reload holds the store's slot")
+        let newer = Task { try await host.startRuntime() }
+        do {
+            try await newer.value
+            XCTFail("the newer start found the store busy, so it does not start")
+        } catch {
+            XCTAssertEqual(error as? RuntimeStartRefusal, .held, "the newer start holds before the lane")
+        }
+        harness.stateFiles.release()
+        await reload.value
+
+        harness.hold.release()
+        await assertSuperseded(older, "the newer admission ended the older start's group")
+        XCTAssertNotEqual(host.orchestrator.snapshot.runtimeStatus.state, .running, "no activation outlives its authority")
+        XCTAssertNil(host.orchestrator.snapshot.bindings.proxyPort)
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "the older start cleared the system proxy it applied")
+        XCTAssertNil(harness.machine.launchdEnvironment["HTTP_PROXY"])
+        XCTAssertTrue(
+            host.orchestrator.eventLog.events.compactMap(\.typed).contains(.configWorkflow(.held(ConfigurationWorkflowHeld(
+                phase: .start, input: .unit, reason: .storeBusy
+            )))),
+            "the newer start reports the busy store"
+        )
+        // A later Start is admitted normally: nothing was left fenced or authorized.
+        try await host.startRuntime()
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
+        await host.stopRuntime()
+    }
+
+    /// Decision 0035's scoped cleanup: a held Start tears down only the modules it owns. A second Start over a running proxy owns no proxy,
+    /// so when a reload replaces its captured input while it reapplies, the running listener and its system proxy stay as they were.
+    func testAHeldStartOverARunningProxyLeavesTheRunningProxyUp() async throws {
+        let host = try await launch(platform: PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true))
+        try await host.startRuntime()
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running)
+        XCTAssertTrue(harness.wifi.routesThroughAProxy)
+        harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let start = Task { try await host.startRuntime() }
+        await harness.hold.waitUntilReached()
+
+        let reloaded = LockedCount()
+        let harness = self.harness!
+        let reload = Task {
+            try await harness.flip(PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: false), on: host)
+            reloaded.set(1)
+        }
+        for _ in 0..<5_000 where host.passesWaitingForLifecycle == 0 && reloaded.value != 1 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(host.passesWaitingForLifecycle, 1, "the reload's pass waits for the start's platform work")
+        harness.hold.release()
+        await assertSuperseded(start, "the reload replaced the second start's captured input")
+        try await reload.value
+
+        XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running, "the held start owned no proxy, so it stopped none")
+        XCTAssertTrue(harness.wifi.routesThroughAProxy, "and cleared no system proxy")
+        XCTAssertTrue(
+            host.orchestrator.eventLog.events.compactMap(\.typed).contains(.configWorkflow(.held(ConfigurationWorkflowHeld(
+                phase: .start, input: .unit, reason: .inputReplaced
+            )))),
+            "the start reports the replaced input"
+        )
+        // The observers follow the modules that stay up, so the VPN monitor still reaches the running proxy.
+        harness.vpn.emit(.connected)
+        await host.deliveries.drain()
+        XCTAssertEqual(host.orchestrator.snapshot.vpnState, .connected, "the held start left the runtime's observers running")
+        await host.stopRuntime()
+        XCTAssertFalse(harness.wifi.routesThroughAProxy, "a Stop still owns every module")
     }
 
     /// A start whose bind fails while a reload's pass waits behind its lane. The start reverts under its own token and the pass then finds its

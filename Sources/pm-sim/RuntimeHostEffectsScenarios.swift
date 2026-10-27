@@ -110,13 +110,20 @@ enum RuntimeHostEffectsScenario {
                 assertions += respelling.assertions
                 notes += respelling.notes
             }
+            var captured = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced {
+                captured = await exerciseReloadAfterCapture(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += captured.assertions
+                notes += captured.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
+                && captured.quiesced {
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
-                unconfirmedHost = respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
+                unconfirmedHost = captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
             }
@@ -355,6 +362,107 @@ enum RuntimeHostEffectsScenario {
             let flush = await host.flushEvents()
             quiesced = settled == .settled && flush.allConfirmed
             assertions.append(.init("the lifecycle error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// A reload that adopts an edit after a Start captured its saved input (decision 0037). The Start is held on its PAC fetch, after its
+    /// capture and commit; the reload's observation replaces the pair, so the Start's remaining effects hold and are not rebound to the edit.
+    /// Its teardown clears the modules it owned, and the reload's pass, admitted under it, applies nothing. The next explicit Start then
+    /// captures the edit.
+    @MainActor
+    private static func exerciseReloadAfterCapture(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let machine = fakes.machine
+        let fetch = HeldPACFetch()
+        var config = GenericDefaults.shared.makeConfig()
+        config.dnsForwarderEnabled = false
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = true
+        config.pacURL = "http://pac.example.test/captured.pac"
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        let host: RuntimeHost
+        do {
+            let reserved = try HeldLoopbackListener()
+            config.localPort = reserved.port
+            reserved.release()
+            try ProxyConfigPersistence.save(config, in: environment)
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home, pac: fetch)
+            )
+        } catch {
+            notes.append("capture host did not open: \(error.localizedDescription)")
+            check("the capture host opened over the saved configuration", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+
+        var quiesced = false
+        var heldStart: Task<Void, Error>?
+        do {
+            let start = Task { @MainActor in try await host.startRuntime() }
+            heldStart = start
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while !fetch.isHeld, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            check("the captured start is held on its PAC fetch", fetch.isHeld)
+
+            var edited = config
+            edited.profileName = "Edited after the capture"
+            try ProxyConfigPersistence.save(edited, in: environment)
+            // The reload's pass waits for the held Start's lane, so the reload runs beside it; its adoption is seen in the host view.
+            let reload = Task { @MainActor in await host.reloadConfiguration() }
+            while host.status().profileName != edited.profileName, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            check("the reload adopted the edit while the start was held", host.status().profileName == edited.profileName)
+            fetch.release()
+            var held: RuntimeStartRefusal?
+            do {
+                try await start.value
+            } catch {
+                held = error as? RuntimeStartRefusal
+                notes.append("captured start: \(error.localizedDescription)")
+            }
+            await reload.value
+            check("the start whose capture was replaced reports its typed supersession", held == .superseded)
+            check("the held start leaves no listener", host.status().bindings.proxyPort == nil)
+            check("the held start leaves no system proxy", machine.service("Wi-Fi").webProxy.enabled == false)
+
+            try await host.startRuntime()
+            check("the next start captures the edit", host.status().profileName == edited.profileName)
+            check("the next start binds its listener", host.status().bindings.proxyPort == config.localPort)
+
+            await host.stopRuntime()
+            check("the capture host's final stop clears the system proxy", machine.service("Wi-Fi").webProxy.enabled == false)
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            check("the capture host settles before its root is released", settled == .settled)
+            let flush = await host.flushEvents()
+            check("the capture host's observability flush is confirmed", flush.allConfirmed)
+            quiesced = settled == .settled && flush.allConfirmed
+        } catch {
+            notes.append("capture exercise error: \(error.localizedDescription)")
+            fetch.release()
+            if let heldStart, case .failure(let failure) = await heldStart.result {
+                notes.append("held start on the error path: \(failure.localizedDescription)")
+            }
+            await host.stopRuntime()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            quiesced = settled == .settled && flush.allConfirmed
+            assertions.append(.init("the capture error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }

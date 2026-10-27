@@ -108,8 +108,9 @@ package enum ConfigurationWorkflowHoldReason: String, Codable, Sendable, Equatab
     case intentExhausted = "intent_exhausted"
     /// A terminal stop has latched, so no Start is admitted again in this process (the quit policy).
     case terminating
-    /// A newer observation or intent replaced the saved input this Start captured at preparation, so its remaining effects hold. It is not
-    /// rebound or retried (decision 0037).
+    /// The saved input this Start captured at preparation no longer stands, so its remaining effects hold: a newer observation, write or
+    /// intent changed it, or a refused reload or a lost baseline left the store without the baselines its receipts name. It is not rebound
+    /// or retried (decision 0037).
     case inputReplaced = "input_replaced"
     /// DNS still owes a session Stop's disable save, which a facade Start may not displace, so the whole Start was refused at admission.
     case stopSaveOwed = "stop_save_owed"

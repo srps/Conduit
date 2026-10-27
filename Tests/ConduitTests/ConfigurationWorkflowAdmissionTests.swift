@@ -93,9 +93,8 @@ final class ConfigurationWorkflowAdmissionTests: XCTestCase {
                     captures.append(workflow.generation)
                 case .claim:
                     guard let ticket = starts.last else { continue }
-                    let claim = workflow.writeClaim(for: ticket)
+                    // The store's write claim is built from this same admission check at the capture (`prepareStart`).
                     XCTAssertEqual(workflow.isCurrent(ticket), oracle.isCurrent(ticket.generation), "\(trace)")
-                    XCTAssertEqual(claim.isCurrent(), oracle.isCurrent(ticket.generation), "\(trace)")
                 }
                 XCTAssertEqual(workflow.generation, oracle.generation, "\(trace)")
                 XCTAssertEqual(workflow.stopFenced, oracle.fenced, "\(trace)")
