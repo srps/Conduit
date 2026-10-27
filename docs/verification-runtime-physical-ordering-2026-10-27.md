@@ -1,6 +1,6 @@
 # Runtime physical ordering checkpoint, 2026-10-27
 
-Status: local implementation; shared-owner/client and AppState adoption remain incomplete. This implements physical ordering under decision 0031, without changing control intent, persistence or package API signatures.
+Status: unreleased implementation; shared-owner/client and AppState adoption remain incomplete. This implements physical ordering under decision 0031, without changing control intent, persistence or package API signatures.
 
 `ProxyOrchestrator` uses one small `PhysicalLifecycle` for each of proxy, DNS/intercept and native tunnels. It extracts the existing proxy claim rule: a physical effect waits for its predecessor, checks that its admission is current, then claims in the same owner turn. Once claimed, a bind or teardown finishes before another can touch its listeners. DNS config restart and tunnel reconcile retain the current physical admission instead of manufacturing a fresh Start after a Stop. Stale completions cannot publish running state or start health probing. Repeated Start keeps existing listener/session identity.
 
@@ -11,6 +11,8 @@ The new actual-loopback tests hold DNS inside its existing UDP-before-TCP seam a
 The corrected source passed the exact verification wrapper: 574 focused tests, the existing actual-host simulator, event catalogue, decision history and whitespace checks. The parent separately executed [six production guard mutations](experiments/runtime-physical-guards/README.md); each failed its intended assertions, and the exact restored source passed all 15 focused physical tests. An independent subscription-backed Claude review accepted the claim mechanism and requested explicit restart-epoch capture plus held-teardown edit witnesses; those follow-ups and their mutations are complete. The full workflow and fresh review of the combined owner remain due.
 
 The earlier independent baseline failed before any mutation. The first-attempt ephemeral UDP port was not necessarily the TCP pair that actually bound. Configured, currently free test pairs now make that ownership check explicit; tests and release probes are not retried. The fixture ambiguity is established from source, while the exact historical conflicting holder/schedule remains unidentified.
+
+The final shared-owner rerun includes the full-start completion joins: one current per-module completion covers preparation as well as the physical bind, and Stop remains independent. All six strict guard removals failed intended assertions without compiler errors or crashes; baseline and exactly restored runs passed 19 physical tests. [Current results](experiments/runtime-physical-guards/results-owner-checkpoint.json) retain source/test identity. The [shared-owner verification](verification-runtime-module-owner-2026-10-27.md) covers actual mixed-scope proxy/DNS/tunnel callers and inherited cleanup.
 
 ## Boundaries and remaining work
 

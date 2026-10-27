@@ -107,7 +107,7 @@ host. The Settings UI is not exercised by the gate tests.
 Does not prove: atomic multi-file commits, cancellation of started writes,
 exclusive ownership across processes or machine cleanup after a deadline.
 
-Store core, not adopted (2026-10-25): [`ConfigurationStore.swift`](../../Sources/ConduitRuntime/ConfigurationStore.swift) makes one serialized writer for the runtime, platform and preferences files. It stages the runtime and platform candidates before the first write, writes the platform file first, and reports typed persistence facts with the caller's context. Each operation holds one busy slot and refuses an overlapping call as busy without queuing it. It has no Start, Stop, apply, intent counter or request ledger, and no app path constructs it yet. Evidence and limits are in [the verification note](../verification-configuration-store-2026-10-25.md).
+Historical store-core checkpoint (2026-10-25; since adopted by the shared host): [`ConfigurationStore.swift`](../../Sources/ConduitRuntime/ConfigurationStore.swift) makes one serialized writer for the runtime, platform and preferences files. It stages the runtime and platform candidates before the first write, writes the platform file first, and reports typed persistence facts with the caller's context. Each operation holds one busy slot and refuses an overlapping call as busy without queuing it. It has no Start, Stop, apply, intent counter or request ledger, and no app path constructs it yet. Evidence and limits are in [the verification note](../verification-configuration-store-2026-10-25.md).
 
 Physical verification primitive, consumed by the store core (2026-10-25): [`VerifiedConfigurationFileReplacement.swift`](../../Sources/PlatformMac/VerifiedConfigurationFileReplacement.swift)
 classifies a component replacement as verified persisted, verified not persisted, unknown or not started, from an expected-baseline pre-read, the write's own result and bounded read-back. The outcome carries no bytes. It takes no intent generation and mints no receipt; the store owns component baselines/receipts, while the actual workflow owns intent and apply. Evidence and limits are in [the verification note](../verification-runtime-file-replacement-2026-10-24.md).
@@ -120,10 +120,11 @@ byte-aware adoption predicate across the host, reconciler and orchestrator, with
 and credential caches. Its [verification checkpoint](../verification-byte-exact-runtime-intent-2026-10-26.md)
 records failing witnesses, executed mutations and remaining checks. Neither establishes AppState convergence.
 
+The [shared module owner checkpoint](../verification-runtime-module-owner-2026-10-27.md) now uses that sole store for module Starts and owed DNS Stop saves. [`RuntimeModuleIntents`](../../Sources/ConduitRuntime/RuntimeModuleIntent.swift) preserves a disable displaced by an unverified Start, fulfils it through matching verified writes and retains a newer Stop over late completion. [`Actual-host tests`](../../Tests/ConduitTests/RuntimeHostInteractiveTests.swift) and strict source mutations cover these cases. The reserved final editor flush and AppState writer deletion remain incomplete.
+
 ## Open questions
 
-Classify secret-free committed fields and coupled components before their client
-commands. Decision [0017](0017-exclusive-state-directory-writer.md) settles writer lifetime
+Private configuration classification and bounds are selected in 0018/0021/0022; actual client adoption and measured limits remain. Decision [0017](0017-exclusive-state-directory-writer.md) settles writer lifetime
 with an exclusive lease. Its OS adapter and startup acquisition are implemented;
 complete writer coverage, shutdown accounting and upgrade evidence remain due. Settle listener handoff failure/retirement policy before changing those paths. Size total shutdown and
 helper/lock budgets with evidence.

@@ -160,6 +160,8 @@ This is physical ordering, not AppState activation or complete resource isolatio
 the remaining shared-pool Stop boundary is tracked in
 [#250](https://github.com/srps/Conduit/issues/250).
 
+The [shared module owner](../verification-runtime-module-owner-2026-10-27.md) now develops all three lanes through [`RuntimeHostLifecycle`](../../Sources/ConduitRuntime/RuntimeHostLifecycle.swift), with typed member/companion settlements and full-start completion joins. Inherited unconfigured DNS cleanup is distinguished from an ordinary configured-off Start, which preserves user resolvers. Strict guard mutations and actual-host/loopback witnesses accompany the implementation; the one AppState activation still follows actual client adoption.
+
 Does not prove: actual app/client/store integration, RuntimeActor isolation,
 production daemon ownership, real-session auth/PAC or release readiness.
 

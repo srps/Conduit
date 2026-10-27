@@ -1,5 +1,8 @@
 # Physical lifecycle guards: executed negative controls
 
+Current shared-owner rerun (`a7f4366`, 2026-10-27): all six production-source mutations failed intended assertions without compiler errors or crashes; baseline and exactly restored runs passed 19 physical tests. [`results-owner-checkpoint.json`](results-owner-checkpoint.json) records code/test identity and outcomes. The current replay covers these six checks. Earlier results below retain their original scopes and source identities.
+
+
 The first four actual production-source mutations were executed on 2026-10-27 in an isolated worktree. Each failed its named assertion; none was counted from a compiler failure or crash. Baseline and byte-exact restored runs passed all 12 physical-ordering tests. `results.json` records source hashes, targeted assertions and exit codes.
 
 | Mutation | Actual witness |

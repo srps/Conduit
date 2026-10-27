@@ -87,9 +87,9 @@ supported the capture shape and identified integration obligations.
 failed their intended assertions; restored tests passed. Every workflow gate and
 fresh review of the later combined owner remain due.
 
-Does not prove: module lifecycle/client integration, scoped cleanup, final
-AppState activation, release readiness or real-machine behavior. These remain
-incomplete at this checkpoint.
+The subsequent [shared module owner](../verification-runtime-module-owner-2026-10-27.md) adds scoped lifecycle cleanup, member/companion outcomes and completion ordering over that same capture path. It introduces no alternate writer or rebind loop.
+
+Does not prove: actual framed-client/private-editor adoption, final AppState activation, RuntimeActor isolation, production profile selection, release readiness or real-machine behavior.
 
 ## Open questions
 

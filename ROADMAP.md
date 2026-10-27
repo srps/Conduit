@@ -56,10 +56,7 @@ host-checked conditional DNS activation is selected ([0036](./docs/decisions/003
 Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
 Stop/status/private-read adapter work remains independent.
 The unmerged [module-owner checkpoint](./docs/verification-runtime-module-owner-2026-10-27.md)
-now develops all three module lanes over one lifecycle/store path. Its 710 focused
-tests, actual-host scenario and seven executed guard mutations precede full
-workflow/independent review. Complete typed module outcomes and actual framed
-client adoption before the single AppState switch; no shipping claim follows.
+now develops all three module lanes over one lifecycle/store path, with typed module/companion outcomes and full-start completion joins. The inherited-cleanup checkpoint passed 1,346 focused tests (two skips), 95 actual-host assertions and fresh scoped subscription reviews. Twenty strict source mutations each failed intended assertions; restored module/model/physical tests passed. Full workflow/hosted gates remain due. Complete actual framed-client/private-editor adoption before the single AppState switch; no shipping claim follows.
 
 Preparation-time capture is selected in [0037](./docs/decisions/0037-saved-command-preparation-capture.md).
 The local saved-command checkpoint replaces the admission pin and passes focused

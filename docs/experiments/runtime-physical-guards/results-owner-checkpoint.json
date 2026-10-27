@@ -1,0 +1,95 @@
+{
+  "source_sha256": {
+    "Sources/ProxyKernel/Proxy/PhysicalLifecycle.swift": "96227dcab76986e089777b2df2716c7ce5bc437cd958566f272265c546242d71",
+    "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift": "903f2ad7da27b4758b7587eb1214b5a773529cc1aafdf7cd7e74a84ffe68f076"
+  },
+  "restored_exactly": true,
+  "checks": [
+    {
+      "invalid_markers": [],
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 10.64,
+      "assertions": []
+    },
+    {
+      "invalid_markers": [],
+      "name": "stale-effect-claim",
+      "exit": 1,
+      "seconds": 13.08,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:746: error: -[ConduitTests.PhysicalLifecycleTests testAnEffectSupersededBeforeItsClaimRunsNothing] : XCTAssertFalse failed",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:747: error: -[ConduitTests.PhysicalLifecycleTests testAnEffectSupersededBeforeItsClaimRunsNothing] : XCTAssertEqual failed: (\"[\"bind\"]\") is not equal to (\"[]\")"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "stale-dns-publication",
+      "exit": 1,
+      "seconds": 17.93,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:241: error: -[ConduitTests.RuntimePhysicalOrderingTests testDNSStopAdmittedDuringTheBindClosesItAndPublishesStopped] : XCTAssertFalse failed - the superseded start publishes nothing: [ProxyKernel.ModuleRunState.running, ProxyKernel.ModuleRunState.stopped]"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "repeated-tunnel-start",
+      "exit": 1,
+      "seconds": 10.24,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:652: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertEqual failed: (\"2\") is not equal to (\"1\") - a start while running admits nothing",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:656: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertEqual failed: (\"[ObjectIdentifier(0x00000009bd0f4480)]\") is not equal to (\"[ObjectIdentifier(0x00000009bd0f4180)]\") - the running listener is kept, not rebound",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:657: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertTrue failed",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:658: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertEqual failed: (\"0\") is not equal to (\"1\") - the live session keeps its count",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:670: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertEqual failed: (\"4\") is not equal to (\"3\")"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "stale-bind-cleanup",
+      "exit": 1,
+      "seconds": 10.46,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:307: error: -[ConduitTests.RuntimePhysicalOrderingTests testANewerStartClosesTheBindOfTheStartItSuperseded] : XCTAssertEqual failed: (\"failed\") is not equal to (\"running\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:310: error: -[ConduitTests.RuntimePhysicalOrderingTests testANewerStartClosesTheBindOfTheStartItSuperseded] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(27000)\")"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "dns-edit-during-stop",
+      "exit": 1,
+      "seconds": 9.96,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:396: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : XCTAssertTrue failed - the condition never held",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:404: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : XCTAssertEqual failed: (\"running\") is not equal to (\"stopped\")",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:404: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : XCTAssertNil failed: \"36701\"",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:404: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : XCTAssertNil failed: \"36701\"",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:404: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : XCTAssertNil failed: \"36701\"",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:405: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : failed - UDP port 36701 is still bound: bind(descriptor:ptr:bytes:): Address already in use) (errno: 48)",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:406: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : failed - TCP port 36701 is still bound: bind(descriptor:ptr:bytes:): Address already in use) (errno: 48)",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:407: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : XCTAssertEqual failed: (\"[ProxyKernel.ModuleRunState.stopped, ProxyKernel.ModuleRunState.starting, ProxyKernel.ModuleRunState.stopped, ProxyKernel.ModuleRunState.running]\") is not equal to (\"[ProxyKernel.ModuleRunState.stopped]\") - only the stop publishes; nothing binds after it",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:409: error: -[ConduitTests.RuntimePhysicalOrderingTests testADNSEditDuringAStopsHeldTeardownNeitherRestartsNorBinds] : XCTAssertEqual failed: (\"[Optional(\"reason=dns_section\")]\") is not equal to (\"[]\") - the edit decided no restart"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "tunnel-edit-during-stop",
+      "exit": 1,
+      "seconds": 9.57,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:729: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelEditDuringAStopsHeldTeardownNeitherReconcilesNorBinds] : XCTAssertEqual failed: (\"[\"config.tunnels_reconcile\"]\") is not equal to (\"[]\") - the edit decided no reconcile"
+      ]
+    },
+    {
+      "invalid_markers": [],
+      "name": "restored",
+      "exit": 0,
+      "seconds": 7.99,
+      "assertions": []
+    }
+  ],
+  "head": "a7f4366779ddca8e307afeaf0b2e515a8367aa05",
+  "baseline_tests": 19,
+  "restored_tests": 19,
+  "test_sha256": "663890f493f656de0ff742c5720de2db292e97002c12f6cb35716241557aeee7"
+}

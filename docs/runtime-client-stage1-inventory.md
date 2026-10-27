@@ -1,6 +1,6 @@
 # Runtime client: stage-1 inventory and review gates
 
-Foundation inventory from 2026-10-24, with current status corrected on 2026-10-26.
+Foundation inventory from 2026-10-24, with current status corrected on 2026-10-27.
 AppState has not adopted the client. This document retains the original inventory
 and measurements; [ROADMAP](../ROADMAP.md) owns execution status and
 [decision records](decisions/README.md) own selected policies.
@@ -156,12 +156,12 @@ encoded-byte cap is enforced separately.
 
 ## Event migration inventory
 
-Live `lifecycle.*` producers include superseded, coalesced,
+The first four typed `lifecycle.*` producers include superseded, coalesced,
 termination_drain_expired **and version_changed** (AppUpdates). The fourth producer
 was missed by the initial three-name inventory and is included in the merged
 foundation. All four emitted names now use typed values across producer, codecs,
 bridge and assertions. Configuration workflow decisions are also typed through
-the shared-host adoption in PR #244; other families migrate with their owners.
+the shared-host adoption in PR #244. The [shared module owner](verification-runtime-module-owner-2026-10-27.md) adds the fifth lifecycle name, `module_settled`, with closed member/companion outcomes and once-per-effect production. Other families migrate with their owners.
 The global catalogue is
 still hand-maintained. `lifecycle.crash_restart` is catalogued as planned,
 not an emitted event. Migrated names derive metadata from typed fields; the
