@@ -358,10 +358,13 @@ extension RuntimeHost {
         limits: RuntimeServiceLimits,
         clientFrameLimits: ControlFrameLimits,
         wireBudgetCap: Duration
-    ) throws -> any RuntimeClient {
+    ) throws -> RuntimeInMemoryClients {
         let composition = RuntimeControlComposition(host: self, limits: limits, timing: .system, scheduling: TaskOwnerScheduling())
         do {
-            return try makeFramedRuntimeClient(transport: composition.transport, limits: clientFrameLimits, wireBudgetCap: wireBudgetCap)
+            return RuntimeInMemoryClients(
+                control: try makeFramedRuntimeClient(transport: composition.transport, limits: clientFrameLimits, wireBudgetCap: wireBudgetCap),
+                editor: PrivateEditorClient(transport: composition.transport)
+            )
         } catch {
             // No client holds the composition, so the host is left with none.
             onControlStateChange = nil
@@ -370,12 +373,21 @@ extension RuntimeHost {
     }
 }
 
+/// The two clients of one in-memory composition: the ordinary framed client and the private editor client, over the same service, transport
+/// and private custody.
+package struct RuntimeInMemoryClients: Sendable {
+    package let control: any RuntimeClient
+    package let editor: PrivateEditorClient
+}
+
 /// The control service composed over one host, and its in-memory transport (decision 0014). The caller supplies every bound and the
 /// clock: no production profile is selected, so a test or a scenario passes its own explicit one. One service per host.
 @MainActor
 struct RuntimeControlComposition {
     let service: RuntimeServiceCore
     let transport: RuntimeInMemoryTransport
+    /// The composition's one private custody, shared by every transport it builds (decisions 0021 and 0034).
+    let privateCustody: RuntimePrivateCustody
 
     init(
         host: RuntimeHost,
@@ -392,7 +404,12 @@ struct RuntimeControlComposition {
             makeOperationID: { ControlOperationID(rawValue: UUID()) }
         )
         self.service = service
-        transport = RuntimeInMemoryTransport(core: service, limits: limits, timing: timing, scheduling: scheduling)
+        let custody = RuntimePrivateCustody()
+        privateCustody = custody
+        transport = RuntimeInMemoryTransport(
+            core: service, limits: limits, timing: timing, scheduling: scheduling,
+            privateChannel: RuntimePrivateChannel(custody: custody, owner: host)
+        )
         // Weak: the service holds the host as its owner, so the host must not keep the service alive.
         host.onControlStateChange = { [weak service] in service?.ownerDidChange() }
     }

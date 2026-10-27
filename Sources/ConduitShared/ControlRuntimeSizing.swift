@@ -113,6 +113,8 @@ extension ControlOperationOutcome {
             try completion.result.measure(into: &budget)
         case .partiallyCompleted(let modules):
             try budget.elements(modules.entries.count)
+        case .configurationSettled(let receipt):
+            try budget.elements(receipt.modules.count)
         case .superseded, .failed:
             break
         }

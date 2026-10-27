@@ -97,4 +97,8 @@ protocol ControlCommandOwner: AnyObject {
         operation: ControlOperationID,
         report: ControlEffectReport
     )
+
+    /// Launches a private editor update the owner admitted through `RuntimeServiceCore.submitPrivate`. The owner holds its frozen input
+    /// under `operation`; the service never held it.
+    func startPrivateEffect(operation: ControlOperationID, report: ControlEffectReport)
 }

@@ -604,7 +604,7 @@ enum RuntimeHostEffectsScenario {
     private static func stopProxyThroughClient(_ host: RuntimeHost) async throws -> (proxyShown: Bool, completed: Bool) {
         let client = try host.makeInMemoryControlClient(
             limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
-        )
+        ).control
         let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
         let snapshot = try await client.readSnapshot(deadline: deadline)
         let stream = try await client.subscribe(.live, deadline: deadline)
@@ -613,14 +613,15 @@ enum RuntimeHostEffectsScenario {
         let admission = try await client.submit(
             .stop(.proxy), requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: snapshot.stamp.incarnation, deadline: deadline
         )
-        guard case .accepted(let operation) = admission else { return (snapshot.proxyState != .stopped, false) }
+        let proxyShown = snapshot.proxyState == .running
+        guard case .accepted(let operation) = admission else { return (proxyShown, false) }
         for _ in 0..<64 {
             if case .operationFinished(let finished) = try await stream.next(deadline), finished.operationID == operation {
                 let completed = if case .completed(let completion) = finished.outcome { completion.command == .stop } else { false }
-                return (snapshot.proxyState != .stopped, completed)
+                return (proxyShown, completed)
             }
         }
-        return (snapshot.proxyState != .stopped, false)
+        return (proxyShown, false)
     }
 
     /// This scenario's own control-service profile. Every value is explicit and scenario-only, sized for one client and a handful of

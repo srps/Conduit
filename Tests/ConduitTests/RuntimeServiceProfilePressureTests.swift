@@ -144,10 +144,11 @@ final class RuntimeServiceProfilePressureTests: XCTestCase {
     }
 
     /// Waits until the owner queue holds exactly one first round per admitted call, then returns whether it did. A call reserves its lane and
-    /// queues that round in one synchronous step, but in its own task, and those tasks run in parallel with the calls refused. A refusal count
-    /// or a lane count can therefore be reached while an admitted call has reserved and not yet queued its round. A drain made then misses the
-    /// round, and the call stays unanswered until teardown cancels it as `notSent(cancelled)`: the status reads seen on 2026-10-27. The
-    /// failure message names the queue as it was, so a recurrence shows which stage was short.
+    /// later queues that round, in its own task, and those tasks run in parallel with the calls refused. A refusal count or a lane count can
+    /// therefore be reached while an admitted call has reserved and not yet queued its round. A drain made then misses the round, and the call
+    /// stays unanswered until teardown cancels it as `notSent(cancelled)`. That is traced from the source and consistent with the status reads
+    /// seen on 2026-10-27; it was not reproduced deterministically. The failure message names the queue as it was, so a recurrence shows which
+    /// stage was short.
     private func awaitQueuedRounds(_ harness: RuntimeServiceHarness, _ rounds: Int, _ stage: String) async {
         let queued = await awaitState { harness.scheduling.pendingCount == rounds }
         XCTAssertTrue(queued, "\(stage): \(harness.scheduling.pendingCount) owner rounds queued, expected one per admitted call (\(rounds))")

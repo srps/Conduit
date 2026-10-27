@@ -131,16 +131,20 @@ struct RuntimeInMemoryTransport: ControlRuntimeTransport {
     /// The server's own frame caps. A caller's limits may narrow them, and they never widen them.
     let requestFrameCap: Int
     let replyFrameCap: Int
+    /// The composition's private editor channel, shared by every transport it builds; nil where no private owner is composed.
+    let privateChannel: RuntimePrivateChannel?
 
     init(
         core: RuntimeServiceCore,
         limits: RuntimeServiceLimits,
         timing: RuntimeServiceTiming,
-        scheduling: any RuntimeOwnerScheduling
+        scheduling: any RuntimeOwnerScheduling,
+        privateChannel: RuntimePrivateChannel? = nil
     ) {
         self.core = core
         self.timing = timing
         self.scheduling = scheduling
+        self.privateChannel = privateChannel
         self.lanes = RuntimeLaneCounter(limits: limits)
         self.faults = RuntimeTransportFaults()
         self.requestFrameCap = limits.maxRequestBytes

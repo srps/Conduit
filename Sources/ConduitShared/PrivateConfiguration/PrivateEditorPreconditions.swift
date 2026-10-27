@@ -70,8 +70,10 @@ extension PrivateModuleSlots: Equatable where Value: Equatable {}
 /// Each case is distinct, and none is implied by another. Stop is not here: an urgent Stop stays an ordinary command,
 /// with its own capacity, and never waits behind a private body.
 package enum PrivateModuleIntent: Sendable, Equatable {
-    /// An ordinary knob save. It persists and changes no lifecycle state: it applies nothing, never clears a Stop fence
-    /// and never enables a stopped module.
+    /// An ordinary knob save. It persists and changes no lifecycle state: on its own it applies nothing, never clears a
+    /// Stop fence and never enables a stopped module. The runtime has one applied input (decisions 0025 and 0037), so when
+    /// another slot of the same request starts or applies, the one verified pair reaches every running module, this one
+    /// included: its values are then applied, not only saved.
     case saveOnly
     /// It persists, then applies only while the module is still running under this lifecycle revision. It never clears a
     /// Stop fence and never enables a stopped module.

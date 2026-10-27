@@ -175,13 +175,23 @@ final class PrivateEditorCodecTests: XCTestCase {
         XCTAssertFalse(described.contains("sample"), "the profile name is a value")
     }
 
-    /// The preconditions have no generic coding path. Only the private codec writes or reads them.
-    func testPreconditionsAreNotCodable() throws {
+    /// The lifecycle intents have no generic coding path; only the private codec writes or reads them. A baseline holds no configuration
+    /// value, so a causal receipt carries it on the ordinary wire too, with the same members and the version as the same exact `UInt64`
+    /// number, at its maximum included. The private codec's own bytes are pinned by the frame tests and do not change.
+    func testIntentsAreNotCodableAndABaselineKeepsItsExactVersionOnTheOrdinaryWire() throws {
         let request = try PrivateConfigSamples.request()
-        XCTAssertNil(request.runtimeBaseline as Any as? any Encodable)
-        XCTAssertNil(request.runtimeBaseline as Any as? any Decodable)
         XCTAssertNil(request.modules as Any as? any Encodable)
         XCTAssertNil(request.modules.proxy as Any as? any Encodable)
+
+        let widest = PrivateConfigSamples.baseline(.runtime, version: UInt64.max)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let encoded = String(decoding: try encoder.encode(widest), as: UTF8.self)
+        XCTAssertEqual(
+            encoded,
+            #"{"component":"runtime","namespace":"\#(widest.namespace.rawValue.uuidString)","version":18446744073709551615}"#
+        )
+        XCTAssertEqual(try JSONDecoder().decode(PrivateBaseline.self, from: Data(encoded.utf8)), widest)
     }
 
     // MARK: - Helpers

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
 import PlatformMac
 import ProxyKernel
@@ -179,45 +180,46 @@ final class ConfigurationStore {
         records[component].present
     }
 
-    /// Commits the runtime and platform files as one coupled operation (decisions 0015 and 0025). Both candidates stage before the
-    /// first write, and a staging refusal of either starts no write. The platform file is considered first. A present file whose
-    /// verified value already equals the candidate is verified without a save, and the others are saved only when they differ. The runtime
-    /// file is saved only once the platform file is verified, so a runtime rewrite cannot drop legacy platform values the platform file
-    /// does not yet hold. A rewrite that would drop legacy preference values also waits for the preferences sidecar to verify, in the same
-    /// physical step (decision 0026). Each write is conditional on its own baseline (decision 0027). There is no rollback and no retry.
-    func commitRuntimeAndPlatform(
-        _ runtime: ProxyConfig,
-        _ platform: PlatformIntegrationConfig,
-        expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>,
-        context: ConfigurationOperationContext,
-        claim: ConfigurationWriteClaim
-    ) async -> ConfigurationStoreAdmission<RuntimePlatformCommitResult> {
-        guard !isBusy else { return .busy }
-        isBusy = true
-        defer { isBusy = false }
-        return .admitted(await commitHeldRuntimeAndPlatform(runtime, platform, expecting: expected, context: context, claim: claim))
-    }
-
-    /// The saved-input form of the coupled commit (decision 0037). It takes the store's one slot first and then, in that same synchronous
-    /// turn, hands `capture` the current values; the candidate it returns is committed against the baselines those values came from. A
-    /// busy slot calls nothing. A nil candidate declines the commit and writes nothing; the slot is released either way.
+    /// The one coupled commit of the runtime and platform files (decisions 0015, 0025 and 0037). It takes the store's one slot first and then,
+    /// in that same synchronous turn, hands `capture` the current values, nil before any adopted observation. The candidate it returns is
+    /// committed against `expected`: the exact baselines a frozen editor request names, or, when nil, the baselines the current values came
+    /// from (a saved command's capture). Either way a lifecycle merge made in `capture` sees the store as it is at the claim. A busy slot calls
+    /// nothing. A nil candidate declines the commit and writes nothing; the slot is released either way.
+    ///
+    /// Both candidates stage before the first write, and a staging refusal of either starts no write. The platform file is considered first.
+    /// A present file whose verified value already equals the candidate is verified without a save, and the others are saved only when they
+    /// differ. The runtime file is saved only once the platform file is verified, so a runtime rewrite cannot drop legacy platform values the
+    /// platform file does not yet hold. A rewrite that would drop legacy preference values also waits for the preferences sidecar to verify,
+    /// in the same physical step (decision 0026). Each write is conditional on its own baseline (decision 0027). No rollback and no retry.
     func commitCapturedRuntimeAndPlatform(
+        expecting expected: ConfigurationSlots<ConfigurationBaselineToken?>? = nil,
         context: ConfigurationOperationContext,
         claim: ConfigurationWriteClaim,
-        capture: (ConfigurationValues) -> (runtime: ProxyConfig, platform: PlatformIntegrationConfig)?
+        capture: (ConfigurationValues?) -> (runtime: ProxyConfig, platform: PlatformIntegrationConfig)?
     ) async -> ConfigurationStoreAdmission<RuntimePlatformCommitResult?> {
         guard !isBusy else { return .busy }
         isBusy = true
         defer { isBusy = false }
-        guard let current = values, let candidate = capture(current) else { return .admitted(nil) }
-        let expected = ConfigurationSlots(
+        guard let candidate = capture(values) else { return .admitted(nil) }
+        let tokens = expected ?? ConfigurationSlots(
             runtime: baselineToken(for: .runtime),
             platform: baselineToken(for: .platform),
             preferences: nil
         )
         return .admitted(await commitHeldRuntimeAndPlatform(
-            candidate.runtime, candidate.platform, expecting: expected, context: context, claim: claim
+            candidate.runtime, candidate.platform, expecting: tokens, context: context, claim: claim
         ))
+    }
+
+    /// The token a submitted baseline names: its own namespace, component and exact version, for `authority` to decide. Only this file mints
+    /// tokens, so a decoded baseline gains no authority the store's records do not confirm.
+    func token(naming baseline: PrivateBaseline) -> ConfigurationBaselineToken {
+        let component: ConfigurationComponent = switch baseline.component {
+        case .runtime: .runtime
+        case .platform: .platform
+        case .preferences: .preferences
+        }
+        return ConfigurationBaselineToken(storeIncarnation: baseline.namespace.rawValue, component: component, version: baseline.version)
     }
 
     /// The coupled commit under a slot its caller already took.

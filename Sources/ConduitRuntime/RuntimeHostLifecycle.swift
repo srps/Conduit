@@ -51,6 +51,21 @@ struct RuntimeAdmittedStart: Sendable {
     let actions: PrivateModuleSlots<RuntimeModuleAction>
     let operation: LifecycleOperation
     let restartsProxy: Bool
+    /// An editor request's frozen candidate, committed in place of the saved capture through the same preparation.
+    var frozen: RuntimeConfigurationWorkflow.FrozenInput?
+    /// Where the preparation leaves its commit facts, for the request's receipt.
+    let facts = RuntimeCommitFacts()
+}
+
+/// The facts one Start produced for its request's receipt: its commit result and the DNS bit it staged, empty until a commit ran, and each
+/// member's result as its lane effect recorded it (the same value its `lifecycle.module_settled` carries), empty until it took lanes.
+@MainActor
+final class RuntimeCommitFacts: Sendable {
+    var commit: RuntimePlatformCommitResult?
+    var dnsStaged: Bool?
+    var members: PrivateModuleSlots<RuntimeModuleStartResult?>?
+
+    nonisolated init() {}
 }
 
 /// One Stop fenced in its synchronous turn and not yet run (`RuntimeHost.admitModuleStop`).
@@ -329,7 +344,9 @@ extension RuntimeHost {
         let operation = admitted.operation
         let restartsProxy = admitted.restartsProxy
         await awaitLaunchRecovery()
-        let preparation = await workflow.prepareStart(ticket)
+        let preparation = await workflow.prepareStart(ticket, frozen: admitted.frozen)
+        admitted.facts.commit = preparation.commit
+        admitted.facts.dnsStaged = preparation.dnsStaged
         emitConfigurationEvents(preparation.events)
         let prepared: RuntimeConfigurationWorkflow.PreparedStart
         switch preparation.preparation {
@@ -358,10 +375,15 @@ extension RuntimeHost {
             // This call's admission ended the running Start's group, and its own authorized group adopted the effect in the same turn, so
             // the effect settles this group with what it does.
             await join(running, operation: operation)
+            admitted.facts.members = running.results
             guard running.completed else { throw RuntimeStartRefusal.notRunning }
             return running.outcome
         case .run(let start):
-            defer { endLanes(start) }
+            // On every exit, after any finalization: the members' recorded settlements, not a value derived from the error.
+            defer {
+                admitted.facts.members = start.results
+                endLanes(start)
+            }
             do {
                 return try await runStartEffect(start)
             } catch {

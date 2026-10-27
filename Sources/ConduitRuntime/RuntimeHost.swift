@@ -54,6 +54,8 @@ package final class RuntimeHost {
     /// The latest control Stop admitted for each module and the revision its fence took, so a repeated Stop joins it while that fence is
     /// still the module's latest admission. Three fixed slots.
     var controlStops = PrivateModuleSlots<RuntimeControlStop?>(proxy: nil, dns: nil, tunnels: nil)
+    /// The private updates admitted and not launched yet, with their frozen inputs. The composition's one frozen-input slot bounds it to one.
+    var privateUpdates: [ControlOperationID: RuntimePrivateUpdate] = [:]
     /// Start, Stop and reload calls begun and not yet finished. A settle reads it, so a call that has not yet reached the lane or the
     /// workflow, still waiting for launch recovery, is seen.
     var pendingAdmissions = 0
@@ -834,7 +836,7 @@ package final class RuntimeHost {
     /// The one writer of the accepted host view after `open`: the runtime and platform inputs status reports, the VPN monitor's
     /// flap-window timings, and `configGeneration`, which counts adoptions of this view. The view is not a durable or applied counter; the
     /// machine-acting paths read the reconciler's baselines. The caller logs the non-blocking validation problems once.
-    private func adoptHostView(runtime: ProxyConfig, platform: PlatformIntegrationConfig) {
+    func adoptHostView(runtime: ProxyConfig, platform: PlatformIntegrationConfig) {
         config = runtime
         platformConfig = platform
         vpnFlapWindowBox.withLockedValue { window in

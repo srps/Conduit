@@ -14,6 +14,9 @@ package enum ControlRejectionCode: String, Codable, Sendable, Equatable, CaseIte
     case changedIncarnation = "changed_incarnation"
     /// The request ID was recorded with a different payload. The earlier admission is never reused for it.
     case requestConflict = "request_conflict"
+    /// The request ID already names a private editor request, or a private request reuses a recorded ID. A private ID is lookup-only:
+    /// look the admission up and never resend. Nothing derived from a private body is kept to compare.
+    case requestReused = "request_reused"
     /// The command is larger than the request cap the host accepts, so it cannot be recorded. Nothing was admitted.
     case commandTooLarge = "command_too_large"
     /// The host failed to record the command for a reason of its own. Nothing was admitted, and the cause is not reported.
@@ -30,6 +33,7 @@ package enum ControlRejectionCode: String, Codable, Sendable, Equatable, CaseIte
         case .deadlineExpired: "The time budget ended before the command was admitted."
         case .changedIncarnation: "The runtime restarted since the command was read, so it was not applied."
         case .requestConflict: "This request ID was already used for a different command."
+        case .requestReused: "This request ID was already admitted; look it up rather than send it again."
         case .commandTooLarge: "The command is larger than the runtime accepts, so it was not admitted."
         case .internalFailure: "The runtime could not record this command, so it was not admitted."
         }
@@ -259,6 +263,9 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
     /// Some modules completed and others did not. See `ControlModuleOutcomes`.
     case partiallyCompleted(ControlModuleOutcomes)
     case failed(ControlFailureCode)
+    /// A private editor update settled: its causal receipt, whatever each file and module came to. It is settlement, never admission,
+    /// and it carries no configuration value.
+    case configurationSettled(ControlConfigurationReceipt)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -266,6 +273,7 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
         case by
         case modules
         case failure
+        case receipt
     }
 
     package init(from decoder: any Decoder) throws {
@@ -279,6 +287,8 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
             self = .partiallyCompleted(try container.decode(ControlModuleOutcomes.self, forKey: .modules))
         case "failed":
             self = .failed(try container.decode(ControlFailureCode.self, forKey: .failure))
+        case "configurationSettled":
+            self = .configurationSettled(try container.decode(ControlConfigurationReceipt.self, forKey: .receipt))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown outcome")
         }
@@ -299,6 +309,9 @@ package enum ControlOperationOutcome: Codable, Sendable, Equatable {
         case .failed(let code):
             try container.encode("failed", forKey: .type)
             try container.encode(code, forKey: .failure)
+        case .configurationSettled(let receipt):
+            try container.encode("configurationSettled", forKey: .type)
+            try container.encode(receipt, forKey: .receipt)
         }
     }
 }

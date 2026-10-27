@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Darwin
 import XCTest
 import ConduitShared
 @testable import ConduitRuntime
@@ -6,6 +7,46 @@ import ConduitShared
 @testable import ProxyKernel
 import ProxyControlBridge
 import RuntimeEvents
+
+/// A loopback TCP listener the test holds, so a proxy that binds its port fails as on a contended port.
+private final class HeldTCPListener {
+    let port: Int
+    private let descriptor: Int32
+
+    init() throws {
+        let fd = Darwin.socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw CocoaError(.fileWriteUnknown) }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let bound = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        var chosen = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &chosen) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.getsockname(fd, $0, &length) }
+        }
+        guard bound == 0, Darwin.listen(fd, 1) == 0, named == 0 else {
+            Darwin.close(fd)
+            throw CocoaError(.fileWriteUnknown)
+        }
+        descriptor = fd
+        port = Int(UInt16(bigEndian: chosen.sin_port))
+    }
+
+    deinit {
+        Darwin.close(descriptor)
+    }
+}
+
+/// A request a test built ahead, sent through the client's single-use producer. Test-only: production maps inside the exchange.
+fileprivate extension PrivateEditorClient {
+    func submit(_ request: PrivateConfigurationRequest, deadline: RuntimeDeadline) async throws -> ControlAdmission {
+        try await submit(requestID: request.requestID, deadline: deadline) { request }
+    }
+}
 
 /// The actual `RuntimeHost` as the control service's one command owner (decisions 0014, 0031, 0035 and 0036): host, then
 /// `RuntimeServiceCore`, then the in-memory transport, then the framed client, over a `FakeMachine` and a scratch root. Every bound is
@@ -162,6 +203,394 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         guard case .upstreamHealth(let stale) = again else { return XCTFail("the retained revision: \(again)") }
         XCTAssertEqual(stale.status, .staleRevision(current: newer), "the old revision's rows are named stale, never relabelled")
         XCTAssertEqual(stale.rows.map(\.name), ["Synthetic"])
+    }
+
+    // MARK: - Private editor channel
+
+    private func editor(_ composed: Composed) -> PrivateEditorClient {
+        PrivateEditorClient(transport: composed.composition.transport)
+    }
+
+    private func observation(_ composed: Composed) async throws -> PrivateEditorObservation {
+        let answer = try await editor(composed).read(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: composed.host.incarnation,
+            budget: try ControlWireBudget(1_000), deadline: deadline()
+        )
+        guard case .observation(let observed) = answer else {
+            XCTFail("a read answers an observation: \(answer)")
+            throw RuntimeClientError.unexpectedReply
+        }
+        return observed
+    }
+
+    /// An update of `observed`'s values with `edit` applied, at its exact baselines, with one intent per module.
+    private func update(
+        _ composed: Composed,
+        from observed: PrivateEditorObservation,
+        modules: PrivateModuleSlots<PrivateModuleIntent> = PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly),
+        requestID: ControlRequestID = ControlRequestID(rawValue: UUID()),
+        budgetMilliseconds: Int = 1_000,
+        edit: (inout ProxyConfig) -> Void
+    ) throws -> PrivateConfigurationRequest {
+        var values = try PrivateConfigurationBridge.makeValues(from: observed)
+        edit(&values.config)
+        return try PrivateConfigurationBridge.makeRequest(
+            config: values.config, platform: values.platform, requestID: requestID, incarnation: composed.host.incarnation,
+            budget: try ControlWireBudget(budgetMilliseconds),
+            runtimeBaseline: try XCTUnwrap(observed.components.runtime.baseline),
+            platformBaseline: try XCTUnwrap(observed.components.platform.baseline),
+            modules: modules
+        )
+    }
+
+    private func receipt(_ outcome: ControlOperationOutcome) throws -> ControlConfigurationReceipt {
+        guard case .configurationSettled(let receipt) = outcome else {
+            XCTFail("an update settles with its receipt: \(outcome)")
+            throw RuntimeClientError.unexpectedReply
+        }
+        return receipt
+    }
+
+    /// A private read through the actual channel is one owner turn of the store's values, exact baselines and module intents.
+    func testAPrivateReadIsTheStoresObservationThroughTheActualChannel() async throws {
+        let composed = try await compose()
+        let observed = try await observation(composed)
+        let capture = composed.host.workflow.editorCapture()
+        XCTAssertEqual(observed.components, capture.components)
+        XCTAssertEqual(observed.modules, capture.modules)
+        XCTAssertEqual(composed.composition.privateCustody.held.transfer, false, "the transfer ends with the exchange")
+
+        let other = try await editor(composed).read(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: ControlHostIncarnation(rawValue: UUID()),
+            budget: try ControlWireBudget(1_000), deadline: deadline()
+        )
+        XCTAssertEqual(other, .refused(.changedIncarnation))
+    }
+
+    /// An all-save-only update persists its frozen values at the exact baselines it names and changes no lifecycle intent. Its receipt names
+    /// the request, the host, each file's write with its new baseline and the DNS bit merged in its claim. The frozen-input slot is held until
+    /// the operation quiesced. Its request ID is lookup-only afterwards, on either channel. The same old baselines then conflict as stale.
+    func testASaveOnlyUpdateSettlesWithItsCausalReceiptAndItsIDIsLookupOnly() async throws {
+        let composed = try await compose()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let revisions = composed.host.workflow.revisions
+        let request = try update(composed, from: observed) { $0.profileName = "Edited" }
+
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        let outcome = try await finished(operation, on: stream)
+        let settled = try receipt(outcome)
+        XCTAssertEqual(settled.requestID, request.requestID)
+        XCTAssertEqual(settled.incarnation, composed.host.incarnation)
+        XCTAssertEqual(settled.runtime.write, .persisted(reportedError: false))
+        XCTAssertGreaterThan(try XCTUnwrap(settled.runtime.baseline).version, request.runtimeBaseline.version)
+        XCTAssertEqual(settled.committedDNSForwarderEnabled, observed.runtime.dns.forwarderEnabled)
+        XCTAssertEqual(settled.modules, [])
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Edited")
+        XCTAssertEqual(composed.host.workflow.revisions, revisions, "a save changes no lifecycle revision")
+        XCTAssertEqual(composed.composition.privateCustody.held.input, false, "the frozen input is released at quiescence")
+        XCTAssertEqual(composed.composition.service.liveOperationCount, 0)
+
+        let resent = try await editor(composed).submit(request, deadline: deadline())
+        XCTAssertEqual(resent, .rejected(.requestReused))
+        let ordinary = try await composed.client.submit(
+            .stop(.tunnels), requestID: request.requestID, expectedIncarnation: composed.host.incarnation, deadline: deadline()
+        )
+        XCTAssertEqual(ordinary, .rejected(.requestReused), "an ordinary submit may not reuse a private ID")
+
+        let stale = try update(composed, from: observed) { $0.profileName = "Older draft" }
+        let staleOperation = try accepted(try await editor(composed).submit(stale, deadline: deadline()))
+        let staleOutcome = try await finished(staleOperation, on: stream)
+        let refused = try receipt(staleOutcome)
+        XCTAssertEqual(refused.runtime.write, .notAttempted(.baselineMismatch), "an old baseline never overwrites a newer file")
+        XCTAssertNil(refused.runtime.baseline)
+        XCTAssertNil(refused.committedDNSForwarderEnabled)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Edited")
+    }
+
+    /// A Start slot starts its module from the frozen values through the one Start path, and the receipt carries the member's result. A
+    /// stale Start revision refuses the whole request before anything is written.
+    func testAStartUpdateStartsFromTheFrozenValuesAndAStaleOneIsRefusedWhole() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let start = try update(
+            composed, from: observed,
+            modules: PrivateModuleSlots(proxy: .start(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly)
+        ) { $0.profileName = "Started" }
+        let operation = try accepted(try await editor(composed).submit(start, deadline: deadline()))
+        let outcome = try await finished(operation, on: stream)
+        let settled = try receipt(outcome)
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
+        XCTAssertEqual(composed.host.config.profileName, "Started", "the host adopted the frozen values it verified")
+
+        let after = try await observation(composed)
+        let stale = try update(
+            composed, from: after,
+            modules: PrivateModuleSlots(proxy: .start(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly)
+        ) { $0.profileName = "Never" }
+        let refusedWhole = try await editor(composed).submit(stale, deadline: deadline())
+        XCTAssertEqual(refusedWhole, .rejected(.staleRevision))
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Started")
+        XCTAssertEqual(composed.composition.privateCustody.held.input, false, "a refused update releases its slot with its exchange")
+    }
+
+    /// An update whose wait ended before its frame was handed over, by an expired deadline or a cancelled task, is not sent: nothing is
+    /// admitted, recorded or written, and both custody terms are released with the exchange.
+    func testAPrivateUpdateEndedBeforeItsSendIsNotSentAndAdmitsNothing() async throws {
+        let composed = try await compose()
+        let observed = try await observation(composed)
+        let request = try update(composed, from: observed) { $0.profileName = "Never" }
+        let editor = editor(composed)
+        do {
+            _ = try await editor.submit(request, deadline: RuntimeDeadline(instant: ContinuousClock.now.advanced(by: .seconds(-1))))
+            XCTFail("an expired update is not sent")
+        } catch let error as RuntimeClientError {
+            XCTAssertEqual(error, .notSent(.deadlineExpired))
+        }
+        let limit = deadline()
+        let cancelled = Task { () async -> RuntimeClientError? in
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                _ = try await editor.submit(request, deadline: limit)
+                return nil
+            } catch let error as RuntimeClientError {
+                return error
+            } catch {
+                return nil
+            }
+        }
+        let error = await cancelled.value
+        XCTAssertEqual(error, .notSent(.cancelled))
+        let lookup = try await composed.client.lookupAdmission(
+            of: request.requestID, expectedIncarnation: composed.host.incarnation, deadline: deadline()
+        )
+        XCTAssertEqual(lookup, .unknown(.notRecorded), "nothing was admitted or recorded")
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName,
+                       observed.runtime.profileName)
+        XCTAssertEqual(composed.composition.privateCustody.held.transfer, false)
+        XCTAssertEqual(composed.composition.privateCustody.held.input, false)
+    }
+
+    /// A busy channel refuses an update before its producer maps anything, so a peer never builds a second full request. A frozen input
+    /// still held by an admitted operation refuses another update, but not a read, which takes only the transfer.
+    func testABusyUpdateRefusesBeforeItsRequestIsMappedAndAHeldInputLeavesReadsOpen() async throws {
+        let composed = try await compose()
+        let custody = composed.composition.privateCustody
+        let transfer = try XCTUnwrap(custody.reserve(.update))
+        // Set to 1 by a producer call; it stays at its initial -1 while no producer runs.
+        let mapped = LockedCount()
+        do {
+            _ = try await editor(composed).submit(requestID: ControlRequestID(rawValue: UUID()), deadline: deadline()) {
+                mapped.set(1)
+                throw RuntimeClientError.unexpectedReply
+            }
+            XCTFail("a busy channel refuses the update")
+        } catch let error as RuntimeClientError {
+            XCTAssertEqual(error, .notSent(.transportBusy))
+        }
+        XCTAssertEqual(mapped.value, -1, "the producer is never called while the channel is busy")
+
+        // An admitted operation keeps the input after its exchange ends.
+        let input = try XCTUnwrap(transfer.takeInputSlot())
+        transfer.end()
+        XCTAssertEqual(custody.held.transfer, false)
+        XCTAssertEqual(custody.held.input, true)
+        _ = try await observation(composed)
+        do {
+            _ = try await editor(composed).submit(requestID: ControlRequestID(rawValue: UUID()), deadline: deadline()) {
+                mapped.set(1)
+                throw RuntimeClientError.unexpectedReply
+            }
+            XCTFail("a held frozen input refuses another update")
+        } catch let error as RuntimeClientError {
+            XCTAssertEqual(error, .notSent(.transportBusy))
+        }
+        XCTAssertEqual(mapped.value, -1)
+        input.release()
+        XCTAssertEqual(custody.held.input, false)
+    }
+
+    /// An apply-while-running update saves, then applies its verified pair to the module running at the revision it named, with no lifecycle
+    /// change. Once the module is stopped the same kind of update is persisted and held. A moved revision refuses it whole.
+    func testAnApplyWhileRunningUpdateAppliesOnlyToTheModuleStillRunningAtItsRevision() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let revisions = composed.host.workflow.revisions
+        let apply = PrivateModuleSlots<PrivateModuleIntent>(
+            proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+        )
+        let request = try update(composed, from: observed, modules: apply) { $0.profileName = "Applied" }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        let outcome = try await finished(operation, on: stream)
+        let settled = try receipt(outcome)
+        XCTAssertEqual(settled.applied, true)
+        XCTAssertEqual(composed.host.config.profileName, "Applied", "the running proxy took the verified pair")
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
+        XCTAssertEqual(composed.host.workflow.revisions, revisions, "applying changes no lifecycle revision")
+
+        let stop = try accepted(try await submit(composed, .stop(.proxy)))
+        _ = try await finished(stop, on: stream)
+        let stopped = try await observation(composed)
+        let held = try update(composed, from: stopped, modules: PrivateModuleSlots(
+            proxy: .applyWhileRunning(ifLifecycleRevision: stopped.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+        )) { $0.profileName = "Saved only" }
+        let heldOperation = try accepted(try await editor(composed).submit(held, deadline: deadline()))
+        let heldOutcome = try await finished(heldOperation, on: stream)
+        let heldReceipt = try receipt(heldOutcome)
+        XCTAssertEqual(heldReceipt.applied, false, "a stopped module is not started by an apply")
+        XCTAssertEqual(heldReceipt.runtime.write, .persisted(reportedError: false), "the values are still saved")
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp)
+
+        let moved = try update(composed, from: stopped, modules: apply) { $0.profileName = "Never" }
+        let refused = try await editor(composed).submit(moved, deadline: deadline())
+        XCTAssertEqual(refused, .rejected(.staleRevision))
+    }
+
+    /// The `lifecycle.module_settled` values recorded for `group`, by module.
+    private func settlements(_ harness: InteractiveHostHarness, group: Int) -> [ControlModuleReceipt] {
+        harness.typedEvents().compactMap { payload in
+            guard case .lifecycle(.moduleSettled(let settled)) = payload, settled.group == group,
+                  case .explicit(let module, let result) = settled.settlement else { return nil }
+            let control: ControlModule = switch module {
+            case .proxy: .proxy
+            case .dns: .dns
+            case .tunnels: .tunnels
+            }
+            return ControlModuleReceipt(module: control, result: ControlLifecycleModuleResult(result))
+        }
+    }
+
+    /// A frozen Start whose proxy cannot bind reports each member's recorded settlement, the same values its `lifecycle.module_settled`
+    /// events carry: the proxy failed, and in a combined Start the DNS member it held is superseded.
+    func testAFrozenStartsReceiptCarriesTheRecordedSettlementsOfAFailedBind() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true)
+        let occupied = try HeldTCPListener()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        for withDNS in [false, true] {
+            let observed = try await observation(composed)
+            let group = composed.host.workflow.generation + 1
+            let modules = PrivateModuleSlots<PrivateModuleIntent>(
+                proxy: .start(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision),
+                dns: withDNS ? .start(ifLifecycleRevision: observed.modules.dns.lifecycleRevision) : .saveOnly,
+                tunnels: .saveOnly
+            )
+            let request = try update(composed, from: observed, modules: modules) { $0.localPort = occupied.port }
+            let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+            let outcome = try await finished(operation, on: stream)
+            let settled = try receipt(outcome)
+            let expected: [ControlModuleReceipt] = withDNS
+                ? [ControlModuleReceipt(module: .proxy, result: .failed), ControlModuleReceipt(module: .dns, result: .superseded)]
+                : [ControlModuleReceipt(module: .proxy, result: .failed)]
+            XCTAssertEqual(settled.modules, expected, "combined: \(withDNS)")
+            XCTAssertEqual(settlements(composed.harness, group: group), expected, "the receipt and the events agree (combined: \(withDNS))")
+            XCTAssertFalse(composed.host.runtimeState().proxyIsUp)
+        }
+    }
+
+    /// A request whose own budget lapsed before the admission turn is refused with the typed `deadlineExpired`: nothing is admitted or
+    /// recorded, nothing is written, and the slot is released. A read at the same budget is refused the same way.
+    func testAPrivateRequestWhoseBudgetLapsedBeforeAdmissionIsRefusedTyped() async throws {
+        let composed = try await compose()
+        let observed = try await observation(composed)
+        let request = try update(composed, from: observed, budgetMilliseconds: 0) { $0.profileName = "Never" }
+        let admission = try await editor(composed).submit(request, deadline: deadline())
+        XCTAssertEqual(admission, .rejected(.deadlineExpired))
+        let lookup = try await composed.client.lookupAdmission(
+            of: request.requestID, expectedIncarnation: composed.host.incarnation, deadline: deadline()
+        )
+        XCTAssertEqual(lookup, .unknown(.notRecorded), "a lapsed budget records no alias")
+        XCTAssertEqual(composed.composition.privateCustody.held.input, false)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName,
+                       observed.runtime.profileName)
+
+        let read = try await editor(composed).read(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: composed.host.incarnation,
+            budget: try ControlWireBudget(0), deadline: deadline()
+        )
+        XCTAssertEqual(read, .refused(.deadlineExpired))
+    }
+
+    /// A save stages DNS's durable intent, never the draft's DNS bit: after a session DNS Stop, a frozen draft that still says enabled
+    /// writes the Stop's disable, and the receipt names it.
+    func testASaveMergesTheDNSStopsDisableOverTheDraftsEnable() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let draft = try await observation(composed)
+        XCTAssertTrue(draft.runtime.dns.forwarderEnabled)
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        _ = try await finished(stop, on: stream)
+        let current = try await observation(composed)
+
+        // The draft's values, at the current baselines: its DNS bit is still the enable the user saw before the Stop.
+        var values = try PrivateConfigurationBridge.makeValues(from: draft)
+        values.config.profileName = "Merged"
+        let request = try PrivateConfigurationBridge.makeRequest(
+            config: values.config, platform: values.platform, requestID: ControlRequestID(rawValue: UUID()),
+            incarnation: composed.host.incarnation, budget: try ControlWireBudget(1_000),
+            runtimeBaseline: try XCTUnwrap(current.components.runtime.baseline),
+            platformBaseline: try XCTUnwrap(current.components.platform.baseline),
+            modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+        )
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        let outcome = try await finished(operation, on: stream)
+        let settled = try receipt(outcome)
+        XCTAssertEqual(settled.committedDNSForwarderEnabled, false)
+        let saved = try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false)
+        XCTAssertEqual(saved.profileName, "Merged")
+        XCTAssertFalse(saved.dnsForwarderEnabled, "the Stop's disable stands")
+        XCTAssertTrue(composed.host.workflow.dnsIntent.fenced, "a save never clears a fence")
+    }
+
+    /// A save-only slot beside another module's Start: the one verified pair reaches every running module, so the running proxy takes the
+    /// saved proxy values too (decisions 0025 and 0037).
+    func testASaveOnlySlotBesideAnotherModulesStartReachesTheRunningModule() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let request = try update(composed, from: observed, modules: PrivateModuleSlots(
+            proxy: .saveOnly, dns: .saveOnly, tunnels: .start(ifLifecycleRevision: observed.modules.tunnels.lifecycleRevision)
+        )) { $0.profileName = "Whole pair" }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        _ = try await finished(operation, on: stream)
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
+        XCTAssertEqual(composed.host.heldRuntimeConfig.profileName, "Whole pair", "the running proxy holds the one applied input")
+    }
+
+    /// While the composition's private transfer is held, another private exchange is refused before anything is encoded, and ordinary
+    /// status still answers.
+    func testABusyPrivateTransferRefusesBeforeEncodingAndStatusStillAnswers() async throws {
+        let composed = try await compose()
+        let held = try XCTUnwrap(composed.composition.privateCustody.reserve(.read))
+        do {
+            _ = try await editor(composed).read(
+                requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: composed.host.incarnation,
+                budget: try ControlWireBudget(1_000), deadline: deadline()
+            )
+            XCTFail("a second private exchange is refused")
+        } catch let error as RuntimeClientError {
+            XCTAssertEqual(error, .notSent(.transportBusy))
+        }
+        _ = try await composed.client.readSnapshot(deadline: deadline())
+        held.end()
+        XCTAssertEqual(composed.composition.privateCustody.held.transfer, false)
     }
 
     // MARK: - Presentation revision
@@ -343,6 +772,70 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(composed.composition.service.liveOperationCount, 0, "every operation quiesced")
         XCTAssertEqual(composed.host.pendingAdmissions, 0, "the dropped Stop's admission was released")
         XCTAssertTrue(composed.host.controlAdmissions.isEmpty)
+    }
+
+    /// A failure bound on real effects: polls an observed boundary, never decides by time.
+    private func eventually(_ condition: @MainActor () -> Bool) async throws -> Bool {
+        for _ in 0..<2_000 where !condition() {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        return condition()
+    }
+
+    /// An admitted Stop launches even when every caller reference to its composition is gone before its launch hop runs: the hop holds the
+    /// service, so the fenced work is not stranded in the owner. Manual hops make the order exact.
+    func testAnAdmittedStopLaunchesAndQuiescesAfterItsCallerDroppedTheComposition() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: true)
+        self.harness = harness
+        let host = try await harness.makeHost()
+        try await host.startRuntime()
+        let scheduling = ManualOwnerScheduling()
+        weak var released: RuntimeServiceCore?
+        do {
+            let composition = RuntimeControlComposition(
+                host: host, limits: try RuntimeServiceFixtures.limits(), timing: ManualRuntimeTiming().timing, scheduling: scheduling
+            )
+            released = composition.service
+            let admission = composition.service.submit(ControlOperationRequest(
+                requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, command: .stop(.dns)
+            ))
+            _ = try accepted(admission)
+        }
+        XCTAssertNotNil(released, "the queued launch keeps the service")
+        XCTAssertEqual(host.controlAdmissions.count, 1)
+        XCTAssertTrue(host.workflow.dnsIntent.fenced)
+        scheduling.drainAll()
+        XCTAssertTrue(host.controlAdmissions.isEmpty, "the launch handed the admission to its effect")
+        let quiet = try await eventually { host.pendingAdmissions == 0 }
+        XCTAssertTrue(quiet, "the effect ran to its end")
+        XCTAssertFalse(harness.machine.dnsRelayRunning, "the fenced Stop tore DNS down")
+        XCTAssertEqual(harness.savedDNSEnabled, false, "and saved its disable")
+    }
+
+    /// A Stop whose launch is delayed until after a newer Start of its module acts on nothing: its teardown names only modules still at the
+    /// revision its fence took, so the newer runtime keeps running and the Stop settles as stale.
+    func testAStopLaunchedAfterANewerStartLeavesTheNewerRuntimeRunning() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
+        self.harness = harness
+        let host = try await harness.makeHost()
+        try await host.startRuntime()
+        let scheduling = ManualOwnerScheduling()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.limits(), timing: ManualRuntimeTiming().timing, scheduling: scheduling
+        )
+        let operation = try accepted(composition.service.submit(ControlOperationRequest(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, command: .stop(.proxy)
+        )))
+        let restarted = try await host.startProxy(conditionalDNS: false)
+        XCTAssertEqual(restarted.modules.proxy, .started, "the newer Start clears the fence and runs")
+
+        scheduling.drainAll()
+        let quiet = try await eventually { host.pendingAdmissions == 0 }
+        XCTAssertTrue(quiet)
+        XCTAssertTrue(host.runtimeState().proxyIsUp, "the stale Stop did not stop the newer runtime")
+        XCTAssertTrue(harness.machine.service("Wi-Fi").routesThroughAProxy)
+        XCTAssertEqual(composition.service.operationLookup(ControlOperationQuery(expectedIncarnation: host.incarnation, operationID: operation)),
+                       .finished(.failed(.staleRevision)))
     }
 
     // MARK: - Restart

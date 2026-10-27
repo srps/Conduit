@@ -34,9 +34,16 @@ enum RuntimePartition: Hashable, Sendable {
 /// admission. Admission never waits for alias room, so an alias cannot block a fence.
 ///
 /// The table takes no lock and calls nothing. The owner turn is its only caller.
+/// Where an alias came from. An ordinary request keeps its command fingerprint, so a resend recovers its admission and a different
+/// payload conflicts. A private editor request keeps nothing derived from its body: its ID is lookup-only, and any reuse is refused.
+enum RuntimeAliasOrigin: Equatable {
+    case ordinary(fingerprint: Data)
+    case privateEditor
+}
+
 struct RuntimeAliasTable {
     struct Alias {
-        let fingerprint: Data
+        let origin: RuntimeAliasOrigin
         let admission: ControlAdmission
         let partition: RuntimePartition
         let admittedAt: ContinuousClock.Instant
@@ -72,16 +79,17 @@ struct RuntimeAliasTable {
     /// nothing else is touched.
     mutating func record(
         _ id: ControlRequestID,
-        fingerprint: Data,
+        origin: RuntimeAliasOrigin,
         partition: RuntimePartition,
         admission: ControlAdmission,
         now: ContinuousClock.Instant
     ) {
+        // A private alias holds no fingerprint, so its record is never larger than the worst ordinary one it is charged as.
         let charge = limits.aliasRecordWorstBytes
         while let oldest = order[partition, default: []].first, isFull(partition, adding: charge) {
             remove(oldest)
         }
-        aliases[id] = Alias(fingerprint: fingerprint, admission: admission, partition: partition, admittedAt: now)
+        aliases[id] = Alias(origin: origin, admission: admission, partition: partition, admittedAt: now)
         order[partition, default: []].append(id)
         bytes[partition, default: 0] += charge
     }

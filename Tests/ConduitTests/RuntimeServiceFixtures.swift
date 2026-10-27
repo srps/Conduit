@@ -361,6 +361,12 @@ final class FakeCommandOwner: ControlCommandOwner {
         }
     }
 
+    /// The fake admits no private update, so the service never launches one on it.
+    func startPrivateEffect(operation: ControlOperationID, report: ControlEffectReport) {
+        startedOperations.append(operation)
+        reports[operation] = report
+    }
+
     /// Reports a logical settlement, the way the real owner does when its work decides an outcome.
     func settle(_ operation: ControlOperationID, with outcome: ControlOperationOutcome) {
         reports[operation]?.settled(outcome)

@@ -113,6 +113,34 @@ final class RuntimeConfigurationWorkflow {
     struct StartOutcome {
         let preparation: StartPreparation
         let events: [ConfigurationWorkflowEvent]
+        /// The commit's persistence facts and the DNS bit it staged, when the store ran the commit. A receipt reports them whatever the
+        /// Start then does.
+        var commit: RuntimePlatformCommitResult? = nil
+        var dnsStaged: Bool? = nil
+    }
+
+    /// A frozen editor candidate (decision 0018): the submitted values and the exact baselines its request named. The DNS bit and the
+    /// launch-at-login flag are merged from the store inside the claim, so the request can neither restore an older enable nor override the
+    /// administrative flag.
+    struct FrozenInput: Sendable {
+        let runtime: ProxyConfig
+        let platform: PlatformIntegrationConfig
+        let expected: ConfigurationSlots<ConfigurationBaselineToken?>
+    }
+
+    /// One admitted all-save-only update: no lifecycle admission, no revision change and no fence change. It stands while no terminal stop
+    /// has latched and DNS's durable intent has not moved since it was admitted.
+    struct SaveTicket: Sendable {
+        let dnsIntentRevision: Int?
+        let requestID: ControlRequestID?
+    }
+
+    struct SaveOutcome {
+        let commit: RuntimePlatformCommitResult?
+        let dnsStaged: Bool?
+        /// The claim no longer stood, by a terminal stop or a newer DNS intent, so nothing was captured or written.
+        let superseded: Bool
+        let events: [ConfigurationWorkflowEvent]
     }
 
     struct ReloadOutcome {
@@ -486,6 +514,11 @@ final class RuntimeConfigurationWorkflow {
     /// Whether the store still holds the pair a prepared Start captured. After authorization the host's lane tokens and member checks
     /// order the Start against newer admissions, and this alone says whether its remaining effects may use the pair. Any later write
     /// replaces it, a DNS Stop's verified disable included (decision 0037).
+    /// Whether the store still holds a verified pair: no observation or write replaced either file since it verified.
+    func stillHolds(_ input: VerifiedRuntimePlatformInput) -> Bool {
+        store.stillHolds(input)
+    }
+
     func holdsInput(_ prepared: PreparedStart) -> Bool {
         store.stillHolds(prepared.input)
     }
@@ -497,7 +530,7 @@ final class RuntimeConfigurationWorkflow {
     /// pair came from. A busy store captures nothing and holds the Start. A runtime input that blocks a start holds without any write.
     /// Absent defaults are persisted here, before the Start, and a present file that verifies is verified without a rewrite. The admission is
     /// checked again after the commit, and the prepared pair is returned only when both receipts verified.
-    func prepareStart(_ ticket: StartTicket) async -> StartOutcome {
+    func prepareStart(_ ticket: StartTicket, frozen: FrozenInput? = nil) async -> StartOutcome {
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
         guard isCurrent(ticket) else {
@@ -514,7 +547,10 @@ final class RuntimeConfigurationWorkflow {
             return intent.withLockedValue { $0.isPending(lifecycle) }
         }
         let operation = context(generation: ticket.generation, requestID: ticket.requestID)
-        let admission = await store.commitCapturedRuntimeAndPlatform(context: operation, claim: claim) { values in
+        let admission = await store.commitCapturedRuntimeAndPlatform(
+            expecting: frozen?.expected, context: operation, claim: claim
+        ) { values in
+            guard let values else { return nil }
             // The store's adopted DNS bit is a durable fact, observed first, so a reload that adopted it before this point supplies the
             // value and is never written over.
             guard let lifecycle = intent.withLockedValue({ $0.capture(ticket.lifecycle, observedDNS: values.runtime.dnsForwarderEnabled) }),
@@ -522,15 +558,14 @@ final class RuntimeConfigurationWorkflow {
                 capture = .ended
                 return nil
             }
-            var runtime = values.runtime
-            runtime.dnsForwarderEnabled = staged
-            guard !runtime.validate().contains(where: \.blocksProxyStart) else {
+            let candidate = Self.merged(frozen.map { ($0.runtime, $0.platform) } ?? (values.runtime, values.platform), dns: staged, store: values)
+            guard !candidate.runtime.validate().contains(where: \.blocksProxyStart) else {
                 capture = .blocking
                 return nil
             }
             capture = .captured(lifecycle)
             binding.withLockedValue { $0 = lifecycle }
-            return (runtime, values.platform)
+            return candidate
         }
         guard case .admitted(let committed) = admission else {
             return StartOutcome(preparation: .held, events: [held(.start, .unit, .storeBusy)])
@@ -563,10 +598,12 @@ final class RuntimeConfigurationWorkflow {
         // The admission is checked again after the commit's suspension. A committed file keeps its persistence even if the Start stops.
         guard isCurrent(captured) else {
             events += supersession(of: captured)
-            return StartOutcome(preparation: .superseded, events: events)
+            return StartOutcome(preparation: .superseded, events: events, commit: result, dnsStaged: staged)
         }
         if let verified = result.verifiedInput {
-            return StartOutcome(preparation: .ready(PreparedStart(ticket: captured, input: verified)), events: events)
+            return StartOutcome(
+                preparation: .ready(PreparedStart(ticket: captured, input: verified)), events: events, commit: result, dnsStaged: staged
+            )
         }
         if result.platform.isVerified {
             events.append(held(.start, .runtime, .commitFailed))
@@ -576,7 +613,84 @@ final class RuntimeConfigurationWorkflow {
                 events.append(held(.start, .runtime, .heldBehind))
             }
         }
-        return StartOutcome(preparation: .held, events: events)
+        return StartOutcome(preparation: .held, events: events, commit: result, dnsStaged: staged)
+    }
+
+    /// The candidate a commit stages: `values` with the DNS bit its claim staged and the store's own launch-at-login flag. A saved capture's
+    /// values already hold that flag; a frozen request never carries it (decision 0018), so the administrative value stays the store's.
+    private static func merged(
+        _ values: (runtime: ProxyConfig, platform: PlatformIntegrationConfig),
+        dns staged: Bool,
+        store: ConfigurationValues
+    ) -> (runtime: ProxyConfig, platform: PlatformIntegrationConfig) {
+        var runtime = values.runtime
+        runtime.dnsForwarderEnabled = staged
+        var platform = values.platform
+        platform.launchAtLogin = store.platform.launchAtLogin
+        return (runtime, platform)
+    }
+
+    /// The frozen candidate of an editor request, with the exact tokens its baselines name. The store mints them, and its authority decides.
+    func frozenInput(
+        runtime: ProxyConfig,
+        platform: PlatformIntegrationConfig,
+        runtimeBaseline: PrivateBaseline,
+        platformBaseline: PrivateBaseline
+    ) -> FrozenInput {
+        FrozenInput(
+            runtime: runtime,
+            platform: platform,
+            expected: ConfigurationSlots(
+                runtime: store.token(naming: runtimeBaseline), platform: store.token(naming: platformBaseline), preferences: nil
+            )
+        )
+    }
+
+    // MARK: - Save
+
+    /// Admits an all-save-only update in one turn. It changes no intent, revision or fence, so it neither clears a Stop fence nor leaves any
+    /// activation behind. After a terminal stop nothing new is admitted.
+    func admitSave(requestID: ControlRequestID?) -> Result<SaveTicket, RuntimeStartRefusal> {
+        let state = intent.withLockedValue { (terminal: $0.terminal, revision: $0.dnsIntentRevision) }
+        guard !state.terminal else { return .failure(.terminated) }
+        return .success(SaveTicket(dnsIntentRevision: state.revision, requestID: requestID))
+    }
+
+    /// Commits a save's frozen candidate through the one coupled commit, with DNS's durable intent merged inside the claim: a session Stop's
+    /// disable stays, and another request's pending enable is never written (decision 0015). The claim holds while DNS's intent has not moved
+    /// and no terminal stop latched; nothing is applied, and a verified disable fulfils the Stop save it matches.
+    func saveFrozen(_ ticket: SaveTicket, _ frozen: FrozenInput) async -> SaveOutcome {
+        operationsInFlight += 1
+        defer { operationsInFlight -= 1 }
+        let intent = self.intent
+        let claim = ConfigurationWriteClaim {
+            intent.withLockedValue { !$0.terminal && $0.dnsIntentRevision == ticket.dnsIntentRevision }
+        }
+        var staged: Bool?
+        let admission = await store.commitCapturedRuntimeAndPlatform(
+            expecting: frozen.expected, context: context(generation: generation, requestID: ticket.requestID), claim: claim
+        ) { values in
+            guard let values, claim.isCurrent() else { return nil }
+            let dns = intent.withLockedValue { $0.stagedDNSForwarderEnabled(for: nil) }
+            staged = dns
+            return Self.merged((frozen.runtime, frozen.platform), dns: dns, store: values)
+        }
+        guard case .admitted(let written) = admission else {
+            return SaveOutcome(commit: nil, dnsStaged: nil, superseded: false, events: [held(.start, .unit, .storeBusy)])
+        }
+        guard let result = written, let staged else {
+            // The claim no longer stood when the slot was taken: a terminal stop, or a newer DNS intent the save would have written over.
+            return SaveOutcome(
+                commit: nil, dnsStaged: nil, superseded: true, events: [held(.start, .unit, isTerminal ? .terminating : .inputReplaced)]
+            )
+        }
+        if result.runtime.isVerified {
+            intent.withLockedValue { $0.recordVerifiedDNSWrite(staged, intentRevision: ticket.dnsIntentRevision, ownEnable: false) }
+        }
+        return SaveOutcome(
+            commit: result, dnsStaged: staged, superseded: false,
+            events: [committed(.runtime, result.runtime), committed(.platform, result.platform)]
+        )
     }
 
     // MARK: - Reload

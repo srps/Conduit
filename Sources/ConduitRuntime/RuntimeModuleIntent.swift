@@ -155,8 +155,9 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     /// request's pending enable is not yet persisted intent (decisions 0015, 0035 and 0036), so no other group writes it first and no
     /// companion can act on it. A companion, a Stop's save and a facade's `configuredStart` project the configured intent. The permission
     /// and the fence stay as they were until `authorize`.
-    func stagedDNSForwarderEnabled(for group: Int) -> Bool {
-        if case .start(let start) = modules.dns.pending, !start.configured, start.group == group { return true }
+    /// A nil `group` is a save, which has no Start of its own and stages the durable intent.
+    func stagedDNSForwarderEnabled(for group: Int?) -> Bool {
+        if let group, case .start(let start) = modules.dns.pending, !start.configured, start.group == group { return true }
         return dnsConfigured
     }
 
@@ -169,11 +170,17 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     /// any other is the disable itself. The same holds once that Start ended before its write verified and gave the save back: its own
     /// late enable, under the intent revision its explicit DNS admission set, is the newer fact. A newer session Stop moved the revision.
     mutating func recordVerifiedDNSWrite(_ enabled: Bool, for ticket: RuntimeLifecycleTicket) {
-        guard dnsIntentRevision == ticket.dnsIntentRevision else { return }
-        dnsConfigured = enabled
         let ownEnable = enabled && ticket.actions.dns == .start && ticket.group == ticket.dnsIntentRevision
+        recordVerifiedDNSWrite(enabled, intentRevision: ticket.dnsIntentRevision, ownEnable: ownEnable)
+    }
+
+    /// The one rule for a verified runtime write's DNS bit, a Start's or a save's, staged under `intentRevision`. A save has no Start of its
+    /// own, so it is never `ownEnable`.
+    mutating func recordVerifiedDNSWrite(_ enabled: Bool, intentRevision: Int?, ownEnable: Bool) {
+        guard let intentRevision, dnsIntentRevision == intentRevision else { return }
+        dnsConfigured = enabled
         switch modules.dns.pending {
-        case .stopSave(let revision) where (!enabled || ownEnable) && revision == ticket.dnsIntentRevision:
+        case .stopSave(let revision) where (!enabled || ownEnable) && revision == intentRevision:
             modules.dns.pending = nil
         case .start(var start) where start.displacesOwedSave:
             start.displacesOwedSave = false
