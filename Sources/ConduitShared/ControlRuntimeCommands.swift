@@ -19,6 +19,7 @@ package enum ControlRuntimeCommandKind: String, Codable, Sendable, Equatable, Ca
     case refreshPreflight = "refresh-preflight"
     case setLaunchAtLogin = "set-launch-at-login"
     case credentialsChanged = "credentials-changed"
+    case reload
     case quit
 }
 
@@ -113,6 +114,10 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     /// The client wrote or cleared the saved proxy password in the shared store: the host drops the credential it caches, and a read
     /// already out discards its answer. It carries no secret, identity or digest, and nothing is read again until a handshake needs it.
     case credentialsChanged
+    /// The explicit reload-and-reconcile (decision 0032): one read-only observation of the files through the host's sole store, then
+    /// adoption and the eligible apply under the generation its admission captured. It carries nothing, and its result grants no
+    /// write authority: a client rebuilds a clean draft from a fresh private read, and a dirty draft keeps its original baselines.
+    case reload
     /// The process quit (decision 0015). Admission latches the terminal stop and opens the reserved flush window for `flush`. `total` is the
     /// one remaining budget, counted from the Quit's admission, that the flush, the store join, the teardown and the diagnostic flush share: the
     /// operation completes when they end, or fails `cleanupIncomplete` at that deadline, while the work still runs and owns the root until
@@ -129,6 +134,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .refreshPreflight: .refreshPreflight
         case .setLaunchAtLogin: .setLaunchAtLogin
         case .credentialsChanged: .credentialsChanged
+        case .reload: .reload
         case .quit: .quit
         }
     }
@@ -184,6 +190,12 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
             self = .setLaunchAtLogin(try container.decode(Bool.self, forKey: .enabled), ifPlatformBaseline: baseline)
         case .credentialsChanged:
             self = .credentialsChanged
+        case .reload:
+            // Unknown keys stay additive; a known key belongs to another command, so the value is inconsistent.
+            guard container.allKeys.allSatisfy({ $0 == .type }) else {
+                throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "a reload carries nothing")
+            }
+            self = .reload
         case .quit:
             self = .quit(
                 total: try container.decode(ControlWireBudget.self, forKey: .totalMilliseconds),
@@ -208,7 +220,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
             try container.encode(module, forKey: .module)
             try container.encode(revision, forKey: .lifecycleRevision)
             try container.encodeIfPresent(companion, forKey: .conditionalDNSRevision)
-        case .testDNS, .credentialsChanged:
+        case .testDNS, .credentialsChanged, .reload:
             break
         case .refreshPreflight(let helperReplaced):
             try container.encode(helperReplaced, forKey: .helperReplaced)
@@ -345,6 +357,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
     case platformWrite(ControlComponentWrite)
     /// A session DNS Stop that attempted its disable save: the save's causal runtime write. A Stop that attempted none is `settled`.
     case dnsDisable(ControlDNSDisableWrite)
+    /// An explicit reload's typed answer.
+    case reload(ControlReloadResult)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -352,6 +366,7 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
         case liveness
         case observation
         case write
+        case reload
     }
 
     package init(from decoder: any Decoder) throws {
@@ -369,6 +384,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
             self = .platformWrite(try container.decode(ControlComponentWrite.self, forKey: .write))
         case "dns-disable":
             self = .dnsDisable(try container.decode(ControlDNSDisableWrite.self, forKey: .write))
+        case "reload":
+            self = .reload(try container.decode(ControlReloadResult.self, forKey: .reload))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown result")
         }
@@ -394,6 +411,9 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
         case .dnsDisable(let write):
             try container.encode("dns-disable", forKey: .type)
             try container.encode(write, forKey: .write)
+        case .reload(let result):
+            try container.encode("reload", forKey: .type)
+            try container.encode(result, forKey: .reload)
         }
     }
 }

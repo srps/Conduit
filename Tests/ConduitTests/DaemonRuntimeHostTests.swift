@@ -3051,8 +3051,9 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let startsBefore = privilege.commands(matching: .startDNSRelay).count
         let onMainBefore = privilege.mainThreadOperations.filter { $0 == .startDNSRelay }.count
 
-        host.handleDNSHealthResult(alive: false, forwarderPort: 5353)
-        host.handleDNSHealthResult(alive: false, forwarderPort: 5353)
+        let token = host.lanes.dns.observationToken
+        host.handleDNSHealthResult(alive: false, forwarderPort: 5353, armedBy: token)
+        host.handleDNSHealthResult(alive: false, forwarderPort: 5353, armedBy: token)
         await host.deliveries.drain()
 
         XCTAssertEqual(privilege.commands(matching: .startDNSRelay).count, startsBefore + 1, "one restart for the two ticks")
@@ -3068,7 +3069,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         let privilege = harness.machine.privilege
         let startsBefore = privilege.commands(matching: .startDNSRelay).count
 
-        host.handleDNSHealthResult(alive: false, forwarderPort: 5353)
+        host.handleDNSHealthResult(alive: false, forwarderPort: 5353, armedBy: host.lanes.dns.observationToken)
         await host.deliveries.drain()
 
         XCTAssertEqual(privilege.commands(matching: .startDNSRelay).count, startsBefore)
@@ -3280,7 +3281,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
             XCTAssertEqual(error as? RuntimeStartRefusal, .held, "the newer start holds before the lane")
         }
         harness.stateFiles.release()
-        await reload.value
+        _ = await reload.value
 
         harness.hold.release()
         await assertSuperseded(older, "the newer admission ended the older start's group")
@@ -3447,7 +3448,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         XCTAssertNotEqual(stopped.value, 1, "the stop waits for the re-apply that is out")
 
         harness.hold.release()
-        await reload.value
+        _ = await reload.value
         await stop.value
         XCTAssertFalse(harness.wifi.routesThroughAProxy, "the stop's clear landed after the re-apply")
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .stopped)
@@ -3656,7 +3657,7 @@ final class DaemonRuntimeHostTests: XCTestCase {
         await harness.hold.waitUntilReached()
         XCTAssertFalse(harness.hold.reachedOnMainThread)
         harness.hold.release()
-        await reload.value
+        _ = await reload.value
 
         XCTAssertTrue(harness.machine.launchdEnvironment["NO_PROXY"]?.contains("bypass.example") == true)
         await host.stopRuntime()

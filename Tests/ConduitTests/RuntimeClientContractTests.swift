@@ -107,7 +107,8 @@ final class RuntimeClientContractTests: XCTestCase {
     func testTheApprovedCommandSetExcludesConfigApply() throws {
         XCTAssertEqual(
             ControlRuntimeCommandKind.allCases.map(\.rawValue),
-            ["stop", "start", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "credentials-changed", "quit"]
+            ["stop", "start", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "credentials-changed",
+             "reload", "quit"]
         )
         // The invalidation names nothing beyond itself: no secret, identity or digest.
         XCTAssertEqual(String(decoding: try JSONEncoder().encode(ControlRuntimeCommand.credentialsChanged), as: UTF8.self),

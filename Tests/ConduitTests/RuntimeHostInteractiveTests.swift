@@ -1039,7 +1039,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         harness.hold.release()
 
         let outcome = try await start.value
-        await reload.value
+        _ = await reload.value
         XCTAssertEqual(outcome.modules.proxy, .started, "the completed proxy is a fact")
         XCTAssertEqual(outcome.conditionalDNS, .superseded, "the companion holds on the replaced pair")
         XCTAssertEqual(host.orchestrator.snapshot.runtimeStatus.state, .running, "and the proxy stays up")
@@ -1130,7 +1130,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         } catch let refusal as RuntimeStartRefusal {
             XCTAssertEqual(refusal, .superseded)
         }
-        await reload.value
+        _ = await reload.value
         XCTAssertNotEqual(host.orchestrator.snapshot.dnsRunState, .running, "the held Start left no forwarder")
         XCTAssertFalse(harness.machine.dnsRelayRunning)
         XCTAssertEqual(host.workflow.dnsIntent.fenced, true, "its prior fence is back")

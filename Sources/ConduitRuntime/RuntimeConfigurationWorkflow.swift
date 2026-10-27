@@ -51,6 +51,26 @@ package enum RuntimeStartRefusal: LocalizedError, Equatable, Sendable {
     }
 }
 
+/// An explicit reload's typed answer (decision 0032). The workflow decides it at the same return as the reload's events, and the host
+/// completes an eligible one after its reconcile pass. It carries no configuration value, baseline or generation.
+package enum RuntimeReloadDecision: Equatable, Sendable {
+    /// Nothing was adopted: the store's slot was busy, or the observation was refused whole.
+    case refused(ConfigurationWorkflowRefusal)
+    /// The store adopted this observation, the preferences among it, whether or not its runtime and platform inputs applied.
+    case adopted(RuntimeReloadApply)
+}
+
+/// What an adopted reload did to the runtime and platform inputs.
+package enum RuntimeReloadApply: Equatable, Sendable {
+    /// A newer Start or Stop was admitted during the read, so the observation is not current and nothing applied.
+    case superseded
+    /// The current observation may not apply for this reason; the applied view stays.
+    case held(ConfigurationWorkflowHeldInput, ConfigurationWorkflowHoldReason)
+    /// The host view adopted the observation and its one reconcile pass was submitted and drained: an attempt, not proof of each
+    /// effect. `currentAtEnd` is whether the reload's admission was still the latest, with no Stop fence, once the pass had drained.
+    case reconcileAttempted(currentAtEnd: Bool)
+}
+
 /// The one configuration owner of one `RuntimeHost` (decisions 0015, 0025, 0027, 0031 and 0032). It holds the sole
 /// `ConfigurationStore` privately. It owns the intent generation, the synchronous Start and Stop admissions and the session Stop fence.
 /// The store has no intent counter of its own, and nothing else in the host writes configuration.
@@ -155,12 +175,27 @@ final class RuntimeConfigurationWorkflow {
     }
 
     struct ReloadOutcome {
+        /// The reload's answer, decided at the same return as `events`.
+        enum Answer {
+            /// Refused, superseded or held: nothing applies.
+            case decided(RuntimeReloadDecision)
+            /// The current observation may apply. The host adopts it, and its reconcile pass completes the answer.
+            case eligible(runtime: ProxyConfig, platform: PlatformIntegrationConfig)
+        }
+
         let events: [ConfigurationWorkflowEvent]
-        /// The runtime and platform inputs the host may apply. `nil` keeps the applied view and the reconciler's baseline as they are.
-        let applied: (runtime: ProxyConfig, platform: PlatformIntegrationConfig)?
+        let answer: Answer
         /// Whether a current observation was adopted, whatever the apply decision. A stale observation is still the store's durable one,
-        /// but it is not current, so it is not counted here.
+        /// but it is not current, so it is not counted here; the answer reports it adopted and superseded.
         let adopted: Bool
+        /// The context the store echoed for this observation; nil when its slot was busy and nothing was read.
+        let context: ConfigurationOperationContext?
+
+        /// The runtime and platform inputs the host may apply. `nil` keeps the applied view and the reconciler's baseline as they are.
+        var applied: (runtime: ProxyConfig, platform: PlatformIntegrationConfig)? {
+            guard case .eligible(let runtime, let platform) = answer else { return nil }
+            return (runtime, platform)
+        }
     }
 
     private let store: ConfigurationStore
@@ -809,25 +844,18 @@ final class RuntimeConfigurationWorkflow {
 
     /// An explicit reload: one read-only observation through the store, then adoption and the eligibility decision. `captured` is the
     /// generation the caller read before its first suspension, launch recovery included, so an admission made during that wait makes
-    /// this observation stale. Nothing is written, so a reload never writes a migration or a default.
-    func reload(capturedAt captured: Int) async -> ReloadOutcome {
+    /// this observation stale. `requestID` is the client request the store context names; nil names a fresh one. Nothing is written, so
+    /// a reload never writes a migration or a default.
+    func reload(capturedAt captured: Int, requestID: ControlRequestID? = nil) async -> ReloadOutcome {
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
-        let report = await store.load(context: context(generation: captured), allowMissing: startupAllowsMissing)
+        let report = await store.load(context: context(generation: captured, requestID: requestID), allowMissing: startupAllowsMissing)
         guard case .admitted(let loaded) = report else {
-            return ReloadOutcome(
-                events: [.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(.busy)))],
-                applied: nil,
-                adopted: false
-            )
+            return refusedReload(.busy, context: nil)
         }
         switch loaded.outcome {
         case .refused(let refusal):
-            return ReloadOutcome(
-                events: [.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(Self.refusal(refusal))))],
-                applied: nil,
-                adopted: false
-            )
+            return refusedReload(Self.refusal(refusal), context: loaded.context)
         case .adopted:
             var events: [ConfigurationWorkflowEvent] = [
                 .observed(ConfigurationWorkflowObserved(phase: .reload, observation: .adopted)),
@@ -842,35 +870,42 @@ final class RuntimeConfigurationWorkflow {
             // A newer intent that landed during the read makes this observation stale. It stays a durable observation, and nothing applies.
             let current = generation
             guard current == captured else {
-                events += staleEvents(.reload, generation: captured, current: current)
-                return ReloadOutcome(events: events, applied: nil, adopted: false)
+                let stale = staleReload(generation: captured, current: current)
+                events.append(stale.event)
+                return ReloadOutcome(events: events, answer: .decided(.adopted(stale.apply)), adopted: false, context: loaded.context)
             }
-            let applied = eligibleInput(values, events: &events)
-            return ReloadOutcome(events: events, applied: applied, adopted: true)
+            if let hold = reloadHold(values) {
+                events.append(held(.reload, hold.input, hold.reason))
+                return ReloadOutcome(
+                    events: events, answer: .decided(.adopted(.held(hold.input, hold.reason))), adopted: true, context: loaded.context
+                )
+            }
+            return ReloadOutcome(
+                events: events, answer: .eligible(runtime: values.runtime, platform: values.platform), adopted: true, context: loaded.context
+            )
         }
     }
 
-    /// The runtime and platform the host may apply, or nil with a held event. Preferences are not in this decision.
-    private func eligibleInput(
-        _ values: ConfigurationValues,
-        events: inout [ConfigurationWorkflowEvent]
-    ) -> (runtime: ProxyConfig, platform: PlatformIntegrationConfig)? {
-        if stopFenced {
-            events.append(held(.reload, .unit, .stopFenced))
-            return nil
-        }
+    private func refusedReload(_ refusal: ConfigurationWorkflowRefusal, context: ConfigurationOperationContext?) -> ReloadOutcome {
+        ReloadOutcome(
+            events: [.observed(ConfigurationWorkflowObserved(phase: .reload, observation: .refused(refusal)))],
+            answer: .decided(.refused(refusal)),
+            adopted: false,
+            context: context
+        )
+    }
+
+    /// Why the current observation's runtime and platform may not apply, or nil when they may. Preferences are not in this decision.
+    private func reloadHold(
+        _ values: ConfigurationValues
+    ) -> (input: ConfigurationWorkflowHeldInput, reason: ConfigurationWorkflowHoldReason)? {
+        if stopFenced { return (.unit, .stopFenced) }
         // Decision 0032: a present required file is valid reload authority when this observation verified it, with matching adopted
         // baselines. A valid external edit needs no commit receipt, because the reload writes nothing. An absent required file is
         // uncommitted, and a later explicit Start commits its defaults first.
-        guard store.isPresent(.runtime), store.isPresent(.platform) else {
-            events.append(held(.reload, .unit, .uncommitted))
-            return nil
-        }
-        if values.runtime.validate().contains(where: \.blocksProxyStart) {
-            events.append(held(.reload, .runtime, .startBlocking))
-            return nil
-        }
-        return (values.runtime, values.platform)
+        guard store.isPresent(.runtime), store.isPresent(.platform) else { return (.unit, .uncommitted) }
+        if values.runtime.validate().contains(where: \.blocksProxyStart) { return (.runtime, .startBlocking) }
+        return nil
     }
 
     // MARK: - Mapping
@@ -900,17 +935,13 @@ final class RuntimeConfigurationWorkflow {
         .committed(ConfigurationWorkflowCommitted(file: file, write: Self.write(outcome)))
     }
 
-    /// The event for an admission that stopped under `generation`. A newer generation is `superseded`. The only other way one stops is a
-    /// Stop fence at the maximum generation, which cannot advance, so that stop is reported as the closed fence hold.
-    private func staleEvents(
-        _ phase: ConfigurationWorkflowIntentPhase,
-        generation: Int,
-        current: Int
-    ) -> [ConfigurationWorkflowEvent] {
-        if ConfigurationWorkflowSuperseded.isValid(phase: phase, generation: generation, current: current) {
-            return [.superseded(ConfigurationWorkflowSuperseded(phase: phase, generation: generation, current: current))]
+    /// The event and the answer for a reload whose admission stopped under `generation`. A newer generation is `superseded`. The only
+    /// other way one stops is a Stop fence at the maximum generation, which cannot advance, so that stop is reported as the closed fence hold.
+    private func staleReload(generation: Int, current: Int) -> (event: ConfigurationWorkflowEvent, apply: RuntimeReloadApply) {
+        if ConfigurationWorkflowSuperseded.isValid(phase: .reload, generation: generation, current: current) {
+            return (.superseded(ConfigurationWorkflowSuperseded(phase: .reload, generation: generation, current: current)), .superseded)
         }
-        return [held(phase, .unit, .stopFenced)]
+        return (held(.reload, .unit, .stopFenced), .held(.unit, .stopFenced))
     }
 
     private static func file(_ component: ConfigurationComponent) -> ConfigurationWorkflowFile {

@@ -456,7 +456,7 @@ enum RuntimeHostEffectsScenario {
                 held = error as? RuntimeStartRefusal
                 notes.append("captured start: \(error.localizedDescription)")
             }
-            await reload.value
+            _ = await reload.value
             check("the start whose capture was replaced reports its typed supersession", held == .superseded)
             check("the held start leaves no listener", host.status().bindings.proxyPort == nil)
             check("the held start leaves no system proxy", machine.service("Wi-Fi").webProxy.enabled == false)
@@ -492,7 +492,8 @@ enum RuntimeHostEffectsScenario {
     /// saves its disable; a menu Restart's companion then finds the fence; a request naming a moved revision is refused whole; the menu's
     /// saved DNS Start through the framed client enables DNS again with its causal receipt, and a saved tunnels Start binds the loopback
     /// tunnel without rewriting the pair; a preflight refresh reads the fake helper and a credentials notice completes, through the same
-    /// client; and the process quit latches, tears every module down and returns with every lane idle.
+    /// client; an explicit reload through it refuses a malformed file whole and adopts an external edit, writing neither (decision 0032);
+    /// and the process quit latches, tears every module down and returns with every lane idle.
     @MainActor
     private static func exerciseModuleLifecycle(
         session: StateRootSession,
@@ -615,6 +616,22 @@ enum RuntimeHostEffectsScenario {
                 guard case .completed(let completion)? = credentials else { return false }
                 return completion.command == .credentialsChanged && completion.result == .settled
             }())
+
+            let valid = try Data(contentsOf: environment.configFile)
+            let malformed = Data("{".utf8)
+            try malformed.write(to: environment.configFile)
+            let refused = reloadResult(try await settleThroughClient(clients.control, .reload))
+            check("a malformed file reloaded through the framed client is refused whole and left as it is",
+                  refused == .refused(.invalidContent) && (try? Data(contentsOf: environment.configFile)) == malformed)
+            try valid.write(to: environment.configFile)
+            var external = try ProxyConfigPersistence.load(in: environment, allowMissing: false)
+            external.profileName = "Reloaded through the client"
+            try ProxyConfigPersistence.save(external, in: environment)
+            let edited = try Data(contentsOf: environment.configFile)
+            let adopted = reloadResult(try await settleThroughClient(clients.control, .reload))
+            check("an external edit reloaded through the framed client is adopted and its reconcile attempted under its admission",
+                  adopted == .adopted(.reconcileAttempted(currentAtEnd: true)) && host.status().profileName == external.profileName)
+            check("the reload writes nothing", (try? Data(contentsOf: environment.configFile)) == edited)
 
             let quit = try await quitThroughClient(clients)
             let stored = try AppPreferencesPersistence.load(in: environment)
@@ -785,6 +802,12 @@ enum RuntimeHostEffectsScenario {
             }
         }
         return nil
+    }
+
+    /// The reload answer a settlement carries, nil for any other outcome.
+    private static func reloadResult(_ outcome: ControlOperationOutcome?) -> ControlReloadResult? {
+        guard case .completed(let completion)? = outcome, case .reload(let result) = completion.result else { return nil }
+        return result
     }
 
     /// A preferences save through the editor client, then the process quit through the framed client with its reserved preferences flush,

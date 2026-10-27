@@ -194,7 +194,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         guard case .completed(let completion) = outcome else { return nil }
         switch completion.result {
         case .settled, .dnsDisable: return completion.command
-        case .upstreamProbe, .dnsLiveness, .preflight, .platformWrite: return nil
+        case .upstreamProbe, .dnsLiveness, .preflight, .platformWrite, .reload: return nil
         }
     }
 
@@ -2598,7 +2598,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         fetch.release()
 
         let settled = try receipt(try await finished(start, on: stream))
-        await reload.value
+        _ = await reload.value
         XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .superseded)], "no success for a replaced capture")
         XCTAssertEqual(settled.prior?.runtime, captured)
         XCTAssertTrue(settled.runtime.write.isVerified, "the commit it made stays a reported fact")
@@ -2666,7 +2666,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let busy = try await finished(try accepted(try await savedStart(composed, .proxy)), on: stream)
         XCTAssertEqual(busy, .failed(.storeBusy))
         files.hold.release()
-        await reload.value
+        _ = await reload.value
 
         let observed = try await observation(composed)
         let settled = try receipt(try await finished(try accepted(try await savedStart(composed, .proxy)), on: stream))

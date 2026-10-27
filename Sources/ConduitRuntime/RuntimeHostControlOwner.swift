@@ -122,6 +122,8 @@ enum RuntimeControlAdmission {
     case preflight
     /// The client changed the saved password; the effect drops the cached credential.
     case credentialsChanged
+    /// An explicit reload, pending work from its admission, with the intent generation its fence captured.
+    case reload(capturedAt: Int, request: ControlRequestID)
 }
 
 /// The latest control Stop of one module: the service operation and the revision its fence took.
@@ -153,7 +155,12 @@ extension RuntimeHost: ControlCommandOwner {
             incarnation: incarnation, presentationRevision: current, configRevision: configRevision, lifecycleRevision: lifecycle,
             modules: ControlModuleRevisions(proxy: proxy, dns: dns, tunnels: tunnels)
         )
-        let kernel = orchestrator.snapshot
+        var kernel = orchestrator.snapshot
+        // The host's DNS health observation is a fact of the running forwarder: the kernel's run state stays authoritative, and an error
+        // of the kernel's own wins. Projected before the stamp, so its change moves the presentation revision.
+        if dnsRelayUnresponsive, kernel.dnsRunState == .running, kernel.dnsError == nil {
+            kernel.dnsError = Self.dnsRelayUnresponsiveError
+        }
         let projected: ControlRuntimeSnapshot
         do {
             projected = try RuntimeSnapshotControlProjection.snapshot(
@@ -166,6 +173,9 @@ extension RuntimeHost: ControlCommandOwner {
         guard let stamped = presentation.stamp(projected) else { return snapshotUnavailable(.revisionExhausted) }
         return stamped
     }
+
+    /// The fixed DNS error the health observation projects; the app's own text for the same reading.
+    static let dnsRelayUnresponsiveError = "DNS pipeline unresponsive"
 
     /// The closed failure of a snapshot read, recorded once per failure episode so a persistent failure cannot flood the bounded event log.
     private func snapshotUnavailable(_ reason: RuntimeServiceSnapshotUnavailableReason) -> ControlRuntimeSnapshot? {
@@ -228,6 +238,12 @@ extension RuntimeHost: ControlCommandOwner {
         case .credentialsChanged:
             guard !workflow.isTerminal else { return .rejected(.hostStopping) }
             controlAdmissions[operation] = .credentialsChanged
+            return .admitted
+        case .reload:
+            // Captured in this admission turn, so a Start, Stop or update admitted before the effect's read makes it stale (decision 0032).
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            pendingAdmissions += 1
+            controlAdmissions[operation] = .reload(capturedAt: workflow.generation, request: request)
             return .admitted
         case .restart(.dns, _, _), .restart(.tunnels, _, _), .testUpstream:
             // Not adopted on this owner yet; each is refused whole before anything changes.
@@ -318,6 +334,14 @@ extension RuntimeHost: ControlCommandOwner {
             report.settled(completed(.credentialsChanged))
             report.quiesced()
             onControlStateChange?()
+        case .reload(let captured, let request):
+            Task { @MainActor [self] in
+                defer { pendingAdmissions -= 1 }
+                let decision = await performReload(capturedAt: captured, requestID: request)
+                report.settled(completed(.reload, result: .reload(Self.reloadResult(decision))))
+                report.quiesced()
+                onControlStateChange?()
+            }
         }
     }
 
@@ -436,6 +460,20 @@ extension RuntimeHost: ControlCommandOwner {
             return completed(.setLaunchAtLogin, result: .platformWrite(try Self.componentWrite(write)))
         } catch {
             preconditionFailure("an admin settlement is built from the store's own consistent facts")
+        }
+    }
+
+    /// A reload's answer on the wire, one case for one. The shared refusal and hold vocabulary goes through the bridge's own maps.
+    static func reloadResult(_ decision: RuntimeReloadDecision) -> ControlReloadResult {
+        switch decision {
+        case .refused(let refusal):
+            .refused(ControlConfigWorkflowRefusal(refusal))
+        case .adopted(.superseded):
+            .adopted(.superseded)
+        case .adopted(.held(let input, let reason)):
+            .adopted(.held(ControlConfigWorkflowHeldInput(input), ControlConfigWorkflowHoldReason(reason)))
+        case .adopted(.reconcileAttempted(let currentAtEnd)):
+            .adopted(.reconcileAttempted(currentAtEnd: currentAtEnd))
         }
     }
 

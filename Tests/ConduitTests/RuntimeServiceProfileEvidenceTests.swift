@@ -372,6 +372,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             // JSON `false` is a byte longer than `true`, as for the login-item flag below.
             ("submit-refresh-preflight", .refreshPreflight(helperReplaced: false)),
             ("submit-credentials-changed", .credentialsChanged),
+            ("submit-reload", .reload),
             ("submit-set-launch-at-login", .setLaunchAtLogin(false, ifPlatformBaseline: platformBaseline)),
             ("submit-quit-both-flushes", .quit(total: try ControlWireBudget(Int(Int32.max)), flush: flush)),
         ]
@@ -531,6 +532,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         let preferences = try ControlPreferencesReceipt(
             requestID: requestID, incarnation: incarnation, preferences: try widest(try componentWrites(.preferences, namespace: namespace))
         )
+        let reload = try widest(everyControlReloadResult())
         return [
             ("configuration-receipt-conditional-dns", .configurationSettled(try receipts([.proxy, .tunnels], conditionalDNS: companion))),
             ("configuration-receipt-three-members", .configurationSettled(try receipts(ControlModule.allCases, conditionalDNS: nil))),
@@ -544,6 +546,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             ("test-upstream", try completed(.testUpstream, .upstreamProbe(probe))),
             ("refresh-preflight", try completed(.refreshPreflight, .preflight(preflight))),
             ("set-launch-at-login", try completed(.setLaunchAtLogin, .platformWrite(platform))),
+            ("reload", try completed(.reload, .reload(reload))),
             ("partially-completed", .partiallyCompleted(partial)),
             ("failed", .failed(try widest(ControlFailureCode.allCases))),
             ("superseded", .superseded(by: ControlOperationID(rawValue: id))),
