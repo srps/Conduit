@@ -3,6 +3,7 @@ import ConduitShared
 import Foundation
 import ProxyControlBridge
 import ProxyKernel
+import RuntimeEvents
 
 /// The presentation revision of the host's control snapshots, and the last snapshot stamped with it. The revision moves only when a
 /// projection differs from the last one, so the service's slot never sees two bodies under one revision. It holds one snapshot, replaced
@@ -155,17 +156,16 @@ extension RuntimeHost: ControlCommandOwner {
             )
         } catch {
             // The projection names no value in its error, and none is kept. The read that asked fails closed.
-            return snapshotUnavailable("projection_failed")
+            return snapshotUnavailable(.projectionFailed)
         }
-        guard let stamped = presentation.stamp(projected) else { return snapshotUnavailable("revision_exhausted") }
+        guard let stamped = presentation.stamp(projected) else { return snapshotUnavailable(.revisionExhausted) }
         return stamped
     }
 
     /// The closed failure of a snapshot read, recorded once per failure episode so a persistent failure cannot flood the bounded event log.
-    private func snapshotUnavailable(_ reason: StaticString) -> ControlRuntimeSnapshot? {
+    private func snapshotUnavailable(_ reason: RuntimeServiceSnapshotUnavailableReason) -> ControlRuntimeSnapshot? {
         if presentation.projectionFailed() {
-            recordLifecycle(RuntimeEvent(kind: .health, event: "runtime_service.snapshot_unavailable", detail: "reason=\(reason)"),
-                            level: .warning)
+            recordLifecycle(RuntimeEvent(payload: .runtimeService(.snapshotUnavailable(reason))), level: .warning)
         }
         return nil
     }
@@ -175,8 +175,7 @@ extension RuntimeHost: ControlCommandOwner {
     }
 
     func serviceFault(_ fault: ControlServiceFault) {
-        recordLifecycle(RuntimeEvent(kind: .health, event: "runtime_service.fault", detail: "fault=\(Self.faultName(fault))"),
-                        level: .warning)
+        recordLifecycle(RuntimeEvent(payload: .runtimeService(.fault(Self.recordedFault(fault)))), level: .warning)
     }
 
     func fence(
@@ -257,23 +256,23 @@ extension RuntimeHost: ControlCommandOwner {
                 onControlStateChange?()
             }
         case .dnsProbe(let port):
-            // A port that cannot be named on the wire, as an unbound forwarder configured on port 0, has nothing to probe.
-            guard let wirePort = try? ControlPort(port) else {
-                logger.log(.warning, "DNS test: no forwarder port to probe.", category: .system)
-                report.settled(.failed(.effectFailed))
-                report.quiesced()
-                return
-            }
             Task { @MainActor [self] in
-                let manager = systemDNSManager
-                logger.log(.notice, "DNS test: probing 127.0.0.1:\(port)...", category: .system)
-                let answered = await platformWork.run { manager.probeLiveness(port: port) }
-                if answered {
-                    logger.log(.notice, "DNS test: PASS — received response from relay/forwarder pipeline.", category: .system)
+                let outcome: ControlOperationOutcome
+                // A port that cannot be named on the wire, as an unbound forwarder configured on port 0, has nothing to probe.
+                if let wirePort = try? ControlPort(port) {
+                    logger.log(.notice, "DNS test: probing 127.0.0.1:\(port)...", category: .system)
+                    let answered = await dnsLiveness(port: port).value
+                    if answered {
+                        logger.log(.notice, "DNS test: PASS — received response from relay/forwarder pipeline.", category: .system)
+                    } else {
+                        logger.log(.warning, "DNS test: FAIL — no response from 127.0.0.1:\(port) within 2s.", category: .system)
+                    }
+                    outcome = completed(.testDNS, result: .dnsLiveness(ControlDNSLivenessProbe(port: wirePort, answered: answered)))
                 } else {
-                    logger.log(.warning, "DNS test: FAIL — no response from 127.0.0.1:\(port) within 2s.", category: .system)
+                    logger.log(.warning, "DNS test: no forwarder port to probe.", category: .system)
+                    outcome = .failed(.effectFailed)
                 }
-                report.settled(completed(.testDNS, result: .dnsLiveness(ControlDNSLivenessProbe(port: wirePort, answered: answered))))
+                report.settled(outcome)
                 report.quiesced()
                 onControlStateChange?()
             }
@@ -434,20 +433,42 @@ extension RuntimeHost: ControlCommandOwner {
         }
     }
 
-    private static func faultName(_ fault: ControlServiceFault) -> String {
+    /// The app's Test DNS probe of `port`, as `AppState` and the host's own DNS health timer run theirs: through the injected probe on a
+    /// global queue, never on `platformWork`, so a probe waiting out its timeout cannot hold a Stop's or a quit's teardown there. One
+    /// physical probe runs at a time. A request for the latest probe's port joins it, and one for another port runs after it, so each
+    /// answer is for the port its request chose and the probes waiting are bounded by the service's ordinary capacity.
+    private func dnsLiveness(port: Int) -> Task<Bool, Never> {
+        if let latest = dnsLivenessProbe, latest.port == port { return latest.answer }
+        let previous = dnsLivenessProbe?.answer
+        let identity = UUID()
+        let manager = systemDNSManager
+        let answer = Task { @MainActor [weak self] in
+            _ = await previous?.value
+            let answered = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async { continuation.resume(returning: manager.probeLiveness(port: port)) }
+            }
+            if self?.dnsLivenessProbe?.identity == identity { self?.dnsLivenessProbe = nil }
+            return answered
+        }
+        dnsLivenessProbe = (port, identity, answer)
+        return answer
+    }
+
+    /// The service's fault as the recorded domain value: one case for one, with no default, so a new site fails to compile here.
+    private static func recordedFault(_ fault: ControlServiceFault) -> RuntimeServiceFault {
         switch fault {
-        case .submitCommandNotEncodable: "submit_command_not_encodable"
-        case .outcomeNotEncodable: "outcome_not_encodable"
-        case .projectionNotEncodable: "projection_not_encodable"
-        case .projectionCountMismatch: "projection_count_mismatch"
-        case .snapshotIncarnationMismatch: "snapshot_incarnation_mismatch"
-        case .revisionTotalChanged: "revision_total_changed"
-        case .collectionAccountingMismatch: "collection_accounting_mismatch"
-        case .quiescenceAccountingMismatch: "quiescence_accounting_mismatch"
-        case .snapshotNotEncodable: "snapshot_not_encodable"
-        case .snapshotOverBound: "snapshot_over_bound"
-        case .snapshotRevisionConflict: "snapshot_revision_conflict"
-        case .snapshotRevisionRegressed: "snapshot_revision_regressed"
+        case .submitCommandNotEncodable: .submitCommandNotEncodable
+        case .outcomeNotEncodable: .outcomeNotEncodable
+        case .projectionNotEncodable: .projectionNotEncodable
+        case .projectionCountMismatch: .projectionCountMismatch
+        case .snapshotIncarnationMismatch: .snapshotIncarnationMismatch
+        case .revisionTotalChanged: .revisionTotalChanged
+        case .collectionAccountingMismatch: .collectionAccountingMismatch
+        case .quiescenceAccountingMismatch: .quiescenceAccountingMismatch
+        case .snapshotNotEncodable: .snapshotNotEncodable
+        case .snapshotOverBound: .snapshotOverBound
+        case .snapshotRevisionConflict: .snapshotRevisionConflict
+        case .snapshotRevisionRegressed: .snapshotRevisionRegressed
         }
     }
 }

@@ -91,6 +91,8 @@ final class InteractiveHostHarness {
         let environment: RuntimeEnvironment
         let machine: FakeMachine
         let hold = HeldCall()
+        /// The ports the host's injected DNS probe was asked, in order. Each probe is offered to `hold` first as `("dns-probe", [port])`.
+        let dnsProbes = LockedLog<Int>()
         let vpn = FakeVPNStatusObserver()
         /// The PAC evaluator the orchestrator fetches through; a test that holds a Start before its bind names a `HeldPACFetch`.
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
@@ -117,6 +119,8 @@ final class InteractiveHostHarness {
             let machine = self.machine
             let hold = self.hold
             let vpn = self.vpn
+            let dnsProbes = self.dnsProbes
+            let dnsProbe = FakeDNSProbe()
             let built = try await RuntimeHost.open(
                 stateSession: session,
                 logger: DiscardingLogSink(),
@@ -135,7 +139,11 @@ final class InteractiveHostHarness {
                         hold.pass(launchPath, arguments)
                         return try machine.run(launchPath, arguments)
                     },
-                    dnsResponds: FakeDNSProbe().responds(onPort:),
+                    dnsResponds: { port in
+                        dnsProbes.append(port)
+                        hold.pass("dns-probe", [String(port)])
+                        return dnsProbe.responds(onPort: port)
+                    },
                     networkPath: FakeNetworkPathObserver(),
                     networkLocation: FakeNetworkLocationObserver(),
                     networkLocationStoreFactory: { _ in nil },

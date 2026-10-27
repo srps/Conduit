@@ -229,6 +229,18 @@ final class LockedSlot<Value: Sendable>: @unchecked Sendable {
     }
 }
 
+/// Values any thread appends, in order, and the test reads.
+final class LockedLog<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [Value] = []
+
+    var values: [Value] { lock.withLock { stored } }
+
+    func append(_ value: Value) {
+        lock.withLock { stored.append(value) }
+    }
+}
+
 /// A count one thread writes and another reads after joining it.
 final class LockedCount: @unchecked Sendable {
     private let lock = NSLock()

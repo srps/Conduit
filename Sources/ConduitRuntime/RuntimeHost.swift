@@ -58,6 +58,9 @@ package final class RuntimeHost {
     var privateUpdates: [ControlOperationID: RuntimePrivateUpdate] = [:]
     /// The quit's one reserved draft flush, once a quit opened it.
     var quitFlush: RuntimeQuitFlush?
+    /// The latest Test DNS probe, which every later one runs after: its port, an identity of its own, and the probe. Cleared by the probe
+    /// itself in the owner turn it ends, and only while it is still the latest, so a request never joins an answer already given.
+    var dnsLivenessProbe: (port: Int, identity: UUID, answer: Task<Bool, Never>)?
     /// Start, Stop and reload calls begun and not yet finished. A settle reads it, so a call that has not yet reached the lane or the
     /// workflow, still waiting for launch recovery, is seen.
     var pendingAdmissions = 0

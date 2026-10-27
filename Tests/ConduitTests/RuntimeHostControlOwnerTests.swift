@@ -41,6 +41,42 @@ private final class HeldTCPListener {
     }
 }
 
+/// The actual framed client, except that every subscription it opens takes its slot and then ends at once, as a stream the host ended early.
+private struct EarlyEndingClient: RuntimeClient {
+    let inner: any RuntimeClient
+
+    func submit(
+        _ command: ControlRuntimeCommand, requestID: ControlRequestID, expectedIncarnation: ControlHostIncarnation, deadline: RuntimeDeadline
+    ) async throws -> ControlAdmission {
+        try await inner.submit(command, requestID: requestID, expectedIncarnation: expectedIncarnation, deadline: deadline)
+    }
+
+    func lookupAdmission(
+        of requestID: ControlRequestID, expectedIncarnation: ControlHostIncarnation, deadline: RuntimeDeadline
+    ) async throws -> ControlRequestLookup {
+        try await inner.lookupAdmission(of: requestID, expectedIncarnation: expectedIncarnation, deadline: deadline)
+    }
+
+    func outcome(
+        of operation: ControlOperationID, expectedIncarnation: ControlHostIncarnation, deadline: RuntimeDeadline
+    ) async throws -> ControlOperationLookup {
+        try await inner.outcome(of: operation, expectedIncarnation: expectedIncarnation, deadline: deadline)
+    }
+
+    func subscribe(_ request: ControlSubscriptionRequest, deadline: RuntimeDeadline) async throws -> RuntimeSubscription {
+        let opened = try await inner.subscribe(request, deadline: deadline)
+        return RuntimeSubscription(next: { _ in .end(ControlStreamEnd(reason: .resyncRequired)) }, cancel: opened.cancel)
+    }
+
+    func readPage(_ request: ControlPageRequest, deadline: RuntimeDeadline) async throws -> ControlPageReply {
+        try await inner.readPage(request, deadline: deadline)
+    }
+
+    func readSnapshot(deadline: RuntimeDeadline) async throws -> ControlRuntimeSnapshot {
+        try await inner.readSnapshot(deadline: deadline)
+    }
+}
+
 /// A request a test built ahead, sent through the client's single-use producer. Test-only: production maps inside the exchange.
 fileprivate extension PrivateEditorClient {
     func submit(_ request: PrivateConfigurationRequest, deadline: RuntimeDeadline) async throws -> ControlAdmission {
@@ -128,8 +164,15 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         )
     }
 
+    /// The typed projection-failure records, each checked as the health record its value derives, on the kernel log and on the wire.
     private func unavailableEvents(_ host: RuntimeHost) -> Int {
-        host.orchestrator.eventLog.events.filter { $0.event == "runtime_service.snapshot_unavailable" }.count
+        let recorded = host.orchestrator.eventLog.events.filter { $0.typed == .runtimeService(.snapshotUnavailable(.projectionFailed)) }
+        for event in recorded {
+            XCTAssertEqual(event.kind, .health)
+            XCTAssertEqual(event.detail, "reason=projection_failed")
+            XCTAssertEqual(ControlRuntimeEvent(event).typed, .runtimeService(.snapshotUnavailable(.projectionFailed)))
+        }
+        return recorded.count
     }
 
     private func accepted(_ admission: ControlAdmission, file: StaticString = #filePath, line: UInt = #line) throws -> ControlOperationID {
@@ -1288,6 +1331,175 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(custody.held.input, false)
     }
 
+    /// The client quit gets no stream: the app's own subscription and another window's hold both subscriber slots, so its own is refused.
+    /// The earlier update is parked in its store step, so the one wait for it finds it pending. Both declared saves are still attempted:
+    /// the configuration save waits for the held input, its producer is handed the receipt the one lookup after the release found, and the
+    /// preferences save, attempted though no stream reports the configuration save, flushes after that save's release. With no stream to
+    /// report the Quit, the routine keeps its caller to the end of the short total and reads the Quit completed there, so it never returns
+    /// while the host's teardown may still run.
+    func testTheClientQuitFlushesBothDeclaredSavesWhenItsSubscriptionIsRefused() async throws {
+        let files = HeldStateFileRead()
+        let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
+        try await composed.host.startRuntime()
+        let app = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { app.cancel() }
+        let window = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { window.cancel() }
+        _ = try await app.next(deadline())
+        _ = try await window.next(deadline())
+        let observed = try await observation(composed)
+        let prior = try update(composed, from: observed) { $0.profileName = "Prior" }
+        files.hold.arm { [platformPath = composed.harness.session.plan.platformConfig.path] name, values in
+            name == "read" && values == [platformPath]
+        }
+        _ = try accepted(try await editor(composed).submit(prior, deadline: deadline()))
+        await files.hold.waitUntilReached()
+
+        let values = try PrivateConfigurationBridge.makeValues(from: observed)
+        let incarnation = composed.host.incarnation
+        let preferencesBaseline = try XCTUnwrap(observed.components.preferences.baseline)
+        let handedPrior = LockedSlot<RuntimeQuitStep>()
+        let configuration = Self.finalConfiguration(
+            values, incarnation: incarnation, runtime: try XCTUnwrap(observed.components.runtime.baseline),
+            platform: try XCTUnwrap(observed.components.platform.baseline), handedPrior: handedPrior
+        )
+        let quitting = Task { [client = composed.client, editor = editor(composed)] in
+            await RuntimeClientQuit.quit(
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(3), priorUpdate: prior.requestID,
+                configuration: configuration,
+                preferences: { requestID, _ in
+                    var preferences = values.preferences
+                    preferences.preferredBrowserTestURL = "https://final.example.test/"
+                    return try PrivateConfigurationBridge.makePreferencesRequest(
+                        preferences: preferences, requestID: requestID, incarnation: incarnation,
+                        budget: try ControlWireBudget(1_000), preferencesBaseline: preferencesBaseline
+                    )
+                }
+            )
+        }
+        let custody = composed.composition.privateCustody
+        let waiting = try await eventually { custody.isAwaitingCapacity }
+        XCTAssertTrue(waiting, "the final save waits for the held input though the quit has no stream")
+        XCTAssertTrue(composed.host.workflow.isTerminal, "the Quit fenced first")
+        XCTAssertNil(handedPrior.value, "nothing is mapped while that input is held")
+        files.hold.release()
+        let result = await quitting.value
+
+        XCTAssertEqual(result.observationFailure, .wire(.subscriberLimit))
+        guard case .settled(.configurationSettled(let priorReceipt)) = result.priorUpdate else {
+            return XCTFail("the one lookup after the release reads the earlier update's receipt: \(result.priorUpdate)")
+        }
+        XCTAssertEqual(priorReceipt.runtime.write, .notAttempted(.superseded))
+        XCTAssertEqual(handedPrior.value, result.priorUpdate, "the producer was handed that receipt")
+        guard case .settled(.configurationSettled(let final)) = result.configuration else {
+            return XCTFail("the configuration save is read once the preferences save holds its released input: \(result.configuration)")
+        }
+        XCTAssertEqual(final.runtime.write, .persisted(reportedError: false))
+        switch result.preferences {
+        case .settled(.preferencesSettled(let receipt)): XCTAssertEqual(receipt.preferences.write, .persisted(reportedError: false))
+        case .unsettled: break
+        default: XCTFail("the preferences save is admitted: \(result.preferences)")
+        }
+        guard case .settled(let quit) = result.quit else { return XCTFail("the Quit is read settled before the routine returns: \(result.quit)") }
+        XCTAssertEqual(completed(quit), .quit)
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp, "the host's teardown ended before the routine returned")
+        XCTAssertEqual(custody.held.input, false)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Final")
+        XCTAssertEqual(try AppPreferencesPersistence.load(in: composed.harness.environment).preferredBrowserTestURL, "https://final.example.test/")
+    }
+
+    /// The client quit's stream ends before the earlier update settles. Its declared save is still attempted under the same capacity wait,
+    /// rebases only from the receipt the one lookup after the release reads, and is written. With the stream gone, the routine keeps its
+    /// caller to the end of the short total and reads the Quit completed there, so it never returns while the host's teardown may run.
+    func testTheClientQuitFlushesItsDeclaredSaveWhenItsStreamEndsEarly() async throws {
+        let files = HeldStateFileRead()
+        let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
+        try await composed.host.startRuntime()
+        let observed = try await observation(composed)
+        let prior = try update(composed, from: observed) { $0.profileName = "Prior" }
+        files.hold.arm { [platformPath = composed.harness.session.plan.platformConfig.path] name, values in
+            name == "read" && values == [platformPath]
+        }
+        _ = try accepted(try await editor(composed).submit(prior, deadline: deadline()))
+        await files.hold.waitUntilReached()
+
+        let values = try PrivateConfigurationBridge.makeValues(from: observed)
+        let incarnation = composed.host.incarnation
+        let handedPrior = LockedSlot<RuntimeQuitStep>()
+        let configuration = Self.finalConfiguration(
+            values, incarnation: incarnation, runtime: try XCTUnwrap(observed.components.runtime.baseline),
+            platform: try XCTUnwrap(observed.components.platform.baseline), handedPrior: handedPrior
+        )
+        let quitting = Task { [client = EarlyEndingClient(inner: composed.client), editor = editor(composed)] in
+            await RuntimeClientQuit.quit(
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(3), priorUpdate: prior.requestID,
+                configuration: configuration
+            )
+        }
+        let custody = composed.composition.privateCustody
+        let waiting = try await eventually { custody.isAwaitingCapacity }
+        XCTAssertTrue(waiting, "the final save waits for the held input after the stream ended")
+        XCTAssertNil(handedPrior.value)
+        files.hold.release()
+        let result = await quitting.value
+
+        XCTAssertEqual(result.observationFailure, .streamClosed(.resyncRequired))
+        guard case .settled(.configurationSettled) = result.priorUpdate else {
+            return XCTFail("the one lookup after the release reads the earlier update's receipt: \(result.priorUpdate)")
+        }
+        XCTAssertEqual(handedPrior.value, result.priorUpdate)
+        switch result.configuration {
+        case .settled(.configurationSettled(let final)): XCTAssertEqual(final.runtime.write, .persisted(reportedError: false))
+        case .unsettled: break
+        default: XCTFail("the declared save is admitted: \(result.configuration)")
+        }
+        guard case .settled(let quit) = result.quit else { return XCTFail("the Quit is read settled before the routine returns: \(result.quit)") }
+        XCTAssertEqual(completed(quit), .quit)
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp, "the host's teardown ended before the routine returned")
+        XCTAssertEqual(custody.held.input, false)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Final")
+    }
+
+    /// With no stream to report it and the host's teardown held on a machine call, the Quit is still pending at the one final read, so the
+    /// client quit reports it unsettled, and only once the whole total deadline has passed: its caller is never let go while that teardown
+    /// may still run. The real clock bounds only from below; nothing is timed.
+    func testTheClientQuitKeepsItsCallerToTheTotalDeadlineWhileAnUnobservedTeardownIsHeld() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        composed.harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let total = Duration.seconds(2)
+        let began = ContinuousClock.now
+        let quitting = Task { [client = EarlyEndingClient(inner: composed.client), editor = editor(composed), incarnation = composed.host.incarnation] in
+            await RuntimeClientQuit.quit(control: client, editor: editor, incarnation: incarnation, total: total, now: began)
+        }
+        await composed.harness.hold.waitUntilReached()
+        XCTAssertTrue(composed.host.workflow.isTerminal, "the Quit latched and its teardown is held")
+        let result = await quitting.value
+        let returned = ContinuousClock.now
+
+        guard case .unsettled = result.quit else { return XCTFail("a Quit still tearing down is reported unsettled: \(result.quit)") }
+        XCTAssertEqual(result.observationFailure, .streamClosed(.resyncRequired))
+        XCTAssertGreaterThanOrEqual(returned, began.advanced(by: total), "the caller is kept to the total deadline itself")
+        XCTAssertGreaterThan(composed.host.pendingAdmissions, 0, "the quit's held work had not ended when the routine returned")
+
+        composed.harness.hold.release()
+        let ended = try await eventually { !composed.host.runtimeState().proxyIsUp && composed.host.pendingAdmissions == 0 }
+        XCTAssertTrue(ended, "the released teardown ends the quit")
+    }
+
+    /// A client quit whose total deadline has already passed reports the deadline, not an invalid value, and latches nothing.
+    func testTheClientQuitReportsAnExhaustedBudgetAsItsDeadline() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let result = await RuntimeClientQuit.quit(
+            control: composed.client, editor: editor(composed), incarnation: composed.host.incarnation, total: .zero
+        )
+        XCTAssertEqual(result.quit, .clientFailure(.notSent(.deadlineExpired)))
+        XCTAssertFalse(composed.host.workflow.isTerminal)
+    }
+
     /// An invalid runtime draft does not hold back a valid sidecar edit at quit: the final save carries the last clean runtime value under
     /// its exact submitted baseline, so the runtime file is verified unchanged and only the platform file is written. The quit applies
     /// nothing and writes no DNS disable.
@@ -1592,6 +1804,39 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(recovered.stamp.presentationRevision, completion.presentationRevision)
         XCTAssertNotEqual(recovered.dnsRunState, .running, "the recovered snapshot shows the Stop")
         XCTAssertEqual(unavailableEvents(composed.host), 1)
+    }
+
+    /// Every service fault the owner receives is recorded as its own typed health value, whose detail keeps the untyped record's
+    /// `fault=` spelling, and the bridge carries the same value to the wire. One record per report: the owner adds no coalescing.
+    func testEveryServiceFaultIsRecordedAsItsOwnTypedHealthEvent() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        let faults: [(ControlServiceFault, RuntimeServiceFault, String)] = [
+            (.submitCommandNotEncodable, .submitCommandNotEncodable, "submit_command_not_encodable"),
+            (.outcomeNotEncodable, .outcomeNotEncodable, "outcome_not_encodable"),
+            (.projectionNotEncodable, .projectionNotEncodable, "projection_not_encodable"),
+            (.projectionCountMismatch, .projectionCountMismatch, "projection_count_mismatch"),
+            (.snapshotIncarnationMismatch, .snapshotIncarnationMismatch, "snapshot_incarnation_mismatch"),
+            (.revisionTotalChanged, .revisionTotalChanged, "revision_total_changed"),
+            (.collectionAccountingMismatch, .collectionAccountingMismatch, "collection_accounting_mismatch"),
+            (.quiescenceAccountingMismatch, .quiescenceAccountingMismatch, "quiescence_accounting_mismatch"),
+            (.snapshotNotEncodable, .snapshotNotEncodable, "snapshot_not_encodable"),
+            (.snapshotOverBound, .snapshotOverBound, "snapshot_over_bound"),
+            (.snapshotRevisionConflict, .snapshotRevisionConflict, "snapshot_revision_conflict"),
+            (.snapshotRevisionRegressed, .snapshotRevisionRegressed, "snapshot_revision_regressed"),
+        ]
+        XCTAssertEqual(Set(faults.map(\.1)), Set(RuntimeServiceFault.allCases), "each domain fault has exactly one service site")
+        for (fault, recorded, spelling) in faults {
+            composed.host.serviceFault(fault)
+            let event = try XCTUnwrap(composed.host.orchestrator.eventLog.events.last)
+            XCTAssertEqual(event.typed, .runtimeService(.fault(recorded)))
+            XCTAssertEqual(event.kind, .health)
+            XCTAssertEqual(event.event, RuntimeServiceEventName.fault.rawValue)
+            XCTAssertEqual(event.detail, "fault=\(spelling)")
+            XCTAssertEqual(ControlRuntimeEvent(event).typed, .runtimeService(.fault(try XCTUnwrap(ControlRuntimeServiceFault(rawValue: spelling)))))
+        }
+        composed.host.serviceFault(.snapshotOverBound)
+        let reports = composed.host.orchestrator.eventLog.events.filter { $0.typed == .runtimeService(.fault(.snapshotOverBound)) }
+        XCTAssertEqual(reports.count, 2)
     }
 
     // MARK: - Stop
@@ -2057,6 +2302,42 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         await composed.host.shutdown()
         let refused = try await submit(composed, .testDNS)
         XCTAssertEqual(refused, .rejected(.hostStopping))
+    }
+
+    /// A Test DNS probe waiting out its timeout holds no platform work: held inside the injected probe, off the main thread and off the
+    /// platform queue, a DNS Stop's teardown and a quit's both complete through the client meanwhile. A second Test DNS of the same port
+    /// joins the held probe rather than queueing its own, and both report that probe's reading once it answers.
+    func testAHeldTestDNSProbeDelaysNeitherAStopNorAQuitAndARepeatJoinsIt() async throws {
+        let composed = try await compose()
+        try await composed.host.startRuntime()
+        XCTAssertTrue(composed.harness.machine.dnsRelayRunning)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+
+        composed.harness.hold.arm(onQueueLabeled: "user-initiated-qos") { name, _ in name == "dns-probe" }
+        let first = try accepted(try await submit(composed, .testDNS))
+        await composed.harness.hold.waitUntilReached()
+        XCTAssertFalse(composed.harness.hold.reachedOnMainThread, "the probe runs off the main actor")
+        let second = try accepted(try await submit(composed, .testDNS))
+
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        let stopOutcome = try await finished(stop, on: stream)
+        XCTAssertEqual(completed(stopOutcome), .stop, "the DNS Stop completes while the probe is held: \(stopOutcome)")
+        XCTAssertFalse(composed.harness.machine.dnsRelayRunning, "its teardown restored system DNS meanwhile")
+        let quit = try accepted(try await submit(composed, .quit(total: try ControlWireBudget(30_000), flush: .none)))
+        let quitOutcome = try await finished(quit, on: stream)
+        XCTAssertEqual(completed(quitOutcome), .quit, "the quit completes while the probe is held: \(quitOutcome)")
+        let asked = composed.harness.dnsProbes.values.count
+
+        composed.harness.hold.release()
+        let outcomes = try await finishedAll([first, second], on: stream)
+        let reading = ControlCommandResult.dnsLiveness(ControlDNSLivenessProbe(port: try ControlPort(53), answered: false))
+        for operation in [first, second] {
+            guard case .completed(let completion)? = outcomes[operation] else { return XCTFail("each Test DNS completes") }
+            XCTAssertEqual(completion.result, reading)
+        }
+        XCTAssertEqual(composed.harness.dnsProbes.values.count, asked, "the repeat joined the held probe and asked no port of its own")
     }
 
     /// The companion key is additive: a Restart without it encodes exactly as before, one with it round-trips, and a non-proxy Restart

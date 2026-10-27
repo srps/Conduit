@@ -111,15 +111,17 @@ package struct PrivateEditorClient: Sendable {
     /// the one the request must carry, known before mapping so every failure names it. The answer is the admission only; settlement and the
     /// causal receipt are read through the ordinary operation lookup. A wait that ended after a possible send is `admissionUnknown`.
     /// `awaitingCapacity` waits within `deadline` for a busy custody to be physically released instead of refusing it at once; only the
-    /// quit's final flush asks for it, after the update before it settled.
+    /// quit's final flush asks for it. The producer may await, inside the reservation: the quit's looks the earlier update up once there,
+    /// after that update's frozen input was released. A `RuntimeClientError` it throws is reported as it is; any other failure is the
+    /// client's own refusal of the value.
     package func submit(
         requestID: ControlRequestID,
         deadline: RuntimeDeadline,
         awaitingCapacity: Bool = false,
-        request makeRequest: @Sendable () throws -> PrivateConfigurationRequest
+        request makeRequest: @Sendable () async throws -> PrivateConfigurationRequest
     ) async throws -> ControlAdmission {
         try await exchangeUpdate(.update, requestID: requestID, capacityUntil: awaitingCapacity ? deadline : nil) { exchange in
-            let request = try Self.mapLocally(requestID: requestID, requestIDOf: \.requestID, makeRequest)
+            let request = try await Self.mapLocally(requestID: requestID, requestIDOf: \.requestID, makeRequest)
             let frame = try Self.encodeLocally { try PrivateConfigurationEncoder.encode(request) }
             return try Self.admission(try await exchange.send(frame, deadline)) { try $0.admission(answering: request) }
         }
@@ -131,10 +133,10 @@ package struct PrivateEditorClient: Sendable {
         requestID: ControlRequestID,
         deadline: RuntimeDeadline,
         awaitingCapacity: Bool = false,
-        request makeRequest: @Sendable () throws -> PrivatePreferencesRequest
+        request makeRequest: @Sendable () async throws -> PrivatePreferencesRequest
     ) async throws -> ControlAdmission {
         try await exchangeUpdate(.preferences, requestID: requestID, capacityUntil: awaitingCapacity ? deadline : nil) { exchange in
-            let request = try Self.mapLocally(requestID: requestID, requestIDOf: \.requestID, makeRequest)
+            let request = try await Self.mapLocally(requestID: requestID, requestIDOf: \.requestID, makeRequest)
             let frame = try Self.encodeLocally { try PrivateConfigurationEncoder.encode(request) }
             return try Self.admission(try await exchange.send(frame, deadline)) { try $0.admission(answering: request) }
         }
@@ -169,15 +171,18 @@ package struct PrivateEditorClient: Sendable {
         }
     }
 
-    /// The request the caller's producer maps, before any send. A mapping refusal, or a request under another ID, is the client's own.
+    /// The request the caller's producer maps, before any send. A mapping refusal, or a request under another ID, is the client's own; a
+    /// client error the producer names, such as its deadline passing, keeps its meaning.
     private static func mapLocally<Request>(
         requestID: ControlRequestID,
         requestIDOf: KeyPath<Request, ControlRequestID>,
-        _ makeRequest: () throws -> Request
-    ) throws -> Request {
+        _ makeRequest: () async throws -> Request
+    ) async throws -> Request {
         let request: Request
         do {
-            request = try makeRequest()
+            request = try await makeRequest()
+        } catch let error as RuntimeClientError {
+            throw error
         } catch PrivateConfigurationWireError.frameTooLarge {
             throw RuntimeClientError.localRefusal(.frameTooLarge)
         } catch {

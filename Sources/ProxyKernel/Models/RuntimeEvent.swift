@@ -31,7 +31,7 @@ package struct RuntimeEvent: Codable, Sendable {
     package let typed: RuntimeEventPayload?
 
     /// The legacy envelope, for unmigrated families. Every name in the closed
-    /// `lifecycle.` and `config.workflow.` namespaces traps here: those are emitted through
+    /// `lifecycle.`, `config.workflow.` and `runtime_service.` namespaces traps here: those are emitted through
     /// `init(payload:)` only, so no untyped record can carry one.
     package init(kind: RuntimeEventKind, event: String, detail: String? = nil) {
         precondition(
@@ -59,6 +59,7 @@ package struct RuntimeEvent: Codable, Sendable {
         switch payload {
         case .lifecycle: .lifecycle
         case .configWorkflow: .config
+        case .runtimeService: .health
         }
     }
 

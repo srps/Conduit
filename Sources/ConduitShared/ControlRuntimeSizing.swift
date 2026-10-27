@@ -220,7 +220,7 @@ extension ControlTypedRuntimeEvent {
         switch self {
         case .lifecycle(let lifecycle):
             try lifecycle.measure(into: &budget)
-        case .configWorkflow:
+        case .configWorkflow, .runtimeService:
             // Closed enums and bounded integers only: no free text to count, as the lifecycle's closed cases.
             break
         }
