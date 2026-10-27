@@ -369,7 +369,8 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             ("submit-start-companion", .start(.proxy, ifModuleRevision: lifecycle, conditionalDNSRevision: lifecycle)),
             ("submit-test-dns", .testDNS),
             ("submit-test-upstream", .testUpstream(upstream)),
-            ("submit-refresh-preflight", .refreshPreflight),
+            ("submit-refresh-preflight", .refreshPreflight(helperReplaced: true)),
+            ("submit-credentials-changed", .credentialsChanged),
             ("submit-set-launch-at-login", .setLaunchAtLogin(false, ifPlatformBaseline: platformBaseline)),
             ("submit-quit-both-flushes", .quit(total: try ControlWireBudget(Int(Int32.max)), flush: flush)),
         ]
@@ -503,8 +504,10 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         ))
 
         let status = ControlIntegrationStatus(enabled: false, alreadyApplied: false, privilegeLevel: try widest(ControlPrivilegeLevel.allCases))
+        // A busy read is the widest: it carries the held verdict and the busy flag, which a conclusive read leaves out.
         let items = ControlPreflightItems(
-            systemProxy: status, environmentVariables: status, splitDNS: status, helper: try widest(ControlHelperStatus.allCases)
+            systemProxy: status, environmentVariables: status, splitDNS: status, helper: try widest(ControlHelperStatus.allCases),
+            helperReadBusy: true
         )
         let reading = try widest([ControlPreflightReading.observed(items)] + ControlPreflightUnavailableReason.allCases.map { .unavailable($0) })
         let observedAt = try widest([
@@ -531,6 +534,7 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             ("preferences-receipt", .preferencesSettled(preferences)),
             ("stop-dns-disable", try completed(.stop, .dnsDisable(disable))),
             ("stop-settled", try completed(.stop, .settled)),
+            ("credentials-changed", try completed(.credentialsChanged, .settled)),
             ("quit-settled", try completed(.quit, .settled)),
             ("test-dns", try completed(.testDNS, .dnsLiveness(ControlDNSLivenessProbe(port: try ControlPort(65_535), answered: false)))),
             ("test-upstream", try completed(.testUpstream, .upstreamProbe(probe))),

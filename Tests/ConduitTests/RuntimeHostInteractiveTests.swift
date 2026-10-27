@@ -98,6 +98,10 @@ final class InteractiveHostHarness {
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
         /// The state-file access the host's store uses; a test that parks a store step names a `HeldStateFileRead`.
         var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
+        /// The helper status source; nil observes none. A preflight test names a `FakeHelperLifecycle` read through `hold`.
+        var helperStatus: (any HelperLifecycleManaging)?
+        /// The saved-password store; a credentials test shares it with the app-side writer it stands in for.
+        var credentials: any SecretStore = InMemorySecretStore()
         private let directory: URL
         private(set) var host: RuntimeHost?
 
@@ -121,6 +125,7 @@ final class InteractiveHostHarness {
             let vpn = self.vpn
             let dnsProbes = self.dnsProbes
             let dnsProbe = FakeDNSProbe()
+            let helperStatus = self.helperStatus.map { HoldingHelperStatus(base: $0, hold: hold) }
             let built = try await RuntimeHost.open(
                 stateSession: session,
                 logger: DiscardingLogSink(),
@@ -128,8 +133,10 @@ final class InteractiveHostHarness {
                 startedAt: Date(timeIntervalSince1970: 1_700_000_000),
                 terminalExit: { XCTFail("the runtime host ended the process") },
                 effects: RuntimeHostEffects(
-                    privilege: { _ in RuntimePrivilegeAdapters(client: HoldingPrivilegeClient(base: machine, hold: hold), helperStatus: nil) },
-                    credentials: InMemorySecretStore(),
+                    privilege: { _ in
+                        RuntimePrivilegeAdapters(client: HoldingPrivilegeClient(base: machine, hold: hold), helperStatus: helperStatus)
+                    },
+                    credentials: credentials,
                     kerberosTicketRecovery: FakeKerberosTicketRecovery(),
                     gss: .injected { RefusingGSS() },
                     pacEvaluator: pacEvaluator,

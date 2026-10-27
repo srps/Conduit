@@ -261,9 +261,11 @@ package final class RuntimeHost {
     /// The resolver flag's baseline covers it too, and a split-DNS retry
     /// writes no intercept files, so a repair does not stand in for it.
     private var resolverSwitchInterceptRefreshFailed = false
-    /// Where the helper check reads the helper's status, from `effects`. `nil`
+    /// Where the helper check and the preflight read the helper's status, from `effects`. `nil`
     /// makes no observation, so a test never reaches the installed helper.
-    private let helperStatusSource: (any HelperLifecycleManaging)?
+    let helperStatusSource: (any HelperLifecycleManaging)?
+    /// The preflight's held helper verdict, its generation and its two passes (`RuntimeHostPreflight.swift`).
+    var preflight = RuntimeHostPreflightState()
     /// Stamps VPN reports on the monitor's callback; the split-DNS gate
     /// and the orchestrator each apply only reports newer than the last
     /// they applied, since deliveries can land out of order (#155).
@@ -1061,7 +1063,7 @@ package final class RuntimeHost {
     /// a check sleeping on the count from before it. Returns whether it
     /// dispatched one.
     @discardableResult
-    private func observeHelperForSplitDNS(available: Bool, trigger: String) -> Bool {
+    func observeHelperForSplitDNS(available: Bool, trigger: String) -> Bool {
         guard splitDNSRepair.shouldRetry(helperAvailable: available), !splitDNSRetryInFlight else { return false }
         splitDNSRetryInFlight = true
         endSplitDNSHelperCheck()

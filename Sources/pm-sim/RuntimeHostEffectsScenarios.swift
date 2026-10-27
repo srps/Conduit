@@ -491,7 +491,8 @@ enum RuntimeHostEffectsScenario {
     /// port. A proxy Start's companion starts configured DNS; a proxy Stop leaves DNS running; a session DNS Stop restores system DNS and
     /// saves its disable; a menu Restart's companion then finds the fence; a request naming a moved revision is refused whole; the menu's
     /// saved DNS Start through the framed client enables DNS again with its causal receipt, and a saved tunnels Start binds the loopback
-    /// tunnel without rewriting the pair; and the process quit latches, tears every module down and returns with every lane idle.
+    /// tunnel without rewriting the pair; a preflight refresh reads the fake helper and a credentials notice completes, through the same
+    /// client; and the process quit latches, tears every module down and returns with every lane idle.
     @MainActor
     private static func exerciseModuleLifecycle(
         session: StateRootSession,
@@ -597,6 +598,18 @@ enum RuntimeHostEffectsScenario {
                 receipt.runtime.write == .unchanged && receipt.prior?.runtime == receipt.runtime.baseline
                     && receipt.committedDNSForwarderEnabled == true
             } ?? false)
+            // The app's preflight and its credentials notice, through the same client: the fake helper answers installed.
+            let preflight = try await settleThroughClient(clients.control, .refreshPreflight(helperReplaced: true))
+            check("a preflight refresh through the framed client reads the installed helper", {
+                guard case .completed(let completion)? = preflight, case .preflight(let observation) = completion.result,
+                      case .observed(let items) = observation.reading else { return false }
+                return items.helper == .installed && !items.helperReadBusy
+            }())
+            let credentials = try await settleThroughClient(clients.control, .credentialsChanged)
+            check("a credentials notice through the framed client completes", {
+                guard case .completed(let completion)? = credentials else { return false }
+                return completion.command == .credentialsChanged && completion.result == .settled
+            }())
 
             let quit = try await quitThroughClient(clients)
             let stored = try AppPreferencesPersistence.load(in: environment)
@@ -699,6 +712,26 @@ enum RuntimeHostEffectsScenario {
         }
         let staleRefused = try await submit() == .rejected(.staleRevision)
         return (receipt, staleRefused, try await client.readSnapshot(deadline: deadline))
+    }
+
+    /// One command through the host's framed client, and its settlement, nil when it was not admitted or never settled within the bound.
+    @MainActor
+    private static func settleThroughClient(_ client: any RuntimeClient, _ command: ControlRuntimeCommand) async throws -> ControlOperationOutcome? {
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let incarnation = try await client.readSnapshot(deadline: deadline).stamp.incarnation
+        let stream = try await client.subscribe(.live, deadline: deadline)
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline)
+        let admission = try await client.submit(
+            command, requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation, deadline: deadline
+        )
+        guard case .accepted(let operation) = admission else { return nil }
+        for _ in 0..<64 {
+            if case .operationFinished(let finished) = try await stream.next(deadline), finished.operationID == operation {
+                return finished.outcome
+            }
+        }
+        return nil
     }
 
     /// A preferences save through the editor client, then the process quit through the framed client with its reserved preferences flush,

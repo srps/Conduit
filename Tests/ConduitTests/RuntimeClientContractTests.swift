@@ -107,8 +107,13 @@ final class RuntimeClientContractTests: XCTestCase {
     func testTheApprovedCommandSetExcludesConfigApply() throws {
         XCTAssertEqual(
             ControlRuntimeCommandKind.allCases.map(\.rawValue),
-            ["stop", "start", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "quit"]
+            ["stop", "start", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login", "credentials-changed", "quit"]
         )
+        // The invalidation names nothing beyond itself: no secret, identity or digest.
+        XCTAssertEqual(String(decoding: try JSONEncoder().encode(ControlRuntimeCommand.credentialsChanged), as: UTF8.self),
+                       #"{"type":"credentials-changed"}"#)
+        XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: Data(#"{"type":"refresh-preflight"}"#.utf8)),
+                             "a preflight refresh names whether the helper was replaced")
         let save = ControlRequestID(rawValue: UUID())
         let quit = ControlRuntimeCommand.quit(total: try ControlWireBudget(5_000), flush: try ControlQuitFlush(configuration: save, preferences: nil))
         XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeCommand.self, from: try JSONEncoder().encode(quit)), quit)
@@ -223,6 +228,24 @@ final class RuntimeClientContractTests: XCTestCase {
             let data = try JSONEncoder().encode(completion)
             XCTAssertEqual(try JSONDecoder().decode(ControlCompletion.self, from: data), completion)
         }
+    }
+
+    /// One observed reading tells a client both the held helper verdict to show and whether this pass's own read was busy. The flag is
+    /// written only when set, so a conclusive pass encodes as before, and an absent flag decodes as a conclusive read.
+    func testAPreflightReadingCarriesTheHeldVerdictAndWhetherItsReadWasBusy() throws {
+        let off = ControlIntegrationStatus(enabled: false, alreadyApplied: false, privilegeLevel: .none)
+        let busy = ControlPreflightItems(systemProxy: off, environmentVariables: off, splitDNS: off, helper: .installed, helperReadBusy: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let busyText = String(decoding: try encoder.encode(busy), as: UTF8.self)
+        XCTAssertTrue(busyText.contains(#""helper":"installed","helperReadBusy":true"#), busyText)
+        XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(busyText.utf8)), busy)
+
+        var conclusive = busy
+        conclusive.helperReadBusy = false
+        let conclusiveText = String(decoding: try encoder.encode(conclusive), as: UTF8.self)
+        XCTAssertFalse(conclusiveText.contains("helperReadBusy"), conclusiveText)
+        XCTAssertEqual(try JSONDecoder().decode(ControlPreflightItems.self, from: Data(conclusiveText.utf8)), conclusive)
     }
 
     // MARK: - Incarnation scope

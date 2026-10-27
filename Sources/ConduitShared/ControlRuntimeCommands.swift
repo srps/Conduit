@@ -18,6 +18,7 @@ package enum ControlRuntimeCommandKind: String, Codable, Sendable, Equatable, Ca
     case testUpstream = "test-upstream"
     case refreshPreflight = "refresh-preflight"
     case setLaunchAtLogin = "set-launch-at-login"
+    case credentialsChanged = "credentials-changed"
     case quit
 }
 
@@ -103,10 +104,15 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     )
     case testDNS
     case testUpstream(ControlUpstreamReference)
-    case refreshPreflight
+    /// One helper and integration preflight pass that begins after this request was admitted. `helperReplaced` says the client has just
+    /// installed or uninstalled the helper: the verdict the host holds, and any pass already reading, describe the old one.
+    case refreshPreflight(helperReplaced: Bool)
     /// The app's login-item administration (decision 0018): it saves only the platform file's `launchAtLogin`, under the exact platform
     /// baseline the client observed, and applies nothing. It carries no configuration value beyond the flag.
     case setLaunchAtLogin(Bool, ifPlatformBaseline: PrivateBaseline)
+    /// The client wrote or cleared the saved proxy password in the shared store: the host drops the credential it caches, and a read
+    /// already out discards its answer. It carries no secret, identity or digest, and nothing is read again until a handshake needs it.
+    case credentialsChanged
     /// The process quit (decision 0015). Admission latches the terminal stop and opens the reserved flush window for `flush`. `total` is the
     /// one remaining budget, counted from the Quit's admission, that the flush, the store join, the teardown and the diagnostic flush share: the
     /// operation completes when they end, or fails `cleanupIncomplete` at that deadline, while the work still runs and owns the root until
@@ -122,6 +128,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .testUpstream: .testUpstream
         case .refreshPreflight: .refreshPreflight
         case .setLaunchAtLogin: .setLaunchAtLogin
+        case .credentialsChanged: .credentialsChanged
         case .quit: .quit
         }
     }
@@ -135,6 +142,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case upstream
         case enabled
         case baseline
+        case helperReplaced
         case totalMilliseconds
         case flush
     }
@@ -167,13 +175,15 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .testUpstream:
             self = .testUpstream(try container.decode(ControlUpstreamReference.self, forKey: .upstream))
         case .refreshPreflight:
-            self = .refreshPreflight
+            self = .refreshPreflight(helperReplaced: try container.decode(Bool.self, forKey: .helperReplaced))
         case .setLaunchAtLogin:
             let baseline = try container.decode(PrivateBaseline.self, forKey: .baseline)
             guard baseline.component == .platform else {
                 throw DecodingError.dataCorruptedError(forKey: .baseline, in: container, debugDescription: "the flag is the platform file's")
             }
             self = .setLaunchAtLogin(try container.decode(Bool.self, forKey: .enabled), ifPlatformBaseline: baseline)
+        case .credentialsChanged:
+            self = .credentialsChanged
         case .quit:
             self = .quit(
                 total: try container.decode(ControlWireBudget.self, forKey: .totalMilliseconds),
@@ -198,8 +208,10 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
             try container.encode(module, forKey: .module)
             try container.encode(revision, forKey: .lifecycleRevision)
             try container.encodeIfPresent(companion, forKey: .conditionalDNSRevision)
-        case .testDNS, .refreshPreflight:
+        case .testDNS, .credentialsChanged:
             break
+        case .refreshPreflight(let helperReplaced):
+            try container.encode(helperReplaced, forKey: .helperReplaced)
         case .testUpstream(let reference):
             try container.encode(reference, forKey: .upstream)
         case .setLaunchAtLogin(let enabled, let baseline):
@@ -322,7 +334,7 @@ package struct ControlDNSLivenessProbe: Codable, Sendable, Equatable {
 
 /// The value a settled command reports beyond its settled revision. Each command has
 /// exactly one result kind, which `ControlCompletion` enforces. `settled` belongs only
-/// to Stop and quit, whose result is the revision they settle at; no command
+/// to Stop, quit and a credentials invalidation, whose result is the revision they settle at; no command
 /// reports a generic success in place of its observation.
 package enum ControlCommandResult: Codable, Sendable, Equatable {
     case settled

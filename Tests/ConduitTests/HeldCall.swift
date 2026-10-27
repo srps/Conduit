@@ -113,6 +113,25 @@ final class HoldingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
     }
 }
 
+/// A helper status source that offers every status read to a `HeldCall` first as `("helper-status", [])`, then reads the one behind it.
+final class HoldingHelperStatus: HelperLifecycleManaging, @unchecked Sendable {
+    private let base: any HelperLifecycleManaging
+    private let hold: HeldCall
+
+    init(base: any HelperLifecycleManaging, hold: HeldCall) {
+        self.base = base
+        self.hold = hold
+    }
+
+    var status: HelperToolPrivilegeClient.Status {
+        hold.pass("helper-status", [])
+        return base.status
+    }
+
+    func installHelper() throws -> HelperPinOutcome { try base.installHelper() }
+    func uninstallHelper() throws { try base.uninstallHelper() }
+}
+
 /// The operating system's state-file access, offering each configuration read to a `HeldCall` first as `("read", [path])`. A store's
 /// physical steps run on `PlatformWork`, never the main thread, so an armed read parks there with the store's slot held.
 final class HeldStateFileRead: StateFileAccessing, @unchecked Sendable {

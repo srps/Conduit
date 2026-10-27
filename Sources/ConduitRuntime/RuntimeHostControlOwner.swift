@@ -118,6 +118,10 @@ enum RuntimeControlAdmission {
     case quit(Task<Void, Never>, RuntimeQuitFlush)
     /// A DNS liveness probe of the port the fence chose.
     case dnsProbe(port: Int)
+    /// A preflight request, joined to the pass that begins after its admission (`admitPreflight`).
+    case preflight(Task<ControlOperationOutcome, Never>)
+    /// The client changed the saved password; the effect drops the cached credential.
+    case credentialsChanged
 }
 
 /// The latest control Stop of one module: the service operation and the revision its fence took.
@@ -215,7 +219,16 @@ extension RuntimeHost: ControlCommandOwner {
             let port = platformConfig.manageSystemDNS ? 53 : (orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort)
             controlAdmissions[operation] = .dnsProbe(port: port)
             return .admitted
-        case .restart(.dns, _, _), .restart(.tunnels, _, _), .testUpstream, .refreshPreflight:
+        case .refreshPreflight(let helperReplaced):
+            // The app's preflight refresh. It reads; it changes no intent. A replacement it names revokes the pass already reading.
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            controlAdmissions[operation] = .preflight(admitPreflight(helperReplaced: helperReplaced))
+            return .admitted
+        case .credentialsChanged:
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            controlAdmissions[operation] = .credentialsChanged
+            return .admitted
+        case .restart(.dns, _, _), .restart(.tunnels, _, _), .testUpstream:
             // Not adopted on this owner yet; each is refused whole before anything changes.
             return .rejected(.notImplemented)
         }
@@ -287,6 +300,20 @@ extension RuntimeHost: ControlCommandOwner {
                 report.quiesced()
                 onControlStateChange?()
             }
+        case .preflight(let pass):
+            // Quiesced when its pass ends: the read may outlast the quit, and the operation keeps its capacity until then.
+            Task { @MainActor [self] in
+                report.settled(await pass.value)
+                report.quiesced()
+                onControlStateChange?()
+            }
+        case .credentialsChanged:
+            // The next handshake reads the store afresh; a read already out discards its answer. Nothing is read again here: the client
+            // wrote the store, and the app never re-warms after a save or a clear either.
+            credentialManager.invalidateCachedCredentials()
+            report.settled(completed(.credentialsChanged))
+            report.quiesced()
+            onControlStateChange?()
         }
     }
 
@@ -409,7 +436,7 @@ extension RuntimeHost: ControlCommandOwner {
     }
 
     /// The one completion path of every command: its result, cited at the revision that reflects the settlement.
-    private func completed(_ command: ControlRuntimeCommandKind, result: ControlCommandResult = .settled) -> ControlOperationOutcome {
+    func completed(_ command: ControlRuntimeCommandKind, result: ControlCommandResult = .settled) -> ControlOperationOutcome {
         // The revision that reflects the settlement is the one this turn's snapshot carries. When none can be projected, the settlement
         // reserves the next one, which the first projection after it takes; the last body, from before the settlement, is never cited.
         // At the maximum no revision can reflect it, so it fails closed.

@@ -247,11 +247,11 @@ package struct ControlCompletion: Codable, Sendable, Equatable {
         try container.encode(result, forKey: .result)
     }
 
-    /// Stop and quit settle with no payload. Each observation command reports its own. A saved Start or Restart never completes here: it
+    /// Stop, quit and a credentials invalidation settle with no payload. Each observation command reports its own. A saved Start or Restart never completes here: it
     /// settles with its causal receipt (`configurationSettled`), or fails with its closed cause when no commit ran.
     private static func pairs(command: ControlRuntimeCommandKind, result: ControlCommandResult) -> Bool {
         switch (command, result) {
-        case (.stop, .settled), (.quit, .settled): true
+        case (.stop, .settled), (.quit, .settled), (.credentialsChanged, .settled): true
         case (.stop, .dnsDisable): true
         case (.testUpstream, .upstreamProbe): true
         case (.testDNS, .dnsLiveness): true

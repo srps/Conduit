@@ -2639,6 +2639,43 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertFalse(composed.host.workflow.dnsIntent.configured, "and no enable was left behind")
     }
 
+    /// The ordinary meaning of a saved Start that does not start. One that finds the store's one slot taken, here by a reload parked on its
+    /// read, captured and wrote nothing, so it fails `storeBusy` with no receipt. One whose proxy cannot bind its saved port ran its commit,
+    /// so it settles with its receipt: the verified pair and its prior stay reported facts, and the member is `failed`, never a success or a
+    /// bare `effectFailed`.
+    func testASavedStartOnABusyStoreFailsAndOneWhoseBindFailsReportsItsFailedMember() async throws {
+        let occupied = try HeldTCPListener()
+        let files = HeldStateFileRead()
+        let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files) { harness in
+            var config = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+            config.localPort = occupied.port
+            try ProxyConfigPersistence.save(config, in: harness.environment)
+        }
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+
+        let platformPath = composed.harness.session.plan.platformConfig.path
+        files.hold.arm { name, values in name == "read" && values == [platformPath] }
+        defer { files.hold.release() }
+        let reload = Task { await composed.host.reloadConfiguration() }
+        await files.hold.waitUntilReached()
+        let busy = try await finished(try accepted(try await savedStart(composed, .proxy)), on: stream)
+        XCTAssertEqual(busy, .failed(.storeBusy))
+        files.hold.release()
+        await reload.value
+
+        let observed = try await observation(composed)
+        let settled = try receipt(try await finished(try accepted(try await savedStart(composed, .proxy)), on: stream))
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .failed)])
+        XCTAssertTrue(settled.runtime.write.isVerified && settled.platform.write.isVerified, "the commit it ran stays reported")
+        XCTAssertEqual(settled.prior, ControlCommitPrior(
+            runtime: observed.components.runtime.baseline, platform: observed.components.platform.baseline
+        ))
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp)
+        XCTAssertFalse(composed.harness.machine.service("Wi-Fi").routesThroughAProxy, "the failed bind leaves no system proxy")
+    }
+
     /// The companion key is additive: a Restart without it encodes exactly as before, one with it round-trips, and a non-proxy Restart
     /// that names one is refused on decode. A saved Start names its module's own revision under its own key, with the same companion rule.
     func testTheRestartCompanionKeyIsAdditiveAndOnlyForTheProxy() throws {
@@ -2688,11 +2725,14 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertFalse(String(decoding: try JSONEncoder().encode(privateReceipt), as: UTF8.self).contains("prior"))
     }
 
-    /// Commands this owner has not adopted are refused whole at the fence, and a Restart after the process quit is refused as stopping.
+    /// Commands this owner has not adopted are refused whole at the fence. After the process quit, a Restart, a saved Start, a preflight
+    /// refresh and a credentials invalidation are each refused as stopping.
     func testUnadoptedCommandsAreRefusedAndARestartAfterQuitIsRefused() async throws {
         let composed = try await compose(dnsForwarderEnabled: false)
-        let revision = try await composed.client.readSnapshot(deadline: deadline()).stamp.lifecycleRevision
-        for command in [ControlRuntimeCommand.restart(.dns, ifLifecycleRevision: revision), .refreshPreflight] {
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        let revision = snapshot.stamp.lifecycleRevision
+        let upstream = ControlUpstreamReference(configRevision: snapshot.stamp.configRevision, upstreamID: ControlUpstreamID(rawValue: UUID()))
+        for command in [ControlRuntimeCommand.restart(.dns, ifLifecycleRevision: revision), .testUpstream(upstream)] {
             let admission = try await composed.client.submit(
                 command, requestID: ControlRequestID(rawValue: UUID()),
                 expectedIncarnation: composed.host.incarnation, deadline: deadline()
@@ -2702,10 +2742,18 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(composed.host.workflow.generation, revision.rawValue)
 
         await composed.host.shutdown()
-        let afterQuit = try await composed.client.submit(
-            .restart(.proxy, ifLifecycleRevision: try await composed.client.readSnapshot(deadline: deadline()).stamp.lifecycleRevision),
-            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: composed.host.incarnation, deadline: deadline()
-        )
-        XCTAssertEqual(afterQuit, .rejected(.hostStopping))
+        let stamp = try await composed.client.readSnapshot(deadline: deadline()).stamp
+        let modules = try XCTUnwrap(stamp.modules)
+        for command in [
+            ControlRuntimeCommand.restart(.proxy, ifLifecycleRevision: stamp.lifecycleRevision),
+            .start(.dns, ifModuleRevision: modules.dns),
+            .refreshPreflight(helperReplaced: false),
+            .credentialsChanged,
+        ] {
+            let afterQuit = try await composed.client.submit(
+                command, requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: composed.host.incarnation, deadline: deadline()
+            )
+            XCTAssertEqual(afterQuit, .rejected(.hostStopping), "\(command.kind.rawValue)")
+        }
     }
 }

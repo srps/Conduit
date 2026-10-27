@@ -47,18 +47,52 @@ package struct ControlPreflightItems: Codable, Sendable, Equatable {
     package var systemProxy: ControlIntegrationStatus
     package var environmentVariables: ControlIntegrationStatus
     package var splitDNS: ControlIntegrationStatus
+    /// The verdict the host holds after this pass, for display: a `busy` read keeps the last conclusive one (STYLE rule 11), and is the
+    /// status itself only where none is held.
     package var helper: ControlHelperStatus
+    /// This pass's own helper read was `busy`. It is inconclusive, so it grants nothing: `helper` may still show the last conclusive verdict,
+    /// and the client schedules its one re-read. False for a conclusive read.
+    package var helperReadBusy: Bool
 
     package init(
         systemProxy: ControlIntegrationStatus,
         environmentVariables: ControlIntegrationStatus,
         splitDNS: ControlIntegrationStatus,
-        helper: ControlHelperStatus
+        helper: ControlHelperStatus,
+        helperReadBusy: Bool = false
     ) {
         self.systemProxy = systemProxy
         self.environmentVariables = environmentVariables
         self.splitDNS = splitDNS
         self.helper = helper
+        self.helperReadBusy = helperReadBusy
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case systemProxy
+        case environmentVariables
+        case splitDNS
+        case helper
+        case helperReadBusy
+    }
+
+    /// `helperReadBusy` is written only when set, so a conclusive pass encodes as before.
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        systemProxy = try container.decode(ControlIntegrationStatus.self, forKey: .systemProxy)
+        environmentVariables = try container.decode(ControlIntegrationStatus.self, forKey: .environmentVariables)
+        splitDNS = try container.decode(ControlIntegrationStatus.self, forKey: .splitDNS)
+        helper = try container.decode(ControlHelperStatus.self, forKey: .helper)
+        helperReadBusy = try container.decodeIfPresent(Bool.self, forKey: .helperReadBusy) ?? false
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(systemProxy, forKey: .systemProxy)
+        try container.encode(environmentVariables, forKey: .environmentVariables)
+        try container.encode(splitDNS, forKey: .splitDNS)
+        try container.encode(helper, forKey: .helper)
+        if helperReadBusy { try container.encode(true, forKey: .helperReadBusy) }
     }
 
     /// Derived from the item statuses; it cannot disagree with them.

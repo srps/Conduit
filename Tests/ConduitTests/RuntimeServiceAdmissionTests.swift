@@ -31,7 +31,7 @@ final class RuntimeServiceAdmissionTests: XCTestCase {
 
         let other = RuntimeServiceFixtures.incarnation(7)
         XCTAssertEqual(
-            harness.core.submit(try RuntimeServiceFixtures.request(2, .refreshPreflight, in: other)),
+            harness.core.submit(try RuntimeServiceFixtures.request(2, .refreshPreflight(helperReplaced: false), in: other)),
             .rejected(.changedIncarnation)
         )
         XCTAssertEqual(harness.core.aliasCount, 0)
