@@ -1,0 +1,41 @@
+{
+  "sourceCommit": "291267029bc0d09117fe03e77923cee9411db643",
+  "mutations": [
+    {
+      "name": "receipt-freshness",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "witness": "testBoundedCaptureHistoriesAgreeWithAnIndependentReference",
+      "mutant_sha256": "c372a8b5bac8b6a5e75b5b9701d63137f1bdc3f02f99a602900ea4e6e7c42a43"
+    },
+    {
+      "name": "late-stop-after-quit",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "witness": "testALateDNSStopAfterQuitCreatesAndDropsNoSave",
+      "mutant_sha256": "1f7b7e0202a0f20e96bf108adb4c829cb12b6bead5d17353b9be24f389060c9e"
+    },
+    {
+      "name": "captured-write-claim",
+      "exit": 1,
+      "detectedByAssertion": true,
+      "witness": "testAStopAdmittedBeforeTheClaimRevokesTheWriteAndNothingApplies",
+      "mutant_sha256": "819c0aaf1c9d7e30868324ab61354885c4d3f81301618094f9be087e7220e3d8"
+    }
+  ],
+  "restoredChecks": [
+    {
+      "filter": "ConfigurationCaptureModelTests|RuntimeModuleIntentTests",
+      "exit": 0
+    },
+    {
+      "filter": "ConfigurationWorkflowPhaseTests|ConfigurationWorkflowModelTests",
+      "exit": 0
+    }
+  ],
+  "restoredSourceSHA256": {
+    "Sources/ConduitRuntime/ConfigurationStore.swift": "7410c267a95cc50aa18e09fa29abc690b8a56e63a2315b83063168743f373926",
+    "Sources/ConduitRuntime/RuntimeModuleIntent.swift": "8892d12da01e99e280e96c436a1e5bb9a2d24d9822e9ae85edf37d777145a705",
+    "Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift": "615a70463ff6624dbfc67b622049fb725648d09cc45457bc8a9722c329f384b0"
+  }
+}

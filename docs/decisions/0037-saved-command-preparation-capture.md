@@ -79,9 +79,13 @@ late-follow path are removed.
 
 [`ConfigurationCaptureModelTests`](../../Tests/ConduitTests/ConfigurationCaptureModelTests.swift)
 drives the actual workflow/store through 93 bounded histories and 165 transitions,
-including six changed-then-restored cases. Focused workflow/host tests and the
-actual-host simulator passed at the local checkpoint. Full-workflow verification,
-independent review and source-guard checks remain due.
+including six changed-then-restored cases. At checkpoint `2912670`, independent
+verification passed 259 focused tests, the actual-host simulator and the complete
+Swift suite (3,488 tests, four skips). A subscription-backed static Claude review
+supported the capture shape and identified integration obligations.
+[Three executed production guard mutations](../experiments/preparation-capture-guards/README.md)
+failed their intended assertions; restored tests passed. Every workflow gate and
+fresh review of the later combined owner remain due.
 
 Does not prove: module lifecycle/client integration, scoped cleanup, final
 AppState activation, release readiness or real-machine behavior. These remain
