@@ -148,6 +148,18 @@ coverage. The service/client and AppState have not adopted that owner yet; the
 [next client review](../design-runtime-editor-contract-review.md) records those
 remaining integration obligations and limits.
 
+The [physical-ordering checkpoint](../verification-runtime-physical-ordering-2026-10-27.md)
+extracts the existing proxy claim rule into one small per-module
+[`PhysicalLifecycle`](../../Sources/ProxyKernel/Proxy/PhysicalLifecycle.swift).
+[`ProxyOrchestrator`](../../Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift) consumes it for
+DNS/intercept and native tunnels as well, so a claimed bind finishes before its
+teardown and stale completions cannot publish over a newer admission.
+[`Actual-loopback tests`](../../Tests/ConduitTests/RuntimePhysicalOrderingTests.swift)
+cover Stop/restart ordering and repeated-Start listener/session preservation.
+This is physical ordering, not AppState activation or complete resource isolation;
+the remaining shared-pool Stop boundary is tracked in
+[#250](https://github.com/srps/Conduit/issues/250).
+
 Does not prove: actual app/client/store integration, RuntimeActor isolation,
 production daemon ownership, real-session auth/PAC or release readiness.
 
@@ -155,8 +167,9 @@ production daemon ownership, real-session auth/PAC or release readiness.
 
 Complete the workflow freshness/private-editor observation API, preserving
 client-observed prior component preconditions separately from runtime views and
-intent fences, including a measured private editor-reply budget. Select the
-remaining coherent profile from measurements before
+intent fences. [0034](0034-private-editor-reply-frame-cap.md) selects the private
+reply ceiling; actual-adapter custody and responsiveness still need verification.
+Select the remaining coherent profile from measurements before
 the affected adoption. [0032](0032-explicit-reload-and-reconcile.md) selects
 read-only reload-and-reconcile of eligible inputs; that policy is resolved. Revisit the
 activation sequence if a demonstrated delivery/compatibility need outweighs the

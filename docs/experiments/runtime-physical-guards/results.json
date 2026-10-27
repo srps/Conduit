@@ -1,0 +1,59 @@
+{
+  "source_sha256": {
+    "Sources/ProxyKernel/Proxy/PhysicalLifecycle.swift": "f92610c1cc97fa8c1bb7e767c78eb5826eb8fd88186de93e1b4b42cee5791e47",
+    "Sources/ProxyKernel/Proxy/ProxyOrchestrator.swift": "b62692f884cd73fcf248dc42ae9bdfc1bf4f1203343fc0b8a00843d22dda01c8"
+  },
+  "restored_exactly": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 10.45,
+      "assertions": []
+    },
+    {
+      "name": "stale-effect-claim",
+      "exit": 1,
+      "seconds": 15.89,
+      "assertions": [
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:510: error: -[ConduitTests.PhysicalLifecycleTests testAnEffectSupersededBeforeItsClaimRunsNothing] : XCTAssertFalse failed",
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:511: error: -[ConduitTests.PhysicalLifecycleTests testAnEffectSupersededBeforeItsClaimRunsNothing] : XCTAssertEqual failed: (\"[\"bind\"]\") is not equal to (\"[]\")"
+      ]
+    },
+    {
+      "name": "stale-dns-publication",
+      "exit": 1,
+      "seconds": 16.31,
+      "assertions": [
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:213: error: -[ConduitTests.RuntimePhysicalOrderingTests testDNSStopAdmittedDuringTheBindClosesItAndPublishesStopped] : XCTAssertFalse failed - the superseded start publishes nothing: [ProxyKernel.ModuleRunState.starting, ProxyKernel.ModuleRunState.running, ProxyKernel.ModuleRunState.running, ProxyKernel.ModuleRunState.stopped]"
+      ]
+    },
+    {
+      "name": "repeated-tunnel-start",
+      "exit": 1,
+      "seconds": 15.69,
+      "assertions": [
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:458: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertEqual failed: (\"2\") is not equal to (\"1\") - a start while running admits nothing",
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:462: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertEqual failed: (\"[ObjectIdentifier(0x00000001070fd940)]\") is not equal to (\"[ObjectIdentifier(0x00000001070fd4c0)]\") - the running listener is kept, not rebound",
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:463: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertTrue failed",
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:464: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertEqual failed: (\"0\") is not equal to (\"1\") - the live session keeps its count",
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:476: error: -[ConduitTests.RuntimePhysicalOrderingTests testATunnelStartLeavesTheSharedPoolAloneAndARepeatedStartKeepsListenerAndSessions] : XCTAssertEqual failed: (\"4\") is not equal to (\"3\")"
+      ]
+    },
+    {
+      "name": "stale-bind-cleanup",
+      "exit": 1,
+      "seconds": 19.28,
+      "assertions": [
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:279: error: -[ConduitTests.RuntimePhysicalOrderingTests testANewerStartClosesTheBindOfTheStartItSuperseded] : XCTAssertEqual failed: (\"failed\") is not equal to (\"running\")",
+        "Tests/ConduitTests/RuntimePhysicalOrderingTests.swift:282: error: -[ConduitTests.RuntimePhysicalOrderingTests testANewerStartClosesTheBindOfTheStartItSuperseded] : XCTAssertEqual failed: (\"nil\") is not equal to (\"Optional(25300)\")"
+      ]
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 13.39,
+      "assertions": []
+    }
+  ]
+}
