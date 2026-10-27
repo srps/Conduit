@@ -92,11 +92,25 @@ whole-probe memory samples are not shipping guarantees. Independent review found
 probe-held observation copies, an understated validator-accepted wide fixture and
 mislabelled cleanup timing; these were corrected in the
 [actual-client probe](experiments/actual-runtime-client-profile/README.md). Its
-28 recorded mode/trials are tied to the earlier source-equivalent `2fe9cd2` /
-`4825d24` checkpoint: a validator-accepted 6,448,967-byte reply and 6,350,146-byte
-request complete Start; escape-heavy frame sizes stay below 8 MiB. These are
-measured points, not absolute bounds. A resolved-source rerun still precedes
-profile selection. Encoded reservations do not bound process RSS.
+resolved-source run records 29 passing mode/trials on source-equivalent
+`ebff753` / `4be2399`, with stable source and linked objects. The added
+validator-wide final-save case calls the production `RuntimeClientQuit.quit`,
+rebases only from its own prior receipt, verifies both final files and proves
+physical cleanup. Independent subscription-backed review checked the actual
+routine, causal authority, fake effects and quoted numeric cells. The
+[raw numeric records](experiments/actual-runtime-client-profile/runs/ebff753-85GRoD/metadata.json)
+are preserved alongside the earlier checkpoint rather than relabelled.
+
+The valid wide reply/request remain 6,448,967 / 6,350,146 bytes; escape-heavy
+frames remain below 8 MiB. Live contention Stop completion was 2.7–19.7 ms,
+including slower results with and without sampling. The actual Quit routine
+completed in 1,009.9 ms, including a deliberately held prior save; 622.3 ms
+followed its release. These are single-machine observations, not latency
+guarantees. Whole-probe peaks include test fixtures and verification reads:
+96.5 MB footprint / 109.9 MB RSS in the older contention mode, and a 54.67 MB
+sampled malloc phase maximum in the routine mode. No application memory bound,
+plateau or attribution of residual allocations is established. Encoded
+reservations do not bound process RSS. Shipping profile selection remains open.
 
 The actual outcome codec also measures every outcome kind at its widened
 constructed point: the upstream-probe result is 9,616 bytes (9,812 as a stream
@@ -123,6 +137,6 @@ is `176bb9daa53d048b1ad93f0fb4b449d2bc3357ed`; the independent verification
 checkout has the same tree. Documentation updates that follow this run do not
 change the tested Sources, Tests, scripts, resources or package files.
 
-Hosted CI, the resolved-source resource rerun and the next AppState integration
-obligations remain separate. No installed-app, RuntimeActor or release-readiness
+The resolved-source resource run and its independent review passed. Hosted CI
+and the next AppState integration obligations remain separate. No installed-app, RuntimeActor or release-readiness
 claim follows from this passing workflow.

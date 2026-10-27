@@ -80,10 +80,18 @@ Saved commands capture their input once at preparation capacity (0037); private
 Starts keep their submitted frozen values. Neither follows a newer replacement
 through a rebind loop.
 
-The remaining Start-plus-apply combination and client-facing diagnostic inventory
-must be completed or shown unnecessary from actual AppState call sites before
-activation. Refusing an unadopted command is not parity evidence, and must not
-lead to a direct-host UI fallback.
+Call-site review found that native Starts are saved-value menu, Overview and
+shortcut actions; Settings never combines Start with apply. Mixed private
+Start-plus-apply remains explicitly refused for this release. Ordinary saved
+Start and the remaining helper/credential/wake integration still precede
+activation; none may introduce a direct-host UI fallback.
+
+Launch flags `--port`, `--no-system-proxy` and `--no-env` currently persist at
+launch. Preserve them through one existing private save-only update after host
+open/read, before exposing runtime controls; failed persistence holds that
+startup intent. This needs no override layer or second loader. App-only events
+remain in their bounded app-local log and `proxy.log`, as today; the host owns
+`events.ndjson`. These retain existing behavior without a new event-ingress API.
 
 ## Capacity and termination
 

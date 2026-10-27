@@ -31,14 +31,15 @@ remains the serving version. [CHANGELOG](./CHANGELOG.md) records shipped history
 | --- | --- | --- |
 | Contracts and mechanisms | Typed lifecycle/configuration values, framed client/service, bounded observation/replay, verified store and file readers are merged. | Broader event families migrate with their owners. |
 | Shared owner | PR253 converges DNS, tunnels and proxy on one lifecycle/store path, with preparation-time capture, exact freshness and Stop/Quit policy. | Consume that owner from AppState. |
-| Actual client integration | Local work connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Finish the resolved-source resource rerun and exact-head hosted checks; all 41 local gates pass. |
+| Actual client integration | Local work connects host admission/observation, private frozen updates, receipts, preferences/admin persistence and final Quit saves through the actual framed clients. | Resolved-source resource run/review and all 41 local gates pass; finish exact-head hosted checks and the remaining native-client commands. |
 | AppState, isolation and release | One final activation and deletion is selected (0031); 64 KiB ordinary frames and 8 MiB private frames are selected. | Set the measured composition profile, switch AppState once and delete replaced paths, move the control cluster to RuntimeActor, then complete release acceptance. |
 
 The [client-owner checkpoint](./docs/verification-runtime-client-owner-2026-10-27.md)
 records the scoped independent review and all 41 passing local gates: 3,619 tests
 (four skips), 103 simulator records and perf. Hosted checks remain pending. Do not copy test profiles into production.
-The actual-client memory/latency probe is under independent review; preliminary
-whole-probe numbers are not installed-app RAM or shipping responsiveness claims.
+The resolved-source actual-client probe passed 29 mode/trials and independent
+review, including the production Quit routine. Whole-probe numbers are not
+installed-app RAM or shipping responsiveness claims.
 
 The merged [module-owner verification](./docs/verification-runtime-module-owner-2026-10-27.md)
 records all 41 local workflow checks, 3,551 tests (four skips), 103 simulator

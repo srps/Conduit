@@ -78,6 +78,16 @@ Does not prove: actual framed-client/private-editor adoption, AppState activatio
 
 The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) carries whole-request validation through [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift), the sole workflow/store and [`RuntimeHostControlOwnerTests`](../../Tests/ConduitTests/RuntimeHostControlOwnerTests.swift). It covers stale admission, Stop before an unstarted write and honest component receipts. Complete-source review and AppState activation remain open.
 
+### Native-client scope review (2026-10-27)
+
+Read-only call-site review found all AppState Starts in menu, Overview or shortcut
+controls using saved values; no Settings caller combines frozen Start and apply.
+For this release the unused mixed private Start-plus-apply combination remains
+explicitly refused as one request. This does not weaken whole-request revision
+validation or add an alternate writer. Ordinary saved Start and client-facing
+diagnostics remain implementation obligations before AppState activation.
+
+
 ## Open questions
 
 [0036](0036-conditional-dns-activation.md) selects conditional proxy-to-DNS startup/Restart; that choice is resolved. Production capacity,
