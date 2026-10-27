@@ -72,7 +72,8 @@ final class RuntimeLaneCounter: @unchecked Sendable {
         case .read: limits.readLaneCapacity
         case .stream: limits.streamLaneCapacity
         case .stop: limits.stopLaneCapacityPerModule
-        case .quit, .privateTransfer: 1
+        case .quit: RuntimeServiceLimits.quitLaneCapacity
+        case .privateTransfer: RuntimeServiceLimits.privateTransferCapacity
         }
     }
 }

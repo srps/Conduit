@@ -63,13 +63,14 @@ package struct RuntimeServiceLimits: Sendable, Equatable {
     /// its control-log entry. They are measured here, so a replacement is never retained at a guessed size.
     let internalFailureOutcomeBytes: Int
     let internalFailureFinishedBytes: Int
-    /// Request aliases per partition (ordinary, and one per stop module), by count and encoded bytes. Aliases are
-    /// evictable and never pin an operation, and admission never waits for alias room.
+    /// Request aliases per partition (`RuntimePartition.all`: ordinary, the quit's, and one per stop module), by count and encoded
+    /// bytes. Aliases are evictable and never pin an operation, and admission never waits for alias room.
     let aliasCapacityPerPartition: Int
     let aliasByteCapacityPerPartition: Int
     /// Ordinary operations admitted and not yet quiesced. A stop module has its own two slots, one active and one queued.
     let ordinaryPendingCapacity: Int
-    /// The operation table's bound, derived: the ordinary capacity plus two slots per stop module.
+    /// The operation table's bound, derived: the ordinary capacity, two slots per stop module, and the quit's partition, which holds the
+    /// one quit and each final save it reserved (`quitPartitionOperations`).
     let operationCapacity: Int
     /// One operation record holds an identifier and small enums. A queued operation also holds its command, at most
     /// `maxRequestBytes`, until it launches.
@@ -81,14 +82,16 @@ package struct RuntimeServiceLimits: Sendable, Equatable {
     /// Retained records one janitor turn may remove.
     let janitorBatch: Int
     /// Transport reservations in flight per lane: ordinary commands, reads, parked stream pulls, and each module's stop. Each lane is
-    /// explicit and separate, so a full lane of one kind never refuses another kind.
+    /// explicit and separate, so a full lane of one kind never refuses another kind. The quit's lane and the private transfer are
+    /// structural bounds of one (`quitLaneCapacity`, `privateTransferCapacity`).
     let ordinaryLaneCapacity: Int
     let readLaneCapacity: Int
     let streamLaneCapacity: Int
     let stopLaneCapacityPerModule: Int
     /// Concurrently open subscriptions.
     let subscriberLimit: Int
-    /// The total in-flight reservations across every lane, derived and checked.
+    /// The total in-flight ordinary-frame reservations across every lane, the quit's included, derived and checked. The private
+    /// transfer carries private frames, so it is counted apart (`privateTransferRetainedBytes`).
     let laneCount: Int
     /// The event ring: retained positions, and encoded bytes across the events it holds.
     let ringCapacity: Int
@@ -147,9 +150,22 @@ package struct RuntimeServiceLimits: Sendable, Equatable {
     let retainedByteBudget: Int
     /// The ceiling the owner passes. The budget must not exceed it, and the owner, not the service, chooses it.
     let retainedByteCeiling: Int
+    /// The private custody's own encoded-byte terms, fixed by the private frame caps and kept apart from `retainedByteBudget` and its
+    /// ceiling. One transfer holds at most one request frame and one editor reply frame; one admitted input holds at most one request
+    /// body until its operation quiesces. They bound encoded bytes only: decoded values, encoder scratch and the process are measured
+    /// separately, and none of these terms is an RSS bound.
+    let privateTransferRetainedBytes: Int
+    let privateInputRetainedBytes: Int
 
     /// One active and one queued operation per stop module.
     static let stopSlotsPerModule = 2
+    /// The quit's partition: the one quit the host's latch admits, and each final save it may reserve, admitted once.
+    static let quitPartitionOperations = 1 + RuntimeQuitFlush.Part.allCases.count
+    /// The quit's own lane: the host admits one quit.
+    static let quitLaneCapacity = 1
+    /// The composition's one private transfer and one admitted frozen input (`RuntimePrivateCustody`).
+    static let privateTransferCapacity = 1
+    static let privateInputCapacity = 1
 
     /// Package so a scoped `pm-sim` scenario (decision 0033) can name its own explicit profile for `RuntimeHost.makeInMemoryControlClient`.
     /// Every value is the caller's; nothing here is a shipping default.
@@ -244,9 +260,12 @@ package struct RuntimeServiceLimits: Sendable, Equatable {
             throw ControlRuntimeWireError.invalidValue
         }
         let modules = ControlModule.allCases.count
-        let partitions = modules + 1
+        // The alias table's own partitions, so the budget counts exactly the partitions it keeps.
+        let partitions = RuntimePartition.all.count
         let collectionKinds = ControlCollectionKind.allCases.count
-        guard let operations = Self.checkedSum([ordinaryPendingCapacity, Self.stopSlotsPerModule * modules]),
+        guard let operations = Self.checkedSum([
+                  ordinaryPendingCapacity, Self.stopSlotsPerModule * modules, Self.quitPartitionOperations,
+              ]),
               let aliasTotal = Self.checkedProduct(partitions, aliasByteCapacityPerPartition),
               let perOperation = Self.checkedSum([operationRecord, maxRequestBytes]),
               let operationBytes = Self.checkedProduct(operations, perOperation),
@@ -258,7 +277,9 @@ package struct RuntimeServiceLimits: Sendable, Equatable {
               let proofTotal = Self.checkedProduct(proofSlots, proofBytes),
               let collectionTotal = Self.checkedSum([collectionRetainedByteCapacity, proofTotal, collectionByteCapacity]),
               let stopLaneTotal = Self.checkedProduct(stopLaneCapacityPerModule, modules),
-              let laneCount = Self.checkedSum([ordinaryLaneCapacity, readLaneCapacity, streamLaneCapacity, stopLaneTotal]),
+              let laneCount = Self.checkedSum([
+                  ordinaryLaneCapacity, readLaneCapacity, streamLaneCapacity, stopLaneTotal, Self.quitLaneCapacity,
+              ]),
               // Two request-sized and two reply-sized values per reservation: the request frame and the decoded message, the refusal
               // and one produced answer. See `laneRetainedBytes`.
               let perReservation = Self.checkedSum([maxRequestBytes, maxRequestBytes, maxReplyBytes, maxReplyBytes]),
@@ -272,10 +293,17 @@ package struct RuntimeServiceLimits: Sendable, Equatable {
                   controlLogByteCapacity, ingressByteCapacity, collectionTotal, laneBytes, firstFrameBytes,
                   snapshotBytes, subscriberRecords,
               ]),
-              budget <= retainedByteCeiling
+              budget <= retainedByteCeiling,
+              let privateFrames = Self.checkedSum([
+                  PrivateConfigurationFrame.maxRequestFrameBytes, PrivateConfigurationFrame.maxEditorReplyFrameBytes,
+              ]),
+              let privateTransfer = Self.checkedProduct(Self.privateTransferCapacity, privateFrames),
+              let privateInput = Self.checkedProduct(Self.privateInputCapacity, PrivateConfigurationFrame.maxRequestFrameBytes)
         else {
             throw ControlRuntimeWireError.invalidValue
         }
+        self.privateTransferRetainedBytes = privateTransfer
+        self.privateInputRetainedBytes = privateInput
         self.maxRequestBytes = maxRequestBytes
         self.maxReplyBytes = maxReplyBytes
         self.admissionWorstBytes = admissionWorst

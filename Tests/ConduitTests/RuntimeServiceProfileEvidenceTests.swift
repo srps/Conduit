@@ -258,6 +258,13 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
                 + " subscriberRecordRetainedBytes=\(limits.subscriberRecordRetainedBytes) collectionProofBytes=\(limits.collectionProofBytes)"
                 + " baselineFrameOverheadBytes=\(limits.baselineFrameOverheadBytes) maxEventBytes=\(limits.maxEventBytes)"
         )
+        print(
+            "RUNTIME-SERVICE-PROFILE structural aliasPartitions=\(RuntimePartition.all.count)"
+                + " quitPartitionOperations=\(RuntimeServiceLimits.quitPartitionOperations) quitLane=\(RuntimeServiceLimits.quitLaneCapacity)"
+                + " privateTransfer=\(RuntimeServiceLimits.privateTransferCapacity) privateInput=\(RuntimeServiceLimits.privateInputCapacity)"
+                + " privateTransferRetainedBytes=\(limits.privateTransferRetainedBytes) privateInputRetainedBytes=\(limits.privateInputRetainedBytes)"
+                + " (encoded bytes outside retainedByteBudget; not an RSS bound)"
+        )
         XCTAssertLessThanOrEqual(limits.retainedByteBudget, limits.retainedByteCeiling)
     }
 
@@ -298,6 +305,39 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         }
     }
 
+    /// The Quit's wire form is strict. The widest legal Quit round-trips; from its own encoding, both final saves naming one request, a
+    /// negative or out-of-range total, and a missing total or flush are each refused on decode. Building a flush that names one request
+    /// twice is refused too.
+    func testTheWidestQuitRoundTripsAndItsMalformedFormsAreRefused() throws {
+        let widest = try XCTUnwrap(try Self.widestCalls().first { $0.label == "submit-quit-both-flushes" })
+        guard case .submit(let request) = widest.call, case .quit(_, let flush) = request.command else {
+            return XCTFail("the widest Quit is a submitted quit")
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let text = String(decoding: try encoder.encode(request.command), as: UTF8.self)
+        XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeCommand.self, from: Data(text.utf8)), request.command)
+
+        let configuration = try XCTUnwrap(flush.configuration)
+        let preferences = try XCTUnwrap(flush.preferences)
+        func quoted(_ id: ControlRequestID) throws -> String { String(decoding: try encoder.encode(id), as: UTF8.self) }
+        let total = "\"totalMilliseconds\":\(Int32.max)"
+        XCTAssertTrue(text.contains(total), text)
+        let flushText = String(decoding: try encoder.encode(flush), as: UTF8.self)
+        let refused = [
+            text.replacingOccurrences(of: try quoted(preferences), with: try quoted(configuration)),
+            text.replacingOccurrences(of: total, with: "\"totalMilliseconds\":-1"),
+            text.replacingOccurrences(of: total, with: "\"totalMilliseconds\":\(Int(Int32.max) + 1)"),
+            text.replacingOccurrences(of: total + ",", with: ""),
+            text.replacingOccurrences(of: "\"flush\":" + flushText + ",", with: ""),
+        ]
+        for mutated in refused {
+            XCTAssertNotEqual(mutated, text, "the mutation applies")
+            XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: Data(mutated.utf8)), mutated)
+        }
+        XCTAssertThrowsError(try ControlQuitFlush(configuration: configuration, preferences: configuration))
+    }
+
     /// Each current call at its widest legal form. Every identifier is the widest UUID value, every revision and count is `Int.max`, and every
     /// module and collection kind is the one with the longest name or the largest response.
     static func widestCalls() throws -> [(label: String, call: ControlRuntimeCall)] {
@@ -313,6 +353,13 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             throw RuntimeServiceProfileError.internalFailure
         }
         let upstream = ControlUpstreamReference(configRevision: config, upstreamID: ControlUpstreamID(rawValue: id))
+        // The widest platform baseline: the widest namespace and the full UInt64 version, which the wire carries as an exact number.
+        let platformBaseline = PrivateBaseline(namespace: PrivateBaselineNamespace(rawValue: id), component: .platform, version: .max)
+        // The widest Quit: the protocol's largest total budget, and both final saves named, each by a widest UUID. The two must differ.
+        let flush = try ControlQuitFlush(
+            configuration: ControlRequestID(rawValue: id),
+            preferences: ControlRequestID(rawValue: RuntimeServiceFixtures.uuid(0xFFFF_FFFF_FFFE))
+        )
         let commands: [(label: String, command: ControlRuntimeCommand)] = [
             ("submit-stop", .stop(.tunnels)),
             ("submit-restart", .restart(.tunnels, ifLifecycleRevision: lifecycle)),
@@ -321,6 +368,8 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             ("submit-test-dns", .testDNS),
             ("submit-test-upstream", .testUpstream(upstream)),
             ("submit-refresh-preflight", .refreshPreflight),
+            ("submit-set-launch-at-login", .setLaunchAtLogin(false, ifPlatformBaseline: platformBaseline)),
+            ("submit-quit-both-flushes", .quit(total: try ControlWireBudget(Int(Int32.max)), flush: flush)),
         ]
         var calls: [(label: String, call: ControlRuntimeCall)] = []
         for entry in commands {
