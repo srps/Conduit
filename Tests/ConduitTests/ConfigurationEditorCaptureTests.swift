@@ -19,10 +19,11 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
         return try AppPreferencesPersistence.stagedData(for: preferences)
     }
 
-    private func opened(_ fixture: Fixture) async throws -> RuntimeConfigurationWorkflow {
-        let workflow = RuntimeConfigurationWorkflow(
-            store: fixture.store, incarnation: ControlHostIncarnation(rawValue: UUID()), startupAllowsMissing: true
-        )
+    private func opened(
+        _ fixture: Fixture,
+        incarnation: ControlHostIncarnation = ControlHostIncarnation(rawValue: UUID())
+    ) async throws -> RuntimeConfigurationWorkflow {
+        let workflow = RuntimeConfigurationWorkflow(store: fixture.store, incarnation: incarnation, startupAllowsMissing: true)
         _ = try await workflow.open()
         return workflow
     }
@@ -121,6 +122,32 @@ final class ConfigurationEditorCaptureTests: XCTestCase {
         ))
         XCTAssertEqual(refused.values.preferences, before.values.preferences)
         XCTAssertEqual(refused.values.runtime, before.values.runtime)
+    }
+
+    /// A client's request ID follows its Start into the store, and the store context names the host's incarnation: both receipts of the
+    /// prepared pair carry them. The host's own facade, which has no client request, names a fresh ID instead.
+    func testAClientRequestAndTheHostIncarnationReachTheStartsCommitReceipts() async throws {
+        let fixture = try Fixture()
+        defer { fixture.close() }
+        let incarnation = ControlHostIncarnation(rawValue: UUID())
+        let workflow = try await opened(fixture, incarnation: incarnation)
+        let request = ControlRequestID(rawValue: UUID())
+
+        let ticket = try workflow.admitStart(PrivateModuleSlots(proxy: .start, dns: .none, tunnels: .none), requestID: request).get()
+        guard case .ready(let prepared) = await workflow.prepareStart(ticket).preparation else {
+            return XCTFail("the Start's required defaults verified")
+        }
+        for receipt in [prepared.input.runtimeReceipt, prepared.input.platformReceipt] {
+            XCTAssertEqual(receipt.context.requestID, request)
+            XCTAssertEqual(receipt.context.hostIncarnation, incarnation)
+        }
+
+        let facade = try workflow.admitStart().get()
+        guard case .ready(let facadePrepared) = await workflow.prepareStart(facade).preparation else {
+            return XCTFail("the facade Start verified")
+        }
+        XCTAssertNotEqual(facadePrepared.input.runtimeReceipt.context.requestID, request)
+        XCTAssertEqual(facadePrepared.input.runtimeReceipt.context.hostIncarnation, incarnation)
     }
 
     /// A session DNS Stop's fence is in the next capture, at the revision its admission took, with no store work.

@@ -6,23 +6,53 @@ import ProxyKernel
 
 /// The presentation revision of the host's control snapshots, and the last snapshot stamped with it. The revision moves only when a
 /// projection differs from the last one, so the service's slot never sees two bodies under one revision. It holds one snapshot, replaced
-/// in place, and no history.
+/// in place, and no history. A nil `last` means the current revision has no body yet: nothing was projected, or a settlement reserved it.
 struct RuntimeHostPresentation {
     private(set) var revision = 0
     private(set) var last: ControlRuntimeSnapshot?
+    /// Whether the latest projection failed, so its diagnostic is recorded once per failure episode. A stamped projection clears it.
+    private(set) var failing = false
+
+    /// `revision` is the first revision, 0 for a host; a test seeds it near `Int.max` to reach exhaustion.
+    init(revision: Int = 0) {
+        precondition(revision >= 0, "a presentation revision is never negative")
+        self.revision = revision
+    }
 
     /// `projected` is stamped with the current revision. An equal projection answers the last snapshot; a different one takes the next
-    /// revision. At the maximum no newer revision exists, so the projection keeps the current one and the service refuses it as a
-    /// revision conflict, a closed fault, rather than this host reusing an older revision.
-    mutating func stamp(_ projected: ControlRuntimeSnapshot) -> ControlRuntimeSnapshot {
-        if let last, last == projected { return last }
+    /// revision, and a body for a revision that has none takes that revision. Nil when a changed body needs a revision past the maximum:
+    /// the read fails closed rather than reuse a revision for a different body.
+    mutating func stamp(_ projected: ControlRuntimeSnapshot) -> ControlRuntimeSnapshot? {
+        if let last, last == projected {
+            failing = false
+            return last
+        }
         var stamped = projected
-        if last != nil, revision < Int.max, let next = ControlPresentationRevision(rawValue: revision + 1) {
+        if last != nil {
+            guard revision < Int.max, let next = ControlPresentationRevision(rawValue: revision + 1) else { return nil }
             revision += 1
             stamped.stamp.presentationRevision = next
         }
         last = stamped
+        failing = false
         return stamped
+    }
+
+    /// Records a failed projection. True only when it begins a failure episode, so the caller records its diagnostic once.
+    mutating func projectionFailed() -> Bool {
+        defer { failing = true }
+        return !failing
+    }
+
+    /// A settlement that no projection reflects yet takes the next revision, with no body, so the first projection after it takes that
+    /// revision and a subscriber holding an older one knows its view is not current. Repeated reservations before that projection name
+    /// the same revision, which reflects them all. False at the maximum, where no newer revision exists.
+    mutating func reserveUnprojected() -> Bool {
+        guard last != nil else { return true }
+        guard revision < Int.max else { return false }
+        revision += 1
+        last = nil
+        return true
     }
 }
 
@@ -33,6 +63,46 @@ extension RuntimeConfigurationWorkflow.EditorCapture {
         try PrivateConfigurationBridge.makeObservation(
             config: values.runtime, platform: values.platform, preferences: values.preferences,
             terminal: terminal, components: components, modules: modules
+        )
+    }
+}
+
+/// One collection's revision: the kernel value it was taken from, and a counter that moves whenever that value differs. The value is the
+/// kernel's own copy-on-write storage, so an unchanged collection compares in constant time and the host keeps no projected rows.
+private struct RuntimeCollectionRevisionTracker<Source: Equatable> {
+    private var source: Source?
+    private var revision = 0
+    /// Set once a change needed a revision past the maximum. A revision names one body for its whole life, so none is reused; the
+    /// collection then reports no captured revision for the rest of this host's life.
+    private var exhausted = false
+
+    mutating func revision(for current: Source) -> ControlCollectionRevision? {
+        if let source, source == current {
+            return exhausted ? nil : ControlCollectionRevision(rawValue: revision)
+        }
+        if source != nil {
+            if revision == Int.max { exhausted = true }
+            if !exhausted { revision += 1 }
+        }
+        source = current
+        return exhausted ? nil : ControlCollectionRevision(rawValue: revision)
+    }
+}
+
+/// The revisions the host's snapshots pin for its four collections, each taken in the snapshot's own owner turn. A page captures its rows
+/// in that turn too (`projectedRows`), so the rows are exactly the revision's.
+struct RuntimeHostCollections {
+    private var activeConnections = RuntimeCollectionRevisionTracker<ActiveConnectionStore>()
+    private var upstreamHealth = RuntimeCollectionRevisionTracker<[UpstreamRuntimeStatus]>()
+    private var tunnelBindings = RuntimeCollectionRevisionTracker<[TunnelBindingInfo]>()
+    private var tunnelDNSHosts = RuntimeCollectionRevisionTracker<TunnelDNSOverrideStatus>()
+
+    mutating func revisions(of snapshot: ProxyOrchestratorSnapshot) -> ControlCollectionRevisions {
+        ControlCollectionRevisions(
+            activeConnections: activeConnections.revision(for: snapshot.activeConnections),
+            upstreamHealth: upstreamHealth.revision(for: snapshot.upstreamStatuses),
+            tunnelBindings: tunnelBindings.revision(for: snapshot.bindings.tunnels),
+            tunnelDNSHosts: tunnelDNSHosts.revision(for: snapshot.tunnelDNSOverrideStatus)
         )
     }
 }
@@ -58,26 +128,41 @@ extension RuntimeHost: ControlCommandOwner {
     /// captured revision, so their counts are exact and their rows unavailable as `not_captured`. Nil, with its event, when the projection
     /// fails.
     func snapshot() -> ControlRuntimeSnapshot? {
+        let revisions = workflow.revisions
         guard let lifecycle = ControlLifecycleRevision(rawValue: workflow.generation),
               let configRevision = ControlConfigRevision(rawValue: configGeneration),
-              let current = ControlPresentationRevision(rawValue: presentation.revision)
+              let current = ControlPresentationRevision(rawValue: presentation.revision),
+              let proxy = ControlLifecycleRevision(rawValue: revisions.proxy),
+              let dns = ControlLifecycleRevision(rawValue: revisions.dns),
+              let tunnels = ControlLifecycleRevision(rawValue: revisions.tunnels)
         else {
             preconditionFailure("the host's counters are never negative")
         }
         let stamp = ControlRuntimeStamp(
-            incarnation: incarnation, presentationRevision: current, configRevision: configRevision, lifecycleRevision: lifecycle
+            incarnation: incarnation, presentationRevision: current, configRevision: configRevision, lifecycleRevision: lifecycle,
+            modules: ControlModuleRevisions(proxy: proxy, dns: dns, tunnels: tunnels)
         )
+        let kernel = orchestrator.snapshot
+        let projected: ControlRuntimeSnapshot
         do {
-            let projected = try RuntimeSnapshotControlProjection.snapshot(
-                orchestrator.snapshot, stamp: stamp, profileName: config.profileName, collectionRevisions: ControlCollectionRevisions()
+            projected = try RuntimeSnapshotControlProjection.snapshot(
+                kernel, stamp: stamp, profileName: config.profileName, collectionRevisions: collections.revisions(of: kernel)
             )
-            return presentation.stamp(projected)
         } catch {
             // The projection names no value in its error, and none is kept. The read that asked fails closed.
-            recordLifecycle(RuntimeEvent(kind: .health, event: "runtime_service.snapshot_unavailable", detail: "reason=projection_failed"),
-                            level: .warning)
-            return nil
+            return snapshotUnavailable("projection_failed")
         }
+        guard let stamped = presentation.stamp(projected) else { return snapshotUnavailable("revision_exhausted") }
+        return stamped
+    }
+
+    /// The closed failure of a snapshot read, recorded once per failure episode so a persistent failure cannot flood the bounded event log.
+    private func snapshotUnavailable(_ reason: StaticString) -> ControlRuntimeSnapshot? {
+        if presentation.projectionFailed() {
+            recordLifecycle(RuntimeEvent(kind: .health, event: "runtime_service.snapshot_unavailable", detail: "reason=\(reason)"),
+                            level: .warning)
+        }
+        return nil
     }
 
     func projectedRows(for kind: ControlCollectionKind, within budget: ControlRowBudget) -> ControlProjection {
@@ -98,9 +183,9 @@ extension RuntimeHost: ControlCommandOwner {
         switch command {
         case .stop(let module):
             return fenceStop(module, request: request, operation: operation, candidate: candidate)
-        case .restart(.proxy, let expected):
-            return fenceProxyRestart(expected, request: request, operation: operation)
-        case .restart(.dns, _), .restart(.tunnels, _), .testDNS, .testUpstream, .refreshPreflight:
+        case .restart(.proxy, let expected, let companion):
+            return fenceProxyRestart(expected, conditionalDNS: companion, request: request, operation: operation)
+        case .restart(.dns, _, _), .restart(.tunnels, _, _), .testDNS, .testUpstream, .refreshPreflight:
             // Not adopted on this owner yet; each is refused whole before anything changes.
             return .rejected(.notImplemented)
         }
@@ -163,12 +248,14 @@ extension RuntimeHost: ControlCommandOwner {
         return .admitted
     }
 
-    /// The ordinary menu Restart of the proxy (decision 0036), with no companion: the request names no DNS revision, so none is derived.
-    /// `ifLifecycleRevision` is the whole-host lifecycle counter the client read in a snapshot stamp. When it still matches, in this same
-    /// turn no module's revision has moved, so the proxy's own revision is taken here as its exact precondition; that is the only
-    /// derivation made. A moved counter refuses the whole request before anything changes (decision 0035).
+    /// The ordinary menu Restart of the proxy (decision 0036). `ifLifecycleRevision` is the whole-host lifecycle counter the client read in
+    /// a snapshot stamp. When it still matches, in this same turn no module's revision has moved, so the proxy's own revision is taken here
+    /// as its exact precondition; that is the only derivation made. `conditionalDNS` is the DNS revision the client itself observed: it
+    /// asks for the companion and is checked as given, never filled from host state, and a request without it has no companion. A moved
+    /// counter or DNS revision refuses the whole request before anything changes (decision 0035).
     private func fenceProxyRestart(
         _ expected: ControlLifecycleRevision,
+        conditionalDNS: ControlLifecycleRevision?,
         request: ControlRequestID,
         operation: ControlOperationID
     ) -> ControlOwnerFenceResult {
@@ -180,10 +267,11 @@ extension RuntimeHost: ControlCommandOwner {
             emitConfigurationEvents(workflow.admissionEvents(.stale(.proxy)))
             return .rejected(.staleRevision)
         }
+        // Decoding refused a companion on any other module, so only the proxy reaches here with one.
         let proxyRevision = workflow.revisions.proxy
         switch admitModuleStart(
-            PrivateModuleSlots(proxy: .start, dns: .none, tunnels: .none),
-            expecting: PrivateModuleSlots(proxy: proxyRevision, dns: nil, tunnels: nil),
+            PrivateModuleSlots(proxy: .start, dns: conditionalDNS == nil ? .none : .conditionalActivation, tunnels: .none),
+            expecting: PrivateModuleSlots(proxy: proxyRevision, dns: conditionalDNS?.rawValue, tunnels: nil),
             operation: .proxyStart,
             restartsProxy: true,
             requestID: request
@@ -220,8 +308,12 @@ extension RuntimeHost: ControlCommandOwner {
     }
 
     private func completed(_ command: ControlRuntimeCommandKind) -> ControlOperationOutcome {
-        // The revision that reflects the settlement is the one this turn's snapshot carries.
-        _ = snapshot()
+        // The revision that reflects the settlement is the one this turn's snapshot carries. When none can be projected, the settlement
+        // reserves the next one, which the first projection after it takes; the last body, from before the settlement, is never cited.
+        // At the maximum no revision can reflect it, so it fails closed.
+        if snapshot() == nil, !presentation.reserveUnprojected() {
+            return .failed(.internalFailure)
+        }
         guard let revision = ControlPresentationRevision(rawValue: presentation.revision) else {
             preconditionFailure("a presentation revision is never negative")
         }
@@ -254,6 +346,26 @@ extension RuntimeHost: ControlCommandOwner {
         case .snapshotOverBound: "snapshot_over_bound"
         case .snapshotRevisionConflict: "snapshot_revision_conflict"
         case .snapshotRevisionRegressed: "snapshot_revision_regressed"
+        }
+    }
+}
+
+extension RuntimeHost {
+    /// The production in-memory composition over this host, handed out only as the client a caller holds (decisions 0014 and 0033): the
+    /// actual service, transport, clock and owner hops, with no concrete service or transport exposed. The caller passes every bound; no
+    /// shipping profile is selected. The client keeps the composition alive. One per host.
+    package func makeInMemoryControlClient(
+        limits: RuntimeServiceLimits,
+        clientFrameLimits: ControlFrameLimits,
+        wireBudgetCap: Duration
+    ) throws -> any RuntimeClient {
+        let composition = RuntimeControlComposition(host: self, limits: limits, timing: .system, scheduling: TaskOwnerScheduling())
+        do {
+            return try makeFramedRuntimeClient(transport: composition.transport, limits: clientFrameLimits, wireBudgetCap: wireBudgetCap)
+        } catch {
+            // No client holds the composition, so the host is left with none.
+            onControlStateChange = nil
+            throw error
         }
     }
 }

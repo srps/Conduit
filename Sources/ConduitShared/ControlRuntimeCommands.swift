@@ -36,8 +36,14 @@ package struct ControlUpstreamReference: Codable, Sendable, Equatable {
 package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     /// Stops one module for this session. Admission sets the session fence.
     case stop(ControlModule)
-    /// Restarts one module only if the lifecycle revision still matches.
-    case restart(ControlModule, ifLifecycleRevision: ControlLifecycleRevision)
+    /// Restarts one module only if the whole-host lifecycle revision still matches. `conditionalDNSRevision`, valid only for the proxy,
+    /// asks for DNS's conditional companion (decision 0036) at the DNS revision the client observed; absent, the Restart has no companion,
+    /// as before. A non-proxy Restart that names one is refused on decode and on encode.
+    case restart(
+        ControlModule,
+        ifLifecycleRevision: ControlLifecycleRevision,
+        conditionalDNSRevision: ControlLifecycleRevision? = nil
+    )
     case testDNS
     case testUpstream(ControlUpstreamReference)
     case refreshPreflight
@@ -56,6 +62,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case type
         case module
         case lifecycleRevision
+        case conditionalDNSRevision
         case upstream
     }
 
@@ -69,9 +76,17 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .stop:
             self = .stop(try container.decode(ControlModule.self, forKey: .module))
         case .restart:
+            let module = try container.decode(ControlModule.self, forKey: .module)
+            let companion = try container.decodeIfPresent(ControlLifecycleRevision.self, forKey: .conditionalDNSRevision)
+            guard companion == nil || module == .proxy else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .conditionalDNSRevision, in: container, debugDescription: "only a proxy restart has a DNS companion"
+                )
+            }
             self = .restart(
-                try container.decode(ControlModule.self, forKey: .module),
-                ifLifecycleRevision: try container.decode(ControlLifecycleRevision.self, forKey: .lifecycleRevision)
+                module,
+                ifLifecycleRevision: try container.decode(ControlLifecycleRevision.self, forKey: .lifecycleRevision),
+                conditionalDNSRevision: companion
             )
         case .testDNS:
             self = .testDNS
@@ -88,9 +103,15 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         switch self {
         case .stop(let module):
             try container.encode(module, forKey: .module)
-        case .restart(let module, let revision):
+        case .restart(let module, let revision, let companion):
+            guard companion == nil || module == .proxy else {
+                throw EncodingError.invalidValue(module, .init(
+                    codingPath: encoder.codingPath, debugDescription: "only a proxy restart has a DNS companion"
+                ))
+            }
             try container.encode(module, forKey: .module)
             try container.encode(revision, forKey: .lifecycleRevision)
+            try container.encodeIfPresent(companion, forKey: .conditionalDNSRevision)
         case .testDNS, .refreshPreflight:
             break
         case .testUpstream(let reference):

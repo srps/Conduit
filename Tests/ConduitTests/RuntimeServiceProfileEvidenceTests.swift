@@ -316,6 +316,8 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         let commands: [(label: String, command: ControlRuntimeCommand)] = [
             ("submit-stop", .stop(.tunnels)),
             ("submit-restart", .restart(.tunnels, ifLifecycleRevision: lifecycle)),
+            // Only a proxy Restart may name the companion's DNS revision, so this is the widest Restart now (decision 0036).
+            ("submit-restart-companion", .restart(.proxy, ifLifecycleRevision: lifecycle, conditionalDNSRevision: lifecycle)),
             ("submit-test-dns", .testDNS),
             ("submit-test-upstream", .testUpstream(upstream)),
             ("submit-refresh-preflight", .refreshPreflight),

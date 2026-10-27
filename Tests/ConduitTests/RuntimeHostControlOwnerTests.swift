@@ -4,6 +4,7 @@ import ConduitShared
 @testable import ConduitRuntime
 @testable import PlatformMac
 @testable import ProxyKernel
+import ProxyControlBridge
 import RuntimeEvents
 
 /// The actual `RuntimeHost` as the control service's one command owner (decisions 0014, 0031, 0035 and 0036): host, then
@@ -64,6 +65,31 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         throw RuntimeClientError.unexpectedReply
     }
 
+    /// The stream's frames up to every named operation's settlement, with each outcome. Bounded like `finished`.
+    private func finishedAll(
+        _ operations: Set<ControlOperationID>,
+        on stream: RuntimeSubscription
+    ) async throws -> [ControlOperationID: ControlOperationOutcome] {
+        var outcomes: [ControlOperationID: ControlOperationOutcome] = [:]
+        for _ in 0..<128 where !operations.isSubset(of: Set(outcomes.keys)) {
+            if case .operationFinished(let finished) = try await stream.next(deadline()) {
+                outcomes[finished.operationID] = finished.outcome
+            }
+        }
+        XCTAssertTrue(operations.isSubset(of: Set(outcomes.keys)), "every operation's settlement reached the stream")
+        return outcomes
+    }
+
+    private func submit(_ composed: Composed, _ command: ControlRuntimeCommand) async throws -> ControlAdmission {
+        try await composed.client.submit(
+            command, requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: composed.host.incarnation, deadline: deadline()
+        )
+    }
+
+    private func unavailableEvents(_ host: RuntimeHost) -> Int {
+        host.orchestrator.eventLog.events.filter { $0.event == "runtime_service.snapshot_unavailable" }.count
+    }
+
     private func accepted(_ admission: ControlAdmission, file: StaticString = #filePath, line: UInt = #line) throws -> ControlOperationID {
         guard case .accepted(let operation) = admission else {
             XCTFail("expected an accepted admission, got \(admission)", file: file, line: line)
@@ -91,10 +117,127 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(snapshot.stamp.lifecycleRevision.rawValue, composed.host.workflow.generation)
         XCTAssertEqual(snapshot.stamp.configRevision.rawValue, composed.host.configGeneration)
         XCTAssertEqual(snapshot.proxyState, .running)
-        XCTAssertEqual(snapshot.collections.activeConnections.state, .unavailable(.notCaptured), "no collection revision is captured yet")
+        for kind in ControlCollectionKind.allCases {
+            guard case .available = snapshot.collections.reference(for: kind).state else {
+                return XCTFail("\(kind) names the revision of the kernel value it was taken from")
+            }
+        }
+        let modules = try XCTUnwrap(snapshot.stamp.modules)
+        let revisions = composed.host.workflow.revisions
+        XCTAssertEqual([modules.proxy.rawValue, modules.dns.rawValue, modules.tunnels.rawValue],
+                       ControlModule.allCases.map { revisions[$0] })
 
         let again = try await composed.client.readSnapshot(deadline: deadline())
         XCTAssertEqual(again.stamp.presentationRevision, snapshot.stamp.presentationRevision, "an unchanged body keeps its revision")
+    }
+
+    /// A page through the client is captured from the host in the turn that names its revision: the upstream rows are the configured
+    /// upstream, at the snapshot's revision. A change of the kernel collection names a newer revision, and the old cursor reads as stale.
+    func testAPageThroughTheClientIsCapturedAtTheSnapshotsCollectionRevision() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        guard case .available(let revision) = snapshot.collections.upstreamHealth.state else {
+            return XCTFail("the upstream collection names a revision")
+        }
+        let first = try await composed.client.readPage(
+            ControlPageRequest(expectedIncarnation: composed.host.incarnation, collection: .upstreamHealth, cursor: nil), deadline: deadline()
+        )
+        guard case .upstreamHealth(let page) = first else { return XCTFail("an upstream page: \(first)") }
+        XCTAssertEqual(page.revision, revision)
+        XCTAssertEqual(page.status, .current)
+        XCTAssertEqual(page.rows.map(\.name), ["Synthetic"])
+
+        composed.host.orchestrator.mutateSnapshotForTesting { $0.upstreamStatuses = [] }
+        let moved = try await composed.client.readSnapshot(deadline: deadline())
+        guard case .available(let newer) = moved.collections.upstreamHealth.state else { return XCTFail("a newer revision") }
+        XCTAssertGreaterThan(newer, revision)
+        let again = try await composed.client.readPage(
+            ControlPageRequest(
+                expectedIncarnation: composed.host.incarnation, collection: .upstreamHealth,
+                cursor: ControlPageCursor(revision: revision, offset: try ControlCount(0))
+            ),
+            deadline: deadline()
+        )
+        guard case .upstreamHealth(let stale) = again else { return XCTFail("the retained revision: \(again)") }
+        XCTAssertEqual(stale.status, .staleRevision(current: newer), "the old revision's rows are named stale, never relabelled")
+        XCTAssertEqual(stale.rows.map(\.name), ["Synthetic"])
+    }
+
+    // MARK: - Presentation revision
+
+    private func projected(_ profile: String, at revision: Int) throws -> ControlRuntimeSnapshot {
+        try RuntimeSnapshotControlProjection.snapshot(
+            ProxyOrchestratorSnapshot(tunnelDNSOverrideStatus: .notNeeded),
+            stamp: ControlRuntimeStamp(
+                incarnation: RuntimeServiceFixtures.incarnation(1),
+                presentationRevision: try XCTUnwrap(ControlPresentationRevision(rawValue: revision)),
+                configRevision: try XCTUnwrap(ControlConfigRevision(rawValue: 0)),
+                lifecycleRevision: try XCTUnwrap(ControlLifecycleRevision(rawValue: 0))
+            ),
+            profileName: profile,
+            collectionRevisions: ControlCollectionRevisions()
+        )
+    }
+
+    /// The revision moves only with the body; a settlement no projection reflects reserves the next revision once, which the next body
+    /// takes; a failure episode is reported once; and at the maximum a changed body and a reservation both fail closed.
+    func testThePresentationRevisionMovesWithItsBodyReservesForASettlementAndFailsClosedAtTheMaximum() throws {
+        var presentation = RuntimeHostPresentation()
+        let first = try XCTUnwrap(presentation.stamp(try projected("A", at: 0)))
+        XCTAssertEqual(presentation.stamp(try projected("A", at: 0)), first, "an equal body keeps its revision")
+        XCTAssertEqual(presentation.stamp(try projected("B", at: 0))?.stamp.presentationRevision.rawValue, 1)
+
+        XCTAssertTrue(presentation.projectionFailed(), "a failure begins an episode")
+        XCTAssertFalse(presentation.projectionFailed(), "a repeated failure is the same episode")
+        XCTAssertTrue(presentation.reserveUnprojected())
+        XCTAssertTrue(presentation.reserveUnprojected())
+        XCTAssertEqual(presentation.revision, 2, "repeated reservations name one revision")
+        let recovered = presentation.stamp(try projected("B", at: 2))
+        XCTAssertEqual(recovered?.stamp.presentationRevision.rawValue, 2, "the first body after a reservation takes it")
+        XCTAssertFalse(presentation.failing, "a stamped body ends the episode")
+        XCTAssertTrue(presentation.projectionFailed(), "a later failure begins a new episode")
+
+        var exhausted = RuntimeHostPresentation(revision: Int.max)
+        XCTAssertNotNil(exhausted.stamp(try projected("A", at: Int.max)))
+        XCTAssertNil(exhausted.stamp(try projected("B", at: Int.max)), "a changed body past the maximum is refused, not given the old revision")
+        XCTAssertFalse(exhausted.reserveUnprojected(), "no newer revision exists for a settlement")
+        XCTAssertEqual(exhausted.last?.profileName, "A")
+    }
+
+    /// While the host cannot project its state, reads fail closed and the diagnostic is recorded once. A DNS Stop completed meanwhile names
+    /// the next revision, above any snapshot a subscriber holds, and the first snapshot after recovery takes exactly that revision and shows
+    /// the Stop. The negative flap total is the reachable failure the review traced from a wall-clock step.
+    func testAStopCompletedWhileTheSnapshotFailsNamesTheRevisionTheRecoveredSnapshotTakes() async throws {
+        let composed = try await compose()
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let before = try await composed.client.readSnapshot(deadline: deadline()).stamp.presentationRevision
+
+        composed.host.orchestrator.mutateSnapshotForTesting { $0.runtimeStatus.metrics.vpnFlapTotalDuration = -1 }
+        for _ in 0..<2 {
+            do {
+                _ = try await composed.client.readSnapshot(deadline: deadline())
+                XCTFail("a read fails closed while the projection fails")
+            } catch let error as RuntimeClientError {
+                XCTAssertEqual(error, .wire(.internalFailure))
+            }
+        }
+        let operation = try accepted(try await submit(composed, .stop(.dns)))
+        let outcome = try await finished(operation, on: stream)
+        guard case .completed(let completion) = outcome else { return XCTFail("the Stop's effect completed: \(outcome)") }
+        XCTAssertEqual(completion.command, .stop)
+        XCTAssertGreaterThan(completion.presentationRevision, before, "the completion never names the body from before it")
+        XCTAssertEqual(composed.host.orchestrator.snapshot.runtimeStatus.metrics.vpnFlapTotalDuration, -1, "the DNS Stop kept the failure")
+        XCTAssertEqual(unavailableEvents(composed.host), 1, "one diagnostic for the whole failure episode")
+
+        composed.host.orchestrator.mutateSnapshotForTesting { $0.runtimeStatus.metrics.vpnFlapTotalDuration = 0 }
+        let recovered = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertEqual(recovered.stamp.presentationRevision, completion.presentationRevision)
+        XCTAssertNotEqual(recovered.dnsRunState, .running, "the recovered snapshot shows the Stop")
+        XCTAssertEqual(unavailableEvents(composed.host), 1)
     }
 
     // MARK: - Stop
@@ -165,6 +308,43 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(composed.host.orchestrator.snapshot.dnsRunState, .running, "DNS is outside the Stop's scope")
     }
 
+    /// A Stop queued behind an active one is dropped when a newer Stop replaces it. Stop A is held at its teardown; a Restart moves the
+    /// proxy's revision, so Stop B fences again and queues behind A; another Restart moves it again, and Stop C replaces the queued B. B is
+    /// settled as superseded by C and never runs, its admission is released, and once everything ends no admission or operation is left.
+    func testAQueuedStopReplacedByANewerStopIsDroppedAndItsAdmissionReleased() async throws {
+        let composed = try await compose()
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        func restart() async throws -> ControlOperationID {
+            let observed = try await composed.client.readSnapshot(deadline: deadline()).stamp.lifecycleRevision
+            return try accepted(try await submit(composed, .restart(.proxy, ifLifecycleRevision: observed)))
+        }
+
+        composed.harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let stopA = try accepted(try await submit(composed, .stop(.proxy)))
+        await composed.harness.hold.waitUntilReached()
+        let restart1 = try await restart()
+        let stopB = try accepted(try await submit(composed, .stop(.proxy)))
+        XCTAssertEqual(composed.composition.service.stopSlotState(.proxy).queued, true, "B queues behind the active A")
+        let restart2 = try await restart()
+        let stopC = try accepted(try await submit(composed, .stop(.proxy)))
+        let dropped = try await composed.client.outcome(of: stopB, expectedIncarnation: composed.host.incarnation, deadline: deadline())
+        XCTAssertEqual(dropped, .finished(.superseded(by: stopC)))
+        composed.harness.hold.release()
+
+        let outcomes = try await finishedAll([stopA, stopB, stopC, restart1, restart2], on: stream)
+        XCTAssertEqual(outcomes[stopA], .superseded(by: stopB))
+        XCTAssertEqual(outcomes[stopC].flatMap { completed($0) }, .stop)
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp, "the latest Stop holds the proxy down")
+        XCTAssertEqual(composed.composition.service.liveOperationCount, 0, "every operation quiesced")
+        XCTAssertEqual(composed.host.pendingAdmissions, 0, "the dropped Stop's admission was released")
+        XCTAssertTrue(composed.host.controlAdmissions.isEmpty)
+    }
+
     // MARK: - Restart
 
     /// The ordinary menu Restart names the whole-host lifecycle counter the client read. It restarts the proxy through the host's one Start
@@ -205,6 +385,55 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertTrue(composed.harness.typedEvents().contains(.configWorkflow(.held(ConfigurationWorkflowHeld(
             phase: .start, input: .unit, reason: .staleRevision
         )))))
+    }
+
+    /// A menu Restart that names the DNS revision the client read asks for the conditional companion: with DNS configured, unfenced and
+    /// down, the companion starts it beside the proxy. Once a DNS Stop moves DNS's revision, a Restart naming the old one is refused whole,
+    /// even at the current whole-host counter, and nothing changes.
+    func testARestartNamingTheObservedDNSRevisionStartsTheCompanionAndAMovedOneIsRefusedWhole() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await composed.client.readSnapshot(deadline: deadline()).stamp
+        let modules = try XCTUnwrap(observed.modules, "the host reports each module's revision")
+        XCTAssertEqual(modules.dns.rawValue, composed.host.workflow.revisions.dns)
+
+        let restart = try accepted(try await submit(
+            composed, .restart(.proxy, ifLifecycleRevision: observed.lifecycleRevision, conditionalDNSRevision: modules.dns)
+        ))
+        let outcome = try await finished(restart, on: stream)
+        XCTAssertEqual(completed(outcome), .restart)
+        XCTAssertTrue(composed.harness.machine.dnsRelayRunning, "the companion started the configured DNS")
+        XCTAssertTrue(composed.harness.typedEvents().contains(.lifecycle(.moduleSettled(LifecycleModuleSettled(
+            settlement: .conditionalDNS(.started), group: observed.lifecycleRevision.rawValue + 1
+        )))))
+
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        _ = try await finished(stop, on: stream)
+        let current = try await composed.client.readSnapshot(deadline: deadline()).stamp
+        let generation = composed.host.workflow.generation
+        let stale = try await submit(
+            composed, .restart(.proxy, ifLifecycleRevision: current.lifecycleRevision, conditionalDNSRevision: modules.dns)
+        )
+        XCTAssertEqual(stale, .rejected(.staleRevision), "the client's DNS revision is checked as given")
+        XCTAssertEqual(composed.host.workflow.generation, generation)
+        XCTAssertFalse(composed.harness.machine.dnsRelayRunning)
+    }
+
+    /// The companion key is additive: a Restart without it encodes exactly as before, one with it round-trips, and a non-proxy Restart
+    /// that names one is refused on decode.
+    func testTheRestartCompanionKeyIsAdditiveAndOnlyForTheProxy() throws {
+        let revision = try XCTUnwrap(ControlLifecycleRevision(rawValue: 7))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let plain = String(decoding: try encoder.encode(ControlRuntimeCommand.restart(.proxy, ifLifecycleRevision: revision)), as: UTF8.self)
+        XCTAssertEqual(plain, #"{"lifecycleRevision":7,"module":"proxy","type":"restart"}"#)
+        let companion = ControlRuntimeCommand.restart(.proxy, ifLifecycleRevision: revision, conditionalDNSRevision: revision)
+        XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeCommand.self, from: try encoder.encode(companion)), companion)
+        let invalid = Data(#"{"conditionalDNSRevision":7,"lifecycleRevision":7,"module":"dns","type":"restart"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: invalid))
+        XCTAssertThrowsError(try encoder.encode(ControlRuntimeCommand.restart(.dns, ifLifecycleRevision: revision, conditionalDNSRevision: revision)))
     }
 
     /// Commands this owner has not adopted are refused whole at the fence, and a Restart after the process quit is refused as stopping.

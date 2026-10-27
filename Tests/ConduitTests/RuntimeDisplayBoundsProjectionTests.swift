@@ -500,11 +500,14 @@ final class RuntimeDisplayBoundsProjectionTests: XCTestCase {
         XCTAssertNotNil(snapshot.tunnelDNSOverride.unavailableReason)
         XCTAssertNotNil(snapshot.bindings.transparentProxy?.port)
 
+        let maxLifecycle = try XCTUnwrap(ControlLifecycleRevision(rawValue: Int.max))
         snapshot.stamp = ControlRuntimeStamp(
             incarnation: ControlHostIncarnation(rawValue: widest),
             presentationRevision: try XCTUnwrap(ControlPresentationRevision(rawValue: Int.max)),
             configRevision: try XCTUnwrap(ControlConfigRevision(rawValue: Int.max)),
-            lifecycleRevision: try XCTUnwrap(ControlLifecycleRevision(rawValue: Int.max))
+            lifecycleRevision: maxLifecycle,
+            // The host reports every module's revision (decision 0035), so the widest stamp carries all three at the maximum.
+            modules: ControlModuleRevisions(proxy: maxLifecycle, dns: maxLifecycle, tunnels: maxLifecycle)
         )
         snapshot.dnsQueryCount = maxCount
         snapshot.dnsDoHFallbackCount = maxCount
@@ -550,6 +553,7 @@ final class RuntimeDisplayBoundsProjectionTests: XCTestCase {
         let payload = try ControlRuntimeCodec.encodeBoundedPayload(message, limits: roomy)
         let frame = try ControlRuntimeCodec.encodeFrame(message, limits: roomy)
         XCTAssertEqual(frame.count, payload.count + 1, "a frame is its JSON payload plus one line feed")
+        XCTAssertLessThanOrEqual(frame.count, 65_536, "the widest baseline, line feed included, fits the selected ordinary frame (decision 0030)")
         XCTAssertEqual(try ControlRuntimeCodec.decodeFullFrame(frame, limits: roomy), message)
         XCTAssertNoThrow(try ControlRuntimeCodec.encodeFrame(message, limits: try ControlFrameLimits(maxFrameBytes: frame.count)))
         let shortLimit = try ControlFrameLimits(maxFrameBytes: frame.count - 1)

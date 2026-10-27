@@ -544,7 +544,12 @@ enum RuntimeHostEffectsScenario {
             check("a menu Restart brings the proxy up", restart.modules.proxy == .started && machine.service("Wi-Fi").routesThroughAProxy)
             check("its companion finds the DNS fence and starts nothing", restart.conditionalDNS == .fenced && !machine.dnsRelayRunning)
 
-            _ = await host.stopProxy()
+            // The same Stop through the actual composition: host, service, in-memory transport and framed client. The client and its
+            // stream end inside the helper, so their release hops run during the awaits below, before the root is released.
+            let viaClient = try await stopProxyThroughClient(host)
+            check("the client's snapshot shows the restarted proxy", viaClient.proxyShown)
+            check("a proxy Stop through the framed client completes", viaClient.completed)
+            check("the client's Stop clears the system proxy", !machine.service("Wi-Fi").routesThroughAProxy)
             var refusal: RuntimeStartRefusal?
             do {
                 _ = try await host.startDNS(expecting: PrivateModuleSlots(proxy: nil, dns: observed.dns - 1, tunnels: nil))
@@ -591,6 +596,49 @@ enum RuntimeHostEffectsScenario {
             assertions.append(.init("the module error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// A proxy Stop through the host's in-memory control client. The client, its stream and the composition they hold end when this
+    /// returns; the stream's cancel queues the one hop that releases its subscriber.
+    @MainActor
+    private static func stopProxyThroughClient(_ host: RuntimeHost) async throws -> (proxyShown: Bool, completed: Bool) {
+        let client = try host.makeInMemoryControlClient(
+            limits: try controlProfile(), clientFrameLimits: try ControlFrameLimits(maxFrameBytes: 64 * 1024), wireBudgetCap: .seconds(30)
+        )
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let snapshot = try await client.readSnapshot(deadline: deadline)
+        let stream = try await client.subscribe(.live, deadline: deadline)
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline)
+        let admission = try await client.submit(
+            .stop(.proxy), requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: snapshot.stamp.incarnation, deadline: deadline
+        )
+        guard case .accepted(let operation) = admission else { return (snapshot.proxyState != .stopped, false) }
+        for _ in 0..<64 {
+            if case .operationFinished(let finished) = try await stream.next(deadline), finished.operationID == operation {
+                let completed = if case .completed(let completion) = finished.outcome { completion.command == .stop } else { false }
+                return (snapshot.proxyState != .stopped, completed)
+            }
+        }
+        return (snapshot.proxyState != .stopped, false)
+    }
+
+    /// This scenario's own control-service profile. Every value is explicit and scenario-only, sized for one client and a handful of
+    /// operations; none is a shipping default.
+    private static func controlProfile() throws -> RuntimeServiceLimits {
+        try RuntimeServiceLimits(
+            maxRequestBytes: 4096, maxReplyBytes: 64 * 1024,
+            aliasCapacityPerPartition: 8, aliasByteCapacityPerPartition: 1 << 20,
+            ordinaryPendingCapacity: 2, outcomeCapacity: 8, outcomeByteCapacity: 1 << 20,
+            retentionAge: .seconds(60), janitorBatch: 4,
+            ordinaryLaneCapacity: 2, readLaneCapacity: 2, streamLaneCapacity: 2, stopLaneCapacityPerModule: 1, subscriberLimit: 2,
+            ringCapacity: 16, ringByteCapacity: 1 << 16, maxEventBytes: 4096,
+            ingressCapacity: 8, ingressByteCapacity: 1 << 15, drainItemsPerTurn: 4, drainBytesPerTurn: 1 << 14,
+            controlLogCapacity: 8, controlLogByteCapacity: 1 << 14, replayChunkItems: 4, replayChunkBytes: 1 << 14,
+            collectionRowCapacity: 16, collectionByteCapacity: 1 << 14, collectionProofCapacityPerKind: 4,
+            collectionRowRevisionsPerKind: 2, collectionRetainedByteCapacity: 1 << 14, collectionRowRetentionAge: .seconds(60),
+            latestSnapshotByteCapacity: 1 << 14, subscriberRecordBytes: 256, retainedByteCeiling: 1 << 24
+        )
     }
 
     /// An external edit that only respells the PAC URL (#246), reloaded into a running actual host. Precomposed `é` and `e` with a

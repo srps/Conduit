@@ -9,18 +9,37 @@ package struct ControlRuntimeStamp: Codable, Sendable, Equatable {
     package var incarnation: ControlHostIncarnation
     package var presentationRevision: ControlPresentationRevision
     package var configRevision: ControlConfigRevision
+    /// The whole-host lifecycle counter: it moves on every module's admission, so a matching value means no module moved.
     package var lifecycleRevision: ControlLifecycleRevision
+    /// Each module's own lifecycle revision in the same turn (decision 0035), which a request names for one module, such as Restart's
+    /// conditional DNS companion. Absent from a stamp that does not report them, which keeps the earlier encoding.
+    package var modules: ControlModuleRevisions?
 
     package init(
         incarnation: ControlHostIncarnation,
         presentationRevision: ControlPresentationRevision,
         configRevision: ControlConfigRevision,
-        lifecycleRevision: ControlLifecycleRevision
+        lifecycleRevision: ControlLifecycleRevision,
+        modules: ControlModuleRevisions? = nil
     ) {
         self.incarnation = incarnation
         self.presentationRevision = presentationRevision
         self.configRevision = configRevision
         self.lifecycleRevision = lifecycleRevision
+        self.modules = modules
+    }
+}
+
+/// One lifecycle revision per module, in a fixed shape.
+package struct ControlModuleRevisions: Codable, Sendable, Equatable {
+    package var proxy: ControlLifecycleRevision
+    package var dns: ControlLifecycleRevision
+    package var tunnels: ControlLifecycleRevision
+
+    package init(proxy: ControlLifecycleRevision, dns: ControlLifecycleRevision, tunnels: ControlLifecycleRevision) {
+        self.proxy = proxy
+        self.dns = dns
+        self.tunnels = tunnels
     }
 }
 

@@ -48,7 +48,7 @@ enum RuntimeWireSize {
 /// encoded custody. They are not an RSS guarantee, and not a claim about when the optimizer releases a value. The budget
 /// must not exceed `retainedByteCeiling`, which the owner passes explicitly, so an over-large configuration is refused at
 /// construction.
-struct RuntimeServiceLimits: Sendable, Equatable {
+package struct RuntimeServiceLimits: Sendable, Equatable {
     /// The server's ingress cap for one request frame, applied before any parsing.
     let maxRequestBytes: Int
     /// The server's cap for one reply or stream frame.
@@ -151,7 +151,9 @@ struct RuntimeServiceLimits: Sendable, Equatable {
     /// One active and one queued operation per stop module.
     static let stopSlotsPerModule = 2
 
-    init(
+    /// Package so a scoped `pm-sim` scenario (decision 0033) can name its own explicit profile for `RuntimeHost.makeInMemoryControlClient`.
+    /// Every value is the caller's; nothing here is a shipping default.
+    package init(
         maxRequestBytes: Int,
         maxReplyBytes: Int,
         aliasCapacityPerPartition: Int,

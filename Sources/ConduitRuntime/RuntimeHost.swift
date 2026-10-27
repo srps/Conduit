@@ -43,6 +43,8 @@ package final class RuntimeHost {
     /// The presentation revision this host stamps its control snapshots with, and the last body it stamped (`RuntimeHostControlOwner`).
     /// One value, replaced in place, so it holds no history.
     var presentation = RuntimeHostPresentation()
+    /// The revision of each collection its control snapshots pin, from the kernel values they were taken from. Four fixed slots.
+    var collections = RuntimeHostCollections()
     /// Told when the host's safe state may have changed, so the control service composed over it captures a new snapshot. Set only by
     /// that composition; nil when no service is composed.
     var onControlStateChange: (@MainActor () -> Void)?
