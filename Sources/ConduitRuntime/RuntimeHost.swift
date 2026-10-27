@@ -445,12 +445,21 @@ package final class RuntimeHost {
             logger: logger,
             resolverDirectory: effects.resolverDirectory
         )
+        // The connection audit writer reports a refused destination on the same log as the other diagnostic writers (#222).
+        let auditSink = Self.makeAuditSink(
+            for: loadedConfiguration.config,
+            environment: environment,
+            writerLeaseFile: stateSession.writerLeaseFile,
+            logger: logger,
+            eventLog: diagnosticsEventLog
+        )
         let orchestrator = ProxyOrchestrator(
             config: loadedConfiguration.config,
             logger: logger,
             privilegeClient: auditedPrivilegeClient,
             authenticatorProvider: nil,
             pacEvaluator: effects.pacEvaluator,
+            auditSink: auditSink,
             eventLog: diagnosticsEventLog,
             resolverManager: tunnelResolverManager,
             portHolderProbe: effects.portHolderProbe
@@ -550,6 +559,40 @@ package final class RuntimeHost {
         startLocationObserver()
         startWakeObserver()
         startEnvironmentDriftTimer()
+    }
+
+    /// The connection audit sink the orchestrator records each closed connection to. Twin of `AppState.makeAuditSink`, until the app
+    /// adopts this host: off (the default) is the no-op sink; on, a bounded file at `auditLogPath`, or the root's `audit.ndjson` when no
+    /// path is set, with `auditLogMaxBytes`. The guard protects the same resources as the other writers, the writer lease included, so a
+    /// configured path that aliases one is refused with one fixed event and the runtime keeps serving.
+    ///
+    /// Built once, from the configuration the host opened with. A reload does not re-resolve it, as in the app.
+    private static func makeAuditSink(
+        for config: ProxyConfig,
+        environment: RuntimeEnvironment,
+        writerLeaseFile: URL,
+        logger: any LogSink,
+        eventLog: RuntimeEventLog
+    ) -> any ConnectionAuditSink {
+        guard config.auditLogEnabled else {
+            return DiscardingConnectionAuditSink()
+        }
+        let url: URL
+        if let path = config.auditLogPath, !path.isEmpty {
+            url = URL(fileURLWithPath: path)
+        } else {
+            url = environment.configDirectory.appendingPathComponent("audit.ndjson")
+        }
+        // An explicit path may leave the state directory, never land on a protected resource (#222).
+        return FileConnectionAuditSink(
+            fileURL: url,
+            maxBytes: config.auditLogMaxBytes,
+            logger: logger,
+            destinationGuard: diagnosticDestinationGuard(
+                for: .connectionAudit, in: environment, writerLeaseFile: writerLeaseFile
+            ),
+            eventLog: eventLog
+        )
     }
 
     /// Waits for launch-time crash recovery before this host touches a
