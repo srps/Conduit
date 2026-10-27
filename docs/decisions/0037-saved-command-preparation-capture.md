@@ -92,6 +92,17 @@ Does not prove: actual framed-client/private-editor adoption, final AppState act
 
 The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) connects [`RuntimeHostControlOwner`](../../Sources/ConduitRuntime/RuntimeHostControlOwner.swift) to the actual framed client while retaining this single preparation-time capture. Private Starts retain their frozen submissions. No admission snapshot registry or late rebind path is introduced; final integration review and AppState deletion remain open.
 
+The native-client completion adds ordinary saved Start and gives saved Start and
+Restart the same causal receipt as private Start.
+[`ControlRuntimeCommand`](../../Sources/ConduitShared/ControlRuntimeCommands.swift)
+requires the exact module revision;
+[`prepareStart`](../../Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift)
+captures prior component baselines in the sole store capture turn. A submitting
+draft can advance only while it still matches that prior. Private frozen receipt
+encoding, v1 control, helper IPC and schema-two files remain unchanged. The
+unshipped v2 Restart result now reports persisted facts and member outcomes
+instead of generic success.
+
 ## Open questions
 
 Production custody/deadline limits still require actual-adapter measurements.

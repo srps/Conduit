@@ -122,7 +122,7 @@ Does not prove: universal allocation bounds, host/client transfer fairness,
 complete sole-writer coverage, AppState convergence, installed-app
 behavior or release readiness.
 
-The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) connects the private reply codec to coherent host observations through [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift). Preliminary actual-path measurements are being corrected following independent review; do not treat them as shipping RAM, latency or absolute widest-frame bounds.
+The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) connects the private reply codec to coherent host observations through [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift). The resolved-source actual-client run passed 29 mode/trials, including the production Quit routine; independent review checked causal receipts, fake effects, cleanup and numeric evidence. Raw measurements and earlier checkpoints are preserved. They are not shipping RAM, latency or absolute widest-frame bounds.
 
 ## Open questions
 

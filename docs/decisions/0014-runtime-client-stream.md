@@ -102,6 +102,13 @@ Does not prove: a production control socket, cross-process authority, host fence
 
 The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) connects [`RuntimeHostControlOwner`](../../Sources/ConduitRuntime/RuntimeHostControlOwner.swift) and [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift) to that same framed service, with causal receipts and shared physical custody. It records focused checks and outstanding review/profile/activation gates; mechanism-only results do not establish release readiness.
 
+The native-client follow-up adds the Foundation-only
+[`ProxyRecoveryEvent`](../../Sources/RuntimeEvents/ProxyRecoveryEvents.swift)
+family, its separate wire mirror and exhaustive bridge. The kernel emits at its
+existing recovery decision sites; RuntimeHost's extra recovery callback is
+removed. AppState retains its legacy notification callback until activation.
+No summary or endpoint enters the new typed payload.
+
 ## Open questions
 
 Exact command/field inventory, measured frame/page/queue limits and deadline values
