@@ -34,7 +34,7 @@ The first broad run exposed the pre-existing configured-port-zero applied-endpoi
 
 An earlier `thILFZ` owner run failed gated-settle teardown, then correctly retained its one lease slot and failed the next fixture. Its exact settlement/flush cause was not captured. The fixture now reports settlement, joins/admissions, lane/store idle and each diagnostic phase on recurrence. Later passing runs do not diagnose that failure; bounds and fail-closed retention stay.
 
-All41 workflow steps, the full Swift suite and exact-head hosted checks/review disposition remain due before merge. The focused checks above are not release acceptance.
+All 41 local workflow checks passed on unchanged runtime/test/script fingerprint `69297b5df0c305b13eb3bf45ac12495d63210e2d01e604b250dd555ef0e581e0`: 3,551 tests (four skips), all 103 simulator records, perf and packaging/boundary checks. [Workflow evidence](experiments/runtime-module-guards/workflow-checks.json) records the source checkpoint. Exact-head hosted checks and review disposition are recorded on the pull request; local checks alone are not release acceptance.
 
 ## Still required
 

@@ -42,8 +42,8 @@ read-only reload-and-reconcile of eligible inputs, retaining Stop fences and
 mixed-input holds. Save-before-apply and the Stop/Quit exceptions remain selected.
 [0034](./docs/decisions/0034-private-editor-reply-frame-cap.md) selects complete private editor replies at 8 MiB. [Actual-codec sizing and allocation-lifetime measurements](./docs/experiments/private-editor-codec/README.md) cover the headless codec; real-adapter Stop/status responsiveness remains an adoption gate. Service-profile defaults remain unselected and must not inherit experimental values.
 
-Latest merged verified slice: [PR249](https://github.com/srps/Conduit/pull/249),
-fixing final diagnostic marker confirmation beside a retired timer. All41local
+Prior diagnostic verification: [PR249](https://github.com/srps/Conduit/pull/249),
+fixing final diagnostic marker confirmation beside a retired timer. All 41 local
 workflow checks and exact-head hosted Swift/CodeQL passed: 3,459 tests (four skips),
 103 simulator records and perf. Three actual guard mutations and independent
 subscription-backed reviews are recorded in the [verification](./docs/verification-diagnostic-marker-drain-2026-10-26.md).
@@ -55,14 +55,14 @@ the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-
 host-checked conditional DNS activation is selected ([0036](./docs/decisions/0036-conditional-dns-activation.md)).
 Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
 Stop/status/private-read adapter work remains independent.
-The unmerged [module-owner checkpoint](./docs/verification-runtime-module-owner-2026-10-27.md)
-now develops all three module lanes over one lifecycle/store path, with typed module/companion outcomes and full-start completion joins. The inherited-cleanup checkpoint passed 1,346 focused tests (two skips), 95 actual-host assertions and fresh scoped subscription reviews. Twenty strict source mutations each failed intended assertions; restored module/model/physical tests passed. Full workflow/hosted gates remain due. Complete actual framed-client/private-editor adoption before the single AppState switch; no shipping claim follows.
+The [module-owner checkpoint](./docs/verification-runtime-module-owner-2026-10-27.md)
+now develops all three module lanes over one lifecycle/store path, with typed module/companion outcomes and full-start completion joins. The inherited-cleanup checkpoint passed 1,346 focused tests (two skips), 95 actual-host assertions and fresh scoped subscription reviews. Twenty strict source mutations each failed intended assertions; restored module/model/physical tests passed. All 41 local workflow checks passed on stable source: 3,551 tests (four skips), all 103 simulator records and perf. Hosted gates/review are recorded on its PR. Complete actual framed-client/private-editor adoption before the single AppState switch; no shipping claim follows.
 
 Preparation-time capture is selected in [0037](./docs/decisions/0037-saved-command-preparation-capture.md).
 The local saved-command checkpoint replaces the admission pin and passes focused
 workflow/host coverage plus an independent 93-history capture model. Complete actual
 shared module/client ownership, then activate AppState once and delete its old
-runtime/save paths. Full verification and review remain due for this checkpoint.
+runtime/save paths. The combined owner verification is linked above; actual client/private-editor adoption remains incomplete.
 Use one store/load pipeline; no compatibility mode matrix or rebind loop.
 
 Supporting evidence stays with its owning slice:

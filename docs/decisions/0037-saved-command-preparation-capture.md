@@ -84,8 +84,7 @@ verification passed 259 focused tests, the actual-host simulator and the complet
 Swift suite (3,488 tests, four skips). A subscription-backed static Claude review
 supported the capture shape and identified integration obligations.
 [Three executed production guard mutations](../experiments/preparation-capture-guards/README.md)
-failed their intended assertions; restored tests passed. Every workflow gate and
-fresh review of the later combined owner remain due.
+failed their intended assertions; restored tests passed. The subsequent full workflow and fresh combined-owner review are recorded in the shared-owner verification below.
 
 The subsequent [shared module owner](../verification-runtime-module-owner-2026-10-27.md) adds scoped lifecycle cleanup, member/companion outcomes and completion ordering over that same capture path. It introduces no alternate writer or rebind loop.
 
