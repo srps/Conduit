@@ -1,0 +1,63 @@
+{
+  "head": "1ae1317fe2bda73146678bb57cef1525ef1907ab",
+  "source_sha256": "355d9e6e80199990fe868bd381e97755e87a37b7ffb2f24b25e920f3bc44ac8d",
+  "tests_sha256": "5d28f7ac2e993e34258eb1a54dab4d28fa207698ea538ebe16d5e19b2e4f99b4",
+  "restored_exactly": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 75.24,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 11 tests, with 0 failures (0 unexpected) in 2.635 (2.642) seconds"
+      ]
+    },
+    {
+      "name": "settlement-cites-old-snapshot",
+      "exit": 1,
+      "seconds": 10.43,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:232: error: -[ConduitTests.RuntimeHostControlOwnerTests testAStopCompletedWhileTheSnapshotFailsNamesTheRevisionTheRecoveredSnapshotTakes] : XCTAssertGreaterThan failed: (\"ControlOrdinal<ControlPresentationRevisionDomain>(rawValue: 4)\") is not greater than (\"ControlOrdinal<ControlPresentationRevisionDomain>(rawValue: 4)\") - the completion never names the body from before it",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:238: error: -[ConduitTests.RuntimeHostControlOwnerTests testAStopCompletedWhileTheSnapshotFailsNamesTheRevisionTheRecoveredSnapshotTakes] : XCTAssertEqual failed: (\"ControlOrdinal<ControlPresentationRevisionDomain>(rawValue: 5)\") is not equal to (\"ControlOrdinal<ControlPresentationRevisionDomain>(rawValue: 4)\")"
+      ],
+      "invalid_markers": [],
+      "summary": []
+    },
+    {
+      "name": "manufacture-companion-revision",
+      "exit": 1,
+      "seconds": 13.64,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:419: error: -[ConduitTests.RuntimeHostControlOwnerTests testARestartNamingTheObservedDNSRevisionStartsTheCompanionAndAMovedOneIsRefusedWhole] : XCTAssertEqual failed: (\"accepted(0DEAAED8-8EF9-4053-A4FA-C8FC95875FA5)\") is not equal to (\"rejected(ConduitShared.ControlRejectionCode.staleRevision)\") - the client's DNS revision is checked as given",
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:420: error: -[ConduitTests.RuntimeHostControlOwnerTests testARestartNamingTheObservedDNSRevisionStartsTheCompanionAndAMovedOneIsRefusedWhole] : XCTAssertEqual failed: (\"3\") is not equal to (\"2\")"
+      ],
+      "invalid_markers": [],
+      "summary": []
+    },
+    {
+      "name": "abandon-dropped-stop-admission",
+      "exit": 1,
+      "seconds": 12.04,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:344: error: -[ConduitTests.RuntimeHostControlOwnerTests testAQueuedStopReplacedByANewerStopIsDroppedAndItsAdmissionReleased] : XCTAssertEqual failed: (\"1\") is not equal to (\"0\") - the dropped Stop's admission was released",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:158: error: -[ConduitTests.RuntimeHostControlOwnerTests testAQueuedStopReplacedByANewerStopIsDroppedAndItsAdmissionReleased] : XCTAssertEqual failed: (\"runtimeActive\") is not equal to (\"settled\") - the harness's host settles before its root is released",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:167: error: -[ConduitTests.RuntimeHostControlOwnerTests testAQueuedStopReplacedByANewerStopIsDroppedAndItsAdmissionReleased] : failed - the harness's shutdown is unconfirmed: its host and root are kept"
+      ],
+      "invalid_markers": [],
+      "summary": []
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 9.26,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 11 tests, with 0 failures (0 unexpected) in 1.816 (1.830) seconds"
+      ]
+    }
+  ],
+  "tree": "897ce9364ac100ef995a4838622e44b2e0d0cb92"
+}
