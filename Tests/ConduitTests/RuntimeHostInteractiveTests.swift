@@ -1160,7 +1160,7 @@ final class RuntimeHostInteractiveTests: XCTestCase {
         let busy = await workflow.saveOwedDNSStop()
         XCTAssertEqual(busy.save, .owed)
         XCTAssertEqual(busy.events, [.held(ConfigurationWorkflowHeld(phase: .stop, input: .runtime, reason: .storeBusy))])
-        XCTAssertEqual(ControlConfigWorkflowEvent(busy.events[0]).detail, "phase=stop component=runtime reason=store_busy")
+        XCTAssertEqual(busy.events.first.map { ControlConfigWorkflowEvent($0).detail }, "phase=stop component=runtime reason=store_busy")
         XCTAssertTrue(workflow.dnsIntent.fenced, "the fence stays")
         XCTAssertEqual(try Data(contentsOf: harness.environment.configFile), saved, "nothing was written")
         files.release()
