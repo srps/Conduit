@@ -18,8 +18,9 @@ private final class RefusingGSS: GSSTokenProvider, @unchecked Sendable {
     func resetContext() {}
 }
 
-/// A UDP socket the test holds on a loopback port it chose, so a DNS forwarder's bind on that port fails as a contended port does.
-private final class HeldUDPPort {
+/// A UDP socket the test holds on a loopback port it chose, so a DNS forwarder's bind on that port fails as a contended port does. The
+/// control-owner tests hold one for a frozen request's forwarder port.
+final class HeldUDPPort {
     let port: Int
     private let descriptor: Int32
 
@@ -93,6 +94,8 @@ final class InteractiveHostHarness {
         let vpn = FakeVPNStatusObserver()
         /// The PAC evaluator the orchestrator fetches through; a test that holds a Start before its bind names a `HeldPACFetch`.
         var pacEvaluator: any PacEvaluator = FakePacEvaluator()
+        /// The state-file access the host's store uses; a test that parks a store step names a `HeldStateFileRead`.
+        var stateFiles: any StateFileAccessing = StateFileAccess.operatingSystem()
         private let directory: URL
         private(set) var host: RuntimeHost?
 
@@ -139,7 +142,7 @@ final class InteractiveHostHarness {
                     vpnStatusMonitor: { _, _ in vpn },
                     homeDirectory: directory.appendingPathComponent("home", isDirectory: true),
                     resolverDirectory: machine.resolverDirectory.path,
-                    stateFiles: StateFileAccess.operatingSystem()
+                    stateFiles: stateFiles
                 ),
                 reapplyRetrySchedule: ConfigReapplyRetry.Schedule(delays: [.seconds(3600)]),
                 splitDNSHelperCheckInterval: .seconds(3600)

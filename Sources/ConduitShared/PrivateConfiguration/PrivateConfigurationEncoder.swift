@@ -419,6 +419,7 @@ extension PrivateJSONEmitter {
     }
 
     private func writeModuleIntents(_ value: PrivateModuleSlots<PrivateModuleIntent>) throws {
+        guard value.isWellFormed else { throw PrivateConfigurationWireError.invalidValue }
         try object {
             try member("proxy") { try writeModuleIntent(value.proxy) }
             try member("dns") { try writeModuleIntent(value.dns) }
@@ -431,6 +432,7 @@ extension PrivateJSONEmitter {
         case .saveOnly: (.saveOnly, nil)
         case .applyWhileRunning(let revision): (.applyWhileRunning, revision)
         case .start(let revision): (.start, revision)
+        case .conditionalStart(let revision): (.conditionalStart, revision)
         }
         try object {
             try member("action") { try writeString(action.rawValue) }

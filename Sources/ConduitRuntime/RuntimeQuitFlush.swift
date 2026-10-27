@@ -13,7 +13,8 @@ import Foundation
 /// as such while its work still runs and still owns the root, until it ends.
 @MainActor
 final class RuntimeQuitFlush {
-    enum Part {
+    /// The final saves one quit may declare, each admitted once: with the quit itself, the operations its partition can hold.
+    enum Part: CaseIterable {
         case configuration
         case preferences
     }

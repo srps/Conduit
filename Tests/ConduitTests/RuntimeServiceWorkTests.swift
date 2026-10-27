@@ -435,10 +435,14 @@ final class RuntimeServiceWorkTests: XCTestCase {
     func testTheRetainedByteBudgetIsTheExactSumOfEveryTerm() throws {
         let limits = try RuntimeServiceFixtures.limits()
         let modules = ControlModule.allCases.count
-        let partitions = modules + 1
+        // Ordinary, the quit's, and one per stop module.
+        let partitions = 2 + modules
         let collectionKinds = ControlCollectionKind.allCases.count
-        let operations = limits.ordinaryPendingCapacity + RuntimeServiceLimits.stopSlotsPerModule * modules
-        let laneCount = limits.ordinaryLaneCapacity + limits.readLaneCapacity + limits.streamLaneCapacity + limits.stopLaneCapacityPerModule * modules
+        // Two slots per stop module, and the quit with its configuration and preferences final saves.
+        let operations = limits.ordinaryPendingCapacity + 2 * modules + 3
+        // The quit's own lane holds one ordinary-frame reservation.
+        let laneCount = limits.ordinaryLaneCapacity + limits.readLaneCapacity + limits.streamLaneCapacity + limits.stopLaneCapacityPerModule * modules + 1
+        XCTAssertEqual(limits.operationCapacity, operations)
         XCTAssertEqual(limits.laneCount, laneCount)
         XCTAssertEqual(limits.laneRetainedBytes, laneCount * (2 * limits.maxRequestBytes + 2 * limits.maxReplyBytes))
         XCTAssertEqual(limits.firstFrameRetainedBytes, limits.subscriberLimit * limits.maxReplyBytes)
@@ -451,6 +455,27 @@ final class RuntimeServiceWorkTests: XCTestCase {
             + 2 * limits.latestSnapshotByteCapacity + limits.subscriberLimit * limits.subscriberRecordBytes
         XCTAssertEqual(limits.retainedByteBudget, expected)
         XCTAssertLessThanOrEqual(limits.retainedByteBudget, limits.retainedByteCeiling)
+    }
+
+    /// The structural terms come from the structures that hold them: every alias partition the table keeps, the quit's partition with
+    /// its reserved final saves, and the private custody's terms at the private frame caps, which stay outside the ordinary budget.
+    func testTheStructuralTermsComeFromTheTableTheQuitAndThePrivateCustody() throws {
+        let limits = try RuntimeServiceFixtures.limits()
+        XCTAssertEqual(RuntimePartition.all.count, ControlModule.allCases.count + 2)
+        XCTAssertTrue(RuntimePartition.all.contains(.quit))
+        XCTAssertEqual(RuntimeServiceLimits.quitPartitionOperations, 1 + RuntimeQuitFlush.Part.allCases.count)
+        XCTAssertEqual(
+            limits.privateTransferRetainedBytes,
+            PrivateConfigurationFrame.maxRequestFrameBytes + PrivateConfigurationFrame.maxEditorReplyFrameBytes
+        )
+        XCTAssertEqual(limits.privateInputRetainedBytes, PrivateConfigurationFrame.maxRequestFrameBytes)
+        let counter = RuntimeLaneCounter(limits: limits)
+        let quit = try XCTUnwrap(counter.reserve(.quit, onQuiesced: nil))
+        XCTAssertNil(counter.reserve(.quit, onQuiesced: nil), "the quit lane holds one reservation")
+        let transfer = try XCTUnwrap(counter.reserve(.privateTransfer, onQuiesced: nil))
+        XCTAssertNil(counter.reserve(.privateTransfer, onQuiesced: nil), "the private transfer holds one reservation")
+        quit.end(.timer)
+        transfer.end(.timer)
     }
 
     /// Doubling the reply cap moves the budget by exactly the reservation and first-frame terms that scale with it.

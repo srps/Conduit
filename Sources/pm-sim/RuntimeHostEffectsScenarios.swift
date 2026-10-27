@@ -669,15 +669,30 @@ enum RuntimeHostEffectsScenario {
             guard case .preferencesSettled(let receipt)? = outcome else { return false }
             return receipt.preferences.write == .persisted(reportedError: false)
         }
-        let saved = written(try await preferences { $0.automaticUpdateChecks = true })
-        // The final save's ID is minted before the Quit names it, so only that save may spend the reservation.
-        let finalSave = ControlRequestID(rawValue: UUID())
-        let quit = try await clients.control.submit(
-            .quit(total: try ControlWireBudget(10_000), flush: try ControlQuitFlush(configuration: nil, preferences: finalSave)),
-            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation, deadline: deadline
+        let earlier = ControlRequestID(rawValue: UUID())
+        let saved = written(try await preferences(earlier) { $0.automaticUpdateChecks = true })
+        let answer = try await clients.editor.read(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: incarnation,
+            budget: try ControlWireBudget(1_000), deadline: deadline
         )
-        let flushed = written(try await preferences(finalSave) { $0.preferredBrowserTestURL = "https://quit-flush.example.test/" })
-        let completed = if case .completed(let completion)? = try await settled(quit) { completion.command == .quit } else { false }
+        guard case .observation(let observed) = answer, let baseline = observed.components.preferences.baseline else {
+            return (saved, false, false)
+        }
+        var final = try PrivateConfigurationBridge.makeValues(from: observed).preferences
+        final.preferredBrowserTestURL = "https://quit-flush.example.test/"
+        // The bounded client quit: the framed Quit fences first and names the final save's ID, minted inside it, so only that save may
+        // spend the reservation; the save waits for the earlier update's settlement before it takes the one frozen-input slot.
+        let result = await RuntimeClientQuit.quit(
+            control: clients.control, editor: clients.editor, incarnation: incarnation, total: .seconds(10), priorUpdate: earlier,
+            preferences: { [final] requestID, _ in
+                try PrivateConfigurationBridge.makePreferencesRequest(
+                    preferences: final, requestID: requestID, incarnation: incarnation,
+                    budget: try ControlWireBudget(1_000), preferencesBaseline: baseline
+                )
+            }
+        )
+        let flushed = if case .settled(let outcome) = result.preferences { written(outcome) } else { false }
+        let completed = if case .settled(.completed(let completion)) = result.quit { completion.command == .quit } else { false }
         return (saved, completed, flushed)
     }
 

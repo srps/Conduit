@@ -19,6 +19,22 @@ final class RuntimePrivateCustody: @unchecked Sendable {
     private let lock = NSLock()
     private let transfers: RuntimeLaneCounter
     private var inputHeld = false
+    /// The one capacity-wait permit: the quit's final flush, whose settled predecessor can still hold the transfer while its client decodes
+    /// the reply. One wait and its one timer hold it; a physical release resumes the wait, and its deadline or cancellation ends it. The
+    /// caller returns when its wait ends, and the permit returns only once its timer has also physically ended.
+    private var capacityWait: CapacityWaitState?
+
+    private struct CapacityWaitState {
+        var continuation: CheckedContinuation<CapacityWait, Never>?
+        var ended: RuntimeWaitEnd?
+        var waiting = true
+        var timerRunning = true
+    }
+
+    private enum CapacityWait {
+        case released
+        case ended(RuntimeWaitEnd)
+    }
 
     init(limits: RuntimeServiceLimits) {
         transfers = RuntimeLaneCounter(limits: limits)
@@ -30,7 +46,11 @@ final class RuntimePrivateCustody: @unchecked Sendable {
         let reserved = lock.withLock { () -> RuntimeLaneTicket? in
             guard !purpose.holdsInput || !inputHeld else { return nil }
             // An input the round never took is released only when the ticket has quiesced: no queued or running round can still admit.
-            guard let ticket = transfers.reserve(.privateTransfer, onQuiesced: { input.releaseUntaken() }) else { return nil }
+            // The slot is back in the counter before this runs, so a capacity waiter it wakes finds it free.
+            guard let ticket = transfers.reserve(.privateTransfer, onQuiesced: { [weak self] in
+                input.releaseUntaken()
+                self?.capacityReleased()
+            }) else { return nil }
             if purpose.holdsInput {
                 inputHeld = true
                 input.hold(RuntimeFrozenInputSlot(custody: self))
@@ -42,6 +62,69 @@ final class RuntimePrivateCustody: @unchecked Sendable {
         return RuntimePrivateReservation(ticket: ticket, input: input)
     }
 
+    /// Reserves as `reserve` does, waiting until `deadline` while the custody is busy. Only a physical release wakes the wait, and it then
+    /// tries once more; nothing polls. One caller may wait at a time, and a second is refused busy at once. The end says why no
+    /// reservation was made: the deadline, the caller's cancellation, or another waiter.
+    func reserve(
+        _ purpose: PrivateExchangePurpose,
+        until deadline: RuntimeDeadline,
+        timing: RuntimeServiceTiming
+    ) async -> Result<RuntimePrivateReservation, RuntimeWaitEnd> {
+        if let reservation = reserve(purpose) { return .success(reservation) }
+        let permitted = lock.withLock { () -> Bool in
+            guard capacityWait == nil else { return false }
+            capacityWait = CapacityWaitState()
+            return true
+        }
+        guard permitted else { return .failure(.transportBusy) }
+        let timer = Task { [weak self] in
+            defer { self?.endCapacityPermit(timer: true) }
+            do {
+                try await timing.sleep(deadline.instant)
+            } catch {
+                // Cancelled once the wait ended first.
+                return
+            }
+            self?.endCapacityWait(.deadlineExpired)
+        }
+        let result = await withTaskCancellationHandler {
+            while true {
+                if let reservation = reserve(purpose) { return Result<RuntimePrivateReservation, RuntimeWaitEnd>.success(reservation) }
+                switch await awaitRelease(of: purpose, until: deadline, timing: timing) {
+                case .released:
+                    continue
+                case .ended(let end):
+                    return .failure(end)
+                }
+            }
+        } onCancel: {
+            endCapacityWait(.cancelled)
+        }
+        // The caller has its answer now. The permit stays held until the cancelled timer has physically ended, so no second wait arms
+        // another timer meanwhile, and a stale timer can never end a later wait.
+        timer.cancel()
+        endCapacityPermit(timer: false)
+        return result
+    }
+
+    /// Whether a caller is waiting for a release now, for tests that order a release after the wait began.
+    var isAwaitingCapacity: Bool {
+        lock.withLock { capacityWait?.continuation != nil }
+    }
+
+    /// Whether the capacity-wait permit is held, by a wait or by its timer's cleanup.
+    var capacityPermitHeld: Bool {
+        lock.withLock { capacityWait != nil }
+    }
+
+    /// One holder of the permit ended: the wait, or its timer. The permit returns when both have.
+    private func endCapacityPermit(timer: Bool) {
+        lock.withLock {
+            if timer { capacityWait?.timerRunning = false } else { capacityWait?.waiting = false }
+            if let wait = capacityWait, !wait.waiting, !wait.timerRunning { capacityWait = nil }
+        }
+    }
+
     /// What is held now: for tests and measurements, which assert release only after physical cleanup.
     var held: (transfer: Bool, input: Bool) {
         let transfer = transfers.inFlight(.privateTransfer) > 0
@@ -50,6 +133,46 @@ final class RuntimePrivateCustody: @unchecked Sendable {
 
     fileprivate func releaseInput() {
         lock.withLock { inputHeld = false }
+        capacityReleased()
+    }
+
+    /// One wait for a release, under the permit. Registration rechecks the wait's end, the deadline and capacity under the lock, so a
+    /// release, an expiry or a cancel that came first is never missed.
+    private func awaitRelease(
+        of purpose: PrivateExchangePurpose,
+        until deadline: RuntimeDeadline,
+        timing: RuntimeServiceTiming
+    ) async -> CapacityWait {
+        await withCheckedContinuation { (continuation: CheckedContinuation<CapacityWait, Never>) in
+            let early = lock.withLock { () -> CapacityWait? in
+                if let ended = capacityWait?.ended { return .ended(ended) }
+                if deadline.remaining(at: timing.now()) <= .zero { return .ended(.deadlineExpired) }
+                if transfers.inFlight(.privateTransfer) == 0, !purpose.holdsInput || !inputHeld { return .released }
+                capacityWait?.continuation = continuation
+                return nil
+            }
+            if let early { continuation.resume(returning: early) }
+        }
+    }
+
+    private func capacityReleased() {
+        let waiter = lock.withLock { () -> CheckedContinuation<CapacityWait, Never>? in
+            defer { capacityWait?.continuation = nil }
+            return capacityWait?.continuation
+        }
+        waiter?.resume(returning: .released)
+    }
+
+    /// Ends the wait that holds the permit, now or at its next registration.
+    private func endCapacityWait(_ end: RuntimeWaitEnd) {
+        let resumed = lock.withLock { () -> (CheckedContinuation<CapacityWait, Never>, RuntimeWaitEnd)? in
+            guard var wait = capacityWait else { return nil }
+            let first = wait.ended ?? end
+            wait.ended = first
+            defer { wait.continuation = nil; capacityWait = wait }
+            return wait.continuation.map { ($0, first) }
+        }
+        if let (waiter, first) = resumed { waiter.resume(returning: .ended(first)) }
     }
 }
 
@@ -193,10 +316,20 @@ struct RuntimePrivateChannel: Sendable {
 extension RuntimeInMemoryTransport: PrivateEditorTransport {
     func withPrivateExchange<T: Sendable>(
         _ purpose: PrivateExchangePurpose,
+        capacityUntil: RuntimeDeadline?,
         _ body: (PrivateExchange) async throws -> T
     ) async throws -> T {
         guard let channel = privateChannel else { throw ControlRuntimeTransportFailure.notSent(.disconnected) }
-        guard let reservation = channel.custody.reserve(purpose) else { throw ControlRuntimeTransportFailure.notSent(.transportBusy) }
+        let reservation: RuntimePrivateReservation
+        if let capacityUntil {
+            switch await channel.custody.reserve(purpose, until: capacityUntil, timing: timing) {
+            case .success(let reserved): reservation = reserved
+            case .failure(let end): throw ControlRuntimeTransportFailure.notSent(end)
+            }
+        } else {
+            guard let reserved = channel.custody.reserve(purpose) else { throw ControlRuntimeTransportFailure.notSent(.transportBusy) }
+            reservation = reserved
+        }
         defer { reservation.end() }
         let core = self.core
         let now = timing.now
@@ -394,7 +527,8 @@ extension RuntimeHost {
     /// The whole request in one turn (decision 0035): every actionable revision is checked before anything changes, and a refusal changes
     /// nothing. Start slots form one group through the host's one Start path, with the frozen candidate in place of the saved capture. A
     /// request with no Start changes no lifecycle intent: it saves, and applies to each apply-while-running module still running at the
-    /// revision it named. A Start beside an apply-while-running slot is not adopted yet, so it is refused whole.
+    /// revision it named. A conditional DNS slot rides the proxy Start as the menu Restart's companion does. A Start beside an
+    /// apply-while-running slot is not adopted yet, so it is refused whole.
     func fencePrivateUpdate(
         _ request: PrivateConfigurationRequest,
         values: (runtime: ProxyConfig, platform: PlatformIntegrationConfig),
@@ -413,8 +547,14 @@ extension RuntimeHost {
             case .start(let revision):
                 actions[module] = .start
                 expected[module] = revision.rawValue
+            case .conditionalStart(let revision):
+                // The codec admits it only in DNS's slot beside the proxy's Start: the menu Restart's companion, with the revision the
+                // client observed checked as given (decision 0036).
+                actions[module] = .conditionalActivation
+                expected[module] = revision.rawValue
             }
         }
+        assert(request.modules.isWellFormed, "the codec refuses a conditional companion without its proxy Start")
         let applies = ControlModule.allCases.filter { applying[$0] != nil }
         if !applies.isEmpty {
             guard ControlModule.allCases.allSatisfy({ actions[$0] == .none }) else { return .rejected(.notImplemented) }
@@ -565,9 +705,12 @@ extension RuntimeHost {
                     result: admitted.facts.members?[module].map { ControlLifecycleModuleResult($0) } ?? .superseded
                 )
             }
+            // The companion's own recorded result. A Start that ended before the companion ran never ran it, which is its `superseded`.
+            let conditionalDNS = admitted.actions.dns == .conditionalActivation
+                ? ControlLifecycleConditionalDNSResult(admitted.facts.conditionalDNS ?? .superseded) : nil
             return receipt(
                 update.requestID, commit: admitted.facts.commit, dnsStaged: admitted.facts.dnsStaged, modules: results, applied: nil,
-                unsaved: unsaved
+                conditionalDNS: conditionalDNS, unsaved: unsaved
             )
         }
     }
@@ -603,6 +746,7 @@ extension RuntimeHost {
         dnsStaged: Bool?,
         modules: [ControlModuleReceipt],
         applied: Bool?,
+        conditionalDNS: ControlLifecycleConditionalDNSResult? = nil,
         unsaved: ControlFailureCode
     ) -> ControlOperationOutcome {
         guard let commit else { return .failed(unsaved) }
@@ -615,7 +759,8 @@ extension RuntimeHost {
                 platform: try Self.componentWrite(commit.platform),
                 committedDNSForwarderEnabled: runtime.write.isVerified ? dnsStaged : nil,
                 modules: modules,
-                applied: applied
+                applied: applied,
+                conditionalDNS: conditionalDNS
             ))
         } catch {
             preconditionFailure("a receipt is built from the store's own consistent facts")

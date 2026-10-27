@@ -72,9 +72,10 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let client: any RuntimeClient
     }
 
-    private func compose(dnsForwarderEnabled: Bool = true) async throws -> Composed {
+    private func compose(dnsForwarderEnabled: Bool = true, stateFiles: (any StateFileAccessing)? = nil) async throws -> Composed {
         let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: dnsForwarderEnabled)
         self.harness = harness
+        if let stateFiles { harness.stateFiles = stateFiles }
         let host = try await harness.makeHost()
         let composition = RuntimeControlComposition(
             host: host,
@@ -139,9 +140,13 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         return operation
     }
 
+    /// The command a lifecycle completion names: settled, or a DNS Stop's causal disable write.
     private func completed(_ outcome: ControlOperationOutcome) -> ControlRuntimeCommandKind? {
-        if case .completed(let completion) = outcome, completion.result == .settled { return completion.command }
-        return nil
+        guard case .completed(let completion) = outcome else { return nil }
+        switch completion.result {
+        case .settled, .dnsDisable: return completion.command
+        case .upstreamProbe, .dnsLiveness, .preflight, .platformWrite: return nil
+        }
     }
 
     // MARK: - One incarnation
@@ -230,10 +235,12 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         modules: PrivateModuleSlots<PrivateModuleIntent> = PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly),
         requestID: ControlRequestID = ControlRequestID(rawValue: UUID()),
         budgetMilliseconds: Int = 1_000,
+        editPlatform: (inout PlatformIntegrationConfig) -> Void = { _ in },
         edit: (inout ProxyConfig) -> Void
     ) throws -> PrivateConfigurationRequest {
         var values = try PrivateConfigurationBridge.makeValues(from: observed)
         edit(&values.config)
+        editPlatform(&values.platform)
         return try PrivateConfigurationBridge.makeRequest(
             config: values.config, platform: values.platform, requestID: requestID, incarnation: composed.host.incarnation,
             budget: try ControlWireBudget(budgetMilliseconds),
@@ -893,39 +900,64 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
             composition.service.requestLookup(ControlRequestQuery(expectedIncarnation: host.incarnation, requestID: request.requestID))
         }
 
+        // Each caller's answer lands in a slot, so the test sees whether it arrived while the round is still held without awaiting the
+        // caller first. The round is always drained before a caller is awaited, so a caller that is not detached fails the test, not hangs it.
+        func submitting(_ request: PrivateConfigurationRequest) -> (Task<Void, Never>, LockedSlot<Result<ControlAdmission, any Error>>) {
+            let answer = LockedSlot<Result<ControlAdmission, any Error>>()
+            let task = Task {
+                do {
+                    answer.set(.success(try await editor.submit(request, deadline: deadline())))
+                } catch {
+                    answer.set(.failure(error))
+                }
+            }
+            return (task, answer)
+        }
+
         // The request's one-second budget ends before the caller's own deadline while its round waits in the seam.
         let budgeted = try update(host: host, from: observed) { $0.profileName = "Never admitted" }
-        let waiting = Task { try await editor.submit(budgeted, deadline: deadline()) }
-        let armed = try await eventually { clock.armedTimerCount > 0 && scheduling.pendingCount > 0 }
+        let hopsBeforeBudgeted = scheduling.queuedHopCount
+        let timersBefore = clock.armedTimerCount
+        let (waiting, budgetedAnswer) = submitting(budgeted)
+        let armed = try await eventually {
+            clock.armedTimerCount > timersBefore && scheduling.queuedHopCount > hopsBeforeBudgeted
+        }
         XCTAssertTrue(armed, "the wait armed its timer and queued its round")
         clock.advance(by: .seconds(2))
         clock.fireAll()
-        let refused = try await waiting.value
-        XCTAssertEqual(refused, .rejected(.deadlineExpired), "the typed budget refusal, before any claim")
+        let budgetAnswered = try await eventually { budgetedAnswer.value != nil }
+        XCTAssertTrue(budgetAnswered, "the budget detaches the caller while its round is still held")
         XCTAssertEqual(custody.held.transfer, true, "the queued round still holds the transfer")
         XCTAssertEqual(custody.held.input, true, "and the input it could still have admitted")
         _ = try accepted(composition.service.submit(ControlOperationRequest(
             requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, command: .stop(.tunnels)
         )))
         scheduling.drainAll()
+        await waiting.value
+        guard case .success(let refused)? = budgetedAnswer.value else {
+            return XCTFail("the budgeted caller is answered: \(String(describing: budgetedAnswer.value))")
+        }
+        XCTAssertEqual(refused, .rejected(.deadlineExpired), "the typed budget refusal, before any claim")
         let released = try await eventually { !custody.held.transfer && !custody.held.input }
         XCTAssertTrue(released, "the transfer and the input return once the round ran unclaimed")
         XCTAssertEqual(lookup(budgeted), .unknown(.notRecorded), "nothing was admitted or recorded")
 
         // A caller cancelled while its round waits ends unsent; the round then runs unclaimed.
         let cancelled = try update(host: host, from: observed) { $0.profileName = "Cancelled" }
-        let task = Task { try await editor.submit(cancelled, deadline: deadline()) }
-        let queued = try await eventually { scheduling.pendingCount > 0 }
-        XCTAssertTrue(queued)
+        let hopsBeforeCancelled = scheduling.queuedHopCount
+        let (task, cancelledAnswer) = submitting(cancelled)
+        let queued = try await eventually { scheduling.queuedHopCount > hopsBeforeCancelled }
+        XCTAssertTrue(queued, "the cancelled caller's round waits in the seam")
         task.cancel()
-        do {
-            _ = try await task.value
-            XCTFail("a cancelled wait is not answered")
-        } catch let error as RuntimeClientError {
-            XCTAssertEqual(error, .notSent(.cancelled))
-        }
+        let cancelAnswered = try await eventually { cancelledAnswer.value != nil }
+        XCTAssertTrue(cancelAnswered, "cancellation detaches the caller while its round is still held")
         XCTAssertEqual(custody.held.transfer, true, "the cancelled caller's round still holds the transfer")
         scheduling.drainAll()
+        await task.value
+        guard case .failure(let error as RuntimeClientError)? = cancelledAnswer.value else {
+            return XCTFail("a cancelled wait is not answered: \(String(describing: cancelledAnswer.value))")
+        }
+        XCTAssertEqual(error, .notSent(.cancelled))
         let cleaned = try await eventually { !custody.held.transfer && !custody.held.input }
         XCTAssertTrue(cleaned)
         XCTAssertEqual(lookup(cancelled), .unknown(.notRecorded))
@@ -1004,6 +1036,364 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(composition.privateCustody.held.input, false)
     }
 
+    /// A Stop of the module an apply names, admitted while that apply's store commit is parked on its platform verification read, revokes
+    /// the runtime write that has not started (decision 0035). The parked read finishes, nothing is written, the receipt reports the runtime
+    /// write not attempted with no new baseline and no apply, and the Stop settles while the store step is still parked.
+    func testAStopAdmittedWhileAnApplysCommitIsParkedRevokesItsUnstartedRuntimeWrite() async throws {
+        let files = HeldStateFileRead()
+        let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let saved = try Data(contentsOf: composed.harness.environment.configFile)
+        let request = try update(composed, from: observed, modules: PrivateModuleSlots(
+            proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+        )) { $0.profileName = "Revoked while parked" }
+
+        // The platform value is unchanged, so the coupled commit verifies the platform file by reading it before the runtime write.
+        let platformPath = composed.harness.session.plan.platformConfig.path
+        files.hold.arm { name, values in name == "read" && values == [platformPath] }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        await files.hold.waitUntilReached()
+        XCTAssertFalse(files.hold.reachedOnMainThread)
+
+        let stop = try accepted(try await submit(composed, .stop(.proxy)))
+        let stopOutcome = try await finished(stop, on: stream)
+        XCTAssertNotNil(completed(stopOutcome), "the Stop settles without the parked store step")
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp)
+        files.hold.release()
+        let settled = try receipt(try await finished(operation, on: stream))
+        XCTAssertEqual(settled.platform.write, .unchanged)
+        guard case .notAttempted = settled.runtime.write else {
+            return XCTFail("the revoked runtime write is not attempted: \(settled.runtime.write)")
+        }
+        XCTAssertNil(settled.runtime.baseline, "no new runtime baseline without a verified write")
+        XCTAssertEqual(settled.applied, false)
+        XCTAssertEqual(try Data(contentsOf: composed.harness.environment.configFile), saved, "the revoked save wrote nothing")
+        XCTAssertEqual(composed.composition.privateCustody.held.input, false)
+    }
+
+    /// The client quit over the actual framed and private clients while an earlier update still holds the one frozen input in a parked
+    /// store step: the Quit fences first, its final saves wait for that update's settlement, and the configuration save rebases only from
+    /// that update's causal receipt. Both declared saves then flush under the IDs the Quit named, and the Quit completes.
+    func testTheClientQuitFencesFirstThenFlushesOnceTheEarlierUpdateReleasesItsInput() async throws {
+        let files = HeldStateFileRead()
+        let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
+        try await composed.host.startRuntime()
+        let observed = try await observation(composed)
+        let prior = try update(composed, from: observed) { $0.profileName = "Prior" }
+        let platformPath = composed.harness.session.plan.platformConfig.path
+        files.hold.arm { name, values in name == "read" && values == [platformPath] }
+        _ = try accepted(try await editor(composed).submit(prior, deadline: deadline()))
+        await files.hold.waitUntilReached()
+
+        let values = try PrivateConfigurationBridge.makeValues(from: observed)
+        let incarnation = composed.host.incarnation
+        let observedRuntime = try XCTUnwrap(observed.components.runtime.baseline)
+        let observedPlatform = try XCTUnwrap(observed.components.platform.baseline)
+        let preferencesBaseline = try XCTUnwrap(observed.components.preferences.baseline)
+        let handedPrior = LockedSlot<RuntimeQuitStep>()
+        let configuration = Self.finalConfiguration(
+            values, incarnation: incarnation, runtime: observedRuntime, platform: observedPlatform, handedPrior: handedPrior
+        )
+        let quitting = Task { [client = composed.client, editor = editor(composed)] in
+            await RuntimeClientQuit.quit(
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(30), priorUpdate: prior.requestID,
+                configuration: configuration,
+                preferences: { requestID, _ in
+                    var preferences = values.preferences
+                    preferences.preferredBrowserTestURL = "https://final.example.test/"
+                    return try PrivateConfigurationBridge.makePreferencesRequest(
+                        preferences: preferences, requestID: requestID, incarnation: incarnation,
+                        budget: try ControlWireBudget(1_000), preferencesBaseline: preferencesBaseline
+                    )
+                }
+            )
+        }
+        let fenced = try await eventually { composed.host.workflow.isTerminal }
+        XCTAssertTrue(fenced, "the Quit fences while the earlier update is still in the store")
+        XCTAssertEqual(composed.composition.privateCustody.held.input, true, "the earlier update still holds the one frozen input")
+        XCTAssertNil(handedPrior.value, "no final save is mapped while that input is held")
+        files.hold.release()
+        let result = await quitting.value
+
+        guard case .settled(.configurationSettled(let priorReceipt)) = result.priorUpdate else {
+            return XCTFail("the earlier update settles with its receipt: \(result.priorUpdate)")
+        }
+        // The earlier save is ordinary work: the Quit's latch revoked its runtime write, which had not started, and its platform file was
+        // verified. The final save keeps the runtime baseline it was submitted at, because the receipt names no new one.
+        XCTAssertEqual(priorReceipt.runtime.write, .notAttempted(.superseded))
+        XCTAssertNil(priorReceipt.runtime.baseline)
+        XCTAssertEqual(priorReceipt.platform.write, .unchanged)
+        XCTAssertEqual(handedPrior.value, result.priorUpdate, "the producer saw that receipt")
+        guard case .settled(.configurationSettled(let final)) = result.configuration else {
+            return XCTFail("the final configuration save settles with its receipt: \(result.configuration)")
+        }
+        XCTAssertEqual(final.runtime.write, .persisted(reportedError: false))
+        guard case .settled(.preferencesSettled(let preferences)) = result.preferences else {
+            return XCTFail("the final preferences save settles with its receipt: \(result.preferences)")
+        }
+        XCTAssertEqual(preferences.preferences.write, .persisted(reportedError: false))
+        guard case .settled(let quit) = result.quit else { return XCTFail("the Quit settles: \(result.quit)") }
+        XCTAssertEqual(completed(quit), .quit)
+        XCTAssertNil(result.observationFailure)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Final")
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp)
+        XCTAssertEqual(composed.composition.privateCustody.held.input, false)
+    }
+
+    /// A final configuration producer for the client quit: `values` renamed "Final", at the baselines the draft was submitted at, rebased
+    /// only from the earlier update's settled receipt. It records the prior step it was handed.
+    private nonisolated static func finalConfiguration(
+        _ values: (config: ProxyConfig, platform: PlatformIntegrationConfig, preferences: AppPreferences),
+        incarnation: ControlHostIncarnation,
+        runtime: PrivateBaseline,
+        platform: PrivateBaseline,
+        handedPrior: LockedSlot<RuntimeQuitStep>
+    ) -> @Sendable (ControlRequestID, RuntimeQuitStep) throws -> PrivateConfigurationRequest {
+        { requestID, prior in
+            handedPrior.set(prior)
+            var runtimeBaseline = runtime
+            var platformBaseline = platform
+            if case .settled(.configurationSettled(let receipt)) = prior {
+                runtimeBaseline = receipt.runtime.baseline ?? runtimeBaseline
+                platformBaseline = receipt.platform.baseline ?? platformBaseline
+            }
+            var config = values.config
+            config.profileName = "Final"
+            return try PrivateConfigurationBridge.makeRequest(
+                config: config, platform: values.platform, requestID: requestID, incarnation: incarnation,
+                budget: try ControlWireBudget(1_000), runtimeBaseline: runtimeBaseline, platformBaseline: platformBaseline,
+                modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+            )
+        }
+    }
+
+    /// A settled earlier update whose own client is still decoding its reply keeps the one private transfer: the logical settlement comes
+    /// before physical quiescence. The client quit sees that receipt, its final save waits for the custody's release within the same
+    /// deadline instead of taking the busy transfer as its answer, and once the earlier exchange ends the declared save flushes.
+    func testTheClientQuitsFinalSaveWaitsForATransferHeldPastTheEarlierUpdatesSettlement() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let held = HeldPrivateTransport(inner: composed.composition.transport)
+        defer { held.release() }
+        let prior = try update(composed, from: observed) { $0.profileName = "Prior" }
+        held.arm(.afterReply)
+        let priorCaller = Task { try await PrivateEditorClient(transport: held).submit(prior, deadline: deadline()) }
+        await held.waitUntilHeld()
+        // The host settled the earlier update while its caller still holds the transfer to decode the reply.
+        var priorSettled = false
+        for _ in 0..<64 where !priorSettled {
+            if case .operationFinished(let finished) = try await stream.next(deadline()),
+               case .configurationSettled(let receipt) = finished.outcome, receipt.requestID == prior.requestID {
+                priorSettled = true
+            }
+        }
+        XCTAssertTrue(priorSettled, "the earlier update settled")
+        let custody = composed.composition.privateCustody
+        XCTAssertEqual(custody.held.transfer, true, "its caller still holds the transfer")
+        XCTAssertEqual(custody.held.input, false, "its frozen input was released before its settlement")
+
+        let values = try PrivateConfigurationBridge.makeValues(from: observed)
+        let incarnation = composed.host.incarnation
+        let handedPrior = LockedSlot<RuntimeQuitStep>()
+        let configuration = Self.finalConfiguration(
+            values, incarnation: incarnation, runtime: try XCTUnwrap(observed.components.runtime.baseline),
+            platform: try XCTUnwrap(observed.components.platform.baseline), handedPrior: handedPrior
+        )
+        let quitting = Task { [client = composed.client, editor = editor(composed)] in
+            await RuntimeClientQuit.quit(
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(30), priorUpdate: prior.requestID,
+                configuration: configuration
+            )
+        }
+        let waiting = try await eventually { custody.isAwaitingCapacity }
+        XCTAssertTrue(waiting, "the final save waits for the custody, not refused busy")
+        XCTAssertTrue(composed.host.workflow.isTerminal, "the Quit fenced first")
+        XCTAssertNil(handedPrior.value, "nothing is mapped before the transfer is free")
+        held.release()
+        _ = try accepted(try await priorCaller.value)
+        let result = await quitting.value
+
+        guard case .settled(.configurationSettled(let priorReceipt)) = result.priorUpdate else {
+            return XCTFail("the earlier update's receipt is the routine's prior step: \(result.priorUpdate)")
+        }
+        XCTAssertEqual(priorReceipt.runtime.write, .persisted(reportedError: false))
+        XCTAssertEqual(handedPrior.value, result.priorUpdate)
+        guard case .settled(.configurationSettled(let final)) = result.configuration else {
+            return XCTFail("the declared final save flushes once the transfer is free: \(result.configuration)")
+        }
+        XCTAssertEqual(final.runtime.write, .persisted(reportedError: false), "rebased from the earlier receipt")
+        guard case .settled(let quit) = result.quit else { return XCTFail("the Quit settles: \(result.quit)") }
+        XCTAssertEqual(completed(quit), .quit)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Final")
+        XCTAssertEqual(custody.held.transfer, false)
+        XCTAssertEqual(custody.held.input, false)
+    }
+
+    /// An earlier update whose frame has not reached the host yet holds the custody while the host has no record of it. The client quit's
+    /// lookup of it proves nothing, so its final save waits for the custody's release; the earlier update then arrives after the Quit's
+    /// latch, is refused as ordinary work, and frees the custody, and the declared save flushes.
+    func testTheClientQuitsFinalSaveWaitsForAnEarlierUpdateTheHostHasNotRecordedYet() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let observed = try await observation(composed)
+        let held = HeldPrivateTransport(inner: composed.composition.transport)
+        defer { held.release() }
+        let prior = try update(composed, from: observed) { $0.profileName = "Prior" }
+        held.arm(.beforeSend)
+        let priorCaller = Task { try await PrivateEditorClient(transport: held).submit(prior, deadline: deadline()) }
+        await held.waitUntilHeld()
+        let custody = composed.composition.privateCustody
+        XCTAssertEqual(custody.held.transfer, true)
+        XCTAssertEqual(custody.held.input, true)
+
+        let values = try PrivateConfigurationBridge.makeValues(from: observed)
+        let incarnation = composed.host.incarnation
+        let handedPrior = LockedSlot<RuntimeQuitStep>()
+        let configuration = Self.finalConfiguration(
+            values, incarnation: incarnation, runtime: try XCTUnwrap(observed.components.runtime.baseline),
+            platform: try XCTUnwrap(observed.components.platform.baseline), handedPrior: handedPrior
+        )
+        let quitting = Task { [client = composed.client, editor = editor(composed)] in
+            await RuntimeClientQuit.quit(
+                control: client, editor: editor, incarnation: incarnation, total: .seconds(30), priorUpdate: prior.requestID,
+                configuration: configuration
+            )
+        }
+        let waiting = try await eventually { custody.isAwaitingCapacity }
+        XCTAssertTrue(waiting, "the final save waits for the custody the unrecorded update holds")
+        XCTAssertTrue(composed.host.workflow.isTerminal, "the Quit fenced first")
+        held.release()
+        let priorAdmission = try await priorCaller.value
+        XCTAssertEqual(priorAdmission, .rejected(.hostStopping), "the earlier update arrived after the latch, as ordinary work")
+        let result = await quitting.value
+
+        XCTAssertEqual(result.priorUpdate, .notRecorded(.notRecorded))
+        XCTAssertEqual(handedPrior.value, .notRecorded(.notRecorded))
+        guard case .settled(.configurationSettled(let final)) = result.configuration else {
+            return XCTFail("the declared final save flushes once the custody is free: \(result.configuration)")
+        }
+        XCTAssertEqual(final.runtime.write, .persisted(reportedError: false))
+        guard case .settled(let quit) = result.quit else { return XCTFail("the Quit settles: \(result.quit)") }
+        XCTAssertEqual(completed(quit), .quit)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Final")
+        XCTAssertEqual(custody.held.transfer, false)
+        XCTAssertEqual(custody.held.input, false)
+    }
+
+    /// An invalid runtime draft does not hold back a valid sidecar edit at quit: the final save carries the last clean runtime value under
+    /// its exact submitted baseline, so the runtime file is verified unchanged and only the platform file is written. The quit applies
+    /// nothing and writes no DNS disable.
+    func testTheClientQuitFlushesASidecarEditBesideTheCleanRuntimeValueAndWritesNoDisable() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true)
+        try await composed.host.startRuntime()
+        let observed = try await observation(composed)
+        let values = try PrivateConfigurationBridge.makeValues(from: observed)
+        let incarnation = composed.host.incarnation
+        let runtimeBaseline = try XCTUnwrap(observed.components.runtime.baseline)
+        let platformBaseline = try XCTUnwrap(observed.components.platform.baseline)
+        let result = await RuntimeClientQuit.quit(
+            control: composed.client, editor: editor(composed), incarnation: incarnation, total: .seconds(30),
+            configuration: { requestID, _ in
+                var platform = values.platform
+                platform.manageEnvironmentVariables = false
+                return try PrivateConfigurationBridge.makeRequest(
+                    config: values.config, platform: platform, requestID: requestID, incarnation: incarnation,
+                    budget: try ControlWireBudget(1_000), runtimeBaseline: runtimeBaseline, platformBaseline: platformBaseline,
+                    modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+                )
+            }
+        )
+        XCTAssertEqual(result.priorUpdate, .notDeclared)
+        XCTAssertEqual(result.preferences, .notDeclared)
+        guard case .settled(.configurationSettled(let receipt)) = result.configuration else {
+            return XCTFail("the final save settles with its receipt: \(result.configuration)")
+        }
+        XCTAssertEqual(receipt.runtime.write, .unchanged, "the clean runtime value is verified, not rewritten")
+        XCTAssertEqual(receipt.platform.write, .persisted(reportedError: false))
+        XCTAssertNil(receipt.applied, "the final save applies nothing")
+        guard case .settled(let quit) = result.quit else { return XCTFail("the Quit settles: \(result.quit)") }
+        XCTAssertEqual(completed(quit), .quit)
+        XCTAssertFalse(try PlatformConfigPersistence.load(in: composed.harness.environment).manageEnvironmentVariables)
+        XCTAssertEqual(composed.harness.savedDNSEnabled, true, "the quit writes no DNS disable")
+    }
+
+    /// A final save that asks for anything but save-only is refused before it leaves the client, so the quit never applies or starts a
+    /// module. The declared part then keeps the host's window open until the short total deadline; only the refusal and the unchanged file
+    /// are checked, nothing about timing.
+    func testTheClientQuitRefusesANonSaveOnlyFinalSaveLocally() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let observed = try await observation(composed)
+        let incarnation = composed.host.incarnation
+        let request = try update(composed, from: observed, modules: PrivateModuleSlots(
+            proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+        )) { $0.profileName = "Never applied" }
+        let saved = try Data(contentsOf: composed.harness.environment.configFile)
+        let result = await RuntimeClientQuit.quit(
+            control: composed.client, editor: editor(composed), incarnation: incarnation, total: .seconds(2),
+            configuration: { requestID, _ in
+                var asked = request
+                asked.requestID = requestID
+                return asked
+            }
+        )
+        XCTAssertEqual(result.configuration, .clientFailure(.localRefusal(.invalidValue)))
+        XCTAssertEqual(try Data(contentsOf: composed.harness.environment.configFile), saved)
+    }
+
+    /// The saved pair an apply verified is replaced while the apply is parked inside its reconciler pass, after the push and before its flag
+    /// actions: a login-item administration write moves the platform file's version and changes no module revision, so only the store's
+    /// still-holds check sees it (decision 0037). The rest of that apply holds: its environment clear never runs, and its receipt does not
+    /// claim the pair was applied. A module Stop during the apply is the revision witness, separately.
+    func testASavedPairReplacedWhileAnApplyIsParkedHoldsTheRestOfThatApply() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        XCTAssertFalse(composed.harness.machine.launchdEnvironment.isEmpty, "the running proxy manages the environment")
+        let observed = try await observation(composed)
+        let revisions = composed.host.workflow.revisions
+        let request = try update(composed, from: observed, modules: PrivateModuleSlots(
+            proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+        ), editPlatform: { $0.manageEnvironmentVariables = false }) { $0.noProxyHosts.append("bypass.example") }
+
+        // The pass pushes the runtime input, then re-advertises the bypass list in the manual-mode system proxy before any flag action.
+        composed.harness.hold.arm(onQueueLabeled: ".platform-work") { name, arguments in
+            name == "/usr/sbin/networksetup" && arguments.first == "-listallnetworkservices"
+        }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        await composed.harness.hold.waitUntilReached()
+        XCTAssertFalse(composed.harness.hold.reachedOnMainThread)
+        XCTAssertTrue(composed.host.heldRuntimeConfig.noProxyHosts.contains("bypass.example"), "the push already ran")
+
+        let platformBaseline = try XCTUnwrap(composed.host.workflow.editorCapture().observation().components.platform.baseline)
+        XCTAssertGreaterThan(platformBaseline.version, try XCTUnwrap(observed.components.platform.baseline).version,
+                             "the apply's own platform write verified")
+        let admin = try accepted(try await submit(composed, .setLaunchAtLogin(true, ifPlatformBaseline: platformBaseline)))
+        guard case .completed(let completion) = try await finished(admin, on: stream),
+              case .platformWrite(let write) = completion.result else {
+            return XCTFail("the administration write completes with its platform write")
+        }
+        XCTAssertEqual(write.write, .persisted(reportedError: false))
+
+        composed.harness.hold.release()
+        let settled = try receipt(try await finished(operation, on: stream))
+        XCTAssertEqual(settled.platform.write, .persisted(reportedError: false))
+        XCTAssertEqual(settled.applied, false, "a replaced pair is not reported applied")
+        XCTAssertFalse(composed.harness.machine.launchdEnvironment.isEmpty, "the replaced pair's environment clear never ran")
+        XCTAssertEqual(composed.host.workflow.revisions, revisions)
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
+    }
+
     /// An apply that moves the proxy onto an occupied port: the runtime takes the new input though its listener cannot bind. The receipt says
     /// the runtime took it, the accepted view follows it rather than lagging behind, and the snapshot shows the listener down.
     func testAnApplyOntoAnOccupiedPortReportsTheInputTakenAndTheListenerDown() async throws {
@@ -1028,6 +1418,85 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertFalse(composed.host.runtimeState().proxyIsUp, "the failed listener is not reported as running")
         let snapshot = try await composed.client.readSnapshot(deadline: deadline())
         XCTAssertNotEqual(snapshot.proxyState, .running)
+    }
+
+    /// A capacity wait holds the custody's one permit and one timer. A physical release wakes it and its caller has the reservation at
+    /// once; a cancelled caller has its end at once. In both cases the cancelled timer keeps the permit until it physically ends, so a
+    /// second waiter is refused busy and arms no timer meanwhile. A deadline ends a wait the same way.
+    func testACapacityWaitHoldsOnePermitAndTimerUntilTheTimerPhysicallyEnds() async throws {
+        let custody = RuntimePrivateCustody(limits: try RuntimeServiceFixtures.limits())
+        let clock = ManualRuntimeTiming()
+        clock.holdCancelledCompletions()
+        let deadline = RuntimeDeadline.after(.seconds(30), from: clock.now)
+        // Each answer lands in a slot; every task is cancelled, or its clock released, before it is awaited, so a regression fails an
+        // assertion instead of hanging the test.
+        func waiting(_ purpose: PrivateExchangePurpose) -> (Task<Void, Never>, LockedSlot<Result<RuntimePrivateReservation, RuntimeWaitEnd>>) {
+            let answer = LockedSlot<Result<RuntimePrivateReservation, RuntimeWaitEnd>>()
+            let task = Task { answer.set(await custody.reserve(purpose, until: deadline, timing: clock.timing)) }
+            return (task, answer)
+        }
+        func secondWaiterRefusedWithoutATimer() async throws -> Bool {
+            let timers = clock.armedTimerCount
+            let (task, answer) = waiting(.read)
+            let answered = try await eventually { answer.value != nil }
+            task.cancel()
+            await task.value
+            guard answered, case .failure(.transportBusy)? = answer.value else { return false }
+            return clock.armedTimerCount == timers
+        }
+
+        // Woken by a release: the caller reserves while its cancelled timer is still held.
+        let first = try XCTUnwrap(custody.reserve(.update))
+        let (woken, wokenAnswer) = waiting(.update)
+        let registered = try await eventually { custody.isAwaitingCapacity }
+        XCTAssertTrue(registered)
+        XCTAssertEqual(clock.armedTimerCount, 1, "one timer for the wait")
+        first.end()
+        let reserved = try await eventually { wokenAnswer.value != nil }
+        XCTAssertTrue(reserved, "the release wakes the wait")
+        XCTAssertEqual(clock.heldCancellationCount, 1, "the caller has its answer before its cancelled timer ended")
+        XCTAssertTrue(custody.capacityPermitHeld, "that timer keeps the permit")
+        let refusedWhileHeld = try await secondWaiterRefusedWithoutATimer()
+        XCTAssertTrue(refusedWhileHeld, "a second waiter is refused busy and arms no timer")
+        clock.releaseHeldCancellations()
+        woken.cancel()
+        await woken.value
+        guard case .success(let reservation)? = wokenAnswer.value else { return XCTFail("the release lets the wait reserve") }
+        defer { reservation.end() }
+        let freed = try await eventually { !custody.capacityPermitHeld }
+        XCTAssertTrue(freed, "the permit returns once the timer has ended")
+
+        // A cancelled caller has its end at once; its timer again holds the permit until it ends.
+        let (cancelled, cancelledAnswer) = waiting(.update)
+        let waitingAgain = try await eventually { custody.isAwaitingCapacity }
+        XCTAssertTrue(waitingAgain)
+        cancelled.cancel()
+        let ended = try await eventually { cancelledAnswer.value != nil }
+        XCTAssertTrue(ended)
+        if case .failure(.cancelled)? = cancelledAnswer.value {} else { XCTFail("the cancelled caller ends unsent") }
+        XCTAssertEqual(clock.heldCancellationCount, 1)
+        let refusedAfterCancel = try await secondWaiterRefusedWithoutATimer()
+        XCTAssertTrue(refusedAfterCancel)
+        clock.releaseHeldCancellations()
+        await cancelled.value
+        let freedAgain = try await eventually { !custody.capacityPermitHeld }
+        XCTAssertTrue(freedAgain)
+
+        // The deadline ends the wait through its own timer, which then ends too.
+        let (expiring, expiringAnswer) = waiting(.update)
+        let waitingLast = try await eventually { custody.isAwaitingCapacity }
+        XCTAssertTrue(waitingLast)
+        clock.advance(by: .seconds(31))
+        clock.fireAll()
+        let expired = try await eventually { expiringAnswer.value != nil }
+        expiring.cancel()
+        clock.releaseHeldCancellations()
+        await expiring.value
+        XCTAssertTrue(expired)
+        if case .failure(.deadlineExpired)? = expiringAnswer.value {} else { XCTFail("the deadline ends the wait") }
+        let freedLast = try await eventually { !custody.capacityPermitHeld }
+        XCTAssertTrue(freedLast)
+        XCTAssertEqual(clock.armedTimerCount, 0)
     }
 
     /// While the composition's private transfer is held, another private exchange is refused before anything is encoded, and ordinary
@@ -1370,6 +1839,226 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertFalse(composed.harness.machine.dnsRelayRunning)
     }
 
+    /// A private proxy Start whose DNS slot is the conditional companion, at the DNS revision the client observed.
+    private func conditionalStart(
+        _ composed: Composed,
+        from observed: PrivateEditorObservation,
+        dnsRevision: ControlLifecycleRevision? = nil,
+        edit: (inout ProxyConfig) -> Void = { _ in }
+    ) throws -> PrivateConfigurationRequest {
+        try update(composed, from: observed, modules: PrivateModuleSlots(
+            proxy: .start(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision),
+            dns: .conditionalStart(ifLifecycleRevision: dnsRevision ?? observed.modules.dns.lifecycleRevision),
+            tunnels: .saveOnly
+        ), edit: edit)
+    }
+
+    /// A private proxy Start with the conditional DNS slot starts configured, unfenced, down DNS from the Start's own verified pair, as
+    /// the menu Restart's companion does (decision 0036). Its receipt reports the companion's result apart from the proxy member, and
+    /// the companion changes no DNS control and writes no enable.
+    func testAPrivateProxyStartsConditionalSlotStartsConfiguredDNSFromTheSamePair() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let dnsRevision = composed.host.workflow.revisions.dns
+        let request = try conditionalStart(composed, from: observed) { $0.profileName = "Shared pair" }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        let settled = try receipt(try await finished(operation, on: stream))
+
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertEqual(settled.conditionalDNS, .started)
+        XCTAssertEqual(settled.runtime.write, .persisted(reportedError: false))
+        XCTAssertEqual(settled.committedDNSForwarderEnabled, true)
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
+        XCTAssertTrue(composed.harness.machine.dnsRelayRunning, "the companion started the configured DNS")
+        XCTAssertEqual(composed.host.heldRuntimeConfig.profileName, "Shared pair", "both modules run the Start's one verified pair")
+        XCTAssertEqual(composed.host.workflow.revisions.dns, dnsRevision, "the companion changes no DNS control")
+        XCTAssertEqual(composed.harness.savedDNSEnabled, true)
+    }
+
+    /// Disabled, running and fenced DNS are each the companion's typed no-op through the private Start, and none of them enables DNS or
+    /// clears its fence. A DNS revision the client observed before a Stop moved it refuses the whole Start before anything changes.
+    func testAPrivateConditionalSlotIsATypedNoOpForDisabledRunningOrFencedDNSAndAStaleOneIsRefusedWhole() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+
+        let disabled = try await observation(composed)
+        let first = try accepted(try await editor(composed).submit(try conditionalStart(composed, from: disabled), deadline: deadline()))
+        let notConfigured = try receipt(try await finished(first, on: stream))
+        XCTAssertEqual(notConfigured.conditionalDNS, .notConfigured)
+        XCTAssertEqual(notConfigured.committedDNSForwarderEnabled, false, "the companion writes no enable")
+        XCTAssertFalse(composed.harness.machine.dnsRelayRunning)
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
+
+        // An explicit DNS Start enables DNS; a companion then finds it running.
+        let enabling = try await observation(composed)
+        let dns = try accepted(try await editor(composed).submit(try update(composed, from: enabling, modules: PrivateModuleSlots(
+            proxy: .saveOnly, dns: .start(ifLifecycleRevision: enabling.modules.dns.lifecycleRevision), tunnels: .saveOnly
+        )) { _ in }, deadline: deadline()))
+        let dnsReceipt = try receipt(try await finished(dns, on: stream))
+        XCTAssertEqual(dnsReceipt.modules, [ControlModuleReceipt(module: .dns, result: .started)])
+        let running = try await observation(composed)
+        let again = try accepted(try await editor(composed).submit(try conditionalStart(composed, from: running), deadline: deadline()))
+        let activeReceipt = try receipt(try await finished(again, on: stream))
+        XCTAssertEqual(activeReceipt.conditionalDNS, .alreadyActive)
+
+        // A DNS Stop fences DNS and moves its revision: the companion finds the fence, and a Start naming the old revision is stale.
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        _ = try await finished(stop, on: stream)
+        let fencedView = try await observation(composed)
+        let fenced = try accepted(try await editor(composed).submit(try conditionalStart(composed, from: fencedView), deadline: deadline()))
+        let fencedReceipt = try receipt(try await finished(fenced, on: stream))
+        XCTAssertEqual(fencedReceipt.conditionalDNS, .fenced)
+        XCTAssertEqual(fencedReceipt.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertFalse(composed.harness.machine.dnsRelayRunning, "the fenced DNS stays down")
+        XCTAssertTrue(composed.host.workflow.dnsIntent.fenced, "and its fence stays")
+        XCTAssertEqual(composed.harness.savedDNSEnabled, false)
+
+        // Current baselines and proxy revision, with the DNS revision read before the Stop.
+        let latest = try await observation(composed)
+        XCTAssertNotEqual(latest.modules.dns.lifecycleRevision, running.modules.dns.lifecycleRevision, "the Stop moved DNS's revision")
+        let saved = try Data(contentsOf: composed.harness.environment.configFile)
+        let generation = composed.host.workflow.generation
+        let stale = try conditionalStart(
+            composed, from: latest, dnsRevision: running.modules.dns.lifecycleRevision
+        ) { $0.profileName = "Never" }
+        let refused = try await editor(composed).submit(stale, deadline: deadline())
+        XCTAssertEqual(refused, .rejected(.staleRevision), "the observed DNS revision is checked as given")
+        XCTAssertEqual(composed.host.workflow.generation, generation, "a refused request changes no intent")
+        XCTAssertEqual(try Data(contentsOf: composed.harness.environment.configFile), saved, "and writes nothing")
+    }
+
+    /// A companion whose forwarder cannot bind on the frozen request's port reports its own failure in the receipt: the proxy member
+    /// started and stays up, and DNS's configured intent and fence are left as they were.
+    func testAPrivateConditionalSlotsFailedBindLeavesTheProxyUp() async throws {
+        let held = try HeldUDPPort()
+        let composed = try await compose(dnsForwarderEnabled: true)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let request = try conditionalStart(composed, from: observed) { $0.dnsForwarderPort = held.port }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        let settled = try receipt(try await finished(operation, on: stream))
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertEqual(settled.conditionalDNS, .failed)
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp, "the proxy stays up")
+        XCTAssertFalse(composed.harness.machine.dnsRelayRunning)
+        XCTAssertEqual(composed.host.workflow.dnsIntent.configured, true, "the failed companion keeps DNS's configured intent")
+        XCTAssertEqual(composed.host.workflow.dnsIntent.fenced, false, "and sets no fence")
+    }
+
+    /// A session DNS Stop's disable write, read from its completion. Fails the test for any other completion.
+    private func dnsDisable(_ outcome: ControlOperationOutcome) throws -> ControlDNSDisableWrite {
+        guard case .completed(let completion) = outcome, case .dnsDisable(let write) = completion.result else {
+            XCTFail("a DNS Stop completes with its disable write: \(outcome)")
+            throw RuntimeClientError.unexpectedReply
+        }
+        return write
+    }
+
+    /// A client's dirty draft and its own DNS Stop: the Stop's completion names the runtime baseline its disable was conditional on, which
+    /// is the draft's own, so the draft alone moves to the new baseline. Without that the next save conflicts with the client's own Stop;
+    /// with it the later local edit persists and the committed DNS bit stays false. Nothing is reread or rebound by value.
+    func testADNSStopsCausalWriteLetsTheSameClientsDirtyDraftSaveOverIt() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let draftRuntime = try XCTUnwrap(observed.components.runtime.baseline)
+
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        let disable = try dnsDisable(try await finished(stop, on: stream))
+        XCTAssertEqual(disable.prior, draftRuntime, "the disable was conditional on the baseline this draft holds")
+        XCTAssertEqual(disable.runtime.write, .persisted(reportedError: false))
+        let moved = try XCTUnwrap(disable.runtime.baseline)
+        XCTAssertGreaterThan(moved.version, draftRuntime.version)
+
+        // The draft as submitted: the Stop's own write conflicts with it.
+        func save(at runtime: PrivateBaseline) async throws -> ControlConfigurationReceipt {
+            var values = try PrivateConfigurationBridge.makeValues(from: observed)
+            values.config.profileName = "Dirty"
+            let request = try PrivateConfigurationBridge.makeRequest(
+                config: values.config, platform: values.platform, requestID: ControlRequestID(rawValue: UUID()),
+                incarnation: composed.host.incarnation, budget: try ControlWireBudget(1_000), runtimeBaseline: runtime,
+                platformBaseline: try XCTUnwrap(observed.components.platform.baseline),
+                modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+            )
+            let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+            return try receipt(try await finished(operation, on: stream))
+        }
+        let unrebased = try await save(at: draftRuntime)
+        XCTAssertEqual(unrebased.runtime.write, .notAttempted(.baselineMismatch), "the client's own Stop moved the baseline")
+
+        // The causal rule: only a draft at the write's prior baseline moves to its new one.
+        let rebased = disable.prior == draftRuntime ? moved : draftRuntime
+        let saved = try await save(at: rebased)
+        XCTAssertEqual(saved.runtime.write, .persisted(reportedError: false), "the later local edit persists")
+        XCTAssertEqual(saved.committedDNSForwarderEnabled, false, "and the committed DNS bit stays the Stop's false")
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Dirty")
+        XCTAssertEqual(composed.harness.savedDNSEnabled, false)
+    }
+
+    /// Another client's write between this client's observation and its DNS Stop: the Stop's disable is conditional on the other client's
+    /// baseline, not this draft's, so the draft does not move and its save still conflicts. The other client's edit is kept.
+    func testADNSStopAfterAnotherClientsWriteDoesNotRebaseThisDraft() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let draftRuntime = try XCTUnwrap(observed.components.runtime.baseline)
+
+        let other = PrivateEditorClient(transport: composed.composition.transport)
+        let otherOperation = try accepted(try await other.submit(
+            try update(composed, from: observed) { $0.profileName = "Other" }, deadline: deadline()
+        ))
+        let otherReceipt = try receipt(try await finished(otherOperation, on: stream))
+        let otherBaseline = try XCTUnwrap(otherReceipt.runtime.baseline)
+
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        let disable = try dnsDisable(try await finished(stop, on: stream))
+        XCTAssertEqual(disable.prior, otherBaseline, "the disable was conditional on the other client's write")
+        XCTAssertNotEqual(disable.prior, draftRuntime)
+        let rebased = disable.prior == draftRuntime ? try XCTUnwrap(disable.runtime.baseline) : draftRuntime
+
+        let mine = try update(composed, from: observed) { $0.profileName = "Mine" }
+        XCTAssertEqual(mine.runtimeBaseline, rebased, "the draft keeps the baseline it was submitted at")
+        let operation = try accepted(try await editor(composed).submit(mine, deadline: deadline()))
+        let settled = try receipt(try await finished(operation, on: stream))
+        XCTAssertEqual(settled.runtime.write, .notAttempted(.baselineMismatch), "the intervening write still conflicts")
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Other")
+        XCTAssertEqual(composed.harness.savedDNSEnabled, false)
+    }
+
+    /// Test DNS through the actual client probes the port the app's own Test DNS chooses, from the host's state and no editor value: port
+    /// 53 while the host manages system DNS. The completion carries the probe's reading, which here is the fake's silence, and changes no
+    /// intent. After the quit it is refused as stopping.
+    func testTestDNSProbesTheHostsManagedPortAndReportsItsReading() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let revisions = composed.host.workflow.revisions
+        let probe = try accepted(try await submit(composed, .testDNS))
+        guard case .completed(let completion) = try await finished(probe, on: stream) else { return XCTFail("the probe completes") }
+        XCTAssertEqual(completion.command, .testDNS)
+        XCTAssertEqual(completion.result, .dnsLiveness(ControlDNSLivenessProbe(port: try ControlPort(53), answered: false)))
+        XCTAssertEqual(composed.host.workflow.revisions, revisions, "a probe changes no intent")
+
+        await composed.host.shutdown()
+        let refused = try await submit(composed, .testDNS)
+        XCTAssertEqual(refused, .rejected(.hostStopping))
+    }
+
     /// The companion key is additive: a Restart without it encodes exactly as before, one with it round-trips, and a non-proxy Restart
     /// that names one is refused on decode.
     func testTheRestartCompanionKeyIsAdditiveAndOnlyForTheProxy() throws {
@@ -1389,7 +2078,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
     func testUnadoptedCommandsAreRefusedAndARestartAfterQuitIsRefused() async throws {
         let composed = try await compose(dnsForwarderEnabled: false)
         let revision = try await composed.client.readSnapshot(deadline: deadline()).stamp.lifecycleRevision
-        for command in [ControlRuntimeCommand.restart(.dns, ifLifecycleRevision: revision), .testDNS, .refreshPreflight] {
+        for command in [ControlRuntimeCommand.restart(.dns, ifLifecycleRevision: revision), .refreshPreflight] {
             let admission = try await composed.client.submit(
                 command, requestID: ControlRequestID(rawValue: UUID()),
                 expectedIncarnation: composed.host.incarnation, deadline: deadline()

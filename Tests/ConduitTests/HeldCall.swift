@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import ConduitShared
 import Foundation
 import PlatformMac
 import ProxyKernel
@@ -109,6 +110,122 @@ final class HoldingPrivilegeClient: PrivilegeClient, @unchecked Sendable {
             hold.pass(step.operation.rawValue, step.values)
         }
         try base.execute(batch: batch)
+    }
+}
+
+/// The operating system's state-file access, offering each configuration read to a `HeldCall` first as `("read", [path])`. A store's
+/// physical steps run on `PlatformWork`, never the main thread, so an armed read parks there with the store's slot held.
+final class HeldStateFileRead: StateFileAccessing, @unchecked Sendable {
+    let hold = HeldCall()
+    private let inner = StateFileAccess.operatingSystem()
+
+    func readConfigurationFile(_ file: StateRootFile, limit: Int) -> Result<Data, ConfigurationFileError> {
+        hold.pass("read", [file.path])
+        return inner.readConfigurationFile(file, limit: limit)
+    }
+
+    func replaceConfigurationFile(_ file: StateRootFile, bytes: Data) -> Result<Void, ConfigurationFileWriteError> {
+        inner.replaceConfigurationFile(file, bytes: bytes)
+    }
+
+    func entryPresence(_ file: StateRootFile) -> Result<Bool, ConfigurationPresenceError> {
+        inner.entryPresence(file)
+    }
+}
+
+/// A private transport over another one that holds one armed exchange at a chosen point: before its frame is sent, so the host has no
+/// record of it while its custody is reserved, or after its reply arrived and before the client decodes it, so the host's operation can
+/// settle while the transfer is still held. Unarmed, it passes every exchange through.
+final class HeldPrivateTransport: PrivateEditorTransport, @unchecked Sendable {
+    enum Point {
+        case beforeSend
+        case afterReply
+    }
+
+    private let inner: any PrivateEditorTransport
+    private let lock = NSLock()
+    private var armed: Point?
+    private var reached = false
+    private var released = false
+    private var reachedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+    init(inner: any PrivateEditorTransport) {
+        self.inner = inner
+    }
+
+    func arm(_ point: Point) {
+        lock.withLock { armed = point }
+    }
+
+    /// Waits until the armed exchange is held.
+    func waitUntilHeld() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let already = lock.withLock { () -> Bool in
+                if reached { return true }
+                reachedWaiters.append(continuation)
+                return false
+            }
+            if already { continuation.resume() }
+        }
+    }
+
+    /// Lets the held exchange go on. Idempotent, so a test may also call it on every exit.
+    func release() {
+        let waiter = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            released = true
+            defer { releaseWaiter = nil }
+            return releaseWaiter
+        }
+        waiter?.resume()
+    }
+
+    func withPrivateExchange<T: Sendable>(
+        _ purpose: PrivateExchangePurpose,
+        capacityUntil: RuntimeDeadline?,
+        _ body: (PrivateExchange) async throws -> T
+    ) async throws -> T {
+        try await inner.withPrivateExchange(purpose, capacityUntil: capacityUntil) { exchange in
+            try await body(PrivateExchange { frame, deadline in
+                await self.hold(at: .beforeSend)
+                let reply = try await exchange.send(frame, deadline)
+                await self.hold(at: .afterReply)
+                return reply
+            })
+        }
+    }
+
+    private func hold(at point: Point) async {
+        let waiters = lock.withLock { () -> [CheckedContinuation<Void, Never>]? in
+            guard armed == point else { return nil }
+            armed = nil
+            reached = true
+            defer { reachedWaiters = [] }
+            return reachedWaiters
+        }
+        guard let waiters else { return }
+        for waiter in waiters { waiter.resume() }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let go = lock.withLock { () -> Bool in
+                if released { return true }
+                releaseWaiter = continuation
+                return false
+            }
+            if go { continuation.resume() }
+        }
+    }
+}
+
+/// One value a task stores and the test reads without awaiting that task, so a test can see whether an answer arrived while the work
+/// that would otherwise answer it is still held.
+final class LockedSlot<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value?
+
+    var value: Value? { lock.withLock { stored } }
+
+    func set(_ value: Value) {
+        lock.withLock { stored = value }
     }
 }
 

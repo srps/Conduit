@@ -299,6 +299,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
     case preflight(ControlPreflightObservation)
     /// A login-item administration's platform write, with the new verified baseline only when it verified.
     case platformWrite(ControlComponentWrite)
+    /// A session DNS Stop that attempted its disable save: the save's causal runtime write. A Stop that attempted none is `settled`.
+    case dnsDisable(ControlDNSDisableWrite)
 
     private enum CodingKeys: String, CodingKey {
         case type
@@ -321,6 +323,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
             self = .preflight(try container.decode(ControlPreflightObservation.self, forKey: .observation))
         case "platform-write":
             self = .platformWrite(try container.decode(ControlComponentWrite.self, forKey: .write))
+        case "dns-disable":
+            self = .dnsDisable(try container.decode(ControlDNSDisableWrite.self, forKey: .write))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown result")
         }
@@ -342,6 +346,9 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
             try container.encode(observation, forKey: .observation)
         case .platformWrite(let write):
             try container.encode("platform-write", forKey: .type)
+            try container.encode(write, forKey: .write)
+        case .dnsDisable(let write):
+            try container.encode("dns-disable", forKey: .type)
             try container.encode(write, forKey: .write)
         }
     }

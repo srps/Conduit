@@ -32,10 +32,13 @@ package struct PrivateExchange: Sendable {
 
 /// A byte transport for the private frames. The reservation is scoped: `body` runs inside it, and the transfer is released
 /// only after `body` has returned or thrown, so the reply's decode and the release of its buffer are inside the reservation.
-/// A refused reservation throws `ControlRuntimeTransportFailure.notSent(.transportBusy)` before `body` runs.
+/// A refused reservation throws `ControlRuntimeTransportFailure.notSent(.transportBusy)` before `body` runs. With
+/// `capacityUntil`, a busy custody is waited for instead, until that deadline, and only its physical release ends the wait:
+/// the wait ends unsent with the deadline, the caller's cancellation, or `transportBusy` when another caller already waits.
 package protocol PrivateEditorTransport: Sendable {
     func withPrivateExchange<T: Sendable>(
         _ purpose: PrivateExchangePurpose,
+        capacityUntil: RuntimeDeadline?,
         _ body: (PrivateExchange) async throws -> T
     ) async throws -> T
 }
@@ -82,7 +85,7 @@ package struct PrivateEditorClient: Sendable {
     ) async throws -> PrivateEditorAnswer {
         let request = PrivateEditorReadRequest(requestID: requestID, incarnation: expectedIncarnation, budget: budget)
         do {
-            return try await transport.withPrivateExchange(.read) { exchange in
+            return try await transport.withPrivateExchange(.read, capacityUntil: nil) { exchange in
                 let frame = try Self.encodeLocally { try PrivateConfigurationEncoder.encode(request) }
                 let reply = try await exchange.send(frame, deadline)
                 let decoded = try PrivateConfigurationDecoder.decodeReply(
@@ -107,12 +110,15 @@ package struct PrivateEditorClient: Sendable {
     /// so a busy channel refuses before a second full request exists, and the mapped request lives only for this exchange. `requestID` is
     /// the one the request must carry, known before mapping so every failure names it. The answer is the admission only; settlement and the
     /// causal receipt are read through the ordinary operation lookup. A wait that ended after a possible send is `admissionUnknown`.
+    /// `awaitingCapacity` waits within `deadline` for a busy custody to be physically released instead of refusing it at once; only the
+    /// quit's final flush asks for it, after the update before it settled.
     package func submit(
         requestID: ControlRequestID,
         deadline: RuntimeDeadline,
+        awaitingCapacity: Bool = false,
         request makeRequest: @Sendable () throws -> PrivateConfigurationRequest
     ) async throws -> ControlAdmission {
-        try await exchangeUpdate(.update, requestID: requestID) { exchange in
+        try await exchangeUpdate(.update, requestID: requestID, capacityUntil: awaitingCapacity ? deadline : nil) { exchange in
             let request = try Self.mapLocally(requestID: requestID, requestIDOf: \.requestID, makeRequest)
             let frame = try Self.encodeLocally { try PrivateConfigurationEncoder.encode(request) }
             return try Self.admission(try await exchange.send(frame, deadline)) { try $0.admission(answering: request) }
@@ -124,9 +130,10 @@ package struct PrivateEditorClient: Sendable {
     package func submitPreferences(
         requestID: ControlRequestID,
         deadline: RuntimeDeadline,
+        awaitingCapacity: Bool = false,
         request makeRequest: @Sendable () throws -> PrivatePreferencesRequest
     ) async throws -> ControlAdmission {
-        try await exchangeUpdate(.preferences, requestID: requestID) { exchange in
+        try await exchangeUpdate(.preferences, requestID: requestID, capacityUntil: awaitingCapacity ? deadline : nil) { exchange in
             let request = try Self.mapLocally(requestID: requestID, requestIDOf: \.requestID, makeRequest)
             let frame = try Self.encodeLocally { try PrivateConfigurationEncoder.encode(request) }
             return try Self.admission(try await exchange.send(frame, deadline)) { try $0.admission(answering: request) }
@@ -145,10 +152,11 @@ package struct PrivateEditorClient: Sendable {
     private func exchangeUpdate(
         _ purpose: PrivateExchangePurpose,
         requestID: ControlRequestID,
+        capacityUntil: RuntimeDeadline?,
         _ body: (PrivateExchange) async throws -> ControlAdmission
     ) async throws -> ControlAdmission {
         do {
-            return try await transport.withPrivateExchange(purpose, body)
+            return try await transport.withPrivateExchange(purpose, capacityUntil: capacityUntil, body)
         } catch let failure as ControlRuntimeTransportFailure {
             switch failure {
             case .notSent(let end): throw RuntimeClientError.notSent(end)

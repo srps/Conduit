@@ -81,4 +81,20 @@ package enum PrivateModuleIntent: Sendable, Equatable {
     /// An explicit enable with these frozen values. It persists them, then starts the module from the verified pair. Only
     /// a Start that is still current, with its revision matching and no newer Start or Stop, may clear the module's fence.
     case start(ifLifecycleRevision: ControlLifecycleRevision)
+    /// DNS's conditional companion of a proxy `start` in the same request (decision 0036): valid only in DNS's slot and only
+    /// beside the proxy's `start`. After the proxy started, DNS starts from the same verified pair when its saved intent is
+    /// enabled and no Stop fence holds it, and otherwise starts nothing. It never clears a fence or writes an enable. The
+    /// revision is the DNS revision the client observed, checked as given with the rest of the request.
+    case conditionalStart(ifLifecycleRevision: ControlLifecycleRevision)
+}
+
+extension PrivateModuleSlots where Value == PrivateModuleIntent {
+    /// Whether every intent sits in a slot that may carry it: a conditional companion only in DNS's slot, beside a proxy Start.
+    package var isWellFormed: Bool {
+        let conditionalElsewhere = [proxy, tunnels].contains { if case .conditionalStart = $0 { true } else { false } }
+        guard !conditionalElsewhere else { return false }
+        if case .conditionalStart = dns, case .start = proxy { return true }
+        if case .conditionalStart = dns { return false }
+        return true
+    }
 }

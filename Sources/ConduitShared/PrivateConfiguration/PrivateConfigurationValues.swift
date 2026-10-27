@@ -434,14 +434,14 @@ package struct PrivateConfigurationRequest: Sendable, Equatable, CustomStringCon
     package var runtime: PrivateRuntimeConfiguration
     package var platform: PrivatePlatformConfiguration
 
-    /// Throws `invalidValue` when a baseline names another file than its slot.
+    /// Throws `invalidValue` when a baseline names another file than its slot, or an intent sits in a slot that cannot carry it.
     package init(
         requestID: ControlRequestID, incarnation: ControlHostIncarnation, budget: ControlWireBudget,
         runtimeBaseline: PrivateBaseline, platformBaseline: PrivateBaseline,
         modules: PrivateModuleSlots<PrivateModuleIntent>,
         runtime: PrivateRuntimeConfiguration, platform: PrivatePlatformConfiguration
     ) throws {
-        guard runtimeBaseline.component == .runtime, platformBaseline.component == .platform else {
+        guard runtimeBaseline.component == .runtime, platformBaseline.component == .platform, modules.isWellFormed else {
             throw PrivateConfigurationWireError.invalidValue
         }
         self.requestID = requestID

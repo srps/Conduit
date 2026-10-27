@@ -64,6 +64,8 @@ final class RuntimeCommitFacts: Sendable {
     var commit: RuntimePlatformCommitResult?
     var dnsStaged: Bool?
     var members: PrivateModuleSlots<RuntimeModuleStartResult?>?
+    /// The conditional DNS companion's result as its effect recorded it, nil until it ran.
+    var conditionalDNS: RuntimeConditionalDNSResult?
     /// The preparation found the store's one slot taken.
     var storeBusy = false
 
@@ -77,6 +79,16 @@ struct RuntimeAdmittedStop: Sendable {
     /// The counter value the Stop's fence took. Its teardown acts only on a module still at it.
     let revision: Int
     let requestID: ControlRequestID?
+    /// Where the run leaves its disable save's write facts, for the request's completion.
+    let facts = RuntimeStopFacts()
+}
+
+/// The runtime file's facts from the disable save one session DNS Stop attempted, nil until it ran one.
+@MainActor
+final class RuntimeStopFacts: Sendable {
+    var dnsWrite: RuntimeConfigurationWorkflow.DNSStopWrite?
+
+    nonisolated init() {}
 }
 
 // MARK: - Lane effect
@@ -379,12 +391,14 @@ extension RuntimeHost {
             // the effect settles this group with what it does.
             await join(running, operation: operation)
             admitted.facts.members = running.results
+            admitted.facts.conditionalDNS = running.conditionalDNS
             guard running.completed else { throw RuntimeStartRefusal.notRunning }
             return running.outcome
         case .run(let start):
             // On every exit, after any finalization: the members' recorded settlements, not a value derived from the error.
             defer {
                 admitted.facts.members = start.results
+                admitted.facts.conditionalDNS = start.conditionalDNS
                 endLanes(start)
             }
             do {
@@ -925,13 +939,14 @@ extension RuntimeHost {
         guard reason == .session, modules.contains(.dns) else {
             return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: nil)
         }
-        let save = await workflow.saveOwedDNSStop(requestID: admitted.requestID)
+        let save = await workflow.saveOwedDNSStopWrite(requestID: admitted.requestID)
         emitConfigurationEvents(save.events)
         let result: RuntimeDNSStopSave = switch save.save {
         case .saved: .saved
         case .owed: .owed
         case .notOwed: .notOwed
         }
+        admitted.facts.dnsWrite = save.write
         return RuntimeModuleStopOutcome(stopped: stopped, dnsSave: result)
     }
 

@@ -316,6 +316,7 @@ enum PrivateModuleIntentAction: String, CaseIterable {
     case saveOnly
     case applyWhileRunning
     case start
+    case conditionalStart
 }
 
 /// The wire spelling of a `PrivateComponentState` case.

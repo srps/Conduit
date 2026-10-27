@@ -123,6 +123,48 @@ package struct ControlComponentWrite: Codable, Sendable, Equatable {
     }
 }
 
+/// The runtime file's write from a session DNS Stop's disable save (decision 0015): the exact baseline the write was conditional on, and
+/// the write with its new baseline only when it verified. It is a causal fact, not a refresh: only a draft whose runtime baseline is that
+/// same `prior` may move it to the new one, and the DNS bit it then holds is false. A draft at any other baseline keeps its own, so a
+/// write another client made in between still conflicts. `prior` is nil when the store held no runtime baseline, and then nothing was written.
+package struct ControlDNSDisableWrite: Codable, Sendable, Equatable {
+    package let prior: PrivateBaseline?
+    package let runtime: ControlComponentWrite
+
+    package init(prior: PrivateBaseline?, runtime: ControlComponentWrite) throws {
+        guard prior.map({ $0.component == .runtime }) ?? true, runtime.baseline.map({ $0.component == .runtime }) ?? true,
+              prior != nil || !runtime.write.isVerified
+        else {
+            throw ControlRuntimeWireError.invalidValue
+        }
+        self.prior = prior
+        self.runtime = runtime
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case prior
+        case runtime
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        do {
+            try self.init(
+                prior: try container.decodeIfPresent(PrivateBaseline.self, forKey: .prior),
+                runtime: try container.decode(ControlComponentWrite.self, forKey: .runtime)
+            )
+        } catch is ControlRuntimeWireError {
+            throw DecodingError.dataCorruptedError(forKey: .prior, in: container, debugDescription: "an inconsistent disable write")
+        }
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(prior, forKey: .prior)
+        try container.encode(runtime, forKey: .runtime)
+    }
+}
+
 /// One explicit member's result in an update's Start.
 package struct ControlModuleReceipt: Codable, Sendable, Equatable {
     package let module: ControlModule
@@ -192,6 +234,9 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
     /// means the runtime did not take the whole pair: a named module stopped, moved or went down before the pass completed (its runtime input
     /// may already be held, as the snapshot shows), a flag action did not land, or the pair did not verify.
     package let applied: Bool?
+    /// For a proxy Start that asked for DNS's conditional companion only: the companion's own closed result, kept apart from the members,
+    /// so its no-op never reads as a DNS member's result. `superseded` when the Start ended before the companion ran. Nil when none was asked.
+    package let conditionalDNS: ControlLifecycleConditionalDNSResult?
 
     package init(
         requestID: ControlRequestID,
@@ -200,12 +245,14 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
         platform: ControlComponentWrite,
         committedDNSForwarderEnabled: Bool?,
         modules: [ControlModuleReceipt],
-        applied: Bool? = nil
+        applied: Bool? = nil,
+        conditionalDNS: ControlLifecycleConditionalDNSResult? = nil
     ) throws {
         guard runtime.baseline.map({ $0.component == .runtime }) ?? true,
               platform.baseline.map({ $0.component == .platform }) ?? true,
               (committedDNSForwarderEnabled != nil) == runtime.write.isVerified,
-              modules.count <= ControlModule.allCases.count, Set(modules.map(\.module)).count == modules.count
+              modules.count <= ControlModule.allCases.count, Set(modules.map(\.module)).count == modules.count,
+              conditionalDNS == nil || !modules.contains(where: { $0.module == .dns })
         else {
             throw ControlRuntimeWireError.invalidValue
         }
@@ -216,6 +263,7 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
         self.committedDNSForwarderEnabled = committedDNSForwarderEnabled
         self.modules = modules
         self.applied = applied
+        self.conditionalDNS = conditionalDNS
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -226,6 +274,7 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
         case committedDNSForwarderEnabled
         case modules
         case applied
+        case conditionalDNS
     }
 
     package init(from decoder: any Decoder) throws {
@@ -238,7 +287,8 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
                 platform: try container.decode(ControlComponentWrite.self, forKey: .platform),
                 committedDNSForwarderEnabled: try container.decodeIfPresent(Bool.self, forKey: .committedDNSForwarderEnabled),
                 modules: try container.decode([ControlModuleReceipt].self, forKey: .modules),
-                applied: try container.decodeIfPresent(Bool.self, forKey: .applied)
+                applied: try container.decodeIfPresent(Bool.self, forKey: .applied),
+                conditionalDNS: try container.decodeIfPresent(ControlLifecycleConditionalDNSResult.self, forKey: .conditionalDNS)
             )
         } catch is ControlRuntimeWireError {
             throw DecodingError.dataCorruptedError(forKey: .modules, in: container, debugDescription: "an inconsistent receipt")
@@ -254,5 +304,6 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
         try container.encodeIfPresent(committedDNSForwarderEnabled, forKey: .committedDNSForwarderEnabled)
         try container.encode(modules, forKey: .modules)
         try container.encodeIfPresent(applied, forKey: .applied)
+        try container.encodeIfPresent(conditionalDNS, forKey: .conditionalDNS)
     }
 }

@@ -251,6 +251,7 @@ package struct ControlCompletion: Codable, Sendable, Equatable {
     private static func pairs(command: ControlRuntimeCommandKind, result: ControlCommandResult) -> Bool {
         switch (command, result) {
         case (.stop, .settled), (.restart, .settled), (.quit, .settled): true
+        case (.stop, .dnsDisable): true
         case (.testUpstream, .upstreamProbe): true
         case (.testDNS, .dnsLiveness): true
         case (.refreshPreflight, .preflight): true

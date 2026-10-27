@@ -386,6 +386,21 @@ final class RuntimeConfigurationWorkflow {
     /// or its end without one, settles it, so this writes nothing. `requestID` is the client request of the Stop that owes it, nil for
     /// the host's own composition.
     func saveOwedDNSStop(requestID: ControlRequestID? = nil) async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent]) {
+        let outcome = await saveOwedDNSStopWrite(requestID: requestID)
+        return (outcome.save, outcome.events)
+    }
+
+    /// The runtime file's facts from one attempted disable save: the exact baseline it was conditional on, nil when the store held none,
+    /// and its write. A client whose draft holds that same baseline knows the write was this Stop's own.
+    struct DNSStopWrite: Equatable {
+        let prior: PrivateBaseline?
+        let write: ConfigurationWriteOutcome
+    }
+
+    /// `saveOwedDNSStop`, with the write facts of the save it attempted, nil when it attempted none.
+    func saveOwedDNSStopWrite(
+        requestID: ControlRequestID? = nil
+    ) async -> (save: DNSStopSave, events: [ConfigurationWorkflowEvent], write: DNSStopWrite?) {
         enum Owed { case save(revision: Int), carried, notOwed }
         let owed = intent.withLockedValue { state -> Owed in
             switch state.modules.dns.pending {
@@ -397,24 +412,27 @@ final class RuntimeConfigurationWorkflow {
         let revision: Int
         switch owed {
         case .save(let owedRevision): revision = owedRevision
-        case .carried: return (.owed, [])
-        case .notOwed: return (.notOwed, [])
+        case .carried: return (.owed, [], nil)
+        case .notOwed: return (.notOwed, [], nil)
         }
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
         let intent = self.intent
+        // Read in the same turn the commit takes the store's slot, so it is the baseline the write was conditional on.
+        let expected = store.baselineToken(for: .runtime)
         let admission = await store.commitDNSLifecycle(
             enabled: false,
-            expecting: store.baselineToken(for: .runtime),
+            expecting: expected,
             context: context(generation: revision, requestID: requestID),
             claim: ConfigurationWriteClaim { intent.withLockedValue { $0.stopSaveIsCurrent(revision: revision) } }
         )
         // A busy slot attempts nothing: the disable stays owed, the fence stays, and the typed hold says why.
-        guard case .admitted(let result) = admission else { return (.owed, [held(.stop, .runtime, .storeBusy)]) }
+        guard case .admitted(let result) = admission else { return (.owed, [held(.stop, .runtime, .storeBusy)], nil) }
         let events = [committed(.runtime, result.runtime)]
-        guard result.runtime.isVerified else { return (.owed, events) }
+        let write = DNSStopWrite(prior: expected.map { Self.privateBaseline($0) }, write: result.runtime)
+        guard result.runtime.isVerified else { return (.owed, events, write) }
         intent.withLockedValue { $0.finishStopSave(revision: revision) }
-        return (.saved, events)
+        return (.saved, events, write)
     }
 
     /// Authorizes a Start whose verified pair the host has adopted: its members gain the permission the facade grants and lose their

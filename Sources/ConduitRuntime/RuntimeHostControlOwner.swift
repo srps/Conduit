@@ -114,6 +114,8 @@ enum RuntimeControlAdmission {
     case launchAtLogin(Bool, PrivateBaseline, ControlRequestID)
     /// The quit latched at the fence; its work already runs, and its window holds the one total deadline.
     case quit(Task<Void, Never>, RuntimeQuitFlush)
+    /// A DNS liveness probe of the port the fence chose.
+    case dnsProbe(port: Int)
 }
 
 /// The latest control Stop of one module: the service operation and the revision its fence took.
@@ -202,7 +204,14 @@ extension RuntimeHost: ControlCommandOwner {
             guard let window = quitFlush else { preconditionFailure("a quit with a deadline holds its window") }
             controlAdmissions[operation] = .quit(work, window)
             return .admitted
-        case .restart(.dns, _, _), .restart(.tunnels, _, _), .testDNS, .testUpstream, .refreshPreflight:
+        case .testDNS:
+            // The app's Test DNS, from this host's own state and no editor value: system DNS's port 53 while the host manages it,
+            // otherwise the forwarder's bound port, or its configured one when none is bound. It reads; it changes no intent.
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            let port = platformConfig.manageSystemDNS ? 53 : (orchestrator.snapshot.bindings.dnsPort ?? config.dnsForwarderPort)
+            controlAdmissions[operation] = .dnsProbe(port: port)
+            return .admitted
+        case .restart(.dns, _, _), .restart(.tunnels, _, _), .testUpstream, .refreshPreflight:
             // Not adopted on this owner yet; each is refused whole before anything changes.
             return .rejected(.notImplemented)
         }
@@ -224,7 +233,7 @@ extension RuntimeHost: ControlCommandOwner {
         case .stop(let stop, let module):
             Task { @MainActor [self] in
                 let outcome = await runAdmittedStop(stop)
-                report.settled(controlOutcome(of: outcome, module: module))
+                report.settled(controlOutcome(of: outcome, module: module, dnsWrite: stop.facts.dnsWrite))
                 report.quiesced()
                 onControlStateChange?()
             }
@@ -244,6 +253,27 @@ extension RuntimeHost: ControlCommandOwner {
                 report.settled(await window.settled() ? completed(.quit) : .failed(.cleanupIncomplete))
                 onControlStateChange?()
                 await work.value
+                report.quiesced()
+                onControlStateChange?()
+            }
+        case .dnsProbe(let port):
+            // A port that cannot be named on the wire, as an unbound forwarder configured on port 0, has nothing to probe.
+            guard let wirePort = try? ControlPort(port) else {
+                logger.log(.warning, "DNS test: no forwarder port to probe.", category: .system)
+                report.settled(.failed(.effectFailed))
+                report.quiesced()
+                return
+            }
+            Task { @MainActor [self] in
+                let manager = systemDNSManager
+                logger.log(.notice, "DNS test: probing 127.0.0.1:\(port)...", category: .system)
+                let answered = await platformWork.run { manager.probeLiveness(port: port) }
+                if answered {
+                    logger.log(.notice, "DNS test: PASS — received response from relay/forwarder pipeline.", category: .system)
+                } else {
+                    logger.log(.warning, "DNS test: FAIL — no response from 127.0.0.1:\(port) within 2s.", category: .system)
+                }
+                report.settled(completed(.testDNS, result: .dnsLiveness(ControlDNSLivenessProbe(port: wirePort, answered: answered))))
                 report.quiesced()
                 onControlStateChange?()
             }
@@ -331,10 +361,27 @@ extension RuntimeHost: ControlCommandOwner {
     // MARK: Outcomes
 
     /// A Stop completed when its module is down, by its own teardown or one it joined. A module a newer Start took is not this Stop's.
-    /// Its fence was established at admission either way, and a DNS disable save's own result is its typed `config.workflow` event.
-    private func controlOutcome(of stop: RuntimeModuleStopOutcome, module: ControlModule) -> ControlOperationOutcome {
+    /// Its fence was established at admission either way. A session DNS Stop that attempted its disable save completes with that save's
+    /// causal runtime write, so the client that holds the baseline it was conditional on can recognize the write as its own Stop's.
+    private func controlOutcome(
+        of stop: RuntimeModuleStopOutcome,
+        module: ControlModule,
+        dnsWrite: RuntimeConfigurationWorkflow.DNSStopWrite?
+    ) -> ControlOperationOutcome {
         guard stop.stopped.contains(module) || modulesDown().contains(module) else { return .failed(.staleRevision) }
-        return completed(.stop)
+        guard let dnsWrite else { return completed(.stop) }
+        do {
+            let write = try ControlDNSDisableWrite(
+                prior: dnsWrite.prior,
+                runtime: ControlComponentWrite(
+                    write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(dnsWrite.write)),
+                    baseline: dnsWrite.write.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
+                )
+            )
+            return completed(.stop, result: .dnsDisable(write))
+        } catch {
+            preconditionFailure("a disable write is built from the store's own consistent facts")
+        }
     }
 
     /// A Restart's proxy member result. Its typed `lifecycle.module_settled` carries the same value.
