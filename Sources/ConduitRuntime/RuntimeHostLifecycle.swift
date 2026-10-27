@@ -64,6 +64,8 @@ final class RuntimeCommitFacts: Sendable {
     var commit: RuntimePlatformCommitResult?
     var dnsStaged: Bool?
     var members: PrivateModuleSlots<RuntimeModuleStartResult?>?
+    /// The preparation found the store's one slot taken.
+    var storeBusy = false
 
     nonisolated init() {}
 }
@@ -347,6 +349,7 @@ extension RuntimeHost {
         let preparation = await workflow.prepareStart(ticket, frozen: admitted.frozen)
         admitted.facts.commit = preparation.commit
         admitted.facts.dnsStaged = preparation.dnsStaged
+        admitted.facts.storeBusy = preparation.storeBusy
         emitConfigurationEvents(preparation.events)
         let prepared: RuntimeConfigurationWorkflow.PreparedStart
         switch preparation.preparation {
@@ -952,13 +955,19 @@ extension RuntimeHost {
     /// It joins launch recovery first, and this is where the daemon parts from the app: `AppState.performTerminationCleanup` does not join
     /// because `applicationWillTerminate` is synchronous. `SIGTERM` reaches this through a `Task`, so the join leaves the main actor free,
     /// and the stop's clears never overlap recovery's.
-    package func shutdown() async {
+    ///
+    /// `reservingFlushUntil` opens the quit's one reserved draft flush until that total deadline (`RuntimeQuitFlush`): the quit waits for the
+    /// flush it admits, or for the deadline, before it joins store work and confirms the flush of diagnostics. Nil reserves none.
+    package func shutdown(reservingFlushUntil deadline: ContinuousClock.Instant? = nil) async {
         if let quit {
             await quit.value
             return
         }
         pendingAdmissions += 1
         workflow.admitStop(terminal: true)
+        // In the latch's own turn, so no client sees the latch without the window.
+        let flush = deadline.map { RuntimeQuitFlush(until: $0) }
+        quitFlush = flush
         stoppedEffectsJoin?.finish(.superseded)
         let quit = Task { @MainActor [self] in
             defer { pendingAdmissions -= 1 }
@@ -970,6 +979,7 @@ extension RuntimeHost {
             stop.stopped = await tearDown(Self.allModules, under: stop, terminal: true)
             endLanes(stop)
             await waitUntilIdle(Self.allModules)
+            await flush?.closed()
             await workflow.waitUntilIdle()
             await flushEvents()
         }

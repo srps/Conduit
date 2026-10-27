@@ -111,6 +111,7 @@ struct RuntimeHostCollections {
 enum RuntimeControlAdmission {
     case stop(RuntimeAdmittedStop, ControlModule)
     case restart(RuntimeAdmittedStart)
+    case launchAtLogin(Bool, PrivateBaseline, ControlRequestID)
 }
 
 /// The latest control Stop of one module: the service operation and the revision its fence took.
@@ -185,6 +186,11 @@ extension RuntimeHost: ControlCommandOwner {
             return fenceStop(module, request: request, operation: operation, candidate: candidate)
         case .restart(.proxy, let expected, let companion):
             return fenceProxyRestart(expected, conditionalDNS: companion, request: request, operation: operation)
+        case .setLaunchAtLogin(let enabled, let baseline):
+            guard !workflow.isTerminal else { return .rejected(.hostStopping) }
+            pendingAdmissions += 1
+            controlAdmissions[operation] = .launchAtLogin(enabled, baseline, request)
+            return .admitted
         case .restart(.dns, _, _), .restart(.tunnels, _, _), .testDNS, .testUpstream, .refreshPreflight:
             // Not adopted on this owner yet; each is refused whole before anything changes.
             return .rejected(.notImplemented)
@@ -204,6 +210,15 @@ extension RuntimeHost: ControlCommandOwner {
             Task { @MainActor [self] in
                 let outcome = await runAdmittedStop(stop)
                 report.settled(controlOutcome(of: outcome, module: module))
+                report.quiesced()
+                onControlStateChange?()
+            }
+        case .launchAtLogin(let enabled, let baseline, let request):
+            Task { @MainActor [self] in
+                defer { pendingAdmissions -= 1 }
+                let outcome = await workflow.commitLaunchAtLogin(enabled, expecting: baseline, requestID: request)
+                emitConfigurationEvents(outcome.events)
+                report.settled(launchAtLoginOutcome(outcome.write))
                 report.quiesced()
                 onControlStateChange?()
             }
@@ -304,6 +319,24 @@ extension RuntimeHost: ControlCommandOwner {
         case .failed?: .failed(.effectFailed)
         case .superseded?: .failed(.staleRevision)
         case .notConfigured?, nil: .failed(.internalFailure)
+        }
+    }
+
+    /// The admin write's settlement: its platform write with the new baseline when it verified, or the store's closed capacity cause.
+    private func launchAtLoginOutcome(_ write: ConfigurationWriteOutcome?) -> ControlOperationOutcome {
+        guard let write else { return .failed(.storeBusy) }
+        do {
+            let component = try ControlComponentWrite(
+                write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(write)),
+                baseline: write.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
+            )
+            _ = snapshot()
+            guard let revision = ControlPresentationRevision(rawValue: presentation.revision) else {
+                preconditionFailure("a presentation revision is never negative")
+            }
+            return .completed(try ControlCompletion(command: .setLaunchAtLogin, presentationRevision: revision, result: .platformWrite(component)))
+        } catch {
+            preconditionFailure("an admin settlement is built from the store's own consistent facts")
         }
     }
 

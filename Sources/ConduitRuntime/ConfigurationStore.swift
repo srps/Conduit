@@ -295,6 +295,49 @@ final class ConfigurationStore {
         }
     }
 
+    /// Commits the launch-at-login administration into the platform file alone (decision 0018 keeps it app administration). The candidate
+    /// is the store's current platform value with only `launchAtLogin` set, staged, compared and written through the same steps as every
+    /// platform write, conditional on `expected`, the exact platform baseline the client named. No runtime or preferences file is touched,
+    /// so a latched runtime file does not hold it, and nothing is applied. A later runtime or platform save merges the flag from the store
+    /// inside its own claim, so no editor draft can restore an older value.
+    func commitLaunchAtLogin(
+        enabled: Bool,
+        expecting expected: ConfigurationBaselineToken,
+        context: ConfigurationOperationContext,
+        claim: ConfigurationWriteClaim
+    ) async -> ConfigurationStoreAdmission<ConfigurationWriteOutcome> {
+        guard !isBusy else { return .busy }
+        isBusy = true
+        defer { isBusy = false }
+        let baseline: ConfigurationFileBaseline
+        switch authority(expected, for: .platform) {
+        case .success(let value):
+            baseline = value
+        case .failure(let reason):
+            return .admitted(.notAttempted(reason))
+        }
+        guard var edited = values?.platform else { preconditionFailure("a platform baseline is held only with adopted values") }
+        edited.launchAtLogin = enabled
+        let candidate = edited
+        let current = values?.platform
+        let source = session.plan.platformConfig.path
+        let file: ConfigurationStagedFile<PlatformIntegrationConfig>
+        switch await work.run({ ConfigurationStoreIO.stagePlatform(candidate, current: current, source: source) }) {
+        case .ready(let value):
+            file = value
+        case .refused(let reason):
+            return .admitted(.notAttempted(.stagingRefused(reason)))
+        }
+        let outcome = await commit(
+            file.bytes, component: .platform, baseline: baseline, sameValue: file.comparison == .same,
+            preservation: [], context: context, claim: claim
+        )
+        if outcome.isVerified {
+            values?.platform = file.value
+        }
+        return .admitted(outcome)
+    }
+
     /// Persists DNS's lifecycle intent into the runtime file alone, the Stop exception of decision 0015: a disable must not wait on a
     /// latched, changed or unrelated platform file, and it requests no sidecar creation. The candidate is the store's current runtime value
     /// with only `dnsForwarderEnabled` set, staged, compared and written through the same steps as every runtime write: the conditional

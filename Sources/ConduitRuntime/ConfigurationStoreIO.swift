@@ -219,7 +219,7 @@ enum ConfigurationStoreIO {
         return staged(file.bytes, file.value, current: current) { try ProxyConfigPersistence.stagedFile(for: $0).bytes }
     }
 
-    private static func stagePlatform(
+    static func stagePlatform(
         _ config: PlatformIntegrationConfig,
         current: PlatformIntegrationConfig?,
         source: String

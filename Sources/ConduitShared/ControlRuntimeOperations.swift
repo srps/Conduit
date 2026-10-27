@@ -89,10 +89,14 @@ package enum ControlFailureCode: String, Codable, Sendable, Equatable, CaseItera
     case cleanupIncomplete = "cleanup_incomplete"
     case staleRevision = "stale_revision"
     case internalFailure = "internal_failure"
+    /// The configuration store's one slot was taken by another operation, so nothing was captured or written. A capacity answer, not a
+    /// persistence failure: a later explicit request may succeed.
+    case storeBusy = "store_busy"
 
     /// Sanitized text for display. The code, not this text, carries the meaning.
     package var humanDescription: String {
         switch self {
+        case .storeBusy: "The configuration store was busy, so nothing was saved; try again."
         case .effectFailed: "The change did not take effect."
         case .cleanupIncomplete: "Cleanup did not finish; recovery work remains."
         case .staleRevision: "The operation was superseded by a newer revision."
@@ -250,6 +254,7 @@ package struct ControlCompletion: Codable, Sendable, Equatable {
         case (.testUpstream, .upstreamProbe): true
         case (.testDNS, .dnsLiveness): true
         case (.refreshPreflight, .preflight): true
+        case (.setLaunchAtLogin, .platformWrite): true
         default: false
         }
     }

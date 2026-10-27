@@ -101,10 +101,12 @@ final class RuntimeClientContractTests: XCTestCase {
 
     // MARK: - Commands and admission
 
-    func testTheApprovedCommandSetIsExactlyFiveAndExcludesStartAndConfigApply() throws {
+    /// The ordinary commands, with the login-item administration as the one write: it saves a single platform flag and applies nothing.
+    /// Start and configuration apply stay off this wire; they travel on the private editor request.
+    func testTheApprovedCommandSetExcludesStartAndConfigApply() throws {
         XCTAssertEqual(
             ControlRuntimeCommandKind.allCases.map(\.rawValue),
-            ["stop", "restart", "test-dns", "test-upstream", "refresh-preflight"]
+            ["stop", "restart", "test-dns", "test-upstream", "refresh-preflight", "set-launch-at-login"]
         )
         let decoder = JSONDecoder()
         XCTAssertThrowsError(try decoder.decode(ControlRuntimeCommand.self, from: Data(#"{"type":"start","module":"proxy"}"#.utf8)))

@@ -280,8 +280,8 @@ final class RuntimePrivateWorkBox {
 struct RuntimePrivateUpdate {
     enum Work {
         case start(RuntimeAdmittedStart)
-        /// A save, with the revision each apply-while-running module was admitted at, nil for a save-only module.
-        case save(RuntimeConfigurationWorkflow.SaveTicket, RuntimeConfigurationWorkflow.FrozenInput, applying: PrivateModuleSlots<Int?>)
+        /// A save; its ticket names the revision of each module it applies to.
+        case save(RuntimeConfigurationWorkflow.SaveTicket, RuntimeConfigurationWorkflow.FrozenInput)
     }
 
     let requestID: ControlRequestID
@@ -334,15 +334,24 @@ extension RuntimeHost {
             runtimeBaseline: request.runtimeBaseline, platformBaseline: request.platformBaseline
         )
         let members = ControlModule.allCases.filter { actions[$0] == .start }
+        // After the quit latched, only its one reserved flush is admitted: all save-only, nothing to start or apply.
+        var flush = false
+        if workflow.isTerminal {
+            guard members.isEmpty, applies.isEmpty, quitFlush?.admit() == true else {
+                emitConfigurationEvents(workflow.terminalRefusal())
+                return .rejected(.hostStopping)
+            }
+            flush = true
+        }
         let work: RuntimePrivateUpdate.Work
         if members.isEmpty {
-            guard case .success(let ticket) = workflow.admitSave(requestID: request.requestID) else {
+            guard case .success(let ticket) = workflow.admitSave(requestID: request.requestID, applying: applying, quitFlush: flush) else {
                 emitConfigurationEvents(workflow.terminalRefusal())
                 return .rejected(.hostStopping)
             }
             pendingAdmissions += 1
             stoppedEffectsJoin?.finish(.superseded)
-            work = .save(ticket, frozen, applying: applying)
+            work = .save(ticket, frozen)
         } else {
             let operationName: LifecycleOperation = members.count == 1
                 ? (members[0] == .proxy ? .proxyStart : members[0] == .dns ? .dnsStart : .tunnelsStart)
@@ -386,25 +395,31 @@ extension RuntimeHost {
     /// The update's work and its causal receipt. A request whose store commit never ran has no receipt: it fails with its closed cause.
     private func runPrivateUpdate(_ update: RuntimePrivateUpdate) async -> ControlOperationOutcome {
         switch update.work {
-        case .save(let ticket, let frozen, let applying):
+        case .save(let ticket, let frozen):
             defer { pendingAdmissions -= 1 }
+            let applying = ticket.applying
             await awaitLaunchRecovery()
             let saved = await workflow.saveFrozen(ticket, frozen)
             emitConfigurationEvents(saved.events)
+            if ticket.quitFlush { quitFlush?.finish() }
             var applied: Bool?
             if ControlModule.allCases.contains(where: { applying[$0] != nil }) {
                 applied = if let verified = saved.commit?.verifiedInput { await applyWhileRunning(verified, at: applying) } else { false }
             }
             return receipt(
                 update.requestID, commit: saved.commit, dnsStaged: saved.dnsStaged, modules: [], applied: applied,
-                unsaved: saved.superseded ? .staleRevision : .effectFailed
+                unsaved: saved.storeBusy ? .storeBusy : saved.superseded ? .staleRevision : .effectFailed
             )
         case .start(let admitted):
             var unsaved = ControlFailureCode.effectFailed
             do {
                 _ = try await runAdmittedStart(admitted)
             } catch let refusal as RuntimeStartRefusal {
-                if refusal == .superseded || refusal == .terminated { unsaved = .staleRevision }
+                if admitted.facts.storeBusy {
+                    unsaved = .storeBusy
+                } else if refusal == .superseded || refusal == .terminated {
+                    unsaved = .staleRevision
+                }
             } catch {
                 // The member's own failure is recorded in its settlement below; the error text is not kept.
             }
@@ -425,7 +440,10 @@ extension RuntimeHost {
 
     /// Applies a save's verified pair through the one reconciler, only while every module it names still runs at the revision it was admitted
     /// at, no terminal stop latched and the store still holds the pair (decisions 0025 and 0037). It never authorizes a Start, clears a fence
-    /// or enables a module; a Stop or newer Start of a named module, or a newer write, holds the rest. Returns whether the pair is applied.
+    /// or enables a module; a Stop or newer Start of a named module, or a newer write, holds the rest. As a reload does, the accepted view is
+    /// adopted before the push, so it never falls behind what the runtime takes. Returns whether the runtime's applied input is now this
+    /// pair: the reconciler's baseline, which moves only to what a push reports held. That is not a claim that a listener came up; a failed
+    /// one shows in the snapshot and the lifecycle state.
     private func applyWhileRunning(_ verified: VerifiedRuntimePlatformInput, at revisions: PrivateModuleSlots<Int?>) async -> Bool {
         let stands: @MainActor @Sendable () -> Bool = { [weak self] in
             guard let self, !self.workflow.isTerminal, self.workflow.stillHolds(verified) else { return false }
@@ -436,13 +454,12 @@ extension RuntimeHost {
             }
         }
         guard stands() else { return false }
-        reconciler.reconcile(config: verified.runtime, platformConfig: verified.platform, isCurrent: stands)
-        await reconciler.drain()
-        guard stands() else { return false }
         if ConfigDiff(old: config, new: verified.runtime).inputChanged || platformConfig != verified.platform {
             adoptHostView(runtime: verified.runtime, platform: verified.platform)
         }
-        return true
+        reconciler.reconcile(config: verified.runtime, platformConfig: verified.platform, isCurrent: stands)
+        await reconciler.drain()
+        return !reconciler.lags(config: verified.runtime, platformConfig: verified.platform)
     }
 
     private func receipt(
@@ -474,16 +491,7 @@ extension RuntimeHost {
     private static func componentWrite(_ outcome: ConfigurationWriteOutcome) throws -> ControlComponentWrite {
         try ControlComponentWrite(
             write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(outcome)),
-            baseline: outcome.verifiedReceipt.map { receipt in
-                let file: ControlConfigWorkflowFile = switch receipt.component {
-                case .runtime: .runtime
-                case .platform: .platform
-                case .preferences: .preferences
-                }
-                return PrivateBaseline(
-                    namespace: PrivateBaselineNamespace(rawValue: receipt.storeIncarnation), component: file, version: receipt.version
-                )
-            }
+            baseline: outcome.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
         )
     }
 }

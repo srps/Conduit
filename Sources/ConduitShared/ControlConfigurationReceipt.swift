@@ -146,8 +146,10 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
     package let committedDNSForwarderEnabled: Bool?
     /// Each explicit Start member's result, in module order, at most one per module. Empty for a save.
     package let modules: [ControlModuleReceipt]
-    /// For an apply-while-running update only: whether its verified pair was applied to the running modules it named. Nil when none was
-    /// asked. False means it was persisted and held, because a module stopped or moved, or the pair did not verify.
+    /// For an apply-while-running update only: whether the runtime's applied input is now its verified pair. Nil when none was asked. True
+    /// says the runtime took the input, not that every listener came up: a failed one shows in the snapshot and its lifecycle state. False
+    /// means the runtime did not take it: a named module stopped or moved before the push, a flag action did not land, or the pair did not
+    /// verify.
     package let applied: Bool?
 
     package init(

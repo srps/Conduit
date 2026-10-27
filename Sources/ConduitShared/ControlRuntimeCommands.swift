@@ -16,6 +16,7 @@ package enum ControlRuntimeCommandKind: String, Codable, Sendable, Equatable, Ca
     case testDNS = "test-dns"
     case testUpstream = "test-upstream"
     case refreshPreflight = "refresh-preflight"
+    case setLaunchAtLogin = "set-launch-at-login"
 }
 
 /// An upstream named together with the configuration revision it belongs to, so
@@ -47,6 +48,9 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     case testDNS
     case testUpstream(ControlUpstreamReference)
     case refreshPreflight
+    /// The app's login-item administration (decision 0018): it saves only the platform file's `launchAtLogin`, under the exact platform
+    /// baseline the client observed, and applies nothing. It carries no configuration value beyond the flag.
+    case setLaunchAtLogin(Bool, ifPlatformBaseline: PrivateBaseline)
 
     package var kind: ControlRuntimeCommandKind {
         switch self {
@@ -55,6 +59,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .testDNS: .testDNS
         case .testUpstream: .testUpstream
         case .refreshPreflight: .refreshPreflight
+        case .setLaunchAtLogin: .setLaunchAtLogin
         }
     }
 
@@ -64,6 +69,8 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case lifecycleRevision
         case conditionalDNSRevision
         case upstream
+        case enabled
+        case baseline
     }
 
     package init(from decoder: any Decoder) throws {
@@ -94,6 +101,12 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
             self = .testUpstream(try container.decode(ControlUpstreamReference.self, forKey: .upstream))
         case .refreshPreflight:
             self = .refreshPreflight
+        case .setLaunchAtLogin:
+            let baseline = try container.decode(PrivateBaseline.self, forKey: .baseline)
+            guard baseline.component == .platform else {
+                throw DecodingError.dataCorruptedError(forKey: .baseline, in: container, debugDescription: "the flag is the platform file's")
+            }
+            self = .setLaunchAtLogin(try container.decode(Bool.self, forKey: .enabled), ifPlatformBaseline: baseline)
         }
     }
 
@@ -116,6 +129,12 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
             break
         case .testUpstream(let reference):
             try container.encode(reference, forKey: .upstream)
+        case .setLaunchAtLogin(let enabled, let baseline):
+            guard baseline.component == .platform else {
+                throw EncodingError.invalidValue(baseline, .init(codingPath: encoder.codingPath, debugDescription: "the flag is the platform file's"))
+            }
+            try container.encode(enabled, forKey: .enabled)
+            try container.encode(baseline, forKey: .baseline)
         }
     }
 }
@@ -214,12 +233,15 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
     case upstreamProbe(ControlUpstreamProbe)
     case dnsLiveness(ControlDNSLivenessProbe)
     case preflight(ControlPreflightObservation)
+    /// A login-item administration's platform write, with the new verified baseline only when it verified.
+    case platformWrite(ControlComponentWrite)
 
     private enum CodingKeys: String, CodingKey {
         case type
         case probe
         case liveness
         case observation
+        case write
     }
 
     package init(from decoder: any Decoder) throws {
@@ -233,6 +255,8 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
             self = .dnsLiveness(try container.decode(ControlDNSLivenessProbe.self, forKey: .liveness))
         case "preflight":
             self = .preflight(try container.decode(ControlPreflightObservation.self, forKey: .observation))
+        case "platform-write":
+            self = .platformWrite(try container.decode(ControlComponentWrite.self, forKey: .write))
         default:
             throw DecodingError.dataCorruptedError(forKey: .type, in: container, debugDescription: "an unknown result")
         }
@@ -252,6 +276,9 @@ package enum ControlCommandResult: Codable, Sendable, Equatable {
         case .preflight(let observation):
             try container.encode("preflight", forKey: .type)
             try container.encode(observation, forKey: .observation)
+        case .platformWrite(let write):
+            try container.encode("platform-write", forKey: .type)
+            try container.encode(write, forKey: .write)
         }
     }
 }

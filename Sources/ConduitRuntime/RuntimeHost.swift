@@ -56,6 +56,8 @@ package final class RuntimeHost {
     var controlStops = PrivateModuleSlots<RuntimeControlStop?>(proxy: nil, dns: nil, tunnels: nil)
     /// The private updates admitted and not launched yet, with their frozen inputs. The composition's one frozen-input slot bounds it to one.
     var privateUpdates: [ControlOperationID: RuntimePrivateUpdate] = [:]
+    /// The quit's one reserved draft flush, once a quit opened it.
+    var quitFlush: RuntimeQuitFlush?
     /// Start, Stop and reload calls begun and not yet finished. A settle reads it, so a call that has not yet reached the lane or the
     /// workflow, still waiting for launch recovery, is seen.
     var pendingAdmissions = 0

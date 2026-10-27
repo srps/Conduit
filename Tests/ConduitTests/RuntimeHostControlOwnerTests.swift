@@ -574,6 +574,152 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(composed.host.heldRuntimeConfig.profileName, "Whole pair", "the running proxy holds the one applied input")
     }
 
+    /// The login-item administration saves the platform file's flag alone, under its exact platform baseline, and applies nothing; an old
+    /// baseline is refused as stale; and a later editor save merges the stored flag, so an older draft cannot restore it.
+    func testLaunchAtLoginAdministrationWritesOnlyItsFlagAndAnEditorSaveKeepsIt() async throws {
+        let composed = try await compose()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        XCTAssertFalse(observed.launchAtLogin)
+        let platformBaseline = try XCTUnwrap(observed.components.platform.baseline)
+
+        let admin = try accepted(try await submit(composed, .setLaunchAtLogin(true, ifPlatformBaseline: platformBaseline)))
+        let outcome = try await finished(admin, on: stream)
+        guard case .completed(let completion) = outcome, case .platformWrite(let write) = completion.result else {
+            return XCTFail("the admin write completes with its platform write: \(outcome)")
+        }
+        XCTAssertEqual(write.write, .persisted(reportedError: false))
+        XCTAssertGreaterThan(try XCTUnwrap(write.baseline).version, platformBaseline.version)
+        XCTAssertTrue(try PlatformConfigPersistence.load(in: composed.harness.environment).launchAtLogin)
+
+        let again = try accepted(try await submit(composed, .setLaunchAtLogin(false, ifPlatformBaseline: platformBaseline)))
+        let staleOutcome = try await finished(again, on: stream)
+        guard case .completed(let staleCompletion) = staleOutcome, case .platformWrite(let stale) = staleCompletion.result else {
+            return XCTFail("the stale admin write still settles: \(staleOutcome)")
+        }
+        XCTAssertEqual(stale.write, .notAttempted(.baselineMismatch))
+
+        // The draft from before the admin write, saved at the current baselines: the stored flag stays.
+        let current = try await observation(composed)
+        var values = try PrivateConfigurationBridge.makeValues(from: observed)
+        values.config.profileName = "After admin"
+        let request = try PrivateConfigurationBridge.makeRequest(
+            config: values.config, platform: values.platform, requestID: ControlRequestID(rawValue: UUID()),
+            incarnation: composed.host.incarnation, budget: try ControlWireBudget(1_000),
+            runtimeBaseline: try XCTUnwrap(current.components.runtime.baseline),
+            platformBaseline: try XCTUnwrap(current.components.platform.baseline),
+            modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+        )
+        let save = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        _ = try await finished(save, on: stream)
+        XCTAssertTrue(try PlatformConfigPersistence.load(in: composed.harness.environment).launchAtLogin, "the editor save kept the flag")
+    }
+
+    /// The quit's one reserved flush: after the latch, one all-save-only update is admitted and written, nothing is applied, and the quit
+    /// waits for it within its total deadline. A second update, or one after a deadline already past, is refused as stopping.
+    func testTheQuitAdmitsOneReservedFlushWithinItsDeadlineAndNothingAfter() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let observed = try await observation(composed)
+        let applied = composed.host.config.profileName
+        let host = composed.host
+        let quit = Task { @MainActor in await host.shutdown(reservingFlushUntil: ContinuousClock.now.advanced(by: .seconds(30))) }
+        let latched = try await eventually { host.workflow.isTerminal }
+        XCTAssertTrue(latched)
+
+        let flush = try update(composed, from: observed) { $0.profileName = "Flushed" }
+        _ = try accepted(try await editor(composed).submit(flush, deadline: deadline()))
+        await quit.value
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Flushed")
+        XCTAssertEqual(host.config.profileName, applied, "the flush applies nothing")
+        XCTAssertFalse(host.runtimeState().proxyIsUp)
+
+        let after = try await observation(composed)
+        let second = try update(composed, from: after) { $0.profileName = "Too late" }
+        let refused = try await editor(composed).submit(second, deadline: deadline())
+        XCTAssertEqual(refused, .rejected(.hostStopping))
+    }
+
+    /// A quit whose deadline already passed opens no window: it does not wait, and a flush is refused as stopping.
+    func testAQuitWhoseDeadlinePassedAdmitsNoFlush() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        let observed = try await observation(composed)
+        await composed.host.shutdown(reservingFlushUntil: ContinuousClock.now.advanced(by: .seconds(-1)))
+        let flush = try update(composed, from: observed) { $0.profileName = "Never" }
+        let refused = try await editor(composed).submit(flush, deadline: deadline())
+        XCTAssertEqual(refused, .rejected(.hostStopping))
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName,
+                       observed.runtime.profileName)
+    }
+
+    /// A Stop of a module an apply-while-running save names, fenced after the save's admission and before its queued launch, revokes the
+    /// unstarted write (decision 0035): nothing is written, the update settles stale, and its slot and admission are released.
+    func testAStopAfterAnApplysAdmissionRevokesItsUnstartedWrite() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
+        self.harness = harness
+        let host = try await harness.makeHost()
+        try await host.startRuntime()
+        let scheduling = ManualOwnerScheduling()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.limits(), timing: ManualRuntimeTiming().timing, scheduling: scheduling
+        )
+        let editor = PrivateEditorClient(transport: composition.transport)
+        let capture = host.workflow.editorCapture()
+        let observed = try capture.observation()
+        let before = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false).profileName
+        var values = try PrivateConfigurationBridge.makeValues(from: observed)
+        values.config.profileName = "Revoked"
+        let request = try PrivateConfigurationBridge.makeRequest(
+            config: values.config, platform: values.platform, requestID: ControlRequestID(rawValue: UUID()),
+            incarnation: host.incarnation, budget: try ControlWireBudget(1_000),
+            runtimeBaseline: try XCTUnwrap(observed.components.runtime.baseline),
+            platformBaseline: try XCTUnwrap(observed.components.platform.baseline),
+            modules: PrivateModuleSlots(
+                proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+            )
+        )
+        let operation = try accepted(try await editor.submit(request, deadline: deadline()))
+        _ = try accepted(composition.service.submit(ControlOperationRequest(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, command: .stop(.proxy)
+        )))
+        scheduling.drainAll()
+        let quiet = try await eventually { host.pendingAdmissions == 0 }
+        XCTAssertTrue(quiet)
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false).profileName, before,
+                       "the revoked save wrote nothing")
+        XCTAssertEqual(composition.service.operationLookup(ControlOperationQuery(expectedIncarnation: host.incarnation, operationID: operation)),
+                       .finished(.failed(.staleRevision)))
+        XCTAssertEqual(composition.privateCustody.held.input, false)
+    }
+
+    /// An apply that moves the proxy onto an occupied port: the runtime takes the new input though its listener cannot bind. The receipt says
+    /// the runtime took it, the accepted view follows it rather than lagging behind, and the snapshot shows the listener down.
+    func testAnApplyOntoAnOccupiedPortReportsTheInputTakenAndTheListenerDown() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        try await composed.host.startRuntime()
+        let occupied = try HeldTCPListener()
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let generation = composed.host.configGeneration
+        let request = try update(composed, from: observed, modules: PrivateModuleSlots(
+            proxy: .applyWhileRunning(ifLifecycleRevision: observed.modules.proxy.lifecycleRevision), dns: .saveOnly, tunnels: .saveOnly
+        )) { $0.localPort = occupied.port }
+        let operation = try accepted(try await editor(composed).submit(request, deadline: deadline()))
+        let outcome = try await finished(operation, on: stream)
+        let settled = try receipt(outcome)
+        XCTAssertEqual(settled.applied, true, "the runtime took the input")
+        XCTAssertEqual(composed.host.heldRuntimeConfig.localPort, occupied.port)
+        XCTAssertEqual(composed.host.config.localPort, occupied.port, "the accepted view does not lag the runtime")
+        XCTAssertGreaterThan(composed.host.configGeneration, generation)
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp, "the failed listener is not reported as running")
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        XCTAssertNotEqual(snapshot.proxyState, .running)
+    }
+
     /// While the composition's private transfer is held, another private exchange is refused before anything is encoded, and ordinary
     /// status still answers.
     func testABusyPrivateTransferRefusesBeforeEncodingAndStatusStillAnswers() async throws {
