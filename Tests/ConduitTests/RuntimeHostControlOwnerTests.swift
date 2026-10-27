@@ -108,10 +108,16 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let client: any RuntimeClient
     }
 
-    private func compose(dnsForwarderEnabled: Bool = true, stateFiles: (any StateFileAccessing)? = nil) async throws -> Composed {
+    /// `beforeOpen` shapes the scratch root's saved files or the harness's effects before the host opens over them.
+    private func compose(
+        dnsForwarderEnabled: Bool = true,
+        stateFiles: (any StateFileAccessing)? = nil,
+        beforeOpen: (InteractiveHostHarness) throws -> Void = { _ in }
+    ) async throws -> Composed {
         let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: dnsForwarderEnabled)
         self.harness = harness
         if let stateFiles { harness.stateFiles = stateFiles }
+        try beforeOpen(harness)
         let host = try await harness.makeHost()
         let composition = RuntimeControlComposition(
             host: host,
@@ -2011,8 +2017,9 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
     // MARK: - Restart
 
     /// The ordinary menu Restart names the whole-host lifecycle counter the client read. It restarts the proxy through the host's one Start
-    /// path, with no companion and no editor values, and settles as a completed Restart under its own group. The same request at the old
-    /// counter is then refused whole, and nothing changes.
+    /// path, with no companion and no editor values, and settles with its causal receipt under its own group: the proxy member started, and
+    /// the saved pair it verified unchanged against the baselines it captured. The same request at the old counter is then refused whole,
+    /// and nothing changes.
     func testAProxyRestartAtTheObservedRevisionRestartsAndAStaleOneIsRefusedWhole() async throws {
         let composed = try await compose()
         try await composed.host.startRuntime()
@@ -2020,13 +2027,20 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         defer { stream.cancel() }
         _ = try await stream.next(deadline())
         let observed = try await composed.client.readSnapshot(deadline: deadline()).stamp.lifecycleRevision
+        let before = try await observation(composed).components
 
+        let requestID = ControlRequestID(rawValue: UUID())
         let operation = try accepted(try await composed.client.submit(
-            .restart(.proxy, ifLifecycleRevision: observed), requestID: ControlRequestID(rawValue: UUID()),
+            .restart(.proxy, ifLifecycleRevision: observed), requestID: requestID,
             expectedIncarnation: composed.host.incarnation, deadline: deadline()
         ))
-        let outcome = try await finished(operation, on: stream)
-        XCTAssertEqual(completed(outcome), .restart)
+        let settled = try receipt(try await finished(operation, on: stream))
+        XCTAssertEqual(settled.requestID, requestID)
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertNil(settled.conditionalDNS)
+        XCTAssertEqual(settled.runtime.write, .unchanged)
+        XCTAssertEqual(settled.prior, ControlCommitPrior(runtime: before.runtime.baseline, platform: before.platform.baseline))
+        XCTAssertEqual(settled.runtime.baseline, before.runtime.baseline, "an unchanged pair keeps its baselines")
         XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
         let group = observed.rawValue + 1
         XCTAssertTrue(composed.harness.typedEvents().contains(.lifecycle(.moduleSettled(
@@ -2065,8 +2079,9 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let restart = try accepted(try await submit(
             composed, .restart(.proxy, ifLifecycleRevision: observed.lifecycleRevision, conditionalDNSRevision: modules.dns)
         ))
-        let outcome = try await finished(restart, on: stream)
-        XCTAssertEqual(completed(outcome), .restart)
+        let settled = try receipt(try await finished(restart, on: stream))
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertEqual(settled.conditionalDNS, .started, "the companion's own result, apart from the members")
         XCTAssertTrue(composed.harness.machine.dnsRelayRunning, "the companion started the configured DNS")
         XCTAssertTrue(composed.harness.typedEvents().contains(.lifecycle(.moduleSettled(LifecycleModuleSettled(
             settlement: .conditionalDNS(.started), group: observed.lifecycleRevision.rawValue + 1
@@ -2119,6 +2134,7 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
         XCTAssertTrue(composed.harness.machine.dnsRelayRunning, "the companion started the configured DNS")
         XCTAssertEqual(composed.host.heldRuntimeConfig.profileName, "Shared pair", "both modules run the Start's one verified pair")
+        XCTAssertNil(settled.prior, "a private Start's priors are the baselines it submitted")
         XCTAssertEqual(composed.host.workflow.revisions.dns, dnsRevision, "the companion changes no DNS control")
         XCTAssertEqual(composed.harness.savedDNSEnabled, true)
     }
@@ -2376,8 +2392,255 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         XCTAssertEqual(composed.harness.dnsProbes.values.count, asked, "the repeat joined the held probe and asked no port of its own")
     }
 
+    // MARK: - Saved Start
+
+    /// A saved Start through the actual framed client, at the module revision the client's own snapshot stamp names.
+    private func savedStart(
+        _ composed: Composed,
+        _ module: ControlModule,
+        conditionalDNS: Bool = false,
+        requestID: ControlRequestID = ControlRequestID(rawValue: UUID())
+    ) async throws -> ControlAdmission {
+        let snapshot = try await composed.client.readSnapshot(deadline: deadline())
+        let modules = try XCTUnwrap(snapshot.stamp.modules)
+        let revision = switch module {
+        case .proxy: modules.proxy
+        case .dns: modules.dns
+        case .tunnels: modules.tunnels
+        }
+        return try await composed.client.submit(
+            .start(module, ifModuleRevision: revision, conditionalDNSRevision: conditionalDNS ? modules.dns : nil),
+            requestID: requestID, expectedIncarnation: composed.host.incarnation, deadline: deadline()
+        )
+    }
+
+    /// The menu's saved DNS Start beside a client's dirty draft (decision 0037). The Start carries no draft value: DNS starts from the saved
+    /// pair its preparation captured, and the receipt names the baselines its enable was conditional on, which are this draft's, and the
+    /// runtime baseline it wrote. The draft as it stands now conflicts with that write; moved by the causal rule alone, its later local edit
+    /// saves over it, and the committed DNS bit stays the Start's enable rather than the draft's stale false.
+    func testASavedDNSStartRunsTheSavedPairAndItsReceiptRebasesOnlyTheDraftAtItsPrior() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let draft = (runtime: try XCTUnwrap(observed.components.runtime.baseline), platform: try XCTUnwrap(observed.components.platform.baseline))
+        let saved = try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName
+
+        let requestID = ControlRequestID(rawValue: UUID())
+        let start = try accepted(try await savedStart(composed, .dns, requestID: requestID))
+        let settled = try receipt(try await finished(start, on: stream))
+        XCTAssertEqual(settled.requestID, requestID)
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .dns, result: .started)])
+        XCTAssertEqual(settled.prior, ControlCommitPrior(runtime: draft.runtime, platform: draft.platform))
+        XCTAssertEqual(settled.runtime.write, .persisted(reportedError: false), "the explicit enable is a write")
+        XCTAssertEqual(settled.committedDNSForwarderEnabled, true)
+        let written = try XCTUnwrap(settled.runtime.baseline)
+        XCTAssertGreaterThan(written.version, draft.runtime.version)
+        XCTAssertEqual(settled.platform.baseline, draft.platform, "the platform file verified unchanged")
+        XCTAssertTrue(composed.harness.machine.dnsRelayRunning)
+        XCTAssertEqual(composed.host.heldRuntimeConfig.profileName, saved, "DNS runs the saved pair, not any editor draft")
+
+        func save(at runtime: PrivateBaseline, platform: PrivateBaseline) async throws -> ControlConfigurationReceipt {
+            var values = try PrivateConfigurationBridge.makeValues(from: observed)
+            values.config.profileName = "Dirty draft"
+            let request = try PrivateConfigurationBridge.makeRequest(
+                config: values.config, platform: values.platform, requestID: ControlRequestID(rawValue: UUID()),
+                incarnation: composed.host.incarnation, budget: try ControlWireBudget(1_000), runtimeBaseline: runtime,
+                platformBaseline: platform, modules: PrivateModuleSlots(proxy: .saveOnly, dns: .saveOnly, tunnels: .saveOnly)
+            )
+            return try receipt(try await finished(try accepted(try await editor(composed).submit(request, deadline: deadline())), on: stream))
+        }
+        let unrebased = try await save(at: draft.runtime, platform: draft.platform)
+        XCTAssertEqual(unrebased.runtime.write, .notAttempted(.baselineMismatch), "the Start's own enable moved the runtime baseline")
+
+        // The causal rule, per file: only a draft at exactly the prior moves to the new baseline.
+        let prior = try XCTUnwrap(settled.prior)
+        let rebasedRuntime = prior.runtime == draft.runtime ? written : draft.runtime
+        let rebasedPlatform = prior.platform == draft.platform ? try XCTUnwrap(settled.platform.baseline) : draft.platform
+        let rebased = try await save(at: rebasedRuntime, platform: rebasedPlatform)
+        XCTAssertEqual(rebased.runtime.write, .persisted(reportedError: false), "the later local edit persists")
+        XCTAssertEqual(rebased.committedDNSForwarderEnabled, true, "the draft's stale DNS bit never reverts the Start's enable")
+        XCTAssertEqual(try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false).profileName, "Dirty draft")
+        XCTAssertEqual(composed.harness.savedDNSEnabled, true)
+    }
+
+    /// A saved Start over an absent platform file persists its defaults before it starts (decision 0036), and the receipt's platform prior
+    /// is the absent file's own baseline, so a draft that observed the absence is the one that may move to the written baseline.
+    func testASavedStartPersistsAnAbsentPlatformFilesDefaultsFromItsAbsentPrior() async throws {
+        let composed = try await compose(dnsForwarderEnabled: false) { harness in
+            try FileManager.default.removeItem(at: harness.environment.platformConfigFile)
+        }
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        guard case .absent(let absent) = try await observation(composed).components.platform else {
+            return XCTFail("the platform file is observed absent")
+        }
+
+        let settled = try receipt(try await finished(try accepted(try await savedStart(composed, .proxy)), on: stream))
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertEqual(settled.prior?.platform, absent)
+        XCTAssertEqual(settled.platform.write, .persisted(reportedError: false))
+        XCTAssertGreaterThan(try XCTUnwrap(settled.platform.baseline).version, absent.version)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: composed.harness.environment.platformConfigFile.path), "the defaults were saved")
+        guard case .verified(let now) = try await observation(composed).components.platform else {
+            return XCTFail("the saved defaults are now a verified file")
+        }
+        XCTAssertEqual(now, settled.platform.baseline)
+        XCTAssertTrue(composed.host.runtimeState().proxyIsUp)
+    }
+
+    /// A saved Start names the exact revisions it observed (decision 0035). After a DNS Stop moved DNS's revision, a DNS Start at the old
+    /// one, and a proxy Start whose companion names it, are each refused whole before any write. At the current revisions the proxy starts,
+    /// and its companion finds the Stop's fence: it starts nothing, keeps the fence and writes no enable (decision 0036).
+    func testASavedStartAtAMovedRevisionIsRefusedWholeAndItsCompanionKeepsTheStopFence() async throws {
+        let composed = try await compose(dnsForwarderEnabled: true)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let first = try await composed.client.readSnapshot(deadline: deadline())
+        let before = try XCTUnwrap(first.stamp.modules)
+        _ = try await finished(try accepted(try await submit(composed, .stop(.dns))), on: stream)
+        let saved = try Data(contentsOf: composed.harness.environment.configFile)
+        let generation = composed.host.workflow.generation
+        let second = try await composed.client.readSnapshot(deadline: deadline())
+        let current = try XCTUnwrap(second.stamp.modules)
+        XCTAssertNotEqual(current.dns, before.dns)
+
+        for stale in [
+            ControlRuntimeCommand.start(.dns, ifModuleRevision: before.dns),
+            .start(.proxy, ifModuleRevision: current.proxy, conditionalDNSRevision: before.dns),
+        ] {
+            let refused = try await submit(composed, stale)
+            XCTAssertEqual(refused, .rejected(.staleRevision), "\(stale)")
+        }
+        XCTAssertEqual(composed.host.workflow.generation, generation, "a refused request changes no intent")
+        XCTAssertEqual(try Data(contentsOf: composed.harness.environment.configFile), saved, "and writes nothing")
+
+        let settled = try receipt(try await finished(try accepted(try await savedStart(composed, .proxy, conditionalDNS: true)), on: stream))
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertEqual(settled.conditionalDNS, .fenced)
+        XCTAssertEqual(settled.committedDNSForwarderEnabled, false, "the companion writes no enable")
+        XCTAssertFalse(composed.harness.machine.dnsRelayRunning)
+        XCTAssertTrue(composed.host.workflow.dnsIntent.fenced, "and the Stop's fence stays")
+    }
+
+    /// A reload that adopts an external edit after a saved Start was admitted and before its preparation supplies the pair it captures
+    /// (decision 0037): the receipt's prior is the reloaded baseline, not the one current at admission, and the proxy runs the edit. Manual
+    /// hops hold the launch between the two.
+    func testAReloadBeforeASavedStartsPreparationSuppliesThePairItCaptures() async throws {
+        let harness = try makeInteractiveHarness(platform: proxyAndDNS, dnsForwarderEnabled: false)
+        self.harness = harness
+        let host = try await harness.makeHost()
+        let scheduling = ManualOwnerScheduling()
+        let composition = RuntimeControlComposition(
+            host: host, limits: try RuntimeServiceFixtures.limits(), timing: ManualRuntimeTiming().timing, scheduling: scheduling
+        )
+        let admitted = try XCTUnwrap(host.workflow.editorCapture().components.runtime.baseline)
+        guard let proxy = ControlLifecycleRevision(rawValue: host.workflow.revisions.proxy) else { return XCTFail("a revision") }
+        let operation = try accepted(composition.service.submit(ControlOperationRequest(
+            requestID: ControlRequestID(rawValue: UUID()), expectedIncarnation: host.incarnation, command: .start(.proxy, ifModuleRevision: proxy)
+        )))
+
+        var edited = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+        edited.profileName = "Reloaded before preparation"
+        try ProxyConfigPersistence.save(edited, in: harness.environment)
+        await host.reloadConfiguration()
+        let reloaded = try XCTUnwrap(host.workflow.editorCapture().components.runtime.baseline)
+        XCTAssertNotEqual(reloaded, admitted, "the reload observed the edit")
+
+        scheduling.drainAll()
+        let quiet = try await eventually { host.pendingAdmissions == 0 }
+        XCTAssertTrue(quiet)
+        scheduling.drainAll()
+        guard case .finished(.configurationSettled(let settled)) = composition.service.operationLookup(
+            ControlOperationQuery(expectedIncarnation: host.incarnation, operationID: operation)
+        ) else {
+            return XCTFail("the saved Start settles with its receipt")
+        }
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .started)])
+        XCTAssertEqual(settled.prior?.runtime, reloaded, "the capture was made at preparation, after the reload")
+        XCTAssertEqual(host.heldRuntimeConfig.profileName, edited.profileName)
+    }
+
+    /// A reload that replaces the pair after a saved Start captured and committed it holds the Start's remaining effects (decision 0037):
+    /// held on its PAC fetch, the Start sees the reload adopt an edit, then ends with its proxy member `superseded` and no listener left,
+    /// never rebound to the edit. Its receipt still reports the verified commit and the prior it was conditional on.
+    func testAReplacementAfterASavedStartsCaptureHoldsItsRemainingEffects() async throws {
+        let fetch = HeldPACFetch()
+        let composed = try await compose(dnsForwarderEnabled: false) { harness in
+            var config = try ProxyConfigPersistence.load(in: harness.environment, allowMissing: false)
+            config.pacRoutingEnabled = true
+            config.pacURL = "http://pac.example.test/captured.pac"
+            try ProxyConfigPersistence.save(config, in: harness.environment)
+            harness.pacEvaluator = fetch
+        }
+        defer { fetch.release() }
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let observed = try await observation(composed)
+        let captured = try XCTUnwrap(observed.components.runtime.baseline)
+
+        let start = try accepted(try await savedStart(composed, .proxy))
+        let held = try await eventually { fetch.isHeld }
+        XCTAssertTrue(held, "the Start is held on its PAC fetch, after its capture and commit")
+        var edited = try ProxyConfigPersistence.load(in: composed.harness.environment, allowMissing: false)
+        edited.profileName = "Edited after the capture"
+        try ProxyConfigPersistence.save(edited, in: composed.harness.environment)
+        let reload = Task { await composed.host.reloadConfiguration() }
+        let adopted = try await eventually { composed.host.config.profileName == edited.profileName }
+        XCTAssertTrue(adopted, "the reload adopted the edit while the Start was held")
+        fetch.release()
+
+        let settled = try receipt(try await finished(start, on: stream))
+        await reload.value
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .proxy, result: .superseded)], "no success for a replaced capture")
+        XCTAssertEqual(settled.prior?.runtime, captured)
+        XCTAssertTrue(settled.runtime.write.isVerified, "the commit it made stays a reported fact")
+        XCTAssertFalse(composed.host.runtimeState().proxyIsUp, "the held Start leaves no listener")
+        XCTAssertFalse(composed.harness.machine.service("Wi-Fi").routesThroughAProxy)
+    }
+
+    /// A DNS Stop admitted while a saved DNS Start's commit is parked on its platform verification read is admitted and settles at once
+    /// (decision 0015): the Start does not hold it. Released, the Start's runtime write is revoked before it begins, so the enable is never
+    /// saved, and the Start reports its superseded member with no new runtime baseline and no success. DNS stays down and fenced, with no
+    /// configured intent left behind.
+    func testAStopWinsASavedStartParkedInItsCommitAndTheStartReportsNoSuccess() async throws {
+        let files = HeldStateFileRead()
+        let composed = try await compose(dnsForwarderEnabled: false, stateFiles: files)
+        let stream = try await composed.client.subscribe(.live, deadline: deadline())
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline())
+        let saved = try Data(contentsOf: composed.harness.environment.configFile)
+        let platformPath = composed.harness.session.plan.platformConfig.path
+        files.hold.arm { name, values in name == "read" && values == [platformPath] }
+        defer { files.hold.release() }
+
+        let start = try accepted(try await savedStart(composed, .dns))
+        await files.hold.waitUntilReached()
+        let stop = try accepted(try await submit(composed, .stop(.dns)))
+        let stopped = try await finished(stop, on: stream)
+        XCTAssertEqual(completed(stopped), .stop, "the Stop settles while the Start's store step is parked")
+        files.hold.release()
+
+        let settled = try receipt(try await finished(start, on: stream))
+        XCTAssertEqual(settled.modules, [ControlModuleReceipt(module: .dns, result: .superseded)])
+        guard case .notAttempted = settled.runtime.write else {
+            return XCTFail("the revoked enable is not attempted: \(settled.runtime.write)")
+        }
+        XCTAssertNil(settled.runtime.baseline)
+        XCTAssertNil(settled.committedDNSForwarderEnabled)
+        XCTAssertNotNil(settled.prior?.runtime, "the prior the revoked write would have been conditional on")
+        XCTAssertEqual(try Data(contentsOf: composed.harness.environment.configFile), saved, "the enable was never saved")
+        XCTAssertFalse(composed.harness.machine.dnsRelayRunning)
+        XCTAssertTrue(composed.host.workflow.dnsIntent.fenced, "the Stop's fence stands")
+        XCTAssertFalse(composed.host.workflow.dnsIntent.configured, "and no enable was left behind")
+    }
+
     /// The companion key is additive: a Restart without it encodes exactly as before, one with it round-trips, and a non-proxy Restart
-    /// that names one is refused on decode.
+    /// that names one is refused on decode. A saved Start names its module's own revision under its own key, with the same companion rule.
     func testTheRestartCompanionKeyIsAdditiveAndOnlyForTheProxy() throws {
         let revision = try XCTUnwrap(ControlLifecycleRevision(rawValue: 7))
         let encoder = JSONEncoder()
@@ -2389,6 +2652,40 @@ final class RuntimeHostControlOwnerTests: XCTestCase {
         let invalid = Data(#"{"conditionalDNSRevision":7,"lifecycleRevision":7,"module":"dns","type":"restart"}"#.utf8)
         XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: invalid))
         XCTAssertThrowsError(try encoder.encode(ControlRuntimeCommand.restart(.dns, ifLifecycleRevision: revision, conditionalDNSRevision: revision)))
+
+        let start = String(decoding: try encoder.encode(ControlRuntimeCommand.start(.tunnels, ifModuleRevision: revision)), as: UTF8.self)
+        XCTAssertEqual(start, #"{"module":"tunnels","moduleRevision":7,"type":"start"}"#)
+        let startCompanion = ControlRuntimeCommand.start(.proxy, ifModuleRevision: revision, conditionalDNSRevision: revision)
+        XCTAssertEqual(try JSONDecoder().decode(ControlRuntimeCommand.self, from: try encoder.encode(startCompanion)), startCompanion)
+        let dnsCompanion = Data(#"{"conditionalDNSRevision":7,"module":"dns","moduleRevision":7,"type":"start"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: dnsCompanion))
+        XCTAssertThrowsError(try encoder.encode(ControlRuntimeCommand.start(.dns, ifModuleRevision: revision, conditionalDNSRevision: revision)))
+        let wholeHost = Data(#"{"lifecycleRevision":7,"module":"dns","type":"start"}"#.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(ControlRuntimeCommand.self, from: wholeHost), "a Start names its module's revision")
+    }
+
+    /// A saved command's receipt prior is consistent with its writes: a verified write follows a prior of its own file, and a file with no
+    /// prior verified nothing. A private receipt names no prior, and encodes as before.
+    func testAReceiptPriorIsRefusedWhenItCannotPrecedeItsWrites() throws {
+        let namespace = PrivateBaselineNamespace(rawValue: UUID())
+        func baseline(_ file: ControlConfigWorkflowFile, _ version: UInt64) -> PrivateBaseline {
+            PrivateBaseline(namespace: namespace, component: file, version: version)
+        }
+        let runtime = try ControlComponentWrite(write: .persisted(reportedError: false), baseline: baseline(.runtime, 2))
+        let platform = try ControlComponentWrite(write: .unchanged, baseline: baseline(.platform, 1))
+        func make(_ prior: ControlCommitPrior?) throws -> ControlConfigurationReceipt {
+            try ControlConfigurationReceipt(
+                requestID: ControlRequestID(rawValue: UUID()), incarnation: ControlHostIncarnation(rawValue: UUID()),
+                runtime: runtime, platform: platform, committedDNSForwarderEnabled: true,
+                modules: [ControlModuleReceipt(module: .dns, result: .started)], prior: prior
+            )
+        }
+        let saved = try make(ControlCommitPrior(runtime: baseline(.runtime, 1), platform: baseline(.platform, 1)))
+        XCTAssertEqual(try JSONDecoder().decode(ControlConfigurationReceipt.self, from: try JSONEncoder().encode(saved)), saved)
+        XCTAssertThrowsError(try make(ControlCommitPrior(runtime: nil, platform: baseline(.platform, 1))), "a verified write had a baseline")
+        XCTAssertThrowsError(try make(ControlCommitPrior(runtime: baseline(.platform, 1), platform: baseline(.platform, 1))), "of its own file")
+        let privateReceipt = try make(nil)
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(privateReceipt), as: UTF8.self).contains("prior"))
     }
 
     /// Commands this owner has not adopted are refused whole at the fence, and a Restart after the process quit is refused as stopping.

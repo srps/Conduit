@@ -117,6 +117,8 @@ final class RuntimeConfigurationWorkflow {
         /// Start then does.
         var commit: RuntimePlatformCommitResult? = nil
         var dnsStaged: Bool? = nil
+        /// The baselines the commit was conditional on, read in the slot's turn with the capture; set exactly when `commit` is.
+        var prior: ControlCommitPrior? = nil
         /// The store's one slot was taken, so nothing was captured or written.
         var storeBusy = false
     }
@@ -560,9 +562,10 @@ final class RuntimeConfigurationWorkflow {
 
     /// Prepares a saved-input Start after launch recovery (decision 0037). The store takes its one slot and, in that same turn, the capture
     /// reads the store's current pair, observes its DNS bit and merges DNS's local intent; the commit then runs against the baselines that
-    /// pair came from. A busy store captures nothing and holds the Start. A runtime input that blocks a start holds without any write.
-    /// Absent defaults are persisted here, before the Start, and a present file that verifies is verified without a rewrite. The admission is
-    /// checked again after the commit, and the prepared pair is returned only when both receipts verified.
+    /// pair came from, which the capture records as the commit's prior. A busy store captures nothing and holds the Start. A runtime input
+    /// that blocks a start holds without any write. Absent defaults are persisted here, before the Start, and a present file that verifies
+    /// is verified without a rewrite. The admission is checked again after the commit, and the prepared pair is returned only when both
+    /// receipts verified.
     func prepareStart(_ ticket: StartTicket, frozen: FrozenInput? = nil) async -> StartOutcome {
         operationsInFlight += 1
         defer { operationsInFlight -= 1 }
@@ -571,6 +574,7 @@ final class RuntimeConfigurationWorkflow {
         }
         enum Capture { case pending, ended, blocking, captured(RuntimeLifecycleTicket) }
         var capture = Capture.pending
+        var capturedPrior: ControlCommitPrior?
         // The claim reads the captured binding, so a change of the staged DNS value after the capture revokes the write. It asks whether
         // the group's shared prepare still stands, so an admission on a module outside the group does not revoke it (decision 0035).
         let binding = NIOLockedValueBox(ticket.lifecycle)
@@ -598,6 +602,13 @@ final class RuntimeConfigurationWorkflow {
             }
             capture = .captured(lifecycle)
             binding.withLockedValue { $0 = lifecycle }
+            // The tokens the store commits this candidate against, read in its slot's turn: a frozen request's own, else the current ones
+            // the saved pair came from.
+            let runtimeToken = frozen.map { $0.expected.runtime } ?? store.baselineToken(for: .runtime)
+            let platformToken = frozen.map { $0.expected.platform } ?? store.baselineToken(for: .platform)
+            capturedPrior = ControlCommitPrior(
+                runtime: runtimeToken.map { Self.privateBaseline($0) }, platform: platformToken.map { Self.privateBaseline($0) }
+            )
             return candidate
         }
         guard case .admitted(let committed) = admission else {
@@ -615,8 +626,8 @@ final class RuntimeConfigurationWorkflow {
             // The store has no adopted values, so nothing was captured or written.
             return StartOutcome(preparation: .held, events: [held(.start, .unit, .commitFailed)])
         }
-        guard let result = committed, let staged = lifecycle.dnsStaged else {
-            preconditionFailure("a captured candidate is committed with its staged DNS value")
+        guard let result = committed, let staged = lifecycle.dnsStaged, let prior = capturedPrior else {
+            preconditionFailure("a captured candidate is committed with its staged DNS value and its prior")
         }
         var captured = ticket
         captured.lifecycle = lifecycle
@@ -631,11 +642,12 @@ final class RuntimeConfigurationWorkflow {
         // The admission is checked again after the commit's suspension. A committed file keeps its persistence even if the Start stops.
         guard isCurrent(captured) else {
             events += supersession(of: captured)
-            return StartOutcome(preparation: .superseded, events: events, commit: result, dnsStaged: staged)
+            return StartOutcome(preparation: .superseded, events: events, commit: result, dnsStaged: staged, prior: prior)
         }
         if let verified = result.verifiedInput {
             return StartOutcome(
-                preparation: .ready(PreparedStart(ticket: captured, input: verified)), events: events, commit: result, dnsStaged: staged
+                preparation: .ready(PreparedStart(ticket: captured, input: verified)), events: events, commit: result, dnsStaged: staged,
+                prior: prior
             )
         }
         if result.platform.isVerified {
@@ -646,7 +658,7 @@ final class RuntimeConfigurationWorkflow {
                 events.append(held(.start, .runtime, .heldBehind))
             }
         }
-        return StartOutcome(preparation: .held, events: events, commit: result, dnsStaged: staged)
+        return StartOutcome(preparation: .held, events: events, commit: result, dnsStaged: staged, prior: prior)
     }
 
     /// The candidate a commit stages: `values` with the DNS bit its claim staged and the store's own launch-at-login flag. A saved capture's

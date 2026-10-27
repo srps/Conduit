@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 
-// The causal settlement of one private editor update (decisions 0015, 0018, 0025 and 0035). It carries safe facts only: the
-// request and host it answers, each file's write result with the new verified baseline, the DNS bit the runtime file now holds,
-// and each module's result. No configuration value or private URL is in it, so the ordinary lookup retains it like any outcome,
-// and a client rebases only the draft it submitted under this request ID.
+// The causal settlement of one private editor update or saved Start (decisions 0015, 0018, 0025, 0035 and 0037). It carries safe facts
+// only: the request and host it answers, each file's write result with the new verified baseline, the DNS bit the runtime file now
+// holds, and each module's result. No configuration value or private URL is in it, so the ordinary lookup retains it like any outcome,
+// and only the client that sent this request ID rebases a draft from it.
 
 /// The ordinary-wire form of a store baseline: the same members as the private codec writes, with the version as an exact `UInt64`
 /// number. It holds no configuration value.
@@ -121,6 +121,17 @@ package struct ControlComponentWrite: Codable, Sendable, Equatable {
         try container.encode(write, forKey: .write)
         try container.encodeIfPresent(baseline, forKey: .baseline)
     }
+
+    /// Whether the new baseline, when there is one, is `file`'s.
+    package func names(_ file: ControlConfigWorkflowFile) -> Bool {
+        baseline.map { $0.component == file } ?? true
+    }
+
+    /// Whether this write can be the one conditional on `prior` in `file`: both baselines are `file`'s, and with no prior, which is a file
+    /// the store held no baseline for, nothing verified.
+    package func follows(_ prior: PrivateBaseline?, in file: ControlConfigWorkflowFile) -> Bool {
+        names(file) && (prior.map { $0.component == file } ?? !write.isVerified)
+    }
 }
 
 /// The runtime file's write from a session DNS Stop's disable save (decision 0015): the exact baseline the write was conditional on, and
@@ -132,11 +143,7 @@ package struct ControlDNSDisableWrite: Codable, Sendable, Equatable {
     package let runtime: ControlComponentWrite
 
     package init(prior: PrivateBaseline?, runtime: ControlComponentWrite) throws {
-        guard prior.map({ $0.component == .runtime }) ?? true, runtime.baseline.map({ $0.component == .runtime }) ?? true,
-              prior != nil || !runtime.write.isVerified
-        else {
-            throw ControlRuntimeWireError.invalidValue
-        }
+        guard runtime.follows(prior, in: .runtime) else { throw ControlRuntimeWireError.invalidValue }
         self.prior = prior
         self.runtime = runtime
     }
@@ -184,7 +191,7 @@ package struct ControlPreferencesReceipt: Codable, Sendable, Equatable {
     package let preferences: ControlComponentWrite
 
     package init(requestID: ControlRequestID, incarnation: ControlHostIncarnation, preferences: ControlComponentWrite) throws {
-        guard preferences.baseline.map({ $0.component == .preferences }) ?? true else { throw ControlRuntimeWireError.invalidValue }
+        guard preferences.names(.preferences) else { throw ControlRuntimeWireError.invalidValue }
         self.requestID = requestID
         self.incarnation = incarnation
         self.preferences = preferences
@@ -217,8 +224,40 @@ package struct ControlPreferencesReceipt: Codable, Sendable, Equatable {
     }
 }
 
-/// The causal settlement of one private update. Only the client that submitted `requestID` to `incarnation` may rebase a draft from it,
-/// and only the draft it submitted: later local edits stay.
+/// The exact baselines a saved Start's or Restart's commit was conditional on (decision 0037), taken in the store's slot in the same turn
+/// its preparation captured the saved pair. Nil for a file the store held no baseline for, which was then not written.
+package struct ControlCommitPrior: Codable, Sendable, Equatable {
+    package let runtime: PrivateBaseline?
+    package let platform: PrivateBaseline?
+
+    package init(runtime: PrivateBaseline?, platform: PrivateBaseline?) {
+        self.runtime = runtime
+        self.platform = platform
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runtime
+        case platform
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        runtime = try container.decodeIfPresent(PrivateBaseline.self, forKey: .runtime)
+        platform = try container.decodeIfPresent(PrivateBaseline.self, forKey: .platform)
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(runtime, forKey: .runtime)
+        try container.encodeIfPresent(platform, forKey: .platform)
+    }
+}
+
+/// The causal settlement of one private update, or of one saved Start or Restart whose preparation ran its commit. Only the client that
+/// submitted `requestID` to `incarnation` may rebase a draft from it. A private update rebases only the draft it submitted: later local
+/// edits stay. A saved command submitted no draft, so `prior` names what its writes were conditional on: a draft moves a file to its new
+/// baseline only while it holds that file's prior exactly, and a draft at any other baseline keeps its own, so a write another client made
+/// in between still conflicts.
 package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
     package let requestID: ControlRequestID
     package let incarnation: ControlHostIncarnation
@@ -237,6 +276,9 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
     /// For a proxy Start that asked for DNS's conditional companion only: the companion's own closed result, kept apart from the members,
     /// so its no-op never reads as a DNS member's result. `superseded` when the Start ended before the companion ran. Nil when none was asked.
     package let conditionalDNS: ControlLifecycleConditionalDNSResult?
+    /// For a saved Start or Restart only: the baselines its commit was conditional on. Nil for a private update, whose submitted baselines
+    /// are its own.
+    package let prior: ControlCommitPrior?
 
     package init(
         requestID: ControlRequestID,
@@ -246,10 +288,11 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
         committedDNSForwarderEnabled: Bool?,
         modules: [ControlModuleReceipt],
         applied: Bool? = nil,
-        conditionalDNS: ControlLifecycleConditionalDNSResult? = nil
+        conditionalDNS: ControlLifecycleConditionalDNSResult? = nil,
+        prior: ControlCommitPrior? = nil
     ) throws {
-        guard runtime.baseline.map({ $0.component == .runtime }) ?? true,
-              platform.baseline.map({ $0.component == .platform }) ?? true,
+        guard runtime.names(.runtime), platform.names(.platform),
+              prior.map({ runtime.follows($0.runtime, in: .runtime) && platform.follows($0.platform, in: .platform) }) ?? true,
               (committedDNSForwarderEnabled != nil) == runtime.write.isVerified,
               modules.count <= ControlModule.allCases.count, Set(modules.map(\.module)).count == modules.count,
               conditionalDNS == nil || !modules.contains(where: { $0.module == .dns })
@@ -264,6 +307,7 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
         self.modules = modules
         self.applied = applied
         self.conditionalDNS = conditionalDNS
+        self.prior = prior
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -275,6 +319,7 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
         case modules
         case applied
         case conditionalDNS
+        case prior
     }
 
     package init(from decoder: any Decoder) throws {
@@ -288,7 +333,8 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
                 committedDNSForwarderEnabled: try container.decodeIfPresent(Bool.self, forKey: .committedDNSForwarderEnabled),
                 modules: try container.decode([ControlModuleReceipt].self, forKey: .modules),
                 applied: try container.decodeIfPresent(Bool.self, forKey: .applied),
-                conditionalDNS: try container.decodeIfPresent(ControlLifecycleConditionalDNSResult.self, forKey: .conditionalDNS)
+                conditionalDNS: try container.decodeIfPresent(ControlLifecycleConditionalDNSResult.self, forKey: .conditionalDNS),
+                prior: try container.decodeIfPresent(ControlCommitPrior.self, forKey: .prior)
             )
         } catch is ControlRuntimeWireError {
             throw DecodingError.dataCorruptedError(forKey: .modules, in: container, debugDescription: "an inconsistent receipt")
@@ -305,5 +351,6 @@ package struct ControlConfigurationReceipt: Codable, Sendable, Equatable {
         try container.encode(modules, forKey: .modules)
         try container.encodeIfPresent(applied, forKey: .applied)
         try container.encodeIfPresent(conditionalDNS, forKey: .conditionalDNS)
+        try container.encodeIfPresent(prior, forKey: .prior)
     }
 }

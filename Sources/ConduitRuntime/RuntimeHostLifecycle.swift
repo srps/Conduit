@@ -63,6 +63,8 @@ struct RuntimeAdmittedStart: Sendable {
 final class RuntimeCommitFacts: Sendable {
     var commit: RuntimePlatformCommitResult?
     var dnsStaged: Bool?
+    /// The baselines the commit was conditional on, from the capture's own turn; set exactly when `commit` is.
+    var prior: ControlCommitPrior?
     var members: PrivateModuleSlots<RuntimeModuleStartResult?>?
     /// The conditional DNS companion's result as its effect recorded it, nil until it ran.
     var conditionalDNS: RuntimeConditionalDNSResult?
@@ -361,6 +363,7 @@ extension RuntimeHost {
         let preparation = await workflow.prepareStart(ticket, frozen: admitted.frozen)
         admitted.facts.commit = preparation.commit
         admitted.facts.dnsStaged = preparation.dnsStaged
+        admitted.facts.prior = preparation.prior
         admitted.facts.storeBusy = preparation.storeBusy
         emitConfigurationEvents(preparation.events)
         let prepared: RuntimeConfigurationWorkflow.PreparedStart

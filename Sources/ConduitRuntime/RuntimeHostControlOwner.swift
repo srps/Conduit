@@ -111,7 +111,8 @@ struct RuntimeHostCollections {
 /// A control operation the host admitted at the service's fence and has not launched. It holds no configuration value.
 enum RuntimeControlAdmission {
     case stop(RuntimeAdmittedStop, ControlModule)
-    case restart(RuntimeAdmittedStart)
+    /// A saved Start or Restart, settled with its causal receipt for `request`.
+    case start(RuntimeAdmittedStart, request: ControlRequestID)
     case launchAtLogin(Bool, PrivateBaseline, ControlRequestID)
     /// The quit latched at the fence; its work already runs, and its window holds the one total deadline.
     case quit(Task<Void, Never>, RuntimeQuitFlush)
@@ -187,6 +188,10 @@ extension RuntimeHost: ControlCommandOwner {
         switch command {
         case .stop(let module):
             return fenceStop(module, request: request, operation: operation, candidate: candidate)
+        case .start(let module, let expected, let companion):
+            return fenceSavedStart(
+                module, expected: expected.rawValue, conditionalDNS: companion, restartsProxy: false, request: request, operation: operation
+            )
         case .restart(.proxy, let expected, let companion):
             return fenceProxyRestart(expected, conditionalDNS: companion, request: request, operation: operation)
         case .setLaunchAtLogin(let enabled, let baseline):
@@ -276,18 +281,9 @@ extension RuntimeHost: ControlCommandOwner {
                 report.quiesced()
                 onControlStateChange?()
             }
-        case .restart(let start):
+        case .start(let start, let request):
             Task { @MainActor [self] in
-                let outcome: ControlOperationOutcome
-                do {
-                    outcome = controlOutcome(of: try await runAdmittedStart(start))
-                } catch let refusal as RuntimeStartRefusal {
-                    outcome = .failed(Self.failure(of: refusal))
-                } catch {
-                    // The proxy listener's own start failure surfaces as the member's typed `failed` settlement before it is thrown.
-                    outcome = .failed(.effectFailed)
-                }
-                report.settled(outcome)
+                report.settled(await settleAdmittedStart(start, requestID: request, reportsPrior: true))
                 report.quiesced()
                 onControlStateChange?()
             }
@@ -336,17 +332,42 @@ extension RuntimeHost: ControlCommandOwner {
             emitConfigurationEvents(workflow.admissionEvents(.stale(.proxy)))
             return .rejected(.staleRevision)
         }
-        // Decoding refused a companion on any other module, so only the proxy reaches here with one.
-        let proxyRevision = workflow.revisions.proxy
-        switch admitModuleStart(
-            PrivateModuleSlots(proxy: .start, dns: conditionalDNS == nil ? .none : .conditionalActivation, tunnels: .none),
-            expecting: PrivateModuleSlots(proxy: proxyRevision, dns: conditionalDNS?.rawValue, tunnels: nil),
-            operation: .proxyStart,
-            restartsProxy: true,
-            requestID: request
-        ) {
+        return fenceSavedStart(
+            .proxy, expected: workflow.revisions.proxy, conditionalDNS: conditionalDNS, restartsProxy: true, request: request,
+            operation: operation
+        )
+    }
+
+    /// A saved Start of one module, the app's menu, Overview and shortcut controls (decision 0037), and the Restart's own admission: the
+    /// host's one Start path with no editor value, whose preparation captures the saved pair once. `expected` is the module's exact
+    /// revision and `conditionalDNS` the DNS revision the client observed for the proxy's companion (decision 0036); each is checked as
+    /// given in this one turn, so a moved one refuses the whole request before anything changes (decision 0035).
+    private func fenceSavedStart(
+        _ module: ControlModule,
+        expected: Int,
+        conditionalDNS: ControlLifecycleRevision?,
+        restartsProxy: Bool,
+        request: ControlRequestID,
+        operation: ControlOperationID
+    ) -> ControlOwnerFenceResult {
+        // Decoding and encoding refuse a companion on any module but the proxy, so none reaches here.
+        precondition(conditionalDNS == nil || module == .proxy, "only the proxy's Start has a DNS companion")
+        var actions = PrivateModuleSlots<RuntimeModuleAction>(proxy: .none, dns: .none, tunnels: .none)
+        var revisions = PrivateModuleSlots<Int?>(proxy: nil, dns: nil, tunnels: nil)
+        actions[module] = .start
+        revisions[module] = expected
+        if let conditionalDNS {
+            actions[.dns] = .conditionalActivation
+            revisions[.dns] = conditionalDNS.rawValue
+        }
+        let name: LifecycleOperation = switch module {
+        case .proxy: .proxyStart
+        case .dns: .dnsStart
+        case .tunnels: .tunnelsStart
+        }
+        switch admitModuleStart(actions, expecting: revisions, operation: name, restartsProxy: restartsProxy, requestID: request) {
         case .success(let admitted):
-            controlAdmissions[operation] = .restart(admitted)
+            controlAdmissions[operation] = .start(admitted, request: request)
             return .admitted
         case .failure(.stale):
             return .rejected(.staleRevision)
@@ -370,26 +391,10 @@ extension RuntimeHost: ControlCommandOwner {
         guard stop.stopped.contains(module) || modulesDown().contains(module) else { return .failed(.staleRevision) }
         guard let dnsWrite else { return completed(.stop) }
         do {
-            let write = try ControlDNSDisableWrite(
-                prior: dnsWrite.prior,
-                runtime: ControlComponentWrite(
-                    write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(dnsWrite.write)),
-                    baseline: dnsWrite.write.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
-                )
-            )
+            let write = try ControlDNSDisableWrite(prior: dnsWrite.prior, runtime: try Self.componentWrite(dnsWrite.write))
             return completed(.stop, result: .dnsDisable(write))
         } catch {
             preconditionFailure("a disable write is built from the store's own consistent facts")
-        }
-    }
-
-    /// A Restart's proxy member result. Its typed `lifecycle.module_settled` carries the same value.
-    private func controlOutcome(of start: RuntimeModuleStartOutcome) -> ControlOperationOutcome {
-        switch start.modules.proxy {
-        case .started?: completed(.restart)
-        case .failed?: .failed(.effectFailed)
-        case .superseded?: .failed(.staleRevision)
-        case .notConfigured?, nil: .failed(.internalFailure)
         }
     }
 
@@ -397,11 +402,7 @@ extension RuntimeHost: ControlCommandOwner {
     private func launchAtLoginOutcome(_ write: ConfigurationWriteOutcome?) -> ControlOperationOutcome {
         guard let write else { return .failed(.storeBusy) }
         do {
-            let component = try ControlComponentWrite(
-                write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(write)),
-                baseline: write.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
-            )
-            return completed(.setLaunchAtLogin, result: .platformWrite(component))
+            return completed(.setLaunchAtLogin, result: .platformWrite(try Self.componentWrite(write)))
         } catch {
             preconditionFailure("an admin settlement is built from the store's own consistent facts")
         }
@@ -422,14 +423,6 @@ extension RuntimeHost: ControlCommandOwner {
             return .completed(try ControlCompletion(command: command, presentationRevision: revision, result: result))
         } catch {
             preconditionFailure("a command settles with its own result kind")
-        }
-    }
-
-    private static func failure(of refusal: RuntimeStartRefusal) -> ControlFailureCode {
-        switch refusal {
-        case .superseded, .terminated, .stale: .staleRevision
-        case .held, .notRunning: .effectFailed
-        case .intentExhausted, .stopSaveOwed: .internalFailure
         }
     }
 

@@ -286,8 +286,8 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
     }
 
     /// Every current call, at its widest legal identifiers, cursors and budgets, encodes as one request frame within the server's request cap.
-    /// The encode is the check: a frame above the cap throws, and the test fails with that error. Future Start and private workflow payloads are
-    /// not defined on this wire and are not measured here.
+    /// The encode is the check: a frame above the cap throws, and the test fails with that error. Private workflow payloads are not defined on
+    /// this wire and are not measured here.
     func testEveryCurrentCallFramesWithinTheServerRequestCapAtItsWidestLegalForm() throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
         let serverCap = try RuntimeServiceProfileCandidate.frameLimits(limits.maxRequestBytes)
@@ -365,6 +365,8 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
             ("submit-restart", .restart(.tunnels, ifLifecycleRevision: lifecycle)),
             // Only a proxy Restart may name the companion's DNS revision, so this is the widest Restart now (decision 0036).
             ("submit-restart-companion", .restart(.proxy, ifLifecycleRevision: lifecycle, conditionalDNSRevision: lifecycle)),
+            // A saved Start has the same companion rule, so the proxy's with one is the widest.
+            ("submit-start-companion", .start(.proxy, ifModuleRevision: lifecycle, conditionalDNSRevision: lifecycle)),
             ("submit-test-dns", .testDNS),
             ("submit-test-upstream", .testUpstream(upstream)),
             ("submit-refresh-preflight", .refreshPreflight),
@@ -395,8 +397,8 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
 
     /// Every settled outcome kind at its widest legal form, measured as the service retains it (`RuntimeServiceCore.measureRetained`) and as the
     /// codec frames its lookup reply and its stream settlement. The candidate's outcome store, control log and reply cap each hold the widest.
-    /// The configuration receipt is measured both with the conditional DNS companion and with all three members, and a DNS Stop completion with
-    /// its causal disable write. Each closed field is the case with the longest encoding, chosen by encoding every case; numbers are at their
+    /// The configuration receipt is measured both with the conditional DNS companion and with all three members, a saved Start's receipt with
+    /// both priors and its companion, and a DNS Stop completion with its causal disable write. Each closed field is the case with the longest encoding, chosen by encoding every case; numbers are at their
     /// maximum and baselines at the full `UInt64` version. Nothing is promoted to a default: the candidate is the test's own profile.
     func testTheWidestOutcomeOfEveryKindFitsTheCandidateOutcomeLogAndReplyBounds() throws {
         let limits = try RuntimeServiceProfileCandidate.limits()
@@ -471,13 +473,22 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         let platform = try widest(try componentWrites(.platform, namespace: namespace))
         let member = try widest(ControlLifecycleModuleResult.allCases)
         let companion = try widest(ControlLifecycleConditionalDNSResult.allCases)
-        func receipts(_ modules: [ControlModule], conditionalDNS: ControlLifecycleConditionalDNSResult?) throws -> ControlConfigurationReceipt {
+        // A saved Start's prior names both files at the full version.
+        let savedPrior = ControlCommitPrior(
+            runtime: PrivateBaseline(namespace: namespace, component: .runtime, version: .max),
+            platform: PrivateBaseline(namespace: namespace, component: .platform, version: .max)
+        )
+        func receipts(
+            _ modules: [ControlModule],
+            conditionalDNS: ControlLifecycleConditionalDNSResult?,
+            prior: ControlCommitPrior? = nil
+        ) throws -> ControlConfigurationReceipt {
             try widest(try runtimeWrites.map { runtime in
                 try ControlConfigurationReceipt(
                     requestID: requestID, incarnation: incarnation, runtime: runtime, platform: platform,
                     committedDNSForwarderEnabled: runtime.write.isVerified ? false : nil,
                     modules: modules.map { ControlModuleReceipt(module: $0, result: member) },
-                    applied: false, conditionalDNS: conditionalDNS
+                    applied: prior == nil ? false : nil, conditionalDNS: conditionalDNS, prior: prior
                 )
             })
         }
@@ -516,10 +527,10 @@ final class RuntimeServiceProfileEvidenceTests: XCTestCase {
         return [
             ("configuration-receipt-conditional-dns", .configurationSettled(try receipts([.proxy, .tunnels], conditionalDNS: companion))),
             ("configuration-receipt-three-members", .configurationSettled(try receipts(ControlModule.allCases, conditionalDNS: nil))),
+            ("saved-start-receipt-conditional-dns", .configurationSettled(try receipts([.proxy], conditionalDNS: companion, prior: savedPrior))),
             ("preferences-receipt", .preferencesSettled(preferences)),
             ("stop-dns-disable", try completed(.stop, .dnsDisable(disable))),
             ("stop-settled", try completed(.stop, .settled)),
-            ("restart-settled", try completed(.restart, .settled)),
             ("quit-settled", try completed(.quit, .settled)),
             ("test-dns", try completed(.testDNS, .dnsLiveness(ControlDNSLivenessProbe(port: try ControlPort(65_535), answered: false)))),
             ("test-upstream", try completed(.testUpstream, .upstreamProbe(probe))),

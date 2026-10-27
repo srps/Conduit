@@ -478,8 +478,9 @@ enum RuntimeHostEffectsScenario {
 
     /// The per-module lifecycle facade of the actual host (decisions 0031, 0035, 0036 and 0037), over the run's fakes and an ephemeral DNS
     /// port. A proxy Start's companion starts configured DNS; a proxy Stop leaves DNS running; a session DNS Stop restores system DNS and
-    /// saves its disable; a menu Restart's companion then finds the fence; a request naming a moved revision is refused whole; an explicit
-    /// DNS Start enables DNS again; and the process quit latches, tears every module down and returns with every lane idle.
+    /// saves its disable; a menu Restart's companion then finds the fence; a request naming a moved revision is refused whole; the menu's
+    /// saved DNS Start through the framed client enables DNS again with its causal receipt, and a saved tunnels Start binds the loopback
+    /// tunnel without rewriting the pair; and the process quit latches, tears every module down and returns with every lane idle.
     @MainActor
     private static func exerciseModuleLifecycle(
         session: StateRootSession,
@@ -498,6 +499,8 @@ enum RuntimeHostEffectsScenario {
         config.localPACEnabled = false
         config.pacRoutingEnabled = false
         config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        // One loopback tunnel on an ephemeral port, for the saved tunnels Start through the framed client.
+        config.tunnelDefinitions = [TunnelDefinition(localPort: 0, remoteHost: "127.0.0.1", remotePort: 9)]
         let host: RuntimeHost
         // The earlier hosts' events share the owned file, so only the events after this count are this host's.
         let earlier: Int
@@ -563,8 +566,26 @@ enum RuntimeHostEffectsScenario {
             check("a request naming a moved revision is refused whole", refusal == .stale(.dns))
             check("the refused request starts nothing and writes nothing", !machine.dnsRelayRunning && savedDNS() == false)
 
-            let dns = try await host.startDNS(expecting: PrivateModuleSlots(proxy: nil, dns: host.moduleRevisions.dns, tunnels: nil))
-            check("an explicit DNS Start enables DNS again", dns.modules.dns == .started && savedDNS() == true && machine.dnsRelayRunning)
+            // The menu's saved DNS Start through the framed client: no configuration value, the client's own observed DNS revision, and
+            // a causal receipt naming the runtime baseline its enable was conditional on and the one it wrote.
+            let dns = try await savedStartThroughClient(clients.control, .dns)
+            check("a saved DNS Start through the framed client enables DNS again",
+                  dns.receipt?.modules == [ControlModuleReceipt(module: .dns, result: .started)]
+                      && dns.receipt?.committedDNSForwarderEnabled == true && savedDNS() == true && machine.dnsRelayRunning)
+            check("its receipt names the baseline its enable was conditional on and the newer one it wrote", dns.receipt.map { receipt in
+                guard receipt.runtime.write == .persisted(reportedError: false), let prior = receipt.prior?.runtime,
+                      let written = receipt.runtime.baseline else { return false }
+                return written.version > prior.version
+            } ?? false)
+            check("the same Start at the revision it moved is refused whole", dns.staleRefused && savedDNS() == true)
+            let tunnels = try await savedStartThroughClient(clients.control, .tunnels)
+            check("a saved tunnels Start through the framed client binds the configured tunnel",
+                  tunnels.receipt?.modules == [ControlModuleReceipt(module: .tunnels, result: .started)]
+                      && tunnels.after.tunnelsRunState == .running && tunnels.after.dnsRunState == .running)
+            check("its unchanged saved pair verifies without a rewrite", tunnels.receipt.map { receipt in
+                receipt.runtime.write == .unchanged && receipt.prior?.runtime == receipt.runtime.baseline
+                    && receipt.committedDNSForwarderEnabled == true
+            } ?? false)
 
             let quit = try await quitThroughClient(clients)
             let stored = try AppPreferencesPersistence.load(in: environment)
@@ -572,7 +593,8 @@ enum RuntimeHostEffectsScenario {
             check("a framed Quit latches, admits its reserved preferences flush and completes", quit.completed)
             check("the reserved flush wrote the quit-time preferences",
                   quit.flushed && stored.preferredBrowserTestURL == "https://quit-flush.example.test/")
-            check("the quit leaves every module down", host.status().state == "stopped" && host.status().dnsRunState != "running")
+            check("the quit leaves every module down", host.status().state == "stopped" && host.status().dnsRunState != "running"
+                && host.status().tunnelsRunState != "running")
             check("the quit restores system DNS", !machine.dnsRelayRunning)
             check("the quit persists no disable", savedDNS() == true)
             var afterQuit: RuntimeStartRefusal?
@@ -594,7 +616,7 @@ enum RuntimeHostEffectsScenario {
             check("each member and each companion records its own settlement once", written == [
                 .explicit(.proxy, .started), .conditionalDNS(.started),
                 .explicit(.proxy, .started), .conditionalDNS(.fenced),
-                .explicit(.dns, .started),
+                .explicit(.dns, .started), .explicit(.tunnels, .started),
             ])
         } catch {
             notes.append("module exercise error: \(error.localizedDescription)")
@@ -628,6 +650,44 @@ enum RuntimeHostEffectsScenario {
             }
         }
         return (proxyShown, false)
+    }
+
+    /// One saved Start of `module` through the host's framed client (decision 0037): it names the module revision the client's own snapshot
+    /// stamp reads and carries no configuration value, and its settlement is the receipt the client reads. The same request is then sent
+    /// again at that revision, which the Start moved, and the host must refuse it whole. `after` is the client's next snapshot.
+    @MainActor
+    private static func savedStartThroughClient(
+        _ client: any RuntimeClient,
+        _ module: ControlModule
+    ) async throws -> (receipt: ControlConfigurationReceipt?, staleRefused: Bool, after: ControlRuntimeSnapshot) {
+        let deadline = RuntimeDeadline.after(.seconds(30), from: ContinuousClock.now)
+        let snapshot = try await client.readSnapshot(deadline: deadline)
+        guard let modules = snapshot.stamp.modules else { return (nil, false, snapshot) }
+        let observed = switch module {
+        case .proxy: modules.proxy
+        case .dns: modules.dns
+        case .tunnels: modules.tunnels
+        }
+        let stream = try await client.subscribe(.live, deadline: deadline)
+        defer { stream.cancel() }
+        _ = try await stream.next(deadline)
+        func submit() async throws -> ControlAdmission {
+            try await client.submit(
+                .start(module, ifModuleRevision: observed), requestID: ControlRequestID(rawValue: UUID()),
+                expectedIncarnation: snapshot.stamp.incarnation, deadline: deadline
+            )
+        }
+        var receipt: ControlConfigurationReceipt?
+        if case .accepted(let operation) = try await submit() {
+            for _ in 0..<64 {
+                if case .operationFinished(let finished) = try await stream.next(deadline), finished.operationID == operation {
+                    if case .configurationSettled(let settled) = finished.outcome { receipt = settled }
+                    break
+                }
+            }
+        }
+        let staleRefused = try await submit() == .rejected(.staleRevision)
+        return (receipt, staleRefused, try await client.readSnapshot(deadline: deadline))
     }
 
     /// A preferences save through the editor client, then the process quit through the framed client with its reserved preferences flush,

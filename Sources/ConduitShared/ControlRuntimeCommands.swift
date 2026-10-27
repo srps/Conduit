@@ -12,6 +12,7 @@ package enum ControlModule: String, Codable, Sendable, Equatable, CaseIterable {
 /// listed here is refused as an unknown command.
 package enum ControlRuntimeCommandKind: String, Codable, Sendable, Equatable, CaseIterable {
     case stop
+    case start
     case restart
     case testDNS = "test-dns"
     case testUpstream = "test-upstream"
@@ -79,12 +80,19 @@ package struct ControlUpstreamReference: Codable, Sendable, Equatable {
     }
 }
 
-/// An explicit intent. Start and config apply are not defined on this wire yet:
-/// their payloads wait for the source inventory and an owner checkpoint, and until
-/// then a `start` discriminator is an unknown command.
+/// An explicit intent. Config apply is not defined on this wire: editor values travel on the private editor request.
 package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     /// Stops one module for this session. Admission sets the session fence.
     case stop(ControlModule)
+    /// The saved-value Start of one module, as the app's menu, Overview and shortcut controls ask it (decision 0037): it carries no
+    /// configuration value, and its preparation captures the saved pair once. It is admitted only while the module's lifecycle revision is
+    /// still `ifModuleRevision`, the one the client read in a snapshot stamp. `conditionalDNSRevision` is the proxy-only companion of
+    /// `restart`, under the same rule (decision 0036).
+    case start(
+        ControlModule,
+        ifModuleRevision: ControlLifecycleRevision,
+        conditionalDNSRevision: ControlLifecycleRevision? = nil
+    )
     /// Restarts one module only if the whole-host lifecycle revision still matches. `conditionalDNSRevision`, valid only for the proxy,
     /// asks for DNS's conditional companion (decision 0036) at the DNS revision the client observed; absent, the Restart has no companion,
     /// as before. A non-proxy Restart that names one is refused on decode and on encode.
@@ -108,6 +116,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     package var kind: ControlRuntimeCommandKind {
         switch self {
         case .stop: .stop
+        case .start: .start
         case .restart: .restart
         case .testDNS: .testDNS
         case .testUpstream: .testUpstream
@@ -120,6 +129,7 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case type
         case module
+        case moduleRevision
         case lifecycleRevision
         case conditionalDNSRevision
         case upstream
@@ -138,14 +148,15 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         switch kind {
         case .stop:
             self = .stop(try container.decode(ControlModule.self, forKey: .module))
+        case .start:
+            let (module, companion) = try Self.decodeCompanion(container)
+            self = .start(
+                module,
+                ifModuleRevision: try container.decode(ControlLifecycleRevision.self, forKey: .moduleRevision),
+                conditionalDNSRevision: companion
+            )
         case .restart:
-            let module = try container.decode(ControlModule.self, forKey: .module)
-            let companion = try container.decodeIfPresent(ControlLifecycleRevision.self, forKey: .conditionalDNSRevision)
-            guard companion == nil || module == .proxy else {
-                throw DecodingError.dataCorruptedError(
-                    forKey: .conditionalDNSRevision, in: container, debugDescription: "only a proxy restart has a DNS companion"
-                )
-            }
+            let (module, companion) = try Self.decodeCompanion(container)
             self = .restart(
                 module,
                 ifLifecycleRevision: try container.decode(ControlLifecycleRevision.self, forKey: .lifecycleRevision),
@@ -177,12 +188,13 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         switch self {
         case .stop(let module):
             try container.encode(module, forKey: .module)
+        case .start(let module, let revision, let companion):
+            try Self.checkCompanion(module, companion, codingPath: encoder.codingPath)
+            try container.encode(module, forKey: .module)
+            try container.encode(revision, forKey: .moduleRevision)
+            try container.encodeIfPresent(companion, forKey: .conditionalDNSRevision)
         case .restart(let module, let revision, let companion):
-            guard companion == nil || module == .proxy else {
-                throw EncodingError.invalidValue(module, .init(
-                    codingPath: encoder.codingPath, debugDescription: "only a proxy restart has a DNS companion"
-                ))
-            }
+            try Self.checkCompanion(module, companion, codingPath: encoder.codingPath)
             try container.encode(module, forKey: .module)
             try container.encode(revision, forKey: .lifecycleRevision)
             try container.encodeIfPresent(companion, forKey: .conditionalDNSRevision)
@@ -199,6 +211,26 @@ package enum ControlRuntimeCommand: Codable, Sendable, Equatable {
         case .quit(let total, let flush):
             try container.encode(total, forKey: .totalMilliseconds)
             try container.encode(flush, forKey: .flush)
+        }
+    }
+
+    /// A Start's or Restart's module and DNS companion. Only the proxy has a companion, so any other module that names one is refused.
+    private static func decodeCompanion(
+        _ container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> (ControlModule, ControlLifecycleRevision?) {
+        let module = try container.decode(ControlModule.self, forKey: .module)
+        let companion = try container.decodeIfPresent(ControlLifecycleRevision.self, forKey: .conditionalDNSRevision)
+        guard companion == nil || module == .proxy else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .conditionalDNSRevision, in: container, debugDescription: "only the proxy has a DNS companion"
+            )
+        }
+        return (module, companion)
+    }
+
+    private static func checkCompanion(_ module: ControlModule, _ companion: ControlLifecycleRevision?, codingPath: [any CodingKey]) throws {
+        guard companion == nil || module == .proxy else {
+            throw EncodingError.invalidValue(module, .init(codingPath: codingPath, debugDescription: "only the proxy has a DNS companion"))
         }
     }
 }
@@ -290,7 +322,7 @@ package struct ControlDNSLivenessProbe: Codable, Sendable, Equatable {
 
 /// The value a settled command reports beyond its settled revision. Each command has
 /// exactly one result kind, which `ControlCompletion` enforces. `settled` belongs only
-/// to lifecycle commands, whose result is the revision they settle at; no command
+/// to Stop and quit, whose result is the revision they settle at; no command
 /// reports a generic success in place of its observation.
 package enum ControlCommandResult: Codable, Sendable, Equatable {
     case settled

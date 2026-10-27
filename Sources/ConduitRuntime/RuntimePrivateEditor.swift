@@ -685,34 +685,47 @@ extension RuntimeHost {
                 preconditionFailure("a receipt is built from the store's own consistent facts")
             }
         case .start(let admitted):
-            var unsaved = ControlFailureCode.effectFailed
-            do {
-                _ = try await runAdmittedStart(admitted)
-            } catch let refusal as RuntimeStartRefusal {
-                if admitted.facts.storeBusy {
-                    unsaved = .storeBusy
-                } else if refusal == .superseded || refusal == .terminated {
-                    unsaved = .staleRevision
-                }
-            } catch {
-                // The member's own failure is recorded in its settlement below; the error text is not kept.
+            // The submitted baselines are this request's priors, so its receipt names none.
+            return await settleAdmittedStart(admitted, requestID: update.requestID, reportsPrior: false)
+        }
+    }
+
+    /// Runs one admitted Start through the host's one Start path and settles it with its causal receipt: each file's write, the DNS bit the
+    /// runtime file then holds, each explicit member's recorded result and the companion's. It is a receipt whatever the members came to, so a
+    /// held or superseded Start reports its completed saves and no success. A Start whose commit never ran has no receipt: it fails with its
+    /// closed cause. `reportsPrior` adds the baselines the commit was conditional on, for a saved command, which submitted none (decision 0037).
+    func settleAdmittedStart(
+        _ admitted: RuntimeAdmittedStart,
+        requestID: ControlRequestID,
+        reportsPrior: Bool
+    ) async -> ControlOperationOutcome {
+        var unsaved = ControlFailureCode.effectFailed
+        do {
+            _ = try await runAdmittedStart(admitted)
+        } catch let refusal as RuntimeStartRefusal {
+            if admitted.facts.storeBusy {
+                unsaved = .storeBusy
+            } else if refusal == .superseded || refusal == .terminated {
+                unsaved = .staleRevision
             }
-            // Each member's result is the one its lane effect recorded, the value of its `lifecycle.module_settled`. A member that never
-            // settled, because the Start ended before it took lanes, did not finish.
-            let results = ControlModule.allCases.filter { admitted.actions[$0] == .start }.map { module in
-                ControlModuleReceipt(
-                    module: module,
-                    result: admitted.facts.members?[module].map { ControlLifecycleModuleResult($0) } ?? .superseded
-                )
-            }
-            // The companion's own recorded result. A Start that ended before the companion ran never ran it, which is its `superseded`.
-            let conditionalDNS = admitted.actions.dns == .conditionalActivation
-                ? ControlLifecycleConditionalDNSResult(admitted.facts.conditionalDNS ?? .superseded) : nil
-            return receipt(
-                update.requestID, commit: admitted.facts.commit, dnsStaged: admitted.facts.dnsStaged, modules: results, applied: nil,
-                conditionalDNS: conditionalDNS, unsaved: unsaved
+        } catch {
+            // The member's own failure is recorded in its settlement below; the error text is not kept.
+        }
+        // Each member's result is the one its lane effect recorded, the value of its `lifecycle.module_settled`. A member that never
+        // settled, because the Start ended before it took lanes, did not finish.
+        let results = ControlModule.allCases.filter { admitted.actions[$0] == .start }.map { module in
+            ControlModuleReceipt(
+                module: module,
+                result: admitted.facts.members?[module].map { ControlLifecycleModuleResult($0) } ?? .superseded
             )
         }
+        // The companion's own recorded result. A Start that ended before the companion ran never ran it, which is its `superseded`.
+        let conditionalDNS = admitted.actions.dns == .conditionalActivation
+            ? ControlLifecycleConditionalDNSResult(admitted.facts.conditionalDNS ?? .superseded) : nil
+        return receipt(
+            requestID, commit: admitted.facts.commit, dnsStaged: admitted.facts.dnsStaged, modules: results, applied: nil,
+            conditionalDNS: conditionalDNS, prior: reportsPrior ? admitted.facts.prior : nil, unsaved: unsaved
+        )
     }
 
     /// Applies a save's verified pair through the one reconciler, only while every module it names still runs at the revision it was admitted
@@ -747,6 +760,7 @@ extension RuntimeHost {
         modules: [ControlModuleReceipt],
         applied: Bool?,
         conditionalDNS: ControlLifecycleConditionalDNSResult? = nil,
+        prior: ControlCommitPrior? = nil,
         unsaved: ControlFailureCode
     ) -> ControlOperationOutcome {
         guard let commit else { return .failed(unsaved) }
@@ -760,7 +774,8 @@ extension RuntimeHost {
                 committedDNSForwarderEnabled: runtime.write.isVerified ? dnsStaged : nil,
                 modules: modules,
                 applied: applied,
-                conditionalDNS: conditionalDNS
+                conditionalDNS: conditionalDNS,
+                prior: prior
             ))
         } catch {
             preconditionFailure("a receipt is built from the store's own consistent facts")
@@ -768,7 +783,7 @@ extension RuntimeHost {
     }
 
     /// One file's safe result: its closed write, and the exact new baseline only when it verified.
-    private static func componentWrite(_ outcome: ConfigurationWriteOutcome) throws -> ControlComponentWrite {
+    static func componentWrite(_ outcome: ConfigurationWriteOutcome) throws -> ControlComponentWrite {
         try ControlComponentWrite(
             write: ControlConfigWorkflowWrite(RuntimeConfigurationWorkflow.write(outcome)),
             baseline: outcome.verifiedReceipt.map { RuntimeConfigurationWorkflow.privateBaseline($0) }
