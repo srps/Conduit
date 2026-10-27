@@ -27,7 +27,7 @@ or release. Decisions 0015, 0017, 0026 and 0027 are linked to this note as parti
 - Authority is decided per component. A refused component keeps its own reason. An authorized component is held behind the refused one:
   `heldBehindPlatform` for the runtime, `heldBehindRuntime` for the platform. No refusal does I/O.
 - `commitPreferences(_:expecting:context:)` is independent. It uses the same slot and the same physical path.
-- `verifyUnchanged(_:expecting:context:)` checks components against their baselines without writing. A changed file latches its component.
+- No-op commits of the current values verify components through the same write path without replacing unchanged files. A changed file latches its component. The later client-owner cleanup removed the redundant `verifyUnchanged` store entry point; the lower-level verified file reader remains shared.
 - Every operation returns `.busy` when another holds the slot. A busy call queues nothing, retains no body and makes no read or write.
 - A token is `(store incarnation, component, version)`. A token from another incarnation, an older version, or a latched component is refused as
   `baselineMismatch` or `noAuthoritativeBaseline`. The store issues a token only from its own adoption or verified write.

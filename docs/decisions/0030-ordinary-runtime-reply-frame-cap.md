@@ -2,7 +2,7 @@
 
 - Date: 2026-10-25
 - Decision: accepted (owner, 2026-10-25, #186: selected “64 KiB replies/stream frames (Recommended)”)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -82,6 +82,10 @@ The existing measurement is
 [the checkpoint](../runtime-service-engine-checkpoint-2026-10-25.md).
 This evidence supports the decision and does not claim enforcement of a shipping
 profile or actual RuntimeHost/AppState adoption.
+
+The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) exercises the actual host through [`RuntimeInMemoryTransport`](../../Sources/ConduitRuntime/RuntimeInMemoryTransport.swift) under the selected 64 KiB reply cap. [`RuntimeServiceLimits`](../../Sources/ConduitRuntime/RuntimeServiceLimits.swift) accounts for its structural Quit/Stop lanes and operation partitions. The module-stamp extension raises the measured populated baseline by 96 bytes to 49,472; production profile selection and AppState composition remain open.
+
+Does not prove: selected production capacities/deadlines, AppState activation, RuntimeActor isolation, installed-app behavior or release readiness.
 
 ## Open questions
 

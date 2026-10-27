@@ -53,7 +53,7 @@ Each record carries three statuses, because merged does not mean it works:
 | [0027](0027-refuse-external-configuration-edits.md) | Refuse ordinary saves over changed configuration files | accepted | partial | none |
 | [0028](0028-fixed-writable-state-filenames.md) | Fixed writable state filenames within the canonical root | accepted | partial | none |
 | [0029](0029-bound-runtime-display-text.md) | Bound runtime display text with explicit notices | accepted | partial | none |
-| [0030](0030-ordinary-runtime-reply-frame-cap.md) | Ordinary v2 replies and stream frames capped at 64 KiB | accepted | planned | none |
+| [0030](0030-ordinary-runtime-reply-frame-cap.md) | Ordinary v2 replies and stream frames capped at 64 KiB | accepted | partial | none |
 | [0031](0031-incremental-runtime-development-single-activation.md) | Incremental runtime development with one AppState activation | accepted | partial | none |
 | [0032](0032-explicit-reload-and-reconcile.md) | Explicit configuration reload adopts and reconciles eligible changes | accepted | partial | none |
 | [0033](0033-headless-real-host-simulation.md) | Headless real-host simulation with explicit effect injection | accepted | implemented | none |

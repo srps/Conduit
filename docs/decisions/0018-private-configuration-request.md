@@ -166,6 +166,8 @@ readiness. The frame cap is recorded under [0019](0019-private-configuration-fra
 Their executed sizing output is in the experiment README; that candidate is sizing evidence
 only and is not production code.
 
+The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) now uses [`PrivateEditorClient`](../../Sources/ConduitShared/PrivateConfiguration/PrivateEditorClient.swift) and [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift) for memory observations and frozen updates through the actual framed transport and sole store. Mapping/encoding occurs inside the reserved transfer. Final measurements and AppState adoption remain open.
+
 ## Open questions
 
 - [0019](0019-private-configuration-frame-budget.md) selects one private frame and an

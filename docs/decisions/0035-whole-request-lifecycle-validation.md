@@ -73,9 +73,10 @@ implements the host-side rule in
 [`RuntimeConfigurationWorkflow`](../../Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift).
 [`Actual-host reference/model and ordering tests`](../../Tests/ConduitTests/RuntimeHostInteractiveTests.swift)
 and [executed guard mutations](../experiments/runtime-module-guards/README.md)
-cover the selected authority and freshness rules. The framed client/private editor
-has not adopted them yet; implementation is partial.
+cover the selected authority and freshness rules. The client integration follows below; AppState activation remains open.
 Does not prove: actual framed-client/private-editor adoption, AppState activation, RuntimeActor isolation, production service-profile selection or release readiness.
+
+The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) carries whole-request validation through [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift), the sole workflow/store and [`RuntimeHostControlOwnerTests`](../../Tests/ConduitTests/RuntimeHostControlOwnerTests.swift). It covers stale admission, Stop before an unstarted write and honest component receipts. Complete-source review and AppState activation remain open.
 
 ## Open questions
 

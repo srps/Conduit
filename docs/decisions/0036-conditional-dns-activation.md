@@ -82,9 +82,10 @@ implements the host-side rule in
 [`RuntimeConfigurationWorkflow`](../../Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift).
 [`Actual-host reference/model and ordering tests`](../../Tests/ConduitTests/RuntimeHostInteractiveTests.swift)
 and [executed guard mutations](../experiments/runtime-module-guards/README.md)
-cover the selected authority and freshness rules. The framed client/private editor
-has not adopted them yet; implementation is partial.
+cover the selected authority and freshness rules. The client integration follows below; AppState activation remains open.
 Does not prove: actual framed-client/private-editor adoption, AppState activation, RuntimeActor isolation, production service-profile selection or release readiness.
+
+The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) carries the exact client-observed DNS revision through ordinary Restart and the private Start's conditional DNS slot. [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift) uses the same host lifecycle primitive and reports its companion result separately. It adds no DNS-enable write or fence-clearing shortcut. Complete-source review and AppState activation remain open.
 
 ## Open questions
 

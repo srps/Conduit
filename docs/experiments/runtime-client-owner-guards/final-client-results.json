@@ -1,0 +1,56 @@
+{
+  "head": "2fe9cd2701b6dc74028bbddb72c26e55617bad33",
+  "source_sha256": {
+    "Sources/ConduitRuntime/RuntimePrivateEditor.swift": "7148fd023bd7b1083a546b0e28b688608f628463d846c6945bb534aeab9efec6"
+  },
+  "tests_sha256": "bd41d81fe2ec2c32e7eba53631abe1605dcaf641bd7884cb4d4ba003aef7c25b",
+  "restored_exactly": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 115.71,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 48 tests, with 0 failures (0 unexpected) in 36.502 (36.527) seconds"
+      ]
+    },
+    {
+      "name": "apply-pair-replaced-after-push",
+      "exit": 1,
+      "seconds": 20.13,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:1391: error: -[ConduitTests.RuntimeHostControlOwnerTests testASavedPairReplacedWhileAnApplyIsParkedHoldsTheRestOfThatApply] : XCTAssertEqual failed: (\"Optional(true)\") is not equal to (\"Optional(false)\") - a replaced pair is not reported applied",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:1392: error: -[ConduitTests.RuntimeHostControlOwnerTests testASavedPairReplacedWhileAnApplyIsParkedHoldsTheRestOfThatApply] : XCTAssertFalse failed - the replaced pair's environment clear never ran"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true
+    },
+    {
+      "name": "capacity-permit-released-before-timer",
+      "exit": 1,
+      "seconds": 37.46,
+      "assertions": [
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:1458: error: -[ConduitTests.RuntimeHostControlOwnerTests testACapacityWaitHoldsOnePermitAndTimerUntilTheTimerPhysicallyEnds] : XCTAssertTrue failed - that timer keeps the permit",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:1460: error: -[ConduitTests.RuntimeHostControlOwnerTests testACapacityWaitHoldsOnePermitAndTimerUntilTheTimerPhysicallyEnds] : XCTAssertTrue failed - a second waiter is refused busy and arms no timer",
+        "/Users/SIS8LIS/.codex/worktrees/runtime-client-events/Conduit/Tests/ConduitTests/RuntimeHostControlOwnerTests.swift:1479: error: -[ConduitTests.RuntimeHostControlOwnerTests testACapacityWaitHoldsOnePermitAndTimerUntilTheTimerPhysicallyEnds] : XCTAssertTrue failed"
+      ],
+      "invalid_markers": [],
+      "summary": [],
+      "caught_by_intended_assertion": true
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 41.41,
+      "assertions": [],
+      "invalid_markers": [],
+      "summary": [
+        "\t Executed 48 tests, with 0 failures (0 unexpected) in 34.199 (34.210) seconds"
+      ]
+    }
+  ],
+  "implementation_equivalent_commit": "4825d24242f525d18811bd67cf00425e303e1b58"
+}

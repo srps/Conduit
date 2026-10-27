@@ -100,6 +100,8 @@ Not implemented: a production owner adapter in the actual host, a production v2 
 
 Does not prove: a production control socket, cross-process authority, host fences, admission order, retention, validated shipping resource limits, or the full client-engine behavior.
 
+The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) connects [`RuntimeHostControlOwner`](../../Sources/ConduitRuntime/RuntimeHostControlOwner.swift) and [`RuntimePrivateEditor`](../../Sources/ConduitRuntime/RuntimePrivateEditor.swift) to that same framed service, with causal receipts and shared physical custody. It records focused checks and outstanding review/profile/activation gates; mechanism-only results do not establish release readiness.
+
 ## Open questions
 
 Exact command/field inventory, measured frame/page/queue limits and deadline values

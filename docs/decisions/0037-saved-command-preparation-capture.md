@@ -90,6 +90,8 @@ The subsequent [shared module owner](../verification-runtime-module-owner-2026-1
 
 Does not prove: actual framed-client/private-editor adoption, final AppState activation, RuntimeActor isolation, production profile selection, release readiness or real-machine behavior.
 
+The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) connects [`RuntimeHostControlOwner`](../../Sources/ConduitRuntime/RuntimeHostControlOwner.swift) to the actual framed client while retaining this single preparation-time capture. Private Starts retain their frozen submissions. No admission snapshot registry or late rebind path is introduced; final integration review and AppState deletion remain open.
+
 ## Open questions
 
 Production custody/deadline limits still require actual-adapter measurements.

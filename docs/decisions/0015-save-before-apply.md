@@ -122,6 +122,8 @@ records failing witnesses, executed mutations and remaining checks. Neither esta
 
 The [shared module owner checkpoint](../verification-runtime-module-owner-2026-10-27.md) now uses that sole store for module Starts and owed DNS Stop saves. [`RuntimeModuleIntents`](../../Sources/ConduitRuntime/RuntimeModuleIntent.swift) preserves a disable displaced by an unverified Start, fulfils it through matching verified writes and retains a newer Stop over late completion. [`Actual-host tests`](../../Tests/ConduitTests/RuntimeHostInteractiveTests.swift) and strict source mutations cover these cases. The reserved final editor flush and AppState writer deletion remain incomplete.
 
+The local [actual-client checkpoint](../verification-runtime-client-owner-2026-10-27.md) adds [`RuntimeClientQuit`](../../Sources/ConduitShared/PrivateConfiguration/RuntimeClientQuit.swift), request-bound final saves and causal DNS-disable write facts over the same store. Logical deadline and physical cleanup remain distinct. AppState's old writers remain until its single activation; current focused verification is not release acceptance.
+
 ## Open questions
 
 Private configuration classification and bounds are selected in 0018/0021/0022; actual client adoption and measured limits remain. Decision [0017](0017-exclusive-state-directory-writer.md) settles writer lifetime

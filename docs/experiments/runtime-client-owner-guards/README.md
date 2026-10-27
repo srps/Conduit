@@ -41,8 +41,9 @@ scope of the earlier 11-test experiment.
   failed intended assertions: exact save baselines, recorded lifecycle results
   in receipts, admitted-input capacity, wire budgets, and the DNS Stop merge.
   Removing the apply pair-freshness check **survived** its existing test. That is
-  a recorded coverage gap, assigned a direct replacement-during-apply witness;
-  it is not evidence that the guard is unnecessary. Replay with
+  a recorded coverage gap; the final-client experiment below supplies and
+  discriminates its replacement-during-apply witness. It is not evidence that
+  the guard is unnecessary. Replay with
   replay-private.py OUTPUT --repo CHECKOUT.
 - [Authority model results](authority-model-results.json): the independent model
   passed all 88 legal depth-three histories (264 transitions). Removing either
@@ -78,3 +79,46 @@ CHECKOUT on the recorded source/test bytes. Its portable driver was
 syntax-checked; the executed driver used the same checks with fixed paths.
 This does not close the separately recorded pair-replacement coverage gap,
 verify the later request-bound reservation or establish release readiness.
+
+
+## Replacement freshness and physical capacity wait
+
+[Final client results](final-client-results.json) cover the tree-equivalent
+implementation checkpoint `4825d24`. Baseline and exact-byte-restored runs each
+passed all 48 actual-client owner tests. Two isolated removals failed cleanly:
+
+- Removing pair freshness after the reconciler push caused two assertions: the
+  receipt claimed the replaced pair was applied and its obsolete environment
+  clear ran. This closes the earlier **surviving witness gap**, within this
+  specific replacement schedule.
+- Returning the capacity-wait permit before its cancelled timer physically ended
+  caused three assertions: another waiter could enter and arm a timer. The
+  bounded witness drained its clock/tasks and ended normally.
+
+No compiler/crash failure was counted; all source bytes were restored. Replay
+with `replay-final-client.py OUTPUT --repo CHECKOUT` using the recorded source/test
+bytes. The portable driver was syntax-checked; the executed driver used the same
+mutation/assertion checks without the portable preflight identity lookup. These
+checks do not prove every cancellation or replacement schedule, production UI
+draft behavior, a shipping memory bound or release readiness.
+
+
+## Probe and terminal observation corrections
+
+[Correction results](correction-results.json) cover the reviewed client corrections
+and the strengthened held-probe witness. Baseline and exact-byte-restored runs
+each passed all 54 actual-client owner tests. Two independent removals failed:
+
+- Moving the DNS probe back onto the serial platform queue caused five ordering
+  assertions: DNS Stop and Quit could not settle while that read was held. Two
+  additional harness assertions reported unconfirmed shutdown after the mutation;
+  its isolated process retained the host/root authority instead of releasing it
+  unsafely. No compiler error, timeout or crash was counted.
+- Returning from the lost-stream Quit path before the total deadline caused the
+  intended deadline lower-bound assertion while teardown was still held.
+
+All mutated bytes were restored. Replay with `replay-corrections.py OUTPUT --repo
+CHECKOUT` using the recorded sources/tests. The portable driver was syntax-checked;
+the executed driver used the same mutations/assertion checks without the portable
+identity lookup. This proves discrimination of those two schedules, not all probe
+ports, actor/OS schedules or release readiness.
