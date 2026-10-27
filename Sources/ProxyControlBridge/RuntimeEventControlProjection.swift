@@ -64,6 +64,8 @@ extension ControlLifecycleOperation {
         case .dnsStop: self = .dnsStop
         case .runtimeStart: self = .runtimeStart
         case .runtimeStop: self = .runtimeStop
+        case .tunnelsStart: self = .tunnelsStart
+        case .tunnelsStop: self = .tunnelsStop
         }
     }
 }
@@ -137,6 +139,7 @@ extension ControlConfigWorkflowIntentPhase {
         switch phase {
         case .start: self = .start
         case .reload: self = .reload
+        case .stop: self = .stop
         }
     }
 }
@@ -219,6 +222,7 @@ extension ControlConfigWorkflowHoldReason {
         case .inputReplaced: self = .inputReplaced
         case .stopSaveOwed: self = .stopSaveOwed
         case .storeBusy: self = .storeBusy
+        case .staleRevision: self = .staleRevision
         }
     }
 }

@@ -16,6 +16,8 @@ package enum LifecycleOperation: String, Codable, Sendable, Equatable, CaseItera
     case dnsStop = "dns_stop"
     case runtimeStart = "runtime_start"
     case runtimeStop = "runtime_stop"
+    case tunnelsStart = "tunnels_start"
+    case tunnelsStop = "tunnels_stop"
 }
 
 /// Why a superseded operation stopped short of its platform work.

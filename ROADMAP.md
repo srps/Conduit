@@ -20,7 +20,7 @@ with remaining validation called out separately. An item needs a pillar fit.
 See also [Product Pillars](./README.md#product-pillars), [`AGENTS.md`](./AGENTS.md),
 and [`docs/STYLE.md`](./docs/STYLE.md).
 
-## Immediate priorities (2026-10-26)
+## Immediate priorities (2026-10-27)
 
 The runtime architecture program ([#186](https://github.com/srps/Conduit/issues/186),
 [#180](https://github.com/srps/Conduit/issues/180),
@@ -55,6 +55,12 @@ the owner selected whole-request validation ([0035](./docs/decisions/0035-whole-
 host-checked conditional DNS activation is selected ([0036](./docs/decisions/0036-conditional-dns-activation.md)).
 Both are planned for interactive adoption. Exact revisions and save-only keep their approved meaning.
 Stop/status/private-read adapter work remains independent.
+The unmerged [module-owner checkpoint](./docs/verification-runtime-module-owner-2026-10-27.md)
+now develops all three module lanes over one lifecycle/store path. Its 710 focused
+tests, actual-host scenario and seven executed guard mutations precede full
+workflow/independent review. Complete typed module outcomes and actual framed
+client adoption before the single AppState switch; no shipping claim follows.
+
 Preparation-time capture is selected in [0037](./docs/decisions/0037-saved-command-preparation-capture.md).
 The local saved-command checkpoint replaces the admission pin and passes focused
 workflow/host coverage plus an independent 93-history capture model. Complete actual

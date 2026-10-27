@@ -224,7 +224,7 @@ final class RuntimeEventTypedTests: XCTestCase {
     func testEveryOperationAndReasonKeepsItsLegacySpelling() {
         XCTAssertEqual(
             LifecycleOperation.allCases.map(\.rawValue).sorted(),
-            ["dns_start", "dns_stop", "proxy_start", "proxy_stop", "runtime_start", "runtime_stop"]
+            ["dns_start", "dns_stop", "proxy_start", "proxy_stop", "runtime_start", "runtime_stop", "tunnels_start", "tunnels_stop"]
         )
         XCTAssertEqual(LifecycleSupersessionReason.allCases.map(\.rawValue).sorted(), ["runtime_down", "superseded"])
     }

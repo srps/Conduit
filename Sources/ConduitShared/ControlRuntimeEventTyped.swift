@@ -279,6 +279,8 @@ package enum ControlLifecycleOperation: String, Codable, Sendable, Equatable, Ca
     case dnsStop = "dns_stop"
     case runtimeStart = "runtime_start"
     case runtimeStop = "runtime_stop"
+    case tunnelsStart = "tunnels_start"
+    case tunnelsStop = "tunnels_stop"
 }
 
 /// Wire spelling of a supersession reason.

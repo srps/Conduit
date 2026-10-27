@@ -1,0 +1,123 @@
+{
+  "source_sha256": {
+    "Sources/ConduitRuntime/RuntimeModuleIntent.swift": "e57648611da2043df72a121acbac6738f18ba0879a4ab682d1639c60371ce6a3",
+    "Sources/ConduitRuntime/RuntimeHostLifecycle.swift": "fd84d49f9833d9ddd64f150a633e38c8f4b094fdb847e378f233dc4b7abaf7ac",
+    "Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift": "f39218a7922a2fb1aa90d8aa05d4d5424449a13fd784f264bf3106cc5ce6dc12"
+  },
+  "restored_exactly": true,
+  "checks": [
+    {
+      "name": "baseline",
+      "exit": 0,
+      "seconds": 25.73,
+      "assertion_count": 0,
+      "assertions": []
+    },
+    {
+      "name": "stale-whole-request",
+      "exit": 1,
+      "seconds": 8.22,
+      "assertion_count": 5,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:676: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : failed - a stale DNS revision refuses the combined request",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:680: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : XCTAssertEqual failed: (\"PrivateModuleSlots<Int>(proxy: 2, dns: 1, tunnels: 0)\") is not equal to (\"PrivateModuleSlots<Int>(proxy: 0, dns: 1, tunnels: 0)\") - the refusal changes no revision",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:682: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : XCTAssertNotEqual failed: (\"running\") is equal to (\"running\") - and starts nothing",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:683: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : XCTAssertFalse failed",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:684: error: -[ConduitTests.RuntimeHostInteractiveTests testAStaleRevisionRefusesTheWholeRequestBeforeAnyWrite] : XCTAssertTrue failed"
+      ]
+    },
+    {
+      "name": "borrow-pending-enable",
+      "exit": 1,
+      "seconds": 7.1,
+      "assertion_count": 8,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:815: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable] : XCTAssertFalse failed - its input keeps DNS's durable false",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:816: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable] : XCTAssertEqual failed: (\"Optional(true)\") is not equal to (\"Optional(false)\") - and so does the file",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:819: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable] : XCTAssertFalse failed - its companion has no enable to act on",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:820: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyRequestPreparedBesideAPendingDNSStartPersistsNoEnable] : XCTAssertFalse failed - and the retired DNS Start left none persisted",
+        "Tests/ConduitTests/RuntimeModuleIntentTests.swift:295: error: -[ConduitTests.RuntimeModuleIntentTests testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable] : XCTAssertEqual failed: (\"Optional(true)\") is not equal to (\"Optional(false)\") - the proxy request stages the durable value",
+        "Tests/ConduitTests/RuntimeModuleIntentTests.swift:301: error: -[ConduitTests.RuntimeModuleIntentTests testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable] : XCTAssertFalse failed - no companion acts on the held Start's enable",
+        "Tests/ConduitTests/RuntimeModuleIntentTests.swift:302: error: -[ConduitTests.RuntimeModuleIntentTests testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable] : XCTAssertFalse failed - and the held Start left no persisted enable",
+        "Tests/ConduitTests/RuntimeModuleIntentTests.swift:303: error: -[ConduitTests.RuntimeModuleIntentTests testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable] : XCTAssertFalse failed"
+      ]
+    },
+    {
+      "name": "unfinished-grant-retirement",
+      "exit": 1,
+      "seconds": 16.38,
+      "assertion_count": 4,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:569: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyStopWhileTheWholeHostStartAppliesHoldsItWhole] : XCTAssertFalse failed - dns keeps no grant from the held group",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:569: error: -[ConduitTests.RuntimeHostInteractiveTests testAProxyStopWhileTheWholeHostStartAppliesHoldsItWhole] : XCTAssertFalse failed - tunnels keeps no grant from the held group",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:528: error: -[ConduitTests.RuntimeHostInteractiveTests testAStartThatThrowsAfterAuthorizationLeavesNoGrantForItsUnsettledMembers] : XCTAssertFalse failed - dns keeps no grant from the aborted group",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:528: error: -[ConduitTests.RuntimeHostInteractiveTests testAStartThatThrowsAfterAuthorizationLeavesNoGrantForItsUnsettledMembers] : XCTAssertFalse failed - tunnels keeps no grant from the aborted group"
+      ]
+    },
+    {
+      "name": "conditional-pair-after-wait",
+      "exit": 1,
+      "seconds": 8.49,
+      "assertion_count": 2,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:647: error: -[ConduitTests.RuntimeHostInteractiveTests testAReloadThatReplacesThePairHoldsTheCompanionAndKeepsTheCompletedProxy] : XCTAssertTrue failed - the held companion started no relay",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:648: error: -[ConduitTests.RuntimeHostInteractiveTests testAReloadThatReplacesThePairHoldsTheCompanionAndKeepsTheCompletedProxy] : XCTAssertFalse failed - and pointed no interface at the loopback forwarder"
+      ]
+    },
+    {
+      "name": "stop-save-busy-event",
+      "exit": 1,
+      "seconds": 7.08,
+      "assertion_count": 1,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:786: error: -[ConduitTests.RuntimeHostInteractiveTests testABusyStoreHoldsTheOwedDisableWithItsTypedStopCauseAndKeepsTheFence] : XCTAssertEqual failed: (\"[]\") is not equal to (\"[RuntimeEvents.ConfigurationWorkflowEvent.held(RuntimeEvents.ConfigurationWorkflowHeld(phase: RuntimeEvents.ConfigurationWorkflowIntentPhase.stop, input: RuntimeEvents.ConfigurationWorkflowHeldInput.runtime, reason: RuntimeEvents.ConfigurationWorkflowHoldReason.storeBusy))]\")"
+      ]
+    },
+    {
+      "name": "owed-disable-fulfilment",
+      "exit": 1,
+      "seconds": 7.38,
+      "assertion_count": 1,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:760: error: -[ConduitTests.RuntimeHostInteractiveTests testAVerifiedSharedWriteOfTheOwedDisableEndsTheObligationAndKeepsTheFence] : XCTAssertEqual failed: (\"saved\") is not equal to (\"notOwed\") - the verified shared write ended the obligation"
+      ]
+    },
+    {
+      "name": "stop-the-wrong-modules",
+      "exit": 1,
+      "seconds": 12.23,
+      "assertion_count": 52,
+      "assertions": [
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true tunnelsStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStart proxyStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStart tunnelsStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true restart proxyStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true restart tunnelsStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true dnsStart proxyStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true dnsStart tunnelsStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1013: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"started(ConduitRuntime.RuntimeModuleStartOutcome(modules: ConduitShared.PrivateModuleSlots<Swift.Optional<ConduitRuntime.RuntimeModuleStartResult>>(proxy: Optional(ConduitRuntime.RuntimeModuleStartResult.started), dns: nil, tunnels: nil), conditionalDNS: Optional(ConduitRuntime.RuntimeConditionalDNSResult.fenced)))\") is not equal to (\"started(ConduitRuntime.RuntimeModuleStartOutcome(modules: ConduitShared.PrivateModuleSlots<Swift.Optional<ConduitRuntime.RuntimeModuleStartResult>>(proxy: Optional(ConduitRuntime.RuntimeModuleStartResult.started), dns: nil, tunnels: nil), conditionalDNS: Optional(ConduitRuntime.RuntimeConditionalDNSResult.started)))\") - saved=true tunnel=true proxyStop proxyStart",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:983: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - saved=true tunnel=true proxyStop proxyStart: DNS run state",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:984: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - saved=true tunnel=true proxyStop proxyStart: system DNS",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:985: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"Optional(false)\") is not equal to (\"Optional(true)\") - saved=true tunnel=true proxyStop proxyStart: saved DNS intent",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStop proxyStart: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:986: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"true\") is not equal to (\"false\") - saved=true tunnel=true proxyStop: DNS fence",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:1013: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"started(ConduitRuntime.RuntimeModuleStartOutcome(modules: ConduitShared.PrivateModuleSlots<Swift.Optional<ConduitRuntime.RuntimeModuleStartResult>>(proxy: Optional(ConduitRuntime.RuntimeModuleStartResult.started), dns: nil, tunnels: nil), conditionalDNS: Optional(ConduitRuntime.RuntimeConditionalDNSResult.fenced)))\") is not equal to (\"started(ConduitRuntime.RuntimeModuleStartOutcome(modules: ConduitShared.PrivateModuleSlots<Swift.Optional<ConduitRuntime.RuntimeModuleStartResult>>(proxy: Optional(ConduitRuntime.RuntimeModuleStartResult.started), dns: nil, tunnels: nil), conditionalDNS: Optional(ConduitRuntime.RuntimeConditionalDNSResult.started)))\") - saved=true tunnel=true proxyStop restart",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:983: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - saved=true tunnel=true proxyStop restart: DNS run state",
+        "Tests/ConduitTests/RuntimeHostInteractiveTests.swift:984: error: -[ConduitTests.RuntimeModuleLifecycleModelTests testTunnelHistoriesStayIsolatedFromTheOtherModules] : XCTAssertEqual failed: (\"false\") is not equal to (\"true\") - saved=true tunnel=true proxyStop restart: system DNS"
+      ]
+    },
+    {
+      "name": "restored",
+      "exit": 0,
+      "seconds": 25.9,
+      "assertion_count": 0,
+      "assertions": []
+    }
+  ],
+  "test_sha256": {
+    "Tests/ConduitTests/RuntimeHostInteractiveTests.swift": "8bff300ea3804a09078aa1e6fe72c5b5da7586cb4bbe38b152481d26e0b9063d",
+    "Tests/ConduitTests/RuntimeModuleIntentTests.swift": "30849fb28529cc7341d19138c7108582974c10491575865c30d0fc8c9fabbdb8"
+  }
+}

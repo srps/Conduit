@@ -2,6 +2,7 @@
 import Darwin
 import Foundation
 import ConduitRuntime
+import ConduitShared
 import NIOConcurrencyHelpers
 import PlatformMac
 import ProxyAuth
@@ -116,14 +117,21 @@ enum RuntimeHostEffectsScenario {
                 assertions += captured.assertions
                 notes += captured.notes
             }
+            var modules = Shutdown(quiesced: false, assertions: [], notes: [], pinnedHost: nil)
             if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
                 && captured.quiesced {
+                modules = await exerciseModuleLifecycle(session: session!, environment: environment, fakes: fakes, home: home)
+                assertions += modules.assertions
+                notes += modules.notes
+            }
+            if shutdown.quiesced && workflow.quiesced && lifecycle.quiesced && source.quiesced && respelling.quiesced
+                && captured.quiesced && modules.quiesced {
                 releaseRoot(&session, environment: environment, scratch: scratch, releaseFailures: releaseFailures,
                             assertions: &assertions, notes: &notes)
             } else {
                 // The host keeps its session, so the root stays claimed for the rest of the process. The slot is the
                 // only reference this scenario keeps, and the scratch directory stays on disk for inspection.
-                unconfirmedHost = captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
+                unconfirmedHost = modules.pinnedHost ?? captured.pinnedHost ?? respelling.pinnedHost ?? source.pinnedHost ?? lifecycle.pinnedHost ?? workflow.pinnedHost ?? shutdown.pinnedHost
                 assertions.append(.init("the shutdown is confirmed", false))
                 notes.append("shutdown not confirmed: host pinned until process exit; root and scratch kept at \(scratch.path)")
             }
@@ -463,6 +471,113 @@ enum RuntimeHostEffectsScenario {
             let flush = await host.flushEvents()
             quiesced = settled == .settled && flush.allConfirmed
             assertions.append(.init("the capture error path settled the host and confirmed its flush", quiesced))
+        }
+        return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
+    }
+
+    /// The per-module lifecycle facade of the actual host (decisions 0031, 0035, 0036 and 0037), over the run's fakes and an ephemeral DNS
+    /// port. A proxy Start's companion starts configured DNS; a proxy Stop leaves DNS running; a session DNS Stop restores system DNS and
+    /// saves its disable; a menu Restart's companion then finds the fence; a request naming a moved revision is refused whole; an explicit
+    /// DNS Start enables DNS again; and the process quit latches, tears every module down and returns with every lane idle.
+    @MainActor
+    private static func exerciseModuleLifecycle(
+        session: StateRootSession,
+        environment: RuntimeEnvironment,
+        fakes: Fakes,
+        home: URL
+    ) async -> Shutdown {
+        var assertions: [ScenarioAssertion] = []
+        var notes: [String] = []
+        func check(_ name: String, _ passed: Bool) { assertions.append(.init(name, passed)) }
+        let machine = fakes.machine
+        var config = GenericDefaults.shared.makeConfig()
+        config.localPort = 0
+        config.dnsForwarderEnabled = true
+        config.dnsForwarderPort = 0
+        config.localPACEnabled = false
+        config.pacRoutingEnabled = false
+        config.upstreams = [UpstreamProxy(name: "Synthetic", host: "127.0.0.1", port: 9, priority: 0)]
+        let host: RuntimeHost
+        do {
+            try ProxyConfigPersistence.save(config, in: environment)
+            try PlatformConfigPersistence.save(
+                PlatformIntegrationConfig(manageSystemProxy: true, manageEnvironmentVariables: true, manageSystemDNS: true), in: environment
+            )
+            host = try await RuntimeHost.open(
+                stateSession: session,
+                logger: DiscardingLogSink(),
+                startupAllowsMissing: false,
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+                terminalExit: {},
+                effects: effects(fakes, home: home)
+            )
+        } catch {
+            notes.append("module host did not open: \(error.localizedDescription)")
+            check("the module host opened over the saved configuration", false)
+            return Shutdown(quiesced: true, assertions: assertions, notes: notes, pinnedHost: nil)
+        }
+        func savedDNS() -> Bool? {
+            (try? ProxyConfigPersistence.load(in: environment, allowMissing: false))?.dnsForwarderEnabled
+        }
+
+        var quiesced = false
+        do {
+            let proxy = try await host.startProxy(conditionalDNS: true)
+            check("a proxy Start reports its proxy started", proxy.modules.proxy == .started)
+            check("its companion starts the configured DNS", proxy.conditionalDNS == .started)
+            check("the companion points system DNS at the forwarder", machine.dnsRelayRunning)
+
+            let proxyStop = await host.stopProxy()
+            check("a proxy Stop stops only the proxy", proxyStop.stopped == [.proxy])
+            check("a proxy Stop clears the system proxy", !machine.service("Wi-Fi").routesThroughAProxy)
+            check("a proxy Stop leaves DNS running", host.status().dnsRunState == "running" && machine.dnsRelayRunning)
+
+            let dnsStop = await host.stopDNS()
+            check("a session DNS Stop saves its disable", dnsStop.dnsSave == .saved && savedDNS() == false)
+            check("a session DNS Stop restores system DNS", !machine.dnsRelayRunning)
+
+            let observed = host.moduleRevisions
+            let restart = try await host.restartProxy()
+            check("a menu Restart brings the proxy up", restart.modules.proxy == .started && machine.service("Wi-Fi").routesThroughAProxy)
+            check("its companion finds the DNS fence and starts nothing", restart.conditionalDNS == .fenced && !machine.dnsRelayRunning)
+
+            _ = await host.stopProxy()
+            var refusal: RuntimeStartRefusal?
+            do {
+                _ = try await host.startDNS(expecting: PrivateModuleSlots(proxy: nil, dns: observed.dns - 1, tunnels: nil))
+            } catch let refused as RuntimeStartRefusal {
+                refusal = refused
+            }
+            check("a request naming a moved revision is refused whole", refusal == .stale(.dns))
+            check("the refused request starts nothing and writes nothing", !machine.dnsRelayRunning && savedDNS() == false)
+
+            let dns = try await host.startDNS(expecting: PrivateModuleSlots(proxy: nil, dns: host.moduleRevisions.dns, tunnels: nil))
+            check("an explicit DNS Start enables DNS again", dns.modules.dns == .started && savedDNS() == true && machine.dnsRelayRunning)
+
+            await host.shutdown()
+            check("the quit leaves every module down", host.status().state == "stopped" && host.status().dnsRunState != "running")
+            check("the quit restores system DNS", !machine.dnsRelayRunning)
+            check("the quit persists no disable", savedDNS() == true)
+            var afterQuit: RuntimeStartRefusal?
+            do {
+                _ = try await host.startProxy(conditionalDNS: true)
+            } catch let refused as RuntimeStartRefusal {
+                afterQuit = refused
+            }
+            check("no Start runs after the quit", afterQuit == .terminated)
+
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            check("the module host settles before its root is released", settled == .settled)
+            let flush = await host.flushEvents()
+            check("the module host's observability flush is confirmed", flush.allConfirmed)
+            quiesced = settled == .settled && flush.allConfirmed
+        } catch {
+            notes.append("module exercise error: \(error.localizedDescription)")
+            await host.shutdown()
+            let settled = await host.settleStoppedEffects(until: ContinuousClock.now.advanced(by: .seconds(5)))
+            let flush = await host.flushEvents()
+            quiesced = settled == .settled && flush.allConfirmed
+            assertions.append(.init("the module error path settled the host and confirmed its flush", quiesced))
         }
         return Shutdown(quiesced: quiesced, assertions: assertions, notes: notes, pinnedHost: quiesced ? nil : host)
     }

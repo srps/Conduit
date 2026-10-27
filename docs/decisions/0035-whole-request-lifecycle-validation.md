@@ -2,7 +2,7 @@
 
 - Date: 2026-10-26
 - Decision: accepted (owner, 2026-10-26, #186)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -66,11 +66,19 @@ autosave races and fresh observations that cannot silently retry Start. Add actu
 
 ## Implementation evidence
 
-None yet. The existing process facade and headless private codec do not implement this interactive rule.
-No AppState activation or production service-profile selection follows from this record.
+The [shared module owner checkpoint](../verification-runtime-module-owner-2026-10-27.md)
+implements the host-side rule in
+[`RuntimeHostLifecycle`](../../Sources/ConduitRuntime/RuntimeHostLifecycle.swift),
+[`RuntimeModuleIntents`](../../Sources/ConduitRuntime/RuntimeModuleIntent.swift) and
+[`RuntimeConfigurationWorkflow`](../../Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift).
+[`Actual-host reference/model and ordering tests`](../../Tests/ConduitTests/RuntimeHostInteractiveTests.swift)
+and [executed guard mutations](../experiments/runtime-module-guards/README.md)
+cover the selected authority and freshness rules. The framed client/private editor
+has not adopted them yet; implementation is partial.
+Does not prove: actual framed-client/private-editor adoption, AppState activation, RuntimeActor isolation, production service-profile selection or release readiness.
 
 ## Open questions
 
-Dependent proxy-to-DNS startup and Restart remain a separate owner choice. Production capacity,
+[0036](0036-conditional-dns-activation.md) selects conditional proxy-to-DNS startup/Restart; that choice is resolved. Production capacity,
 custody/deadline and total Quit values still require actual-adapter measurement. Revisit partial progress
 for demonstrated multi-client need, with explicit dependencies, bounded work and one coherent apply model.

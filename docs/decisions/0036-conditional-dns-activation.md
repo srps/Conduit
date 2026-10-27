@@ -2,7 +2,7 @@
 
 - Date: 2026-10-26
 - Decision: accepted (owner, 2026-10-26, #186)
-- Implementation: planned
+- Implementation: partial
 - Validation: none
 - Supersedes: none
 - Superseded by: none
@@ -75,8 +75,16 @@ execute meaningful guard mutations and add actual-host pm-sim coverage. Renew re
 
 ## Implementation evidence
 
-None yet. The existing process facade and headless codec do not implement this conditional contract.
-No AppState switch, RuntimeActor move or shipping service profile is implied.
+The [shared module owner checkpoint](../verification-runtime-module-owner-2026-10-27.md)
+implements the host-side rule in
+[`RuntimeHostLifecycle`](../../Sources/ConduitRuntime/RuntimeHostLifecycle.swift),
+[`RuntimeModuleIntents`](../../Sources/ConduitRuntime/RuntimeModuleIntent.swift) and
+[`RuntimeConfigurationWorkflow`](../../Sources/ConduitRuntime/RuntimeConfigurationWorkflow.swift).
+[`Actual-host reference/model and ordering tests`](../../Tests/ConduitTests/RuntimeHostInteractiveTests.swift)
+and [executed guard mutations](../experiments/runtime-module-guards/README.md)
+cover the selected authority and freshness rules. The framed client/private editor
+has not adopted them yet; implementation is partial.
+Does not prove: actual framed-client/private-editor adoption, AppState activation, RuntimeActor isolation, production service-profile selection or release readiness.
 
 ## Open questions
 

@@ -329,6 +329,9 @@ private final class GatedSettleFixture {
         }
         settle = nil
         var confirmed = true
+        // Which step left the shutdown unconfirmed, for the retention failure: the settle's last outcome and attempt count, then the
+        // flush's per-writer results. Numeric and enum values only.
+        var why = ""
         if let host {
             await host.stopRuntime()
             var outcome = StoppedEffectsSettlement.busy
@@ -345,12 +348,17 @@ private final class GatedSettleFixture {
                 }
             }
             confirmed = outcome == .settled
+            why = "settle \(outcome) after \(attempts) attempt(s), joins pending \(host.stoppedEffectsJoinCount), "
+                + "admissions pending \(host.pendingAdmissions), lanes idle \(host.lanesIdle), workflow idle \(host.workflow.isIdle)"
             if confirmed {
-                confirmed = (await host.flushEvents()).allConfirmed
+                let report = await host.flushEvents()
+                confirmed = report.allConfirmed
+                why += "; flush audit \(report.audit), events \(report.events), eventsRetry \(String(describing: report.eventsRetry)), "
+                    + "snapshot \(report.snapshot), snapshotEvent \(report.snapshotEvent)"
             }
         }
         guard confirmed else {
-            Self.retain(self, why: "the shutdown is not confirmed")
+            Self.retain(self, why: "the shutdown is not confirmed (\(why))")
             return
         }
         host = nil

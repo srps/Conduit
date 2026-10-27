@@ -29,9 +29,10 @@ final class RuntimeModuleIntentTests: XCTestCase {
     func testAnExplicitDNSStartStagesTheEnableBeforeItsFenceClears() throws {
         var intents = RuntimeModuleIntents(dnsEnabled: true)
         intents.stop([.dns], reason: .session)
-        XCTAssertFalse(intents.stagedDNSForwarderEnabled, "the Stop's save projects the disable")
+        XCTAssertFalse(intents.dnsConfigured, "the Stop's save projects the disable")
         let group = try admitted(&intents, request(dns: .start))
-        XCTAssertTrue(intents.stagedDNSForwarderEnabled, "the pending explicit Start's write stages the enable")
+        XCTAssertTrue(intents.stagedDNSForwarderEnabled(for: group.group), "the pending explicit Start's own write stages the enable")
+        XCTAssertFalse(intents.dnsConfigured, "which is not yet persisted intent")
         XCTAssertTrue(intents.modules.dns.fenced, "the fence protects runtime activation until the verified write")
         XCTAssertFalse(intents.modules.dns.enabled)
         XCTAssertEqual(intents.authorize(group), [.dns])
@@ -41,7 +42,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         var revoked = RuntimeModuleIntents(dnsEnabled: false)
         _ = try admitted(&revoked, request(dns: .start))
         revoked.stop([.dns], reason: .session)
-        XCTAssertFalse(revoked.stagedDNSForwarderEnabled, "a newer Stop revokes the pending target before an unstarted write")
+        XCTAssertFalse(revoked.dnsConfigured, "a newer Stop revokes the pending target before an unstarted write")
     }
 
     /// A held Start and a failed Start leave the permission and the fence they found, so nothing can act on them later. This holds for an
@@ -75,7 +76,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
     func testAConditionalActivationNeverEnablesAndADNSStopCancelsOnlyIt() throws {
         var disabled = RuntimeModuleIntents(dnsEnabled: false)
         let off = try admitted(&disabled, request(proxy: .start, dns: .conditionalActivation))
-        XCTAssertFalse(disabled.stagedDNSForwarderEnabled)
+        XCTAssertFalse(disabled.dnsConfigured)
         XCTAssertFalse(disabled.conditionalActivationAllowed(off), "a disabled DNS is a typed no-op")
         XCTAssertEqual(disabled.authorize(off), [.proxy], "the companion is no explicit-enable member, though it shares the input")
         XCTAssertFalse(disabled.modules.dns.enabled)
@@ -87,7 +88,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         enabled.settleConditional(on, succeeded: false)
         XCTAssertTrue(enabled.modules.dns.enabled, "a failed companion keeps the prior enable and fence")
         XCTAssertFalse(enabled.modules.dns.fenced)
-        XCTAssertTrue(enabled.stagedDNSForwarderEnabled, "and the configured intent")
+        XCTAssertTrue(enabled.dnsConfigured, "and the configured intent")
 
         var retried = RuntimeModuleIntents(dnsEnabled: false)
         retried.observeDurableDNS(true)
@@ -111,9 +112,9 @@ final class RuntimeModuleIntentTests: XCTestCase {
         var held = RuntimeModuleIntents(dnsEnabled: false)
         held.stop([.dns], reason: .session)
         let group = try admitted(&held, request(dns: .start))
-        held.recordVerifiedDNSWrite(held.stagedDNSForwarderEnabled, for:group)
+        held.recordVerifiedDNSWrite(held.stagedDNSForwarderEnabled(for: group.group), for:group)
         held.retire(group)
-        XCTAssertTrue(held.stagedDNSForwarderEnabled, "the next write keeps the enable the file verified")
+        XCTAssertTrue(held.dnsConfigured, "the next write keeps the enable the file verified")
         XCTAssertTrue(held.modules.dns.fenced, "the prior fence returns")
         XCTAssertFalse(held.modules.dns.enabled, "and no permission is left")
 
@@ -122,14 +123,14 @@ final class RuntimeModuleIntentTests: XCTestCase {
         failed.recordVerifiedDNSWrite(true, for:start)
         XCTAssertEqual(failed.authorize(start), [.dns])
         failed.settle(.dns, ticket:start, succeeded: false)
-        XCTAssertTrue(failed.stagedDNSForwarderEnabled)
+        XCTAssertTrue(failed.dnsConfigured)
         XCTAssertFalse(failed.modules.dns.enabled)
 
         var late = RuntimeModuleIntents(dnsEnabled: false)
         let staged = try admitted(&late, request(dns: .start))
         late.stop([.dns], reason: .session)
         late.recordVerifiedDNSWrite(true, for:staged)
-        XCTAssertFalse(late.stagedDNSForwarderEnabled, "the Stop's disable wins over the late older write")
+        XCTAssertFalse(late.dnsConfigured, "the Stop's disable wins over the late older write")
     }
 
     /// Only a newer DNS intent overrides a verified write. A grouped DNS and tunnels Start whose write has begun is ended by an unrelated
@@ -148,7 +149,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
             XCTAssertFalse(intents.isPending(group), "\(label) ends the whole group")
             intents.recordVerifiedDNSWrite(try XCTUnwrap(group.dnsStaged), for: group)
             intents.retire(group)
-            XCTAssertTrue(intents.stagedDNSForwarderEnabled, "\(label): no newer DNS intent, so the saved enable is kept")
+            XCTAssertTrue(intents.dnsConfigured, "\(label): no newer DNS intent, so the saved enable is kept")
             XCTAssertFalse(intents.modules.dns.enabled, "\(label): and it grants no permission")
             XCTAssertNil(intents.modules.dns.pending, label)
         }
@@ -158,7 +159,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         stopped.stop([.tunnels], reason: .session)
         stopped.stop([.dns], reason: .session)
         stopped.recordVerifiedDNSWrite(true, for: stale)
-        XCTAssertFalse(stopped.stagedDNSForwarderEnabled, "a newer DNS Stop still wins after the group ended")
+        XCTAssertFalse(stopped.dnsConfigured, "a newer DNS Stop still wins after the group ended")
 
         var replaced = RuntimeModuleIntents(dnsEnabled: true)
         let older = try admitted(&replaced, request(proxy: .start, dns: .conditionalActivation))
@@ -166,7 +167,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         let newer = try admitted(&replaced, request(dns: .start))
         replaced.retire(newer)
         replaced.recordVerifiedDNSWrite(true, for: older)
-        XCTAssertFalse(replaced.stagedDNSForwarderEnabled, "a late older write loses to the newer DNS Stop")
+        XCTAssertFalse(replaced.dnsConfigured, "a late older write loses to the newer DNS Stop")
     }
 
     /// At the maximum counter a DNS Stop cannot take a newer value, and it still wins over the late write of the Start admitted at the
@@ -177,16 +178,16 @@ final class RuntimeModuleIntentTests: XCTestCase {
         XCTAssertEqual(start.group, Int.max)
         XCTAssertEqual(stopped.stop([.dns], reason: .session), Int.max)
         stopped.recordVerifiedDNSWrite(true, for: start)
-        XCTAssertFalse(stopped.stagedDNSForwarderEnabled, "the Stop at the maximum wins over the late enable")
+        XCTAssertFalse(stopped.dnsConfigured, "the Stop at the maximum wins over the late enable")
 
         var quit = RuntimeModuleIntents(counter: Int.max - 1, dnsEnabled: false)
         let late = try admitted(&quit, request(dns: .start))
         quit.stop(Set(ControlModule.allCases), reason: .processQuit)
-        XCTAssertFalse(quit.stagedDNSForwarderEnabled, "Quit ended the Start and invents no enable")
+        XCTAssertFalse(quit.dnsConfigured, "Quit ended the Start and invents no enable")
         quit.recordVerifiedDNSWrite(true, for: late)
-        XCTAssertTrue(quit.stagedDNSForwarderEnabled, "Quit is no DNS intent, so the late verified enable is kept")
+        XCTAssertTrue(quit.dnsConfigured, "Quit is no DNS intent, so the late verified enable is kept")
         quit.stop(Set(ControlModule.allCases), reason: .processQuit)
-        XCTAssertTrue(quit.stagedDNSForwarderEnabled, "and a second Quit at the maximum invents no disable")
+        XCTAssertTrue(quit.dnsConfigured, "and a second Quit at the maximum invents no disable")
     }
 
     /// A newer Start replacing an authorized, unsettled one owns the module at once. The old Start's late completion, successful or failed,
@@ -284,6 +285,41 @@ final class RuntimeModuleIntentTests: XCTestCase {
         XCTAssertEqual(stoppedLate.modules.proxy.authorized?.group, late.group, "and leaves the started proxy alone")
     }
 
+    /// Another request's pending DNS enable is not yet persisted intent (decisions 0015, 0035 and 0036). A proxy request admitted beside a
+    /// pending explicit DNS Start stages the durable false, not that Start's unverified true; once the DNS Start is held and retired, the
+    /// proxy request's verified write records the false and its own companion finds nothing to activate.
+    func testAProxyRequestNeverStagesAnotherRequestsPendingDNSEnable() throws {
+        var intents = RuntimeModuleIntents(dnsEnabled: false)
+        let dnsStart = try admitted(&intents, request(dns: .start))
+        let proxy = try captured(&intents, admitted(&intents, request(proxy: .start, dns: .conditionalActivation)))
+        XCTAssertEqual(proxy.dnsStaged, false, "the proxy request stages the durable value")
+        XCTAssertTrue(intents.stagedDNSForwarderEnabled(for: dnsStart.group), "while the DNS Start's own write would stage its enable")
+        XCTAssertTrue(intents.isPending(proxy))
+        intents.recordVerifiedDNSWrite(try XCTUnwrap(proxy.dnsStaged), for: proxy)
+        intents.retire(dnsStart)
+        XCTAssertEqual(intents.authorize(proxy), [.proxy])
+        XCTAssertFalse(intents.conditionalActivationAllowed(proxy), "no companion acts on the held Start's enable")
+        XCTAssertFalse(intents.dnsConfigured, "and the held Start left no persisted enable")
+        XCTAssertFalse(intents.stagedDNSForwarderEnabled(for: 0))
+    }
+
+    /// Pins the behavior the request-scoped staging chose: a DNS Start admitted after a group without a companion captured does not hold
+    /// that group, whose write stages the unchanged durable value (decision 0035: the merged persisted value did not change). A group with
+    /// a companion is still held through its DNS revision.
+    func testALaterDNSStartLeavesACapturedGroupWithoutACompanionStanding() throws {
+        var intents = RuntimeModuleIntents(dnsEnabled: false)
+        let proxy = try captured(&intents, admitted(&intents, request(proxy: .start)))
+        let dnsStart = try admitted(&intents, request(dns: .start))
+        XCTAssertTrue(intents.isPending(proxy), "the proxy group's staged false still stands")
+        XCTAssertTrue(intents.isPending(dnsStart))
+        XCTAssertEqual(intents.authorize(proxy), [.proxy])
+
+        var withCompanion = RuntimeModuleIntents(dnsEnabled: false)
+        let companion = try captured(&withCompanion, admitted(&withCompanion, request(proxy: .start, dns: .conditionalActivation)))
+        _ = try admitted(&withCompanion, request(dns: .start))
+        XCTAssertFalse(withCompanion.isPending(companion), "a newer DNS admission still ends a group with a companion")
+    }
+
     /// A reload that observes DNS configured on is not itself a permission, but a later explicit proxy Start with its companion may start
     /// DNS once the group's shared input is adopted. A fenced DNS keeps its disable through the same reload.
     func testAConfiguredDNSActivatesOnlyThroughALaterExplicitCompanion() throws {
@@ -315,7 +351,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         var quit = RuntimeModuleIntents(dnsEnabled: true)
         quit.stop(Set(ControlModule.allCases), reason: .processQuit)
         XCTAssertNil(quit.modules.dns.pending, "Quit reserves no disable save")
-        XCTAssertTrue(quit.stagedDNSForwarderEnabled, "Quit leaves the durable enable")
+        XCTAssertTrue(quit.dnsConfigured, "Quit leaves the durable enable")
     }
 
     /// After Quit has latched, a late session DNS Stop still fences, but it neither creates a disable save nor drops one an earlier Stop owes
@@ -325,7 +361,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         quit.stop(Set(ControlModule.allCases), reason: .processQuit)
         quit.stop([.dns], reason: .session)
         XCTAssertNil(quit.modules.dns.pending, "no new disable save after Quit")
-        XCTAssertTrue(quit.stagedDNSForwarderEnabled, "the configured enable stays")
+        XCTAssertTrue(quit.dnsConfigured, "the configured enable stays")
         XCTAssertTrue(quit.modules.dns.fenced)
 
         var owed = RuntimeModuleIntents(dnsEnabled: true)
@@ -333,7 +369,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         owed.stop(Set(ControlModule.allCases), reason: .processQuit)
         owed.stop([.dns], reason: .session)
         XCTAssertTrue(owed.stopSaveIsCurrent(revision: saved), "the save owed before Quit is kept")
-        XCTAssertFalse(owed.stagedDNSForwarderEnabled, "and still stages its disable")
+        XCTAssertFalse(owed.dnsConfigured, "and still stages its disable")
         XCTAssertTrue(owed.modules.dns.fenced)
     }
 
@@ -359,7 +395,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
             intents.stop(Set(ControlModule.allCases), reason: .facade)
             XCTAssertTrue(intents.allFenced)
             XCTAssertNil(intents.modules.dns.pending, "\(configured): a facade Stop reserves no disable save")
-            XCTAssertEqual(intents.stagedDNSForwarderEnabled, configured, "and keeps the configured intent")
+            XCTAssertEqual(intents.dnsConfigured, configured, "and keeps the configured intent")
 
             let queued = try facade(&intents)
             XCTAssertNil(queued.dnsStaged, "a queued facade carries no configuration value")
@@ -413,7 +449,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         let explicit = try admitted(&intents, request(dns: .start))
         let start = try captured(&intents, facade(&intents))
         intents.recordVerifiedDNSWrite(true, for: explicit)
-        XCTAssertTrue(intents.stagedDNSForwarderEnabled, "the explicit Start's verified enable is the saved fact")
+        XCTAssertTrue(intents.dnsConfigured, "the explicit Start's verified enable is the saved fact")
         XCTAssertFalse(intents.isPending(start), "the facade captured false, so it is held, not re-staged")
         intents.retire(start)
         XCTAssertTrue(intents.allFenced == false && !intents.modules.dns.enabled, "the held facade grants nothing")
@@ -434,7 +470,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         var after = RuntimeModuleIntents(dnsEnabled: false)
         let bound = try captured(&after, facade(&after))
         after.observeDurableDNS(true)
-        XCTAssertTrue(after.stagedDNSForwarderEnabled, "the newer observation is still adopted as the fact")
+        XCTAssertTrue(after.dnsConfigured, "the newer observation is still adopted as the fact")
         XCTAssertFalse(after.isPending(bound), "and it holds the captured facade")
         XCTAssertEqual(after.authorize(bound), [], "which is never authorized on the replaced input")
         XCTAssertFalse(after.holdsGroup(bound))
@@ -453,7 +489,7 @@ final class RuntimeModuleIntentTests: XCTestCase {
         var facadeStopped = RuntimeModuleIntents(dnsEnabled: false)
         facadeStopped.stop(Set(ControlModule.allCases), reason: .facade)
         facadeStopped.observeDurableDNS(true)
-        XCTAssertTrue(facadeStopped.stagedDNSForwarderEnabled, "the facade-stopped DNS adopts the verified observation")
+        XCTAssertTrue(facadeStopped.dnsConfigured, "the facade-stopped DNS adopts the verified observation")
         XCTAssertTrue(facadeStopped.modules.dns.fenced, "and keeps its fence")
         XCTAssertFalse(facadeStopped.modules.dns.enabled, "and gains no permission")
         let start = try captured(&facadeStopped, facade(&facadeStopped))
@@ -465,12 +501,12 @@ final class RuntimeModuleIntentTests: XCTestCase {
         var owed = RuntimeModuleIntents(dnsEnabled: true)
         let saved = owed.stop([.dns], reason: .session)
         owed.observeDurableDNS(true)
-        XCTAssertFalse(owed.stagedDNSForwarderEnabled, "an owed disable save keeps its false")
+        XCTAssertFalse(owed.dnsConfigured, "an owed disable save keeps its false")
         XCTAssertTrue(owed.stopSaveIsCurrent(revision: saved))
 
         owed.finishStopSave(revision: saved)
         owed.observeDurableDNS(true)
-        XCTAssertTrue(owed.stagedDNSForwarderEnabled, "after the save verified, a later edit and reload is a new fact")
+        XCTAssertTrue(owed.dnsConfigured, "after the save verified, a later edit and reload is a new fact")
         XCTAssertTrue(owed.modules.dns.fenced, "while DNS stays fenced")
         XCTAssertFalse(owed.modules.dns.enabled, "and off")
     }
@@ -479,15 +515,15 @@ final class RuntimeModuleIntentTests: XCTestCase {
     func testAReloadObservationNeverRaisesPermission() {
         var intents = RuntimeModuleIntents(dnsEnabled: false)
         intents.observeDurableDNS(true)
-        XCTAssertTrue(intents.stagedDNSForwarderEnabled, "the durable observation is merged into later writes")
+        XCTAssertTrue(intents.dnsConfigured, "the durable observation is merged into later writes")
         XCTAssertFalse(intents.modules.dns.enabled, "but it is not an activation permission")
         intents.observeDurableDNS(false)
-        XCTAssertFalse(intents.stagedDNSForwarderEnabled)
+        XCTAssertFalse(intents.dnsConfigured)
 
         var fenced = RuntimeModuleIntents(dnsEnabled: true)
         fenced.stop([.dns], reason: .session)
         fenced.observeDurableDNS(true)
-        XCTAssertFalse(fenced.stagedDNSForwarderEnabled, "a fenced DNS keeps the disable its Stop set")
+        XCTAssertFalse(fenced.dnsConfigured, "a fenced DNS keeps the disable its Stop set")
     }
 
     /// At the maximum a Start is refused unchanged, and a Stop fences without advancing.
@@ -574,11 +610,11 @@ final class RuntimeModuleIntentTests: XCTestCase {
                     // After Quit a late Stop persists nothing: no new save, no owed save dropped, no configured change. Quit already
                     // ended any pending Start, so the slot holds at most the save owed from before it.
                     if intents.modules.dns.pending != before.modules.dns.pending { return "a DNS Stop after Quit changed the owed save" }
-                    if intents.stagedDNSForwarderEnabled != before.stagedDNSForwarderEnabled {
+                    if intents.dnsConfigured != before.dnsConfigured {
                         return "a DNS Stop after Quit changed the configured intent"
                     }
                     coverage["quit.lateStopPersistedNothing", default: 0] += 1
-                } else if intents.stagedDNSForwarderEnabled {
+                } else if intents.dnsConfigured {
                     return "a session DNS Stop left the enable staged"
                 }
             case .quit:
@@ -628,11 +664,15 @@ final class RuntimeModuleIntentTests: XCTestCase {
                 if (raised || cleared) && step != .authorize { return "\(step) raised \(module)'s permission or cleared its fence" }
                 if case .stopSave = intents.modules[module].pending, module != .dns { return "a save on \(module)" }
             }
-            if case .start = intents.modules.dns.pending {
-                if !intents.stagedDNSForwarderEnabled { return "a pending explicit DNS Start staged no enable" }
+            if case .start(let pending) = intents.modules.dns.pending, !pending.configured {
+                if !intents.stagedDNSForwarderEnabled(for: pending.group) { return "a pending explicit DNS Start staged no enable" }
+                // No other request's write stages that unverified enable.
+                if intents.stagedDNSForwarderEnabled(for: pending.group &+ 1) != intents.dnsConfigured {
+                    return "another group staged a pending DNS Start's enable"
+                }
                 coverage["projection.pendingTarget", default: 0] += 1
             } else if intents.modules.dns.authorized == nil, case .stopSave = intents.modules.dns.pending,
-                      intents.stagedDNSForwarderEnabled {
+                      intents.dnsConfigured {
                 return "a reserved Stop save stages the enable"
             }
         }

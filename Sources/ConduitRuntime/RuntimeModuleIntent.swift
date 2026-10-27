@@ -146,21 +146,27 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         ControlModule.allCases.allSatisfy { modules[$0].fenced }
     }
 
-    /// The `dnsForwarderEnabled` every runtime write stages: true for a pending explicit DNS Start, so its file holds the enable before its
-    /// runtime activation; otherwise the configured intent. A companion projects the configured intent and enables nothing, and a Stop's save
-    /// projects the false its admission set. A facade's `configuredStart` projects the configured intent too. The permission and the fence
-    /// stay as they were until `authorize`.
-    var stagedDNSForwarderEnabled: Bool {
-        if case .start(let start) = modules.dns.pending, !start.configured { return true }
+    /// The `dnsForwarderEnabled` group `group`'s runtime write stages: true when that group's own explicit DNS Start is pending, so its file
+    /// holds the enable before its runtime activation; otherwise the durable configured intent, a session Stop's false included. Another
+    /// request's pending enable is not yet persisted intent (decisions 0015, 0035 and 0036), so no other group writes it first and no
+    /// companion can act on it. A companion, a Stop's save and a facade's `configuredStart` project the configured intent. The permission
+    /// and the fence stay as they were until `authorize`.
+    func stagedDNSForwarderEnabled(for group: Int) -> Bool {
+        if case .start(let start) = modules.dns.pending, !start.configured, start.group == group { return true }
         return dnsConfigured
     }
 
     /// Records a verified runtime write's `dnsForwarderEnabled`, staged by `ticket`'s group. It is a saved fact, kept whatever the Start's
     /// activation does later and whichever member ended the group (decision 0015). Only a newer DNS Start or Stop since the staging wins, so
     /// a late write of an older value cannot overturn a Stop's disable.
+    /// A verified write of the very disable a session Stop still owes, staged by a group admitted after that Stop, fulfils the obligation:
+    /// the file holds it. The fence stays, and nothing else about DNS changes.
     mutating func recordVerifiedDNSWrite(_ enabled: Bool, for ticket: RuntimeLifecycleTicket) {
         guard dnsIntentRevision == ticket.dnsIntentRevision else { return }
         dnsConfigured = enabled
+        if !enabled, case .stopSave(let revision) = modules.dns.pending, revision == ticket.dnsIntentRevision {
+            modules.dns.pending = nil
+        }
     }
 
     // MARK: - Admission
@@ -228,7 +234,7 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         observeDurableDNS(observedDNS)
         guard isPending(ticket) else { return nil }
         var captured = ticket
-        captured.binding = .captured(dnsStaged: stagedDNSForwarderEnabled)
+        captured.binding = .captured(dnsStaged: stagedDNSForwarderEnabled(for: ticket.group))
         return captured
     }
 
@@ -290,7 +296,7 @@ struct RuntimeModuleIntents: Equatable, Sendable {
     /// bound no value, so no observation before its capture makes it stale.
     func isPending(_ ticket: RuntimeLifecycleTicket) -> Bool {
         !terminal && !members(of: ticket.group).isEmpty
-            && (ticket.dnsStaged.map { $0 == stagedDNSForwarderEnabled } ?? true)
+            && (ticket.dnsStaged.map { $0 == stagedDNSForwarderEnabled(for: ticket.group) } ?? true)
             && (!ticket.requestsCompanion || modules.dns.revision == ticket.dnsRevision)
     }
 
@@ -328,6 +334,17 @@ struct RuntimeModuleIntents: Equatable, Sendable {
         return ControlModule.allCases.contains {
             modules[$0].authorized?.group == ticket.group || modules[$0].startedGroup == ticket.group
         }
+    }
+
+    /// Whether `module` still acts under `ticket`'s group: no terminal stop latched, and the module's own record still names the group, as
+    /// a pending member of a prepare that still stands, an authorized Start or a started one. Unlike `holdsGroup`, an admission on another
+    /// module does not end it, so an unrelated Start or Stop leaves this module's progress alone (decision 0035). A Stop or a newer Start of
+    /// this module, or a failed settle, does.
+    func holds(_ module: ControlModule, for ticket: RuntimeLifecycleTicket) -> Bool {
+        guard !terminal else { return false }
+        let intent = modules[module]
+        if case .start(let start) = intent.pending, start.group == ticket.group { return isPending(ticket) }
+        return intent.authorized?.group == ticket.group || intent.startedGroup == ticket.group
     }
 
     /// Ends a held or stale ticket before authorization: its members keep the permission and fence they had. Nothing ran, so the counter
