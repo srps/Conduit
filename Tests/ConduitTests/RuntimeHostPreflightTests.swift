@@ -161,7 +161,8 @@ final class RuntimeHostPreflightTests: XCTestCase {
     /// share that next pass and its one fresh reading. Two passes read the helper.
     func testAReplacementDropsTheReadingAPassBeganBeforeIt() async throws {
         let helper = FakeHelperLifecycle(status: .installed)
-        let composed = try await compose(helper: helper)
+        // Three requests stay unquiesced at once while the first pass reads, so the fixture admits three ordinary operations.
+        let composed = try await compose(helper: helper, ordinaryPending: 3)
         try await composed.host.startRuntime()
         let stream = try await subscribe(composed)
         defer { stream.cancel() }
@@ -219,7 +220,9 @@ final class RuntimeHostPreflightTests: XCTestCase {
     /// latch and the one pending behind it both fail `staleRevision`, and the pending one never reads the helper.
     func testTheQuitWaitsForNoReadingPassAndTheOnePendingAtItsLatchReadsNothing() async throws {
         let helper = FakeHelperLifecycle(status: .installed)
-        let composed = try await compose(helper: helper)
+        // The two passes' requests stay unquiesced while the read is held; a third slot lets the late request reach the host's fence,
+        // which the service's capacity check would otherwise answer first with `queueFull`.
+        let composed = try await compose(helper: helper, ordinaryPending: 3)
         let reads = helper.statusReads
 
         composed.harness.hold.arm { name, _ in name == "helper-status" }
